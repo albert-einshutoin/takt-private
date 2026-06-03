@@ -5,6 +5,7 @@ import type {
   StepProviderOptions,
   WorkflowRuntimeConfig,
 } from '../../core/models/workflow-types.js';
+import type { PermissionMode } from '../../core/models/status.js';
 import type { ProviderPermissionProfiles } from '../../core/models/provider-profiles.js';
 import type {
   AssistantConfig,
@@ -122,7 +123,7 @@ export function denormalizeRateLimitFallback(
 
 export function normalizeProviderProfiles(
   raw: Record<string, {
-    default_permission_mode: string;
+    default_permission_mode: PermissionMode;
     step_permission_overrides?: Record<string, string>;
   }> | undefined,
 ): ProviderPermissionProfiles | undefined {

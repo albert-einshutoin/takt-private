@@ -89,6 +89,7 @@ export const ProviderProfileNameSchema = z.enum([
   'opencode',
   'cursor',
   'copilot',
+  'kiro',
   'mock',
 ]);
 export const ProviderTypeSchema = ProviderProfileNameSchema;
@@ -185,6 +186,7 @@ export const ProviderPermissionProfilesSchema = z.object({
   opencode: ProviderPermissionProfileSchema.optional(),
   cursor: ProviderPermissionProfileSchema.optional(),
   copilot: ProviderPermissionProfileSchema.optional(),
+  kiro: ProviderPermissionProfileSchema.optional(),
   mock: ProviderPermissionProfileSchema.optional(),
 }).strict().optional();
 
