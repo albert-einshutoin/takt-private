@@ -13,7 +13,7 @@ Procedure:
 2. For each requirement, identify the implemented code (file:line)
 3. Actually verify that the code satisfies the requirement by reading files and checking build/test evidence
    - Do not mark a compound requirement ✅ after checking only one side
-   - Do not trust plan or requirements-review judgments without independent verification per requirement
+   - Do not trust plan or pure-review judgments without independent mergeability verification
    - REJECT if any single requirement is unsatisfied
 4. Validate the maintenance scope
    - Check whether required, related, and unnecessary change classifications are valid
@@ -28,7 +28,7 @@ Procedure:
 
 - Summary reports are not primary evidence. Primary evidence is execution-result reports, review reports with concrete checks, and actual code
 - `Build Results` / `Test Results` inside execution-result reports may be treated as primary evidence
-- In `architecture-review` / `qa-review` / `testing-review` / `security-review` / `requirements-review`, prioritize each report's verification-evidence section
+- In `architecture-review` / `qa-review` / `testing-review` / `security-review` / `pure-review`, prioritize each report's verification-evidence section
 - Treat a verification-evidence item as supporting evidence only when target, check content, and result are all present. Otherwise treat it as unverified
 - When evidence conflicts, prefer `execution-result report > review report with concrete checks > summary report`
 
@@ -38,7 +38,7 @@ Procedure:
 
 ## Result: APPROVE / REJECT
 
-## Requirement Satisfaction Check
+## Requirements Fulfillment Check
 
 Extract requirements from the task instructions and verify each requirement against actual code.
 
@@ -50,7 +50,7 @@ Extract requirements from the task instructions and verify each requirement agai
 - Any ❌ requires REJECT
 - ✅ without evidence is invalid
 - Do not mark ✅ when only part of a compound case was checked
-- Do not trust the plan report without independent verification per requirement
+- Do not trust the plan report without independent mergeability verification
 
 ## Maintenance Scope Check
 
@@ -71,7 +71,7 @@ Extract requirements from the task instructions and verify each requirement agai
 
 - If final judgment differs from prior review conclusions, write the reason with evidence
 - When marking false_positive / overreach, state whether it is inappropriate relative to the task or the plan
-- If overturning requirements-review, provide evidence-backed reasoning
+- If overturning pure-review, provide evidence-backed reasoning
 
 ## Verification Summary
 | Item | Status | Verification Method |

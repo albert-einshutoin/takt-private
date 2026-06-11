@@ -17,7 +17,7 @@ Extract requirements from the task spec and verify each one individually against
 - If any ❌ exists, REJECT is mandatory
 - ✅ without evidence is invalid (must verify against actual code)
 - Do not mark a row as ✅ when the evidence covers only part of the cases
-- Do not rely on plan report's judgment; independently verify each requirement
+- Do not rely on plan report's judgment; independently verify mergeability
 
 ## Re-evaluation of Prior Findings
 | finding_id | Prior Status | Re-evaluation | Evidence |

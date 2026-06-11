@@ -15,7 +15,7 @@ Procedure:
 2. For each requirement, identify the implementing code (file:line)
 3. Verify the code actually fulfills the requirement (read the file, check existing test/build evidence)
    - Do not mark a composite requirement as ✅ based on only one side of the cases
-   - Do not rely on the plan report or requirements-review judgment; independently verify each requirement
+   - Do not rely on the plan report or pure-review judgment; independently verify mergeability
    - If any requirement is unfulfilled, REJECT
 4. Re-evaluate prior review findings
    - If a finding does not hold in code, classify it as `false_positive`
@@ -26,7 +26,7 @@ Procedure:
 
 - Do not treat summary reports as primary evidence. Use execution-result reports, reviewer reports with concrete verification details, and actual code in that order
 - You may treat `Build Results` / `Test Results` sections in execution-result reports as primary evidence
-- For `architecture-review`, `qa-review`, `testing-review`, `security-review`, and `requirements-review`, prioritize each report's `Verification Evidence` section
+- For `architecture-review`, `qa-review`, `testing-review`, `security-review`, and `pure-review`, prioritize each report's `Verification Evidence` section
 - Treat each `Verification Evidence` item as supporting evidence only when it states the verified target, what was checked, and observed result. If any part is missing, mark that item as `unverified`
 - If items of evidence conflict, prioritize them in this order: `execution-result report > reviewer report with concrete verification details > summary report`
 
@@ -48,7 +48,7 @@ Extract requirements from the task spec and verify each one individually against
 - If any ❌ exists, REJECT is mandatory
 - ✅ without evidence is invalid (must verify against actual code)
 - Do not mark a row as ✅ when only part of the cases is verified
-- Do not rely on plan report's judgment; independently verify each requirement
+- Do not rely on plan report's judgment; independently verify mergeability
 
 ## Re-evaluation of Prior Findings
 | finding_id | Prior status | Re-evaluation | Evidence |
@@ -57,7 +57,7 @@ Extract requirements from the task spec and verify each one individually against
 
 - If final judgment differs from prior review conclusions, explain why with evidence
 - If marking `false_positive` or `overreach`, state whether it conflicts with the task objective, the plan, or both
-- If overturning a requirements-review conclusion, explain why with concrete evidence
+- If overturning a pure-review conclusion, explain why with concrete evidence
 
 ## Verification Summary
 | Item | Status | Verification method |

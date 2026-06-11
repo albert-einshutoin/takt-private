@@ -119,6 +119,27 @@ steps:
           report:
             - name: ai-antipattern-review.md
               format: ai-antipattern-review
+      - name: pure-review
+        edit: false
+        persona: pure-reviewer
+        policy: review
+        provider_options:
+          claude:
+            allowed_tools:
+              - Read
+              - Glob
+              - Grep
+              - Bash
+              - WebSearch
+              - WebFetch
+        rules:
+          - condition: approved
+          - condition: needs_fix
+        instruction: review-pure
+        output_contracts:
+          report:
+            - name: pure-review.md
+              format: pure-review
       - name: coding-review
         edit: false
         persona: coding-reviewer
@@ -161,11 +182,11 @@ steps:
           - WebFetch
     instruction: supervise
     rules:
-      - condition: All reviewers approved and task requirements met
+      - condition: All reviewers approved and mergeable quality
         next: COMPLETE
       - condition: Only AI-specific issues need fixing
         next: ai-antipattern-fix
-      - condition: Only convention violations or requirements unmet
+      - condition: Only convention violations or mergeability issues need fixing
         next: supervise_fix
       - condition: Multiple types of issues found
         next: fix_both

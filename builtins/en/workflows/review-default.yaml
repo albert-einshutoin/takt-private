@@ -136,9 +136,9 @@ steps:
           - condition: approved
           - condition: needs_fix
 
-      - name: requirements-review
+      - name: pure-review
         edit: false
-        persona: requirements-reviewer
+        persona: pure-reviewer
         policy: review
         provider_options:
           claude:
@@ -149,11 +149,11 @@ steps:
               - Bash
               - WebSearch
               - WebFetch
-        instruction: review-requirements
+        instruction: review-pure
         output_contracts:
           report:
-            - name: requirements-review.md
-              format: requirements-review
+            - name: pure-review.md
+              format: pure-review
         rules:
           - condition: approved
           - condition: needs_fix
@@ -216,7 +216,7 @@ steps:
          - `02-security-review.md` (Security review)
          - `03-qa-review.md` (QA review)
          - `04-testing-review.md` (Testing review)
-         - `05-requirements-review.md` (Requirements review)
+         - `05-pure-review.md` (Requirements review)
          - `06-coding-review.md` (Coding review)
       2. Synthesize the 6 review results
       3. Produce a consolidated review summary with overall verdict
