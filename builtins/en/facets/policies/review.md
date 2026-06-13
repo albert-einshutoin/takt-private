@@ -11,6 +11,7 @@ Define the shared judgment criteria and behavioral principles for all reviewers.
 | Fact-check | Verify against actual code before raising issues. Do not speculate |
 | Practical fixes | Propose implementable solutions, not theoretical ideals |
 | State consistency | For side effects and state changes, verify that success, failure, and interruption paths have no missing, duplicated, or inconsistent effects |
+| Contract consistency | Verify that contracts carried by consolidation or abstraction are applied to existing equivalent branches by the same standard |
 | Behavior evidence | Verify what behavior the tests or logs prove, not merely that they exist |
 | Boy Scout | Have problems fixed within the task scope when they are in changed code or in areas directly affecting correctness, contracts, or wiring of the change |
 
@@ -49,6 +50,7 @@ REJECT without exception if any of the following apply.
 - Replaced code/exports surviving after refactoring
 - Missing cross-validation of related fields (invariants of semantically coupled config values left unverified)
 - Missing caller, producer, or test data updates after a contract change
+- Existing branches with the same contract remain on the old implementation after adding or changing a shared helper, normalizer, builder, or adapter
 - Missing, duplicated, or incorrectly ordered effects in side-effect or state-change paths
 - Sensitive data exposed in logs, error responses, or test output
 
@@ -246,6 +248,16 @@ The review target is the entire cumulative diff from the task's starting point (
 - If the implementation step has emitted `coder-decisions.md`, read it and understand the recorded design decisions
 - Do not dismiss intentional decisions as false positives just because they were recorded. Evaluate validity against `order.md` / `plan.md` / actual code
 - If the design decision itself is flawed, raise it
+
+### Abstraction and Contract Consistency
+
+When the diff adds or changes a shared helper, normalizer, builder, adapter, or state-transition function, identify the contract that abstraction carries and reconcile it against existing equivalent branches.
+
+- List the inputs, outputs, side effects, events, logs, error categories, return values, and cleanup behavior that the function standardizes
+- Search for existing returns, throws, catches, early returns, branches, and call sites with the same responsibility
+- If an existing branch does not satisfy the new contract, treat it as related code even if the code itself predates the change
+- If tests cover only the new abstraction path and do not verify the contract on existing equivalent branches, treat it as a coverage gap
+- "Not explicitly stated in the task requirements" is not a valid reason to mark a contract inconsistency introduced by the diff as non-blocking
 
 ### Reviewing Side Effects and State Transitions
 

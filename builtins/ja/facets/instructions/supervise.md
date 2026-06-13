@@ -22,6 +22,8 @@
    - finding がコード上成立しない場合は false positive として記録する
    - finding が成立しても、タスク目的を外れた追加要求や過剰な一般化なら overreach として記録する
    - false positive / overreach を暗黙のまま流さない
+5. 差分で追加・変更された共通ヘルパー、正規化関数、builder、adapter がある場合、その契約を同じ責務の既存分岐へ照合する
+   - 要件表に明記されていなくても、差分で導入した契約不整合は未確認範囲または REJECT 理由として扱う
 
 ## レポートの優先順位（supervise 固有）
 
