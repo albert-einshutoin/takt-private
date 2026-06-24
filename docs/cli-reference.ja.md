@@ -40,7 +40,7 @@ devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
 devloopd select-issue --repo owner/repo
 devloopd active-runs
-devloopd start --repo owner/repo --once
+devloopd start --repo owner/repo
 ```
 
 `devloopd doctor` のオプション:
@@ -133,7 +133,9 @@ devloopd start --repo owner/repo --once
 | オプション | 説明 |
 |-----------|------|
 | `--repo <owner/repo>` | GitHub リポジトリ |
-| `--once` | scan/run/import cycle を 1 回だけ実行します。長時間 daemon mode が実装されるまでは必須です |
+| `--once` | scan/run/import cycle を 1 回だけ実行して終了します |
+| `--max-cycles <count>` | 指定した daemon cycle 数で停止します |
+| `--interval-seconds <count>` | daemon cycle 間の待機秒数。デフォルトは 60 |
 | `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
 | `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
 | `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |

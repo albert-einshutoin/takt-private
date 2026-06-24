@@ -40,7 +40,7 @@ devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
 devloopd select-issue --repo owner/repo
 devloopd active-runs
-devloopd start --repo owner/repo --once
+devloopd start --repo owner/repo
 ```
 
 `devloopd doctor` options:
@@ -133,7 +133,9 @@ devloopd start --repo owner/repo --once
 | Option | Description |
 |--------|-------------|
 | `--repo <owner/repo>` | GitHub repository |
-| `--once` | Run one finite scan/run/import cycle. Required until long-running daemon mode is implemented |
+| `--once` | Run one finite scan/run/import cycle and exit |
+| `--max-cycles <count>` | Stop after a finite number of daemon cycles |
+| `--interval-seconds <count>` | Seconds to wait between daemon cycles. Defaults to 60 |
 | `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
 | `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
 | `--cwd <path>` | Repository path to run in. Defaults to the current working directory |

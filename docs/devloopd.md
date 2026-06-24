@@ -214,21 +214,24 @@ Default candidate behavior:
 devloopd active-runs
 ```
 
-`devloopd start --once` connects the MVP supervisor path: inspect active runs, scan open issues, select the safest mechanical candidate, run TAKT for that issue, and import the latest TAKT run into the devloop ledger.
+`devloopd start` connects the supervisor path: inspect active runs, scan open issues, select the safest mechanical candidate, run TAKT for that issue, and import the latest TAKT run into the devloop ledger.
 
 ```bash
+devloopd start --repo owner/repo
 devloopd start --repo owner/repo --once
+devloopd start --repo owner/repo --max-cycles 3
 ```
 
-Long-running daemon mode is intentionally not enabled yet. Without `--once`, `devloopd start` exits before scanning or starting TAKT. This keeps the current supervisor bounded while the run scheduler and retry policy are still being hardened.
+Without `--once`, `devloopd start` runs as a daemon loop until the process is stopped. Use `--max-cycles` for a bounded smoke run. The loop waits `--interval-seconds` between cycles and uses `scan-issues` retry-after hints when GitHub rate limits the scan.
 
-The finite cycle uses the same safety boundaries as the lower-level commands:
+Each cycle uses the same safety boundaries as the lower-level commands:
 
 - `active-runs` refuses to start new work when the active run limit is reached
 - `scan-issues` performs mechanical filtering first
 - `auto_merge_candidate` issues are preferred over `auto_pr_only` issues
 - `run` still runs the subscription-only doctor before TAKT starts
 - `import-takt-run --latest` persists the run evidence after TAKT succeeds
+- failures after TAKT starts stop the daemon instead of repeatedly launching unsafe work
 
 ### Active Runs Options
 
@@ -242,7 +245,9 @@ The finite cycle uses the same safety boundaries as the lower-level commands:
 | Option | Description |
 |--------|-------------|
 | `--repo <owner/repo>` | GitHub repository |
-| `--once` | Run one finite scan/run/import cycle. Required until long-running daemon mode is implemented |
+| `--once` | Run one finite scan/run/import cycle and exit |
+| `--max-cycles <count>` | Stop after a finite number of daemon cycles |
+| `--interval-seconds <count>` | Seconds to wait between daemon cycles. Defaults to 60 |
 | `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
 | `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
 | `--cwd <path>` | Repository path to run in. Defaults to the current working directory |

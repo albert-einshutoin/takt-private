@@ -261,7 +261,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd scan-issues --repo owner/repo` | Scan open GitHub Issues and classify mechanical candidates |
 | `devloopd select-issue --repo owner/repo` | Select the safest mechanical issue candidate from a scan |
 | `devloopd active-runs` | Inspect currently running TAKT runs and stale state |
-| `devloopd start --repo owner/repo --once` | Run one finite scan/run/import supervisor cycle |
+| `devloopd start --repo owner/repo` | Run the daemon supervisor loop |
 
 See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 

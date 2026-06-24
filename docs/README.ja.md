@@ -264,7 +264,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `devloopd scan-issues --repo owner/repo` | open GitHub Issue を読み取り、機械的候補を分類します |
 | `devloopd select-issue --repo owner/repo` | scan 結果から最も安全な機械的 Issue 候補を選択します |
 | `devloopd active-runs` | 実行中の TAKT run と stale state を確認します |
-| `devloopd start --repo owner/repo --once` | scan/run/import の supervisor cycle を 1 回だけ実行します |
+| `devloopd start --repo owner/repo` | daemon supervisor loop を実行します |
 
 全コマンド・オプションは [CLI Reference](./cli-reference.ja.md) を参照してください。
 
