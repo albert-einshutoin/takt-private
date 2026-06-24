@@ -21,6 +21,7 @@ import {
   RateLimitFallbackSchema,
   RuntimeConfigSchema,
   TaktProvidersSchema,
+  ProviderTypeSchema,
 } from './schema-base.js';
 
 /** Workflow overrides schema for config-level overrides */
@@ -87,6 +88,9 @@ export const WorkflowCategoryOverlaySchema = z.object({
 
 /** Project config schema */
 const ProjectConfigObjectSchema = z.object({
+  subscription_only: z.boolean().optional(),
+  allowed_providers: z.array(ProviderTypeSchema).min(1).optional(),
+  forbidden_providers: z.array(z.string().min(1)).optional(),
   language: LanguageSchema.optional(),
   provider: ProviderReferenceSchema.optional(),
   model: z.string().optional(),

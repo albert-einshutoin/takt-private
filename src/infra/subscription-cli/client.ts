@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentResponse, PermissionMode } from '../../core/models/index.js';
+import { SUBSCRIPTION_ONLY_FORBIDDEN_ENV_NAMES } from '../../core/subscription-only/policy.js';
 import { buildEnvWithNestedObservabilitySnapshot } from '../../shared/telemetry/index.js';
 import { crossSpawn, getErrorMessage } from '../../shared/utils/index.js';
 import type { ProviderType, StreamCallback } from '../../shared/types/provider.js';
@@ -50,27 +51,6 @@ type ExecError = Error & {
 
 const SUBSCRIPTION_CLI_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const SUBSCRIPTION_CLI_FORCE_KILL_DELAY_MS = 1_000;
-
-export const SUBSCRIPTION_ONLY_FORBIDDEN_ENV_NAMES = [
-  'OPENAI_API_KEY',
-  'TAKT_OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'TAKT_ANTHROPIC_API_KEY',
-  'GOOGLE_API_KEY',
-  'TAKT_GOOGLE_API_KEY',
-  'GEMINI_API_KEY',
-  'TAKT_GEMINI_API_KEY',
-  'OPENROUTER_API_KEY',
-  'TAKT_OPENROUTER_API_KEY',
-  'VERCEL_AI_GATEWAY_API_KEY',
-  'TAKT_VERCEL_AI_GATEWAY_API_KEY',
-  'OPENCODE_API_KEY',
-  'TAKT_OPENCODE_API_KEY',
-  'CURSOR_API_KEY',
-  'TAKT_CURSOR_API_KEY',
-  'KIRO_API_KEY',
-  'TAKT_KIRO_API_KEY',
-] as const;
 
 function isSubscriptionCliProvider(provider: ProviderType): provider is SubscriptionCliProviderType {
   return provider === 'codex-cli'

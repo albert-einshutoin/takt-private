@@ -30,6 +30,10 @@ import { sanitizeConfigValue } from './globalConfigLegacyMigration.js';
 import { serializeGlobalConfig } from './globalConfigSerializer.js';
 import { loadGlobalConfigTrace, type ConfigTrace } from '../traced/tracedConfigLoader.js';
 import { PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS } from '../providerOptionsContract.js';
+import {
+  assertNoForbiddenSubscriptionOnlyConfigKeys,
+  assertSubscriptionOnlyConfig,
+} from '../../../core/subscription-only/policy.js';
 export { validateCliPath } from './cliPathValidator.js';
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
@@ -114,6 +118,7 @@ export class GlobalConfigManager {
       },
       PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS,
     );
+    assertNoForbiddenSubscriptionOnlyConfigKeys(parsedConfig, configPath);
     assertValidGlobalConfig(parsedConfig, configPath, true);
     assertNoUnknownGlobalConfigKeys(rawConfig);
     const parsed = GlobalConfigSchema.parse(rawConfig);
@@ -123,6 +128,9 @@ export class GlobalConfigManager {
       parsed.provider_options as Record<string, unknown> | undefined,
     );
     const config: GlobalConfig = {
+      subscriptionOnly: parsed.subscription_only as boolean | undefined,
+      allowedProviders: parsed.allowed_providers as GlobalConfig['allowedProviders'],
+      forbiddenProviders: parsed.forbidden_providers as GlobalConfig['forbiddenProviders'],
       language: parsed.language,
       provider: normalizedProvider.provider,
       model: normalizedProvider.model,
@@ -243,6 +251,7 @@ export class GlobalConfigManager {
       interactivePreviewSteps: resolveAliasedPreviewCount(parsed as Record<string, unknown>),
       syncProjectLocalTaktOnRetry: parsed.sync_project_local_takt_on_retry as boolean | undefined,
     };
+    assertSubscriptionOnlyConfig(config);
     validateProviderModelCompatibility(config.provider, config.model);
     this.cachedConfig = config;
     this.cachedTrace = trace;

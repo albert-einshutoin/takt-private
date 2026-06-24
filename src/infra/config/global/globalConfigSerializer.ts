@@ -14,6 +14,15 @@ export function serializeGlobalConfig(config: GlobalConfig): Record<string, unkn
     language: config.language,
     provider: config.provider,
   };
+  if (config.subscriptionOnly !== undefined) {
+    raw.subscription_only = config.subscriptionOnly;
+  }
+  if (config.allowedProviders && config.allowedProviders.length > 0) {
+    raw.allowed_providers = config.allowedProviders;
+  }
+  if (config.forbiddenProviders && config.forbiddenProviders.length > 0) {
+    raw.forbidden_providers = config.forbiddenProviders;
+  }
   if (config.model) {
     raw.model = config.model;
   }

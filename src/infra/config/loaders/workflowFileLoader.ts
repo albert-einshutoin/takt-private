@@ -22,6 +22,10 @@ import {
 } from './workflowSourceMetadata.js';
 import type { WorkflowCallArgResolutionPolicy } from './workflowCallableArgResolver.js';
 import { resolveWorkflowTrustInfo, type WorkflowTrustInfo } from './workflowTrustSource.js';
+import {
+  assertSubscriptionOnlyWorkflowConfig,
+  resolveSubscriptionOnlyPolicyConfig,
+} from '../../../core/subscription-only/policy.js';
 
 interface LoadWorkflowFromFileOptions {
   trustInfo?: WorkflowTrustInfo;
@@ -70,6 +74,10 @@ function loadWorkflowFromFileInternal(
     options?.callableArgPolicy,
     loadMode,
     resolveWorkflowCommandGatesPolicy(globalConfig.workflowCommandGates, projectConfig.workflowCommandGates),
+  );
+  assertSubscriptionOnlyWorkflowConfig(
+    config,
+    resolveSubscriptionOnlyPolicyConfig(globalConfig, projectConfig),
   );
   attachWorkflowOpaqueRef(config, buildOpaqueWorkflowRef(filePath, trustInfo));
   attachWorkflowSourcePath(config, filePath);

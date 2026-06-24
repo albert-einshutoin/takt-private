@@ -57,6 +57,10 @@ import { loadProjectConfigTrace, type ConfigTrace } from '../traced/tracedConfig
 import { PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS } from '../providerOptionsContract.js';
 import { getCachedProjectConfigTrace, setCachedProjectConfigTrace } from '../resolutionCache.js';
 import { assertValidProjectConfig } from './projectConfigValidation.js';
+import {
+  assertNoForbiddenSubscriptionOnlyConfigKeys,
+  assertSubscriptionOnlyConfig,
+} from '../../../core/subscription-only/policy.js';
 
 export type { ProjectConfig as ProjectLocalConfig } from '../types.js';
 
@@ -70,11 +74,15 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
     PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS,
   );
   setCachedProjectConfigTrace(projectDir, trace);
+  assertNoForbiddenSubscriptionOnlyConfigKeys(parsedConfig, configPath);
   assertValidProjectConfig(parsedConfig, configPath, true);
   assertValidProjectConfig(rawConfig, configPath);
   const parsedConfigResult = ProjectConfigSchema.parse(rawConfig);
 
   const {
+    subscription_only,
+    allowed_providers,
+    forbidden_providers,
     language,
     provider,
     model,
@@ -149,7 +157,10 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
     } | undefined,
   );
 
-  return {
+  const config: ProjectConfig = {
+    subscriptionOnly: subscription_only as boolean | undefined,
+    allowedProviders: allowed_providers as ProjectConfig['allowedProviders'],
+    forbiddenProviders: forbidden_providers as ProjectConfig['forbiddenProviders'],
     language: language as ProjectConfig['language'],
     pipeline: normalizedPipeline,
     assistant: normalizeAssistantConfig(assistant),
@@ -198,6 +209,8 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
     syncConflictResolver: normalizeSyncConflictResolver(sync_conflict_resolver),
     workflowMcpServers: normalizeWorkflowMcpServers(parsedConfigResult.workflow_mcp_servers),
   };
+  assertSubscriptionOnlyConfig(config);
+  return config;
 }
 
 export function loadProjectConfigTraceState(projectDir: string): ConfigTrace {
@@ -256,7 +269,7 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
   } else {
     delete savePayload.rate_limit_fallback;
   }
-  for (const [camel, snake] of [['language', 'language'], ['autoPr', 'auto_pr'], ['draftPr', 'draft_pr'], ['allowGitHooks', 'allow_git_hooks'], ['allowGitFilters', 'allow_git_filters'], ['vcsProvider', 'vcs_provider'], ['baseBranch', 'base_branch'], ['branchNameStrategy', 'branch_name_strategy'], ['minimalOutput', 'minimal_output'], ['taskPollIntervalMs', 'task_poll_interval_ms'], ['interactivePreviewSteps', 'interactive_preview_steps'], ['syncProjectLocalTaktOnRetry', 'sync_project_local_takt_on_retry'], ['concurrency', 'concurrency']] as const) {
+  for (const [camel, snake] of [['subscriptionOnly', 'subscription_only'], ['allowedProviders', 'allowed_providers'], ['forbiddenProviders', 'forbidden_providers'], ['language', 'language'], ['autoPr', 'auto_pr'], ['draftPr', 'draft_pr'], ['allowGitHooks', 'allow_git_hooks'], ['allowGitFilters', 'allow_git_filters'], ['vcsProvider', 'vcs_provider'], ['baseBranch', 'base_branch'], ['branchNameStrategy', 'branch_name_strategy'], ['minimalOutput', 'minimal_output'], ['taskPollIntervalMs', 'task_poll_interval_ms'], ['interactivePreviewSteps', 'interactive_preview_steps'], ['syncProjectLocalTaktOnRetry', 'sync_project_local_takt_on_retry'], ['concurrency', 'concurrency']] as const) {
     if (config[camel] !== undefined) savePayload[snake] = config[camel];
   }
   delete savePayload.pipeline;
@@ -302,7 +315,7 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
       delete savePayload.with_submodules;
     }
   }
-  for (const k of ['providerProfiles', 'providerOptions', 'rateLimitFallback', 'autoPr', 'draftPr', 'allowGitHooks', 'allowGitFilters', 'vcsProvider', 'baseBranch', 'withSubmodules', 'branchNameStrategy', 'minimalOutput', 'taskPollIntervalMs', 'interactivePreviewSteps', 'syncProjectLocalTaktOnRetry', 'personaProviders', 'providerRouting', 'taktProviders', 'workflowRuntimePrepare', 'workflowCommandGates', 'workflowArpeggio', 'syncConflictResolver', 'workflowMcpServers'] as const) {
+  for (const k of ['providerProfiles', 'providerOptions', 'rateLimitFallback', 'subscriptionOnly', 'allowedProviders', 'forbiddenProviders', 'autoPr', 'draftPr', 'allowGitHooks', 'allowGitFilters', 'vcsProvider', 'baseBranch', 'withSubmodules', 'branchNameStrategy', 'minimalOutput', 'taskPollIntervalMs', 'interactivePreviewSteps', 'syncProjectLocalTaktOnRetry', 'personaProviders', 'providerRouting', 'taktProviders', 'workflowRuntimePrepare', 'workflowCommandGates', 'workflowArpeggio', 'syncConflictResolver', 'workflowMcpServers'] as const) {
     delete savePayload[k];
   }
 
