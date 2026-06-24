@@ -8,8 +8,10 @@ import { formatActiveRunsReport, inspectActiveRuns } from '../../devloopd/active
 import { formatIssueSelectionReport, selectIssueFromScan } from '../../devloopd/issueSelector.js';
 import {
   formatImportTaktRunReport,
+  formatReconcileTaktRunsReport,
   formatTimelineReport,
   importTaktRun,
+  reconcileTaktRuns,
   renderTimeline,
 } from '../../devloopd/ledger.js';
 import { buildDevloopMemory, formatDevloopMemoryReport } from '../../devloopd/memory.js';
@@ -148,6 +150,29 @@ program
     });
 
     console.log(formatTimelineReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('reconcile-runs')
+  .description('Import missing completed TAKT runs into the devloop ledger')
+  .option('--issue <number>', 'GitHub issue number to associate with imported runs', (value: string) => Number(value))
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .action((options: {
+    issue?: number;
+    cwd: string;
+    ledger?: string;
+  }) => {
+    const report = reconcileTaktRuns({
+      repoPath: resolve(options.cwd),
+      issue: Number.isFinite(options.issue) ? options.issue : undefined,
+      ledgerPath: options.ledger,
+    });
+
+    console.log(formatReconcileTaktRunsReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }

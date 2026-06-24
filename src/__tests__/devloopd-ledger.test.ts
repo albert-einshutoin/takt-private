@@ -5,8 +5,10 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   formatImportTaktRunReport,
+  formatReconcileTaktRunsReport,
   formatTimelineReport,
   importTaktRun,
+  reconcileTaktRuns,
   renderTimeline,
 } from '../devloopd/ledger.js';
 
@@ -118,5 +120,26 @@ describe('devloopd ledger import and timeline', () => {
 
     expect(report.passed).toBe(false);
     expect(formatImportTaktRunReport(report)).toContain('No TAKT runs found');
+  });
+
+  it('reconciles missing non-running TAKT runs without duplicating imported runs', () => {
+    writeRunFixture(repoPath, 'run-imported', { startTime: '2026-06-24T00:00:00.000Z' });
+    writeRunFixture(repoPath, 'run-missing', { startTime: '2026-06-24T01:00:00.000Z' });
+    writeRunFixture(repoPath, 'run-active', { status: 'running', startTime: '2026-06-24T02:00:00.000Z' });
+    importTaktRun({ repoPath, runSlug: 'run-imported' });
+
+    const report = reconcileTaktRuns({ repoPath });
+    const output = formatReconcileTaktRunsReport(report);
+
+    expect(report.passed).toBe(true);
+    expect(report.imported.map((item) => item.runSlug)).toEqual(['run-missing']);
+    expect(report.skipped).toEqual([
+      { runSlug: 'run-imported', reason: 'already imported' },
+      { runSlug: 'run-active', reason: 'run is still running' },
+    ]);
+    expect(output).toContain('run-missing');
+
+    const ledger = readFileSync(join(repoPath, '.devloop', 'ledger.jsonl'), 'utf-8').trim().split('\n');
+    expect(ledger).toHaveLength(2);
   });
 });

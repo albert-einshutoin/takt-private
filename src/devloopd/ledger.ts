@@ -67,6 +67,25 @@ export interface TimelineReport {
   ledgerPath: string;
 }
 
+export interface ReconcileTaktRunsOptions {
+  repoPath?: string;
+  ledgerPath?: string;
+  issue?: number;
+}
+
+export interface ReconcileSkippedRun {
+  runSlug: string;
+  reason: 'already imported' | 'run is still running' | 'run metadata unreadable';
+}
+
+export interface ReconcileTaktRunsReport {
+  passed: boolean;
+  message: string;
+  imported: ImportTaktRunReport[];
+  skipped: ReconcileSkippedRun[];
+  ledgerPath: string;
+}
+
 export const DEFAULT_DEVLOOP_LEDGER_RELATIVE_PATH = join('.devloop', 'ledger.jsonl');
 
 function sanitizeDetail(text: string): string {
@@ -95,6 +114,23 @@ function selectRunSlug(repoPath: string, options: ImportTaktRunOptions): string 
 
 function readRequiredRunMeta(repoPath: string, runSlug: string): RunMeta | undefined {
   return readRunMetaBySlug(repoPath, runSlug) ?? undefined;
+}
+
+function listRunSlugs(repoPath: string): string[] {
+  const runsDir = resolve(repoPath, '.takt', 'runs');
+  if (!existsSync(runsDir)) {
+    return [];
+  }
+
+  return readdirSync(runsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort((left, right) => {
+      // Preserve TAKT execution order so ledger replay stays stable across daemon restarts.
+      const leftMeta = readRunMetaBySlug(repoPath, left);
+      const rightMeta = readRunMetaBySlug(repoPath, right);
+      return (leftMeta?.startTime ?? left).localeCompare(rightMeta?.startTime ?? right);
+    });
 }
 
 function sha256File(filePath: string): { sha256: string; bytes: number } {
@@ -249,6 +285,53 @@ export function renderTimeline(options: TimelineOptions): TimelineReport {
   };
 }
 
+export function reconcileTaktRuns(options: ReconcileTaktRunsOptions = {}): ReconcileTaktRunsReport {
+  const repoPath = resolveRepoPath(options.repoPath);
+  const ledgerPath = resolveDevloopLedgerPath(repoPath, options.ledgerPath);
+  const importedRunSlugs = new Set(readDevloopLedgerEvents(ledgerPath).map((event) => event.runSlug));
+  const imported: ImportTaktRunReport[] = [];
+  const skipped: ReconcileSkippedRun[] = [];
+
+  for (const runSlug of listRunSlugs(repoPath)) {
+    if (importedRunSlugs.has(runSlug)) {
+      skipped.push({ runSlug, reason: 'already imported' });
+      continue;
+    }
+
+    const meta = readRequiredRunMeta(repoPath, runSlug);
+    if (!meta) {
+      skipped.push({ runSlug, reason: 'run metadata unreadable' });
+      continue;
+    }
+    if (meta.status === 'running') {
+      skipped.push({ runSlug, reason: 'run is still running' });
+      continue;
+    }
+
+    const report = importTaktRun({
+      repoPath,
+      runSlug,
+      issue: options.issue,
+      ledgerPath: options.ledgerPath,
+    });
+    imported.push(report);
+    if (report.passed) {
+      importedRunSlugs.add(runSlug);
+    }
+  }
+
+  const failedImports = imported.filter((report) => !report.passed);
+  return {
+    passed: failedImports.length === 0,
+    message: failedImports.length === 0
+      ? `Reconciled ${imported.length} TAKT run(s)`
+      : `Failed to reconcile ${failedImports.length} TAKT run(s)`,
+    imported,
+    skipped,
+    ledgerPath,
+  };
+}
+
 export function formatImportTaktRunReport(report: ImportTaktRunReport): string {
   const lines = [
     report.passed ? 'devloopd import-takt-run passed' : 'devloopd import-takt-run failed',
@@ -278,6 +361,25 @@ export function formatTimelineReport(report: TimelineReport): string {
     for (const artifact of event.artifacts.filter((item) => item.kind === 'report')) {
       lines.push(`  report: ${artifact.path} (${basename(artifact.path)}, ${artifact.bytes} bytes)`);
     }
+  }
+
+  return lines.join('\n');
+}
+
+export function formatReconcileTaktRunsReport(report: ReconcileTaktRunsReport): string {
+  const lines = [
+    report.passed ? 'devloopd reconcile-runs passed' : 'devloopd reconcile-runs failed',
+    report.message,
+    `Ledger: ${report.ledgerPath}`,
+  ];
+
+  if (report.imported.length > 0) {
+    lines.push('Imported:');
+    lines.push(...report.imported.map((item) => `- ${item.runSlug ?? 'unknown'}: ${item.message}`));
+  }
+  if (report.skipped.length > 0) {
+    lines.push('Skipped:');
+    lines.push(...report.skipped.map((item) => `- ${item.runSlug}: ${item.reason}`));
   }
 
   return lines.join('\n');
