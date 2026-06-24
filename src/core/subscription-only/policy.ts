@@ -96,7 +96,7 @@ function isRawSubscriptionOnlyEnabled(rawConfig: Record<string, unknown>): boole
   return rawConfig.subscription_only === true || rawConfig.subscriptionOnly === true;
 }
 
-function collectForbiddenConfigKeyPaths(value: unknown, prefix = ''): string[] {
+export function findForbiddenSubscriptionOnlyConfigKeyPaths(value: unknown, prefix = ''): string[] {
   if (!isRecord(value)) {
     return [];
   }
@@ -107,7 +107,7 @@ function collectForbiddenConfigKeyPaths(value: unknown, prefix = ''): string[] {
     if (FORBIDDEN_CONFIG_KEYS.has(key)) {
       paths.push(path);
     }
-    paths.push(...collectForbiddenConfigKeyPaths(child, path));
+    paths.push(...findForbiddenSubscriptionOnlyConfigKeyPaths(child, path));
   }
   return paths;
 }
@@ -120,7 +120,7 @@ export function assertNoForbiddenSubscriptionOnlyConfigKeys(
     return;
   }
 
-  const forbiddenPaths = collectForbiddenConfigKeyPaths(rawConfig);
+  const forbiddenPaths = findForbiddenSubscriptionOnlyConfigKeyPaths(rawConfig);
   if (forbiddenPaths.length === 0) {
     return;
   }
