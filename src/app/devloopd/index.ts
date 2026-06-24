@@ -13,6 +13,7 @@ import {
 import { formatIssueScanReport, scanIssues } from '../../devloopd/issueScanner.js';
 import { formatMergeGateReport, mergeIfSafe } from '../../devloopd/mergeGate.js';
 import { formatDevloopRunReport, runDevloopIssue } from '../../devloopd/run.js';
+import { formatDevloopStartReport, startDevloop } from '../../devloopd/supervisor.js';
 import { getErrorMessage } from '../../shared/utils/error.js';
 
 const require = createRequire(import.meta.url);
@@ -190,6 +191,47 @@ program
     });
 
     console.log(formatIssueScanReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('start')
+  .description('Run a finite subscription-only devloop supervisor cycle')
+  .option('--repo <owner/repo>', 'GitHub repository')
+  .option('--once', 'Run one finite scan/run/import cycle')
+  .option('--workflow <path>', 'TAKT workflow name or path', '.takt/workflows/subscription-devloop.yaml')
+  .option('--policy <path>', 'devloopd policy YAML path')
+  .option('--skip-auth', 'Skip GitHub CLI auth status check')
+  .option('--no-auto-pr', 'Do not pass --auto-pr to TAKT')
+  .option('--no-quiet', 'Do not pass --quiet to TAKT')
+  .option('--cwd <path>', 'Repository path to run in', process.cwd())
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .action(async (options: {
+    repo?: string;
+    once?: boolean;
+    workflow: string;
+    policy?: string;
+    skipAuth?: boolean;
+    autoPr?: boolean;
+    quiet?: boolean;
+    cwd: string;
+    ledger?: string;
+  }) => {
+    const report = await startDevloop({
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+      once: options.once === true,
+      workflow: options.workflow,
+      policyPath: options.policy ? resolve(options.policy) : undefined,
+      skipAuth: options.skipAuth === true,
+      autoPr: options.autoPr !== false,
+      quiet: options.quiet !== false,
+      ledgerPath: options.ledger,
+    });
+
+    console.log(formatDevloopStartReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }

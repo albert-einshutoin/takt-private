@@ -1,0 +1,142 @@
+import { describe, expect, it } from 'vitest';
+import {
+  formatDevloopStartReport,
+  startDevloop,
+  type DevloopStartDependencies,
+} from '../devloopd/supervisor.js';
+import type { IssueCandidate, IssueScanReport } from '../devloopd/issueScanner.js';
+
+function candidate(input: Partial<IssueCandidate> & { number: number; mode: IssueCandidate['mode'] }): IssueCandidate {
+  return {
+    number: input.number,
+    title: input.title ?? `Issue ${input.number}`,
+    url: input.url ?? `https://github.com/owner/repo/issues/${input.number}`,
+    labels: input.labels ?? ['agent:ready'],
+    updatedAt: input.updatedAt ?? '2026-06-24T00:00:00Z',
+    comments: input.comments ?? 0,
+    mechanicalRisk: input.mechanicalRisk ?? (input.mode === 'auto_merge_candidate' ? 'low' : 'medium'),
+    mode: input.mode,
+    reason: input.reason ?? 'test candidate',
+  };
+}
+
+function makeScan(candidates: IssueCandidate[]): IssueScanReport {
+  return {
+    passed: true,
+    message: `Found ${candidates.length} candidate issue(s)`,
+    candidates,
+    skipped: [],
+  };
+}
+
+describe('devloopd supervisor', () => {
+  it('runs one safest issue and imports the latest TAKT run', async () => {
+    const calls: string[] = [];
+    const dependencies: DevloopStartDependencies = {
+      async scanIssues(options) {
+        calls.push(`scan:${options.repo}`);
+        return makeScan([
+          candidate({ number: 200, mode: 'auto_pr_only', mechanicalRisk: 'medium' }),
+          candidate({ number: 123, mode: 'auto_merge_candidate', mechanicalRisk: 'low' }),
+        ]);
+      },
+      async runDevloopIssue(options) {
+        calls.push(`run:${options.issue}:${options.workflow}`);
+        return { passed: true, message: 'TAKT issue pipeline completed' };
+      },
+      importTaktRun(options) {
+        calls.push(`import:${options.issue}`);
+        return {
+          passed: true,
+          message: 'Imported TAKT run run_123',
+          runSlug: 'run_123',
+          ledgerPath: '/repo/.devloop/ledger.jsonl',
+        };
+      },
+    };
+
+    const report = await startDevloop({
+      repoPath: '/repo',
+      repo: 'owner/repo',
+      workflow: 'workflows/subscription-devloop.yaml',
+      once: true,
+      dependencies,
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.selected.map((item) => item.number)).toEqual([123]);
+    expect(calls).toEqual([
+      'scan:owner/repo',
+      'run:123:workflows/subscription-devloop.yaml',
+      'import:123',
+    ]);
+    expect(formatDevloopStartReport(report)).toContain('#123');
+  });
+
+  it('does not start TAKT when the issue scan fails', async () => {
+    const calls: string[] = [];
+    const dependencies: DevloopStartDependencies = {
+      async scanIssues() {
+        calls.push('scan');
+        return { passed: false, message: 'gh issue list failed', candidates: [], skipped: [] };
+      },
+      async runDevloopIssue() {
+        calls.push('run');
+        return { passed: true, message: 'unexpected' };
+      },
+      importTaktRun() {
+        calls.push('import');
+        return { passed: true, message: 'unexpected', ledgerPath: '/repo/.devloop/ledger.jsonl' };
+      },
+    };
+
+    const report = await startDevloop({ repoPath: '/repo', once: true, dependencies });
+
+    expect(report.passed).toBe(false);
+    expect(report.message).toContain('issue scan failed');
+    expect(calls).toEqual(['scan']);
+  });
+
+  it('does not import when the TAKT issue run fails', async () => {
+    const calls: string[] = [];
+    const dependencies: DevloopStartDependencies = {
+      async scanIssues() {
+        calls.push('scan');
+        return makeScan([candidate({ number: 123, mode: 'auto_pr_only' })]);
+      },
+      async runDevloopIssue() {
+        calls.push('run');
+        return { passed: false, message: 'subscription-only doctor failed' };
+      },
+      importTaktRun() {
+        calls.push('import');
+        return { passed: true, message: 'unexpected', ledgerPath: '/repo/.devloop/ledger.jsonl' };
+      },
+    };
+
+    const report = await startDevloop({ repoPath: '/repo', once: true, dependencies });
+
+    expect(report.passed).toBe(false);
+    expect(report.runs[0]?.importReport).toBeUndefined();
+    expect(calls).toEqual(['scan', 'run']);
+  });
+
+  it('requires explicit finite mode before running the supervisor', async () => {
+    const dependencies: DevloopStartDependencies = {
+      async scanIssues() {
+        throw new Error('should not scan');
+      },
+      async runDevloopIssue() {
+        throw new Error('should not run');
+      },
+      importTaktRun() {
+        throw new Error('should not import');
+      },
+    };
+
+    const report = await startDevloop({ repoPath: '/repo', dependencies });
+
+    expect(report.passed).toBe(false);
+    expect(report.message).toContain('pass --once');
+  });
+});
