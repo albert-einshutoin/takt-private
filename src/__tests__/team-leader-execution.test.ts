@@ -22,6 +22,14 @@ function makeResult(part: PartDefinition): PartResult {
   };
 }
 
+function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
+}
+
 describe('runTeamLeaderExecution', () => {
   it('初回5パートを最大2並列で順次実行する', async () => {
     const parts = ['p1', 'p2', 'p3', 'p4', 'p5'].map(makePart);
@@ -108,6 +116,63 @@ describe('runTeamLeaderExecution', () => {
     expect(result.partResults.some((r) => r.part.id === part3.id)).toBe(true);
   });
 
+  it('done 判定時に running 中パート数を伝え、完了まで planning done を保留する', async () => {
+    const fastPart = makePart('verify-gates');
+    const slowPart = makePart('verify');
+    const slowResult = createDeferred<PartResult>();
+    const feedbackRequested = createDeferred<void>();
+    const onPlanningDone = vi.fn();
+
+    const runPart = vi.fn(async (part: PartDefinition) => {
+      if (part.id === slowPart.id) {
+        return slowResult.promise;
+      }
+      return makeResult(part);
+    });
+    const requestMoreParts = vi.fn(async () => {
+      feedbackRequested.resolve();
+      return {
+        done: true,
+        reasoning: 'finished after verification',
+        parts: [],
+      };
+    });
+
+    const execution = runTeamLeaderExecution({
+      initialParts: [fastPart, slowPart],
+      maxConcurrency: 2,
+      refillThreshold: 1,
+      maxTotalParts: 3,
+      runPart,
+      requestMoreParts,
+      onPlanningDone,
+    });
+
+    await feedbackRequested.promise;
+
+    expect(requestMoreParts).toHaveBeenCalledWith({
+      partResults: [expect.objectContaining({ part: fastPart })],
+      scheduledIds: ['verify-gates', 'verify'],
+      remainingPartBudget: 1,
+      unfinishedScheduledPartCount: 1,
+      runningPartCount: 1,
+      queuedPartCount: 0,
+    });
+    expect(onPlanningDone).not.toHaveBeenCalled();
+
+    slowResult.resolve(makeResult(slowPart));
+
+    const result = await execution;
+
+    expect(result.partResults.map((r) => r.part.id).sort()).toEqual(['verify', 'verify-gates']);
+    expect(onPlanningDone).toHaveBeenCalledTimes(1);
+    expect(onPlanningDone).toHaveBeenCalledWith({
+      reason: 'finished after verification',
+      plannedParts: 2,
+      completedParts: 2,
+    });
+  });
+
   it('追加パートが残り maxTotalParts 予算を超える場合はエラーにする', async () => {
     const parts = ['p1', 'p2'].map(makePart);
     const runPart = vi.fn(async (part: PartDefinition) => makeResult(part));
@@ -131,6 +196,8 @@ describe('runTeamLeaderExecution', () => {
       scheduledIds: ['p1', 'p2'],
       remainingPartBudget: 1,
       unfinishedScheduledPartCount: 1,
+      runningPartCount: 0,
+      queuedPartCount: 1,
     });
   });
 

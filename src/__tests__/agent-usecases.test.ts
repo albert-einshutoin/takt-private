@@ -557,6 +557,40 @@ describe('agent-usecases', () => {
     }));
   });
 
+  it('requestMoreParts は running/queued 中の予定済み作業をプロンプトに含める', async () => {
+    vi.mocked(runAgent).mockResolvedValue(doneResponse('x', {
+      done: true,
+      reasoning: 'Enough after running parts finish',
+      parts: [],
+    }));
+
+    await requestMoreParts(
+      'original instruction',
+      [{ id: 'verify-gates', title: 'Verify gates', status: 'done', content: 'lint passed' }],
+      ['verify-gates', 'verify', 'docs'],
+      2,
+      {
+        cwd: '/repo',
+        persona: 'team-leader',
+        language: 'en',
+        unfinishedScheduledPartCount: 2,
+        runningPartCount: 1,
+        queuedPartCount: 1,
+      },
+    );
+
+    expect(runAgent).toHaveBeenCalledWith(
+      'team-leader',
+      expect.stringContaining('Running parts: 1'),
+      expect.any(Object),
+    );
+    expect(runAgent).toHaveBeenCalledWith(
+      'team-leader',
+      expect.stringContaining('Queued parts: 1'),
+      expect.any(Object),
+    );
+  });
+
   it('requestMoreParts は inspect tools を feedback planning call に渡さない', async () => {
     vi.mocked(runAgent).mockResolvedValue(doneResponse('x', {
       done: true,

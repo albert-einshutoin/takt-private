@@ -9,6 +9,7 @@ import {
   buildMorePartsPrompt,
   toMorePartsResponse,
   toPartDefinitions,
+  type MorePartsPlanningContext,
 } from './team-leader-structured-output.js';
 
 export interface DecomposeTaskOptions {
@@ -30,7 +31,7 @@ export interface DecomposeTaskOptions {
   }) => void;
 }
 
-export type MorePartsOptions = Omit<DecomposeTaskOptions, 'inspectTools' | 'onPromptResolved'>;
+export type MorePartsOptions = Omit<DecomposeTaskOptions, 'inspectTools' | 'onPromptResolved'> & MorePartsPlanningContext;
 
 export interface MorePartsResponse {
   done: boolean;
@@ -94,6 +95,7 @@ export async function requestMoreParts(
     existingIds,
     maxAdditionalParts,
     options.language,
+    options,
   );
 
   const response = await runAgent(options.persona, prompt, {

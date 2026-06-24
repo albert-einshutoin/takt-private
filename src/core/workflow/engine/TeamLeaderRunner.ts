@@ -235,6 +235,8 @@ export class TeamLeaderRunner {
         scheduledIds,
         remainingPartBudget,
         unfinishedScheduledPartCount,
+        runningPartCount,
+        queuedPartCount,
       }) => {
         emitTeamLeaderProgressHint(this.deps.engineOptions, 'feedback');
         try {
@@ -262,6 +264,9 @@ export class TeamLeaderRunner {
               workflowMeta: leaderWorkflowMeta,
               childProcessEnv: this.deps.engineOptions.childProcessEnv,
               onStream: this.deps.engineOptions.onStream,
+              unfinishedScheduledPartCount,
+              runningPartCount,
+              queuedPartCount,
             },
           );
         } catch (error) {

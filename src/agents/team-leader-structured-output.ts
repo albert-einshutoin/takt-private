@@ -2,6 +2,12 @@ import type { Language, PartDefinition } from '../core/models/types.js';
 import { ensureUniquePartIds, parsePartDefinitionEntry } from '../core/workflow/part-definition-validator.js';
 import type { MorePartsResponse } from './decompose-task-usecase.js';
 
+export interface MorePartsPlanningContext {
+  unfinishedScheduledPartCount?: number;
+  runningPartCount?: number;
+  queuedPartCount?: number;
+}
+
 function summarizePartContent(content: string): string {
   const maxLength = 2000;
   if (content.length <= maxLength) {
@@ -145,12 +151,52 @@ function buildDecomposeBasePrompt(
   ].join('\n');
 }
 
+function hasMorePartsPlanningContext(context?: MorePartsPlanningContext): boolean {
+  return context?.unfinishedScheduledPartCount !== undefined
+    || context?.runningPartCount !== undefined
+    || context?.queuedPartCount !== undefined;
+}
+
+function buildMorePartsPlanningContextSection(
+  language: Language | undefined,
+  context?: MorePartsPlanningContext,
+): string[] {
+  if (!hasMorePartsPlanningContext(context)) {
+    return [];
+  }
+
+  const unfinishedScheduledPartCount = context?.unfinishedScheduledPartCount ?? 0;
+  const runningPartCount = context?.runningPartCount ?? 0;
+  const queuedPartCount = context?.queuedPartCount ?? 0;
+
+  if (language === 'ja') {
+    return [
+      '',
+      '## 未完了の予定済み作業',
+      `- 未完了の予定済み parts: ${unfinishedScheduledPartCount}`,
+      `- 実行中 parts: ${runningPartCount}`,
+      `- 待機中 parts: ${queuedPartCount}`,
+      '- done=true は、完了済み結果だけでなく上記の未完了作業も踏まえて判断する',
+    ];
+  }
+
+  return [
+    '',
+    '## Scheduled Work Still In Flight',
+    `- Unfinished scheduled parts: ${unfinishedScheduledPartCount}`,
+    `- Running parts: ${runningPartCount}`,
+    `- Queued parts: ${queuedPartCount}`,
+    '- Treat done=true as a decision over completed results plus the in-flight scheduled work above',
+  ];
+}
+
 function buildMorePartsBasePrompt(
   originalInstruction: string,
   allResults: Array<{ id: string; title: string; status: string; content: string }>,
   existingIds: string[],
   maxAdditionalParts: number,
   language?: Language,
+  planningContext?: MorePartsPlanningContext,
 ): string {
   const resultBlock = allResults.map((result) => [
     `### ${result.id}: ${result.title} (${result.status})`,
@@ -167,6 +213,7 @@ function buildMorePartsBasePrompt(
       '',
       '## 完了済みパート',
       resultBlock || '(なし)',
+      ...buildMorePartsPlanningContextSection(language, planningContext),
       '',
       '## 判断ルール',
       '- 追加作業が不要なら done=true にする',
@@ -189,6 +236,7 @@ function buildMorePartsBasePrompt(
     '',
     '## Completed Parts',
     resultBlock || '(none)',
+    ...buildMorePartsPlanningContextSection(language, planningContext),
     '',
     '## Decision Rules',
     '- Set done=true when no additional work is required',
@@ -248,6 +296,7 @@ export function buildMorePartsPrompt(
   existingIds: string[],
   maxAdditionalParts: number,
   language?: Language,
+  planningContext?: MorePartsPlanningContext,
 ): string {
   return buildMorePartsBasePrompt(
     originalInstruction,
@@ -255,6 +304,7 @@ export function buildMorePartsPrompt(
     existingIds,
     maxAdditionalParts,
     language,
+    planningContext,
   );
 }
 
@@ -264,6 +314,7 @@ export function buildPromptBasedMorePartsPrompt(
   existingIds: string[],
   maxAdditionalParts: number,
   language?: Language,
+  planningContext?: MorePartsPlanningContext,
 ): string {
   const outputInstruction = language === 'ja'
     ? [
@@ -285,5 +336,6 @@ export function buildPromptBasedMorePartsPrompt(
     existingIds,
     maxAdditionalParts,
     language,
+    planningContext,
   )}\n${outputInstruction.join('\n')}`;
 }
