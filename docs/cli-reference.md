@@ -25,6 +25,25 @@ This document provides a complete reference for all TAKT CLI commands and option
 
 `--workflow` is the canonical option.
 
+## devloopd
+
+`devloopd` is a separate sidecar binary installed with TAKT. Use it to verify subscription/login-session-only readiness before running long workflows.
+
+```bash
+devloopd doctor --subscription-only
+devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
+```
+
+| Option | Description |
+|--------|-------------|
+| `--subscription-only` | Require subscription-only TAKT config and provider checks |
+| `--repo <path>` | Repository path to inspect |
+| `--policy <path>` | Optional devloop policy YAML path; `mode` must be `subscription_only` |
+| `--verbose` | Show passing checks |
+| `--skip-auth` | Skip `gh auth status` |
+
+See the [devloopd Guide](./devloopd.md) for the full check list.
+
 ## Interactive Mode
 
 A mode where you refine task content through conversation with AI before execution. Useful when task requirements are ambiguous or when you want to clarify content while consulting with AI.

@@ -106,6 +106,8 @@ takt list
 
 設定で `subscription_only: true` を有効にすると、TAKT は workflow 実行前に SDK/API provider と API key 設定を拒否します。デフォルトの allowlist は `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli`, `mock` です。
 
+長い workflow 実行の前に `devloopd doctor --subscription-only` を実行すると、ローカルの subscription-only 設定、必要な CLI、GitHub 認証、TAKT 設定、project workflow をまとめて確認できます。
+
 任意:
 
 - [GitHub CLI](https://cli.github.com/) (`gh`) — `takt #N` で GitHub Issue を使う場合に必要です
@@ -253,6 +255,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `takt workflow init` | カスタム workflow のひな形を作成します |
 | `takt workflow doctor` | カスタム workflow の定義を静的検証します |
 | `takt repertoire add` | GitHub から repertoire パッケージをインストールします |
+| `devloopd doctor --subscription-only` | subscription-only provider 前提のローカル環境を検証します |
 
 全コマンド・オプションは [CLI Reference](./cli-reference.ja.md) を参照してください。
 
@@ -266,6 +269,22 @@ model: gpt-5.5       # プロバイダーにそのまま渡されます
 language: ja        # en or ja
 ```
 
+サブスク/ログインセッションだけで運用する場合:
+
+```yaml
+subscription_only: true
+provider: codex-cli
+allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
+```
+
+`subscription_only` が有効な場合、TAKT は `openai_api_key` のような API key 設定、`codex` や `opencode` のような SDK/API provider、allowlist 外の workflow step 上書き、実行時の `--provider` 上書きを拒否します。
+
+ローカル CLI セッションと workflow がこの方針に合っているか確認します。
+
+```bash
+devloopd doctor --subscription-only
+```
+
 API Key を直接使う場合は、CLI のインストールは不要です（Claude、Codex、OpenCode が対象）。
 
 ```bash
@@ -277,7 +296,7 @@ export TAKT_COPILOT_GITHUB_TOKEN=ghp_...   # GitHub Copilot CLI
 export TAKT_KIRO_API_KEY=...               # Kiro CLI
 ```
 
-全設定項目・プロバイダープロファイル・モデル解決の詳細は [Configuration Guide](./configuration.ja.md) を参照してください。
+全設定項目・プロバイダープロファイル・モデル解決・subscription-only 環境確認の詳細は [Configuration Guide](./configuration.ja.md) と [devloopd Guide](./devloopd.ja.md) を参照してください。
 
 ## カスタマイズ
 

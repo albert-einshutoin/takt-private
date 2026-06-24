@@ -280,6 +280,8 @@ TAKT は Claude、Codex、OpenCode、Cursor、Copilot、Kiro、Antigravity 系 C
 
 `subscription_only: true` を有効にしている場合、API key config フィールドと SDK/API provider は workflow 実行前に拒否されます。代わりに `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli` を使ってください。
 
+長い run の前に `devloopd doctor --subscription-only` を実行すると、必須 CLI、GitHub 認証、禁止された API key 環境変数、TAKT config、project workflow の provider 参照を確認できます。詳細は [devloopd Guide](./devloopd.ja.md) を参照してください。
+
 ### 環境変数（推奨）
 
 ```bash

@@ -25,6 +25,25 @@
 
 正式オプションは `--workflow` です。
 
+## devloopd
+
+`devloopd` は TAKT と一緒にインストールされる別バイナリです。長い workflow を実行する前に、サブスク/ログイン済み CLI provider だけで運用できる状態か確認します。
+
+```bash
+devloopd doctor --subscription-only
+devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
+```
+
+| オプション | 説明 |
+|-----------|------|
+| `--subscription-only` | subscription-only の TAKT config と provider チェックを必須にします |
+| `--repo <path>` | 検査するリポジトリパス |
+| `--policy <path>` | 任意の devloop policy YAML パス。`mode` は `subscription_only` である必要があります |
+| `--verbose` | pass したチェックも表示します |
+| `--skip-auth` | `gh auth status` をスキップします |
+
+完全なチェック内容は [devloopd Guide](./devloopd.ja.md) を参照してください。
+
 ## インタラクティブモード
 
 AI との会話を通じてタスク内容を精緻化してから実行するモードです。タスクの要件が曖昧な場合や、AI と相談しながら内容を詰めたい場合に便利です。

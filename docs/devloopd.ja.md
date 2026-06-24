@@ -1,0 +1,69 @@
+# devloopd
+
+[English](./devloopd.md)
+
+`devloopd` は TAKT に同梱される sidecar CLI です。最初の対応コマンドは、TAKT をサブスク/ログイン済み CLI provider だけで運用するチーム向けのローカル環境 doctor です。
+
+## Doctor
+
+長い workflow 実行や CI 的なローカル自動化の前に実行します。
+
+```bash
+devloopd doctor --subscription-only
+```
+
+すべての必須チェックが通れば終了コード `0`、subscription-only の必須ガードに違反すれば終了コード `1` で終了します。
+
+### チェック内容
+
+`devloopd doctor --subscription-only` は次を確認します。
+
+- `--subscription-only` が明示されていること
+- 任意の devloop policy YAML が `mode: subscription_only` であること
+- `OPENAI_API_KEY` や `TAKT_OPENAI_API_KEY` のような API key 課金系の環境変数が存在しないこと
+- 必須 CLI が `PATH` 上にあること: `takt`, `gh`, `codex`, `opencode`, `agy`
+- Cursor CLI が `cursor-agent` または `agent` として利用できること
+- `--skip-auth` を付けない限り、`gh auth status` が成功すること
+- 解決後の TAKT 設定で `subscription_only: true` が有効であること
+- global / project の TAKT config に API key config キーが含まれていないこと
+- `.takt/workflows/` 配下の project workflow が TAKT workflow doctor に通り、subscription-only provider チェックにも通ること
+
+doctor は禁止された環境変数名と config キー名だけを表示します。secret 値は出力しません。
+
+### オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--subscription-only` | TAKT の subscription-only policy チェックを必須にします |
+| `--repo <path>` | 検査するリポジトリパス。省略時はカレントディレクトリ |
+| `--policy <path>` | 任意の devloop policy YAML パス |
+| `--verbose` | warning / failure だけでなく pass したチェックも表示します |
+| `--skip-auth` | `gh auth status` をスキップします |
+
+### 任意の policy ファイル
+
+project 側に devloop policy を置く場合は `--policy` を使います。
+
+```yaml
+mode: subscription_only
+```
+
+実行例:
+
+```bash
+devloopd doctor --subscription-only --policy .takt/devloopd.yaml
+```
+
+policy ファイルを指定しない場合、doctor は warning を出して続行します。TAKT config と workflow の検査はそのまま実行されます。
+
+## Subscription-Only TAKT Config
+
+global または project config では CLI-only provider を使います。
+
+```yaml
+subscription_only: true
+provider: codex-cli
+allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
+```
+
+`subscription_only: true` が有効な場合、TAKT は `codex` や `opencode` のような SDK/API provider、`openai_api_key` のような API key 設定、allowlist 外の workflow step provider 上書き、allowlist 外の実行時 `--provider` 上書きを拒否します。

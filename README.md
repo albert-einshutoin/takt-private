@@ -106,6 +106,8 @@ These CLI-only providers are intended for subscription or login-session operatio
 
 Set `subscription_only: true` in config to make TAKT reject SDK/API providers and API-key config before workflow execution. The default subscription-only allowlist is `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli`, and `mock`.
 
+Run `devloopd doctor --subscription-only` before long workflow runs to verify the local subscription-only setup, required CLIs, GitHub auth, TAKT config, and project workflows.
+
 Optional:
 
 - [GitHub CLI](https://cli.github.com/) (`gh`) — for `takt #N` (GitHub Issue tasks)
@@ -250,6 +252,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `takt workflow init` | Create a new workflow scaffold |
 | `takt workflow doctor` | Validate workflow definitions |
 | `takt repertoire add` | Install a repertoire package from GitHub |
+| `devloopd doctor --subscription-only` | Validate local subscription-only provider readiness |
 
 See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 
@@ -273,6 +276,12 @@ allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
 
 When `subscription_only` is enabled, TAKT rejects API-key config such as `openai_api_key`, SDK/API providers such as `codex` and `opencode`, workflow step overrides outside the allowlist, and execution-time `--provider` overrides outside the allowlist.
 
+Validate that local CLI sessions and workflow files match this policy:
+
+```bash
+devloopd doctor --subscription-only
+```
+
 Or use API keys directly (no CLI installation required for Claude, Codex, OpenCode):
 
 ```bash
@@ -284,7 +293,7 @@ export TAKT_COPILOT_GITHUB_TOKEN=ghp_...   # GitHub Copilot CLI
 export TAKT_KIRO_API_KEY=...               # Kiro CLI
 ```
 
-See the [Configuration Guide](./docs/configuration.md) for all options, provider profiles, and model resolution.
+See the [Configuration Guide](./docs/configuration.md) and [devloopd Guide](./docs/devloopd.md) for all options, provider profiles, model resolution, and subscription-only readiness checks.
 
 ## Customization
 
