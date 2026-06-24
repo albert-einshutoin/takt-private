@@ -133,4 +133,28 @@ describe('devloopd issue scanner', () => {
     expect(report.passed).toBe(false);
     expect(formatIssueScanReport(report)).toContain('command not found: gh');
   });
+
+  it('classifies GitHub rate limit failures with retry hints', async () => {
+    const runner: DevloopIssueScannerCommandRunner = {
+      resolveCommand(command) {
+        return command === 'gh' ? '/mock/bin/gh' : undefined;
+      },
+      async exec() {
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: 'API rate limit exceeded. retry after 60 seconds',
+        };
+      },
+    };
+
+    const report = await scanIssues({ repoPath: '/repo', runner });
+    const output = formatIssueScanReport(report);
+
+    expect(report.passed).toBe(false);
+    expect(report.failureKind).toBe('rate_limited');
+    expect(report.retryAfterSeconds).toBe(60);
+    expect(output).toContain('rate limited');
+    expect(output).toContain('Retry after: 60s');
+  });
 });

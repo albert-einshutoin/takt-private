@@ -9,6 +9,7 @@ export type DevloopIssueScannerCommandRunner = DevloopCommandRunner;
 
 export type IssueCandidateMode = 'auto_pr_only' | 'auto_merge_candidate' | 'human_required' | 'skip';
 export type IssueMechanicalRisk = 'low' | 'medium' | 'high';
+export type IssueScanFailureKind = 'command_missing' | 'gh_error' | 'rate_limited';
 
 export interface RawIssueInput {
   number: number;
@@ -54,6 +55,8 @@ export interface IssueScanReport {
   message: string;
   candidates: IssueCandidate[];
   skipped: IssueCandidate[];
+  failureKind?: IssueScanFailureKind;
+  retryAfterSeconds?: number;
 }
 
 interface GhIssue {
@@ -126,6 +129,27 @@ function findMatchingLabel(labels: readonly string[], expected: readonly string[
 
 function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
+}
+
+function isRateLimitText(text: string): boolean {
+  return /\b(api )?rate limit\b/i.test(text)
+    || /\bsecondary rate limit\b/i.test(text)
+    || /\bretry-after\b/i.test(text)
+    || /\bretry after\b/i.test(text);
+}
+
+function parseRetryAfterSeconds(text: string): number | undefined {
+  const retryAfterHeader = /\bretry-after\s*:?\s*(\d+)\b/i.exec(text);
+  if (retryAfterHeader?.[1]) {
+    return Number(retryAfterHeader[1]);
+  }
+
+  const retryAfterText = /\bretry after\s+(\d+)\s*(?:s|sec|secs|second|seconds)?\b/i.exec(text);
+  if (retryAfterText?.[1]) {
+    return Number(retryAfterText[1]);
+  }
+
+  return undefined;
 }
 
 function riskForMode(mode: IssueCandidateMode): IssueMechanicalRisk {
@@ -229,7 +253,7 @@ export async function scanIssues(options: ScanIssuesOptions = {}): Promise<Issue
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
   const ghCommand = runner.resolveCommand('gh', env);
   if (ghCommand === undefined) {
-    return { passed: false, message: 'command not found: gh', candidates: [], skipped: [] };
+    return { passed: false, message: 'command not found: gh', candidates: [], skipped: [], failureKind: 'command_missing' };
   }
 
   const args = [
@@ -248,11 +272,27 @@ export async function scanIssues(options: ScanIssuesOptions = {}): Promise<Issue
 
   const result = await runner.exec(ghCommand, args, { cwd: repoPath, env });
   if (result.exitCode !== 0) {
+    const detail = sanitizeText(result.stderr || result.stdout);
+    if (isRateLimitText(detail)) {
+      const retryAfterSeconds = parseRetryAfterSeconds(detail);
+      return {
+        passed: false,
+        message: retryAfterSeconds === undefined
+          ? `gh issue list rate limited: ${detail}`
+          : `gh issue list rate limited; retry after ${retryAfterSeconds}s: ${detail}`,
+        candidates: [],
+        skipped: [],
+        failureKind: 'rate_limited',
+        retryAfterSeconds,
+      };
+    }
+
     return {
       passed: false,
-      message: `gh issue list failed: ${sanitizeText(result.stderr || result.stdout)}`,
+      message: `gh issue list failed: ${detail}`,
       candidates: [],
       skipped: [],
+      failureKind: 'gh_error',
     };
   }
 
@@ -285,6 +325,9 @@ export function formatIssueScanReport(report: IssueScanReport): string {
   if (report.skipped.length > 0) {
     lines.push('Skipped:');
     lines.push(...report.skipped.map((candidate) => `- ${formatCandidate(candidate)}`));
+  }
+  if (report.retryAfterSeconds !== undefined) {
+    lines.push(`Retry after: ${report.retryAfterSeconds}s`);
   }
 
   return lines.join('\n');
