@@ -33,6 +33,8 @@ This document provides a complete reference for all TAKT CLI commands and option
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd run --issue 123 --repo owner/repo
+devloopd import-takt-run --latest --issue 123
+devloopd timeline --issue 123
 ```
 
 `devloopd doctor` options:
@@ -57,6 +59,25 @@ devloopd run --issue 123 --repo owner/repo
 | `--skip-auth` | Skip `gh auth status` |
 | `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
 | `--no-quiet` | Do not pass `--quiet` to TAKT |
+
+`devloopd import-takt-run` options:
+
+| Option | Description |
+|--------|-------------|
+| `--latest` | Import the latest TAKT run from `.takt/runs/` |
+| `--run <slug>` | Import a specific TAKT run slug |
+| `--issue <number>` | Associate the imported run with a GitHub Issue number |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd timeline` options:
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | Filter imported runs by GitHub Issue number |
+| `--run <slug>` | Filter imported runs by TAKT run slug |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
 
 See the [devloopd Guide](./devloopd.md) for the full check list.
 

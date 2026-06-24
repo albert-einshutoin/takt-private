@@ -90,6 +90,36 @@ takt --pipeline \
 | `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
 | `--no-quiet` | Do not pass `--quiet` to TAKT |
 
+## Import And Timeline
+
+TAKT remains the workflow engine and writes run metadata under `.takt/runs/`. `devloopd import-takt-run` imports that metadata into `.devloop/ledger.jsonl`, including artifact paths, byte sizes, and SHA-256 hashes for log and report files.
+
+```bash
+devloopd import-takt-run --latest --issue 123
+devloopd timeline --issue 123
+```
+
+The JSONL ledger is the portable MVP event log. It is ignored by Git via `.devloop/` and can be copied into a future SQLite backend without changing TAKT run outputs.
+
+### Import Options
+
+| Option | Description |
+|--------|-------------|
+| `--latest` | Import the latest TAKT run from `.takt/runs/` |
+| `--run <slug>` | Import a specific TAKT run slug |
+| `--issue <number>` | Associate the imported run with a GitHub Issue number |
+| `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+### Timeline Options
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | Filter imported runs by GitHub Issue number |
+| `--run <slug>` | Filter imported runs by TAKT run slug |
+| `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
 ## Subscription-Only TAKT Config
 
 Use CLI-only providers in global or project config:

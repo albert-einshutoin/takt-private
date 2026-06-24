@@ -254,6 +254,8 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `takt repertoire add` | Install a repertoire package from GitHub |
 | `devloopd doctor --subscription-only` | Validate local subscription-only provider readiness |
 | `devloopd run --issue N` | Run a GitHub Issue through TAKT after subscription-only checks |
+| `devloopd import-takt-run --latest --issue N` | Import TAKT run metadata into the devloop ledger |
+| `devloopd timeline --issue N` | Render imported TAKT run history |
 
 See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 

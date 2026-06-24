@@ -90,6 +90,36 @@ takt --pipeline \
 | `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
 | `--no-quiet` | TAKT に `--quiet` を渡しません |
 
+## Import And Timeline
+
+TAKT は workflow engine として `.takt/runs/` に run metadata を出力します。`devloopd import-takt-run` はその metadata を `.devloop/ledger.jsonl` に取り込み、log / report file の artifact path、byte size、SHA-256 hash を保存します。
+
+```bash
+devloopd import-takt-run --latest --issue 123
+devloopd timeline --issue 123
+```
+
+JSONL ledger は portable な MVP event log です。`.devloop/` は Git から無視され、将来の SQLite backend に移しても TAKT run output 側を変えずに済む境界です。
+
+### Import オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--latest` | `.takt/runs/` から最新 TAKT run を取り込みます |
+| `--run <slug>` | 指定した TAKT run slug を取り込みます |
+| `--issue <number>` | 取り込む run に GitHub Issue 番号を関連付けます |
+| `--cwd <path>` | 検査するリポジトリパス。省略時はカレントディレクトリ |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+### Timeline オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--issue <number>` | GitHub Issue 番号で imported run を絞り込みます |
+| `--run <slug>` | TAKT run slug で imported run を絞り込みます |
+| `--cwd <path>` | 検査するリポジトリパス。省略時はカレントディレクトリ |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
 ## Subscription-Only TAKT Config
 
 global または project config では CLI-only provider を使います。
