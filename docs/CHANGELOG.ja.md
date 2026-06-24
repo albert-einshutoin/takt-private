@@ -6,6 +6,12 @@
 
 フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に基づいています。
 
+## [Unreleased]
+
+### Fixed
+
+- TAKT 管理の Git push を非対話化し、terminal credential prompt を無効化しました (#866)。workflow 実行とローカル commit 作成後に publish が失敗した場合でも、ブランチ/commit を保持し、タスクを `pr_failed` として記録し、PR 作成をスキップして、workflow 実装失敗ではなく再試行可能な publish failure として報告します。
+
 ## [0.48.0] - 2026-06-21
 
 ### Added
