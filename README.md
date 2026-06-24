@@ -258,6 +258,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd timeline --issue N` | Render imported TAKT run history |
 | `devloopd merge-if-safe --pr N` | Enable GitHub auto-merge only after mechanical policy gates pass |
 | `devloopd scan-issues --repo owner/repo` | Scan open GitHub Issues and classify mechanical candidates |
+| `devloopd start --repo owner/repo --once` | Run one finite scan/run/import supervisor cycle |
 
 See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 

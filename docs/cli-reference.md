@@ -37,6 +37,7 @@ devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
+devloopd start --repo owner/repo --once
 ```
 
 `devloopd doctor` options:
@@ -96,6 +97,20 @@ devloopd scan-issues --repo owner/repo
 |--------|-------------|
 | `--repo <owner/repo>` | GitHub repository |
 | `--cwd <path>` | Repository path to run `gh issue list` from |
+
+`devloopd start` options:
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--once` | Run one finite scan/run/import cycle. Required until long-running daemon mode is implemented |
+| `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
+| `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--skip-auth` | Skip `gh auth status` |
+| `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
+| `--no-quiet` | Do not pass `--quiet` to TAKT |
 
 See the [devloopd Guide](./devloopd.md) for the full check list.
 

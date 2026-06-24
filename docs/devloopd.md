@@ -2,7 +2,7 @@
 
 [日本語](./devloopd.ja.md)
 
-`devloopd` is a sidecar CLI packaged with TAKT. Its first supported command is a local readiness doctor for teams that run TAKT only through subscription/login-session CLI providers.
+`devloopd` is a sidecar CLI packaged with TAKT. It provides local readiness checks and finite supervisor utilities for teams that run TAKT only through subscription/login-session CLI providers.
 
 ## Doctor
 
@@ -177,6 +177,37 @@ Default candidate behavior:
 |--------|-------------|
 | `--repo <owner/repo>` | GitHub repository |
 | `--cwd <path>` | Repository path to run `gh issue list` from |
+
+## Start
+
+`devloopd start --once` connects the MVP supervisor path: scan open issues, select the safest mechanical candidate, run TAKT for that issue, and import the latest TAKT run into the devloop ledger.
+
+```bash
+devloopd start --repo owner/repo --once
+```
+
+Long-running daemon mode is intentionally not enabled yet. Without `--once`, `devloopd start` exits before scanning or starting TAKT. This keeps the current supervisor bounded while the run scheduler, retry policy, and memory pager are still being hardened.
+
+The finite cycle uses the same safety boundaries as the lower-level commands:
+
+- `scan-issues` performs mechanical filtering first
+- `auto_merge_candidate` issues are preferred over `auto_pr_only` issues
+- `run` still runs the subscription-only doctor before TAKT starts
+- `import-takt-run --latest` persists the run evidence after TAKT succeeds
+
+### Start Options
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--once` | Run one finite scan/run/import cycle. Required until long-running daemon mode is implemented |
+| `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
+| `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--skip-auth` | Skip `gh auth status` |
+| `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
+| `--no-quiet` | Do not pass `--quiet` to TAKT |
 
 ## Subscription-Only TAKT Config
 

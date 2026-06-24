@@ -37,6 +37,7 @@ devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
+devloopd start --repo owner/repo --once
 ```
 
 `devloopd doctor` のオプション:
@@ -96,6 +97,20 @@ devloopd scan-issues --repo owner/repo
 |-----------|------|
 | `--repo <owner/repo>` | GitHub リポジトリ |
 | `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+
+`devloopd start` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--once` | scan/run/import cycle を 1 回だけ実行します。長時間 daemon mode が実装されるまでは必須です |
+| `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
+| `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--skip-auth` | `gh auth status` をスキップします |
+| `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
+| `--no-quiet` | TAKT に `--quiet` を渡しません |
 
 完全なチェック内容は [devloopd Guide](./devloopd.ja.md) を参照してください。
 

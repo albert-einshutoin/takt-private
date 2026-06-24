@@ -2,7 +2,7 @@
 
 [English](./devloopd.md)
 
-`devloopd` は TAKT に同梱される sidecar CLI です。最初の対応コマンドは、TAKT をサブスク/ログイン済み CLI provider だけで運用するチーム向けのローカル環境 doctor です。
+`devloopd` は TAKT に同梱される sidecar CLI です。TAKT をサブスク/ログイン済み CLI provider だけで運用するチーム向けに、ローカル環境チェックと有限の supervisor utility を提供します。
 
 ## Doctor
 
@@ -177,6 +177,37 @@ Issue body と comments は untrusted input です。scanner はそれらを req
 |-----------|------|
 | `--repo <owner/repo>` | GitHub リポジトリ |
 | `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+
+## Start
+
+`devloopd start --once` は MVP supervisor path をつなぎます。open Issue を scan し、機械的に最も安全な候補を選び、その Issue で TAKT を実行し、最後に最新 TAKT run を devloop ledger に取り込みます。
+
+```bash
+devloopd start --repo owner/repo --once
+```
+
+長時間 daemon mode はまだ有効化していません。`--once` がない場合、`devloopd start` は scan や TAKT 起動の前に終了します。run scheduler、retry policy、memory pager の hardening が済むまでは supervisor を有限に保つためです。
+
+この有限 cycle は下位コマンドと同じ安全境界を使います。
+
+- `scan-issues` が先に機械的 filter を実行する
+- `auto_pr_only` Issue より `auto_merge_candidate` Issue を優先する
+- `run` は TAKT 起動前に subscription-only doctor を実行する
+- TAKT が成功した後に `import-takt-run --latest` で run evidence を保存する
+
+### Start オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--once` | scan/run/import cycle を 1 回だけ実行します。長時間 daemon mode が実装されるまでは必須です |
+| `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
+| `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--skip-auth` | `gh auth status` をスキップします |
+| `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
+| `--no-quiet` | TAKT に `--quiet` を渡しません |
 
 ## Subscription-Only TAKT Config
 
