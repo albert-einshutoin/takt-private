@@ -35,6 +35,7 @@ devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
+devloopd export-ledger --output .devloop/backup/ledger.jsonl
 devloopd timeline --issue 123
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
@@ -82,6 +83,17 @@ devloopd start --repo owner/repo
 | Option | Description |
 |--------|-------------|
 | `--issue <number>` | Associate imported runs with a GitHub Issue number |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd export-ledger` options:
+
+| Option | Description |
+|--------|-------------|
+| `--output <path>` | Output JSONL path. Relative paths must stay inside the repository |
+| `--force` | Overwrite an existing output file |
+| `--issue <number>` | Filter exported runs by GitHub Issue number |
+| `--run <slug>` | Filter exported runs by TAKT run slug |
 | `--cwd <path>` | Repository path to inspect |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
 

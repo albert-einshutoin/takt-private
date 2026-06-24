@@ -97,6 +97,7 @@ TAKT remains the workflow engine and writes run metadata under `.takt/runs/`. `d
 ```bash
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
+devloopd export-ledger --output .devloop/backup/ledger.jsonl
 devloopd timeline --issue 123
 devloopd memory --write
 ```
@@ -104,6 +105,8 @@ devloopd memory --write
 The JSONL ledger is the portable MVP event log. It is ignored by Git via `.devloop/` and can be copied into a future SQLite backend without changing TAKT run outputs.
 
 `devloopd reconcile-runs` scans `.takt/runs/` and imports missing non-running runs into the ledger. It skips already imported runs and running runs, so it is safe to use after a daemon crash, interrupted import, or backup restore.
+
+`devloopd export-ledger` writes filtered ledger events to a JSONL backup file. Relative output paths must stay inside the repository, and existing files are protected unless `--force` is passed.
 
 `devloopd memory` renders a compact project memory snapshot from imported run metadata. It does not read raw log content. Report artifact paths are included for follow-up inspection, while log artifacts are omitted from the memory text.
 
@@ -131,6 +134,17 @@ The JSONL ledger is the portable MVP event log. It is ignored by Git via `.devlo
 | Option | Description |
 |--------|-------------|
 | `--issue <number>` | Associate imported runs with a GitHub Issue number |
+| `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+### Export Options
+
+| Option | Description |
+|--------|-------------|
+| `--output <path>` | Output JSONL path. Relative paths must stay inside the repository |
+| `--force` | Overwrite an existing output file |
+| `--issue <number>` | Filter exported runs by GitHub Issue number |
+| `--run <slug>` | Filter exported runs by TAKT run slug |
 | `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
 

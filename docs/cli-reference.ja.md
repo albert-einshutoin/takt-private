@@ -35,6 +35,7 @@ devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
+devloopd export-ledger --output .devloop/backup/ledger.jsonl
 devloopd timeline --issue 123
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
@@ -82,6 +83,17 @@ devloopd start --repo owner/repo
 | オプション | 説明 |
 |-----------|------|
 | `--issue <number>` | 取り込む run に GitHub Issue 番号を関連付けます |
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+`devloopd export-ledger` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--output <path>` | JSONL 出力パス。相対パスはリポジトリ内に限定されます |
+| `--force` | 既存の出力ファイルを上書きします |
+| `--issue <number>` | GitHub Issue 番号で exported run を絞り込みます |
+| `--run <slug>` | TAKT run slug で exported run を絞り込みます |
 | `--cwd <path>` | 検査するリポジトリパス |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
 
