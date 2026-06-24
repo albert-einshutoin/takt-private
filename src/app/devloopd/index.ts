@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { formatDevloopDoctorReport, runDevloopDoctor } from '../../devloopd/doctor.js';
+import { formatActiveRunsReport, inspectActiveRuns } from '../../devloopd/activeRuns.js';
 import {
   formatImportTaktRunReport,
   formatTimelineReport,
@@ -230,6 +231,26 @@ program
   });
 
 program
+  .command('active-runs')
+  .description('Inspect currently running TAKT runs and stale run state')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--stale-after-minutes <count>', 'Minutes without metadata update before a run is stale', (value: string) => Number(value))
+  .action((options: {
+    cwd: string;
+    staleAfterMinutes?: number;
+  }) => {
+    const report = inspectActiveRuns({
+      repoPath: resolve(options.cwd),
+      staleAfterMinutes: options.staleAfterMinutes,
+    });
+
+    console.log(formatActiveRunsReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
   .command('start')
   .description('Run a finite subscription-only devloop supervisor cycle')
   .option('--repo <owner/repo>', 'GitHub repository')
@@ -241,6 +262,8 @@ program
   .option('--no-quiet', 'Do not pass --quiet to TAKT')
   .option('--cwd <path>', 'Repository path to run in', process.cwd())
   .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .option('--max-active-runs <count>', 'Maximum active TAKT runs allowed before start refuses to scan', (value: string) => Number(value))
+  .option('--stale-after-minutes <count>', 'Minutes without metadata update before active-runs marks a run stale', (value: string) => Number(value))
   .action(async (options: {
     repo?: string;
     once?: boolean;
@@ -251,6 +274,8 @@ program
     quiet?: boolean;
     cwd: string;
     ledger?: string;
+    maxActiveRuns?: number;
+    staleAfterMinutes?: number;
   }) => {
     const report = await startDevloop({
       repoPath: resolve(options.cwd),
@@ -262,6 +287,8 @@ program
       autoPr: options.autoPr !== false,
       quiet: options.quiet !== false,
       ledgerPath: options.ledger,
+      maxActiveRuns: options.maxActiveRuns,
+      staleAfterMinutes: options.staleAfterMinutes,
     });
 
     console.log(formatDevloopStartReport(report));

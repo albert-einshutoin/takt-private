@@ -16,6 +16,7 @@ import {
   type ImportTaktRunOptions,
   type ImportTaktRunReport,
 } from './ledger.js';
+import { inspectActiveRuns, type ActiveRunsReport } from './activeRuns.js';
 import type { DevloopCommandRunner } from './commandRunner.js';
 
 export interface DevloopStartDependencies {
@@ -35,6 +36,8 @@ export interface StartDevloopOptions {
   quiet?: boolean;
   once?: boolean;
   maxRuns?: number;
+  maxActiveRuns?: number;
+  staleAfterMinutes?: number;
   issuePolicy?: Partial<IssueScanPolicy>;
   env?: NodeJS.ProcessEnv;
   runner?: DevloopCommandRunner;
@@ -50,6 +53,7 @@ export interface DevloopStartIssueRun {
 export interface DevloopStartReport {
   passed: boolean;
   message: string;
+  activeRuns?: ActiveRunsReport;
   scan?: IssueScanReport;
   selected: IssueCandidate[];
   runs: DevloopStartIssueRun[];
@@ -91,6 +95,12 @@ function normalizeMaxRuns(value: number | undefined): number | undefined {
   return value;
 }
 
+function normalizeMaxActiveRuns(value: number | undefined): number | undefined {
+  if (value === undefined) return 1;
+  if (!Number.isInteger(value) || value < 1) return undefined;
+  return value;
+}
+
 function makeReport(message: string, passed = false): DevloopStartReport {
   return {
     passed,
@@ -109,9 +119,35 @@ export async function startDevloop(options: StartDevloopOptions = {}): Promise<D
   if (maxRuns === undefined) {
     return makeReport(`maxRuns must be a positive integer: ${String(options.maxRuns)}`);
   }
+  const maxActiveRuns = normalizeMaxActiveRuns(options.maxActiveRuns);
+  if (maxActiveRuns === undefined) {
+    return makeReport(`maxActiveRuns must be a positive integer: ${String(options.maxActiveRuns)}`);
+  }
 
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const dependencies = resolveDependencies(options.dependencies);
+  const activeRuns = inspectActiveRuns({
+    repoPath,
+    staleAfterMinutes: options.staleAfterMinutes,
+  });
+  if (!activeRuns.passed) {
+    return {
+      passed: false,
+      message: activeRuns.message,
+      activeRuns,
+      selected: [],
+      runs: [],
+    };
+  }
+  if (activeRuns.activeRuns.length >= maxActiveRuns) {
+    return {
+      passed: false,
+      message: `active run limit reached: ${activeRuns.activeRuns.length}/${maxActiveRuns}`,
+      activeRuns,
+      selected: [],
+      runs: [],
+    };
+  }
   const scan = await dependencies.scanIssues({
     repoPath,
     repo: options.repo,
@@ -124,6 +160,7 @@ export async function startDevloop(options: StartDevloopOptions = {}): Promise<D
     return {
       passed: false,
       message: 'issue scan failed; no TAKT runs started',
+      activeRuns,
       scan,
       selected: [],
       runs: [],
@@ -135,6 +172,7 @@ export async function startDevloop(options: StartDevloopOptions = {}): Promise<D
     return {
       passed: false,
       message: 'no eligible issue candidates found',
+      activeRuns,
       scan,
       selected,
       runs: [],
@@ -161,6 +199,7 @@ export async function startDevloop(options: StartDevloopOptions = {}): Promise<D
       return {
         passed: false,
         message: 'devloopd start stopped after a failed issue run',
+        activeRuns,
         scan,
         selected,
         runs,
@@ -179,6 +218,7 @@ export async function startDevloop(options: StartDevloopOptions = {}): Promise<D
       return {
         passed: false,
         message: 'devloopd start stopped after a failed run import',
+        activeRuns,
         scan,
         selected,
         runs,
@@ -189,6 +229,7 @@ export async function startDevloop(options: StartDevloopOptions = {}): Promise<D
   return {
     passed: true,
     message: `completed ${runs.length} issue run(s)`,
+    activeRuns,
     scan,
     selected,
     runs,
@@ -207,6 +248,9 @@ export function formatDevloopStartReport(report: DevloopStartReport): string {
 
   if (report.scan) {
     lines.push(`Scan: ${report.scan.message}`);
+  }
+  if (report.activeRuns && report.activeRuns.activeRuns.length > 0) {
+    lines.push(`Active runs: ${report.activeRuns.activeRuns.length}`);
   }
   if (report.selected.length > 0) {
     lines.push('Selected:');

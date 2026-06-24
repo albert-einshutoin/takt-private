@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   formatDevloopStartReport,
   startDevloop,
@@ -27,6 +30,27 @@ function makeScan(candidates: IssueCandidate[]): IssueScanReport {
     candidates,
     skipped: [],
   };
+}
+
+function makeTempRepo(): string {
+  return mkdtempSync(join(tmpdir(), 'takt-devloopd-supervisor-'));
+}
+
+function writeRunningRun(repoPath: string, slug: string): void {
+  const runDir = join(repoPath, '.takt', 'runs', slug);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, 'meta.json'), JSON.stringify({
+    task: 'Running task',
+    workflow: 'subscription-devloop',
+    runSlug: slug,
+    runRoot: `.takt/runs/${slug}`,
+    reportDirectory: `.takt/runs/${slug}/reports`,
+    contextDirectory: `.takt/runs/${slug}/context`,
+    logsDirectory: `.takt/runs/${slug}/logs`,
+    status: 'running',
+    startTime: '2026-06-24T00:00:00.000Z',
+    updatedAt: '2026-06-24T00:30:00.000Z',
+  }), 'utf-8');
 }
 
 describe('devloopd supervisor', () => {
@@ -138,5 +162,30 @@ describe('devloopd supervisor', () => {
 
     expect(report.passed).toBe(false);
     expect(report.message).toContain('pass --once');
+  });
+
+  it('does not scan issues when the active run limit is reached', async () => {
+    const repoPath = makeTempRepo();
+    writeRunningRun(repoPath, 'run-active');
+    const dependencies: DevloopStartDependencies = {
+      async scanIssues() {
+        throw new Error('should not scan');
+      },
+      async runDevloopIssue() {
+        throw new Error('should not run');
+      },
+      importTaktRun() {
+        throw new Error('should not import');
+      },
+    };
+
+    try {
+      const report = await startDevloop({ repoPath, once: true, dependencies });
+
+      expect(report.passed).toBe(false);
+      expect(report.message).toContain('active run limit reached');
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
   });
 });
