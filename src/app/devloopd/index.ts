@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { formatDevloopDoctorReport, runDevloopDoctor } from '../../devloopd/doctor.js';
+import { formatDevloopRunReport, runDevloopIssue } from '../../devloopd/run.js';
 import { getErrorMessage } from '../../shared/utils/error.js';
 
 const require = createRequire(import.meta.url);
@@ -40,6 +41,46 @@ program
     });
 
     console.log(formatDevloopDoctorReport(report, { verbose: options.verbose === true }));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('run')
+  .description('Run a GitHub issue through TAKT after subscription-only readiness checks')
+  .requiredOption('--issue <number>', 'GitHub issue number')
+  .option('--repo <owner/repo>', 'GitHub repository for TAKT PR operations')
+  .option('--workflow <path>', 'TAKT workflow name or path', '.takt/workflows/subscription-devloop.yaml')
+  .option('--policy <path>', 'devloopd policy YAML path')
+  .option('--skip-auth', 'Skip GitHub CLI auth status check')
+  .option('--no-auto-pr', 'Do not pass --auto-pr to TAKT')
+  .option('--no-quiet', 'Do not pass --quiet to TAKT')
+  .option('--cwd <path>', 'Repository path to run in', process.cwd())
+  .option('--verbose', 'Show doctor passing checks')
+  .action(async (options: {
+    issue: string;
+    repo?: string;
+    workflow: string;
+    policy?: string;
+    skipAuth?: boolean;
+    autoPr?: boolean;
+    quiet?: boolean;
+    cwd: string;
+    verbose?: boolean;
+  }) => {
+    const report = await runDevloopIssue({
+      repoPath: resolve(options.cwd),
+      issue: options.issue,
+      repo: options.repo,
+      workflow: options.workflow,
+      policyPath: options.policy ? resolve(options.policy) : undefined,
+      skipAuth: options.skipAuth === true,
+      autoPr: options.autoPr !== false,
+      quiet: options.quiet !== false,
+    });
+
+    console.log(formatDevloopRunReport(report, { verbose: options.verbose === true }));
     if (!report.passed) {
       process.exitCode = 1;
     }

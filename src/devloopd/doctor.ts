@@ -1,5 +1,5 @@
-import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
-import { delimiter, extname, join, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   DEFAULT_SUBSCRIPTION_ONLY_ALLOWED_PROVIDERS,
@@ -13,8 +13,13 @@ import {
   inspectWorkflowFile,
   resolveWorkflowDoctorTargets,
 } from '../infra/config/loaders/workflowDoctor.js';
-import { crossSpawn, getErrorMessage } from '../shared/utils/index.js';
+import { getErrorMessage } from '../shared/utils/index.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import {
+  createDefaultDevloopCommandRunner,
+  type DevloopCommandResult,
+  type DevloopCommandRunner,
+} from './commandRunner.js';
 
 export type DevloopDoctorStatus = 'pass' | 'fail' | 'warn';
 
@@ -30,20 +35,8 @@ export interface DevloopDoctorReport {
   checks: DevloopDoctorCheck[];
 }
 
-export interface DevloopDoctorCommandResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
-
-export interface DevloopDoctorCommandRunner {
-  resolveCommand(command: string, env?: NodeJS.ProcessEnv): string | undefined;
-  exec(
-    command: string,
-    args: readonly string[],
-    options?: { cwd?: string; env?: NodeJS.ProcessEnv },
-  ): Promise<DevloopDoctorCommandResult>;
-}
+export type DevloopDoctorCommandResult = DevloopCommandResult;
+export type DevloopDoctorCommandRunner = DevloopCommandRunner;
 
 export interface RunDevloopDoctorOptions {
   repoPath?: string;
@@ -64,85 +57,6 @@ function makeCheck(status: DevloopDoctorStatus, name: string, message: string, d
 
 function sanitizeDetail(text: string): string {
   return sanitizeSensitiveText(text).trim();
-}
-
-function canExecute(filePath: string): boolean {
-  try {
-    accessSync(filePath, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function candidateCommandNames(command: string, env: NodeJS.ProcessEnv): string[] {
-  if (process.platform !== 'win32' || extname(command)) {
-    return [command];
-  }
-
-  const extensions = (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
-    .split(';')
-    .map((extension) => extension.trim())
-    .filter((extension) => extension.length > 0);
-  return [command, ...extensions.map((extension) => `${command}${extension.toLowerCase()}`)];
-}
-
-function resolveCommandFromPath(command: string, env: NodeJS.ProcessEnv): string | undefined {
-  const pathValue = env.PATH ?? '';
-  if (pathValue.trim() === '') {
-    return undefined;
-  }
-
-  for (const directory of pathValue.split(delimiter)) {
-    if (directory.trim() === '') {
-      continue;
-    }
-    for (const commandName of candidateCommandNames(command, env)) {
-      const candidate = join(directory, commandName);
-      if (canExecute(candidate)) {
-        return candidate;
-      }
-    }
-  }
-
-  return undefined;
-}
-
-function createDefaultCommandRunner(): DevloopDoctorCommandRunner {
-  return {
-    resolveCommand(command, env = process.env) {
-      return resolveCommandFromPath(command, env);
-    },
-    async exec(command, args, options) {
-      return new Promise<DevloopDoctorCommandResult>((resolveResult) => {
-        const child = crossSpawn(command, args, {
-          cwd: options?.cwd,
-          env: options?.env,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        let stdout = '';
-        let stderr = '';
-
-        child.stdout?.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString('utf-8');
-        });
-        child.stderr?.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString('utf-8');
-        });
-        child.on('error', (error) => {
-          resolveResult({ exitCode: 1, stdout, stderr: getErrorMessage(error) });
-        });
-        child.on('close', (exitCode, signal) => {
-          const signalDetail = signal ? `terminated by signal ${signal}` : '';
-          resolveResult({
-            exitCode: exitCode ?? 1,
-            stdout,
-            stderr: [stderr, signalDetail].filter(Boolean).join('\n'),
-          });
-        });
-      });
-    },
-  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -322,7 +236,7 @@ function checkProjectWorkflows(repoPath: string): DevloopDoctorCheck[] {
 export async function runDevloopDoctor(options: RunDevloopDoctorOptions = {}): Promise<DevloopDoctorReport> {
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
-  const runner = options.runner ?? createDefaultCommandRunner();
+  const runner = options.runner ?? createDefaultDevloopCommandRunner();
   const checks: DevloopDoctorCheck[] = [
     checkSubscriptionOnlyFlag(options.subscriptionOnly === true),
     checkDevloopPolicy(options.policyPath),
