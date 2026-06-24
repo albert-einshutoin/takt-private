@@ -50,7 +50,7 @@ program
   .option('--repo <owner/repo>', 'Repository (defaults to current)')
   .option(
     '--provider <name>',
-    'Override agent provider (claude|claude-sdk|claude-terminal|codex|opencode|cursor|copilot|kiro|mock)',
+    'Override agent provider (claude|claude-sdk|claude-terminal|codex|codex-cli|opencode|opencode-cli|cursor|cursor-cli|copilot|kiro|agy-cli|mock)',
   )
   .option('--model <name>', 'Override agent model')
   .option('-t, --task <string>', 'Task content (as alternative to issue reference)')
