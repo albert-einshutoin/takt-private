@@ -239,68 +239,74 @@ describe('command quality gates', () => {
     }
   });
 
-  it('should fail and stop the command when stdout exceeds the output byte limit', async () => {
+  it('should pass when stdout exceeds the capture limit but the command exits with code 0', async () => {
     const projectRoot = createTempDir();
 
     const result = await runCommandQualityGate({
       gate: {
         type: 'command',
         name: 'noisy-check',
-        command: 'node -e "process.stdout.write(\'x\'.repeat(70000)); setInterval(()=>{},1000)"',
+        command: 'node -e "require(\'node:fs\').writeSync(1, Buffer.alloc(70000, \'x\'))"',
         timeoutMs: 1000,
       },
       projectRoot,
     });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.failure).toMatchObject({
-        gateName: 'noisy-check',
-        outputLimitExceeded: true,
-        outputLimitBytes: 65536,
-      });
-      expect(result.failure.stdout.length).toBeLessThan(66000);
-      expect(result.failure.stdout).toContain('[OUTPUT TRUNCATED: exceeded 65536 bytes]');
-      expect(result.failure.outputLogPath).toBeDefined();
-      expect(existsSync(result.failure.outputLogPath!)).toBe(true);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.stdout.length).toBeLessThan(66000);
+      expect(result.stdout).toContain('[OUTPUT TRUNCATED: exceeded 65536 bytes]');
     }
   });
 
-  it('should fail and stop the command when stderr exceeds the output byte limit', async () => {
+  it('should pass when stderr exceeds the capture limit but the command exits with code 0', async () => {
     const projectRoot = createTempDir();
 
     const result = await runCommandQualityGate({
       gate: {
         type: 'command',
         name: 'noisy-stderr-check',
-        command: 'node -e "process.stderr.write(\'x\'.repeat(70000)); setInterval(()=>{},1000)"',
+        command: 'node -e "require(\'node:fs\').writeSync(2, Buffer.alloc(70000, \'x\'))"',
         timeoutMs: 1000,
       },
       projectRoot,
     });
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.failure).toMatchObject({
-        gateName: 'noisy-stderr-check',
-        outputLimitExceeded: true,
-        outputLimitBytes: 65536,
-      });
-      expect(result.failure.stderr.length).toBeLessThan(66000);
-      expect(result.failure.stderr).toContain('[OUTPUT TRUNCATED: exceeded 65536 bytes]');
-      expect(result.failure.outputLogPath).toBeDefined();
-      expect(existsSync(result.failure.outputLogPath!)).toBe(true);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.stderr.length).toBeLessThan(66000);
+      expect(result.stderr).toContain('[OUTPUT TRUNCATED: exceeded 65536 bytes]');
     }
   });
 
-  it('should fail and stop the command when stdout and stderr exceed the combined output byte limit', async () => {
+  it('should pass when stdout and stderr exceed the combined capture limit but the command exits with code 0', async () => {
     const projectRoot = createTempDir();
 
     const result = await runCommandQualityGate({
       gate: {
         type: 'command',
         name: 'combined-noisy-check',
-        command: 'node -e "process.stdout.write(\'o\'.repeat(40000)); process.stderr.write(\'e\'.repeat(40000)); setInterval(()=>{},1000)"',
+        command: 'node -e "const fs = require(\'node:fs\'); fs.writeSync(1, Buffer.alloc(40000, \'o\')); fs.writeSync(2, Buffer.alloc(40000, \'e\'))"',
+        timeoutMs: 1000,
+      },
+      projectRoot,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.stdout.length + result.stderr.length).toBeLessThan(67000);
+      expect(`${result.stdout}${result.stderr}`).toContain('[OUTPUT TRUNCATED: exceeded 65536 bytes]');
+    }
+  });
+
+  it('should fail on non-zero exit even when output capture was truncated', async () => {
+    const projectRoot = createTempDir();
+
+    const result = await runCommandQualityGate({
+      gate: {
+        type: 'command',
+        name: 'noisy-failing-check',
+        command: 'node -e "require(\'node:fs\').writeSync(1, Buffer.alloc(70000, \'x\')); process.exit(1)"',
         timeoutMs: 1000,
       },
       projectRoot,
@@ -309,15 +315,19 @@ describe('command quality gates', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.failure).toMatchObject({
-        gateName: 'combined-noisy-check',
+        gateName: 'noisy-failing-check',
+        exitCode: 1,
         outputLimitExceeded: true,
         outputLimitBytes: 65536,
         timedOut: false,
       });
-      expect(result.failure.stdout.length + result.failure.stderr.length).toBeLessThan(67000);
-      expect(`${result.failure.stdout}${result.failure.stderr}`).toContain('[OUTPUT TRUNCATED: exceeded 65536 bytes]');
+      expect(result.failure.stdout.length).toBeLessThan(66000);
+      expect(result.failure.stdout).toContain('[OUTPUT TRUNCATED: exceeded 65536 bytes]');
       expect(result.failure.outputLogPath).toBeDefined();
       expect(existsSync(result.failure.outputLogPath!)).toBe(true);
+      const message = formatCommandGateFailure(result.failure);
+      expect(message).toContain('Exit code: 1');
+      expect(message).toContain('Output truncated: exceeded 65536 bytes');
     }
   });
 

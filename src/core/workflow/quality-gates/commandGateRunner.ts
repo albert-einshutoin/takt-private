@@ -219,6 +219,8 @@ export function runCommandQualityGate({
 
     child.stdout?.setEncoding('utf-8');
     child.stderr?.setEncoding('utf-8');
+    // The byte limit protects feedback payload size only; command success still
+    // follows exit code/timeout so verbose successful checks do not fail.
     child.stdout?.on('data', (chunk: string) => {
       if (outputLimitExceeded) {
         return;
@@ -228,7 +230,6 @@ export function runCommandQualityGate({
       outputBytes = appended.bytes;
       if (appended.exceeded) {
         outputLimitExceeded = true;
-        terminateProcess();
       }
     });
     child.stderr?.on('data', (chunk: string) => {
@@ -240,7 +241,6 @@ export function runCommandQualityGate({
       outputBytes = appended.bytes;
       if (appended.exceeded) {
         outputLimitExceeded = true;
-        terminateProcess();
       }
     });
 
@@ -331,7 +331,7 @@ export function runCommandQualityGate({
     child.on('close', (code) => {
       clearTimers();
 
-      if (code === 0 && !timedOut && !outputLimitExceeded) {
+      if (code === 0 && !timedOut) {
         settle({ ok: true, stdout, stderr });
         return;
       }
@@ -346,7 +346,7 @@ export function runCommandQualityGate({
         timedOut,
         timedOut ? effectiveTimeoutMs : undefined,
         outputLimitExceeded,
-        timedOut || outputLimitExceeded ? undefined : code ?? undefined,
+        timedOut ? undefined : code ?? undefined,
       ));
     });
   });
