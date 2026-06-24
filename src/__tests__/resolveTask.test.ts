@@ -475,6 +475,23 @@ describe('resolveTaskExecution', () => {
     expect(result.initialIterationOverride).toBeUndefined();
   });
 
+  it('should raise stored maxStepsOverride when resumed iteration reaches an unavailable workflow ceiling', async () => {
+    const root = createTempProjectDir();
+    const task = createTask({
+      data: ({
+        task: 'Run task',
+        workflow: 'missing-workflow',
+        exceeded_max_steps: 50,
+        exceeded_current_iteration: 50,
+      } as unknown) as NonNullable<TaskInfo['data']>,
+    });
+
+    const result = await resolveTaskExecutionStrict(task, root);
+
+    expect(result.initialIterationOverride).toBe(50);
+    expect(result.maxStepsOverride).toBe(51);
+  });
+
   it('should fail fast when an unknown workflow key is present', async () => {
     const root = createTempProjectDir();
     const task = createTask({

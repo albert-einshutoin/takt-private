@@ -38,18 +38,20 @@ export function buildTerminalTaskRecord(
 ): TaskRecord {
   const nextTask = retryMetadata?.preserveExisting ? { ...task } : clearRetryMetadata(task);
   const nextRetryMetadata = retryMetadata?.preserveExisting ? undefined : retryMetadata;
+  const exceededMetadata =
+    nextRetryMetadata?.currentIteration !== undefined && nextRetryMetadata.maxSteps !== undefined
+      ? {
+          exceeded_current_iteration: nextRetryMetadata.currentIteration,
+          exceeded_max_steps: nextRetryMetadata.maxSteps,
+        }
+      : {};
 
   return {
     ...nextTask,
     ...updates,
     ...(nextRetryMetadata?.startStep ? { start_step: nextRetryMetadata.startStep } : {}),
     ...(nextRetryMetadata?.resumePoint ? { resume_point: nextRetryMetadata.resumePoint } : {}),
-    ...(nextRetryMetadata?.currentIteration !== undefined
-      ? { exceeded_current_iteration: nextRetryMetadata.currentIteration }
-      : {}),
-    ...(nextRetryMetadata?.maxSteps !== undefined
-      ? { exceeded_max_steps: nextRetryMetadata.maxSteps }
-      : {}),
+    ...exceededMetadata,
   };
 }
 
@@ -65,6 +67,8 @@ export function buildRetryTaskRecord(
   const taskSpecSource = taskDir
     ? { content: undefined, content_file: undefined, task_dir: taskDir }
     : {};
+  const preservesSameWorkflow = workflow === undefined || workflow === task.workflow;
+  const preservesResumeBudget = resumePoint !== undefined && preservesSameWorkflow;
 
   return {
     ...task,
@@ -79,6 +83,10 @@ export function buildRetryTaskRecord(
     start_step: startStep,
     retry_note: retryNote,
     resume_point: resumePoint,
+    // Retry budgets are tied to the saved resume cursor and workflow. Carrying
+    // them to a different workflow can start that workflow already over budget.
+    exceeded_current_iteration: preservesResumeBudget ? task.exceeded_current_iteration : undefined,
+    exceeded_max_steps: preservesResumeBudget ? task.exceeded_max_steps : undefined,
   };
 }
 

@@ -122,7 +122,9 @@ function resolveRetryMaxStepsOverride(
     return storedMaxSteps;
   }
   if (workflowMaxSteps === undefined) {
-    return storedMaxSteps;
+    return storedMaxSteps !== undefined && initialIteration >= storedMaxSteps
+      ? initialIteration + 1
+      : storedMaxSteps;
   }
 
   // Iteration-limit checks run before the next step, so the restored ceiling

@@ -348,7 +348,7 @@ describe('シナリオ3・4: requeue → re-execution passes exceeded metadata t
     const resumePoint = {
       version: 1 as const,
       stack: [
-        { workflow: 'test-workflow', step: 'implement', kind: 'agent' as const },
+        { workflow: 'test-workflow', step: 'plan', kind: 'agent' as const },
       ],
       iteration: 51,
       elapsed_ms: 183245,
@@ -356,11 +356,10 @@ describe('シナリオ3・4: requeue → re-execution passes exceeded metadata t
     writeFailedRecord(testDir, {
       worktree: true,
       worktree_path: cloneDir,
-      exceeded_current_iteration: 51,
       resume_point: resumePoint,
     });
 
-    runner.requeueTask('task-a', ['failed'], 'implement', undefined, resumePoint);
+    runner.requeueTask('task-a', ['failed'], 'plan', undefined, resumePoint);
 
     const [task] = runner.claimNextTasks(1);
     if (!task) throw new Error('No task claimed');

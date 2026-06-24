@@ -625,6 +625,42 @@ describe('TaskRunner (tasks.yaml)', () => {
     expect(file.tasks[0]?.retry_note).toBe('retry note');
   });
 
+  it('should clear stale retry budget when requeueing onto a different workflow', () => {
+    const resumePoint = {
+      version: 1 as const,
+      stack: [
+        { workflow: 'default', step: 'delegate', kind: 'workflow_call' as const },
+      ],
+      iteration: 7,
+      elapsed_ms: 183245,
+    };
+    writeTasksFile(testDir, [TaskRecordSchema.parse({
+      name: 'task-a',
+      status: 'failed',
+      content: 'Task A',
+      workflow: 'default',
+      start_step: 'delegate',
+      exceeded_max_steps: 30,
+      exceeded_current_iteration: 7,
+      resume_point: resumePoint,
+      created_at: '2026-02-09T00:00:00.000Z',
+      started_at: '2026-02-09T00:01:00.000Z',
+      completed_at: '2026-02-09T00:05:00.000Z',
+      owner_pid: null,
+      failure: {
+        error: 'Boom',
+      },
+    }) as unknown as Record<string, unknown>]);
+
+    runner.requeueTask('task-a', ['failed'], undefined, 'retry note', undefined, 'selected-workflow');
+
+    const file = loadTasksFile(testDir);
+    expect(file.tasks[0]?.workflow).toBe('selected-workflow');
+    expect(file.tasks[0]?.resume_point).toBeUndefined();
+    expect(file.tasks[0]?.exceeded_current_iteration).toBeUndefined();
+    expect(file.tasks[0]?.exceeded_max_steps).toBeUndefined();
+  });
+
   it('should persist task_dir as the only task spec source when requeueing task', () => {
     runner.addTask('Task A');
     const task = runner.claimNextTasks(1)[0]!;
@@ -883,7 +919,7 @@ describe('TaskRunner (tasks.yaml)', () => {
     const file = loadTasksFile(testDir);
     expect(file.tasks[0]?.start_movement).toBe('delegate');
     expect(file.tasks[0]?.start_step).toBeUndefined();
-    expect(file.tasks[0]?.exceeded_current_iteration).toBe(7);
+    expect(file.tasks[0]?.exceeded_current_iteration).toBeUndefined();
     expect(file.tasks[0]?.resume_point).toEqual(workflowCallResumePoint);
     expect(file.tasks[0]?.exceeded_max_steps).toBeUndefined();
   });
