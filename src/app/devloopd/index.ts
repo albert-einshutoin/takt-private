@@ -10,6 +10,7 @@ import {
   importTaktRun,
   renderTimeline,
 } from '../../devloopd/ledger.js';
+import { formatIssueScanReport, scanIssues } from '../../devloopd/issueScanner.js';
 import { formatMergeGateReport, mergeIfSafe } from '../../devloopd/mergeGate.js';
 import { formatDevloopRunReport, runDevloopIssue } from '../../devloopd/run.js';
 import { getErrorMessage } from '../../shared/utils/error.js';
@@ -169,6 +170,26 @@ program
     });
 
     console.log(formatMergeGateReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('scan-issues')
+  .description('Scan GitHub issues and apply mechanical devloop backlog policy')
+  .option('--repo <owner/repo>', 'GitHub repository')
+  .option('--cwd <path>', 'Repository path to run gh from', process.cwd())
+  .action(async (options: {
+    repo?: string;
+    cwd: string;
+  }) => {
+    const report = await scanIssues({
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+    });
+
+    console.log(formatIssueScanReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }
