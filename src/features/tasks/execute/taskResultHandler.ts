@@ -86,7 +86,7 @@ export function persistPrFailedTaskResult(
   prError: string,
 ): void {
   taskRunner.prFailTask(taskResult, prError);
-  info(`Task "${taskResult.task.name}" completed (PR creation failed)`);
+  info(`Task "${taskResult.task.name}" completed (publishing/PR failed)`);
 }
 
 export function persistTaskResult(

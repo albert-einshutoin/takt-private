@@ -51,6 +51,26 @@ export interface PostExecutionResult {
   taskError?: string;
 }
 
+function isGitCredentialPromptFailure(detail: string): boolean {
+  return /could not read (Username|Password)|terminal prompts disabled|authentication failed|GIT_TERMINAL_PROMPT/i.test(detail);
+}
+
+function buildPublishAuthFailureMessage(branch: string, commitHash: string, detail: string): string {
+  return [
+    'Workflow completed, but publishing failed.',
+    '',
+    'Local result is preserved:',
+    `  branch: ${branch}`,
+    `  commit: ${commitHash}`,
+    '',
+    'Git credentials are unavailable for non-interactive push.',
+    'TAKT does not prompt for credentials during task execution.',
+    'Fix authentication, then retry publishing from takt list.',
+    '',
+    `Detail: ${detail}`,
+  ].join('\n');
+}
+
 /**
  * Auto-commit, push, and optionally create a PR after successful task execution.
  */
@@ -100,7 +120,9 @@ export async function postExecutionFlow(options: PostExecutionOptions): Promise<
         outcome: ORIGIN_PUSH_FAILURE_MESSAGE,
         error: pushDetail,
       });
-      const pushFailureMessage = `${ORIGIN_PUSH_FAILURE_MESSAGE} ${pushDetail}`.trim();
+      const pushFailureMessage = isGitCredentialPromptFailure(pushDetail)
+        ? buildPublishAuthFailureMessage(branch, commitResult.commitHash, pushDetail)
+        : `${ORIGIN_PUSH_FAILURE_MESSAGE} ${pushDetail}`.trim();
       error(pushFailureMessage);
       return { prFailed: true, prError: pushFailureMessage };
     }

@@ -126,6 +126,15 @@ function throwPushFailureWithStderr(err: unknown, extraHint: string): never {
   throw err;
 }
 
+function getNonInteractivePushEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    // Long-running TAKT jobs cannot safely answer credential prompts after workflow completion.
+    GCM_INTERACTIVE: 'Never',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+}
+
 /**
  * Throws on failure.
  */
@@ -135,6 +144,7 @@ export function pushBranch(cwd: string, branch: string): void {
     execFileSync('git', ['push', 'origin', branch], {
       cwd,
       stdio: 'pipe',
+      env: getNonInteractivePushEnv(),
     });
   } catch (err) {
     throwPushFailureWithStderr(err, NON_FAST_FORWARD_PUSH_HINT);
@@ -162,6 +172,7 @@ export function pushHeadToOriginBranch(cwd: string, branch: string): void {
     execFileSync('git', ['push', 'origin', `HEAD:refs/heads/${branch}`], {
       cwd,
       stdio: 'pipe',
+      env: getNonInteractivePushEnv(),
     });
   } catch (err) {
     throwPushFailureWithStderr(err, NON_FAST_FORWARD_PUSH_HINT);
@@ -174,7 +185,11 @@ export function relayPushCloneToOrigin(cloneCwd: string, rootCwd: string, branch
   try {
     execFileSync('git', ['fetch', cloneCwd, `HEAD:${tempRef}`], { cwd: rootCwd, stdio: 'pipe' });
     log.info('Relay push: pushing to origin', { rootCwd, branch });
-    execFileSync('git', ['push', 'origin', `${tempRef}:refs/heads/${branch}`], { cwd: rootCwd, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', `${tempRef}:refs/heads/${branch}`], {
+      cwd: rootCwd,
+      stdio: 'pipe',
+      env: getNonInteractivePushEnv(),
+    });
     log.info('Relay push: succeeded', { rootCwd, branch });
   } finally {
     try {

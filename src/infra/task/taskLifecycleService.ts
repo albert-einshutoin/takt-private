@@ -240,7 +240,7 @@ export class TaskLifecycleService {
 
   prFailTask(result: TaskResult, prError: string): string {
     const failure: TaskFailure = {
-      error: `PR creation failed: ${prError}`,
+      error: `Publishing/PR failed: ${prError}`,
     };
 
     this.store.update((current) => {
