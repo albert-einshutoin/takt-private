@@ -56,6 +56,40 @@ devloopd doctor --subscription-only --policy .takt/devloopd.yaml
 
 If no policy file is provided, the doctor emits a warning and continues. TAKT config and workflow checks still run.
 
+## Run
+
+Use `devloopd run` to start a TAKT issue pipeline only after the subscription-only doctor passes:
+
+```bash
+devloopd run --issue 123 --repo owner/repo
+```
+
+The command runs the same checks as `devloopd doctor --subscription-only`. If any required guard fails, TAKT is not started.
+
+When checks pass, `devloopd run` invokes TAKT with argv equivalent to:
+
+```bash
+takt --pipeline \
+  --issue 123 \
+  --workflow .takt/workflows/subscription-devloop.yaml \
+  --auto-pr \
+  --quiet \
+  --repo owner/repo
+```
+
+### Run Options
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | GitHub Issue number to run through TAKT |
+| `--repo <owner/repo>` | Repository used by TAKT for PR operations |
+| `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | Optional devloop policy YAML path passed to the doctor |
+| `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
+| `--skip-auth` | Skip `gh auth status` |
+| `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
+| `--no-quiet` | Do not pass `--quiet` to TAKT |
+
 ## Subscription-Only TAKT Config
 
 Use CLI-only providers in global or project config:

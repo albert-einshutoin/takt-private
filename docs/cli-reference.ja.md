@@ -32,7 +32,10 @@
 ```bash
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
+devloopd run --issue 123 --repo owner/repo
 ```
+
+`devloopd doctor` のオプション:
 
 | オプション | 説明 |
 |-----------|------|
@@ -41,6 +44,19 @@ devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd
 | `--policy <path>` | 任意の devloop policy YAML パス。`mode` は `subscription_only` である必要があります |
 | `--verbose` | pass したチェックも表示します |
 | `--skip-auth` | `gh auth status` をスキップします |
+
+`devloopd run` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--issue <number>` | TAKT で実行する GitHub Issue 番号 |
+| `--repo <owner/repo>` | TAKT の PR 操作用リポジトリ |
+| `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
+| `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
+| `--skip-auth` | `gh auth status` をスキップします |
+| `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
+| `--no-quiet` | TAKT に `--quiet` を渡しません |
 
 完全なチェック内容は [devloopd Guide](./devloopd.ja.md) を参照してください。
 

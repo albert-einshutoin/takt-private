@@ -256,6 +256,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `takt workflow doctor` | カスタム workflow の定義を静的検証します |
 | `takt repertoire add` | GitHub から repertoire パッケージをインストールします |
 | `devloopd doctor --subscription-only` | subscription-only provider 前提のローカル環境を検証します |
+| `devloopd run --issue N` | subscription-only 検査後に GitHub Issue を TAKT pipeline で実行します |
 
 全コマンド・オプションは [CLI Reference](./cli-reference.ja.md) を参照してください。
 

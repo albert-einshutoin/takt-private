@@ -56,6 +56,40 @@ devloopd doctor --subscription-only --policy .takt/devloopd.yaml
 
 policy ファイルを指定しない場合、doctor は warning を出して続行します。TAKT config と workflow の検査はそのまま実行されます。
 
+## Run
+
+`devloopd run` は、subscription-only doctor が通った場合だけ TAKT の Issue pipeline を開始します。
+
+```bash
+devloopd run --issue 123 --repo owner/repo
+```
+
+このコマンドは `devloopd doctor --subscription-only` と同じチェックを実行します。必須ガードに違反した場合、TAKT は起動しません。
+
+チェックが通ると、`devloopd run` は次と同等の argv で TAKT を実行します。
+
+```bash
+takt --pipeline \
+  --issue 123 \
+  --workflow .takt/workflows/subscription-devloop.yaml \
+  --auto-pr \
+  --quiet \
+  --repo owner/repo
+```
+
+### Run オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--issue <number>` | TAKT で実行する GitHub Issue 番号 |
+| `--repo <owner/repo>` | TAKT の PR 操作用リポジトリ |
+| `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | doctor に渡す任意の devloop policy YAML パス |
+| `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
+| `--skip-auth` | `gh auth status` をスキップします |
+| `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
+| `--no-quiet` | TAKT に `--quiet` を渡しません |
+
 ## Subscription-Only TAKT Config
 
 global または project config では CLI-only provider を使います。
