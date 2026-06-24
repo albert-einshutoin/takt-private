@@ -97,9 +97,12 @@ TAKT remains the workflow engine and writes run metadata under `.takt/runs/`. `d
 ```bash
 devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
+devloopd memory --write
 ```
 
 The JSONL ledger is the portable MVP event log. It is ignored by Git via `.devloop/` and can be copied into a future SQLite backend without changing TAKT run outputs.
+
+`devloopd memory` renders a compact project memory snapshot from imported run metadata. It does not read raw log content. Report artifact paths are included for follow-up inspection, while log artifacts are omitted from the memory text.
 
 ### Import Options
 
@@ -119,6 +122,17 @@ The JSONL ledger is the portable MVP event log. It is ignored by Git via `.devlo
 | `--run <slug>` | Filter imported runs by TAKT run slug |
 | `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+### Memory Options
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | Filter imported runs by GitHub Issue number |
+| `--limit <count>` | Maximum imported runs to include. Defaults to 20 |
+| `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--output <path>` | Project-local memory output path. Defaults to `.devloop/memory.md` |
+| `--write` | Write the memory file instead of rendering only |
 
 ## Merge Gate
 

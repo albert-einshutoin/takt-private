@@ -35,6 +35,7 @@ devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
+devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
 devloopd start --repo owner/repo --once
@@ -81,6 +82,17 @@ devloopd start --repo owner/repo --once
 | `--run <slug>` | Filter imported runs by TAKT run slug |
 | `--cwd <path>` | Repository path to inspect |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd memory` options:
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | Filter imported runs by GitHub Issue number |
+| `--limit <count>` | Maximum imported runs to include. Defaults to 20 |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--output <path>` | Project-local memory output path. Defaults to `.devloop/memory.md` |
+| `--write` | Write the memory file instead of rendering only |
 
 `devloopd merge-if-safe` options:
 

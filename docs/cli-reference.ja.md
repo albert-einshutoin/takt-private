@@ -35,6 +35,7 @@ devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
+devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
 devloopd start --repo owner/repo --once
@@ -81,6 +82,17 @@ devloopd start --repo owner/repo --once
 | `--run <slug>` | TAKT run slug で imported run を絞り込みます |
 | `--cwd <path>` | 検査するリポジトリパス |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+`devloopd memory` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--issue <number>` | GitHub Issue 番号で imported run を絞り込みます |
+| `--limit <count>` | 含める imported run の最大数。デフォルトは 20 |
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--output <path>` | project 内の memory 出力パス。デフォルトは `.devloop/memory.md` |
+| `--write` | 表示だけでなく memory file を書き出します |
 
 `devloopd merge-if-safe` のオプション:
 
