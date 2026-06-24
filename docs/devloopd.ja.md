@@ -174,6 +174,7 @@ MVP gate は次の場合、merge 前に拒否または停止します。
 
 ```bash
 devloopd scan-issues --repo owner/repo
+devloopd select-issue --repo owner/repo
 ```
 
 Issue body と comments は untrusted input です。scanner はそれらを requirements / logs として扱い、指示としては扱いません。Issue text が secret、credential access、CI bypass、admin merge、force push、危険な shell command を要求している場合、自動候補にはせず `human_required` に分類します。
@@ -187,12 +188,23 @@ Issue body と comments は untrusted input です。scanner はそれらを req
 - `docs` や `tests` のような低リスク label は `auto_merge_candidate` になり得る
 - その他の eligible Issue は `auto_pr_only` になる。merge には引き続き `devloopd merge-if-safe` が必要
 
+`devloopd select-issue` は scan 結果を再利用し、最も安全な候補を決定的に選びます。`auto_pr_only` より `auto_merge_candidate` を優先し、同じ risk bucket 内では scanner order を維持します。低リスク候補だけを選びたい場合は `--no-auto-pr-only` を使います。
+
 ### Scan オプション
 
 | オプション | 説明 |
 |-----------|------|
 | `--repo <owner/repo>` | GitHub リポジトリ |
 | `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+
+### Select オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+| `--max-selections <count>` | 選択する Issue 候補の最大数。デフォルトは 1 |
+| `--no-auto-pr-only` | 中リスクの `auto_pr_only` 候補を選択しません |
 
 ## Start
 

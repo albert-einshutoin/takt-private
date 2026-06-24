@@ -38,6 +38,7 @@ devloopd timeline --issue 123
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
+devloopd select-issue --repo owner/repo
 devloopd active-runs
 devloopd start --repo owner/repo --once
 ```
@@ -110,6 +111,15 @@ devloopd start --repo owner/repo --once
 |--------|-------------|
 | `--repo <owner/repo>` | GitHub repository |
 | `--cwd <path>` | Repository path to run `gh issue list` from |
+
+`devloopd select-issue` options:
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--cwd <path>` | Repository path to run `gh issue list` from |
+| `--max-selections <count>` | Maximum issue candidates to select. Defaults to 1 |
+| `--no-auto-pr-only` | Do not select medium-risk `auto_pr_only` candidates |
 
 `devloopd active-runs` options:
 

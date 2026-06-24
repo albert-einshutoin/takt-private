@@ -38,6 +38,7 @@ devloopd timeline --issue 123
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
+devloopd select-issue --repo owner/repo
 devloopd active-runs
 devloopd start --repo owner/repo --once
 ```
@@ -110,6 +111,15 @@ devloopd start --repo owner/repo --once
 |-----------|------|
 | `--repo <owner/repo>` | GitHub リポジトリ |
 | `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+
+`devloopd select-issue` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+| `--max-selections <count>` | 選択する Issue 候補の最大数。デフォルトは 1 |
+| `--no-auto-pr-only` | 中リスクの `auto_pr_only` 候補を選択しません |
 
 `devloopd active-runs` のオプション:
 

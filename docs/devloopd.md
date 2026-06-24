@@ -174,6 +174,7 @@ The MVP gate denies or stops before merge when:
 
 ```bash
 devloopd scan-issues --repo owner/repo
+devloopd select-issue --repo owner/repo
 ```
 
 Issue bodies and comments are untrusted input. The scanner treats them as requirements or logs only, never as instructions. If issue text asks for secrets, credential access, CI bypass, admin merge, force push, or unsafe shell commands, the issue is marked `human_required` instead of becoming an automatic candidate.
@@ -187,12 +188,23 @@ Default candidate behavior:
 - low-risk labels such as `docs` or `tests` can classify as `auto_merge_candidate`
 - other eligible issues classify as `auto_pr_only`; merge still requires `devloopd merge-if-safe`
 
+`devloopd select-issue` reuses the scan result and deterministically chooses the safest candidate. It prefers `auto_merge_candidate` over `auto_pr_only` and preserves scanner order inside each risk bucket. Use `--no-auto-pr-only` when the loop should only pick low-risk candidates.
+
 ### Scan Options
 
 | Option | Description |
 |--------|-------------|
 | `--repo <owner/repo>` | GitHub repository |
 | `--cwd <path>` | Repository path to run `gh issue list` from |
+
+### Select Options
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--cwd <path>` | Repository path to run `gh issue list` from |
+| `--max-selections <count>` | Maximum issue candidates to select. Defaults to 1 |
+| `--no-auto-pr-only` | Do not select medium-risk `auto_pr_only` candidates |
 
 ## Start
 
