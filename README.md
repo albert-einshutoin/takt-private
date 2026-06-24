@@ -259,6 +259,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd memory --write` | Write compact project memory from imported TAKT runs |
 | `devloopd merge-if-safe --pr N` | Enable GitHub auto-merge only after mechanical policy gates pass |
 | `devloopd scan-issues --repo owner/repo` | Scan open GitHub Issues and classify mechanical candidates |
+| `devloopd active-runs` | Inspect currently running TAKT runs and stale state |
 | `devloopd start --repo owner/repo --once` | Run one finite scan/run/import supervisor cycle |
 
 See the [CLI Reference](./docs/cli-reference.md) for all commands and options.

@@ -38,6 +38,7 @@ devloopd timeline --issue 123
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
+devloopd active-runs
 devloopd start --repo owner/repo --once
 ```
 
@@ -110,6 +111,13 @@ devloopd start --repo owner/repo --once
 | `--repo <owner/repo>` | GitHub repository |
 | `--cwd <path>` | Repository path to run `gh issue list` from |
 
+`devloopd active-runs` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--stale-after-minutes <count>` | Minutes without metadata update before a run is stale. Defaults to 180 |
+
 `devloopd start` options:
 
 | Option | Description |
@@ -120,6 +128,8 @@ devloopd start --repo owner/repo --once
 | `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
 | `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--max-active-runs <count>` | Maximum active TAKT runs allowed before start refuses to scan. Defaults to 1 |
+| `--stale-after-minutes <count>` | Minutes without metadata update before active-runs marks a run stale. Defaults to 180 |
 | `--skip-auth` | Skip `gh auth status` |
 | `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
 | `--no-quiet` | Do not pass `--quiet` to TAKT |

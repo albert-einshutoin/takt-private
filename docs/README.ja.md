@@ -262,6 +262,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `devloopd memory --write` | 取り込んだ TAKT run から compact project memory を書き出します |
 | `devloopd merge-if-safe --pr N` | 機械的 policy gate 通過後だけ GitHub auto-merge を有効化します |
 | `devloopd scan-issues --repo owner/repo` | open GitHub Issue を読み取り、機械的候補を分類します |
+| `devloopd active-runs` | 実行中の TAKT run と stale state を確認します |
 | `devloopd start --repo owner/repo --once` | scan/run/import の supervisor cycle を 1 回だけ実行します |
 
 全コマンド・オプションは [CLI Reference](./cli-reference.ja.md) を参照してください。

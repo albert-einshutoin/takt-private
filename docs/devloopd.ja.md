@@ -194,20 +194,34 @@ Issue body と comments は untrusted input です。scanner はそれらを req
 
 ## Start
 
-`devloopd start --once` は MVP supervisor path をつなぎます。open Issue を scan し、機械的に最も安全な候補を選び、その Issue で TAKT を実行し、最後に最新 TAKT run を devloop ledger に取り込みます。
+`devloopd active-runs` は `.takt/runs/*/meta.json` を検査し、現在実行中の TAKT run と、metadata の最終更新時刻に基づく stale state を表示します。
+
+```bash
+devloopd active-runs
+```
+
+`devloopd start --once` は MVP supervisor path をつなぎます。active run を検査し、open Issue を scan し、機械的に最も安全な候補を選び、その Issue で TAKT を実行し、最後に最新 TAKT run を devloop ledger に取り込みます。
 
 ```bash
 devloopd start --repo owner/repo --once
 ```
 
-長時間 daemon mode はまだ有効化していません。`--once` がない場合、`devloopd start` は scan や TAKT 起動の前に終了します。run scheduler、retry policy、memory pager の hardening が済むまでは supervisor を有限に保つためです。
+長時間 daemon mode はまだ有効化していません。`--once` がない場合、`devloopd start` は scan や TAKT 起動の前に終了します。run scheduler と retry policy の hardening が済むまでは supervisor を有限に保つためです。
 
 この有限 cycle は下位コマンドと同じ安全境界を使います。
 
+- `active-runs` が active run 上限に達している場合、新しい作業を開始しない
 - `scan-issues` が先に機械的 filter を実行する
 - `auto_pr_only` Issue より `auto_merge_candidate` Issue を優先する
 - `run` は TAKT 起動前に subscription-only doctor を実行する
 - TAKT が成功した後に `import-takt-run --latest` で run evidence を保存する
+
+### Active Runs オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス。省略時はカレントディレクトリ |
+| `--stale-after-minutes <count>` | metadata 更新がない run を stale とみなすまでの分数。デフォルトは 180 |
 
 ### Start オプション
 
@@ -219,6 +233,8 @@ devloopd start --repo owner/repo --once
 | `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
 | `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--max-active-runs <count>` | scan を拒否する active TAKT run 数の上限。デフォルトは 1 |
+| `--stale-after-minutes <count>` | active-runs が run を stale とみなすまでの分数。デフォルトは 180 |
 | `--skip-auth` | `gh auth status` をスキップします |
 | `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
 | `--no-quiet` | TAKT に `--quiet` を渡しません |

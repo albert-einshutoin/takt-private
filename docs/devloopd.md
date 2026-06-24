@@ -194,20 +194,34 @@ Default candidate behavior:
 
 ## Start
 
-`devloopd start --once` connects the MVP supervisor path: scan open issues, select the safest mechanical candidate, run TAKT for that issue, and import the latest TAKT run into the devloop ledger.
+`devloopd active-runs` inspects `.takt/runs/*/meta.json` and reports currently running TAKT runs, including stale state based on the latest metadata update.
+
+```bash
+devloopd active-runs
+```
+
+`devloopd start --once` connects the MVP supervisor path: inspect active runs, scan open issues, select the safest mechanical candidate, run TAKT for that issue, and import the latest TAKT run into the devloop ledger.
 
 ```bash
 devloopd start --repo owner/repo --once
 ```
 
-Long-running daemon mode is intentionally not enabled yet. Without `--once`, `devloopd start` exits before scanning or starting TAKT. This keeps the current supervisor bounded while the run scheduler, retry policy, and memory pager are still being hardened.
+Long-running daemon mode is intentionally not enabled yet. Without `--once`, `devloopd start` exits before scanning or starting TAKT. This keeps the current supervisor bounded while the run scheduler and retry policy are still being hardened.
 
 The finite cycle uses the same safety boundaries as the lower-level commands:
 
+- `active-runs` refuses to start new work when the active run limit is reached
 - `scan-issues` performs mechanical filtering first
 - `auto_merge_candidate` issues are preferred over `auto_pr_only` issues
 - `run` still runs the subscription-only doctor before TAKT starts
 - `import-takt-run --latest` persists the run evidence after TAKT succeeds
+
+### Active Runs Options
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
+| `--stale-after-minutes <count>` | Minutes without metadata update before a run is stale. Defaults to 180 |
 
 ### Start Options
 
@@ -219,6 +233,8 @@ The finite cycle uses the same safety boundaries as the lower-level commands:
 | `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
 | `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--max-active-runs <count>` | Maximum active TAKT runs allowed before start refuses to scan. Defaults to 1 |
+| `--stale-after-minutes <count>` | Minutes without metadata update before active-runs marks a run stale. Defaults to 180 |
 | `--skip-auth` | Skip `gh auth status` |
 | `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
 | `--no-quiet` | Do not pass `--quiet` to TAKT |

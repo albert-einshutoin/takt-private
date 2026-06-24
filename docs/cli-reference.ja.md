@@ -38,6 +38,7 @@ devloopd timeline --issue 123
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo
+devloopd active-runs
 devloopd start --repo owner/repo --once
 ```
 
@@ -110,6 +111,13 @@ devloopd start --repo owner/repo --once
 | `--repo <owner/repo>` | GitHub リポジトリ |
 | `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
 
+`devloopd active-runs` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--stale-after-minutes <count>` | metadata 更新がない run を stale とみなすまでの分数。デフォルトは 180 |
+
 `devloopd start` のオプション:
 
 | オプション | 説明 |
@@ -120,6 +128,8 @@ devloopd start --repo owner/repo --once
 | `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
 | `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--max-active-runs <count>` | scan を拒否する active TAKT run 数の上限。デフォルトは 1 |
+| `--stale-after-minutes <count>` | active-runs が run を stale とみなすまでの分数。デフォルトは 180 |
 | `--skip-auth` | `gh auth status` をスキップします |
 | `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
 | `--no-quiet` | TAKT に `--quiet` を渡しません |
