@@ -35,6 +35,7 @@ devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
+devloopd merge-if-safe --pr 456 --expected-head <sha>
 ```
 
 `devloopd doctor` のオプション:
@@ -78,6 +79,15 @@ devloopd timeline --issue 123
 | `--run <slug>` | TAKT run slug で imported run を絞り込みます |
 | `--cwd <path>` | 検査するリポジトリパス |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+`devloopd merge-if-safe` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--pr <number-or-url>` | Pull Request 番号または URL |
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--expected-head <sha>` | 期待する PR head SHA。現在の head と異なる場合は merge を拒否します |
+| `--cwd <path>` | `gh` を実行するリポジトリパス |
 
 完全なチェック内容は [devloopd Guide](./devloopd.ja.md) を参照してください。
 

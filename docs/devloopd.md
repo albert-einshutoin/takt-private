@@ -120,6 +120,40 @@ The JSONL ledger is the portable MVP event log. It is ignored by Git via `.devlo
 | `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
 
+## Merge Gate
+
+`devloopd merge-if-safe` is the mechanical merge executor. LLM output alone never merges a PR. The command reads PR metadata with `gh pr view`, changed files with `gh pr diff --name-only`, waits for checks with `gh pr checks --watch`, and only then enables auto-merge:
+
+```bash
+devloopd merge-if-safe --pr 456 --expected-head <sha>
+```
+
+When all gates pass, devloopd runs:
+
+```bash
+gh pr merge 456 --auto --squash --delete-branch --match-head-commit <head-sha>
+```
+
+The MVP gate denies or stops before merge when:
+
+- the required `agent:auto-merge` label is missing
+- the PR is draft
+- GitHub checks do not pass
+- review decision is not `APPROVED`
+- `--expected-head` does not match the current PR head SHA
+- forbidden paths are touched, such as `.github/**`, `infra/**`, `terraform/**`, `migrations/**`, `auth/**`, `billing/**`, `payments/**`, `.env*`, `*secret*`, or `*credential*`
+- human-review paths are touched, such as lockfiles, `Dockerfile`, `src/middleware*`, `src/routes*`, or `src/config*`
+- diff size exceeds the default policy of 12 files or 500 changed lines
+
+### Merge Options
+
+| Option | Description |
+|--------|-------------|
+| `--pr <number-or-url>` | Pull request number or URL |
+| `--repo <owner/repo>` | GitHub repository |
+| `--expected-head <sha>` | Expected PR head SHA. The gate denies merge if the current PR head differs |
+| `--cwd <path>` | Repository path to run `gh` from |
+
 ## Subscription-Only TAKT Config
 
 Use CLI-only providers in global or project config:

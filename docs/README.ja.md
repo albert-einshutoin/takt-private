@@ -259,6 +259,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `devloopd run --issue N` | subscription-only 検査後に GitHub Issue を TAKT pipeline で実行します |
 | `devloopd import-takt-run --latest --issue N` | TAKT run metadata を devloop ledger に取り込みます |
 | `devloopd timeline --issue N` | 取り込んだ TAKT run 履歴を表示します |
+| `devloopd merge-if-safe --pr N` | 機械的 policy gate 通過後だけ GitHub auto-merge を有効化します |
 
 全コマンド・オプションは [CLI Reference](./cli-reference.ja.md) を参照してください。
 

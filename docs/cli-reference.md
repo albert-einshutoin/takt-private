@@ -35,6 +35,7 @@ devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
+devloopd merge-if-safe --pr 456 --expected-head <sha>
 ```
 
 `devloopd doctor` options:
@@ -78,6 +79,15 @@ devloopd timeline --issue 123
 | `--run <slug>` | Filter imported runs by TAKT run slug |
 | `--cwd <path>` | Repository path to inspect |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd merge-if-safe` options:
+
+| Option | Description |
+|--------|-------------|
+| `--pr <number-or-url>` | Pull request number or URL |
+| `--repo <owner/repo>` | GitHub repository |
+| `--expected-head <sha>` | Expected PR head SHA. The gate denies merge if the current PR head differs |
+| `--cwd <path>` | Repository path to run `gh` from |
 
 See the [devloopd Guide](./devloopd.md) for the full check list.
 
