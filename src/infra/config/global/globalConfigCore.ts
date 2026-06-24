@@ -80,6 +80,7 @@ export class GlobalConfigManager {
   private static instance: GlobalConfigManager | null = null;
   private cachedConfig: GlobalConfig | null = null;
   private cachedTrace: ConfigTrace | null = null;
+  private cachedParsedConfig: Record<string, unknown> | null = null;
   private constructor() {}
 
   static getInstance(): GlobalConfigManager {
@@ -96,6 +97,7 @@ export class GlobalConfigManager {
   invalidateCache(): void {
     this.cachedConfig = null;
     this.cachedTrace = null;
+    this.cachedParsedConfig = null;
   }
 
   load(): GlobalConfig {
@@ -255,6 +257,7 @@ export class GlobalConfigManager {
     validateProviderModelCompatibility(config.provider, config.model);
     this.cachedConfig = config;
     this.cachedTrace = trace;
+    this.cachedParsedConfig = parsedConfig;
     return config;
   }
 
@@ -267,6 +270,10 @@ export class GlobalConfigManager {
       throw new Error('Global config trace is not available');
     }
     return this.cachedTrace;
+  }
+
+  peekParsedConfig(): Record<string, unknown> | undefined {
+    return this.cachedParsedConfig ?? undefined;
   }
 
   save(config: GlobalConfig): void {
@@ -298,4 +305,8 @@ export function saveGlobalConfig(config: GlobalConfig): void {
 
 export function loadGlobalConfigTraceState(): ConfigTrace {
   return GlobalConfigManager.getInstance().getTrace();
+}
+
+export function getCachedGlobalParsedConfigState(): Record<string, unknown> | undefined {
+  return GlobalConfigManager.getInstance().peekParsedConfig();
 }

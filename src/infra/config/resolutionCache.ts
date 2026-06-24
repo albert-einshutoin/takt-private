@@ -5,6 +5,7 @@ import type { ConfigTrace } from './traced/tracedConfigLoader.js';
 
 const projectConfigCache = new Map<string, ProjectLocalConfig>();
 const projectConfigTraceCache = new Map<string, ConfigTrace>();
+const projectConfigParsedConfigCache = new Map<string, Record<string, unknown>>();
 const resolvedValueCache = new Map<string, unknown>();
 
 function normalizeProjectDir(projectDir: string): string {
@@ -31,6 +32,14 @@ export function setCachedProjectConfigTrace(projectDir: string, trace: ConfigTra
   projectConfigTraceCache.set(normalizeProjectDir(projectDir), trace);
 }
 
+export function getCachedProjectParsedConfig(projectDir: string): Record<string, unknown> | undefined {
+  return projectConfigParsedConfigCache.get(normalizeProjectDir(projectDir));
+}
+
+export function setCachedProjectParsedConfig(projectDir: string, parsedConfig: Record<string, unknown>): void {
+  projectConfigParsedConfigCache.set(normalizeProjectDir(projectDir), parsedConfig);
+}
+
 export function hasCachedResolvedValue(projectDir: string, key: ConfigParameterKey): boolean {
   return resolvedValueCache.has(resolvedValueKey(projectDir, key));
 }
@@ -47,6 +56,7 @@ export function invalidateResolvedConfigCache(projectDir: string): void {
   const normalizedProjectDir = normalizeProjectDir(projectDir);
   projectConfigCache.delete(normalizedProjectDir);
   projectConfigTraceCache.delete(normalizedProjectDir);
+  projectConfigParsedConfigCache.delete(normalizedProjectDir);
   const prefix = `${normalizedProjectDir}::`;
   for (const key of resolvedValueCache.keys()) {
     if (key.startsWith(prefix)) {
@@ -58,5 +68,6 @@ export function invalidateResolvedConfigCache(projectDir: string): void {
 export function invalidateAllResolvedConfigCache(): void {
   projectConfigCache.clear();
   projectConfigTraceCache.clear();
+  projectConfigParsedConfigCache.clear();
   resolvedValueCache.clear();
 }

@@ -54,16 +54,27 @@ const FORBIDDEN_CONFIG_KEYS = new Set([
   'api_key',
   'apiKey',
   'openai_api_key',
+  'openaiApiKey',
   'anthropic_api_key',
+  'anthropicApiKey',
   'google_api_key',
+  'googleApiKey',
   'gemini_api_key',
+  'geminiApiKey',
   'groq_api_key',
+  'groqApiKey',
   'openrouter_api_key',
+  'openrouterApiKey',
   'opencode_api_key',
+  'opencodeApiKey',
   'cursor_api_key',
+  'cursorApiKey',
   'kiro_api_key',
+  'kiroApiKey',
   'copilot_github_token',
+  'copilotGithubToken',
   'vercel_ai_gateway_api_key',
+  'vercelAiGatewayApiKey',
 ]);
 
 export interface SubscriptionOnlyPolicyConfig {
@@ -96,7 +107,15 @@ function isRawSubscriptionOnlyEnabled(rawConfig: Record<string, unknown>): boole
   return rawConfig.subscription_only === true || rawConfig.subscriptionOnly === true;
 }
 
-export function findForbiddenSubscriptionOnlyConfigKeyPaths(value: unknown, prefix = ''): string[] {
+interface ForbiddenConfigKeyScanOptions {
+  ignoreUndefinedValues?: boolean;
+}
+
+export function findForbiddenSubscriptionOnlyConfigKeyPaths(
+  value: unknown,
+  prefix = '',
+  options: ForbiddenConfigKeyScanOptions = {},
+): string[] {
   if (!isRecord(value)) {
     return [];
   }
@@ -104,10 +123,10 @@ export function findForbiddenSubscriptionOnlyConfigKeyPaths(value: unknown, pref
   const paths: string[] = [];
   for (const [key, child] of Object.entries(value)) {
     const path = prefix ? `${prefix}.${key}` : key;
-    if (FORBIDDEN_CONFIG_KEYS.has(key)) {
+    if (FORBIDDEN_CONFIG_KEYS.has(key) && (!options.ignoreUndefinedValues || child !== undefined)) {
       paths.push(path);
     }
-    paths.push(...findForbiddenSubscriptionOnlyConfigKeyPaths(child, path));
+    paths.push(...findForbiddenSubscriptionOnlyConfigKeyPaths(child, path, options));
   }
   return paths;
 }
@@ -115,8 +134,9 @@ export function findForbiddenSubscriptionOnlyConfigKeyPaths(value: unknown, pref
 export function assertNoForbiddenSubscriptionOnlyConfigKeys(
   rawConfig: Record<string, unknown>,
   configPath: string,
+  subscriptionOnlyEnabled = isRawSubscriptionOnlyEnabled(rawConfig),
 ): void {
-  if (!isRawSubscriptionOnlyEnabled(rawConfig)) {
+  if (!subscriptionOnlyEnabled) {
     return;
   }
 
@@ -128,6 +148,28 @@ export function assertNoForbiddenSubscriptionOnlyConfigKeys(
   throw new Error(
     `Subscription-only mode forbids API key config "${forbiddenPaths[0]}" in ${configPath}`,
   );
+}
+
+export function assertNoForbiddenEffectiveSubscriptionOnlyConfigKeys(
+  policy: SubscriptionOnlyPolicyConfig,
+  configs: readonly { config: unknown; configPath: string }[],
+): void {
+  if (policy.subscriptionOnly !== true) {
+    return;
+  }
+
+  for (const { config, configPath } of configs) {
+    // Normalized configs expose optional credential fields as undefined, so only configured values are violations.
+    const forbiddenPaths = findForbiddenSubscriptionOnlyConfigKeyPaths(config, '', {
+      ignoreUndefinedValues: true,
+    });
+    if (forbiddenPaths.length === 0) {
+      continue;
+    }
+    throw new Error(
+      `Subscription-only mode forbids API key config "${forbiddenPaths[0]}" in ${configPath}`,
+    );
+  }
 }
 
 export function getSubscriptionOnlyAllowedProviders(

@@ -84,6 +84,28 @@ describe('devloopd merge gate', () => {
     expect(runner.calls.some((call) => call.args[1] === 'merge')).toBe(false);
   });
 
+  it('treats leading globstar patterns as matching repository root files', () => {
+    const report = evaluateMergeGate({
+      pr: {
+        url: 'https://github.com/owner/repo/pull/12',
+        number: 12,
+        headRefOid: 'abc123',
+        labels: ['agent:auto-merge'],
+        reviewDecision: 'APPROVED',
+        mergeStateStatus: 'CLEAN',
+        isDraft: false,
+        changedFiles: 1,
+        additions: 1,
+        deletions: 0,
+      },
+      changedPaths: ['.env.local'],
+      checksPassed: true,
+    });
+
+    expect(report.result).toBe('POLICY_DENY');
+    expect(report.reasons).toContain('forbidden path touched: .env.local (**/.env*)');
+  });
+
   it('requires the auto-merge label', async () => {
     const runner = makeRunner({ prView: {
       url: 'https://github.com/owner/repo/pull/12',

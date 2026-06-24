@@ -2,10 +2,13 @@ import { dirname } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import type { WorkflowConfig } from '../../../core/models/index.js';
-import { getRepertoireDir } from '../paths.js';
+import { getGlobalConfigPath, getRepertoireDir } from '../paths.js';
 import { resolveWorkflowConfigValue } from '../resolveWorkflowConfigValue.js';
 import { loadGlobalConfig } from '../global/globalConfig.js';
+import { getCachedGlobalParsedConfigState } from '../global/globalConfigCore.js';
 import { loadProjectConfig } from '../project/projectConfig.js';
+import { getProjectConfigPath } from '../project/projectConfigPaths.js';
+import { getCachedProjectParsedConfig } from '../resolutionCache.js';
 import type { FacetResolutionContext } from './resource-resolver.js';
 import { normalizeWorkflowConfig } from './workflowParser.js';
 import {
@@ -23,6 +26,7 @@ import {
 import type { WorkflowCallArgResolutionPolicy } from './workflowCallableArgResolver.js';
 import { resolveWorkflowTrustInfo, type WorkflowTrustInfo } from './workflowTrustSource.js';
 import {
+  assertNoForbiddenEffectiveSubscriptionOnlyConfigKeys,
   assertSubscriptionOnlyWorkflowConfig,
   resolveSubscriptionOnlyPolicyConfig,
 } from '../../../core/subscription-only/policy.js';
@@ -56,6 +60,18 @@ function loadWorkflowFromFileInternal(
 
   const projectConfig = loadProjectConfig(projectDir);
   const globalConfig = loadGlobalConfig();
+  const subscriptionOnlyPolicy = resolveSubscriptionOnlyPolicyConfig(globalConfig, projectConfig);
+  const globalConfigPath = getGlobalConfigPath();
+  const projectConfigPath = getProjectConfigPath(projectDir);
+  const globalParsedConfig = getCachedGlobalParsedConfigState();
+  const projectParsedConfig = getCachedProjectParsedConfig(projectDir);
+  assertNoForbiddenEffectiveSubscriptionOnlyConfigKeys(subscriptionOnlyPolicy, [
+    // Effective subscription-only may come from the other layer, so scan raw configs before schema normalization drops unknown credential leaves.
+    ...(globalParsedConfig ? [{ config: globalParsedConfig, configPath: globalConfigPath }] : []),
+    ...(projectParsedConfig ? [{ config: projectParsedConfig, configPath: projectConfigPath }] : []),
+    { config: globalConfig, configPath: globalConfigPath },
+    { config: projectConfig, configPath: projectConfigPath },
+  ]);
   const trustInfo = options?.trustInfo ?? resolveWorkflowTrustInfo({
     filePath,
     projectCwd: projectDir,
@@ -75,10 +91,7 @@ function loadWorkflowFromFileInternal(
     loadMode,
     resolveWorkflowCommandGatesPolicy(globalConfig.workflowCommandGates, projectConfig.workflowCommandGates),
   );
-  assertSubscriptionOnlyWorkflowConfig(
-    config,
-    resolveSubscriptionOnlyPolicyConfig(globalConfig, projectConfig),
-  );
+  assertSubscriptionOnlyWorkflowConfig(config, subscriptionOnlyPolicy);
   attachWorkflowOpaqueRef(config, buildOpaqueWorkflowRef(filePath, trustInfo));
   attachWorkflowSourcePath(config, filePath);
   attachWorkflowTrustInfo(config, trustInfo);

@@ -55,7 +55,11 @@ import {
 } from '../observabilityConfig.js';
 import { loadProjectConfigTrace, type ConfigTrace } from '../traced/tracedConfigLoader.js';
 import { PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS } from '../providerOptionsContract.js';
-import { getCachedProjectConfigTrace, setCachedProjectConfigTrace } from '../resolutionCache.js';
+import {
+  getCachedProjectConfigTrace,
+  setCachedProjectConfigTrace,
+  setCachedProjectParsedConfig,
+} from '../resolutionCache.js';
 import { assertValidProjectConfig } from './projectConfigValidation.js';
 import {
   assertNoForbiddenSubscriptionOnlyConfigKeys,
@@ -74,6 +78,7 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
     PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS,
   );
   setCachedProjectConfigTrace(projectDir, trace);
+  setCachedProjectParsedConfig(projectDir, parsedConfig);
   assertNoForbiddenSubscriptionOnlyConfigKeys(parsedConfig, configPath);
   assertValidProjectConfig(parsedConfig, configPath, true);
   assertValidProjectConfig(rawConfig, configPath);

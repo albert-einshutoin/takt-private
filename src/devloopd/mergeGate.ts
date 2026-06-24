@@ -125,6 +125,11 @@ function escapeRegExp(text: string): string {
 
 function globToRegExp(pattern: string): RegExp {
   const segments = pattern.split('/');
+  if (segments[0] === '**' && segments.length > 1) {
+    // Security path policies commonly use **/ to mean "repo root or any subdirectory".
+    const tail = segments.slice(1).map((segment) => escapeRegExp(segment).replaceAll('\\*', '[^/]*')).join('/');
+    return new RegExp(`^(?:.*/)?${tail}$`);
+  }
   const source = segments.map((segment) => {
     if (segment === '**') {
       return '(?:.*)';

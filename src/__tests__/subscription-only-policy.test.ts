@@ -139,6 +139,52 @@ steps:
     expect(() => loadWorkflowFromFile(workflowPath, projectDir)).toThrow(/step "plan".*codex/i);
   });
 
+  it('rejects global API key settings when project config enables effective subscription-only mode', () => {
+    writeFileSync(join(globalConfigDir, 'config.yaml'), [
+      'provider: codex-cli',
+      'openai_api_key: sk-test',
+    ].join('\n'), 'utf-8');
+    writeProjectConfig(projectDir, [
+      'subscription_only: true',
+      'provider: codex-cli',
+    ].join('\n'));
+    const workflowPath = writeWorkflow(projectDir, `name: subscription
+initial_step: plan
+steps:
+  - name: plan
+    provider: codex-cli
+    rules:
+      - condition: done
+        next: COMPLETE
+`);
+
+    expect(() => loadWorkflowFromFile(workflowPath, projectDir)).toThrow(/subscription-only.*openai_api_key/i);
+  });
+
+  it('rejects project provider credentials when global config enables effective subscription-only mode', () => {
+    writeFileSync(join(globalConfigDir, 'config.yaml'), [
+      'subscription_only: true',
+      'provider: codex-cli',
+    ].join('\n'), 'utf-8');
+    writeProjectConfig(projectDir, [
+      'provider: codex-cli',
+      'provider_options:',
+      '  codex:',
+      '    apiKey: sk-test',
+    ].join('\n'));
+    const workflowPath = writeWorkflow(projectDir, `name: subscription
+initial_step: plan
+steps:
+  - name: plan
+    provider: codex-cli
+    rules:
+      - condition: done
+        next: COMPLETE
+`);
+
+    expect(() => loadWorkflowFromFile(workflowPath, projectDir)).toThrow(/subscription-only.*provider_options\.codex\.apiKey/i);
+  });
+
   it('surfaces subscription-only provider violations in workflow doctor diagnostics', () => {
     writeProjectConfig(projectDir, [
       'subscription_only: true',
