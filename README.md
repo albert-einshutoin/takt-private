@@ -255,6 +255,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd doctor --subscription-only` | Validate local subscription-only provider readiness |
 | `devloopd run --issue N` | Run a GitHub Issue through TAKT after subscription-only checks |
 | `devloopd import-takt-run --latest --issue N` | Import TAKT run metadata into the devloop ledger |
+| `devloopd reconcile-runs` | Import missing completed TAKT runs into the devloop ledger |
 | `devloopd timeline --issue N` | Render imported TAKT run history |
 | `devloopd memory --write` | Write compact project memory from imported TAKT runs |
 | `devloopd merge-if-safe --pr N` | Enable GitHub auto-merge only after mechanical policy gates pass |

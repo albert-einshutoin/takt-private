@@ -34,6 +34,7 @@ devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
+devloopd reconcile-runs
 devloopd timeline --issue 123
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
@@ -73,6 +74,14 @@ devloopd start --repo owner/repo
 | `--latest` | Import the latest TAKT run from `.takt/runs/` |
 | `--run <slug>` | Import a specific TAKT run slug |
 | `--issue <number>` | Associate the imported run with a GitHub Issue number |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd reconcile-runs` options:
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | Associate imported runs with a GitHub Issue number |
 | `--cwd <path>` | Repository path to inspect |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
 

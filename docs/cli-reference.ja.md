@@ -34,6 +34,7 @@ devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
+devloopd reconcile-runs
 devloopd timeline --issue 123
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
@@ -72,6 +73,14 @@ devloopd start --repo owner/repo
 |-----------|------|
 | `--latest` | `.takt/runs/` から最新 TAKT run を取り込みます |
 | `--run <slug>` | 指定した TAKT run slug を取り込みます |
+| `--issue <number>` | 取り込む run に GitHub Issue 番号を関連付けます |
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+`devloopd reconcile-runs` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
 | `--issue <number>` | 取り込む run に GitHub Issue 番号を関連付けます |
 | `--cwd <path>` | 検査するリポジトリパス |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
