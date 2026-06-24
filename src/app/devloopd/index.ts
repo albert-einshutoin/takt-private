@@ -4,6 +4,12 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { formatDevloopDoctorReport, runDevloopDoctor } from '../../devloopd/doctor.js';
+import {
+  formatImportTaktRunReport,
+  formatTimelineReport,
+  importTaktRun,
+  renderTimeline,
+} from '../../devloopd/ledger.js';
 import { formatDevloopRunReport, runDevloopIssue } from '../../devloopd/run.js';
 import { getErrorMessage } from '../../shared/utils/error.js';
 
@@ -81,6 +87,61 @@ program
     });
 
     console.log(formatDevloopRunReport(report, { verbose: options.verbose === true }));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('import-takt-run')
+  .description('Import TAKT run metadata and artifacts into the devloop ledger')
+  .option('--latest', 'Import the latest TAKT run')
+  .option('--run <slug>', 'TAKT run slug to import')
+  .option('--issue <number>', 'GitHub issue number to associate with the imported run', (value: string) => Number(value))
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .action((options: {
+    latest?: boolean;
+    run?: string;
+    issue?: number;
+    cwd: string;
+    ledger?: string;
+  }) => {
+    const report = importTaktRun({
+      repoPath: resolve(options.cwd),
+      latest: options.latest === true,
+      runSlug: options.run,
+      issue: Number.isFinite(options.issue) ? options.issue : undefined,
+      ledgerPath: options.ledger,
+    });
+
+    console.log(formatImportTaktRunReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('timeline')
+  .description('Render imported TAKT runs from the devloop ledger')
+  .option('--issue <number>', 'Filter by GitHub issue number', (value: string) => Number(value))
+  .option('--run <slug>', 'Filter by TAKT run slug')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .action((options: {
+    issue?: number;
+    run?: string;
+    cwd: string;
+    ledger?: string;
+  }) => {
+    const report = renderTimeline({
+      repoPath: resolve(options.cwd),
+      issue: Number.isFinite(options.issue) ? options.issue : undefined,
+      runSlug: options.run,
+      ledgerPath: options.ledger,
+    });
+
+    console.log(formatTimelineReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }

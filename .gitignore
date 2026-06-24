@@ -35,6 +35,7 @@ e2e/results/
 .envrc
 
 # TAKT runtime data (facets/pieces/config are managed by .takt/.gitignore)
+.devloop/
 
 task_planning/
 
