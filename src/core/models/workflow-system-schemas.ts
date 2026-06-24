@@ -126,6 +126,7 @@ const EnqueueTaskEffectBaseSchema = z.object({
   mode: z.enum(['new', 'from_pr']),
   workflow: z.string().min(1),
   task: z.string().min(1),
+  branch: z.string().min(1).optional(),
   pr: EffectReferenceScalarSchema.optional(),
   issue: z.union([EnqueueIssueRawSchema, TemplateReferenceSchema]).optional(),
   base_branch: EnqueueBaseBranchRawSchema.optional(),
@@ -153,6 +154,13 @@ export const WorkflowEffectRawSchema = z.discriminatedUnion('type', [
         code: z.ZodIssueCode.custom,
         path: ['issue'],
         message: 'enqueue_task mode "from_pr" does not allow "issue"',
+      });
+    }
+    if (data.mode === 'from_pr' && data.branch !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['branch'],
+        message: 'enqueue_task mode "from_pr" does not allow "branch"',
       });
     }
     if (data.mode === 'from_pr' && data.worktree !== undefined) {

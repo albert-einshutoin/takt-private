@@ -147,6 +147,7 @@ export type WorkflowEffect =
     mode: 'new' | 'from_pr';
     workflow: string;
     task: string;
+    branch?: string;
     pr?: WorkflowEffectScalarReference;
     issue?: WorkflowEnqueueIssueConfig | WorkflowTemplateReference;
     base_branch?: string | WorkflowEnqueueBaseBranchConfig;

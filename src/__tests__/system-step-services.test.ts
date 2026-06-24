@@ -2110,7 +2110,7 @@ describe('DefaultSystemStepServices', () => {
     );
   });
 
-  it('rejects from_pr enqueue_task payloads that include issue or worktree at the effect boundary', async () => {
+  it('rejects from_pr enqueue_task payloads that include new-task-only fields at the effect boundary', async () => {
     const services = new DefaultSystemStepServices({
       cwd: '/repo/worktree',
       projectCwd: '/repo',
@@ -2124,6 +2124,7 @@ describe('DefaultSystemStepServices', () => {
       task: '{structured:plan.dummy_field}',
       pr: '{context:route.pr.number}',
       issue: '{structured:plan.issue}',
+      branch: 'feat/stacked-part',
     }, {
       mode: 'from_pr',
       workflow: 'takt-default',
@@ -2131,6 +2132,21 @@ describe('DefaultSystemStepServices', () => {
       pr: 42,
       issue: { create: true },
     }, {} as never)).rejects.toThrow('System effect mode "from_pr" does not allow field "issue"');
+
+    await expect(services.executeEffect({
+      type: 'enqueue_task',
+      mode: 'from_pr',
+      workflow: 'takt-default',
+      task: '{structured:plan.dummy_field}',
+      pr: '{context:route.pr.number}',
+      branch: 'feat/stacked-part',
+    }, {
+      mode: 'from_pr',
+      workflow: 'takt-default',
+      task: 'Address review comments',
+      pr: 42,
+      branch: 'feat/stacked-part',
+    }, {} as never)).rejects.toThrow('System effect mode "from_pr" does not allow field "branch"');
   });
 
   it('treats non-conflict merge failures as failed sync_with_root effects', async () => {

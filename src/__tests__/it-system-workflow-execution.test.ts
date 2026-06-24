@@ -476,6 +476,58 @@ describe('system workflow execution integration', () => {
     });
   });
 
+  it('enqueue_task.branch を新規 task の保存オプションへ伝搬できる', async () => {
+    const config = normalizeWorkflowConfig(
+      {
+        name: 'enqueue-task-explicit-branch',
+        initial_step: 'enqueue_part',
+        max_steps: 2,
+        steps: [
+          {
+            name: 'enqueue_part',
+            mode: 'system',
+            effects: [
+              {
+                type: 'enqueue_task',
+                mode: 'new',
+                workflow: 'takt-default',
+                branch: 'feat/my-feature-part1',
+                base_branch: 'main',
+                task: 'Implement part 1',
+                worktree: {
+                  enabled: true,
+                  auto_pr: true,
+                  draft_pr: true,
+                },
+              },
+            ],
+            rules: [
+              { when: 'effect.enqueue_part.enqueue_task.success == true', next: 'COMPLETE' },
+            ],
+          },
+        ],
+      },
+      projectDir,
+    );
+
+    const state = await new WorkflowEngine(
+      config,
+      projectDir,
+      'Current task body',
+      createSystemEngineOptions(projectDir),
+    ).run();
+
+    expect(state.status).toBe('completed');
+    expect(mockSaveTaskFile).toHaveBeenCalledWith(projectDir, 'Implement part 1', {
+      workflow: 'takt-default',
+      worktree: true,
+      branch: 'feat/my-feature-part1',
+      baseBranch: 'main',
+      autoPr: true,
+      draftPr: true,
+    });
+  });
+
   it('context と structured のテンプレートを effect に展開し effect.when で COMPLETE できる', async () => {
     setMockScenario([
       {

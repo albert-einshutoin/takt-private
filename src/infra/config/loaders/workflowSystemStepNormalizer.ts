@@ -51,6 +51,7 @@ function normalizeWorkflowEffect(effect: RawWorkflowEffect): WorkflowEffect {
       mode: effect.mode,
       workflow: effect.workflow,
       task: effect.task,
+      ...(effect.branch !== undefined ? { branch: effect.branch } : {}),
       ...(effect.base_branch !== undefined ? { base_branch: effect.base_branch } : {}),
       ...(effect.worktree !== undefined ? { worktree: effect.worktree } : {}),
       ...(effect.pr !== undefined ? { pr: normalizeEffectScalarReference(effect.pr, 'effects.pr') } : {}),

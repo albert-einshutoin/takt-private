@@ -661,6 +661,7 @@ describe('system workflow schema', () => {
           workflow: 'takt-default',
           task: '{structured:plan.dummy_field}',
           pr: 42,
+          branch: 'feat/stacked-part',
           issue: { create: true },
           worktree: { enabled: true },
         },
@@ -683,6 +684,10 @@ describe('system workflow schema', () => {
         expect.objectContaining({
           path: ['effects', 0, 'issue'],
           message: 'enqueue_task mode "from_pr" does not allow "issue"',
+        }),
+        expect.objectContaining({
+          path: ['effects', 0, 'branch'],
+          message: 'enqueue_task mode "from_pr" does not allow "branch"',
         }),
         expect.objectContaining({
           path: ['effects', 0, 'worktree'],

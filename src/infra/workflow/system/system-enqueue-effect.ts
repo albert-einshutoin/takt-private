@@ -32,6 +32,7 @@ export async function enqueueTaskEffect(
     mode: 'new' | 'from_pr';
     workflow: string;
     task: string;
+    branch?: string;
     pr?: number;
     issue?: WorkflowEnqueueIssueConfig;
     base_branch?: string | WorkflowEnqueueBaseBranchConfig;
@@ -53,10 +54,12 @@ export async function enqueueTaskEffect(
   }
 
   if (payload.mode === 'new') {
+    // from_pr tasks inherit their target from the source PR, so explicit branch is only saved for new tasks.
     const created = await saveTaskFile(options.projectCwd, payload.task, {
       workflow: payload.workflow,
       ...(issueNumber !== undefined ? { issue: issueNumber } : {}),
       ...(payload.worktree?.enabled === true ? { worktree: true } : {}),
+      ...(payload.branch ? { branch: payload.branch } : {}),
       ...(baseBranch ? { baseBranch } : {}),
       ...(payload.worktree?.auto_pr === true ? { autoPr: true } : {}),
       ...(payload.worktree?.draft_pr === true ? { draftPr: true } : {}),
