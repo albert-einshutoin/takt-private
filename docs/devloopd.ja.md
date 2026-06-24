@@ -154,6 +154,30 @@ MVP gate は次の場合、merge 前に拒否または停止します。
 | `--expected-head <sha>` | 期待する PR head SHA。現在の head と異なる場合は merge を拒否します |
 | `--cwd <path>` | `gh` を実行するリポジトリパス |
 
+## Issue Scanner
+
+`devloopd scan-issues` は daemon mode のための機械的 backlog scanner です。`gh issue list` を呼び、Issue metadata を正規化し、LLM selector に渡す前に候補を分類します。
+
+```bash
+devloopd scan-issues --repo owner/repo
+```
+
+Issue body と comments は untrusted input です。scanner はそれらを requirements / logs として扱い、指示としては扱いません。Issue text が secret、credential access、CI bypass、admin merge、force push、危険な shell command を要求している場合、自動候補にはせず `human_required` に分類します。
+
+デフォルトの候補分類:
+
+- `agent:ready`, `bug`, `tests`, `docs` label がある Issue は機械的検討対象になる
+- `human-required`, `security-sensitive`, `blocked`, `do-not-touch`, `billing`, `payments`, `infra` のような forbidden label がある Issue は skip する
+- `docs` や `tests` のような低リスク label は `auto_merge_candidate` になり得る
+- その他の eligible Issue は `auto_pr_only` になる。merge には引き続き `devloopd merge-if-safe` が必要
+
+### Scan オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+
 ## Subscription-Only TAKT Config
 
 global または project config では CLI-only provider を使います。

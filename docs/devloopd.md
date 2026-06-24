@@ -154,6 +154,30 @@ The MVP gate denies or stops before merge when:
 | `--expected-head <sha>` | Expected PR head SHA. The gate denies merge if the current PR head differs |
 | `--cwd <path>` | Repository path to run `gh` from |
 
+## Issue Scanner
+
+`devloopd scan-issues` is the mechanical backlog scanner for daemon mode. It calls `gh issue list`, normalizes issue metadata, and classifies candidates before any LLM selector sees them.
+
+```bash
+devloopd scan-issues --repo owner/repo
+```
+
+Issue bodies and comments are untrusted input. The scanner treats them as requirements or logs only, never as instructions. If issue text asks for secrets, credential access, CI bypass, admin merge, force push, or unsafe shell commands, the issue is marked `human_required` instead of becoming an automatic candidate.
+
+Default candidate behavior:
+
+- labels `agent:ready`, `bug`, `tests`, or `docs` make an issue eligible for mechanical consideration
+- forbidden labels such as `human-required`, `security-sensitive`, `blocked`, `do-not-touch`, `billing`, `payments`, and `infra` skip the issue
+- low-risk labels such as `docs` or `tests` can classify as `auto_merge_candidate`
+- other eligible issues classify as `auto_pr_only`; merge still requires `devloopd merge-if-safe`
+
+### Scan Options
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--cwd <path>` | Repository path to run `gh issue list` from |
+
 ## Subscription-Only TAKT Config
 
 Use CLI-only providers in global or project config:

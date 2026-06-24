@@ -36,6 +36,7 @@ devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
 devloopd merge-if-safe --pr 456 --expected-head <sha>
+devloopd scan-issues --repo owner/repo
 ```
 
 `devloopd doctor` のオプション:
@@ -88,6 +89,13 @@ devloopd merge-if-safe --pr 456 --expected-head <sha>
 | `--repo <owner/repo>` | GitHub リポジトリ |
 | `--expected-head <sha>` | 期待する PR head SHA。現在の head と異なる場合は merge を拒否します |
 | `--cwd <path>` | `gh` を実行するリポジトリパス |
+
+`devloopd scan-issues` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
 
 完全なチェック内容は [devloopd Guide](./devloopd.ja.md) を参照してください。
 

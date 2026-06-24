@@ -36,6 +36,7 @@ devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd timeline --issue 123
 devloopd merge-if-safe --pr 456 --expected-head <sha>
+devloopd scan-issues --repo owner/repo
 ```
 
 `devloopd doctor` options:
@@ -88,6 +89,13 @@ devloopd merge-if-safe --pr 456 --expected-head <sha>
 | `--repo <owner/repo>` | GitHub repository |
 | `--expected-head <sha>` | Expected PR head SHA. The gate denies merge if the current PR head differs |
 | `--cwd <path>` | Repository path to run `gh` from |
+
+`devloopd scan-issues` options:
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--cwd <path>` | Repository path to run `gh issue list` from |
 
 See the [devloopd Guide](./devloopd.md) for the full check list.
 
