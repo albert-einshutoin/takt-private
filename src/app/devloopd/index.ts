@@ -281,9 +281,11 @@ program
 
 program
   .command('start')
-  .description('Run a finite subscription-only devloop supervisor cycle')
+  .description('Run the subscription-only devloop supervisor')
   .option('--repo <owner/repo>', 'GitHub repository')
-  .option('--once', 'Run one finite scan/run/import cycle')
+  .option('--once', 'Run one finite scan/run/import cycle and exit')
+  .option('--max-cycles <count>', 'Stop after a finite number of daemon cycles', (value: string) => Number(value))
+  .option('--interval-seconds <count>', 'Seconds to wait between daemon cycles', (value: string) => Number(value))
   .option('--workflow <path>', 'TAKT workflow name or path', '.takt/workflows/subscription-devloop.yaml')
   .option('--policy <path>', 'devloopd policy YAML path')
   .option('--skip-auth', 'Skip GitHub CLI auth status check')
@@ -296,6 +298,8 @@ program
   .action(async (options: {
     repo?: string;
     once?: boolean;
+    maxCycles?: number;
+    intervalSeconds?: number;
     workflow: string;
     policy?: string;
     skipAuth?: boolean;
@@ -310,6 +314,8 @@ program
       repoPath: resolve(options.cwd),
       repo: options.repo,
       once: options.once === true,
+      maxCycles: options.maxCycles,
+      intervalSeconds: options.intervalSeconds,
       workflow: options.workflow,
       policyPath: options.policy ? resolve(options.policy) : undefined,
       skipAuth: options.skipAuth === true,

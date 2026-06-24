@@ -145,10 +145,12 @@ describe('devloopd supervisor', () => {
     expect(calls).toEqual(['scan', 'run']);
   });
 
-  it('requires explicit finite mode before running the supervisor', async () => {
+  it('runs daemon cycles without requiring --once', async () => {
+    const calls: string[] = [];
     const dependencies: DevloopStartDependencies = {
       async scanIssues() {
-        throw new Error('should not scan');
+        calls.push('scan');
+        return makeScan([]);
       },
       async runDevloopIssue() {
         throw new Error('should not run');
@@ -158,10 +160,19 @@ describe('devloopd supervisor', () => {
       },
     };
 
-    const report = await startDevloop({ repoPath: '/repo', dependencies });
+    const report = await startDevloop({
+      repoPath: '/repo',
+      maxCycles: 2,
+      sleep: async (milliseconds) => {
+        calls.push(`sleep:${milliseconds}`);
+      },
+      dependencies,
+    });
 
-    expect(report.passed).toBe(false);
-    expect(report.message).toContain('pass --once');
+    expect(report.passed).toBe(true);
+    expect(report.message).toContain('daemon stopped after 2 cycle(s)');
+    expect(report.cycles).toHaveLength(2);
+    expect(calls).toEqual(['scan', 'sleep:60000', 'scan']);
   });
 
   it('does not scan issues when the active run limit is reached', async () => {
@@ -187,5 +198,40 @@ describe('devloopd supervisor', () => {
     } finally {
       rmSync(repoPath, { recursive: true, force: true });
     }
+  });
+
+  it('uses scan retry-after hints before the next daemon cycle', async () => {
+    const calls: string[] = [];
+    const dependencies: DevloopStartDependencies = {
+      async scanIssues() {
+        calls.push('scan');
+        return {
+          passed: false,
+          message: 'gh issue list rate limited',
+          candidates: [],
+          skipped: [],
+          failureKind: 'rate_limited',
+          retryAfterSeconds: 45,
+        };
+      },
+      async runDevloopIssue() {
+        throw new Error('should not run');
+      },
+      importTaktRun() {
+        throw new Error('should not import');
+      },
+    };
+
+    const report = await startDevloop({
+      repoPath: '/repo',
+      maxCycles: 2,
+      sleep: async (milliseconds) => {
+        calls.push(`sleep:${milliseconds}`);
+      },
+      dependencies,
+    });
+
+    expect(report.passed).toBe(true);
+    expect(calls).toEqual(['scan', 'sleep:45000', 'scan']);
   });
 });
