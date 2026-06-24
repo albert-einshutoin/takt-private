@@ -17,6 +17,7 @@ import {
   type ImportTaktRunReport,
 } from './ledger.js';
 import { inspectActiveRuns, type ActiveRunsReport } from './activeRuns.js';
+import { selectIssueCandidates } from './issueSelector.js';
 import type { DevloopCommandRunner } from './commandRunner.js';
 
 export interface DevloopStartDependencies {
@@ -70,23 +71,6 @@ function resolveDependencies(dependencies: Partial<DevloopStartDependencies> | u
     ...DEFAULT_DEPENDENCIES,
     ...dependencies,
   };
-}
-
-function candidatePriority(candidate: IssueCandidate): number {
-  if (candidate.mode === 'auto_merge_candidate') return 0;
-  if (candidate.mode === 'auto_pr_only') return 1;
-  return 2;
-}
-
-function selectCandidates(candidates: readonly IssueCandidate[], maxRuns: number): IssueCandidate[] {
-  return candidates
-    .map((candidate, index) => ({ candidate, index }))
-    // Prefer low-risk mechanically mergeable issues, but keep gh ordering within the same risk bucket.
-    .sort((left, right) =>
-      candidatePriority(left.candidate) - candidatePriority(right.candidate) || left.index - right.index,
-    )
-    .slice(0, maxRuns)
-    .map((entry) => entry.candidate);
 }
 
 function normalizeMaxRuns(value: number | undefined): number | undefined {
@@ -167,7 +151,7 @@ export async function startDevloop(options: StartDevloopOptions = {}): Promise<D
     };
   }
 
-  const selected = selectCandidates(scan.candidates, maxRuns);
+  const selected = selectIssueCandidates(scan.candidates, { maxSelections: maxRuns });
   if (selected.length === 0) {
     return {
       passed: false,

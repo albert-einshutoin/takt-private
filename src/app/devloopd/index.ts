@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { formatDevloopDoctorReport, runDevloopDoctor } from '../../devloopd/doctor.js';
 import { formatActiveRunsReport, inspectActiveRuns } from '../../devloopd/activeRuns.js';
+import { formatIssueSelectionReport, selectIssueFromScan } from '../../devloopd/issueSelector.js';
 import {
   formatImportTaktRunReport,
   formatTimelineReport,
@@ -225,6 +226,34 @@ program
     });
 
     console.log(formatIssueScanReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('select-issue')
+  .description('Scan GitHub issues and select the safest mechanical devloop candidate')
+  .option('--repo <owner/repo>', 'GitHub repository')
+  .option('--cwd <path>', 'Repository path to run gh from', process.cwd())
+  .option('--max-selections <count>', 'Maximum issue candidates to select', (value: string) => Number(value))
+  .option('--no-auto-pr-only', 'Do not select medium-risk auto_pr_only candidates')
+  .action(async (options: {
+    repo?: string;
+    cwd: string;
+    maxSelections?: number;
+    autoPrOnly?: boolean;
+  }) => {
+    const scan = await scanIssues({
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+    });
+    const report = selectIssueFromScan(scan, {
+      maxSelections: options.maxSelections,
+      allowAutoPrOnly: options.autoPrOnly !== false,
+    });
+
+    console.log(formatIssueSelectionReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }
