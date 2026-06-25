@@ -1,5 +1,6 @@
 import { context, metrics, SpanStatusCode, trace, type Attributes, type MetricOptions, type Span } from '@opentelemetry/api';
 import { getErrorMessage } from '../../../shared/utils/index.js';
+import { estimateTokenCostUsd } from '../../../shared/pricing/tokenCost.js';
 import type { ProviderUsageSnapshot } from '../../models/response.js';
 import type { WorkflowMaxSteps, WorkflowResumePointEntry, WorkflowStep } from '../../models/types.js';
 import type { QualityGateResultEntry } from '../quality-gates/types.js';
@@ -56,6 +57,10 @@ const TOKEN_OUTPUT_COUNTER_OPTIONS = {
 const TOKEN_CACHED_INPUT_COUNTER_OPTIONS = {
   description: 'Workflow cached input tokens by provider, model, step, and phase',
   unit: 'tokens',
+};
+const TOKEN_ESTIMATED_COST_COUNTER_OPTIONS = {
+  description: 'Estimated workflow token cost by provider, model, step, and phase',
+  unit: 'USD',
 };
 const PROVIDER_ERROR_COUNTER_OPTIONS = {
   description: 'Provider errors by provider, model, step, and error type',
@@ -629,6 +634,23 @@ function recordTokenMetrics(
     TOKEN_CACHED_INPUT_COUNTER_OPTIONS,
     attributes,
   );
+  const costEstimate = estimateTokenCostUsd({
+    provider: params.providerInfo?.provider,
+    model: params.providerInfo?.model,
+    usage,
+  });
+  if (costEstimate) {
+    addPositiveCounter(
+      meter,
+      'takt.token.estimated_cost_usd',
+      costEstimate.costUsd,
+      TOKEN_ESTIMATED_COST_COUNTER_OPTIONS,
+      compactAttributes({
+        ...attributes,
+        'takt.token.pricing_key': costEstimate.pricingKey,
+      }),
+    );
+  }
 }
 
 function addPositiveCounter(
