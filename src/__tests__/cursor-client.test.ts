@@ -3,6 +3,9 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { mockSpawn } = vi.hoisted(() => ({
@@ -164,6 +167,95 @@ describe('callCursor', () => {
     expect(args).toContain('--');
     expect(args.at(-2)).toBe('--');
     expect(args.at(-1)).toBe('--workspace=/');
+  });
+
+  it('should keep full prompt in argv by default when systemPrompt is present', async () => {
+    mockSpawnWithScenario({
+      stdout: JSON.stringify({ content: 'done' }),
+      code: 0,
+    });
+
+    const result = await callCursor('coder', 'implement feature', {
+      cwd: '/repo',
+      systemPrompt: 'System role',
+    });
+
+    expect(result.status).toBe('done');
+    const [, args] = mockSpawn.mock.calls[0] as [string, string[]];
+    expect(args.at(-1)).toBe('System role\n\nimplement feature');
+  });
+
+  it('should use a temporary prompt file when opt-in is enabled', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'takt-cursor-prompt-file-'));
+    const longPrompt = `implement feature\n${'details '.repeat(200)}`;
+    let promptReferenceArg = '';
+    let promptFilePath = '';
+    let promptFileContent = '';
+
+    try {
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        promptReferenceArg = args.at(-1) ?? '';
+        const match = promptReferenceArg.match(/: (.+)$/);
+        promptFilePath = match?.[1] ?? '';
+        promptFileContent = readFileSync(promptFilePath, 'utf-8');
+
+        const child = createMockChildProcess();
+        queueMicrotask(() => {
+          child.stdout.emit('data', Buffer.from(JSON.stringify({ content: 'done' }), 'utf-8'));
+          child.emit('close', 0, null);
+        });
+        return child;
+      });
+
+      const result = await callCursor('coder', longPrompt, {
+        cwd,
+        systemPrompt: 'System role',
+        usePromptFile: true,
+      });
+
+      expect(result.status).toBe('done');
+      expect(promptReferenceArg).toContain('Read the full task instruction from this file and follow it exactly:');
+      expect(promptReferenceArg).not.toContain(longPrompt);
+      expect(promptReferenceArg).not.toContain('System role');
+      expect(promptFilePath).toContain(join('.takt', 'tmp', 'cursor-prompts'));
+      expect(promptFileContent).toBe(`System role\n\n${longPrompt}`);
+      expect(existsSync(promptFilePath)).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('should clean up the temporary prompt file when cursor-agent fails', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'takt-cursor-prompt-file-fail-'));
+    let promptFilePath = '';
+    let existedDuringSpawn = false;
+
+    try {
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        const promptReferenceArg = args.at(-1) ?? '';
+        const match = promptReferenceArg.match(/: (.+)$/);
+        promptFilePath = match?.[1] ?? '';
+        existedDuringSpawn = existsSync(promptFilePath);
+
+        const child = createMockChildProcess();
+        queueMicrotask(() => {
+          child.stderr.emit('data', Buffer.from('unexpected failure', 'utf-8'));
+          child.emit('close', 2, null);
+        });
+        return child;
+      });
+
+      const result = await callCursor('coder', 'implement feature', {
+        cwd,
+        usePromptFile: true,
+      });
+
+      expect(result.status).toBe('error');
+      expect(existedDuringSpawn).toBe(true);
+      expect(existsSync(promptFilePath)).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   it('should not inject CURSOR_API_KEY when cursorApiKey is undefined', async () => {

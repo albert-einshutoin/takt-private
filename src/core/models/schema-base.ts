@@ -81,6 +81,9 @@ export const StepProviderOptionsObjectSchema = z.object({
   copilot: z.object({
     effort: z.enum(COPILOT_EFFORT_VALUES).optional(),
   }).optional(),
+  cursor: z.object({
+    use_prompt_file: z.boolean().optional(),
+  }).optional(),
   kiro: z.object({
     agent: z.string().min(1).optional(),
   }).optional(),

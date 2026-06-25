@@ -30,6 +30,7 @@ function toCursorOptions(options: ProviderCallOptions): CursorCallOptions {
     onStream: options.onStream,
     cursorApiKey: options.cursorApiKey ?? resolveCursorApiKey(),
     cursorCliPath: resolveCursorCliPath(),
+    usePromptFile: options.providerOptions?.cursor?.usePromptFile,
     childProcessEnv: options.childProcessEnv,
   };
 }

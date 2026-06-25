@@ -164,6 +164,26 @@ describe('CursorProvider', () => {
     );
   });
 
+  it('should pass provider_options.cursor.usePromptFile to callCursor', async () => {
+    mockCallCursor.mockResolvedValue(doneResponse('coder'));
+
+    const provider = new CursorProvider();
+    const agent = provider.setup({ name: 'coder' });
+
+    await agent.call('implement', {
+      cwd: '/tmp/work',
+      providerOptions: {
+        cursor: { usePromptFile: true },
+      },
+    });
+
+    expect(mockCallCursor).toHaveBeenCalledWith(
+      'coder',
+      'implement',
+      expect.objectContaining({ usePromptFile: true }),
+    );
+  });
+
   it('should pass undefined cursorCliPath when resolver returns undefined', async () => {
     mockResolveCursorCliPath.mockReturnValue(undefined);
     mockCallCursor.mockResolvedValue(doneResponse('coder'));

@@ -46,6 +46,9 @@ type RawProviderOptions = {
   copilot?: {
     effort?: CopilotEffort;
   };
+  cursor?: {
+    use_prompt_file?: boolean;
+  };
   kiro?: {
     agent?: string;
   };
@@ -222,6 +225,9 @@ export function normalizeProviderOptions(
   if (options.copilot?.effort !== undefined) {
     result.copilot = { effort: options.copilot.effort };
   }
+  if (options.cursor?.use_prompt_file !== undefined) {
+    result.cursor = { usePromptFile: options.cursor.use_prompt_file };
+  }
   if (options.kiro?.agent !== undefined) {
     result.kiro = { agent: options.kiro.agent };
   }
@@ -296,6 +302,14 @@ export function mergeProviderOptions(
         ...result.copilot,
         ...(layer.copilot.effort !== undefined
           ? { effort: layer.copilot.effort }
+          : {}),
+      };
+    }
+    if (layer.cursor) {
+      result.cursor = {
+        ...result.cursor,
+        ...(layer.cursor.usePromptFile !== undefined
+          ? { usePromptFile: layer.cursor.usePromptFile }
           : {}),
       };
     }
@@ -534,6 +548,12 @@ export function resolveEffectiveProviderOptions(
     stepOptions?.copilot?.effort,
     resolveProviderOptionOrigin(originResolver, 'copilot.effort', source),
   );
+  const cursorUsePromptFile = selectProviderValue(
+    resolvedConfigOptions.cursor?.usePromptFile,
+    personaOptions?.cursor?.usePromptFile,
+    stepOptions?.cursor?.usePromptFile,
+    resolveProviderOptionOrigin(originResolver, 'cursor.usePromptFile', source),
+  );
   const kiroAgent = selectProviderValue(
     resolvedConfigOptions.kiro?.agent,
     personaOptions?.kiro?.agent,
@@ -590,6 +610,7 @@ export function resolveEffectiveProviderOptions(
         ? claude
         : undefined,
     copilot: copilotEffort !== undefined ? { effort: copilotEffort } : undefined,
+    cursor: cursorUsePromptFile !== undefined ? { usePromptFile: cursorUsePromptFile } : undefined,
     kiro: kiroAgent !== undefined ? { agent: kiroAgent } : undefined,
     claudeTerminal:
       claudeTerminalBackend !== undefined
@@ -607,7 +628,13 @@ export function resolveEffectiveProviderOptions(
         : undefined,
   };
 
-  return result.codex || result.opencode || result.claude || result.copilot || result.kiro || result.claudeTerminal
+  return result.codex
+    || result.opencode
+    || result.claude
+    || result.copilot
+    || result.cursor
+    || result.kiro
+    || result.claudeTerminal
     ? result
     : undefined;
 }
@@ -645,6 +672,9 @@ function stripClaudeAllowedTools(
       : {}),
     ...(providerOptions.copilot !== undefined
       ? { copilot: { ...providerOptions.copilot } }
+      : {}),
+    ...(providerOptions.cursor !== undefined
+      ? { cursor: { ...providerOptions.cursor } }
       : {}),
     ...(providerOptions.kiro !== undefined
       ? { kiro: { ...providerOptions.kiro } }
@@ -701,6 +731,7 @@ export const PROVIDER_OPTION_PATHS = [
   'opencode.variant',
   'opencode.allowedTools',
   'copilot.effort',
+  'cursor.usePromptFile',
   'kiro.agent',
   'claudeTerminal.backend',
   'claudeTerminal.timeoutMs',

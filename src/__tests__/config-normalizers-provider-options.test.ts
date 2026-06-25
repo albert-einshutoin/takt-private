@@ -142,6 +142,24 @@ describe('denormalizeProviderOptions', () => {
     expect(denormalizedProviderOptions).toEqual(rawProviderOptions);
   });
 
+  it('should round-trip cursor prompt file opt-in through normalize and denormalize', () => {
+    const rawProviderOptions = {
+      cursor: {
+        use_prompt_file: true,
+      },
+    };
+
+    const normalizedProviderOptions = normalizeProviderOptions(rawProviderOptions);
+    const denormalizedProviderOptions = denormalizeProviderOptions(normalizedProviderOptions);
+
+    expect(normalizedProviderOptions).toEqual({
+      cursor: {
+        usePromptFile: true,
+      },
+    });
+    expect(denormalizedProviderOptions).toEqual(rawProviderOptions);
+  });
+
   it('should persist kiro agent alongside other provider options', () => {
     const result = denormalizeProviderOptions({
       kiro: { agent: 'coder-agent' },

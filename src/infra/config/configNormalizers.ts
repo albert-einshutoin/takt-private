@@ -552,6 +552,9 @@ export function denormalizeProviderOptions(
   if (providerOptions.copilot?.effort !== undefined) {
     raw.copilot = { effort: providerOptions.copilot.effort };
   }
+  if (providerOptions.cursor?.usePromptFile !== undefined) {
+    raw.cursor = { use_prompt_file: providerOptions.cursor.usePromptFile };
+  }
   if (providerOptions.kiro?.agent !== undefined) {
     raw.kiro = { agent: providerOptions.kiro.agent };
   }
