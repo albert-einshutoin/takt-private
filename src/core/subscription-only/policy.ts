@@ -48,7 +48,10 @@ export const SUBSCRIPTION_ONLY_FORBIDDEN_ENV_NAMES = [
   'TAKT_COPILOT_GITHUB_TOKEN',
 ] as const;
 
-const DEFAULT_ALLOWED_SET: ReadonlySet<ProviderType> = new Set(DEFAULT_SUBSCRIPTION_ONLY_ALLOWED_PROVIDERS);
+const CONFIGURABLE_SUBSCRIPTION_SAFE_PROVIDERS: ReadonlySet<ProviderType> = new Set([
+  ...DEFAULT_SUBSCRIPTION_ONLY_ALLOWED_PROVIDERS,
+  'opencode',
+]);
 
 const FORBIDDEN_CONFIG_KEYS = new Set([
   'api_key',
@@ -186,11 +189,11 @@ export function getSubscriptionOnlyAllowedProviders(
 
 function assertConfiguredAllowlistIsSubscriptionSafe(config: SubscriptionOnlyPolicyConfig): void {
   for (const provider of config.allowedProviders ?? []) {
-    if (DEFAULT_ALLOWED_SET.has(provider)) {
+    if (CONFIGURABLE_SUBSCRIPTION_SAFE_PROVIDERS.has(provider)) {
       continue;
     }
     throw new Error(
-      `Subscription-only mode cannot allow API-key provider "${provider}" in allowed_providers`,
+      `Subscription-only mode cannot allow non subscription-safe provider "${provider}" in allowed_providers`,
     );
   }
 }

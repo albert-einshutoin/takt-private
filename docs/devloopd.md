@@ -27,6 +27,8 @@ The command exits with status `0` when every required check passes. It exits wit
 - resolved TAKT config has `subscription_only: true`
 - global and project TAKT config files do not contain API key config keys
 - project workflows under `.takt/workflows/` pass TAKT workflow doctor validation, including subscription-only provider checks
+- OpenCode credential store is readable with `opencode auth list` when `opencode` is explicitly allowlisted
+- recent OpenCode logs do not show known local SQLite storage errors when `opencode` is explicitly allowlisted
 
 The doctor reports forbidden environment variables and config keys by name only. It does not print secret values.
 
@@ -44,6 +46,32 @@ devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
 
 Smoke checks run only after prerequisite doctor checks pass. They use the subscription-only
 environment sanitizer and fail instead of hanging when a CLI exceeds the timeout.
+
+### Troubleshooting Smoke Failures
+
+`smoke:opencode-cli` may fail with an OpenCode `UnknownError` such as
+`Unexpected server error` even when TAKT configuration, command discovery, and
+subscription-only guards are correct. In that case, first run OpenCode directly:
+
+```bash
+opencode run "Reply with exactly: Done"
+```
+
+If the direct command fails the same way, check the OpenCode account and service
+state. If `devloopd doctor` reports `OpenCode storage`, the OpenCode credential
+store is readable but recent logs indicate a local SQLite storage problem such as
+`session_message.seq`; back up or repair the local OpenCode database before
+expecting CLI or SDK smoke runs to pass. To rule out global OpenCode MCP
+configuration, temporarily disable a suspect MCP server with an inline OpenCode
+config override:
+
+```bash
+OPENCODE_CONFIG_CONTENT='{"mcp":{"pencil":{"enabled":false}}}' \
+  opencode run "Reply with exactly: Done"
+```
+
+TAKT keeps subscription-only mode strict during smoke checks. It does not fall
+back to SDK/API providers or API-key credentials when a login-session CLI fails.
 
 ### Options
 
@@ -310,4 +338,11 @@ provider: codex-cli
 allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
 ```
 
-With `subscription_only: true`, TAKT rejects SDK/API providers such as `codex` or `opencode`, API key config such as `openai_api_key`, workflow step provider overrides outside the allowlist, and execution-time `--provider` overrides outside the allowlist.
+With `subscription_only: true`, TAKT rejects API key config such as `openai_api_key`,
+workflow step provider overrides outside the allowlist, and execution-time
+`--provider` overrides outside the allowlist. `opencode` can be added explicitly
+to `allowed_providers` when the OpenCode SDK path should use OpenCode's own
+credential store, such as OpenCode Go/Zen. In that opt-in mode, `devloopd doctor`
+also runs `opencode auth list` as a non-generating credential-store check and
+scans recent OpenCode logs for known local SQLite storage failures.
+TAKT still rejects `opencode_api_key` and `TAKT_OPENCODE_API_KEY`.

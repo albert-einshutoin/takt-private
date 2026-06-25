@@ -118,6 +118,35 @@ describe('subscription-only policy', () => {
     expect(() => loadGlobalConfig()).toThrow(/subscription-only.*openai_api_key/i);
   });
 
+  it('allows the OpenCode SDK provider when it is explicitly allowlisted without TAKT API key config', () => {
+    writeProjectConfig(projectDir, [
+      'subscription_only: true',
+      'provider: opencode',
+      'model: opencode-go/kimi-k2.7-code',
+      'allowed_providers:',
+      '  - codex-cli',
+      '  - opencode',
+      '  - mock',
+    ].join('\n'));
+
+    const config = loadProjectConfig(projectDir);
+
+    expect(config.provider).toBe('opencode');
+    expect(config.allowedProviders).toEqual(['codex-cli', 'opencode', 'mock']);
+  });
+
+  it('still rejects TAKT-managed OpenCode API key config when OpenCode SDK is allowlisted', () => {
+    writeProjectConfig(projectDir, [
+      'subscription_only: true',
+      'provider: opencode',
+      'allowed_providers:',
+      '  - opencode',
+      'opencode_api_key: sk-test',
+    ].join('\n'));
+
+    expect(() => loadProjectConfig(projectDir)).toThrow(/subscription-only.*opencode_api_key/i);
+  });
+
   it('rejects API providers in project-level routing when subscription-only mode is enabled', () => {
     writeProjectConfig(projectDir, [
       'subscription_only: true',

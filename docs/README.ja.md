@@ -286,9 +286,10 @@ language: ja        # en or ja
 subscription_only: true
 provider: codex-cli
 allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
+# OpenCode Go/Zen など OpenCode 側の auth store を使う場合だけ opencode を明示追加します。
 ```
 
-`subscription_only` が有効な場合、TAKT は `openai_api_key` のような API key 設定、`codex` や `opencode` のような SDK/API provider、allowlist 外の workflow step 上書き、実行時の `--provider` 上書きを拒否します。
+`subscription_only` が有効な場合、TAKT は `openai_api_key` のような API key 設定、allowlist 外の provider、allowlist 外の workflow step 上書き、実行時の `--provider` 上書きを拒否します。OpenCode Go/Zen など OpenCode 側の credential store を使う場合は `opencode` を明示的に allowlist へ追加できますが、subscription-only mode では引き続き `opencode_api_key` と `TAKT_OPENCODE_API_KEY` は拒否されます。
 
 ローカル CLI セッションと workflow がこの方針に合っているか確認します。
 
