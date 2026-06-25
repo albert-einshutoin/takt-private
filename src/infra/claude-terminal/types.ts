@@ -119,6 +119,4 @@ export interface BuildClaudeTerminalCommandOptions {
   bypassPermissions?: boolean;
   sessionId?: string;
   newSessionId?: string;
-  systemPrompt?: string;
-  outputSchema?: Record<string, unknown>;
 }

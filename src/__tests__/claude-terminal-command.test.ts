@@ -1,15 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildClaudeTerminalCommand } from '../infra/claude-terminal/command.js';
 
-const SCHEMA = {
-  type: 'object',
-  properties: { decision: { type: 'string' } },
-  required: ['decision'],
-  additionalProperties: false,
-};
-
 describe('Claude terminal command builder', () => {
-  it('Given interactive options, When building command, Then Claude Code is launched without headless flags', () => {
+  it('Given interactive options, When building command, Then Claude Code is launched with short startup flags only', () => {
     const command = buildClaudeTerminalCommand({
       pathToClaudeCodeExecutable: '/opt/claude/bin/claude',
       model: 'opus',
@@ -19,8 +12,6 @@ describe('Claude terminal command builder', () => {
       permissionMode: 'edit',
       bypassPermissions: false,
       sessionId: 'session-123',
-      systemPrompt: 'You are a coder.',
-      outputSchema: SCHEMA,
     });
 
     expect(command).toEqual({
@@ -38,16 +29,14 @@ describe('Claude terminal command builder', () => {
         'acceptEdits',
         '--resume',
         'session-123',
-        '--system-prompt',
-        'You are a coder.',
-        '--json-schema',
-        JSON.stringify(SCHEMA),
       ],
     });
     expect(command.args).not.toContain('-p');
     expect(command.args).not.toContain('--max-turns');
     expect(command.args).not.toContain('--output-format');
     expect(command.args).not.toContain('stream-json');
+    expect(command.args).not.toContain('--system-prompt');
+    expect(command.args).not.toContain('--json-schema');
   });
 
   it('Given bypassPermissions true, When building command, Then bypassPermissions overrides permissionMode', () => {

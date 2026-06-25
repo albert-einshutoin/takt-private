@@ -22,6 +22,13 @@ function createTranscriptReader(response: unknown) {
   };
 }
 
+const SCHEMA = {
+  type: 'object',
+  properties: { decision: { type: 'string' } },
+  required: ['decision'],
+  additionalProperties: false,
+};
+
 describe('Claude terminal client', () => {
   it('Given mock terminal backend, When call succeeds, Then prompt is pasted and session is stopped by default', async () => {
     const backend = createBackend();
@@ -69,6 +76,40 @@ describe('Claude terminal client', () => {
       status: 'done',
       content: 'done',
       sessionId: 'claude-session-1',
+    });
+  });
+
+  it('Given system prompt and output schema, When call succeeds, Then long instructions are pasted instead of added to argv', async () => {
+    const backend = createBackend();
+    const transcriptReader = createTranscriptReader({
+      sessionId: 'claude-session-1',
+      assistantText: 'Done.\n{"decision":"approved"}',
+      events: [],
+    });
+
+    const result = await callClaudeTerminal('coder', 'implement task', {
+      cwd: '/tmp/worktree',
+      backend: 'tmux',
+      systemPrompt: 'You are a coder.',
+      outputSchema: SCHEMA,
+      terminalBackend: backend,
+      transcriptReader,
+    });
+
+    const startOptions = backend.start.mock.calls[0]?.[0];
+    expect(startOptions?.command.args).not.toContain('--system-prompt');
+    expect(startOptions?.command.args).not.toContain('--json-schema');
+    expect(startOptions?.command.args.join('\n')).not.toContain('You are a coder.');
+    expect(startOptions?.command.args.join('\n')).not.toContain('"decision"');
+
+    const pastedPrompt = backend.pasteText.mock.calls[0]?.[1];
+    expect(pastedPrompt).toContain('You are a coder.');
+    expect(pastedPrompt).toContain('Return structured output matching this JSON schema.');
+    expect(pastedPrompt).toContain('"decision"');
+    expect(pastedPrompt).toContain('implement task');
+    expect(result).toMatchObject({
+      status: 'done',
+      structuredOutput: { decision: 'approved' },
     });
   });
 
