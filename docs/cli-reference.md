@@ -27,6 +27,8 @@ This document provides a complete reference for all TAKT CLI commands and option
 
 `--workflow` is the canonical option.
 
+When `--pr` builds a task from review context, the generated order file starts with fix-focused triage: `Current Fix Requirements`, `Needs Current-Code Recheck`, `Triage Notes`, and `Reference Context`. Active review threads and non-bot conversation comments are promoted as current work; outdated unresolved threads and legacy inline comments require latest-code verification; resolved, bot/generated, summary, and archival PR context remain available below as reference only.
+
 ## devloopd
 
 `devloopd` is a separate sidecar binary installed with TAKT. Use it to verify subscription/login-session-only readiness before running long workflows.
