@@ -5,6 +5,7 @@ import {
 } from '../../../infra/config/index.js';
 import {
   type TaskInfo,
+  checkWorktreePreflight,
   createSharedCloneAbortable,
   resolveBaseBranch,
   branchExists,
@@ -16,7 +17,7 @@ import {
 import type { WorkflowConfig, WorkflowResumePoint } from '../../../core/models/index.js';
 import { trimResumePointStackForWorkflow } from '../../../core/workflow/run/resume-point.js';
 import { getGitProvider, type Issue } from '../../../infra/git/index.js';
-import { withProgress } from '../../../shared/ui/index.js';
+import { warn, withProgress } from '../../../shared/ui/index.js';
 import { createLogger, getErrorMessage } from '../../../shared/utils/index.js';
 import { generateReportDir } from '../../../shared/utils/reportDir.js';
 import { generateExecutionReportDir } from '../../../core/workflow/run/run-slug.js';
@@ -204,48 +205,54 @@ export async function resolveTaskExecution(
 
   if (data.worktree) {
     throwIfAborted(abortSignal);
-    const targetBranch = data.branch;
-    const needsBaseBranch = !targetBranch || !branchExists(defaultCwd, targetBranch);
-    baseBranch = needsBaseBranch
-      ? resolveTaskBaseBranch(defaultCwd, data)
-      : preferredBaseBranch;
-
-    const reusedWorktree = resolveReusedWorktreeExecution(
-      defaultCwd,
-      task,
-      configuredStartStep,
-      resumePoint,
-      retryNote,
-    );
-    if (reusedWorktree) {
-      execCwd = reusedWorktree.execCwd;
-      branch = reusedWorktree.branch;
-      worktreePath = reusedWorktree.worktreePath;
-      isWorktree = reusedWorktree.isWorktree;
+    const preflight = checkWorktreePreflight(defaultCwd);
+    if (!preflight.ok) {
+      warn(`${preflight.message} Worktree execution requires a Git repository with at least one commit.`);
+      warn('Running in the current directory instead. Create an initial commit to enable worktrees.');
     } else {
-      const taskSlug = task.slug ?? await withProgress(
-        'Generating branch name...',
-        (slug) => `Branch name generated: ${slug}`,
-        () => summarizeTaskName(task.content, { cwd: defaultCwd }),
-      );
+      const targetBranch = data.branch;
+      const needsBaseBranch = !targetBranch || !branchExists(defaultCwd, targetBranch);
+      baseBranch = needsBaseBranch
+        ? resolveTaskBaseBranch(defaultCwd, data)
+        : preferredBaseBranch;
 
-      throwIfAborted(abortSignal);
-      const result = await withProgress(
-        'Creating clone...',
-        (cloneResult) => `Clone created: ${cloneResult.path} (branch: ${cloneResult.branch})`,
-        async () => createSharedCloneAbortable(defaultCwd, {
-          worktree: data.worktree!,
-          branch: data.branch,
-          ...(preferredBaseBranch ? { baseBranch: preferredBaseBranch } : {}),
-          taskSlug,
-          issueNumber: data.issue,
-        }, abortSignal),
+      const reusedWorktree = resolveReusedWorktreeExecution(
+        defaultCwd,
+        task,
+        configuredStartStep,
+        resumePoint,
+        retryNote,
       );
-      throwIfAborted(abortSignal);
-      execCwd = result.path;
-      branch = result.branch;
-      worktreePath = result.path;
-      isWorktree = true;
+      if (reusedWorktree) {
+        execCwd = reusedWorktree.execCwd;
+        branch = reusedWorktree.branch;
+        worktreePath = reusedWorktree.worktreePath;
+        isWorktree = reusedWorktree.isWorktree;
+      } else {
+        const taskSlug = task.slug ?? await withProgress(
+          'Generating branch name...',
+          (slug) => `Branch name generated: ${slug}`,
+          () => summarizeTaskName(task.content, { cwd: defaultCwd }),
+        );
+
+        throwIfAborted(abortSignal);
+        const result = await withProgress(
+          'Creating clone...',
+          (cloneResult) => `Clone created: ${cloneResult.path} (branch: ${cloneResult.branch})`,
+          async () => createSharedCloneAbortable(defaultCwd, {
+            worktree: data.worktree!,
+            branch: data.branch,
+            ...(preferredBaseBranch ? { baseBranch: preferredBaseBranch } : {}),
+            taskSlug,
+            issueNumber: data.issue,
+          }, abortSignal),
+        );
+        throwIfAborted(abortSignal);
+        execCwd = result.path;
+        branch = result.branch;
+        worktreePath = result.path;
+        isWorktree = true;
+      }
     }
   }
 

@@ -188,11 +188,19 @@ export async function resolveExecutionContext(
 ): Promise<ExecutionContext> {
   if (options.createWorktree) {
     const result = await confirmAndCreateWorktree(cwd, task, options.createWorktree, prBranch, prBaseBranch);
+    if (result.cancelled) {
+      throw new Error('Worktree creation cancelled');
+    }
+    if (!result.isWorktree) {
+      info('Worktree unavailable; running in the current directory without git commit/push.');
+      return {
+        execCwd: result.execCwd,
+        isWorktree: false,
+      };
+    }
     const branch = requireBranch(result.branch, 'worktree execution');
     const baseBranch = requireBaseBranch(result.baseBranch, 'worktree execution');
-    if (result.isWorktree) {
-      success(`Worktree created: ${sanitizeTerminalText(result.execCwd)}`);
-    }
+    success(`Worktree created: ${sanitizeTerminalText(result.execCwd)}`);
     return {
       execCwd: result.execCwd,
       branch,

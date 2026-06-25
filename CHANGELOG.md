@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `claude-terminal` no longer passes long `systemPrompt` or structured output JSON schema values through Claude Code startup argv (#756). Role instructions and structured output guidance are now pasted with the step prompt, while TAKT keeps post-response schema extraction and validation.
 - TAKT-managed Git pushes now run non-interactively with terminal credential prompts disabled (#866). If publishing fails after workflow execution and local commit creation, TAKT preserves the branch/commit, records the task as `pr_failed`, skips PR creation, and reports a retryable publishing failure instead of hanging or marking the workflow implementation as failed.
 - Project config loading is disabled when the project `.takt` directory is the same as the global config directory (#541). This keeps `~/.takt/config.yaml` global-only when running TAKT from the home directory and avoids strict project-config validation of global-only keys.
+- Worktree creation now preflights Git repository state before cloning (#439). Non-Git directories and repositories without an initial commit fall back to current-directory execution with a clear hint instead of failing with a misleading missing `main` branch error.
 
 ## [0.48.0] - 2026-06-21
 

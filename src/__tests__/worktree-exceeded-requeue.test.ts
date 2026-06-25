@@ -39,6 +39,7 @@ vi.mock('../infra/task/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../infra/task/index.js')>();
   return {
     ...actual,
+    checkWorktreePreflight: vi.fn(),
     createSharedCloneAbortable: vi.fn(),
     detectDefaultBranch: vi.fn(),
     summarizeTaskName: vi.fn(),
@@ -64,7 +65,7 @@ vi.mock('../shared/ui/index.js', async (importOriginal) => ({
 import { executeWorkflow } from '../features/tasks/execute/workflowExecution.js';
 import { postExecutionFlow } from '../features/tasks/execute/postExecution.js';
 import { loadWorkflowByIdentifier } from '../infra/config/index.js';
-import { createSharedCloneAbortable, detectDefaultBranch, summarizeTaskName } from '../infra/task/index.js';
+import { checkWorktreePreflight, createSharedCloneAbortable, detectDefaultBranch, summarizeTaskName } from '../infra/task/index.js';
 import { withProgress } from '../shared/ui/index.js';
 import { executeAndCompleteTask } from '../features/tasks/execute/taskExecution.js';
 import { TaskRunner } from '../infra/task/runner.js';
@@ -151,6 +152,7 @@ function buildTestWorkflowConfig(): WorkflowConfig {
 
 function applyDefaultMocks(): void {
   vi.mocked(loadWorkflowByIdentifier).mockReturnValue(buildTestWorkflowConfig());
+  vi.mocked(checkWorktreePreflight).mockReturnValue({ ok: true });
   vi.mocked(detectDefaultBranch).mockReturnValue('main');
   vi.mocked(postExecutionFlow).mockResolvedValue({ prUrl: undefined, prFailed: false });
   vi.mocked(withProgress).mockImplementation(
