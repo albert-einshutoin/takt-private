@@ -104,6 +104,16 @@ describe('subscription-only CLI providers', () => {
     expect(invocation.timeoutMs).toBe(31_000);
   });
 
+  it('passes opencode model to CLI run mode', () => {
+    const invocation = buildSubscriptionCliInvocation('opencode-cli', 'Reply Done', {
+      cwd: '/repo',
+      model: 'opencode-go/kimi-k2.7-code',
+    });
+
+    expect(invocation.command).toBe('opencode');
+    expect(invocation.args).toEqual(['run', '-m', 'opencode-go/kimi-k2.7-code', 'Reply Done']);
+  });
+
   it('kills stalled agy print-mode processes after the configured timeout', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'takt-agy-timeout-'));
     try {
