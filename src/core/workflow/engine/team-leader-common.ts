@@ -1,9 +1,17 @@
 import type {
   PartDefinition,
   PartResult,
+  StepProviderOptions,
   WorkflowStep,
 } from '../../models/types.js';
 import { formatAgentFailure } from '../../../shared/types/agent-failure.js';
+import { mergeProviderOptions } from '../../../infra/config/providerOptions.js';
+
+interface ProviderOptionFields {
+  providerOptions?: StepProviderOptions;
+  directProviderOptions?: StepProviderOptions;
+  workflowProviderOptions?: StepProviderOptions;
+}
 
 export function summarizeParts(parts: PartDefinition[]): Array<{ id: string; title: string }> {
   return parts.map((part) => ({ id: part.id, title: part.title }));
@@ -23,6 +31,35 @@ export function resolvePartErrorDetail(partResult: PartResult): string {
   return detail;
 }
 
+function resolveProviderOptionFields(
+  step: WorkflowStep,
+  scopedOptions: StepProviderOptions | undefined,
+): ProviderOptionFields {
+  const workflowProviderOptions = 'workflowProviderOptions' in step
+    ? step.workflowProviderOptions
+    : undefined;
+  const baseDirectProviderOptions = 'directProviderOptions' in step
+    ? step.directProviderOptions
+    : 'workflowProviderOptions' in step
+      ? undefined
+      : step.providerOptions;
+  const directProviderOptions = mergeProviderOptions(
+    baseDirectProviderOptions,
+    scopedOptions,
+  );
+  const providerOptions = mergeProviderOptions(workflowProviderOptions, directProviderOptions);
+
+  return {
+    providerOptions,
+    ...(directProviderOptions !== undefined || 'directProviderOptions' in step || workflowProviderOptions !== undefined
+      ? { directProviderOptions }
+      : {}),
+    ...(workflowProviderOptions !== undefined || 'workflowProviderOptions' in step
+      ? { workflowProviderOptions }
+      : {}),
+  };
+}
+
 export function createPartStep(step: WorkflowStep, part: PartDefinition): WorkflowStep {
   if (!step.teamLeader) {
     throw new Error(`Step "${step.name}" has no teamLeader configuration`);
@@ -34,6 +71,7 @@ export function createPartStep(step: WorkflowStep, part: PartDefinition): Workfl
   const providerRoutingPersonaKey = step.teamLeader.partPersona
     ? step.teamLeader.partPersona
     : step.providerRoutingPersonaKey;
+  const providerOptionFields = resolveProviderOptionFields(step, step.teamLeader.partProviderOptions);
 
   return {
     name: `${step.name}.${part.id}`,
@@ -44,11 +82,7 @@ export function createPartStep(step: WorkflowStep, part: PartDefinition): Workfl
     providerRoutingPersonaKey,
     tags: step.teamLeader.partTags ?? step.tags,
     session: 'refresh',
-    providerOptions: step.providerOptions,
-    ...('directProviderOptions' in step || 'workflowProviderOptions' in step
-      ? { directProviderOptions: step.directProviderOptions }
-      : {}),
-    ...('workflowProviderOptions' in step ? { workflowProviderOptions: step.workflowProviderOptions } : {}),
+    ...providerOptionFields,
     mcpServers: step.mcpServers,
     provider: step.provider,
     providerSpecified: step.providerSpecified,
@@ -69,6 +103,7 @@ export function createTeamLeaderPlanningStep(step: WorkflowStep): WorkflowStep {
 
   return {
     ...step,
+    ...resolveProviderOptionFields(step, step.teamLeader.providerOptions),
     persona: step.teamLeader.persona ?? step.persona,
     personaPath: step.teamLeader.personaPath ?? step.personaPath,
     personaDisplayName: step.teamLeader.personaDisplayName ?? step.personaDisplayName,

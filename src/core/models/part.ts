@@ -1,6 +1,7 @@
 import type { PermissionMode } from './status.js';
 import type { AgentResponse } from './response.js';
 import type { ProviderType } from '../../shared/types/provider.js';
+import type { StepProviderOptions } from './workflow-provider-options.js';
 
 /** Part definition produced by step team leader agent */
 export interface PartDefinition {
@@ -41,11 +42,15 @@ export interface TeamLeaderConfig {
   timeoutMs: number;
   /** Read-only inspection tools for the parent decomposition call */
   inspectTools?: string[];
+  /** Provider options used only by the parent planning/feedback calls */
+  providerOptions?: StepProviderOptions;
   /** Persona reference for part agents */
   partPersona?: string;
   /** Resolved absolute path for part persona */
   partPersonaPath?: string;
   partTags?: string[];
+  /** Provider options applied to every generated part agent */
+  partProviderOptions?: StepProviderOptions;
   /** Allowed tools for part agents */
   partAllowedTools?: string[];
   /** Whether part agents can edit files */

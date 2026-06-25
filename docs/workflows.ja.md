@@ -237,8 +237,14 @@ CSV / JSON などのデータソースを反復し、同じ step テンプレー
       max_total_parts: 8
       timeout_ms: 600000
       inspect_tools: [read, glob, grep]
+      provider_options:
+        codex:
+          reasoning_effort: xhigh
       part_tags: [coding]
       part_persona: coder
+      part_provider_options:
+        codex:
+          reasoning_effort: high
       part_edit: true
       part_permission_mode: edit
       part_allowed_tools: [Read, Glob, Grep, Edit, Write, Bash]
@@ -254,6 +260,8 @@ CSV / JSON などのデータソースを反復し、同じ step テンプレー
 `max_concurrency` は同時に実行する part 数、`max_total_parts` はその step 全体で計画できる総 part 数（最大 20）を制御します。旧名の `max_parts` は互換性のため `max_concurrency` として扱われます。`part_tags` は生成される part step の provider routing tag です。未指定時は親 step の `tags` を継承します。空文字や空白のみの tag は無効です。`part_tags` は通常の `provider_routing.tags` として解決されるため、`part_persona` による persona routing より優先されます。
 
 `inspect_tools` は親 Team Leader のタスク分解フェーズだけで read-only inspection tools (`read`, `glob`, `grep`) を許可します。不正な tool 名は workflow ロード時にエラーになります。生成される子 part には影響せず、子 part の tool は引き続き `part_allowed_tools` で別に制御されます。inspection tools は Claude 系 provider や OpenCode など、`allowedTools` に対応する provider で利用できます。Team Leader inspection tools に対応しない provider では、実行時に明確なエラーになります。
+
+`team_leader.provider_options` は親の分解・追加計画 call だけに適用されます。`team_leader.part_provider_options` は生成されたすべての子 part に適用されます。どちらも親 step の `provider_options` を先に継承し、自分のフェーズに必要な provider option leaf だけを上書きします。`part_allowed_tools` を指定した場合、子 part の tool scope は引き続き `part_allowed_tools` が正となり、矛盾する tool policy を避けるため、継承された Claude `allowed_tools` は part provider options から除外されます。
 
 ### Workflow Call Step（サブワークフロー）
 
