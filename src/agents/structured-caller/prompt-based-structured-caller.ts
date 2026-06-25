@@ -212,6 +212,7 @@ export class PromptBasedStructuredCaller implements StructuredCaller {
       existingIds,
       maxAdditionalParts,
       options.language,
+      options,
     );
 
     return withRetry(async () => {

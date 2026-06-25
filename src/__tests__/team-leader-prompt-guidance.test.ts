@@ -161,6 +161,43 @@ describe('team leader decomposition guidance', () => {
     expect(promptBasedPrompt).not.toContain('少なくとも1つの part');
   });
 
+  it('Given feedback planning with in-flight scheduled work, When building more-parts prompts, Then the leader sees running and queued counts', () => {
+    const results = [
+      { id: 'verify-gates', title: 'Verify gates', status: 'done', content: 'lint passed' },
+    ];
+    const context = {
+      unfinishedScheduledPartCount: 2,
+      runningPartCount: 1,
+      queuedPartCount: 1,
+    };
+
+    const structuredPrompt = buildMorePartsPrompt(
+      'implement feature',
+      results,
+      ['verify-gates', 'verify', 'docs'],
+      2,
+      'en',
+      context,
+    );
+    const promptBasedPrompt = buildPromptBasedMorePartsPrompt(
+      '実装タスク',
+      results,
+      ['verify-gates', 'verify', 'docs'],
+      2,
+      'ja',
+      context,
+    );
+
+    expect(structuredPrompt).toContain('Scheduled Work Still In Flight');
+    expect(structuredPrompt).toContain('Unfinished scheduled parts: 2');
+    expect(structuredPrompt).toContain('Running parts: 1');
+    expect(structuredPrompt).toContain('Queued parts: 1');
+    expect(promptBasedPrompt).toContain('未完了の予定済み作業');
+    expect(promptBasedPrompt).toContain('未完了の予定済み parts: 2');
+    expect(promptBasedPrompt).toContain('実行中 parts: 1');
+    expect(promptBasedPrompt).toContain('待機中 parts: 1');
+  });
+
   it('Given builtin team-leader facets, When reading runtime instructions, Then both languages reject single oversized parts before execution', () => {
     const japanese = readBuiltinInstruction('builtins/ja/facets/instructions/team-leader-implement.md');
     const english = readBuiltinInstruction('builtins/en/facets/instructions/team-leader-implement.md');

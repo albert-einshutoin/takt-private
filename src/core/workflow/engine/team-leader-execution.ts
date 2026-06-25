@@ -15,6 +15,8 @@ export interface TeamLeaderExecutionOptions {
       scheduledIds: string[];
       remainingPartBudget: number;
       unfinishedScheduledPartCount: number;
+      runningPartCount: number;
+      queuedPartCount: number;
     }
   ) => Promise<MorePartsResponse>;
   onPartQueued?: (part: PartDefinition, partIndex: number) => void;
@@ -53,6 +55,12 @@ export async function runTeamLeaderExecution(
   let leaderDone = false;
   let deferredDoneReason: string | undefined;
 
+  const hasUnfinishedScheduledWork = (): boolean => {
+    // Use the live queue/running state here so a done response cannot finish planning while
+    // already-scheduled parts are still producing useful results.
+    return queue.length > 0 || running.size > 0 || plannedParts.length > partResults.length;
+  };
+
   const tryPlanMoreParts = async (): Promise<void> => {
     if (leaderDone) {
       return;
@@ -80,10 +88,12 @@ export async function runTeamLeaderExecution(
         scheduledIds: [...scheduledIds],
         remainingPartBudget,
         unfinishedScheduledPartCount: plannedParts.length - partResults.length,
+        runningPartCount: running.size,
+        queuedPartCount: queue.length,
       });
 
       if (feedback.done) {
-        if (plannedParts.length > partResults.length) {
+        if (hasUnfinishedScheduledWork()) {
           deferredDoneReason = feedback.reasoning;
           return;
         }
@@ -106,7 +116,7 @@ export async function runTeamLeaderExecution(
       }
 
       if (newParts.length === 0) {
-        if (plannedParts.length > partResults.length) {
+        if (hasUnfinishedScheduledWork()) {
           return;
         }
         options.onPlanningNoNewParts?.({
