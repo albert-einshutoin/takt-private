@@ -39,6 +39,7 @@ import {
   resolveConfigValue,
   invalidateGlobalConfigCache,
   invalidateAllResolvedConfigCache,
+  initProjectDirs,
 } from '../infra/config/index.js';
 import {
   getWorkflowPathTrustInfo,
@@ -2074,5 +2075,48 @@ describe('resolveConfigValue autoPr/draftPr/baseBranch/concurrency from project 
     writeFileSync(join(projectConfigDir, 'config.yaml'), 'concurrency: 3\n');
 
     expect(resolveConfigValue(testDir, 'concurrency')).toBe(3);
+  });
+});
+
+describe('project/global config directory collision', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = join(tmpdir(), `takt-config-collision-${randomUUID()}`);
+    mkdirSync(testDir, { recursive: true });
+    process.env.TAKT_CONFIG_DIR = getProjectConfigDir(testDir);
+    mkdirSync(process.env.TAKT_CONFIG_DIR, { recursive: true });
+    invalidateGlobalConfigCache();
+    invalidateAllResolvedConfigCache();
+  });
+
+  afterEach(() => {
+    invalidateGlobalConfigCache();
+    invalidateAllResolvedConfigCache();
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should not parse the global config file as project config when directories collide', () => {
+    writeFileSync(join(process.env.TAKT_CONFIG_DIR!, 'config.yaml'), [
+      'language: ja',
+      'worktree_dir: /tmp/takt-worktrees',
+      'disabled_builtins: [magi]',
+    ].join('\n'));
+
+    expect(loadProjectConfig(testDir)).toEqual({});
+    expect(resolveConfigValue(testDir, 'worktreeDir')).toBe('/tmp/takt-worktrees');
+  });
+
+  it('should not write project config or project resources when directories collide', () => {
+    const configPath = join(process.env.TAKT_CONFIG_DIR!, 'config.yaml');
+    writeFileSync(configPath, 'language: en\nworktree_dir: /tmp/global\n', 'utf-8');
+
+    saveProjectConfig(testDir, { provider: 'mock' });
+    initProjectDirs(testDir);
+
+    expect(readFileSync(configPath, 'utf-8')).toBe('language: en\nworktree_dir: /tmp/global\n');
+    expect(existsSync(join(process.env.TAKT_CONFIG_DIR!, '.gitignore'))).toBe(false);
   });
 });
