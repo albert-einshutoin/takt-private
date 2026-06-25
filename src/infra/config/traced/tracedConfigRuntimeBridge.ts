@@ -31,20 +31,72 @@ type RuntimeLoadOutput = {
   traceEntries: Array<[string, TracedValue<unknown>]>;
 };
 
+const DEFAULT_TRACED_CONFIG_HELPER_TIMEOUT_MS = 10_000;
+const TRACED_CONFIG_HELPER_TIMEOUT_ENV = 'TAKT_TRACED_CONFIG_HELPER_TIMEOUT_MS';
+
 const require = createRequire(import.meta.url);
 const { execFileSync: execFileSyncRuntime } = require('node:child_process') as typeof import('node:child_process');
 
+function resolveRuntimeLoaderTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const rawTimeout = env[TRACED_CONFIG_HELPER_TIMEOUT_ENV];
+  if (rawTimeout === undefined || rawTimeout.trim() === '') {
+    return DEFAULT_TRACED_CONFIG_HELPER_TIMEOUT_MS;
+  }
+
+  const timeoutMs = Number(rawTimeout);
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`${TRACED_CONFIG_HELPER_TIMEOUT_ENV} must be a positive integer number of milliseconds`);
+  }
+  return timeoutMs;
+}
+
+type RuntimeLoaderError = Error & {
+  code?: string;
+  signal?: string | null;
+  stderr?: Buffer | string;
+};
+
+function stringifyChildOutput(output: Buffer | string | undefined): string {
+  if (output === undefined) {
+    return '';
+  }
+  return Buffer.isBuffer(output) ? output.toString('utf-8').trim() : output.trim();
+}
+
+function createRuntimeLoaderError(error: unknown, timeoutMs: number): Error {
+  const execError = error as RuntimeLoaderError;
+  if (execError?.code === 'ETIMEDOUT') {
+    return new Error(`traced-config helper timed out after ${timeoutMs}ms`, { cause: error });
+  }
+
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const stderr = stringifyChildOutput(execError?.stderr);
+  const details = stderr ? `\n${stderr}` : '';
+  return new Error(`traced-config helper failed: ${errorMessage}${details}`, { cause: error });
+}
+
 function executeRuntimeLoader(input: RuntimeLoadInput): RuntimeLoadOutput {
-  const stdout = execFileSyncRuntime(
-    process.execPath,
-    ['--input-type=module', '-e', TRACED_CONFIG_RUNTIME_SCRIPT],
-    {
-      cwd: TAKT_PACKAGE_ROOT,
-      env: process.env,
-      input: JSON.stringify(input),
-      encoding: 'utf-8',
-    },
-  );
+  const timeoutMs = resolveRuntimeLoaderTimeoutMs();
+  let stdout: string;
+  try {
+    stdout = execFileSyncRuntime(
+      process.execPath,
+      ['--input-type=module', '-e', TRACED_CONFIG_RUNTIME_SCRIPT],
+      {
+        cwd: TAKT_PACKAGE_ROOT,
+        env: process.env,
+        input: JSON.stringify(input),
+        encoding: 'utf-8',
+        // This helper runs at workflow step transitions. A bounded subprocess keeps
+        // config tracing from freezing the whole run if Node startup or traced-config stalls.
+        timeout: timeoutMs,
+        killSignal: 'SIGTERM',
+      },
+    );
+  } catch (error) {
+    throw createRuntimeLoaderError(error, timeoutMs);
+  }
+
   return JSON.parse(stdout.trim()) as RuntimeLoadOutput;
 }
 
