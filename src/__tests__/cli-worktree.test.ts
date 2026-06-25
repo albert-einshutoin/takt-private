@@ -16,6 +16,7 @@ vi.mock('../infra/task/git.js', () => ({
 }));
 
 vi.mock('../infra/task/clone.js', () => ({
+  checkWorktreePreflight: vi.fn(() => ({ ok: true })),
   createSharedClone: vi.fn(),
   removeClone: vi.fn(),
   resolveBaseBranch: vi.fn(() => ({ branch: 'main' })),
@@ -40,6 +41,7 @@ vi.mock('../shared/ui/index.js', () => {
     info,
     error: vi.fn(),
     success: vi.fn(),
+    warn: vi.fn(),
     header: vi.fn(),
     status: vi.fn(),
     setLogLevel: vi.fn(),
@@ -98,18 +100,21 @@ vi.mock('../shared/utils/index.js', async (importOriginal) => ({
 }));
 
 import { confirm } from '../shared/prompt/index.js';
-import { createSharedClone } from '../infra/task/clone.js';
+import { checkWorktreePreflight, createSharedClone } from '../infra/task/clone.js';
 import { summarizeTaskName } from '../infra/task/summarize.js';
-import { info } from '../shared/ui/index.js';
+import { info, warn } from '../shared/ui/index.js';
 import { confirmAndCreateWorktree } from '../features/tasks/index.js';
 
 const mockConfirm = vi.mocked(confirm);
+const mockCheckWorktreePreflight = vi.mocked(checkWorktreePreflight);
 const mockCreateSharedClone = vi.mocked(createSharedClone);
 const mockSummarizeTaskName = vi.mocked(summarizeTaskName);
 const mockInfo = vi.mocked(info);
+const mockWarn = vi.mocked(warn);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockCheckWorktreePreflight.mockReturnValue({ ok: true });
 });
 
 describe('confirmAndCreateWorktree', () => {
@@ -234,6 +239,62 @@ describe('confirmAndCreateWorktree', () => {
 
     expect(mockConfirm).not.toHaveBeenCalled();
     expect(result.isWorktree).toBe(true);
+  });
+
+  it('should ask to run in the current directory when worktree preflight fails interactively', async () => {
+    mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+    mockCheckWorktreePreflight.mockReturnValueOnce({
+      ok: false,
+      reason: 'not_git_repository',
+      message: 'Git repository is not initialized.',
+    });
+
+    const result = await confirmAndCreateWorktree('/project', 'fix auth');
+
+    expect(result).toEqual({ execCwd: '/project', isWorktree: false });
+    expect(mockConfirm).toHaveBeenNthCalledWith(1, 'Create worktree?', true);
+    expect(mockConfirm).toHaveBeenNthCalledWith(2, 'Run in the current directory instead?', true);
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Git repository is not initialized. Worktree execution requires a Git repository with at least one commit.'
+    );
+    expect(mockCreateSharedClone).not.toHaveBeenCalled();
+    expect(mockSummarizeTaskName).not.toHaveBeenCalled();
+  });
+
+  it('should cancel interactive worktree creation when fallback is declined', async () => {
+    mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    mockCheckWorktreePreflight.mockReturnValueOnce({
+      ok: false,
+      reason: 'no_commits',
+      message: 'Git repository has no commits yet.',
+    });
+
+    const result = await confirmAndCreateWorktree('/project', 'fix auth');
+
+    expect(result).toEqual({ execCwd: '/project', isWorktree: false, cancelled: true });
+    expect(mockCreateSharedClone).not.toHaveBeenCalled();
+    expect(mockSummarizeTaskName).not.toHaveBeenCalled();
+  });
+
+  it('should fall back without prompting when override=true and worktree preflight fails', async () => {
+    mockCheckWorktreePreflight.mockReturnValueOnce({
+      ok: false,
+      reason: 'no_commits',
+      message: 'Git repository has no commits yet.',
+    });
+
+    const result = await confirmAndCreateWorktree('/project', 'fix auth', true);
+
+    expect(result).toEqual({ execCwd: '/project', isWorktree: false });
+    expect(mockConfirm).not.toHaveBeenCalled();
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Git repository has no commits yet. Worktree execution requires a Git repository with at least one commit.'
+    );
+    expect(mockWarn).toHaveBeenCalledWith(
+      'Running in the current directory instead. Use --skip-git for explicit in-place pipeline execution or create an initial commit to enable worktrees.'
+    );
+    expect(mockCreateSharedClone).not.toHaveBeenCalled();
+    expect(mockSummarizeTaskName).not.toHaveBeenCalled();
   });
 
   it('should pass branchOverride to createSharedClone', async () => {

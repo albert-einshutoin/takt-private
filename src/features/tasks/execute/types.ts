@@ -201,6 +201,8 @@ export interface WorktreeConfirmationResult {
   branch?: string;
   baseBranch?: string;
   taskSlug?: string;
+  /** True when the user declined both worktree creation and in-place fallback. */
+  cancelled?: boolean;
 }
 
 export interface SelectAndExecuteOptions {

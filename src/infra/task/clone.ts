@@ -37,6 +37,51 @@ export {
 
 const log = createLogger('clone');
 
+export type WorktreePreflightFailureReason = 'not_git_repository' | 'no_commits';
+
+export type WorktreePreflightResult =
+  | { ok: true }
+  | { ok: false; reason: WorktreePreflightFailureReason; message: string };
+
+export function checkWorktreePreflight(projectDir: string): WorktreePreflightResult {
+  try {
+    const insideWorkTree = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+      cwd: projectDir,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    }).trim();
+    if (insideWorkTree !== 'true') {
+      return {
+        ok: false,
+        reason: 'not_git_repository',
+        message: 'Git repository is not initialized.',
+      };
+    }
+  } catch {
+    return {
+      ok: false,
+      reason: 'not_git_repository',
+      message: 'Git repository is not initialized.',
+    };
+  }
+
+  try {
+    // Worktree cloning needs a real HEAD; otherwise default-branch fallback can
+    // turn an empty repository into a misleading "remote branch main" clone error.
+    execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: projectDir,
+      stdio: 'pipe',
+    });
+    return { ok: true };
+  } catch {
+    return {
+      ok: false,
+      reason: 'no_commits',
+      message: 'Git repository has no commits yet.',
+    };
+  }
+}
+
 export class CloneManager {
   private static generateTimestamp(): string {
     return new Date().toISOString().replace(/[-:.]/g, '').slice(0, 13);

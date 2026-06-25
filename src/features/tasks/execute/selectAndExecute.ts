@@ -3,7 +3,7 @@ import {
   isWorkflowPath,
 } from '../../../infra/config/index.js';
 import { confirm } from '../../../shared/prompt/index.js';
-import { createSharedClone, summarizeTaskName, resolveBaseBranch, TaskRunner } from '../../../infra/task/index.js';
+import { checkWorktreePreflight, createSharedClone, summarizeTaskName, resolveBaseBranch, TaskRunner } from '../../../infra/task/index.js';
 import { info, error, warn, withProgress } from '../../../shared/ui/index.js';
 import { statusLine } from '../../../shared/ui/StatusLine.js';
 import { createLogger } from '../../../shared/utils/index.js';
@@ -66,6 +66,21 @@ export async function confirmAndCreateWorktree(
 
   if (!useWorktree) {
     return { execCwd: cwd, isWorktree: false };
+  }
+
+  const preflight = checkWorktreePreflight(cwd);
+  if (!preflight.ok) {
+    warn(`${preflight.message} Worktree execution requires a Git repository with at least one commit.`);
+
+    if (createWorktreeOverride === true) {
+      warn('Running in the current directory instead. Use --skip-git for explicit in-place pipeline execution or create an initial commit to enable worktrees.');
+      return { execCwd: cwd, isWorktree: false };
+    }
+
+    const runInCurrentDirectory = await confirm('Run in the current directory instead?', true);
+    return runInCurrentDirectory
+      ? { execCwd: cwd, isWorktree: false }
+      : { execCwd: cwd, isWorktree: false, cancelled: true };
   }
 
   const baseBranch = resolveBaseBranch(cwd, baseBranchOverride).branch;

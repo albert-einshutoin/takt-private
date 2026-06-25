@@ -42,6 +42,7 @@ beforeEach(() => {
   originalTaktConfigDir = process.env.TAKT_CONFIG_DIR;
   invalidateGlobalConfigCache();
   invalidateAllResolvedConfigCache();
+  vi.spyOn(infraTask, 'checkWorktreePreflight').mockReturnValue({ ok: true });
 });
 
 function createTempProjectDir(): string {
@@ -628,6 +629,51 @@ describe('resolveTaskExecution', () => {
 
     mockCreateSharedClone.mockRestore();
     mockResolveBaseBranch.mockRestore();
+  });
+
+  it('should fall back to the current directory when worktree preflight fails', async () => {
+    const root = createTempProjectDir();
+    const task = createTask({
+      slug: 'worktree-task-123',
+      data: ({
+        task: 'Run worktree task',
+        workflow: 'default',
+        worktree: true,
+        branch: 'feature/worktree-task-123',
+        auto_pr: true,
+      } as unknown) as NonNullable<TaskInfo['data']>,
+      worktreePath: undefined,
+      status: 'pending',
+    });
+
+    const mockPreflight = vi.spyOn(infraTask, 'checkWorktreePreflight').mockReturnValue({
+      ok: false,
+      reason: 'no_commits',
+      message: 'Git repository has no commits yet.',
+    });
+    const mockResolveBaseBranch = vi.spyOn(infraTask, 'resolveBaseBranch').mockReturnValue({
+      branch: 'main',
+    });
+    const mockCreateSharedClone = vi.spyOn(infraTask, 'createSharedCloneAbortable').mockResolvedValue({
+      path: '/tmp/unused-worktree',
+      branch: 'feature/worktree-task-123',
+    });
+
+    const result = await resolveTaskExecutionStrict(task, root);
+
+    expect(result).toMatchObject({
+      execCwd: root,
+      workflowIdentifier: 'default',
+      isWorktree: false,
+      autoPr: true,
+      shouldPublishBranchToOrigin: true,
+    });
+    expect(result.branch).toBeUndefined();
+    expect(result.baseBranch).toBeUndefined();
+    expect(result.worktreePath).toBeUndefined();
+    expect(mockPreflight).toHaveBeenCalledWith(root);
+    expect(mockResolveBaseBranch).not.toHaveBeenCalled();
+    expect(mockCreateSharedClone).not.toHaveBeenCalled();
   });
 
   it('should sequence worktree reportDirName against existing run directories in execCwd', async () => {

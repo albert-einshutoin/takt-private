@@ -25,6 +25,7 @@
 - `claude-terminal` が長い `systemPrompt` や structured output JSON schema を Claude Code 起動時の argv に渡さないようにしました (#756)。role instruction と structured output ガイダンスは step prompt と一緒に貼り付け、TAKT 側の応答後 schema 抽出・検証は維持します。
 - TAKT 管理の Git push を非対話化し、terminal credential prompt を無効化しました (#866)。workflow 実行とローカル commit 作成後に publish が失敗した場合でも、ブランチ/commit を保持し、タスクを `pr_failed` として記録し、PR 作成をスキップして、workflow 実装失敗ではなく再試行可能な publish failure として報告します。
 - project `.takt` directory が global config directory と同一の場合、project config の読み込みを無効化しました (#541)。HOME 直下で TAKT を実行しても `~/.takt/config.yaml` は global config としてのみ扱われ、global-only key が project config validation で弾かれないようになります。
+- worktree 作成前に Git repository state を preflight するようにしました (#439)。Git 管理外ディレクトリや初回 commit 前の repository では、存在しない `main` branch の clone error ではなく、明確なヒント付きで current-directory 実行へフォールバックします。
 
 ## [0.48.0] - 2026-06-21
 

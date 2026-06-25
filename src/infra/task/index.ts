@@ -50,6 +50,7 @@ export {
   createSharedCloneAbortable,
   removeClone,
   createTempCloneForBranch,
+  checkWorktreePreflight,
   saveCloneMeta,
   removeCloneMeta,
   cleanupOrphanedClone,
@@ -60,6 +61,8 @@ export {
   branchExists,
   localBranchExists,
   remoteBranchExists,
+  type WorktreePreflightFailureReason,
+  type WorktreePreflightResult,
   type CreateBaseBranchIfMissingConfig,
 } from './clone.js';
 export {

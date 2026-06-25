@@ -68,6 +68,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loadProjectConfig, resolveConfigValue } from '../infra/config/index.js';
 import {
+  checkWorktreePreflight,
   CloneManager,
   createSharedClone,
   createSharedCloneAbortable,
@@ -123,6 +124,58 @@ function serializedCloneLogs(): string {
     error: mockLogError.mock.calls,
   });
 }
+
+describe('checkWorktreePreflight', () => {
+  it('should pass when the directory is a git work tree with HEAD', () => {
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === 'rev-parse' && argsArr[1] === '--is-inside-work-tree') {
+        return 'true\n';
+      }
+      if (argsArr[0] === 'rev-parse' && argsArr[1] === '--verify' && argsArr[2] === 'HEAD') {
+        return Buffer.from('');
+      }
+      throw new Error(`unexpected git command: ${argsArr.join(' ')}`);
+    });
+
+    expect(checkWorktreePreflight('/project')).toEqual({ ok: true });
+  });
+
+  it('should report a non-git directory before branch resolution', () => {
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === 'rev-parse' && argsArr[1] === '--is-inside-work-tree') {
+        throw new Error('not a git repository');
+      }
+      throw new Error(`unexpected git command: ${argsArr.join(' ')}`);
+    });
+
+    expect(checkWorktreePreflight('/project')).toEqual({
+      ok: false,
+      reason: 'not_git_repository',
+      message: 'Git repository is not initialized.',
+    });
+  });
+
+  it('should report repositories without an initial commit', () => {
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === 'rev-parse' && argsArr[1] === '--is-inside-work-tree') {
+        return 'true\n';
+      }
+      if (argsArr[0] === 'rev-parse' && argsArr[1] === '--verify' && argsArr[2] === 'HEAD') {
+        throw new Error('ambiguous argument HEAD');
+      }
+      throw new Error(`unexpected git command: ${argsArr.join(' ')}`);
+    });
+
+    expect(checkWorktreePreflight('/project')).toEqual({
+      ok: false,
+      reason: 'no_commits',
+      message: 'Git repository has no commits yet.',
+    });
+  });
+});
 
 describe('worktree reference resolution', () => {
   const linkedWorktreePath = path.resolve('workspace', 'linked');

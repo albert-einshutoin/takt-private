@@ -320,6 +320,44 @@ describe('executePipeline', () => {
     expect(mockSuccess).toHaveBeenCalledWith('Worktree created: /tmp/worktree\\tpath');
   });
 
+  it('should run in the current directory when worktree setup falls back', async () => {
+    mockConfirmAndCreateWorktree.mockResolvedValueOnce({
+      execCwd: '/tmp/test',
+      isWorktree: false,
+    });
+    mockExecuteTask.mockResolvedValueOnce(true);
+
+    const exitCode = await executePipeline({
+      task: 'Fix the bug',
+      workflow: 'default',
+      autoPr: false,
+      createWorktree: true,
+      cwd: '/tmp/test',
+    });
+
+    expect(exitCode).toBe(0);
+    expect(mockInfo).toHaveBeenCalledWith(
+      'Worktree unavailable; running in the current directory without git commit/push.'
+    );
+    expect(mockExecuteTask).toHaveBeenCalledWith(expect.objectContaining({
+      task: 'Fix the bug',
+      cwd: '/tmp/test',
+      workflowIdentifier: 'default',
+      projectCwd: '/tmp/test',
+    }));
+    expect(mockStatus).toHaveBeenCalledWith('Branch', '(current)');
+
+    const checkoutCall = mockExecFileSync.mock.calls.find(
+      (call: unknown[]) => call[0] === 'git' && (call[1] as string[])[0] === 'checkout',
+    );
+    const commitCall = mockExecFileSync.mock.calls.find(
+      (call: unknown[]) => call[0] === 'git' && (call[1] as string[])[0] === 'commit',
+    );
+    expect(checkoutCall).toBeUndefined();
+    expect(commitCall).toBeUndefined();
+    expect(mockPushBranch).not.toHaveBeenCalled();
+  });
+
   it('passes provider/model overrides to task execution', async () => {
     mockExecuteTask.mockResolvedValueOnce(true);
 
