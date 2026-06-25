@@ -65,6 +65,25 @@ describe('Claude terminal response normalizer', () => {
     expect(result.structuredOutput).toBeUndefined();
   });
 
+  it('Given outputSchema and invalid structured output, When normalizing, Then TAKT schema validation is still enforced', () => {
+    const result = normalizeClaudeTerminalResponse({
+      agentName: 'coder',
+      sessionId: 'claude-session-1',
+      assistantText: 'Done.\n{"decision":42}',
+      outputSchema: SCHEMA,
+    });
+
+    expect(result).toMatchObject({
+      persona: 'coder',
+      status: 'error',
+      content: 'Done.\n{"decision":42}',
+      sessionId: 'claude-session-1',
+      failureCategory: 'provider_error',
+    });
+    expect(result.error).toMatch(/structured output validation failed/i);
+    expect(result.structuredOutput).toBeUndefined();
+  });
+
   it('Given tool use events, When normalizing, Then equivalent stream tool events are emitted', () => {
     const onStream = vi.fn();
 

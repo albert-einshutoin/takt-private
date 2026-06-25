@@ -92,6 +92,40 @@ function getUnsupportedCallOptionMessage(options: ClaudeTerminalCallOptions): st
   return undefined;
 }
 
+function formatStructuredOutputPromptInstruction(outputSchema: Record<string, unknown>): string {
+  return [
+    'Return structured output matching this JSON schema.',
+    'Include a JSON object in your final answer that satisfies the schema. TAKT validates the returned JSON after the terminal session completes.',
+    '```json',
+    JSON.stringify(outputSchema, null, 2),
+    '```',
+  ].join('\n');
+}
+
+function buildClaudeTerminalPastePrompt(
+  prompt: string,
+  options: Pick<ClaudeTerminalCallOptions, 'systemPrompt' | 'outputSchema'>,
+): string {
+  const sections: string[] = [];
+  const systemPrompt = options.systemPrompt?.trim();
+
+  if (systemPrompt) {
+    sections.push(systemPrompt);
+  }
+  if (options.outputSchema) {
+    sections.push(formatStructuredOutputPromptInstruction(options.outputSchema));
+  }
+  if (sections.length === 0) {
+    return prompt;
+  }
+
+  // Long role/schema instructions are pasted through terminal input instead of startup argv
+  // so large workflow facets do not hit OS/tmux command length limits; TAKT still validates
+  // the structured output after the assistant response is read.
+  sections.push(prompt);
+  return sections.join('\n\n---\n\n');
+}
+
 function collectInteractiveEvents(events: ClaudeTerminalEvent[]): ClaudeTerminalEvent[] {
   return events.filter((event) =>
     event.type === 'permission_request' || event.type === 'ask_user_question'
@@ -256,8 +290,6 @@ export async function callClaudeTerminal(
       bypassPermissions: options.bypassPermissions,
       sessionId: options.sessionId,
       newSessionId: options.sessionId ? undefined : claudeSessionId,
-      systemPrompt: options.systemPrompt,
-      outputSchema: options.outputSchema,
     });
 
     const startedSession = await withAbort(() => {
@@ -279,7 +311,10 @@ export async function callClaudeTerminal(
       cwd: options.cwd,
       sessionId: claudeSessionId,
     }));
-    await withAbort(() => terminalBackend.pasteText(startedSession, prompt));
+    await withAbort(() => terminalBackend.pasteText(
+      startedSession,
+      buildClaudeTerminalPastePrompt(prompt, options),
+    ));
 
     const session = await withAbort(() => transcriptReader.findSession({
       cwd: options.cwd,

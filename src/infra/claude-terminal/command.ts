@@ -41,12 +41,6 @@ export function buildClaudeTerminalCommand(
   } else if (options.newSessionId) {
     args.push('--session-id', options.newSessionId);
   }
-  if (options.systemPrompt?.trim()) {
-    args.push('--system-prompt', options.systemPrompt.trim());
-  }
-  if (options.outputSchema) {
-    args.push('--json-schema', JSON.stringify(options.outputSchema));
-  }
 
   return {
     executable: options.pathToClaudeCodeExecutable ?? 'claude',
