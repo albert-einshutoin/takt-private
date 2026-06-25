@@ -36,6 +36,7 @@
 ```bash
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
+devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
@@ -58,6 +59,8 @@ devloopd start --repo owner/repo
 | `--policy <path>` | 任意の devloop policy YAML パス。`.takt/devloopd.yaml` が存在する場合は自動検出し、`mode` は `subscription_only` である必要があります |
 | `--verbose` | pass したチェックも表示します |
 | `--skip-auth` | `gh auth status` をスキップします |
+| `--smoke-cli` | subscription-only provider の bounded な実 CLI smoke check を実行します |
+| `--smoke-timeout-ms <ms>` | provider ごとの CLI smoke timeout。デフォルトは 60000 |
 
 `devloopd run` のオプション:
 

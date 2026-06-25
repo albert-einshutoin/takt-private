@@ -28,6 +28,8 @@
 
 ### Fixed
 
+- `opencode-cli` provider 実行で `opencode run` に `--model/-m` を渡すようになりました。OpenCode の provider/model CLI contract に沿った subscription-only smoke run ができます。
+- `devloopd doctor --subscription-only --smoke-cli` が `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli` の bounded な実 CLI smoke check を実行できるようになりました。通常の doctor は、明示的に smoke を要求しない限り、課金/生成を伴わない検査のままです。
 - `agy-cli` provider 実行で `provider_options.agy.print_timeout` を受け取り、`agy --print-timeout` として渡せるようになりました。Antigravity の subscription-only smoke run が CLI のデフォルト timeout まで待たず、bounded に失敗できます。
 - `devloopd doctor --subscription-only` が `.takt/devloopd.yaml` を自動検出し、存在しない任意の TAKT config file を warning ではなく skipped check として扱うようになりました。global TAKT config がない source checkout でも、project-local の subscription-only readiness を green にできます。
 - `devloopd doctor --subscription-only` が、`PATH` に `takt` が未インストールでも source checkout 隣接の `bin/takt` wrapper を利用できるようになりました。`npm link` や global install 前のローカル開発 checkout でも subscription-only readiness を検証できます。

@@ -36,6 +36,7 @@ When `--pr` builds a task from review context, the generated order file starts w
 ```bash
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
+devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
@@ -58,6 +59,8 @@ devloopd start --repo owner/repo
 | `--policy <path>` | Optional devloop policy YAML path; defaults to `.takt/devloopd.yaml` when present and `mode` must be `subscription_only` |
 | `--verbose` | Show passing checks |
 | `--skip-auth` | Skip `gh auth status` |
+| `--smoke-cli` | Run bounded real CLI smoke checks for subscription-only providers |
+| `--smoke-timeout-ms <ms>` | Per-provider CLI smoke timeout. Defaults to 60000 |
 
 `devloopd run` options:
 

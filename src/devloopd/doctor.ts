@@ -13,8 +13,14 @@ import {
   inspectWorkflowFile,
   resolveWorkflowDoctorTargets,
 } from '../infra/config/loaders/workflowDoctor.js';
+import {
+  buildSubscriptionCliInvocation,
+  buildSubscriptionOnlyEnv,
+  type SubscriptionCliProviderType,
+} from '../infra/subscription-cli/client.js';
 import { getErrorMessage } from '../shared/utils/index.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import { stripAnsi } from '../shared/utils/text.js';
 import {
   createDefaultDevloopCommandRunner,
   type DevloopCommandResult,
@@ -44,19 +50,29 @@ export interface RunDevloopDoctorOptions {
   subscriptionOnly?: boolean;
   verbose?: boolean;
   skipAuth?: boolean;
+  smokeCli?: boolean;
+  smokeTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   runner?: DevloopDoctorCommandRunner;
 }
 
 const REQUIRED_SUBSCRIPTION_COMMANDS = ['takt', 'gh', 'codex', 'opencode', 'agy'] as const;
 const CURSOR_COMMAND_CANDIDATES = ['cursor-agent', 'agent'] as const;
+const SUBSCRIPTION_CLI_SMOKE_PROVIDERS: readonly SubscriptionCliProviderType[] = [
+  'codex-cli',
+  'cursor-cli',
+  'opencode-cli',
+  'agy-cli',
+];
+const DEFAULT_CLI_SMOKE_TIMEOUT_MS = 60_000;
+const CLI_SMOKE_PROMPT = 'Reply with exactly: Done';
 
 function makeCheck(status: DevloopDoctorStatus, name: string, message: string, detail?: string): DevloopDoctorCheck {
   return detail === undefined ? { status, name, message } : { status, name, message, detail };
 }
 
 function sanitizeDetail(text: string): string {
-  return sanitizeSensitiveText(text).trim();
+  return sanitizeSensitiveText(stripAnsi(text)).trim();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -144,14 +160,24 @@ function resolveSourceCheckoutCommand(command: string, repoPath: string): string
   }
 }
 
-function checkCursorCommand(env: NodeJS.ProcessEnv, runner: DevloopDoctorCommandRunner): DevloopDoctorCheck {
+function resolveCursorCommand(
+  env: NodeJS.ProcessEnv,
+  runner: DevloopDoctorCommandRunner,
+): { command: string; path: string } | undefined {
   for (const command of CURSOR_COMMAND_CANDIDATES) {
     const resolved = runner.resolveCommand(command, env);
     if (resolved !== undefined) {
-      return makeCheck('pass', 'command:cursor', `using cursor CLI: ${command}`, resolved);
+      return { command, path: resolved };
     }
   }
+  return undefined;
+}
 
+function checkCursorCommand(env: NodeJS.ProcessEnv, runner: DevloopDoctorCommandRunner): DevloopDoctorCheck {
+  const resolved = resolveCursorCommand(env, runner);
+  if (resolved !== undefined) {
+    return makeCheck('pass', 'command:cursor', `using cursor CLI: ${resolved.command}`, resolved.path);
+  }
   return makeCheck('fail', 'command:cursor', 'command not found: cursor-agent or agent');
 }
 
@@ -263,6 +289,78 @@ function checkProjectWorkflows(repoPath: string): DevloopDoctorCheck[] {
   }
 }
 
+function commandForSmokeProvider(
+  provider: SubscriptionCliProviderType,
+  env: NodeJS.ProcessEnv,
+  runner: DevloopDoctorCommandRunner,
+): { commandPath: string; commandName: string } | undefined {
+  if (provider === 'codex-cli') {
+    const commandPath = runner.resolveCommand('codex', env);
+    return commandPath === undefined ? undefined : { commandPath, commandName: 'codex' };
+  }
+  if (provider === 'opencode-cli') {
+    const commandPath = runner.resolveCommand('opencode', env);
+    return commandPath === undefined ? undefined : { commandPath, commandName: 'opencode' };
+  }
+  if (provider === 'agy-cli') {
+    const commandPath = runner.resolveCommand('agy', env);
+    return commandPath === undefined ? undefined : { commandPath, commandName: 'agy' };
+  }
+
+  const cursor = resolveCursorCommand(env, runner);
+  return cursor === undefined ? undefined : { commandPath: cursor.path, commandName: cursor.command };
+}
+
+async function checkSubscriptionCliSmokeProvider(
+  provider: SubscriptionCliProviderType,
+  repoPath: string,
+  env: NodeJS.ProcessEnv,
+  runner: DevloopDoctorCommandRunner,
+  timeoutMs: number,
+): Promise<DevloopDoctorCheck> {
+  const command = commandForSmokeProvider(provider, env, runner);
+  if (command === undefined) {
+    return makeCheck('fail', `smoke:${provider}`, `cannot run ${provider} smoke because its CLI command is missing`);
+  }
+
+  const invocation = buildSubscriptionCliInvocation(provider, CLI_SMOKE_PROMPT, {
+    cwd: repoPath,
+    commandPath: command.commandPath,
+    agyPrintTimeout: `${Math.max(1, Math.ceil(timeoutMs / 1_000))}s`,
+  });
+  const result = await runner.exec(invocation.command, invocation.args, {
+    cwd: repoPath,
+    env: buildSubscriptionOnlyEnv(env),
+    stdin: invocation.stdin,
+    // Smoke checks intentionally fail boundedly; hanging CLIs are a real readiness failure.
+    timeoutMs: invocation.timeoutMs ?? timeoutMs,
+  });
+
+  if (result.exitCode === 0) {
+    return makeCheck('pass', `smoke:${provider}`, `${provider} smoke run completed`, command.commandName);
+  }
+
+  return makeCheck(
+    'fail',
+    `smoke:${provider}`,
+    `${provider} smoke run failed`,
+    sanitizeDetail(result.stderr || result.stdout),
+  );
+}
+
+async function checkSubscriptionCliSmoke(
+  repoPath: string,
+  env: NodeJS.ProcessEnv,
+  runner: DevloopDoctorCommandRunner,
+  timeoutMs: number,
+): Promise<DevloopDoctorCheck[]> {
+  const checks: DevloopDoctorCheck[] = [];
+  for (const provider of SUBSCRIPTION_CLI_SMOKE_PROVIDERS) {
+    checks.push(await checkSubscriptionCliSmokeProvider(provider, repoPath, env, runner, timeoutMs));
+  }
+  return checks;
+}
+
 export async function runDevloopDoctor(options: RunDevloopDoctorOptions = {}): Promise<DevloopDoctorReport> {
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
@@ -284,6 +382,19 @@ export async function runDevloopDoctor(options: RunDevloopDoctorOptions = {}): P
       checkResolvedTaktConfig(repoPath),
       ...checkProjectWorkflows(repoPath),
     );
+  }
+
+  if (options.smokeCli === true) {
+    if (checks.some((check) => check.status === 'fail')) {
+      checks.push(makeCheck('warn', 'subscription CLI smoke', 'skipped because prerequisite doctor checks failed'));
+    } else {
+      checks.push(...await checkSubscriptionCliSmoke(
+        repoPath,
+        env,
+        runner,
+        options.smokeTimeoutMs ?? DEFAULT_CLI_SMOKE_TIMEOUT_MS,
+      ));
+    }
   }
 
   return {

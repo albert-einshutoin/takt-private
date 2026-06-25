@@ -154,9 +154,14 @@ export function buildSubscriptionCliInvocation(
   }
 
   if (provider === 'opencode-cli') {
+    const args = ['run'];
+    if (options.model) {
+      args.push('-m', options.model);
+    }
+    args.push(fullPrompt);
     return {
       command: options.commandPath ?? 'opencode',
-      args: ['run', fullPrompt],
+      args,
     };
   }
 

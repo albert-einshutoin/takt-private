@@ -41,19 +41,31 @@ program
   .option('--policy <path>', 'devloopd policy YAML path')
   .option('--verbose', 'Show passing checks')
   .option('--skip-auth', 'Skip GitHub CLI auth status check')
+  .option('--smoke-cli', 'Run bounded real CLI smoke checks for subscription-only providers')
+  .option('--smoke-timeout-ms <ms>', 'Per-provider CLI smoke timeout in milliseconds')
   .action(async (options: {
     subscriptionOnly?: boolean;
     repo: string;
     policy?: string;
     verbose?: boolean;
     skipAuth?: boolean;
+    smokeCli?: boolean;
+    smokeTimeoutMs?: string;
   }) => {
+    const parsedSmokeTimeoutMs = options.smokeTimeoutMs === undefined ? undefined : Number(options.smokeTimeoutMs);
+    const smokeTimeoutMs = parsedSmokeTimeoutMs !== undefined
+      && Number.isFinite(parsedSmokeTimeoutMs)
+      && parsedSmokeTimeoutMs > 0
+      ? parsedSmokeTimeoutMs
+      : undefined;
     const report = await runDevloopDoctor({
       repoPath: resolve(options.repo),
       policyPath: options.policy ? resolve(options.policy) : undefined,
       subscriptionOnly: options.subscriptionOnly === true,
       verbose: options.verbose === true,
       skipAuth: options.skipAuth === true,
+      smokeCli: options.smokeCli === true,
+      smokeTimeoutMs,
     });
 
     console.log(formatDevloopDoctorReport(report, { verbose: options.verbose === true }));

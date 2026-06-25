@@ -13,7 +13,7 @@ export interface DevloopCommandRunner {
   exec(
     command: string,
     args: readonly string[],
-    options?: { cwd?: string; env?: NodeJS.ProcessEnv },
+    options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdin?: string; timeoutMs?: number },
   ): Promise<DevloopCommandResult>;
 }
 
@@ -69,10 +69,41 @@ export function createDefaultDevloopCommandRunner(): DevloopCommandRunner {
         const child = crossSpawn(command, args, {
           cwd: options?.cwd,
           env: options?.env,
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: [options?.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         });
         let stdout = '';
         let stderr = '';
+        let settled = false;
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        let forceKillTimeout: ReturnType<typeof setTimeout> | undefined;
+
+        const resolveOnce = (result: DevloopCommandResult, keepForceKillTimer = false): void => {
+          if (settled) return;
+          settled = true;
+          if (timeout !== undefined) {
+            clearTimeout(timeout);
+          }
+          if (!keepForceKillTimer && forceKillTimeout !== undefined) {
+            clearTimeout(forceKillTimeout);
+          }
+          resolveResult(result);
+        };
+
+        if (options?.timeoutMs !== undefined) {
+          timeout = setTimeout(() => {
+            child.kill('SIGTERM');
+            // Some provider CLIs ignore SIGTERM while waiting on network streams; the
+            // follow-up SIGKILL keeps readiness checks from leaving orphaned processes.
+            forceKillTimeout = setTimeout(() => child.kill('SIGKILL'), 1_000);
+            forceKillTimeout.unref?.();
+            resolveOnce({
+              exitCode: 1,
+              stdout,
+              stderr: [stderr, `command timed out after ${options.timeoutMs}ms`].filter(Boolean).join('\n'),
+            }, true);
+          }, options.timeoutMs);
+          timeout.unref?.();
+        }
 
         child.stdout?.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf-8');
@@ -81,16 +112,20 @@ export function createDefaultDevloopCommandRunner(): DevloopCommandRunner {
           stderr += chunk.toString('utf-8');
         });
         child.on('error', (error) => {
-          resolveResult({ exitCode: 1, stdout, stderr: getErrorMessage(error) });
+          resolveOnce({ exitCode: 1, stdout, stderr: getErrorMessage(error) });
         });
         child.on('close', (exitCode, signal) => {
           const signalDetail = signal ? `terminated by signal ${signal}` : '';
-          resolveResult({
+          resolveOnce({
             exitCode: exitCode ?? 1,
             stdout,
             stderr: [stderr, signalDetail].filter(Boolean).join('\n'),
           });
         });
+
+        if (options?.stdin !== undefined) {
+          child.stdin?.end(options.stdin);
+        }
       });
     },
   };
