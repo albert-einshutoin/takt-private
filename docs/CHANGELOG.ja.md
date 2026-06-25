@@ -10,6 +10,7 @@
 
 ### Added
 
+- Instruction partial include を追加しました (#832)。`facets/partials/instructions/<name>.md` に置いた Markdown 断片を、instruction facet 内の `{name}`（partial が存在する場合）または厳密な `{partial:name}` で共有できます。package-local / project / global / builtin layer は他の facet と同じ優先順で解決し、nested partial をサポートし、循環参照は拒否します。
 - phase usage event record に workflow step の `persona` と `tags` 文脈を追加しました (#870)。workflow YAML を読み直さなくても、provider-routing tag ごとに token usage を絞り込めます。
 - Team leader step でフェーズ別の provider option layer をサポートしました (#878)。`team_leader.provider_options` は親の分解・追加計画 planner に、`team_leader.part_provider_options` は生成された子 part に適用され、どちらも親 step の `provider_options` を継承します。
 - observability で usage を取得できた phase について、provider token usage counter（`takt.token.input_tokens`, `takt.token.output_tokens`, `takt.token.cached_input_tokens`）を送出するようにしました (#869)。既存の OpenTelemetry metric pipeline とローカル `monitor.json` に出力されます。

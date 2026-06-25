@@ -22,6 +22,7 @@ import {
   resolveRefList,
   resolveRefToContent,
 } from './resource-resolver.js';
+import { expandInstructionPartials } from './instructionPartials.js';
 import { mergeProviderOptions } from '../providerOptions.js';
 import { normalizeProviderBlockOptions } from '../providerBlockOptions.js';
 import type { ConfigProviderReference } from '../providerReference.js';
@@ -207,7 +208,7 @@ export function normalizeStepFromRaw(
   if (normalizedOverrides !== undefined) {
     validateWorkflowCallOverrides(normalizedOverrides);
   }
-  const instruction = isSystemStep || isWorkflowCallStep
+  const resolvedInstruction = isSystemStep || isWorkflowCallStep
     ? undefined
     : step.instruction
     ? resolveRefToContent(
@@ -217,6 +218,9 @@ export function normalizeStepFromRaw(
         'instructions',
         context,
       )
+    : undefined;
+  const instruction = resolvedInstruction
+    ? expandInstructionPartials(resolvedInstruction, context)
     : undefined;
 
   validateWorkflowArpeggio(step.name, step.arpeggio, workflowArpeggioPolicy);

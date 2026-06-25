@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Instruction partial includes (#832). Instruction facets can now share Markdown snippets from `facets/partials/instructions/<name>.md` using `{name}` when the partial exists, or strict `{partial:name}` references when missing partials should fail fast. Package-local, project, global, and builtin layers are resolved in the same order as other facets, nested partials are supported, and cycles are rejected.
 - Phase usage event records now include workflow step `persona` and `tags` context (#870). This makes token usage analysis filterable by provider-routing tags without re-reading workflow YAML.
 - Team leader steps now support phase-specific provider option layers (#878). Use `team_leader.provider_options` for the parent decomposition/feedback planner and `team_leader.part_provider_options` for generated child parts, both inheriting from the parent step `provider_options`.
 - Observability now emits provider token usage counters (`takt.token.input_tokens`, `takt.token.output_tokens`, and `takt.token.cached_input_tokens`) for phases that report usage (#869). These metrics are exported through the existing OpenTelemetry metric pipeline and local `monitor.json`.

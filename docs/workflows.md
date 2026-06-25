@@ -96,6 +96,8 @@ Steps reference section maps by key name (e.g., `persona: coder`), not by file p
 
 `persona_name` is only a display name. `provider_routing.personas` in config matches the raw `persona` key, while `provider_routing.tags` matches the optional `tags` array in the order written on the step. Later tags override earlier tags for the same provider/model/provider_options leaf.
 
+Instruction facets can include shared Markdown partials from `facets/partials/instructions/<name>.md`. Use `{review-common}` for a partial that should expand when present, or `{partial:review-common}` when a missing partial should fail workflow loading. Partials resolve through package-local, project, global, then builtin layers; they may include other partials, and cycles are rejected. Built-in template variables such as `{task}`, `{previous_response}`, and `{report_dir}` are still expanded later by the instruction builder.
+
 String `quality_gates` remain AI completion directives and are injected into agent step prompts. `type: command` gates run inside the worktree after an agent step completes and pass only when the command exits with code `0`. Workflow YAML command gates require `workflow_command_gates.custom_scripts: true` in config. Output capture is bounded; exceeding the capture limit truncates stdout/stderr for feedback but does not fail or stop a command that exits with code `0`. On failure, TAKT feeds command metadata, cwd, exit code or timeout details, any output truncation details, the output log path, and bounded sanitized stdout/stderr back into the same agent step. Raw captured stdout and stderr are also written to the local output log. `system` and `workflow_call` steps do not accept `quality_gates`.
 
 
@@ -111,6 +113,7 @@ String `quality_gates` remain AI completion directives and are injected into age
 | `{user_inputs}` | Additional user inputs during workflow (auto-injected if not in template) |
 | `{report_dir}` | Report directory path (e.g., `.takt/runs/20250126-143052-task-summary/reports`) |
 | `{report:filename}` | Inline the content of `{report_dir}/filename` |
+| `{partial:name}` | Strictly include `facets/partials/instructions/name.md`; workflow loading fails if it is missing |
 
 > **Note**: `{task}`, `{previous_response}`, and `{user_inputs}` are auto-injected into instructions. You only need explicit placeholders if you want to control their position in the template.
 

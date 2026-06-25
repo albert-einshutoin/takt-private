@@ -2,6 +2,7 @@ import type { LoopMonitorConfig, LoopMonitorJudge } from '../../../core/models/i
 import type { FacetResolutionContext, WorkflowSections } from './resource-resolver.js';
 import { resolvePersona, resolveRefToContent } from './resource-resolver.js';
 import { normalizeProviderReference } from './workflowStepNormalizer.js';
+import { expandInstructionPartials } from './instructionPartials.js';
 
 function normalizeLoopMonitorJudge(
   raw: {
@@ -22,20 +23,24 @@ function normalizeLoopMonitorJudge(
     undefined,
     workflowDir,
   );
+  const resolvedInstruction = raw.instruction
+    ? resolveRefToContent(
+        raw.instruction,
+        sections.resolvedInstructionsWithSource ?? sections.resolvedInstructions,
+        workflowDir,
+        'instructions',
+        context,
+      )
+    : undefined;
+
   return {
     persona: personaSpec,
     personaPath,
     provider: normalizedProvider.provider,
     model: normalizedProvider.model,
     providerOptions: normalizedProvider.providerOptions,
-    instruction: raw.instruction
-      ? resolveRefToContent(
-          raw.instruction,
-          sections.resolvedInstructionsWithSource ?? sections.resolvedInstructions,
-          workflowDir,
-          'instructions',
-          context,
-        )
+    instruction: resolvedInstruction
+      ? expandInstructionPartials(resolvedInstruction, context)
       : undefined,
     rules: raw.rules.map((rule) => ({ condition: rule.condition, next: rule.next })),
   };
