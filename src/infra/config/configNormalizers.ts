@@ -582,6 +582,13 @@ export function denormalizeProviderOptions(
       ...(groundCheck !== undefined ? { ground_check: groundCheck } : {}),
     };
   }
+  if (providerOptions.agy?.printTimeout !== undefined || providerOptions.agy?.groundCheck !== undefined) {
+    const groundCheck = denormalizeGroundCheckOptions(providerOptions.agy.groundCheck);
+    raw.agy = {
+      ...(providerOptions.agy.printTimeout !== undefined ? { print_timeout: providerOptions.agy.printTimeout } : {}),
+      ...(groundCheck !== undefined ? { ground_check: groundCheck } : {}),
+    };
+  }
   if (providerOptions.claudeTerminal) {
     const claudeTerminal: Record<string, unknown> = {};
     if (providerOptions.claudeTerminal.backend !== undefined) {

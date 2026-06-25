@@ -28,6 +28,8 @@
 
 ### Fixed
 
+- `agy-cli` provider 実行で `provider_options.agy.print_timeout` を受け取り、`agy --print-timeout` として渡せるようになりました。Antigravity の subscription-only smoke run が CLI のデフォルト timeout まで待たず、bounded に失敗できます。
+- `devloopd doctor --subscription-only` が `.takt/devloopd.yaml` を自動検出し、存在しない任意の TAKT config file を warning ではなく skipped check として扱うようになりました。global TAKT config がない source checkout でも、project-local の subscription-only readiness を green にできます。
 - `devloopd doctor --subscription-only` が、`PATH` に `takt` が未インストールでも source checkout 隣接の `bin/takt` wrapper を利用できるようになりました。`npm link` や global install 前のローカル開発 checkout でも subscription-only readiness を検証できます。
 - Finding Contract の ledger がタスク指示書由来の requirement matrix と reviewer finding の acceptance criteria を永続化するようになりました (#831)。review / supervise / report instruction は、finding を resolved として承認する前に requirement id と acceptance criteria を参照できます。
 - Windows で Git Bash または WSL bash 経由の runtime prepare preset が実行できるようになりました (#443)。TAKT は raw な `C:\...` script path を bash に直接渡さず、bash 内で `cygpath` または `wslpath` により変換してから packaged `node` / `gradle` prepare script を実行します。

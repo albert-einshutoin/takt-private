@@ -55,7 +55,7 @@ devloopd start --repo owner/repo
 |--------|-------------|
 | `--subscription-only` | Require subscription-only TAKT config and provider checks |
 | `--repo <path>` | Repository path to inspect |
-| `--policy <path>` | Optional devloop policy YAML path; `mode` must be `subscription_only` |
+| `--policy <path>` | Optional devloop policy YAML path; defaults to `.takt/devloopd.yaml` when present and `mode` must be `subscription_only` |
 | `--verbose` | Show passing checks |
 | `--skip-auth` | Skip `gh auth status` |
 
@@ -66,7 +66,7 @@ devloopd start --repo owner/repo
 | `--issue <number>` | GitHub Issue number to run through TAKT |
 | `--repo <owner/repo>` | Repository used by TAKT for PR operations |
 | `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
-| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
+| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor. Defaults to `.takt/devloopd.yaml` when present |
 | `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
 | `--skip-auth` | Skip `gh auth status` |
 | `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
@@ -162,7 +162,7 @@ devloopd start --repo owner/repo
 | `--max-cycles <count>` | Stop after a finite number of daemon cycles |
 | `--interval-seconds <count>` | Seconds to wait between daemon cycles. Defaults to 60 |
 | `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
-| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
+| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor. Defaults to `.takt/devloopd.yaml` when present |
 | `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
 | `--max-active-runs <count>` | Maximum active TAKT runs allowed before start refuses to scan. Defaults to 1 |

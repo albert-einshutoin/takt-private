@@ -98,6 +98,11 @@ export interface KiroProviderOptions {
   groundCheck?: GroundCheckProviderOptions;
 }
 
+export interface AgyProviderOptions {
+  printTimeout?: string;
+  groundCheck?: GroundCheckProviderOptions;
+}
+
 export interface StepProviderOptions {
   codex?: CodexProviderOptions;
   opencode?: OpenCodeProviderOptions;
@@ -106,6 +111,7 @@ export interface StepProviderOptions {
   copilot?: CopilotProviderOptions;
   cursor?: CursorProviderOptions;
   kiro?: KiroProviderOptions;
+  agy?: AgyProviderOptions;
 }
 
 export type WorkflowStepKind = 'agent' | 'system' | 'workflow_call';

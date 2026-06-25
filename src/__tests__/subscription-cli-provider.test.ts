@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ProviderRegistry } from '../infra/providers/index.js';
 import { SubscriptionCliProvider } from '../infra/providers/subscription-cli.js';
 import {
@@ -88,6 +91,40 @@ describe('subscription-only CLI providers', () => {
         permissionMode: 'full',
       })
     ).toThrow(/does not support full permission/i);
+  });
+
+  it('passes agy print timeout to bounded non-interactive runs', () => {
+    const invocation = buildSubscriptionCliInvocation('agy-cli', 'Reply Done', {
+      cwd: '/repo',
+      agyPrintTimeout: '30s',
+    });
+
+    expect(invocation.command).toBe('agy');
+    expect(invocation.args).toEqual(['--print-timeout', '30s', '-p', 'Reply Done']);
+    expect(invocation.timeoutMs).toBe(31_000);
+  });
+
+  it('kills stalled agy print-mode processes after the configured timeout', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'takt-agy-timeout-'));
+    try {
+      const slowCommand = join(tempDir, 'slow-agy');
+      writeFileSync(slowCommand, '#!/bin/sh\nsleep 5\n', 'utf-8');
+      chmodSync(slowCommand, 0o755);
+
+      const startedAt = Date.now();
+      const response = await callSubscriptionCli('coder', 'Reply Done', {
+        provider: 'agy-cli',
+        cwd: tempDir,
+        commandPath: slowCommand,
+        agyPrintTimeout: '10ms',
+      });
+
+      expect(Date.now() - startedAt).toBeLessThan(4_000);
+      expect(response.status).toBe('error');
+      expect(response.error).toContain('subscription CLI timed out');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('returns an agent error when invocation validation fails before spawn', async () => {

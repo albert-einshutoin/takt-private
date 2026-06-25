@@ -55,7 +55,7 @@ devloopd start --repo owner/repo
 |-----------|------|
 | `--subscription-only` | subscription-only の TAKT config と provider チェックを必須にします |
 | `--repo <path>` | 検査するリポジトリパス |
-| `--policy <path>` | 任意の devloop policy YAML パス。`mode` は `subscription_only` である必要があります |
+| `--policy <path>` | 任意の devloop policy YAML パス。`.takt/devloopd.yaml` が存在する場合は自動検出し、`mode` は `subscription_only` である必要があります |
 | `--verbose` | pass したチェックも表示します |
 | `--skip-auth` | `gh auth status` をスキップします |
 
@@ -66,7 +66,7 @@ devloopd start --repo owner/repo
 | `--issue <number>` | TAKT で実行する GitHub Issue 番号 |
 | `--repo <owner/repo>` | TAKT の PR 操作用リポジトリ |
 | `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
-| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
+| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス。`.takt/devloopd.yaml` が存在する場合は自動検出します |
 | `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
 | `--skip-auth` | `gh auth status` をスキップします |
 | `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
@@ -162,7 +162,7 @@ devloopd start --repo owner/repo
 | `--max-cycles <count>` | 指定した daemon cycle 数で停止します |
 | `--interval-seconds <count>` | daemon cycle 間の待機秒数。デフォルトは 60 |
 | `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
-| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
+| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス。`.takt/devloopd.yaml` が存在する場合は自動検出します |
 | `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
 | `--max-active-runs <count>` | scan を拒否する active TAKT run 数の上限。デフォルトは 1 |

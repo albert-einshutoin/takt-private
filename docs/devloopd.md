@@ -40,25 +40,25 @@ repository. Other provider CLIs must still be installed and discoverable on `PAT
 |--------|-------------|
 | `--subscription-only` | Require TAKT subscription-only policy checks |
 | `--repo <path>` | Repository path to inspect. Defaults to the current working directory |
-| `--policy <path>` | Optional devloop policy YAML path |
+| `--policy <path>` | Optional devloop policy YAML path. Defaults to `.takt/devloopd.yaml` when that file exists |
 | `--verbose` | Show passing checks as well as warnings and failures |
 | `--skip-auth` | Skip `gh auth status` |
 
 ### Optional Policy File
 
-Use `--policy` when a project keeps devloop policy beside its TAKT config:
+Projects can keep devloop policy beside TAKT config at `.takt/devloopd.yaml`:
 
 ```yaml
 mode: subscription_only
 ```
 
-Then run:
+The doctor discovers that file automatically. Use `--policy` only when the policy lives elsewhere:
 
 ```bash
 devloopd doctor --subscription-only --policy .takt/devloopd.yaml
 ```
 
-If no policy file is provided, the doctor emits a warning and continues. TAKT config and workflow checks still run.
+If no policy file is provided and `.takt/devloopd.yaml` does not exist, the doctor emits a warning and continues. TAKT config and workflow checks still run.
 
 ## Run
 
@@ -278,7 +278,7 @@ Each cycle uses the same safety boundaries as the lower-level commands:
 | `--max-cycles <count>` | Stop after a finite number of daemon cycles |
 | `--interval-seconds <count>` | Seconds to wait between daemon cycles. Defaults to 60 |
 | `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
-| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
+| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor. Defaults to `.takt/devloopd.yaml` when present |
 | `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
 | `--max-active-runs <count>` | Maximum active TAKT runs allowed before start refuses to scan. Defaults to 1 |

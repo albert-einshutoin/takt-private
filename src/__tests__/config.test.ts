@@ -782,6 +782,8 @@ describe('loadProjectConfig provider_options', () => {
       '  claude:',
       '    sandbox:',
       '      allow_unsandboxed_commands: true',
+      '  agy:',
+      '    print_timeout: 30s',
     ].join('\n'));
 
     const config = loadProjectConfig(testDir);
@@ -789,6 +791,7 @@ describe('loadProjectConfig provider_options', () => {
     expect(config.providerOptions).toEqual({
       codex: { networkAccess: true },
       claude: { sandbox: { allowUnsandboxedCommands: true } },
+      agy: { printTimeout: '30s' },
     });
   });
 

@@ -21,6 +21,7 @@ export interface SubscriptionCliInvocationOptions {
   permissionMode?: PermissionMode;
   commandPath?: string;
   outputPath?: string;
+  agyPrintTimeout?: string;
 }
 
 export interface SubscriptionCliCallOptions extends SubscriptionCliInvocationOptions {
@@ -35,6 +36,7 @@ export interface SubscriptionCliInvocation {
   args: string[];
   stdin?: string;
   outputPath?: string;
+  timeoutMs?: number;
 }
 
 type ExecResult = {
@@ -51,6 +53,7 @@ type ExecError = Error & {
 
 const SUBSCRIPTION_CLI_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const SUBSCRIPTION_CLI_FORCE_KILL_DELAY_MS = 1_000;
+const SUBSCRIPTION_CLI_TIMEOUT_GRACE_MS = 1_000;
 
 function isSubscriptionCliProvider(provider: ProviderType): provider is SubscriptionCliProviderType {
   return provider === 'codex-cli'
@@ -71,6 +74,34 @@ function mapCodexCliSandboxMode(mode?: PermissionMode): 'read-only' | 'workspace
     throw new Error('codex-cli provider does not support full permission mode because it would disable local sandboxing.');
   }
   return mode === 'readonly' ? 'read-only' : 'workspace-write';
+}
+
+function parseAgyPrintTimeoutMs(value: string | undefined): number | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const milliseconds = Number(trimmed);
+    return Number.isSafeInteger(milliseconds) && milliseconds > 0 ? milliseconds : undefined;
+  }
+
+  const unitMs: Record<string, number> = {
+    ms: 1,
+    s: 1_000,
+    m: 60_000,
+    h: 3_600_000,
+  };
+  let total = 0;
+  let consumed = '';
+  for (const match of trimmed.matchAll(/(\d+(?:\.\d+)?)(ms|s|m|h)/g)) {
+    consumed += match[0];
+    total += Number(match[1]) * unitMs[match[2]!]!;
+  }
+  if (consumed !== trimmed || total <= 0 || !Number.isFinite(total)) {
+    return undefined;
+  }
+  return Math.ceil(total);
 }
 
 export function buildSubscriptionOnlyEnv(
@@ -131,13 +162,20 @@ export function buildSubscriptionCliInvocation(
 
   if (provider === 'agy-cli') {
     const args: string[] = [];
+    const printTimeoutMs = parseAgyPrintTimeoutMs(options.agyPrintTimeout);
     if (options.model) {
       args.push('--model', options.model);
+    }
+    if (options.agyPrintTimeout) {
+      // agy print mode can wait for minutes by default; expose its native timeout so automation fails boundedly.
+      args.push('--print-timeout', options.agyPrintTimeout);
     }
     args.push('-p', fullPrompt);
     return {
       command: options.commandPath ?? 'agy',
       args,
+      // The native agy timeout is not enough when the CLI process itself stalls; keep a TAKT-side kill switch too.
+      timeoutMs: printTimeoutMs === undefined ? undefined : printTimeoutMs + SUBSCRIPTION_CLI_TIMEOUT_GRACE_MS,
     };
   }
 
@@ -190,10 +228,15 @@ function execSubscriptionCli(
     let stderrBytes = 0;
     let settled = false;
     let abortTimer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
 
     const cleanup = (): void => {
       if (abortTimer !== undefined) {
         clearTimeout(abortTimer);
+      }
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer);
       }
       options.abortSignal?.removeEventListener('abort', abortHandler);
     };
@@ -212,7 +255,7 @@ function execSubscriptionCli(
       resolve(result);
     };
 
-    const abortHandler = (): void => {
+    const terminateChild = (): void => {
       if (settled) return;
       child.kill('SIGTERM');
       abortTimer = setTimeout(() => {
@@ -221,6 +264,24 @@ function execSubscriptionCli(
         }
       }, SUBSCRIPTION_CLI_FORCE_KILL_DELAY_MS);
       abortTimer.unref?.();
+    };
+
+    const rejectTimedOut = (): void => {
+      if (settled) return;
+      timedOut = true;
+      child.kill('SIGTERM');
+      const forceKillTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, SUBSCRIPTION_CLI_FORCE_KILL_DELAY_MS);
+      forceKillTimer.unref?.();
+      rejectOnce(Object.assign(new Error(`subscription CLI timed out after ${invocation.timeoutMs}ms`), {
+        stdout,
+        stderr,
+      }));
+    };
+
+    const abortHandler = (): void => {
+      terminateChild();
     };
 
     const appendChunk = (target: 'stdout' | 'stderr', chunk: Buffer | string): void => {
@@ -254,6 +315,14 @@ function execSubscriptionCli(
 
     child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
       if (settled) return;
+      if (timedOut) {
+        rejectOnce(Object.assign(new Error(`subscription CLI timed out after ${invocation.timeoutMs}ms`), {
+          stdout,
+          stderr,
+          signal,
+        }));
+        return;
+      }
       if (options.abortSignal?.aborted) {
         rejectOnce(Object.assign(new Error('Subscription CLI execution aborted'), {
           name: 'AbortError',
@@ -279,6 +348,13 @@ function execSubscriptionCli(
       } else {
         options.abortSignal.addEventListener('abort', abortHandler, { once: true });
       }
+    }
+
+    if (invocation.timeoutMs !== undefined) {
+      timeoutTimer = setTimeout(() => {
+        rejectTimedOut();
+      }, invocation.timeoutMs);
+      timeoutTimer.unref?.();
     }
 
     if (invocation.stdin !== undefined) {
@@ -407,6 +483,7 @@ export async function callSubscriptionCli(
       permissionMode: options.permissionMode,
       commandPath: options.commandPath,
       outputPath,
+      agyPrintTimeout: options.agyPrintTimeout,
     });
 
     const { stdout } = await execSubscriptionCli(invocation, options);

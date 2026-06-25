@@ -24,6 +24,13 @@ function writeGlobalConfig(globalConfigDir: string, content: string): void {
   writeFileSync(join(globalConfigDir, 'config.yaml'), content, 'utf-8');
 }
 
+function writeDevloopPolicy(projectDir: string, content = 'mode: subscription_only\n'): string {
+  const policyPath = join(projectDir, '.takt', 'devloopd.yaml');
+  mkdirSync(join(projectDir, '.takt'), { recursive: true });
+  writeFileSync(policyPath, content, 'utf-8');
+  return policyPath;
+}
+
 function writeWorkflow(projectDir: string, content: string): void {
   const workflowDir = join(projectDir, '.takt', 'workflows');
   mkdirSync(workflowDir, { recursive: true });
@@ -114,6 +121,45 @@ describe('devloopd doctor', () => {
       name: 'command:takt',
       message: 'found takt',
       detail: localTakt,
+    });
+  });
+
+  it('auto-discovers project-local devloop policy when --policy is omitted', async () => {
+    const policyPath = writeDevloopPolicy(projectDir);
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      env: { PATH: '/mock/bin' },
+      runner: makeRunner(),
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.checks).toContainEqual({
+      status: 'pass',
+      name: 'devloop policy',
+      message: 'policy mode is subscription_only',
+      detail: policyPath,
+    });
+  });
+
+  it('treats an absent optional global TAKT config as a passing skipped check', async () => {
+    rmSync(join(globalConfigDir, 'config.yaml'));
+    invalidateGlobalConfigCache();
+    invalidateAllResolvedConfigCache();
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      env: { PATH: '/mock/bin' },
+      runner: makeRunner(),
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.checks).toContainEqual({
+      status: 'pass',
+      name: 'global TAKT config',
+      message: `config file not found; skipped: ${join(globalConfigDir, 'config.yaml')}`,
     });
   });
 

@@ -49,6 +49,7 @@ export type {
   CopilotProviderOptions,
   CursorProviderOptions,
   KiroProviderOptions,
+  AgyProviderOptions,
   StepProviderOptions,
   WorkflowStepKind,
   WorkflowCallOverrides,
