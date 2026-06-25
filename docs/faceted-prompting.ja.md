@@ -364,6 +364,36 @@ steps:
 
 エンジンは各キーをファイルに解決し、内容を読み込み、実行時に最終的なプロンプトを組み立てる。ワークフローの作者がモノリシックなプロンプトを書くことはない。どのファセットを組み合わせるかを選択するだけである。
 
+### プログラムからの prompt payload 取得
+
+TAKT は `faceted-prompting.composePromptPayload()` を薄く包んだ adapter も提供する。ファイル出力ではなく、合成済み prompt をデータとして扱いたいツールで使える。TAKT builtin facet は persona を複数形の `personas/` directory に置くため、直接 payload API を使う場合は path-based ref を使う。
+
+```ts
+import { join } from 'node:path';
+import { composeTaktPromptPayload } from 'takt';
+
+const facetsRoot = join(process.cwd(), 'builtins/en/facets');
+
+const payload = composeTaktPromptPayload({
+  definition: {
+    name: 'coder-implement',
+    persona: 'personas/coder.md',
+    knowledge: ['knowledge/takt.md'],
+    policies: ['policies/coding.md'],
+    instructions: ['instructions/implement.md'],
+  },
+  definitionDir: facetsRoot,
+  facetsRoots: [facetsRoot],
+  composeOptions: { contextMaxChars: 2000 },
+});
+
+console.log(payload.systemPrompt);
+console.log(payload.userPrompt);
+console.log(payload.copyFiles);
+```
+
+返り値には `systemPrompt`、`userPrompt`、facet kind ごとに分類された `copyFiles` が含まれる。これにより、staging や template 生成でも prompt 合成と同じ解決済みファイル一覧を使える。
+
 instructions、policies、knowledge、output contracts の facet ファイルは、standalone directive で同じ kind の別 facet を継承できる。
 
 ```md

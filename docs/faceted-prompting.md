@@ -364,6 +364,36 @@ steps:
 
 The engine resolves each key to its file, reads the content, and assembles the final prompt at runtime. The workflow author never writes a monolithic prompt — only selects which facets to combine.
 
+### Programmatic Prompt Payloads
+
+TAKT also exposes a thin adapter around `faceted-prompting.composePromptPayload()` for tools that need the composed prompt as data instead of writing files. Use path-based refs for TAKT builtin facets because TAKT stores personas under the plural `personas/` directory:
+
+```ts
+import { join } from 'node:path';
+import { composeTaktPromptPayload } from 'takt';
+
+const facetsRoot = join(process.cwd(), 'builtins/en/facets');
+
+const payload = composeTaktPromptPayload({
+  definition: {
+    name: 'coder-implement',
+    persona: 'personas/coder.md',
+    knowledge: ['knowledge/takt.md'],
+    policies: ['policies/coding.md'],
+    instructions: ['instructions/implement.md'],
+  },
+  definitionDir: facetsRoot,
+  facetsRoots: [facetsRoot],
+  composeOptions: { contextMaxChars: 2000 },
+});
+
+console.log(payload.systemPrompt);
+console.log(payload.userPrompt);
+console.log(payload.copyFiles);
+```
+
+The returned payload contains `systemPrompt`, `userPrompt`, and `copyFiles` grouped by facet kind, so staging and template generation can use the same resolved file list as prompt composition.
+
 Facet files for instructions, policies, knowledge, and output contracts can inherit another facet of the same kind with a standalone directive:
 
 ```md

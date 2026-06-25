@@ -42,6 +42,14 @@ export {
   type ProjectLocalConfig,
 } from './infra/config/project/index.js';
 
+// Prompt composition
+export {
+  composeTaktPromptPayload,
+} from './shared/prompts/facetedPayload.js';
+export type {
+  ComposeTaktPromptPayloadParams,
+} from './shared/prompts/facetedPayload.js';
+
 // Workflow engine
 export {
   WorkflowEngine,
