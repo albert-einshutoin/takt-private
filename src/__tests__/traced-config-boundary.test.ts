@@ -252,4 +252,47 @@ describe('traced config boundaries', () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it('runtime bridge rejects an invalid helper timeout before spawning the helper', () => {
+    process.env.TAKT_TRACED_CONFIG_HELPER_TIMEOUT_MS = '0';
+
+    expect(() => loadTraceEntriesViaRuntime({
+      provider: {
+        doc: 'provider',
+        format: String,
+        env: 'TAKT_PROVIDER',
+        sources: { global: false, local: true, env: true, cli: false },
+      },
+    }, 'local', { provider: 'codex' }))
+      .toThrow('TAKT_TRACED_CONFIG_HELPER_TIMEOUT_MS must be a positive integer number of milliseconds');
+  });
+
+  it('runtime bridge times out a slow helper startup instead of blocking workflow progress', () => {
+    const originalNodeOptions = process.env.NODE_OPTIONS;
+    const tempDir = join(tmpdir(), `takt-traced-slow-helper-${randomUUID()}`);
+    const slowImportPath = join(tempDir, 'slow-import.mjs');
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(slowImportPath, 'await new Promise((resolve) => setTimeout(resolve, 250));\n', 'utf-8');
+    process.env.NODE_OPTIONS = `--import=${slowImportPath}`;
+    process.env.TAKT_TRACED_CONFIG_HELPER_TIMEOUT_MS = '25';
+
+    try {
+      expect(() => loadTraceEntriesViaRuntime({
+        provider: {
+          doc: 'provider',
+          format: String,
+          env: 'TAKT_PROVIDER',
+          sources: { global: false, local: true, env: true, cli: false },
+        },
+      }, 'local', { provider: 'codex' }))
+        .toThrow('traced-config helper timed out after 25ms');
+    } finally {
+      if (originalNodeOptions === undefined) {
+        delete process.env.NODE_OPTIONS;
+      } else {
+        process.env.NODE_OPTIONS = originalNodeOptions;
+      }
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
