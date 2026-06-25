@@ -70,24 +70,37 @@ function checkSubscriptionOnlyFlag(required: boolean): DevloopDoctorCheck {
   return makeCheck('fail', 'devloopd mode', 'run devloopd doctor with --subscription-only');
 }
 
-function checkDevloopPolicy(policyPath: string | undefined): DevloopDoctorCheck {
-  if (policyPath === undefined) {
+const DEFAULT_DEVLOOP_POLICY_PATH = join('.takt', 'devloopd.yaml');
+
+function resolveDevloopPolicyPath(repoPath: string, policyPath: string | undefined): string | undefined {
+  if (policyPath !== undefined) {
+    return policyPath;
+  }
+
+  // Keep private checkout readiness self-contained while preserving explicit --policy precedence.
+  const defaultPolicyPath = join(repoPath, DEFAULT_DEVLOOP_POLICY_PATH);
+  return existsSync(defaultPolicyPath) ? defaultPolicyPath : undefined;
+}
+
+function checkDevloopPolicy(repoPath: string, policyPath: string | undefined): DevloopDoctorCheck {
+  const resolvedPolicyPath = resolveDevloopPolicyPath(repoPath, policyPath);
+  if (resolvedPolicyPath === undefined) {
     return makeCheck('warn', 'devloop policy', 'no devloop policy file provided');
   }
 
-  if (!existsSync(policyPath)) {
-    return makeCheck('fail', 'devloop policy', `policy file not found: ${policyPath}`);
+  if (!existsSync(resolvedPolicyPath)) {
+    return makeCheck('fail', 'devloop policy', `policy file not found: ${resolvedPolicyPath}`);
   }
 
   try {
-    const parsed = parseYaml(readFileSync(policyPath, 'utf-8')) as unknown;
+    const parsed = parseYaml(readFileSync(resolvedPolicyPath, 'utf-8')) as unknown;
     if (!isRecord(parsed)) {
       return makeCheck('fail', 'devloop policy', 'policy file must be a YAML object');
     }
     if (parsed.mode !== 'subscription_only') {
       return makeCheck('fail', 'devloop policy', 'policy mode must be subscription_only');
     }
-    return makeCheck('pass', 'devloop policy', 'policy mode is subscription_only');
+    return makeCheck('pass', 'devloop policy', 'policy mode is subscription_only', resolvedPolicyPath);
   } catch (error) {
     return makeCheck('fail', 'devloop policy', `failed to read policy file: ${sanitizeDetail(getErrorMessage(error))}`);
   }
@@ -166,7 +179,7 @@ async function checkGitHubAuth(
 
 function checkRawConfigForForbiddenKeys(configPath: string, label: string): DevloopDoctorCheck {
   if (!existsSync(configPath)) {
-    return makeCheck('warn', label, `config file not found: ${configPath}`);
+    return makeCheck('pass', label, `config file not found; skipped: ${configPath}`);
   }
 
   try {
@@ -256,7 +269,7 @@ export async function runDevloopDoctor(options: RunDevloopDoctorOptions = {}): P
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
   const checks: DevloopDoctorCheck[] = [
     checkSubscriptionOnlyFlag(options.subscriptionOnly === true),
-    checkDevloopPolicy(options.policyPath),
+    checkDevloopPolicy(repoPath, options.policyPath),
     checkForbiddenEnvironment(env),
     ...REQUIRED_SUBSCRIPTION_COMMANDS.map((command) => checkCommand(command, env, runner, repoPath)),
     checkCursorCommand(env, runner),
