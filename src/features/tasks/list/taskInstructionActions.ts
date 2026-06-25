@@ -35,29 +35,36 @@ import {
 
 const log = createLogger('list-tasks');
 
-function collectBranchDiffSection(projectDir: string, defaultBranch: string, branch: string): readonly string[] {
+interface BranchContextBase {
+  baseBranch: string;
+  isPrDerived: boolean;
+  fallbackToDefaultBranch: boolean;
+  prNumber?: number;
+}
+
+function collectBranchDiffSection(projectDir: string, baseBranch: string, branch: string): readonly string[] {
   try {
     const diffStat = execFileSync(
-      'git', ['diff', '--stat', `${defaultBranch}...${branch}`],
+      'git', ['diff', '--stat', `${baseBranch}...${branch}`],
       { cwd: projectDir, encoding: 'utf-8', stdio: 'pipe' },
     ).trim();
     return diffStat
-      ? ['## 現在の変更内容（mainからの差分）', '```', diffStat, '```']
+      ? [`## 現在の変更内容（${baseBranch}からの差分）`, '```', diffStat, '```']
       : [];
   } catch (err) {
     log.debug('Failed to collect branch diff stat for instruction context', {
       branch,
-      defaultBranch,
+      baseBranch,
       error: getErrorMessage(err),
     });
     return [];
   }
 }
 
-function collectBranchCommitSection(projectDir: string, defaultBranch: string, branch: string): readonly string[] {
+function collectBranchCommitSection(projectDir: string, baseBranch: string, branch: string): readonly string[] {
   try {
     const commitLog = execFileSync(
-      'git', ['log', '--oneline', `${defaultBranch}..${branch}`],
+      'git', ['log', '--oneline', `${baseBranch}..${branch}`],
       { cwd: projectDir, encoding: 'utf-8', stdio: 'pipe' },
     ).trim();
     return commitLog
@@ -66,18 +73,93 @@ function collectBranchCommitSection(projectDir: string, defaultBranch: string, b
   } catch (err) {
     log.debug('Failed to collect branch commit log for instruction context', {
       branch,
-      defaultBranch,
+      baseBranch,
       error: getErrorMessage(err),
     });
     return [];
   }
 }
 
-function getBranchContext(projectDir: string, branch: string): string {
-  const defaultBranch = detectDefaultBranch(projectDir);
+function resolveBranchContextBase(
+  projectDir: string,
+  branch: string,
+  target: BranchActionTarget,
+): BranchContextBase {
+  if (!('kind' in target)) {
+    return {
+      baseBranch: detectDefaultBranch(projectDir),
+      isPrDerived: false,
+      fallbackToDefaultBranch: false,
+    };
+  }
+
+  const prNumber = target.data?.pr_number ?? target.prNumber;
+  const isPrDerived = target.data?.source === 'pr_review'
+    || target.source === 'pr_review'
+    || prNumber !== undefined;
+  if (!isPrDerived) {
+    return {
+      baseBranch: detectDefaultBranch(projectDir),
+      isPrDerived: false,
+      fallbackToDefaultBranch: false,
+    };
+  }
+
+  const savedBaseBranch = target.data?.base_branch?.trim();
+  if (savedBaseBranch) {
+    return {
+      baseBranch: savedBaseBranch,
+      isPrDerived: true,
+      fallbackToDefaultBranch: false,
+      ...(prNumber !== undefined ? { prNumber } : {}),
+    };
+  }
+
+  // PR follow-up instructions must be judged against the PR base. If older
+  // task records lack that saved base, make the fallback visible in the prompt
+  // so reviewers do not mistake a default-branch guess for first-party PR data.
+  return {
+    baseBranch: detectDefaultBranch(projectDir),
+    isPrDerived: true,
+    fallbackToDefaultBranch: true,
+    ...(prNumber !== undefined ? { prNumber } : {}),
+  };
+}
+
+function collectPrContextSection(context: BranchContextBase, branch: string): readonly string[] {
+  if (!context.isPrDerived) {
+    return [];
+  }
+
   const lines = [
-    ...collectBranchDiffSection(projectDir, defaultBranch, branch),
-    ...collectBranchCommitSection(projectDir, defaultBranch, branch),
+    '## PR Context',
+    '',
+    'この実行は PR 由来です。判断対象は単一コミットや現在の working tree だけではなく、PR の base から head までの累積差分です。',
+    '',
+    `- PR: ${context.prNumber !== undefined ? `#${context.prNumber}` : '(unknown)'}`,
+    `- Base: ${context.baseBranch}`,
+    `- Head: ${branch}`,
+    `- Diff range: ${context.baseBranch}...${branch}`,
+  ];
+
+  if (context.fallbackToDefaultBranch) {
+    lines.push(`- Base fallback: 保存済み PR base がないため、検出した default branch ${context.baseBranch} を使用しています。`);
+  }
+
+  lines.push(
+    '',
+    '必要な判断は現在の base...head 差分で確認してください。前回 report や review-target.md は snapshot / 参考情報であり、最新差分の代替ではありません。',
+    '',
+  );
+  return lines;
+}
+
+function getBranchContext(projectDir: string, branch: string, target: BranchActionTarget): string {
+  const contextBase = resolveBranchContextBase(projectDir, branch, target);
+  const lines = [
+    ...collectPrContextSection(contextBase, branch),
+    ...collectBranchDiffSection(projectDir, contextBase.baseBranch, branch),
+    ...collectBranchCommitSection(projectDir, contextBase.baseBranch, branch),
   ];
 
   return lines.length > 0 ? `${lines.join('\n')}\n\n` : '';
@@ -128,7 +210,7 @@ export async function instructBranch(
     warn(DEPRECATED_PROVIDER_CONFIG_WARNING);
   }
 
-  const branchContext = getBranchContext(projectDir, branch);
+  const branchContext = getBranchContext(projectDir, branch, target);
 
   const result = await runInstructMode(
     worktreePath, branchContext, branch,

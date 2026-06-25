@@ -10,6 +10,7 @@
 
 ### Added
 
+- PR 由来の review task と Instruct follow-up に明示的な PR context を追加しました (#861)。`takt add --pr`、CLI `--pr`、pipeline `--pr` の prompt に PR 番号、base/head branch、判断対象の base...head diff range を含め、task Instruct では default branch 推測より保存済み PR base branch を優先し、fallback 時はその事実を明示します。
 - interactive root 実行が task 完了または失敗後に初期 prompt へ戻れるようになりました (#838)。続行 prompt は TTY の interactive flow に限定され、pipeline、直接 `--task`、quiet、non-TTY 実行では表示されません。
 - Instruction partial include を追加しました (#832)。`facets/partials/instructions/<name>.md` に置いた Markdown 断片を、instruction facet 内の `{name}`（partial が存在する場合）または厳密な `{partial:name}` で共有できます。package-local / project / global / builtin layer は他の facet と同じ優先順で解決し、nested partial をサポートし、循環参照は拒否します。
 - PR 画像添付を追加しました (#792)。PR 本文・コメント・レビュー内の GitHub ホスト画像を `takt add --pr` と `takt pipeline --pr` の task attachment にダウンロードし、task prompt では安定した `[Image #N]` placeholder と run context の添付パスへ書き換えます。

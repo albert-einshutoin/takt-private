@@ -20,6 +20,7 @@ const {
   mockFindRunForTask,
   mockFindPreviousOrderContent,
   mockWarn,
+  mockDetectDefaultBranch,
   mockIsWorkflowPath,
   mockLoadWorkflowByIdentifier,
   mockLoadAllStandaloneWorkflowsWithSources,
@@ -50,6 +51,7 @@ const {
   mockFindRunForTask: vi.fn(() => null),
   mockFindPreviousOrderContent: vi.fn(() => null),
   mockWarn: vi.fn(),
+  mockDetectDefaultBranch: vi.fn(() => 'main'),
   mockIsWorkflowPath: vi.fn(() => false),
   mockLoadWorkflowByIdentifier: vi.fn(() => ({ name: 'path-workflow' })),
   mockLoadAllStandaloneWorkflowsWithSources: vi.fn(() => new Map<string, unknown>([
@@ -72,7 +74,7 @@ vi.mock('node:child_process', async (importOriginal) => ({
 }));
 
 vi.mock('../infra/task/index.js', () => ({
-  detectDefaultBranch: vi.fn(() => 'main'),
+  detectDefaultBranch: (...args: unknown[]) => mockDetectDefaultBranch(...args),
   TaskRunner: class {
     startReExecution(...args: unknown[]) {
       return mockStartReExecution(...args);
@@ -191,6 +193,7 @@ describe('instructBranch direct execution flow', () => {
     mockSelectRun.mockResolvedValue(null);
     mockFindRunForTask.mockReturnValue(null);
     mockFindPreviousOrderContent.mockReturnValue(null);
+    mockDetectDefaultBranch.mockReturnValue('main');
     mockIsWorkflowPath.mockImplementation((workflow: string) => workflow.startsWith('/') || workflow.startsWith('~') || workflow.startsWith('./') || workflow.startsWith('../') || workflow.endsWith('.yaml') || workflow.endsWith('.yml'));
     mockLoadWorkflowByIdentifier.mockReturnValue({ name: 'path-workflow' });
     mockLoadAllStandaloneWorkflowsWithSources.mockReturnValue(new Map<string, unknown>([
@@ -502,6 +505,91 @@ describe('instructBranch direct execution flow', () => {
       undefined,
       null,
     );
+  });
+
+  it('should use saved PR base branch for PR-derived instruct diff context', async () => {
+    mockExecFileSync
+      .mockReturnValueOnce(' src/pr.ts | 4 +++-\n 1 file changed')
+      .mockReturnValueOnce('def456 address review');
+
+    await instructBranch('/project', {
+      kind: 'completed',
+      name: 'pr-task',
+      createdAt: '2026-02-14T00:00:00.000Z',
+      filePath: '/project/.takt/tasks.yaml',
+      content: 'fix PR',
+      branch: 'feature/pr-123',
+      worktreePath: '/project/.takt/worktrees/pr-task',
+      data: {
+        task: 'fix PR',
+        source: 'pr_review',
+        pr_number: 123,
+        base_branch: 'release/main',
+      },
+      source: 'pr_review',
+      prNumber: 123,
+    });
+
+    expect(mockDetectDefaultBranch).not.toHaveBeenCalled();
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(
+      1,
+      'git',
+      ['diff', '--stat', 'release/main...feature/pr-123'],
+      { cwd: '/project', encoding: 'utf-8', stdio: 'pipe' },
+    );
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(
+      2,
+      'git',
+      ['log', '--oneline', 'release/main..feature/pr-123'],
+      { cwd: '/project', encoding: 'utf-8', stdio: 'pipe' },
+    );
+    expect(mockRunInstructMode).toHaveBeenCalledWith(
+      '/project/.takt/worktrees/pr-task',
+      expect.stringContaining('## PR Context'),
+      'feature/pr-123',
+      'pr-task',
+      'fix PR',
+      '',
+      expect.anything(),
+      undefined,
+      null,
+    );
+    const branchContext = mockRunInstructMode.mock.calls[0]?.[1] as string;
+    expect(branchContext).toContain('- PR: #123');
+    expect(branchContext).toContain('- Base: release/main');
+    expect(branchContext).toContain('- Head: feature/pr-123');
+    expect(branchContext).toContain('- Diff range: release/main...feature/pr-123');
+    expect(branchContext).toContain('review-target.md');
+    expect(branchContext).toContain('## 現在の変更内容（release/mainからの差分）');
+  });
+
+  it('should make the fallback base explicit when PR-derived task has no saved base branch', async () => {
+    mockExecFileSync
+      .mockReturnValueOnce(' src/pr.ts | 2 ++\n 1 file changed')
+      .mockReturnValueOnce('abc123 follow up');
+
+    await instructBranch('/project', {
+      kind: 'completed',
+      name: 'pr-task',
+      createdAt: '2026-02-14T00:00:00.000Z',
+      filePath: '/project/.takt/tasks.yaml',
+      content: 'fix PR',
+      branch: 'feature/pr-123',
+      worktreePath: '/project/.takt/worktrees/pr-task',
+      data: {
+        task: 'fix PR',
+        source: 'pr_review',
+        pr_number: 123,
+      },
+      source: 'pr_review',
+      prNumber: 123,
+    });
+
+    expect(mockDetectDefaultBranch).toHaveBeenCalledWith('/project');
+    const branchContext = mockRunInstructMode.mock.calls[0]?.[1] as string;
+    expect(branchContext).toContain('- Base: main');
+    expect(branchContext).toContain('- Diff range: main...feature/pr-123');
+    expect(branchContext).toContain('保存済み PR base がないため');
   });
 
   it('should call selectWorkflow when previous workflow reuse is declined', async () => {
