@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -180,6 +180,50 @@ describe('devloopd doctor', () => {
     expect(formatDevloopDoctorReport(report, { verbose: true })).toContain('OpenCode auth store');
   });
 
+  it('retries the OpenCode auth store check when the local database is briefly locked', async () => {
+    writeProjectConfig(projectDir, [
+      'subscription_only: true',
+      'provider: opencode',
+      'model: opencode-go/kimi-k2.7-code',
+      'allowed_providers: [codex-cli, opencode, mock]',
+    ].join('\n'));
+    invalidateAllResolvedConfigCache();
+    let authAttempts = 0;
+    const runner: DevloopDoctorCommandRunner = {
+      resolveCommand(command) {
+        return command === 'agent' ? undefined : `/mock/bin/${command}`;
+      },
+      async exec(command, args) {
+        if (command === 'gh' && args.join(' ') === 'auth status') {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+        if (command.endsWith('/opencode') && args.join(' ') === 'auth list') {
+          authAttempts += 1;
+          if (authAttempts === 1) {
+            return { exitCode: 1, stdout: '', stderr: 'database is locked' };
+          }
+          return { exitCode: 0, stdout: 'OpenCode Go', stderr: '' };
+        }
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    };
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(report.passed).toBe(true);
+    expect(authAttempts).toBe(2);
+    expect(report.checks).toContainEqual({
+      status: 'pass',
+      name: 'OpenCode auth store',
+      message: 'opencode auth list succeeded',
+    });
+  });
+
   it('warns about recent OpenCode SQLite storage errors when the OpenCode SDK provider is allowlisted', async () => {
     writeProjectConfig(projectDir, [
       'subscription_only: true',
@@ -210,6 +254,40 @@ describe('devloopd doctor', () => {
       message: expect.stringContaining('SQLite'),
     });
     expect(formatDevloopDoctorReport(report)).toContain('OpenCode storage');
+  });
+
+  it('does not keep warning about stale OpenCode SQLite errors after a newer clean log exists', async () => {
+    writeProjectConfig(projectDir, [
+      'subscription_only: true',
+      'provider: opencode',
+      'model: opencode-go/kimi-k2.7-code',
+      'allowed_providers: [codex-cli, opencode, mock]',
+    ].join('\n'));
+    const openCodeLogDir = join(projectDir, '.local', 'share', 'opencode', 'log');
+    mkdirSync(openCodeLogDir, { recursive: true });
+    const oldErrorLog = join(openCodeLogDir, '2026-06-25T101818.log');
+    const newCleanLog = join(openCodeLogDir, 'opencode.log');
+    writeFileSync(oldErrorLog, 'ERROR SQLiteError: NOT NULL constraint failed: session_message.seq\n', 'utf-8');
+    writeFileSync(newCleanLog, 'timestamp=2026-06-25T10:20:11.636Z level=INFO message=stream providerID=opencode-go\n', 'utf-8');
+    utimesSync(oldErrorLog, new Date('2026-06-25T10:18:18Z'), new Date('2026-06-25T10:18:18Z'));
+    utimesSync(newCleanLog, new Date('2026-06-25T10:20:11Z'), new Date('2026-06-25T10:20:11Z'));
+    invalidateAllResolvedConfigCache();
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      env: { PATH: '/mock/bin', HOME: projectDir },
+      runner: makeRunner(),
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.checks).toContainEqual({
+      status: 'pass',
+      name: 'OpenCode storage',
+      message: 'latest OpenCode log has no SQLite storage errors',
+      detail: newCleanLog,
+    });
+    expect(formatDevloopDoctorReport(report)).not.toContain('OpenCode storage');
   });
 
   it('treats an absent optional global TAKT config as a passing skipped check', async () => {

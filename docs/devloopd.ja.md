@@ -28,7 +28,7 @@ devloopd doctor --subscription-only
 - global / project の TAKT config に API key config キーが含まれていないこと
 - `.takt/workflows/` 配下の project workflow が TAKT workflow doctor に通り、subscription-only provider チェックにも通ること
 - `opencode` が明示的に allowlist されている場合、`opencode auth list` で OpenCode credential store を読めること
-- `opencode` が明示的に allowlist されている場合、直近の OpenCode log に既知の local SQLite storage error が出ていないこと
+- `opencode` が明示的に allowlist されている場合、読み取り可能な最新 OpenCode log に既知の local SQLite storage error が出ていないこと
 
 doctor は禁止された環境変数名と config キー名だけを表示します。secret 値は出力しません。
 
@@ -59,7 +59,7 @@ opencode run "Reply with exactly: Done"
 
 直接実行でも同じ失敗になる場合は、OpenCode の account / service 状態を確認してください。
 `devloopd doctor` が `OpenCode storage` を報告する場合、OpenCode credential store は読めていますが、
-直近 log に `session_message.seq` など local SQLite storage 問題の兆候があります。CLI / SDK smoke
+読み取り可能な最新 log に `session_message.seq` など local SQLite storage 問題の兆候があります。CLI / SDK smoke
 を通す前に、OpenCode の local database をバックアップまたは修復してください。global OpenCode MCP 設定の影響を
 除外したい場合は、inline の OpenCode config override で疑わしい MCP server を一時的に無効化して再試行できます。
 
@@ -341,5 +341,5 @@ allowlist 外の workflow step provider 上書き、allowlist 外の実行時 `-
 OpenCode Go/Zen など OpenCode 側の credential store を使って SDK 経路を使いたい場合は、
 `allowed_providers` に `opencode` を明示追加できます。この opt-in mode では、
 `devloopd doctor` も生成を伴わない credential-store check として `opencode auth list` を実行し、
-直近の OpenCode log に既知の local SQLite storage failure が出ていないか確認します。
+読み取り可能な最新 OpenCode log に既知の local SQLite storage failure が出ていないか確認します。
 TAKT は引き続き `opencode_api_key` と `TAKT_OPENCODE_API_KEY` を拒否します。

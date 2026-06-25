@@ -28,7 +28,7 @@ The command exits with status `0` when every required check passes. It exits wit
 - global and project TAKT config files do not contain API key config keys
 - project workflows under `.takt/workflows/` pass TAKT workflow doctor validation, including subscription-only provider checks
 - OpenCode credential store is readable with `opencode auth list` when `opencode` is explicitly allowlisted
-- recent OpenCode logs do not show known local SQLite storage errors when `opencode` is explicitly allowlisted
+- the latest readable OpenCode log does not show known local SQLite storage errors when `opencode` is explicitly allowlisted
 
 The doctor reports forbidden environment variables and config keys by name only. It does not print secret values.
 
@@ -59,7 +59,7 @@ opencode run "Reply with exactly: Done"
 
 If the direct command fails the same way, check the OpenCode account and service
 state. If `devloopd doctor` reports `OpenCode storage`, the OpenCode credential
-store is readable but recent logs indicate a local SQLite storage problem such as
+store is readable but the latest readable log indicates a local SQLite storage problem such as
 `session_message.seq`; back up or repair the local OpenCode database before
 expecting CLI or SDK smoke runs to pass. To rule out global OpenCode MCP
 configuration, temporarily disable a suspect MCP server with an inline OpenCode
@@ -344,5 +344,5 @@ workflow step provider overrides outside the allowlist, and execution-time
 to `allowed_providers` when the OpenCode SDK path should use OpenCode's own
 credential store, such as OpenCode Go/Zen. In that opt-in mode, `devloopd doctor`
 also runs `opencode auth list` as a non-generating credential-store check and
-scans recent OpenCode logs for known local SQLite storage failures.
+checks the latest readable OpenCode log for known local SQLite storage failures.
 TAKT still rejects `opencode_api_key` and `TAKT_OPENCODE_API_KEY`.

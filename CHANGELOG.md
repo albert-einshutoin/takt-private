@@ -33,9 +33,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   TAKT-managed `opencode_api_key` config and `TAKT_OPENCODE_API_KEY` remain forbidden in
   subscription-only mode, and `devloopd doctor` checks `opencode auth list` when `opencode` is
   allowlisted.
-- `devloopd doctor --subscription-only` now warns when recent OpenCode logs show a known local
-  SQLite storage failure such as `session_message.seq`, helping users separate OpenCode auth-store
-  readiness from local OpenCode database repair work.
+- `devloopd doctor --subscription-only` now checks the latest readable OpenCode log for known local
+  SQLite storage failures such as `session_message.seq`, helping users separate current OpenCode
+  auth-store readiness from local OpenCode database repair work without stale warnings after a
+  fixed CLI run succeeds.
 - `devloopd doctor --subscription-only --smoke-cli` now adds OpenCode-specific diagnostics when
   `smoke:opencode-cli` fails with a server-side `UnknownError`, including direct `opencode run`
   and inline `OPENCODE_CONFIG_CONTENT` checks so subscription-only users can separate TAKT config
