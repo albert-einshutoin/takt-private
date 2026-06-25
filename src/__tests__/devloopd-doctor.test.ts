@@ -163,6 +163,113 @@ describe('devloopd doctor', () => {
     });
   });
 
+  it('runs bounded real CLI smoke checks only when requested', async () => {
+    const execCalls: Array<{
+      command: string;
+      args: readonly string[];
+      stdin?: string;
+      timeoutMs?: number;
+    }> = [];
+    const runner: DevloopDoctorCommandRunner = {
+      resolveCommand(command) {
+        return command === 'agent' ? undefined : `/mock/bin/${command}`;
+      },
+      async exec(command, args, options) {
+        execCalls.push({ command, args, stdin: options?.stdin, timeoutMs: options?.timeoutMs });
+        if (command === 'gh' && args.join(' ') === 'auth status') {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+        return { exitCode: 0, stdout: 'Done', stderr: '' };
+      },
+    };
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      smokeCli: true,
+      smokeTimeoutMs: 1_234,
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.checks.map((check) => check.name)).toEqual(expect.arrayContaining([
+      'smoke:codex-cli',
+      'smoke:cursor-cli',
+      'smoke:opencode-cli',
+      'smoke:agy-cli',
+    ]));
+    expect(execCalls).toContainEqual(expect.objectContaining({
+      command: '/mock/bin/codex',
+      stdin: 'Reply with exactly: Done',
+      timeoutMs: 1_234,
+    }));
+    expect(execCalls).toContainEqual(expect.objectContaining({
+      command: '/mock/bin/opencode',
+      args: ['run', 'Reply with exactly: Done'],
+      timeoutMs: 1_234,
+    }));
+  });
+
+  it('fails the optional CLI smoke check when a provider command exits unsuccessfully', async () => {
+    const runner: DevloopDoctorCommandRunner = {
+      resolveCommand(command) {
+        return command === 'agent' ? undefined : `/mock/bin/${command}`;
+      },
+      async exec(command, args) {
+        if (command === 'gh' && args.join(' ') === 'auth status') {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+        if (command.endsWith('/opencode')) {
+          return { exitCode: 1, stdout: '', stderr: '\x1b[91mUnknownError\x1b[0m: Unexpected server error' };
+        }
+        return { exitCode: 0, stdout: 'Done', stderr: '' };
+      },
+    };
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      smokeCli: true,
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(report.passed).toBe(false);
+    const output = formatDevloopDoctorReport(report);
+    expect(output).toContain('smoke:opencode-cli');
+    expect(output).toContain('Unexpected server error');
+    expect(output).not.toContain('\x1b');
+  });
+
+  it('skips optional CLI smoke checks when prerequisite doctor checks fail', async () => {
+    const execCalls: string[] = [];
+    const runner: DevloopDoctorCommandRunner = {
+      resolveCommand(command) {
+        return command === 'agy' ? undefined : `/mock/bin/${command}`;
+      },
+      async exec(command, args) {
+        execCalls.push(`${command} ${args.join(' ')}`);
+        if (command === 'gh' && args.join(' ') === 'auth status') {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+        return { exitCode: 0, stdout: 'Done', stderr: '' };
+      },
+    };
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      smokeCli: true,
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(report.passed).toBe(false);
+    expect(formatDevloopDoctorReport(report)).toContain('subscription CLI smoke');
+    expect(execCalls).toEqual(['gh auth status']);
+  });
+
   it('hides passing check details unless verbose is enabled', () => {
     const report = {
       passed: true,

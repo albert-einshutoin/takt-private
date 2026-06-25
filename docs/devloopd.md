@@ -34,6 +34,17 @@ When `devloopd` is run from a source checkout before `npm link` or global instal
 the `takt` command check accepts the adjacent `bin/takt` wrapper under the inspected
 repository. Other provider CLIs must still be installed and discoverable on `PATH`.
 
+By default, `doctor` only verifies local configuration, command discovery, and authentication
+state. Add `--smoke-cli` when you want bounded real CLI generation checks for `codex-cli`,
+`cursor-cli`, `opencode-cli`, and `agy-cli`:
+
+```bash
+devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
+```
+
+Smoke checks run only after prerequisite doctor checks pass. They use the subscription-only
+environment sanitizer and fail instead of hanging when a CLI exceeds the timeout.
+
 ### Options
 
 | Option | Description |
@@ -43,6 +54,8 @@ repository. Other provider CLIs must still be installed and discoverable on `PAT
 | `--policy <path>` | Optional devloop policy YAML path. Defaults to `.takt/devloopd.yaml` when that file exists |
 | `--verbose` | Show passing checks as well as warnings and failures |
 | `--skip-auth` | Skip `gh auth status` |
+| `--smoke-cli` | Run bounded real CLI smoke checks for subscription-only providers |
+| `--smoke-timeout-ms <ms>` | Per-provider CLI smoke timeout. Defaults to 60000 |
 
 ### Optional Policy File
 

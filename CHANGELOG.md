@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `opencode-cli` provider runs now pass `--model/-m` through to `opencode run`, matching OpenCode's provider/model CLI contract for subscription-only smoke runs.
+- `devloopd doctor --subscription-only --smoke-cli` now runs bounded real CLI smoke checks for `codex-cli`, `cursor-cli`, `opencode-cli`, and `agy-cli`. The default doctor remains non-billing/non-generating unless smoke is explicitly requested.
 - `agy-cli` provider runs now accept `provider_options.agy.print_timeout`, passed through as `agy --print-timeout`, so Antigravity subscription-only smoke runs can fail boundedly instead of waiting for the CLI default timeout.
 - `devloopd doctor --subscription-only` now auto-discovers `.takt/devloopd.yaml` and treats absent optional TAKT config files as skipped checks instead of warning. Project-local subscription-only readiness can now be green from a source checkout with no global TAKT config.
 - `devloopd doctor --subscription-only` now accepts a source checkout's adjacent `bin/takt` wrapper when `takt` is not installed on `PATH`. This lets local development checkouts verify subscription-only readiness before `npm link` or global installation.
