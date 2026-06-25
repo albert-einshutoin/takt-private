@@ -7,20 +7,23 @@ import type { PermissionMode } from './status.js';
 export const DEFAULT_PROVIDER_PROFILE_PERMISSION_MODE: PermissionMode = 'edit';
 
 /** Supported providers for profile-based permission resolution. */
-export type ProviderProfileName =
-  | 'claude'
-  | 'claude-sdk'
-  | 'claude-terminal'
-  | 'codex'
-  | 'codex-cli'
-  | 'opencode'
-  | 'opencode-cli'
-  | 'cursor'
-  | 'cursor-cli'
-  | 'copilot'
-  | 'kiro'
-  | 'agy-cli'
-  | 'mock';
+export const PROVIDER_PROFILE_NAMES = [
+  'claude',
+  'claude-sdk',
+  'claude-terminal',
+  'codex',
+  'codex-cli',
+  'opencode',
+  'opencode-cli',
+  'cursor',
+  'cursor-cli',
+  'copilot',
+  'kiro',
+  'agy-cli',
+  'mock',
+] as const;
+
+export type ProviderProfileName = (typeof PROVIDER_PROFILE_NAMES)[number];
 
 /** Permission profile for a single provider. */
 export interface ProviderPermissionProfile {

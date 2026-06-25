@@ -10,6 +10,7 @@ import {
   hasProviderOptionsPath,
   toProviderOptionsTracePath,
 } from './providerOptionsContract.js';
+import { PROVIDER_PROFILES_TRACKED_KEYS } from './providerProfilesContract.js';
 import {
   getCachedProjectConfig,
   getCachedResolvedValue,
@@ -24,6 +25,7 @@ import type {
   ProviderOptionsTraceOrigin,
 } from '../../core/workflow/provider-options-trace.js';
 import type { StepProviderOptions } from '../../core/models/workflow-types.js';
+import type { ProviderPermissionProfile, ProviderPermissionProfiles } from '../../core/models/provider-profiles.js';
 
 export type { ConfigParameterKey } from './resolvedConfig.js';
 export { invalidateResolvedConfigCache, invalidateAllResolvedConfigCache } from './resolutionCache.js';
@@ -48,7 +50,7 @@ export interface ResolvedConfigValue<K extends ConfigParameterKey> {
 type ResolutionLayer = 'local' | 'workflow' | 'global';
 interface ResolutionRule<K extends ConfigParameterKey> {
   layers: readonly ResolutionLayer[];
-  mergeMode?: 'analytics' | 'observability';
+  mergeMode?: 'analytics' | 'observability' | 'providerProfiles';
   workflowValue?: (workflowContext: WorkflowContext | undefined) => LoadedConfig[K] | undefined;
 }
 
@@ -95,6 +97,7 @@ const RESOLUTION_REGISTRY: Partial<{ [K in ConfigParameterKey]: ResolutionRule<K
   draftPr: { layers: ['local', 'global'] },
   analytics: { layers: ['local', 'global'], mergeMode: 'analytics' },
   observability: { layers: ['local', 'global'], mergeMode: 'observability' },
+  providerProfiles: { layers: ['local', 'global'], mergeMode: 'providerProfiles' },
   autoFetch: { layers: ['global'] },
   baseBranch: { layers: ['local', 'global'] },
   workflowOverrides: { layers: ['local', 'global'] },
@@ -142,6 +145,65 @@ function resolveObservabilitySource(
   return 'default';
 }
 
+function mergeProviderProfiles(
+  globalProfiles: ProviderPermissionProfiles | undefined,
+  projectProfiles: ProviderPermissionProfiles | undefined,
+): ProviderPermissionProfiles | undefined {
+  if (!globalProfiles && !projectProfiles) {
+    return undefined;
+  }
+
+  const providers = new Set([
+    ...Object.keys(projectProfiles ?? {}),
+    ...Object.keys(globalProfiles ?? {}),
+  ] as Array<keyof ProviderPermissionProfiles>);
+  const merged: ProviderPermissionProfiles = {};
+
+  for (const provider of providers) {
+    const globalProfile = globalProfiles?.[provider];
+    const projectProfile = projectProfiles?.[provider];
+    const defaultPermissionMode = projectProfile?.defaultPermissionMode ?? globalProfile?.defaultPermissionMode;
+    if (!defaultPermissionMode) {
+      continue;
+    }
+
+    const stepPermissionOverrides = {
+      ...(globalProfile?.stepPermissionOverrides ?? {}),
+      ...(projectProfile?.stepPermissionOverrides ?? {}),
+    };
+    const profile: ProviderPermissionProfile = { defaultPermissionMode };
+    if (Object.keys(stepPermissionOverrides).length > 0) {
+      // Global step overrides must remain above a project provider default; project step overrides still win.
+      profile.stepPermissionOverrides = stepPermissionOverrides;
+    }
+    merged[provider] = profile;
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function resolveProviderProfilesSource(
+  projectDir: string,
+  project: ReturnType<typeof loadProjectConfigCached>,
+  global: ReturnType<typeof globalConfigModule.loadGlobalConfig>,
+): ConfigValueSource {
+  if (!project.providerProfiles && !global.providerProfiles) {
+    return 'default';
+  }
+  const projectTrace = loadProjectConfigTraceState(projectDir);
+  const globalTrace = loadGlobalConfigTraceState();
+  if (project.providerProfiles && getProviderProfilesSource(projectTrace) === 'env') {
+    return 'env';
+  }
+  if (global.providerProfiles && getProviderProfilesSource(globalTrace) === 'env') {
+    return 'env';
+  }
+  if (project.providerProfiles) {
+    return 'project';
+  }
+  return 'global';
+}
+
 function getLocalLayerValue<K extends ConfigParameterKey>(
   project: ReturnType<typeof loadProjectConfigCached>,
   key: K,
@@ -174,6 +236,12 @@ function resolveByRegistry<K extends ConfigParameterKey>(
     return {
       value: resolveObservabilityMerged(project, global) as LoadedConfig[K],
       source: resolveObservabilitySource(project, global),
+    };
+  }
+  if (rule.mergeMode === 'providerProfiles') {
+    return {
+      value: mergeProviderProfiles(global.providerProfiles, project.providerProfiles) as LoadedConfig[K],
+      source: resolveProviderProfilesSource(projectDir, project, global),
     };
   }
 
@@ -400,6 +468,31 @@ function getProviderOptionsSource(trace: TracedConfigState): ConfigValueSource {
       return 'env';
     }
     if (origin === 'cli') {
+      return 'env';
+    }
+    if (origin === 'local') {
+      sawLocal = true;
+      continue;
+    }
+    if (origin === 'global') {
+      sawGlobal = true;
+    }
+  }
+  if (sawLocal) {
+    return 'project';
+  }
+  if (sawGlobal) {
+    return 'global';
+  }
+  return 'default';
+}
+
+function getProviderProfilesSource(trace: TracedConfigState): ConfigValueSource {
+  let sawLocal = false;
+  let sawGlobal = false;
+  for (const path of PROVIDER_PROFILES_TRACKED_KEYS) {
+    const origin = trace.getOrigin(path);
+    if (origin === 'env' || origin === 'cli') {
       return 'env';
     }
     if (origin === 'local') {

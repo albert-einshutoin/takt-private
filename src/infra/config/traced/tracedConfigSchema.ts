@@ -9,6 +9,10 @@ import {
 import {
   PROVIDER_OPTIONS_TRACKED_KEYS,
 } from '../providerOptionsContract.js';
+import {
+  PROVIDER_PROFILES_TRACKED_KEYS,
+  getProviderProfilesTrackedKeys,
+} from '../providerProfilesContract.js';
 
 const PROJECT_TRACKED_KEYS = [
   'subscription_only',
@@ -71,7 +75,7 @@ const PROJECT_TRACKED_KEYS = [
   'observability.monitor',
   'observability.session_log_exporter',
   'observability.usage_events_phase',
-  'provider_profiles',
+  ...PROVIDER_PROFILES_TRACKED_KEYS,
   'rate_limit_fallback',
   'rate_limit_fallback.switch_chain',
   'base_branch',
@@ -147,7 +151,7 @@ const GLOBAL_TRACKED_KEYS = [
   'cursor_api_key',
   'bookmarks_file',
   'workflow_categories_file',
-  'provider_profiles',
+  ...PROVIDER_PROFILES_TRACKED_KEYS,
   'rate_limit_fallback',
   'rate_limit_fallback.switch_chain',
   'workflow_overrides',
@@ -237,6 +241,16 @@ function buildTracedSchema(
   return schema;
 }
 
+function withProviderProfileKeys(
+  keys: readonly string[],
+  parsedConfig?: Record<string, unknown>,
+): readonly string[] {
+  if (!parsedConfig) {
+    return keys;
+  }
+  return [...new Set([...keys, ...getProviderProfilesTrackedKeys(parsedConfig)])];
+}
+
 const globalTracedSchema = buildTracedSchema(
   GLOBAL_TRACKED_KEYS,
   GLOBAL_ENV_SPECS,
@@ -250,10 +264,26 @@ const projectTracedSchema = buildTracedSchema(
   'local',
 );
 
-export function getGlobalTracedSchema(): SchemaShape {
-  return globalTracedSchema;
+export function getGlobalTracedSchema(parsedConfig?: Record<string, unknown>): SchemaShape {
+  if (!parsedConfig) {
+    return globalTracedSchema;
+  }
+  return buildTracedSchema(
+    withProviderProfileKeys(GLOBAL_TRACKED_KEYS, parsedConfig),
+    GLOBAL_ENV_SPECS,
+    GLOBAL_DEFAULTS,
+    'global',
+  );
 }
 
-export function getProjectTracedSchema(): SchemaShape {
-  return projectTracedSchema;
+export function getProjectTracedSchema(parsedConfig?: Record<string, unknown>): SchemaShape {
+  if (!parsedConfig) {
+    return projectTracedSchema;
+  }
+  return buildTracedSchema(
+    withProviderProfileKeys(PROJECT_TRACKED_KEYS, parsedConfig),
+    PROJECT_ENV_SPECS,
+    new Map(),
+    'local',
+  );
 }

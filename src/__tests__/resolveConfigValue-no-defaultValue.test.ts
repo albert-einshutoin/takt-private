@@ -321,6 +321,83 @@ describe('config resolution defaults and project-local priority', () => {
       });
     });
 
+    it('merges provider_profiles per provider without dropping global-only providers', () => {
+      writeFileSync(
+        globalConfigPath,
+        [
+          'language: en',
+          'provider_profiles:',
+          '  codex:',
+          '    default_permission_mode: edit',
+          '    step_permission_overrides:',
+          '      implement: full',
+        ].join('\n'),
+        'utf-8',
+      );
+      const projectConfigDir = getProjectConfigDir(projectDir);
+      mkdirSync(projectConfigDir, { recursive: true });
+      writeFileSync(
+        join(projectConfigDir, 'config.yaml'),
+        [
+          'provider_profiles:',
+          '  claude:',
+          '    default_permission_mode: full',
+        ].join('\n'),
+        'utf-8',
+      );
+      invalidateGlobalConfigCache();
+      invalidateAllResolvedConfigCache();
+
+      expect(resolveConfigValue(projectDir, 'providerProfiles')).toEqual({
+        claude: {
+          defaultPermissionMode: 'full',
+        },
+        codex: {
+          defaultPermissionMode: 'edit',
+          stepPermissionOverrides: {
+            implement: 'full',
+          },
+        },
+      });
+    });
+
+    it('keeps global step overrides above project provider defaults when provider_profiles are merged', () => {
+      writeFileSync(
+        globalConfigPath,
+        [
+          'language: en',
+          'provider_profiles:',
+          '  codex:',
+          '    default_permission_mode: full',
+          '    step_permission_overrides:',
+          '      implement: edit',
+        ].join('\n'),
+        'utf-8',
+      );
+      const projectConfigDir = getProjectConfigDir(projectDir);
+      mkdirSync(projectConfigDir, { recursive: true });
+      writeFileSync(
+        join(projectConfigDir, 'config.yaml'),
+        [
+          'provider_profiles:',
+          '  codex:',
+          '    default_permission_mode: readonly',
+        ].join('\n'),
+        'utf-8',
+      );
+      invalidateGlobalConfigCache();
+      invalidateAllResolvedConfigCache();
+
+      expect(resolveConfigValue(projectDir, 'providerProfiles')).toEqual({
+        codex: {
+          defaultPermissionMode: 'readonly',
+          stepPermissionOverrides: {
+            implement: 'edit',
+          },
+        },
+      });
+    });
+
   });
 
   describe('autoFetch', () => {

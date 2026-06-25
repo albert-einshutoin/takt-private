@@ -166,6 +166,66 @@ describe('traced config boundaries', () => {
     }
   });
 
+  it('provider_profiles は provider と step override 単位で raw config と origin を追跡する', () => {
+    const tempDir = join(tmpdir(), `takt-traced-provider-profiles-${randomUUID()}`);
+    const projectConfigDir = join(tempDir, 'project', '.takt');
+    const globalConfigDir = join(tempDir, 'global');
+    const projectConfigPath = join(projectConfigDir, 'config.yaml');
+    const globalConfigPath = join(globalConfigDir, 'config.yaml');
+    mkdirSync(projectConfigDir, { recursive: true });
+    mkdirSync(globalConfigDir, { recursive: true });
+    writeFileSync(
+      projectConfigPath,
+      [
+        'provider_profiles:',
+        '  claude:',
+        '    default_permission_mode: full',
+        '    step_permission_overrides:',
+        '      review: edit',
+      ].join('\n'),
+      'utf-8',
+    );
+    writeFileSync(
+      globalConfigPath,
+      [
+        'provider_profiles:',
+        '  codex:',
+        '    default_permission_mode: edit',
+        '    step_permission_overrides:',
+        '      implement: full',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    try {
+      const projectTraceResult = loadProjectConfigTrace(projectConfigPath, []);
+      const globalTraceResult = loadGlobalConfigTrace(globalConfigPath, (value) => value, []);
+
+      expect(projectTraceResult.rawConfig.provider_profiles).toEqual({
+        claude: {
+          default_permission_mode: 'full',
+          step_permission_overrides: {
+            review: 'edit',
+          },
+        },
+      });
+      expect(globalTraceResult.rawConfig.provider_profiles).toEqual({
+        codex: {
+          default_permission_mode: 'edit',
+          step_permission_overrides: {
+            implement: 'full',
+          },
+        },
+      });
+      expect(projectTraceResult.trace.getOrigin('provider_profiles.claude.default_permission_mode')).toBe('local');
+      expect(projectTraceResult.trace.getOrigin('provider_profiles.claude.step_permission_overrides.review')).toBe('local');
+      expect(globalTraceResult.trace.getOrigin('provider_profiles.codex.default_permission_mode')).toBe('global');
+      expect(globalTraceResult.trace.getOrigin('provider_profiles.codex.step_permission_overrides.implement')).toBe('global');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('project/global config loader は sync_project_local_takt_on_retry の origin を env として記録する', () => {
     const tempDir = join(tmpdir(), `takt-traced-sync-retry-${randomUUID()}`);
     const projectConfigDir = join(tempDir, 'project', '.takt');
