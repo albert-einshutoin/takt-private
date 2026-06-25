@@ -19,6 +19,8 @@ import type { Language } from '../../core/models/types.js';
 import { renderTemplate } from 'faceted-prompting';
 
 export { renderTemplate } from 'faceted-prompting';
+export { composeTaktPromptPayload } from './facetedPayload.js';
+export type { ComposeTaktPromptPayloadParams } from './facetedPayload.js';
 
 /** Cached raw template text (before variable substitution) */
 const templateCache = new Map<string, string>();
