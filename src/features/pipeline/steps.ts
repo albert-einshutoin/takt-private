@@ -8,6 +8,10 @@ import type { Issue } from '../../infra/git/index.js';
 import { resolveConfigValue } from '../../infra/config/index.js';
 import { stageAndCommit, resolveBaseBranch, resolveBaseBranchName, pushBranch, checkoutBranch, getCurrentBranch } from '../../infra/task/index.js';
 import { executeTask, confirmAndCreateWorktree, type ExecuteTaskOptions, type TaskExecutionOptions, type PipelineExecutionOptions } from '../tasks/index.js';
+import { prepareTaskSpecDirectory, cleanupPreparedTaskSpec, type TaskAttachment } from '../tasks/attachments.js';
+import { stageTaskSpecForExecution } from '../tasks/execute/taskSpecContext.js';
+import { collectPrImageAttachments } from '../tasks/prImageAttachments.js';
+import { generateExecutionReportDir } from '../../core/workflow/run/run-slug.js';
 import { info, error, success } from '../../shared/ui/index.js';
 import { statusLine } from '../../shared/ui/StatusLine.js';
 import { getErrorMessage } from '../../shared/utils/index.js';
@@ -20,6 +24,7 @@ export interface TaskContent {
   issue?: Issue;
   prBranch?: string;
   prBaseBranch?: string;
+  attachments?: TaskAttachment[];
 }
 
 export interface GitExecutionContext {
@@ -141,7 +146,7 @@ function fetchVcsResource<T>(
   }
 }
 
-export function resolveTaskContent(options: PipelineExecutionOptions): TaskContent | undefined {
+export async function resolveTaskContent(options: PipelineExecutionOptions): Promise<TaskContent | undefined> {
   const { cwd } = options;
   if (options.prNumber) {
     info(`Fetching PR #${options.prNumber} review comments...`);
@@ -151,12 +156,24 @@ export function resolveTaskContent(options: PipelineExecutionOptions): TaskConte
       (provider) => provider.fetchPrReviewComments(options.prNumber!, cwd),
     );
     if (!prReview) return undefined;
-    const task = formatPrReviewAsTask(prReview);
+    const formattedTask = formatPrReviewAsTask(prReview);
+    let prImages: Awaited<ReturnType<typeof collectPrImageAttachments>>;
+    try {
+      prImages = await collectPrImageAttachments(prReview, cwd);
+    } catch (err) {
+      error(`Failed to download PR image attachments for PR #${options.prNumber}: ${getErrorMessage(err)}`);
+      return undefined;
+    }
+    const task = prImages.rewriteTaskContent(formattedTask);
+    if (prImages.attachments.length > 0) {
+      success(`PR image attachments downloaded: ${prImages.attachments.length}`);
+    }
     success(`PR #${options.prNumber} fetched: "${sanitizeTerminalText(prReview.title)}"`);
     return {
       task,
       prBranch: prReview.headRefName,
       prBaseBranch: prReview.baseRefName,
+      ...(prImages.attachments.length > 0 ? { attachments: prImages.attachments } : {}),
     };
   }
   if (options.issueNumber) {
@@ -237,7 +254,7 @@ export async function resolveExecutionContext(
 export async function runWorkflow(
   projectCwd: string,
   workflow: string,
-  task: string,
+  taskContent: TaskContent,
   execCwd: string,
   options: Pick<PipelineExecutionOptions, 'provider' | 'model' | 'issueNumber' | 'prNumber'>,
   context: ExecutionContext,
@@ -250,17 +267,31 @@ export async function runWorkflow(
 
   statusLine.start('Running...');
   let taskSuccess: boolean;
+  let preparedSpec: ReturnType<typeof prepareTaskSpecDirectory> | undefined;
   try {
+    let executionTask = taskContent.task;
+    let reportDirName: string | undefined;
+    if (taskContent.attachments && taskContent.attachments.length > 0) {
+      const timezone = resolveConfigValue(projectCwd, 'timezone');
+      preparedSpec = prepareTaskSpecDirectory(projectCwd, taskContent.task, taskContent.attachments);
+      reportDirName = generateExecutionReportDir(execCwd, taskContent.task, { timezone });
+      const stagedSpec = stageTaskSpecForExecution(projectCwd, execCwd, preparedSpec.taskDirRelative, reportDirName);
+      executionTask = stagedSpec.taskPrompt;
+    }
     taskSuccess = await executeTask({
-      task,
+      task: executionTask,
       cwd: execCwd,
       workflowIdentifier: workflow,
       projectCwd,
       agentOverrides,
+      ...(reportDirName ? { reportDirName } : {}),
       traceTaskContext: buildPipelineTraceTaskContext(options, context),
     });
   } finally {
     statusLine.stop();
+    if (preparedSpec) {
+      cleanupPreparedTaskSpec(preparedSpec.taskDir);
+    }
   }
 
   if (!taskSuccess) {

@@ -6,6 +6,7 @@ import { parse as parseYaml } from 'yaml';
 
 const mockCheckCliStatus = vi.fn();
 const mockFetchPrReviewComments = vi.fn();
+const mockCollectPrImageAttachments = vi.fn();
 
 vi.mock('../features/interactive/index.js', () => ({
   interactiveMode: vi.fn(),
@@ -35,6 +36,10 @@ vi.mock('../shared/utils/index.js', async (importOriginal) => ({
 
 vi.mock('../features/tasks/execute/selectAndExecute.js', () => ({
   determineWorkflow: vi.fn(),
+}));
+
+vi.mock('../features/tasks/prImageAttachments.js', () => ({
+  collectPrImageAttachments: (...args: unknown[]) => mockCollectPrImageAttachments(...args),
 }));
 
 vi.mock('../infra/task/index.js', async (importOriginal) => ({
@@ -128,6 +133,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   testDir = fs.mkdtempSync(path.join(tmpdir(), 'takt-test-'));
   mockDetermineWorkflow.mockResolvedValue('default');
+  mockCollectPrImageAttachments.mockResolvedValue({
+    attachments: [],
+    rewriteTaskContent: (taskContent: string) => taskContent,
+  });
   mockConfirm.mockResolvedValue(false);
   mockGetCurrentBranch.mockReturnValue('main');
   mockBranchExists.mockReturnValue(true);
@@ -299,6 +308,39 @@ describe('addTask', () => {
     const task = loadTasks(testDir).tasks[0]!;
     expect(task.base_branch).toBe('release/main');
     expect(task.should_publish_branch_to_origin).toBe(true);
+  });
+
+  it('should persist downloaded PR image attachments when PR body has images but no review comments', async () => {
+    const tempAttachmentDir = path.join(testDir, 'tmp-pr-images');
+    fs.mkdirSync(tempAttachmentDir, { recursive: true });
+    const tempPath = path.join(tempAttachmentDir, 'image-1.png');
+    fs.writeFileSync(tempPath, 'png-data', 'utf-8');
+    const prReview = createMockPrReview({
+      body: 'Please inspect ![shot](https://github.com/user-attachments/assets/abc).',
+      comments: [],
+      reviews: [],
+    });
+    mockFetchPrReviewComments.mockReturnValue(prReview);
+    mockFormatPrReviewAsTask.mockReturnValue('Please inspect original image markdown.');
+    mockCollectPrImageAttachments.mockResolvedValue({
+      attachments: [{
+        placeholder: '[Image #1]',
+        tempPath,
+        fileName: 'image-1.png',
+      }],
+      rewriteTaskContent: (taskContent: string) => taskContent.replace('original image markdown', '[Image #1]'),
+    });
+
+    await addTaskWithPrOption(testDir, 'placeholder', 456);
+
+    expect(mockCollectPrImageAttachments).toHaveBeenCalledWith(prReview, testDir);
+    const task = loadTasks(testDir).tasks[0]!;
+    const orderContent = readOrderContent(testDir, task.task_dir);
+    expect(orderContent).toContain('Please inspect [Image #1].');
+    expect(orderContent).toContain('- [Image #1]: `attachments/image-1.png`');
+    expect(fs.readFileSync(path.join(testDir, String(task.task_dir), 'attachments', 'image-1.png'), 'utf-8')).toBe('png-data');
+    expect(task.source).toBe('pr_review');
+    expect(task.pr_number).toBe(456);
   });
 
   it('should not create a PR task when PR has no review comments', async () => {
