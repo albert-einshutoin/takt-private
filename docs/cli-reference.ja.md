@@ -27,6 +27,8 @@
 
 正式オプションは `--workflow` です。
 
+`--pr` が review context から task を作成する場合、生成される order file の先頭には修正焦点の triage として `Current Fix Requirements`、`Needs Current-Code Recheck`、`Triage Notes`、`Reference Context` が入ります。active review thread と bot ではない会話コメントは現在の作業として扱い、outdated unresolved thread と legacy inline comment は最新コードでの再確認対象にします。resolved、bot/generated、summary、過去の PR context は下部に reference として保持します。
+
 ## devloopd
 
 `devloopd` は TAKT と一緒にインストールされる別バイナリです。長い workflow を実行する前に、サブスク/ログイン済み CLI provider だけで運用できる状態か確認します。

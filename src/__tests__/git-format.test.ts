@@ -59,6 +59,103 @@ describe('formatIssueAsTask', () => {
 });
 
 describe('formatPrReviewAsTask', () => {
+  it('should put fix-focused triage sections before archived review context', () => {
+    const prReview: PrReviewData = {
+      number: 16,
+      title: 'Fix focused PR',
+      body: 'PR description',
+      url: 'https://example.com/pr/16',
+      headRefName: 'feature-branch',
+      baseRefName: 'main',
+      comments: [
+        { author: 'maintainer', body: 'Please update the retry copy before merging.' },
+        { author: 'coderabbitai[bot]', body: 'Walkthrough and generated review metadata.' },
+      ],
+      reviews: [
+        { author: 'coderabbitai[bot]', body: 'Generated summary without a concrete finding.' },
+        {
+          author: 'coderabbitai[bot]',
+          body: 'Generated active suggestion should stay reference-only.',
+          path: 'src/generated.ts',
+          line: 3,
+          threadState: 'active',
+          isOutdated: false,
+        },
+        {
+          author: 'reviewer',
+          body: 'Current code still misses the retry guard.',
+          path: 'src/retry.ts',
+          line: 42,
+          threadState: 'active',
+          isOutdated: false,
+        },
+        {
+          author: 'reviewer',
+          body: 'Old comment may still apply to the queue path.',
+          path: 'src/queue.ts',
+          line: 12,
+          threadState: 'outdated-unresolved',
+          isOutdated: true,
+        },
+        {
+          author: 'reviewer',
+          body: 'Resolved comment retained for audit.',
+          path: 'src/done.ts',
+          line: 7,
+          threadState: 'resolved',
+          resolvedBy: 'maintainer',
+          isOutdated: true,
+        },
+      ],
+      files: ['src/retry.ts', 'src/queue.ts'],
+    };
+
+    const result = formatPrReviewAsTask(prReview);
+
+    expect(result).toContain('### Current Fix Requirements');
+    expect(result).toContain('- Conversation comment from maintainer: Please update the retry copy before merging.');
+    expect(result).toContain('- Active review thread from reviewer at src/retry.ts:42: Current code still misses the retry guard.');
+    expect(result).toContain('### Needs Current-Code Recheck');
+    expect(result).toContain('- Outdated unresolved thread from reviewer at src/queue.ts:12: Old comment may still apply to the queue path.');
+    expect(result).toContain('### Triage Notes');
+    expect(result).toContain('- 1 resolved/outdated thread retained as reference only; do not treat it as current work unless the same issue is verified in the latest diff.');
+    expect(result).toContain('- 3 bot/generated item(s) kept under reference context; do not promote them to implementation requirements without current-code evidence.');
+    expect(result).toContain('### Reference Context');
+    expect(result).toContain('- Review summaries, resolved threads, bot comments, PR description, conversation history, and changed files are preserved below for audit.');
+    expect(result).not.toContain('- Active review thread from coderabbitai[bot]');
+
+    const currentFixIndex = result.indexOf('### Current Fix Requirements');
+    const needsRecheckIndex = result.indexOf('### Needs Current-Code Recheck');
+    const triageNotesIndex = result.indexOf('### Triage Notes');
+    const referenceIndex = result.indexOf('### Reference Context');
+    const reviewSummaryIndex = result.indexOf('### Review Summaries');
+    const resolvedIndex = result.indexOf('### Resolved / Outdated Review Threads');
+    expect(currentFixIndex).toBeLessThan(needsRecheckIndex);
+    expect(needsRecheckIndex).toBeLessThan(triageNotesIndex);
+    expect(triageNotesIndex).toBeLessThan(referenceIndex);
+    expect(referenceIndex).toBeLessThan(reviewSummaryIndex);
+    expect(reviewSummaryIndex).toBeLessThan(resolvedIndex);
+  });
+
+  it('should mark ambiguous legacy inline review comments for current-code recheck', () => {
+    const prReview: PrReviewData = {
+      number: 17,
+      title: 'Legacy inline PR',
+      body: '',
+      url: 'https://example.com/pr/17',
+      headRefName: 'feature-branch',
+      comments: [],
+      reviews: [{ author: 'reviewer', body: 'This may still fail on Windows.', path: 'src/path.ts' }],
+      files: [],
+    };
+
+    const result = formatPrReviewAsTask(prReview);
+
+    expect(result).toContain('### Needs Current-Code Recheck');
+    expect(result).toContain('- Legacy inline review comment from reviewer at src/path.ts: This may still fail on Windows.');
+    expect(result).toContain('### Review Comments');
+  });
+
   it('should format legacy PR review data without provider-specific strings', () => {
     const prReview: PrReviewData = {
       number: 10,

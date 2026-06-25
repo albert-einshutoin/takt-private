@@ -150,6 +150,125 @@ function formatResolvedPrReviewComment(review: PrReviewComment): string {
   return lines.join('\n');
 }
 
+function normalizePrCommentBody(body: string): string {
+  return body.replace(/\s+/g, ' ').trim();
+}
+
+function summarizePrCommentBody(body: string): string {
+  const normalized = normalizePrCommentBody(body);
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized;
+}
+
+function isBotAuthor(author: string): boolean {
+  const normalized = author.toLowerCase();
+  return normalized.endsWith('[bot]') || normalized.endsWith('-bot') || normalized.includes('coderabbit');
+}
+
+function formatReviewLocation(review: PrReviewComment): string {
+  if (!review.path) {
+    return '';
+  }
+  return review.line !== undefined ? ` at ${review.path}:${review.line}` : ` at ${review.path}`;
+}
+
+function appendPrFixFocusedSections(
+  parts: string[],
+  prReview: PrReviewData,
+  groups: {
+    summaries: PrReviewComment[];
+    active: PrReviewComment[];
+    outdatedUnresolved: PrReviewComment[];
+    resolved: PrReviewComment[];
+    legacyInlineComments: PrReviewComment[];
+  },
+): void {
+  const currentFixRequirements: string[] = [];
+  const needsCurrentCodeRecheck: string[] = [];
+
+  for (const comment of prReview.comments) {
+    // Bot/generated material is kept for audit below, because generated review text often repeats stale context.
+    if (isBotAuthor(comment.author)) {
+      continue;
+    }
+    currentFixRequirements.push(
+      `- Conversation comment from ${comment.author}: ${summarizePrCommentBody(comment.body)}`,
+    );
+  }
+
+  for (const review of groups.active) {
+    if (isBotAuthor(review.author)) {
+      continue;
+    }
+    currentFixRequirements.push(
+      `- Active review thread from ${review.author}${formatReviewLocation(review)}: ${summarizePrCommentBody(review.body)}`,
+    );
+  }
+
+  for (const review of groups.outdatedUnresolved) {
+    // Outdated unresolved threads can still be real issues, but only after latest-code verification.
+    if (isBotAuthor(review.author)) {
+      continue;
+    }
+    needsCurrentCodeRecheck.push(
+      `- Outdated unresolved thread from ${review.author}${formatReviewLocation(review)}: ${summarizePrCommentBody(review.body)}`,
+    );
+  }
+
+  for (const review of groups.legacyInlineComments) {
+    if (isBotAuthor(review.author)) {
+      continue;
+    }
+    needsCurrentCodeRecheck.push(
+      `- Legacy inline review comment from ${review.author}${formatReviewLocation(review)}: ${summarizePrCommentBody(review.body)}`,
+    );
+  }
+
+  const botReferenceCount = [
+    ...prReview.comments,
+    ...groups.summaries,
+    ...groups.active,
+    ...groups.outdatedUnresolved,
+    ...groups.resolved,
+    ...groups.legacyInlineComments,
+  ].filter((comment) => isBotAuthor(comment.author)).length;
+
+  parts.push('');
+  parts.push('### Current Fix Requirements');
+  if (currentFixRequirements.length > 0) {
+    parts.push(...currentFixRequirements);
+  } else {
+    parts.push('- No current fix requirement could be classified deterministically. Inspect the recheck and reference sections before editing.');
+  }
+
+  parts.push('');
+  parts.push('### Needs Current-Code Recheck');
+  if (needsCurrentCodeRecheck.length > 0) {
+    parts.push(...needsCurrentCodeRecheck);
+  } else {
+    parts.push('- No unresolved outdated or legacy inline review comments were found.');
+  }
+
+  parts.push('');
+  parts.push('### Triage Notes');
+  if (groups.resolved.length > 0) {
+    // Resolved threads are preserved for audit but should not become work unless current code proves the issue still exists.
+    parts.push(`- ${groups.resolved.length} resolved/outdated thread${groups.resolved.length === 1 ? '' : 's'} retained as reference only; do not treat it as current work unless the same issue is verified in the latest diff.`);
+  }
+  if (botReferenceCount > 0) {
+    parts.push(`- ${botReferenceCount} bot/generated item(s) kept under reference context; do not promote them to implementation requirements without current-code evidence.`);
+  }
+  if (groups.summaries.length > 0) {
+    parts.push(`- ${groups.summaries.length} review summar${groups.summaries.length === 1 ? 'y is' : 'ies are'} retained as reference; verify concrete findings against the latest base...head diff.`);
+  }
+  if (groups.resolved.length === 0 && botReferenceCount === 0 && groups.summaries.length === 0) {
+    parts.push('- Deterministic triage found no resolved, bot-generated, or summary-only review material.');
+  }
+
+  parts.push('');
+  parts.push('### Reference Context');
+  parts.push('- Review summaries, resolved threads, bot comments, PR description, conversation history, and changed files are preserved below for audit.');
+}
+
 function appendReviewSection(
   parts: string[],
   title: string,
@@ -228,6 +347,14 @@ export function formatPrReviewAsTask(prReview: PrReviewData): string {
   }
 
   const hasThreadState = active.length > 0 || outdatedUnresolved.length > 0 || resolved.length > 0;
+  appendPrFixFocusedSections(parts, prReview, {
+    summaries,
+    active,
+    outdatedUnresolved,
+    resolved,
+    legacyInlineComments,
+  });
+
   if (hasThreadState) {
     parts.push('');
     parts.push('### Review Policy');
