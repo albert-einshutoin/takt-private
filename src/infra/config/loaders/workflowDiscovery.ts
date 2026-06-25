@@ -90,6 +90,7 @@ function loadWorkflowEntry(entry: WorkflowDirEntry, cwd: string): WorkflowConfig
     projectCwd: cwd,
     lookupCwd: cwd,
     source: entry.source,
+    loadMode: 'discovery',
   });
 }
 
