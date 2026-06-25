@@ -2,7 +2,11 @@ import { mkdtempSync, mkdirSync, existsSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { prepareRuntimeEnvironment, resolveRuntimeConfig } from '../core/runtime/runtime-environment.js';
+import {
+  buildPrepareScriptCommand,
+  prepareRuntimeEnvironment,
+  resolveRuntimeConfig,
+} from '../core/runtime/runtime-environment.js';
 
 describe('prepareRuntimeEnvironment', () => {
   const tempDirs: string[] = [];
@@ -249,6 +253,28 @@ describe('prepareRuntimeEnvironment', () => {
     expect(result?.injectedEnv.GLAB_CONFIG_DIR).toBe(explicitDir);
   });
 
+});
+
+describe('buildPrepareScriptCommand', () => {
+  it('should run prepare scripts directly on non-Windows platforms', () => {
+    expect(buildPrepareScriptCommand('/tmp/prepare-node.sh', 'linux')).toEqual({
+      executable: 'bash',
+      args: ['/tmp/prepare-node.sh'],
+    });
+  });
+
+  it('should convert Windows script paths inside bash before execution', () => {
+    const scriptPath = 'C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\takt\\dist\\core\\runtime\\presets\\prepare-gradle.sh';
+
+    const command = buildPrepareScriptCommand(scriptPath, 'win32');
+
+    expect(command.executable).toBe('bash');
+    expect(command.args[0]).toBe('-lc');
+    expect(command.args[1]).toContain('cygpath -u "$script_path"');
+    expect(command.args[1]).toContain('wslpath -u "$script_path"');
+    expect(command.args[1]).toContain('exec "$script_path"');
+    expect(command.args.at(-1)).toBe(scriptPath);
+  });
 });
 
 describe('resolveRuntimeConfig', () => {

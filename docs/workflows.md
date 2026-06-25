@@ -425,6 +425,8 @@ opencode:
 
 Runtime prepare scripts that run before workflow execution. Builtin presets `node` / `gradle` are always allowed. Custom script paths require `workflow_runtime_prepare.custom_scripts: true` in config.
 
+On Windows, runtime prepare still requires a `bash` executable. TAKT passes the script path through `cygpath` when running under Git Bash, or `wslpath` when running under WSL bash, before executing the prepare script.
+
 ```yaml
 workflow_config:
   runtime:

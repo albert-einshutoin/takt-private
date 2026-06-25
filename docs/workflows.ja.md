@@ -424,6 +424,8 @@ opencode:
 
 workflow 実行前に走る prepare スクリプト。ビルトインプリセットの `node` / `gradle` は常に許可されます。カスタムスクリプトパスを使うには config 側で `workflow_runtime_prepare.custom_scripts: true` を有効にする必要があります。
 
+Windows でも runtime prepare には `bash` executable が必要です。TAKT は Git Bash では `cygpath`、WSL bash では `wslpath` を使って script path を変換してから prepare script を実行します。
+
 ```yaml
 workflow_config:
   runtime:
