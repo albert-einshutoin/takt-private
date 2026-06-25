@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { info, error, success, status } from '../shared/ui/index.js';
 
@@ -20,6 +23,7 @@ const mockFetchPrReviewComments = vi.fn();
 const mockFormatPrReviewAsTask = vi.fn((pr: { number: number; title: string }) =>
   `## PR #${pr.number} Review Comments: ${pr.title}`
 );
+const mockCollectPrImageAttachments = vi.fn();
 
 vi.mock('../infra/git/index.js', () => ({
   getGitProvider: () => ({
@@ -49,6 +53,10 @@ const mockConfirmAndCreateWorktree = vi.fn();
 vi.mock('../features/tasks/index.js', () => ({
   executeTask: mockExecuteTask,
   confirmAndCreateWorktree: mockConfirmAndCreateWorktree,
+}));
+
+vi.mock('../features/tasks/prImageAttachments.js', () => ({
+  collectPrImageAttachments: (...args: unknown[]) => mockCollectPrImageAttachments(...args),
 }));
 
 const mockResolveConfigValues = vi.fn();
@@ -120,6 +128,10 @@ describe('executePipeline', () => {
     mockGetCurrentBranch.mockReturnValue('current/branch');
     mockResolveConfigValues.mockReturnValue({ pipeline: undefined });
     mockResolveConfigValue.mockReturnValue(undefined);
+    mockCollectPrImageAttachments.mockResolvedValue({
+      attachments: [],
+      rewriteTaskContent: (taskContent: string) => taskContent,
+    });
   });
 
   it('should return exit code 2 when neither --issue nor --task is specified', async () => {
@@ -1304,6 +1316,84 @@ describe('executePipeline', () => {
   });
 
   describe('--pr pipeline', () => {
+    it('should stage PR image attachments into the run context for --pr pipeline execution', async () => {
+      const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'takt-pipeline-pr-images-'));
+      const imageTempDir = path.join(projectDir, 'downloaded-images');
+      const imageTempPath = path.join(imageTempDir, 'image-1.png');
+      fs.mkdirSync(imageTempDir, { recursive: true });
+      fs.writeFileSync(imageTempPath, 'png-data', 'utf-8');
+      mockFetchPrReviewComments.mockReturnValueOnce({
+        number: 456,
+        title: 'Fix auth screenshot',
+        body: '![failure](https://github.com/user-attachments/assets/abc)',
+        url: 'https://github.com/org/repo/pull/456',
+        headRefName: 'fix/auth-bug',
+        baseRefName: 'main',
+        comments: [],
+        reviews: [],
+        files: ['src/auth.ts'],
+      });
+      mockFormatPrReviewAsTask.mockReturnValueOnce('Please inspect original screenshot.');
+      mockCollectPrImageAttachments.mockResolvedValueOnce({
+        attachments: [{
+          placeholder: '[Image #1]',
+          tempPath: imageTempPath,
+          fileName: 'image-1.png',
+        }],
+        rewriteTaskContent: (taskContent: string) => taskContent.replace('original screenshot', '[Image #1]'),
+      });
+      mockExecuteTask.mockResolvedValueOnce(true);
+
+      try {
+        const exitCode = await executePipeline({
+          prNumber: 456,
+          workflow: 'default',
+          autoPr: false,
+          skipGit: true,
+          cwd: projectDir,
+        });
+
+        expect(exitCode).toBe(0);
+        expect(mockCollectPrImageAttachments).toHaveBeenCalledWith(
+          expect.objectContaining({ number: 456 }),
+          projectDir,
+        );
+        const executeArg = mockExecuteTask.mock.calls[0]?.[0] as {
+          task: string;
+          reportDirName?: string;
+        };
+        expect(executeArg.reportDirName).toBeDefined();
+        expect(executeArg.task).toContain(`.takt/runs/${executeArg.reportDirName}/context/task/order.md`);
+        const stagedOrderPath = path.join(
+          projectDir,
+          '.takt',
+          'runs',
+          executeArg.reportDirName!,
+          'context',
+          'task',
+          'order.md',
+        );
+        const stagedOrderContent = fs.readFileSync(stagedOrderPath, 'utf-8');
+        expect(stagedOrderContent).toContain(
+          `.takt/runs/${executeArg.reportDirName}/context/task/attachments/image-1.png`,
+        );
+        const stagedImagePath = path.join(
+          projectDir,
+          '.takt',
+          'runs',
+          executeArg.reportDirName!,
+          'context',
+          'task',
+          'attachments',
+          'image-1.png',
+        );
+        expect(fs.readFileSync(stagedImagePath, 'utf-8')).toBe('png-data');
+        expect(fs.existsSync(path.join(projectDir, '.takt', 'tasks'))).toBe(false);
+      } finally {
+        fs.rmSync(projectDir, { recursive: true, force: true });
+      }
+    });
+
     it('should resolve PR review comments and execute pipeline with PR branch checkout', async () => {
       mockFetchPrReviewComments.mockReturnValueOnce({
         number: 456,

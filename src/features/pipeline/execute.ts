@@ -37,7 +37,7 @@ async function runPipeline(options: PipelineExecutionOptions): Promise<PipelineO
     success: false, workflow, issueNumber: options.issueNumber, ...overrides,
   });
 
-  const taskContent = resolveTaskContent(options);
+  const taskContent = await resolveTaskContent(options);
   if (!taskContent) return { exitCode: EXIT_ISSUE_FETCH_FAILED, result: buildResult() };
 
   let context: ExecutionContext;
@@ -56,7 +56,7 @@ async function runPipeline(options: PipelineExecutionOptions): Promise<PipelineO
   }
 
   log.info('Pipeline workflow execution starting', { workflow, branch: context.branch, skipGit, issueNumber: options.issueNumber });
-  const workflowOk = await runWorkflow(cwd, workflow, taskContent.task, context.execCwd, options, context);
+  const workflowOk = await runWorkflow(cwd, workflow, taskContent, context.execCwd, options, context);
   if (!workflowOk) return { exitCode: EXIT_WORKFLOW_FAILED, result: buildResult({ branch: context.branch }) };
 
   if (!skipGit && context.branch) {

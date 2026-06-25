@@ -11,6 +11,7 @@
 ### Added
 
 - Instruction partial include を追加しました (#832)。`facets/partials/instructions/<name>.md` に置いた Markdown 断片を、instruction facet 内の `{name}`（partial が存在する場合）または厳密な `{partial:name}` で共有できます。package-local / project / global / builtin layer は他の facet と同じ優先順で解決し、nested partial をサポートし、循環参照は拒否します。
+- PR 画像添付を追加しました (#792)。PR 本文・コメント・レビュー内の GitHub ホスト画像を `takt add --pr` と `takt pipeline --pr` の task attachment にダウンロードし、task prompt では安定した `[Image #N]` placeholder と run context の添付パスへ書き換えます。
 - phase usage event record に workflow step の `persona` と `tags` 文脈を追加しました (#870)。workflow YAML を読み直さなくても、provider-routing tag ごとに token usage を絞り込めます。
 - Team leader step でフェーズ別の provider option layer をサポートしました (#878)。`team_leader.provider_options` は親の分解・追加計画 planner に、`team_leader.part_provider_options` は生成された子 part に適用され、どちらも親 step の `provider_options` を継承します。
 - Cursor prompt file mode を追加しました (#783)。`provider_options.cursor.use_prompt_file` により、Cursor provider call は full prompt を一時ファイル `.takt/tmp/cursor-prompts` に書き、argv には短いファイル参照 instruction だけを渡せます。デフォルトは従来どおり full prompt argv で、`TAKT_PROVIDER_OPTIONS_CURSOR_USE_PROMPT_FILE=true` でも opt-in できます。

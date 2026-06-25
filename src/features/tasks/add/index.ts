@@ -28,6 +28,7 @@ import {
   prepareTaskSpecDirectory,
   type TaskAttachment,
 } from '../attachments.js';
+import { collectPrImageAttachments } from '../prImageAttachments.js';
 export { extractTitle, createIssueFromTask };
 
 const log = createLogger('add-task');
@@ -217,12 +218,27 @@ export async function addTask(
       return;
     }
 
-    if (prReview.reviews.length === 0 && prReview.comments.length === 0) {
+    let prImages: Awaited<ReturnType<typeof collectPrImageAttachments>>;
+    try {
+      prImages = await withProgress(
+        'Downloading PR image attachments...',
+        (downloaded) => downloaded.attachments.length > 0
+          ? `PR image attachments downloaded: ${downloaded.attachments.length}`
+          : 'No PR image attachments found',
+        async () => collectPrImageAttachments(prReview, cwd),
+      );
+    } catch (e) {
+      const msg = getErrorMessage(e);
+      error(`Failed to download PR image attachments #${prNumber}: ${msg}`);
+      return;
+    }
+
+    if (prReview.reviews.length === 0 && prReview.comments.length === 0 && prImages.attachments.length === 0) {
       error(`PR #${prNumber} has no review comments`);
       return;
     }
 
-    const taskContent = formatPrReviewAsTask(prReview);
+    const taskContent = prImages.rewriteTaskContent(formatPrReviewAsTask(prReview));
     const workflow = await determineWorkflow(cwd, opts?.workflow);
     if (workflow === null) {
       info('Cancelled.');
@@ -236,7 +252,12 @@ export async function addTask(
       autoPr: false,
       shouldPublishBranchToOrigin: true,
     };
-    const created = await saveTaskFile(cwd, taskContent, { workflow, ...settings, prNumber });
+    const created = await saveTaskFile(cwd, taskContent, {
+      workflow,
+      ...settings,
+      prNumber,
+      ...(prImages.attachments.length > 0 ? { attachments: prImages.attachments } : {}),
+    });
     displayTaskCreationResult(created, settings, workflow);
     return;
   }
