@@ -125,6 +125,18 @@ function mergeReviewers(current: readonly string[], rawFindings: readonly RawFin
   return Array.from(new Set([...current, ...rawFindings.map((finding) => finding.reviewer)]));
 }
 
+function mergeStringArrays(...values: Array<readonly string[] | undefined>): string[] {
+  return Array.from(new Set(values.flatMap((value) => value ?? [])));
+}
+
+function requirementRefsFromRawFindings(rawFindings: readonly RawFinding[]): string[] {
+  return mergeStringArrays(...rawFindings.map((finding) => finding.requirementRefs));
+}
+
+function acceptanceCriteriaFromRawFindings(rawFindings: readonly RawFinding[]): string[] {
+  return mergeStringArrays(...rawFindings.map((finding) => finding.acceptanceCriteria));
+}
+
 function mergeRawFindingDetails(current: readonly RawFinding[], next: readonly RawFinding[]): RawFinding[] {
   const byId = new Map<string, RawFinding>();
   for (const rawFinding of current) {
@@ -247,6 +259,8 @@ function buildNewFinding(input: {
     severity: input.severity,
     title: input.title,
     ...rawEvidenceFields(input.rawFindings),
+    requirementRefs: requirementRefsFromRawFindings(input.rawFindings),
+    acceptanceCriteria: acceptanceCriteriaFromRawFindings(input.rawFindings),
     rawFindingIds: input.rawFindingIds,
     firstSeen: observation,
     lastSeen: observationFromContext(input.context),
@@ -272,6 +286,8 @@ function withoutResolutionFields(finding: FindingRecord): Omit<FindingRecord, 'r
     ...(finding.location !== undefined ? { location: finding.location } : {}),
     ...(finding.description !== undefined ? { description: finding.description } : {}),
     ...(finding.suggestion !== undefined ? { suggestion: finding.suggestion } : {}),
+    requirementRefs: finding.requirementRefs ?? [],
+    acceptanceCriteria: finding.acceptanceCriteria ?? [],
     reviewers: finding.reviewers,
     firstSeen: finding.firstSeen,
     lastSeen: finding.lastSeen,
@@ -404,6 +420,11 @@ export function reconcileFindingLedger(input: ReconcileFindingLedgerInput): Find
       location: evidence.location ?? finding.location,
       description: evidence.description,
       suggestion: evidence.suggestion ?? finding.suggestion,
+      requirementRefs: mergeStringArrays(finding.requirementRefs, requirementRefsFromRawFindings(matchedRawFindings)),
+      acceptanceCriteria: mergeStringArrays(
+        finding.acceptanceCriteria,
+        acceptanceCriteriaFromRawFindings(matchedRawFindings),
+      ),
       reviewers: mergeReviewers(finding.reviewers, matchedRawFindings),
       lastSeen: observationFromContext(input.context),
     });
@@ -450,6 +471,11 @@ export function reconcileFindingLedger(input: ReconcileFindingLedgerInput): Find
       location: evidence.location ?? finding.location,
       description: evidence.description,
       suggestion: evidence.suggestion ?? finding.suggestion,
+      requirementRefs: mergeStringArrays(finding.requirementRefs, requirementRefsFromRawFindings(reopenedRawFindings)),
+      acceptanceCriteria: mergeStringArrays(
+        finding.acceptanceCriteria,
+        acceptanceCriteriaFromRawFindings(reopenedRawFindings),
+      ),
       reviewers: mergeReviewers(finding.reviewers, reopenedRawFindings),
       lastSeen: observationFromContext(input.context),
       reopenedEvidence: reopened.evidence,
@@ -505,6 +531,7 @@ export function reconcileFindingLedger(input: ReconcileFindingLedgerInput): Find
     workflowName: input.context.workflowName,
     nextId,
     updatedAt: input.context.timestamp,
+    requirements: input.previousLedger.requirements ?? [],
     findings: [...updatedById.values(), ...newFindings, ...unmentionedNewFindings],
     rawFindings: mergeRawFindingDetails(input.previousLedger.rawFindings, input.rawFindings),
     conflicts,

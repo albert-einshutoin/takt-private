@@ -18,9 +18,9 @@
 structured raw findings を要求された場合は、この表の `family_tag` 値を structured output の `familyTag` フィールドへコピーする。
 
 ## 観測した指摘
-| # | family_tag | カテゴリ | 重大度 | 場所 | 問題 | 修正案 |
-|---|------------|---------|--------|------|------|--------|
-| 1 | hallucination | 幻覚API | high / medium / low | `src/file.ts:23` | 存在しないメソッド | 実在APIへ置換 |
+| # | family_tag | カテゴリ | 重大度 | 場所 | 問題 | 修正案 | 要件Ref | 受け入れ条件 |
+|---|------------|---------|--------|------|------|--------|---|---|
+| 1 | hallucination | 幻覚API | high / medium / low | `src/file.ts:23` | 存在しないメソッド | 実在APIへ置換 | R-0001 | {この指摘を解消扱いにする前に満たすべき条件} |
 
 ## REJECT判定条件
 - ブロッキング指摘が1件以上ある場合のみ REJECT 可

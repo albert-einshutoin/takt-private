@@ -14,9 +14,9 @@
 | Dependencies | ✅ | - |
 
 ## Observed Findings
-| # | family_tag | Severity | Type | Location | Issue | Fix Suggestion |
-|---|------------|----------|------|----------|-------|----------------|
-| 1 | injection-risk | High | SQLi | `src/db.ts:42` | Raw query string | Use parameterized queries |
+| # | family_tag | Severity | Type | Location | Issue | Fix Suggestion | Requirement Refs | Acceptance Criteria |
+|---|------------|----------|------|----------|-------|----------------|---|---|
+| 1 | injection-risk | High | SQLi | `src/db.ts:42` | Raw query string | Use parameterized queries | R-0001 | {Criteria that must be true before this finding is closed} |
 
 ## Verification Evidence
 - Build: {Verified target, what was checked, and observed result; or state that it was unverified}

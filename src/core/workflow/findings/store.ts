@@ -1,6 +1,6 @@
 import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
-import type { FindingLedger, RawFinding } from './types.js';
+import type { FindingLedger, FindingRequirement, RawFinding } from './types.js';
 import { parseFindingLedger, parseRawFindings } from './schemas.js';
 import { assertLedgerIdAllocationInvariant } from './ledger-validation.js';
 import { writeReportFile } from '../report-writer.js';
@@ -11,6 +11,7 @@ interface FindingLedgerStoreOptions {
   workflowName: string;
   ledgerPath: string;
   rawFindingsPath: string;
+  task?: string;
 }
 
 const PRIVATE_DIR_MODE = 0o700;
@@ -114,11 +115,88 @@ function prepareWritableDirectory(baseDir: string, dirPath: string): void {
   assertRealPathInside(baseDir, dirPath);
 }
 
-function createEmptyLedger(workflowName: string): FindingLedger {
+function stripMarkdownListMarker(line: string): string {
+  return line
+    .replace(/^\s*[-*+]\s+/, '')
+    .replace(/^\s*\d+[.)]\s+/, '')
+    .trim();
+}
+
+function isMarkdownListItem(line: string): boolean {
+  return /^\s*(?:[-*+]|\d+[.)])\s+/.test(line);
+}
+
+function extractMarkdownHeading(line: string): string | undefined {
+  const match = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
+  return match?.[1]?.trim();
+}
+
+function isRequirementHeading(heading: string | undefined): boolean {
+  if (heading === undefined) {
+    return false;
+  }
+  return /^(acceptance criteria|requirements?|goals?|tasks?|受け入れ条件|要件|必要なこと|目的|やること)$/i.test(heading);
+}
+
+function collectRequirementStatements(task: string): Array<{ source: string; statement: string }> {
+  const statements: Array<{ source: string; statement: string }> = [];
+  let currentHeading = 'task';
+  let inRequirementSection = false;
+
+  for (const line of task.split(/\r?\n/)) {
+    const heading = extractMarkdownHeading(line);
+    if (heading !== undefined) {
+      currentHeading = heading;
+      inRequirementSection = isRequirementHeading(heading);
+      continue;
+    }
+    if (!inRequirementSection || !isMarkdownListItem(line)) {
+      continue;
+    }
+    const statement = stripMarkdownListMarker(line);
+    if (statement.length > 0) {
+      statements.push({ source: `task:${currentHeading}`, statement });
+    }
+  }
+
+  if (statements.length > 0) {
+    return statements;
+  }
+
+  const fallback = task.trim().replace(/\s+/g, ' ');
+  return fallback.length > 0 ? [{ source: 'task', statement: fallback }] : [];
+}
+
+export function buildRequirementMatrixFromTask(task: string | undefined): FindingRequirement[] {
+  if (task === undefined || task.trim().length === 0) {
+    return [];
+  }
+  return collectRequirementStatements(task).map((item, index) => ({
+    id: `R-${String(index + 1).padStart(4, '0')}`,
+    source: item.source,
+    statement: item.statement,
+    expectedResult: item.statement,
+    targetEntry: 'workflow',
+    // Exceptions are intentionally explicit-only so reviewers cannot silently narrow scope.
+    exceptionConditions: [],
+    acceptanceCriteria: [item.statement],
+  }));
+}
+
+function withTaskRequirements(ledger: FindingLedger, task: string | undefined): FindingLedger {
+  if ((ledger.requirements?.length ?? 0) > 0) {
+    return ledger;
+  }
+  const requirements = buildRequirementMatrixFromTask(task);
+  return requirements.length > 0 ? { ...ledger, requirements } : ledger;
+}
+
+function createEmptyLedger(workflowName: string, task?: string): FindingLedger {
   return {
     version: 1,
     workflowName,
     nextId: 1,
+    requirements: buildRequirementMatrixFromTask(task),
     findings: [],
     rawFindings: [],
     conflicts: [],
@@ -138,15 +216,15 @@ function readProjectLedgerFile(baseDir: string, path: string): FindingLedger {
   return readLedgerFile(path);
 }
 
-function readProjectLedgerOrEmpty(baseDir: string, path: string, workflowName: string): FindingLedger {
+function readProjectLedgerOrEmpty(baseDir: string, path: string, workflowName: string, task?: string): FindingLedger {
   assertRealPathInside(baseDir, findExistingAncestor(dirname(path)));
   assertNotSymlink(path);
   if (!pathExists(path)) {
-    return createEmptyLedger(workflowName);
+    return createEmptyLedger(workflowName, task);
   }
   const ledger = readProjectLedgerFile(baseDir, path);
   assertLedgerWorkflowName(ledger, workflowName, path);
-  return ledger;
+  return withTaskRequirements(ledger, task);
 }
 
 function assertLedgerWorkflowName(ledger: FindingLedger, workflowName: string, source: string): void {
@@ -172,7 +250,7 @@ export function createFindingLedgerStore(options: FindingLedgerStoreOptions): Fi
 
   return {
     loadLedger: () => {
-      return readProjectLedgerOrEmpty(ledgerRoot, ledgerPath, options.workflowName);
+      return readProjectLedgerOrEmpty(ledgerRoot, ledgerPath, options.workflowName, options.task);
     },
     saveLedger: (ledger) => {
       assertLedgerWorkflowName(ledger, options.workflowName, ledgerPath);
@@ -182,7 +260,7 @@ export function createFindingLedgerStore(options: FindingLedgerStoreOptions): Fi
       chmodSync(ledgerPath, PRIVATE_FILE_MODE);
     },
     createRunCopy: () => {
-      const ledger = readProjectLedgerOrEmpty(ledgerRoot, ledgerPath, options.workflowName);
+      const ledger = readProjectLedgerOrEmpty(ledgerRoot, ledgerPath, options.workflowName, options.task);
       prepareWritableCopyPath(options.reportDir, copyPath);
       writeFileSync(copyPath, JSON.stringify(ledger, null, 2), { encoding: 'utf-8', mode: PRIVATE_FILE_MODE });
       chmodSync(copyPath, READ_ONLY_PRIVATE_FILE_MODE);

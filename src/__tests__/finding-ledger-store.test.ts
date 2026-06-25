@@ -40,6 +40,7 @@ function makeLedger(): FindingLedger {
 function createStore(options: {
   projectCwd: string;
   reportDir: string;
+  task?: string;
 }) {
   return createFindingLedgerStore({
     ...options,
@@ -71,6 +72,41 @@ describe('FindingLedgerStore', () => {
     expect(JSON.parse(readFileSync(projectLedgerPath, 'utf-8'))).toEqual(
       expect.objectContaining({ workflowName: 'peer-review', nextId: 2 }),
     );
+  });
+
+  it('should seed a requirement matrix from task acceptance criteria for new finding-contract ledgers', () => {
+    const projectCwd = makeTempDir('takt-findings-project-');
+    const reportDir = makeTempDir('takt-findings-report-');
+    const store = createStore({
+      projectCwd,
+      reportDir,
+      task: [
+        '# Task',
+        'Keep Git metadata available.',
+        '',
+        '## Acceptance Criteria',
+        '- Review approval cites Git metadata evidence for every entry point.',
+        '- Optional scope reductions cite an explicit user instruction.',
+      ].join('\n'),
+    });
+
+    const ledger = store.loadLedger();
+
+    expect(ledger.requirements).toEqual([
+      expect.objectContaining({
+        id: 'R-0001',
+        source: 'task:Acceptance Criteria',
+        statement: 'Review approval cites Git metadata evidence for every entry point.',
+        expectedResult: 'Review approval cites Git metadata evidence for every entry point.',
+        targetEntry: 'workflow',
+        exceptionConditions: [],
+        acceptanceCriteria: ['Review approval cites Git metadata evidence for every entry point.'],
+      }),
+      expect.objectContaining({
+        id: 'R-0002',
+        statement: 'Optional scope reductions cite an explicit user instruction.',
+      }),
+    ]);
   });
 
   it('should protect project ledger and raw findings with owner-only permissions', () => {
@@ -194,8 +230,17 @@ describe('FindingLedgerStore', () => {
 
     expect(firstPath).toBe(join(projectCwd, '.takt/findings/raw/run-1.reviewers.json'));
     expect(secondPath).toBe(join(projectCwd, '.takt/findings/raw/run-1.reviewers.2.json'));
-    expect(JSON.parse(readFileSync(firstPath, 'utf-8'))).toEqual([rawFinding]);
-    expect(JSON.parse(readFileSync(secondPath, 'utf-8'))).toEqual([{ ...rawFinding, rawFindingId: 'raw-2' }]);
+    expect(JSON.parse(readFileSync(firstPath, 'utf-8'))).toEqual([{
+      ...rawFinding,
+      requirementRefs: [],
+      acceptanceCriteria: [],
+    }]);
+    expect(JSON.parse(readFileSync(secondPath, 'utf-8'))).toEqual([{
+      ...rawFinding,
+      rawFindingId: 'raw-2',
+      requirementRefs: [],
+      acceptanceCriteria: [],
+    }]);
   });
 
   it('should reject symlinked ledger files before writing outside the projectCwd', () => {

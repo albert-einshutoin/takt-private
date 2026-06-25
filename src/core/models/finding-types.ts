@@ -22,6 +22,16 @@ export interface FindingContractConfig {
   manager: FindingContractManagerConfig;
 }
 
+export interface FindingRequirement {
+  id: string;
+  source: string;
+  statement: string;
+  expectedResult: string;
+  targetEntry: string;
+  exceptionConditions: string[];
+  acceptanceCriteria: string[];
+}
+
 export interface FindingObservation {
   runId: string;
   stepName: string;
@@ -37,6 +47,8 @@ export interface FindingLedgerEntry {
   location?: string;
   description?: string;
   suggestion?: string;
+  requirementRefs?: string[];
+  acceptanceCriteria?: string[];
   reviewers: string[];
   rawFindingIds: string[];
   firstSeen: FindingObservation;
@@ -53,6 +65,7 @@ export interface FindingLedger {
   workflowName: string;
   nextId: number;
   updatedAt: string;
+  requirements?: FindingRequirement[];
   findings: FindingLedgerEntry[];
   rawFindings: RawFinding[];
   conflicts: FindingLedgerConflict[];
@@ -68,6 +81,8 @@ export interface RawFinding {
   location?: string;
   description: string;
   suggestion?: string;
+  requirementRefs?: string[];
+  acceptanceCriteria?: string[];
 }
 
 export interface FindingManagerMatch {
@@ -144,6 +159,8 @@ export interface FindingsRuleContext {
       location?: string;
       description?: string;
       suggestion?: string;
+      requirementRefs?: string[];
+      acceptanceCriteria?: string[];
       reviewers: string[];
     }>;
   };

@@ -16,9 +16,9 @@
 | Eventual consistency | ✅ | - |
 
 ## Observed Findings
-| # | family_tag | Severity | Scope | Location | Issue | Impact | Fix Suggestion |
-|---|------------|----------|-------|----------|-------|--------|----------------|
-| 1 | cqrs-violation | High / Medium / Low | In-scope | `src/file.ts:42` | Issue description | Domain consistency or maintainability impact | Fix approach |
+| # | family_tag | Severity | Scope | Location | Issue | Impact | Fix Suggestion | Requirement Refs | Acceptance Criteria |
+|---|------------|----------|-------|----------|-------|--------|----------------|---|---|
+| 1 | cqrs-violation | High / Medium / Low | In-scope | `src/file.ts:42` | Issue description | Domain consistency or maintainability impact | Fix approach | R-0001 | {Criteria that must be true before this finding is closed} |
 
 Scope: "In-scope" (fixable in this change) / "Out-of-scope" (existing issue, non-blocking)
 

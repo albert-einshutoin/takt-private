@@ -35,6 +35,16 @@ export const FindingObservationSchema = z.object({
   timestamp: nonEmptyString,
 }).strict();
 
+export const FindingRequirementSchema = z.object({
+  id: nonEmptyString,
+  source: nonEmptyString,
+  statement: nonEmptyString,
+  expectedResult: nonEmptyString,
+  targetEntry: nonEmptyString,
+  exceptionConditions: z.array(nonEmptyString).default([]),
+  acceptanceCriteria: z.array(nonEmptyString).default([]),
+}).strict();
+
 export const FindingLedgerEntrySchema = z.object({
   id: nonEmptyString,
   status: FindingStatusSchema,
@@ -44,6 +54,8 @@ export const FindingLedgerEntrySchema = z.object({
   location: nonEmptyString.optional(),
   description: nonEmptyString.optional(),
   suggestion: nonEmptyString.optional(),
+  requirementRefs: z.array(nonEmptyString).optional().default([]),
+  acceptanceCriteria: z.array(nonEmptyString).optional().default([]),
   reviewers: z.array(nonEmptyString),
   rawFindingIds: z.array(nonEmptyString),
   firstSeen: FindingObservationSchema,
@@ -63,6 +75,8 @@ export const RawFindingSchema = z.object({
   location: nonEmptyString.optional(),
   description: nonEmptyString,
   suggestion: nonEmptyString.optional(),
+  requirementRefs: z.array(nonEmptyString).optional().default([]),
+  acceptanceCriteria: z.array(nonEmptyString).optional().default([]),
 }).strict();
 
 export const ReviewerRawFindingSchema = z.object({
@@ -73,6 +87,8 @@ export const ReviewerRawFindingSchema = z.object({
   location: nonEmptyString.optional(),
   description: nonEmptyString,
   suggestion: nonEmptyString.optional(),
+  requirementRefs: z.array(nonEmptyString).optional().default([]),
+  acceptanceCriteria: z.array(nonEmptyString).optional().default([]),
 }).strict();
 
 export const FindingLedgerConflictSchema = z.object({
@@ -92,6 +108,7 @@ export const FindingLedgerSchema = z.object({
   workflowName: nonEmptyString,
   nextId: z.number().int().positive(),
   updatedAt: nonEmptyString,
+  requirements: z.array(FindingRequirementSchema).optional().default([]),
   findings: z.array(FindingLedgerEntrySchema),
   rawFindings: z.array(RawFindingSchema),
   conflicts: z.array(FindingLedgerConflictSchema),
@@ -224,7 +241,17 @@ export const RawFindingsOutputJsonSchema = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['rawFindingId', 'familyTag', 'severity', 'title', 'location', 'description', 'suggestion'],
+        required: [
+          'rawFindingId',
+          'familyTag',
+          'severity',
+          'title',
+          'location',
+          'description',
+          'suggestion',
+          'requirementRefs',
+          'acceptanceCriteria',
+        ],
         properties: {
           rawFindingId: { type: 'string', minLength: 1 },
           familyTag: {
@@ -237,6 +264,17 @@ export const RawFindingsOutputJsonSchema = {
           location: { type: 'string', minLength: 1 },
           description: { type: 'string', minLength: 1 },
           suggestion: { type: 'string', minLength: 1 },
+          requirementRefs: {
+            type: 'array',
+            items: { type: 'string', minLength: 1 },
+            description: 'Requirement ids from the Finding Contract ledger that this finding evaluates. Use an empty array only when no single requirement applies.',
+          },
+          acceptanceCriteria: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'string', minLength: 1 },
+            description: 'Concrete criteria that must be true before this finding may be considered resolved.',
+          },
         },
       },
     },

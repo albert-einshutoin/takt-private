@@ -17,9 +17,9 @@
 | Type safety | ✅ | - |
 
 ## Observed Findings
-| # | family_tag | Severity | Location | Issue | Impact | Fix Suggestion |
-|---|------------|----------|----------|-------|--------|----------------|
-| 1 | component-design | High / Medium / Low | `src/file.tsx:42` | Issue description | User experience or maintainability impact | Fix approach |
+| # | family_tag | Severity | Location | Issue | Impact | Fix Suggestion | Requirement Refs | Acceptance Criteria |
+|---|------------|----------|----------|-------|--------|----------------|---|---|
+| 1 | component-design | High / Medium / Low | `src/file.tsx:42` | Issue description | User experience or maintainability impact | Fix approach | R-0001 | {Criteria that must be true before this finding is closed} |
 
 ## Rejection Gate
 - REJECT only when at least one blocking finding is observed

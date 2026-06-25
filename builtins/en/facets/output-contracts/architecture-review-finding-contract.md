@@ -15,9 +15,9 @@
 - [x] Call chain verification
 
 ## Observed Findings
-| # | family_tag | Scope | Severity | Location | Issue | Fix Suggestion |
-|---|------------|-------|----------|----------|-------|----------------|
-| 1 | design-violation | In-scope | high / medium / low | `src/file.ts:42` | Issue description | Fix approach |
+| # | family_tag | Scope | Severity | Location | Issue | Fix Suggestion | Requirement Refs | Acceptance Criteria |
+|---|------------|-------|----------|----------|-------|----------------|---|---|
+| 1 | design-violation | In-scope | high / medium / low | `src/file.ts:42` | Issue description | Fix approach | R-0001 | {Criteria that must be true before this finding is closed} |
 
 Scope: "In-scope" (fixable in this change) / "Out-of-scope" (existing issue, non-blocking)
 

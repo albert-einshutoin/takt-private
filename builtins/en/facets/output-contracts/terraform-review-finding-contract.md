@@ -16,9 +16,9 @@
 - [x] Cost trade-off documentation
 
 ## Observed Findings
-| # | family_tag | Severity | Scope | Location | Issue | Impact | Fix Suggestion |
-|---|------------|----------|-------|----------|-------|--------|----------------|
-| 1 | tf-convention | High / Medium / Low | In-scope | `modules/example/main.tf:42` | Issue description | Operations, security, or maintainability impact | Fix approach |
+| # | family_tag | Severity | Scope | Location | Issue | Impact | Fix Suggestion | Requirement Refs | Acceptance Criteria |
+|---|------------|----------|-------|----------|-------|--------|----------------|---|---|
+| 1 | tf-convention | High / Medium / Low | In-scope | `modules/example/main.tf:42` | Issue description | Operations, security, or maintainability impact | Fix approach | R-0001 | {Criteria that must be true before this finding is closed} |
 
 Scope: "In-scope" (fixable in this change) / "Out-of-scope" (existing issue, non-blocking)
 

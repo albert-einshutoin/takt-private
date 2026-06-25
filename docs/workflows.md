@@ -204,6 +204,12 @@ Accepted rules, in selection order:
 
 `ai("...")` rules that point to `fix` are not selected for this failure path. If none of the accepted rules exists, workflow validation fails before execution.
 
+### Finding Contract requirement matrix
+
+Finding Contract ledgers persist a task-derived `requirements` matrix. For a new ledger, TAKT extracts bullet items from task sections such as `Acceptance Criteria`, `Requirements`, `Goals`, `受け入れ条件`, `要件`, and `必要なこと`, then stores each item as `R-0001`, `R-0002`, ... with its source heading, expected result, target entry, explicit exception conditions, and acceptance criteria.
+
+Reviewer raw findings in Finding Contract workflows include `requirementRefs` and `acceptanceCriteria`. The consolidated ledger copies those fields onto each tracked finding so later review, supervise, and report phases can judge `resolved` against the original requirement instead of only checking whether a patch exists. Scope reductions are valid only when the task, specification, or explicit user instruction justifies the exception.
+
 ### Arpeggio Step (data-driven batch)
 
 Iterate over a data source (CSV, JSON, etc.) and apply the same step template to each row with bounded concurrency:

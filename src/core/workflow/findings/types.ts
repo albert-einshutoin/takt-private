@@ -23,6 +23,7 @@ export type {
   FindingObservation,
   FindingRecord,
   FindingReconcileContext,
+  FindingRequirement,
   FindingSeverity,
   FindingsRuleContext,
   FindingStatus,
