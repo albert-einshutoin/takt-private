@@ -13,8 +13,15 @@ import type {
   ProviderOptionsTraceOrigin,
   ProviderResolutionSource,
 } from '../../core/workflow/provider-options-trace.js';
-import type { ProviderType } from '../../shared/types/provider.js';
+import { isProviderType, type ProviderType } from '../../shared/types/provider.js';
 import { providerSupportsClaudeAllowedTools } from '../providers/provider-capabilities.js';
+
+type RawGroundCheckOptions = {
+  enabled?: boolean;
+  provider?: string;
+  model?: string;
+  provider_options?: RawProviderOptions | Record<string, unknown>;
+};
 
 type RawProviderOptions = {
   extends?: string;
@@ -22,11 +29,13 @@ type RawProviderOptions = {
     base_url?: string;
     network_access?: boolean;
     reasoning_effort?: CodexReasoningEffort;
+    ground_check?: RawGroundCheckOptions;
   };
   opencode?: {
     network_access?: boolean;
     variant?: string;
     allowed_tools?: string[];
+    ground_check?: RawGroundCheckOptions;
   };
   claude?: {
     base_url?: string;
@@ -36,21 +45,26 @@ type RawProviderOptions = {
       allow_unsandboxed_commands?: boolean;
       excluded_commands?: string[];
     };
+    ground_check?: RawGroundCheckOptions;
   };
   claude_terminal?: {
     backend?: ClaudeTerminalProviderOptions['backend'];
     timeout_ms?: number;
     keep_session?: boolean;
     transcript_poll_interval_ms?: number;
+    ground_check?: RawGroundCheckOptions;
   };
   copilot?: {
     effort?: CopilotEffort;
+    ground_check?: RawGroundCheckOptions;
   };
   cursor?: {
     use_prompt_file?: boolean;
+    ground_check?: RawGroundCheckOptions;
   };
   kiro?: {
     agent?: string;
+    ground_check?: RawGroundCheckOptions;
   };
 };
 
@@ -136,6 +150,34 @@ function assertAllowedProviderBaseUrl(
   );
 }
 
+function normalizeGroundCheckOptions(
+  raw: RawGroundCheckOptions | undefined,
+  path: string,
+  normalizationOptions: NormalizeProviderOptionsOptions,
+): NonNullable<NonNullable<StepProviderOptions['opencode']>['groundCheck']> | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+  if (raw.provider !== undefined && !isProviderType(raw.provider)) {
+    throw new Error(`Configuration error: ${path}.provider must be a supported provider.`);
+  }
+
+  const providerOptions = normalizeProviderOptions(
+    raw.provider_options,
+    {
+      ...normalizationOptions,
+      pathPrefix: `${path}.provider_options`,
+    },
+  );
+  const result: NonNullable<NonNullable<StepProviderOptions['opencode']>['groundCheck']> = {
+    ...(raw.enabled !== undefined ? { enabled: raw.enabled } : {}),
+    ...(raw.provider !== undefined ? { provider: raw.provider } : {}),
+    ...(raw.model !== undefined ? { model: raw.model } : {}),
+    ...(providerOptions !== undefined ? { providerOptions } : {}),
+  };
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 /** Convert raw YAML provider_options (snake_case) to internal format (camelCase). */
 export function normalizeProviderOptions(
   raw: RawProviderOptions | Record<string, unknown> | undefined,
@@ -155,9 +197,15 @@ export function normalizeProviderOptions(
     options.codex?.base_url !== undefined
     || options.codex?.network_access !== undefined
     || options.codex?.reasoning_effort !== undefined
+    || options.codex?.ground_check !== undefined
   ) {
     const codexBaseUrlPath = `${normalizationOptions.pathPrefix ?? 'provider_options'}.codex.base_url`;
     assertAllowedProviderBaseUrl(codexBaseUrlPath, options.codex.base_url, normalizationOptions);
+    const groundCheck = normalizeGroundCheckOptions(
+      options.codex.ground_check,
+      `${normalizationOptions.pathPrefix ?? 'provider_options'}.codex.ground_check`,
+      normalizationOptions,
+    );
     result.codex = {
       ...(options.codex.base_url !== undefined
         ? { baseUrl: options.codex.base_url }
@@ -168,13 +216,20 @@ export function normalizeProviderOptions(
       ...(options.codex.reasoning_effort !== undefined
         ? { reasoningEffort: options.codex.reasoning_effort }
         : {}),
+      ...(groundCheck !== undefined ? { groundCheck } : {}),
     };
   }
   if (
     options.opencode?.network_access !== undefined
     || options.opencode?.variant !== undefined
     || options.opencode?.allowed_tools !== undefined
+    || options.opencode?.ground_check !== undefined
   ) {
+    const groundCheck = normalizeGroundCheckOptions(
+      options.opencode.ground_check,
+      `${normalizationOptions.pathPrefix ?? 'provider_options'}.opencode.ground_check`,
+      normalizationOptions,
+    );
     result.opencode = {
       ...(options.opencode.network_access !== undefined
         ? { networkAccess: options.opencode.network_access }
@@ -185,6 +240,7 @@ export function normalizeProviderOptions(
       ...(options.opencode.allowed_tools !== undefined
         ? { allowedTools: options.opencode.allowed_tools }
         : {}),
+      ...(groundCheck !== undefined ? { groundCheck } : {}),
     };
   }
   if (
@@ -192,6 +248,7 @@ export function normalizeProviderOptions(
     || options.claude?.allowed_tools !== undefined
     || options.claude?.effort !== undefined
     || options.claude?.sandbox
+    || options.claude?.ground_check !== undefined
   ) {
     const claude: NonNullable<StepProviderOptions['claude']> = {};
     if (options.claude.base_url !== undefined) {
@@ -218,25 +275,63 @@ export function normalizeProviderOptions(
         claude.sandbox = sandbox;
       }
     }
+    const groundCheck = normalizeGroundCheckOptions(
+      options.claude.ground_check,
+      `${normalizationOptions.pathPrefix ?? 'provider_options'}.claude.ground_check`,
+      normalizationOptions,
+    );
+    if (groundCheck !== undefined) {
+      claude.groundCheck = groundCheck;
+    }
     if (Object.keys(claude).length > 0) {
       result.claude = claude;
     }
   }
-  if (options.copilot?.effort !== undefined) {
-    result.copilot = { effort: options.copilot.effort };
+  if (options.copilot?.effort !== undefined || options.copilot?.ground_check !== undefined) {
+    const groundCheck = normalizeGroundCheckOptions(
+      options.copilot.ground_check,
+      `${normalizationOptions.pathPrefix ?? 'provider_options'}.copilot.ground_check`,
+      normalizationOptions,
+    );
+    result.copilot = {
+      ...(options.copilot.effort !== undefined ? { effort: options.copilot.effort } : {}),
+      ...(groundCheck !== undefined ? { groundCheck } : {}),
+    };
   }
-  if (options.cursor?.use_prompt_file !== undefined) {
-    result.cursor = { usePromptFile: options.cursor.use_prompt_file };
+  if (options.cursor?.use_prompt_file !== undefined || options.cursor?.ground_check !== undefined) {
+    const groundCheck = normalizeGroundCheckOptions(
+      options.cursor.ground_check,
+      `${normalizationOptions.pathPrefix ?? 'provider_options'}.cursor.ground_check`,
+      normalizationOptions,
+    );
+    result.cursor = {
+      ...(options.cursor.use_prompt_file !== undefined ? { usePromptFile: options.cursor.use_prompt_file } : {}),
+      ...(groundCheck !== undefined ? { groundCheck } : {}),
+    };
   }
-  if (options.kiro?.agent !== undefined) {
-    result.kiro = { agent: options.kiro.agent };
+  if (options.kiro?.agent !== undefined || options.kiro?.ground_check !== undefined) {
+    const groundCheck = normalizeGroundCheckOptions(
+      options.kiro.ground_check,
+      `${normalizationOptions.pathPrefix ?? 'provider_options'}.kiro.ground_check`,
+      normalizationOptions,
+    );
+    result.kiro = {
+      ...(options.kiro.agent !== undefined ? { agent: options.kiro.agent } : {}),
+      ...(groundCheck !== undefined ? { groundCheck } : {}),
+    };
   }
   if (
     options.claude_terminal?.backend !== undefined
     || options.claude_terminal?.timeout_ms !== undefined
     || options.claude_terminal?.keep_session !== undefined
     || options.claude_terminal?.transcript_poll_interval_ms !== undefined
+    || options.claude_terminal?.ground_check !== undefined
   ) {
+    const groundCheck = normalizeGroundCheckOptions(
+      options.claude_terminal.ground_check,
+      `${normalizationOptions.pathPrefix ?? 'provider_options'}.claude_terminal.ground_check`,
+      normalizationOptions,
+    );
     result.claudeTerminal = {
       ...(options.claude_terminal.backend !== undefined
         ? { backend: options.claude_terminal.backend }
@@ -250,7 +345,30 @@ export function normalizeProviderOptions(
       ...(options.claude_terminal.transcript_poll_interval_ms !== undefined
         ? { transcriptPollIntervalMs: options.claude_terminal.transcript_poll_interval_ms }
         : {}),
+      ...(groundCheck !== undefined ? { groundCheck } : {}),
     };
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function mergeGroundCheckOptions(
+  ...layers: (NonNullable<NonNullable<StepProviderOptions['opencode']>['groundCheck']> | undefined)[]
+): NonNullable<NonNullable<StepProviderOptions['opencode']>['groundCheck']> | undefined {
+  const result: NonNullable<NonNullable<StepProviderOptions['opencode']>['groundCheck']> = {};
+  for (const layer of layers) {
+    if (!layer) continue;
+    if (layer.enabled !== undefined) {
+      result.enabled = layer.enabled;
+    }
+    if (layer.provider !== undefined) {
+      result.provider = layer.provider;
+    }
+    if (layer.model !== undefined) {
+      result.model = layer.model;
+    }
+    if (layer.providerOptions !== undefined) {
+      result.providerOptions = mergeProviderOptions(result.providerOptions, layer.providerOptions);
+    }
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }
@@ -264,6 +382,7 @@ export function mergeProviderOptions(
   for (const layer of layers) {
     if (!layer) continue;
     if (layer.codex) {
+      const groundCheck = mergeGroundCheckOptions(result.codex?.groundCheck, layer.codex.groundCheck);
       result.codex = {
         ...result.codex,
         ...(layer.codex.baseUrl !== undefined
@@ -275,12 +394,19 @@ export function mergeProviderOptions(
         ...(layer.codex.reasoningEffort !== undefined
           ? { reasoningEffort: layer.codex.reasoningEffort }
           : {}),
+        ...(groundCheck !== undefined ? { groundCheck } : {}),
       };
     }
     if (layer.opencode) {
-      result.opencode = { ...result.opencode, ...layer.opencode };
+      const groundCheck = mergeGroundCheckOptions(result.opencode?.groundCheck, layer.opencode.groundCheck);
+      result.opencode = {
+        ...result.opencode,
+        ...layer.opencode,
+        ...(groundCheck !== undefined ? { groundCheck } : {}),
+      };
     }
     if (layer.claude) {
+      const groundCheck = mergeGroundCheckOptions(result.claude?.groundCheck, layer.claude.groundCheck);
       result.claude = {
         ...result.claude,
         ...(layer.claude.baseUrl !== undefined
@@ -295,34 +421,46 @@ export function mergeProviderOptions(
         ...(layer.claude.sandbox
           ? { sandbox: { ...result.claude?.sandbox, ...layer.claude.sandbox } }
           : {}),
+        ...(groundCheck !== undefined ? { groundCheck } : {}),
       };
     }
     if (layer.copilot) {
+      const groundCheck = mergeGroundCheckOptions(result.copilot?.groundCheck, layer.copilot.groundCheck);
       result.copilot = {
         ...result.copilot,
         ...(layer.copilot.effort !== undefined
           ? { effort: layer.copilot.effort }
           : {}),
+        ...(groundCheck !== undefined ? { groundCheck } : {}),
       };
     }
     if (layer.cursor) {
+      const groundCheck = mergeGroundCheckOptions(result.cursor?.groundCheck, layer.cursor.groundCheck);
       result.cursor = {
         ...result.cursor,
         ...(layer.cursor.usePromptFile !== undefined
           ? { usePromptFile: layer.cursor.usePromptFile }
           : {}),
+        ...(groundCheck !== undefined ? { groundCheck } : {}),
       };
     }
     if (layer.kiro) {
+      const groundCheck = mergeGroundCheckOptions(result.kiro?.groundCheck, layer.kiro.groundCheck);
       result.kiro = {
         ...result.kiro,
         ...(layer.kiro.agent !== undefined
           ? { agent: layer.kiro.agent }
           : {}),
+        ...(groundCheck !== undefined ? { groundCheck } : {}),
       };
     }
     if (layer.claudeTerminal) {
-      result.claudeTerminal = { ...result.claudeTerminal, ...layer.claudeTerminal };
+      const groundCheck = mergeGroundCheckOptions(result.claudeTerminal?.groundCheck, layer.claudeTerminal.groundCheck);
+      result.claudeTerminal = {
+        ...result.claudeTerminal,
+        ...layer.claudeTerminal,
+        ...(groundCheck !== undefined ? { groundCheck } : {}),
+      };
     }
   }
 
@@ -385,6 +523,71 @@ function selectProviderValueByScope<T>(
   stepValue: T | undefined,
 ): T | undefined {
   return stepValue ?? personaValue ?? configValue;
+}
+
+type GroundCheckOptions = NonNullable<NonNullable<StepProviderOptions['opencode']>['groundCheck']>;
+
+function selectGroundCheckValue<T>(
+  configValue: T | undefined,
+  personaValue: T | undefined,
+  stepValue: T | undefined,
+  path: string,
+  source: ProviderOptionsSource | undefined,
+  originResolver: ProviderOptionsOriginResolver | undefined,
+): T | undefined {
+  return selectProviderValue(
+    configValue,
+    personaValue,
+    stepValue,
+    resolveProviderOptionOrigin(originResolver, path, source),
+  );
+}
+
+function resolveEffectiveGroundCheckOptions(
+  pathPrefix: string,
+  source: ProviderOptionsSource | undefined,
+  originResolver: ProviderOptionsOriginResolver | undefined,
+  configOptions: GroundCheckOptions | undefined,
+  personaOptions: GroundCheckOptions | undefined,
+  stepOptions: GroundCheckOptions | undefined,
+): GroundCheckOptions | undefined {
+  const enabled = selectGroundCheckValue(
+    configOptions?.enabled,
+    personaOptions?.enabled,
+    stepOptions?.enabled,
+    `${pathPrefix}.groundCheck.enabled`,
+    source,
+    originResolver,
+  );
+  const provider = selectGroundCheckValue(
+    configOptions?.provider,
+    personaOptions?.provider,
+    stepOptions?.provider,
+    `${pathPrefix}.groundCheck.provider`,
+    source,
+    originResolver,
+  );
+  const model = selectGroundCheckValue(
+    configOptions?.model,
+    personaOptions?.model,
+    stepOptions?.model,
+    `${pathPrefix}.groundCheck.model`,
+    source,
+    originResolver,
+  );
+  const providerOptions = mergeProviderOptions(
+    configOptions?.providerOptions,
+    personaOptions?.providerOptions,
+    stepOptions?.providerOptions,
+  );
+
+  const result: GroundCheckOptions = {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(provider !== undefined ? { provider } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(providerOptions !== undefined ? { providerOptions } : {}),
+  };
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 export function resolvePersonaProviderOptions(
@@ -584,22 +787,86 @@ export function resolveEffectiveProviderOptions(
     stepOptions?.claudeTerminal?.transcriptPollIntervalMs,
     resolveProviderOptionOrigin(originResolver, 'claudeTerminal.transcriptPollIntervalMs', source),
   );
+  const codexGroundCheck = resolveEffectiveGroundCheckOptions(
+    'codex',
+    source,
+    originResolver,
+    resolvedConfigOptions.codex?.groundCheck,
+    personaOptions?.codex?.groundCheck,
+    stepOptions?.codex?.groundCheck,
+  );
+  const opencodeGroundCheck = resolveEffectiveGroundCheckOptions(
+    'opencode',
+    source,
+    originResolver,
+    resolvedConfigOptions.opencode?.groundCheck,
+    personaOptions?.opencode?.groundCheck,
+    stepOptions?.opencode?.groundCheck,
+  );
+  const claudeGroundCheck = resolveEffectiveGroundCheckOptions(
+    'claude',
+    source,
+    originResolver,
+    resolvedConfigOptions.claude?.groundCheck,
+    personaOptions?.claude?.groundCheck,
+    stepOptions?.claude?.groundCheck,
+  );
+  const copilotGroundCheck = resolveEffectiveGroundCheckOptions(
+    'copilot',
+    source,
+    originResolver,
+    resolvedConfigOptions.copilot?.groundCheck,
+    personaOptions?.copilot?.groundCheck,
+    stepOptions?.copilot?.groundCheck,
+  );
+  const cursorGroundCheck = resolveEffectiveGroundCheckOptions(
+    'cursor',
+    source,
+    originResolver,
+    resolvedConfigOptions.cursor?.groundCheck,
+    personaOptions?.cursor?.groundCheck,
+    stepOptions?.cursor?.groundCheck,
+  );
+  const kiroGroundCheck = resolveEffectiveGroundCheckOptions(
+    'kiro',
+    source,
+    originResolver,
+    resolvedConfigOptions.kiro?.groundCheck,
+    personaOptions?.kiro?.groundCheck,
+    stepOptions?.kiro?.groundCheck,
+  );
+  const claudeTerminalGroundCheck = resolveEffectiveGroundCheckOptions(
+    'claudeTerminal',
+    source,
+    originResolver,
+    resolvedConfigOptions.claudeTerminal?.groundCheck,
+    personaOptions?.claudeTerminal?.groundCheck,
+    stepOptions?.claudeTerminal?.groundCheck,
+  );
 
   const result: StepProviderOptions = {
     codex:
-      codexBaseUrl !== undefined || codexNetworkAccess !== undefined || codexReasoningEffort !== undefined
+      codexBaseUrl !== undefined
+      || codexNetworkAccess !== undefined
+      || codexReasoningEffort !== undefined
+      || codexGroundCheck !== undefined
         ? {
             ...(codexBaseUrl !== undefined ? { baseUrl: codexBaseUrl } : {}),
             ...(codexNetworkAccess !== undefined ? { networkAccess: codexNetworkAccess } : {}),
             ...(codexReasoningEffort !== undefined ? { reasoningEffort: codexReasoningEffort } : {}),
+            ...(codexGroundCheck !== undefined ? { groundCheck: codexGroundCheck } : {}),
           }
         : undefined,
     opencode:
-      opencodeNetworkAccess !== undefined || opencodeVariant !== undefined || opencodeAllowedTools !== undefined
+      opencodeNetworkAccess !== undefined
+      || opencodeVariant !== undefined
+      || opencodeAllowedTools !== undefined
+      || opencodeGroundCheck !== undefined
         ? {
             ...(opencodeNetworkAccess !== undefined ? { networkAccess: opencodeNetworkAccess } : {}),
             ...(opencodeVariant !== undefined ? { variant: opencodeVariant } : {}),
             ...(opencodeAllowedTools !== undefined ? { allowedTools: opencodeAllowedTools } : {}),
+            ...(opencodeGroundCheck !== undefined ? { groundCheck: opencodeGroundCheck } : {}),
           }
         : undefined,
     claude:
@@ -607,16 +874,39 @@ export function resolveEffectiveProviderOptions(
       || claude.allowedTools !== undefined
       || claude.baseUrl !== undefined
       || claude.effort !== undefined
-        ? claude
+      || claudeGroundCheck !== undefined
+        ? {
+            ...claude,
+            ...(claudeGroundCheck !== undefined ? { groundCheck: claudeGroundCheck } : {}),
+          }
         : undefined,
-    copilot: copilotEffort !== undefined ? { effort: copilotEffort } : undefined,
-    cursor: cursorUsePromptFile !== undefined ? { usePromptFile: cursorUsePromptFile } : undefined,
-    kiro: kiroAgent !== undefined ? { agent: kiroAgent } : undefined,
+    copilot:
+      copilotEffort !== undefined || copilotGroundCheck !== undefined
+        ? {
+            ...(copilotEffort !== undefined ? { effort: copilotEffort } : {}),
+            ...(copilotGroundCheck !== undefined ? { groundCheck: copilotGroundCheck } : {}),
+          }
+        : undefined,
+    cursor:
+      cursorUsePromptFile !== undefined || cursorGroundCheck !== undefined
+        ? {
+            ...(cursorUsePromptFile !== undefined ? { usePromptFile: cursorUsePromptFile } : {}),
+            ...(cursorGroundCheck !== undefined ? { groundCheck: cursorGroundCheck } : {}),
+          }
+        : undefined,
+    kiro:
+      kiroAgent !== undefined || kiroGroundCheck !== undefined
+        ? {
+            ...(kiroAgent !== undefined ? { agent: kiroAgent } : {}),
+            ...(kiroGroundCheck !== undefined ? { groundCheck: kiroGroundCheck } : {}),
+          }
+        : undefined,
     claudeTerminal:
       claudeTerminalBackend !== undefined
       || claudeTerminalTimeoutMs !== undefined
       || claudeTerminalKeepSession !== undefined
       || claudeTerminalTranscriptPollIntervalMs !== undefined
+      || claudeTerminalGroundCheck !== undefined
         ? {
             ...(claudeTerminalBackend !== undefined ? { backend: claudeTerminalBackend } : {}),
             ...(claudeTerminalTimeoutMs !== undefined ? { timeoutMs: claudeTerminalTimeoutMs } : {}),
@@ -624,6 +914,7 @@ export function resolveEffectiveProviderOptions(
             ...(claudeTerminalTranscriptPollIntervalMs !== undefined
               ? { transcriptPollIntervalMs: claudeTerminalTranscriptPollIntervalMs }
               : {}),
+            ...(claudeTerminalGroundCheck !== undefined ? { groundCheck: claudeTerminalGroundCheck } : {}),
           }
         : undefined,
   };
@@ -656,6 +947,9 @@ function stripClaudeAllowedTools(
           : {}),
         ...(providerOptions.claude.sandbox !== undefined
           ? { sandbox: { ...providerOptions.claude.sandbox } }
+          : {}),
+        ...(providerOptions.claude.groundCheck !== undefined
+          ? { groundCheck: providerOptions.claude.groundCheck }
           : {}),
       }
     : undefined;
@@ -724,19 +1018,47 @@ export const PROVIDER_OPTION_PATHS = [
   'claude.allowedTools',
   'claude.sandbox.allowUnsandboxedCommands',
   'claude.sandbox.excludedCommands',
+  'claude.groundCheck.enabled',
+  'claude.groundCheck.provider',
+  'claude.groundCheck.model',
+  'claude.groundCheck.providerOptions',
   'codex.baseUrl',
   'codex.networkAccess',
   'codex.reasoningEffort',
+  'codex.groundCheck.enabled',
+  'codex.groundCheck.provider',
+  'codex.groundCheck.model',
+  'codex.groundCheck.providerOptions',
   'opencode.networkAccess',
   'opencode.variant',
   'opencode.allowedTools',
+  'opencode.groundCheck.enabled',
+  'opencode.groundCheck.provider',
+  'opencode.groundCheck.model',
+  'opencode.groundCheck.providerOptions',
   'copilot.effort',
+  'copilot.groundCheck.enabled',
+  'copilot.groundCheck.provider',
+  'copilot.groundCheck.model',
+  'copilot.groundCheck.providerOptions',
   'cursor.usePromptFile',
+  'cursor.groundCheck.enabled',
+  'cursor.groundCheck.provider',
+  'cursor.groundCheck.model',
+  'cursor.groundCheck.providerOptions',
   'kiro.agent',
+  'kiro.groundCheck.enabled',
+  'kiro.groundCheck.provider',
+  'kiro.groundCheck.model',
+  'kiro.groundCheck.providerOptions',
   'claudeTerminal.backend',
   'claudeTerminal.timeoutMs',
   'claudeTerminal.keepSession',
   'claudeTerminal.transcriptPollIntervalMs',
+  'claudeTerminal.groundCheck.enabled',
+  'claudeTerminal.groundCheck.provider',
+  'claudeTerminal.groundCheck.model',
+  'claudeTerminal.groundCheck.providerOptions',
 ] as const;
 
 export type ProviderOptionPath = (typeof PROVIDER_OPTION_PATHS)[number];

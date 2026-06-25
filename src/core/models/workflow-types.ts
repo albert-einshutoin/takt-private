@@ -45,6 +45,7 @@ export type {
   OpenCodeProviderOptions,
   ClaudeProviderOptions,
   ClaudeTerminalProviderOptions,
+  GroundCheckProviderOptions,
   CopilotProviderOptions,
   CursorProviderOptions,
   KiroProviderOptions,
