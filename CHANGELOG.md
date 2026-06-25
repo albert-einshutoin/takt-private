@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Phase usage event records now include workflow step `persona` and `tags` context (#870). This makes token usage analysis filterable by provider-routing tags without re-reading workflow YAML.
+
 ### Fixed
 
 - TAKT-managed Git pushes now run non-interactively with terminal credential prompts disabled (#866). If publishing fails after workflow execution and local commit creation, TAKT preserves the branch/commit, records the task as `pr_failed`, skips PR creation, and reports a retryable publishing failure instead of hanging or marking the workflow implementation as failed.

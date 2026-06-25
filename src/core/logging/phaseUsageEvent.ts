@@ -25,6 +25,8 @@ export interface PhaseUsageEventLogRecord {
   provider: ProviderType;
   provider_model: string;
   step: string;
+  persona?: string;
+  tags?: string[];
   step_type: PhaseUsageStepType;
   phase: PhaseUsageType;
   phase_name: PhaseName;
@@ -54,6 +56,8 @@ interface PhaseUsageMeta {
   provider: ProviderType;
   providerModel: string;
   step: string;
+  persona?: string;
+  tags: string[];
   stepType: PhaseUsageStepType;
   phase: PhaseUsageType;
   phaseName: PhaseName;
@@ -128,7 +132,10 @@ function mapJudgeStageSpan(
   });
 }
 
-function buildCommonMeta(span: SpanSnapshot): Pick<PhaseUsageMeta, 'provider' | 'providerModel' | 'step' | 'stepType'> | undefined {
+function buildCommonMeta(span: SpanSnapshot): Pick<PhaseUsageMeta, 'provider' | 'providerModel' | 'step' | 'stepType'> & {
+  persona?: string;
+  tags: string[];
+} | undefined {
   const provider = getProvider(span.attributes, 'takt.provider.name');
   const step = getString(span.attributes, 'takt.step.name');
   const stepType = getStepType(span.attributes, 'takt.step.type');
@@ -140,6 +147,8 @@ function buildCommonMeta(span: SpanSnapshot): Pick<PhaseUsageMeta, 'provider' | 
     provider,
     providerModel: getString(span.attributes, 'takt.model.name') ?? '(default)',
     step,
+    persona: getString(span.attributes, 'takt.step.persona'),
+    tags: getTags(span.attributes, 'takt.step.tags'),
     stepType,
   };
 }
@@ -156,6 +165,8 @@ function buildRecord(
     provider: meta.provider,
     provider_model: meta.providerModel,
     step: meta.step,
+    ...(meta.persona ? { persona: meta.persona } : {}),
+    tags: meta.tags,
     step_type: meta.stepType,
     phase: meta.phase,
     phase_name: meta.phaseName,
@@ -247,6 +258,21 @@ function phaseLabelForJudgeStage(stage: JudgeStage | undefined): PhaseUsageType 
 function getString(attributes: Record<string, unknown>, key: string): string | undefined {
   const value = attributes[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getTags(attributes: Record<string, unknown>, key: string): string[] {
+  const raw = getString(attributes, key);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function getNumber(attributes: Record<string, unknown>, key: string): number | undefined {
