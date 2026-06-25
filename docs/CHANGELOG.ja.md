@@ -32,9 +32,9 @@
   `opencode` SDK provider を明示的に allowlist へ追加できるようになりました。subscription-only mode では
   TAKT 管理の `opencode_api_key` 設定と `TAKT_OPENCODE_API_KEY` は引き続き禁止され、`opencode` が
   allowlist されている場合は `devloopd doctor` が `opencode auth list` を確認します。
-- `devloopd doctor --subscription-only` が、直近の OpenCode log に `session_message.seq` など既知の
-  local SQLite storage failure がある場合に warning を出すようになりました。OpenCode auth store の
-  readiness と OpenCode local database の修復作業を切り分けやすくします。
+- `devloopd doctor --subscription-only` が、読み取り可能な最新 OpenCode log で `session_message.seq`
+  など既知の local SQLite storage failure を確認するようになりました。修復後の成功 run で古い失敗ログの
+  stale warning を引きずらず、OpenCode auth store の readiness と OpenCode local database の修復作業を切り分けやすくします。
 - `devloopd doctor --subscription-only --smoke-cli` が、`smoke:opencode-cli` の server-side
   `UnknownError` に OpenCode 固有の診断ヒントを追加するようになりました。直接 `opencode run`
   での確認と inline `OPENCODE_CONFIG_CONTENT` による切り分け手順を表示し、subscription-only

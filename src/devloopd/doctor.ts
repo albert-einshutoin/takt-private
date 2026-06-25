@@ -78,6 +78,7 @@ const SUBSCRIPTION_CLI_SMOKE_PROVIDERS: readonly SubscriptionCliProviderType[] =
 ];
 const DEFAULT_CLI_SMOKE_TIMEOUT_MS = 60_000;
 const OPENCODE_AUTH_LIST_TIMEOUT_MS = 10_000;
+const OPENCODE_AUTH_LIST_LOCK_RETRY_DELAYS_MS = [250, 750] as const;
 const OPENCODE_RECENT_LOG_LIMIT = 10;
 const OPENCODE_RECENT_LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 const OPENCODE_LOG_TAIL_BYTES = 64 * 1_024;
@@ -89,6 +90,10 @@ function makeCheck(status: DevloopDoctorStatus, name: string, message: string, d
 
 function sanitizeDetail(text: string): string {
   return sanitizeSensitiveText(stripAnsi(text)).trim();
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
 function appendSubscriptionCliSmokeHint(
@@ -322,11 +327,27 @@ async function checkOpenCodeAuthStore(
     return makeCheck('fail', 'OpenCode auth store', 'cannot check OpenCode auth because opencode is missing');
   }
 
-  const result = await runner.exec(commandPath, ['auth', 'list'], {
-    cwd: repoPath,
-    env: buildSubscriptionOnlyEnv(env),
-    timeoutMs: OPENCODE_AUTH_LIST_TIMEOUT_MS,
-  });
+  let result: DevloopDoctorCommandResult | undefined;
+  for (const [attemptIndex, retryDelayMs] of [0, ...OPENCODE_AUTH_LIST_LOCK_RETRY_DELAYS_MS].entries()) {
+    if (attemptIndex > 0) {
+      await delay(retryDelayMs);
+    }
+    result = await runner.exec(commandPath, ['auth', 'list'], {
+      cwd: repoPath,
+      env: buildSubscriptionOnlyEnv(env),
+      timeoutMs: OPENCODE_AUTH_LIST_TIMEOUT_MS,
+    });
+    const detail = sanitizeDetail(result.stderr || result.stdout);
+    if (result.exitCode === 0 || !/database is locked/i.test(detail)) {
+      break;
+    }
+    // OpenCode keeps a single local SQLite store; a short retry avoids false negatives
+    // when another local OpenCode process briefly overlaps doctor startup.
+  }
+
+  if (result === undefined) {
+    return makeCheck('fail', 'OpenCode auth store', 'opencode auth list did not run');
+  }
   if (result.exitCode === 0) {
     return makeCheck('pass', 'OpenCode auth store', 'opencode auth list succeeded');
   }
@@ -412,23 +433,44 @@ function checkOpenCodeRecentStorageErrors(repoPath: string, env: NodeJS.ProcessE
     return undefined;
   }
 
-  const logPaths = listRecentOpenCodeLogPaths(logDir);
-  for (const logPath of logPaths) {
+  const latestLogPath = listRecentOpenCodeLogPaths(logDir)[0];
+  if (latestLogPath === undefined) {
+    return undefined;
+  }
+
+  try {
+    // A successful newer OpenCode run should clear older SQLite warnings; otherwise a fixed
+    // local CLI/DB version mismatch keeps reporting stale failures for days.
+    if (containsOpenCodeSqliteStorageError(readUtf8Tail(latestLogPath, OPENCODE_LOG_TAIL_BYTES))) {
+      return makeCheck(
+        'warn',
+        'OpenCode storage',
+        'latest OpenCode log contains a SQLite storage error',
+        `OpenCode local database may need backup or repair before CLI/SDK smoke can pass: ${join(dataDir, 'opencode.db')}`,
+      );
+    }
+    return makeCheck('pass', 'OpenCode storage', 'latest OpenCode log has no SQLite storage errors', latestLogPath);
+  } catch {
+    // If the newest log rotates mid-check, fall back to older readable logs before giving up.
+  }
+
+  for (const logPath of listRecentOpenCodeLogPaths(logDir).slice(1)) {
     try {
       if (containsOpenCodeSqliteStorageError(readUtf8Tail(logPath, OPENCODE_LOG_TAIL_BYTES))) {
         return makeCheck(
           'warn',
           'OpenCode storage',
-          'recent OpenCode log contains a SQLite storage error',
+          'recent readable OpenCode log contains a SQLite storage error',
           `OpenCode local database may need backup or repair before CLI/SDK smoke can pass: ${join(dataDir, 'opencode.db')}`,
         );
       }
+      return makeCheck('pass', 'OpenCode storage', 'recent readable OpenCode log has no SQLite storage errors', logPath);
     } catch {
       // Log readability is advisory; auth and direct smoke checks remain the source of pass/fail readiness.
     }
   }
 
-  return makeCheck('pass', 'OpenCode storage', 'no recent OpenCode SQLite storage errors found', logDir);
+  return undefined;
 }
 
 function checkProjectWorkflows(repoPath: string): DevloopDoctorCheck[] {
