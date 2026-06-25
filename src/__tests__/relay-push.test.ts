@@ -50,14 +50,16 @@ describe('relayPushCloneToOrigin', () => {
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'git',
       ['push', 'origin', 'refs/takt-relay/feat/my-branch:refs/heads/feat/my-branch'],
-      {
+      expect.objectContaining({
         cwd: '/project',
         stdio: 'pipe',
         env: expect.objectContaining({
-          GCM_INTERACTIVE: 'Never',
+          GCM_INTERACTIVE: 'never',
+          GIT_ASKPASS: '',
           GIT_TERMINAL_PROMPT: '0',
+          SSH_ASKPASS: '',
         }),
-      },
+      }),
     );
   });
 

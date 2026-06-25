@@ -126,13 +126,37 @@ function throwPushFailureWithStderr(err: unknown, extraHint: string): never {
   throw err;
 }
 
-function getNonInteractivePushEnv(): NodeJS.ProcessEnv {
-  return {
+function appendGitConfigEnv(env: NodeJS.ProcessEnv, key: string, value: string): void {
+  const parsedCount = Number.parseInt(env.GIT_CONFIG_COUNT ?? '0', 10);
+  const index = Number.isFinite(parsedCount) && parsedCount >= 0 ? parsedCount : 0;
+  env[`GIT_CONFIG_KEY_${index}`] = key;
+  env[`GIT_CONFIG_VALUE_${index}`] = value;
+  env.GIT_CONFIG_COUNT = String(index + 1);
+}
+
+function withSshBatchMode(command: string | undefined): string {
+  const base = command?.trim() || 'ssh';
+  if (/\bBatchMode\s*=\s*yes\b/i.test(base)) {
+    return base;
+  }
+  if (/\bBatchMode\s*=\s*\S+\b/i.test(base)) {
+    return base.replace(/\bBatchMode\s*=\s*\S+\b/i, 'BatchMode=yes');
+  }
+  return `${base} -o BatchMode=yes`;
+}
+
+export function getNonInteractiveGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
-    // Long-running TAKT jobs cannot safely answer credential prompts after workflow completion.
-    GCM_INTERACTIVE: 'Never',
+    // Credential prompts can hang workflow execution, so TAKT-managed pushes must fail fast instead.
     GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: '',
+    SSH_ASKPASS: '',
+    GCM_INTERACTIVE: 'never',
+    GIT_SSH_COMMAND: withSshBatchMode(process.env.GIT_SSH_COMMAND),
   };
+  appendGitConfigEnv(env, 'core.askPass', '');
+  return env;
 }
 
 /**
@@ -144,7 +168,7 @@ export function pushBranch(cwd: string, branch: string): void {
     execFileSync('git', ['push', 'origin', branch], {
       cwd,
       stdio: 'pipe',
-      env: getNonInteractivePushEnv(),
+      env: getNonInteractiveGitEnv(),
     });
   } catch (err) {
     throwPushFailureWithStderr(err, NON_FAST_FORWARD_PUSH_HINT);
@@ -172,7 +196,7 @@ export function pushHeadToOriginBranch(cwd: string, branch: string): void {
     execFileSync('git', ['push', 'origin', `HEAD:refs/heads/${branch}`], {
       cwd,
       stdio: 'pipe',
-      env: getNonInteractivePushEnv(),
+      env: getNonInteractiveGitEnv(),
     });
   } catch (err) {
     throwPushFailureWithStderr(err, NON_FAST_FORWARD_PUSH_HINT);
@@ -188,7 +212,7 @@ export function relayPushCloneToOrigin(cloneCwd: string, rootCwd: string, branch
     execFileSync('git', ['push', 'origin', `${tempRef}:refs/heads/${branch}`], {
       cwd: rootCwd,
       stdio: 'pipe',
-      env: getNonInteractivePushEnv(),
+      env: getNonInteractiveGitEnv(),
     });
     log.info('Relay push: succeeded', { rootCwd, branch });
   } finally {

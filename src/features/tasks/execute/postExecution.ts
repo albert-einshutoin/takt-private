@@ -26,7 +26,6 @@ const ORIGIN_PUSH_FAILURE_MESSAGE = 'Failed to push branch to origin.';
 const PR_COMMENT_FAILURE_MESSAGE = 'Failed to update pull request comment.';
 const PR_CREATION_FAILURE_MESSAGE = 'Failed to create pull request.';
 
-
 export interface PostExecutionOptions {
   execCwd: string;
   projectCwd: string;
