@@ -19,5 +19,7 @@
 !facets/knowledge/**
 !facets/instructions/
 !facets/instructions/**
+!facets/partials/
+!facets/partials/**
 !facets/output-contracts/
 !facets/output-contracts/**

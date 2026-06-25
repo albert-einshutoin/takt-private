@@ -34,6 +34,7 @@ import {
   type WorkflowCallArgResolutionPolicy,
 } from './workflowCallableArgResolver.js';
 import { prepareCallableSubworkflowDiscoveryArgs } from './workflowCallableDiscoveryArgs.js';
+import { expandInstructionPartials } from './instructionPartials.js';
 
 function normalizeSubworkflowConfig(
   raw: ReturnType<typeof WorkflowConfigRawSchema.parse>['subworkflow'],
@@ -72,13 +73,16 @@ function normalizeFindingContractConfig(
   }
 
   const { personaSpec, personaPath } = resolvePersona(raw.manager.persona, sections, workflowDir, context);
-  const instruction = resolveRefToContent(
+  const resolvedInstruction = resolveRefToContent(
     raw.manager.instruction,
     sections.resolvedInstructionsWithSource ?? sections.resolvedInstructions,
     workflowDir,
     'instructions',
     context,
   );
+  const instruction = resolvedInstruction
+    ? expandInstructionPartials(resolvedInstruction, context)
+    : undefined;
   const outputContract = resolveRefToContent(
     raw.manager.output_contract,
     sections.resolvedReportFormatsWithSource ?? sections.resolvedReportFormats,
