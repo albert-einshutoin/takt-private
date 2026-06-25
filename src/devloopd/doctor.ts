@@ -1,4 +1,15 @@
-import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  statSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
@@ -6,6 +17,7 @@ import {
   SUBSCRIPTION_ONLY_FORBIDDEN_ENV_NAMES,
   assertSubscriptionOnlyProvider,
   findForbiddenSubscriptionOnlyConfigKeyPaths,
+  getSubscriptionOnlyAllowedProviders,
   type SubscriptionOnlyPolicyConfig,
 } from '../core/subscription-only/policy.js';
 import { getGlobalConfigPath, getProjectConfigPath, resolveWorkflowConfigValues } from '../infra/config/index.js';
@@ -65,6 +77,10 @@ const SUBSCRIPTION_CLI_SMOKE_PROVIDERS: readonly SubscriptionCliProviderType[] =
   'agy-cli',
 ];
 const DEFAULT_CLI_SMOKE_TIMEOUT_MS = 60_000;
+const OPENCODE_AUTH_LIST_TIMEOUT_MS = 10_000;
+const OPENCODE_RECENT_LOG_LIMIT = 10;
+const OPENCODE_RECENT_LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+const OPENCODE_LOG_TAIL_BYTES = 64 * 1_024;
 const CLI_SMOKE_PROMPT = 'Reply with exactly: Done';
 
 function makeCheck(status: DevloopDoctorStatus, name: string, message: string, detail?: string): DevloopDoctorCheck {
@@ -73,6 +89,26 @@ function makeCheck(status: DevloopDoctorStatus, name: string, message: string, d
 
 function sanitizeDetail(text: string): string {
   return sanitizeSensitiveText(stripAnsi(text)).trim();
+}
+
+function appendSubscriptionCliSmokeHint(
+  provider: SubscriptionCliProviderType,
+  detail: string,
+): string {
+  if (provider !== 'opencode-cli' || !/UnknownError/i.test(detail) || !/Unexpected server error/i.test(detail)) {
+    return detail;
+  }
+
+  // OpenCode UnknownError is returned after the CLI reaches OpenCode, so TAKT
+  // should steer users toward direct CLI/account/service checks instead of
+  // implying a subscription-only config or API-key fallback issue.
+  const hint = [
+    'OpenCode returned a server-side UnknownError.',
+    'Run `opencode run "Reply with exactly: Done"` directly to confirm the CLI outside TAKT.',
+    'If global MCP config is suspect, retry with `OPENCODE_CONFIG_CONTENT=\'{"mcp":{"pencil":{"enabled":false}}}\' opencode run "Reply with exactly: Done"`.',
+    'If the direct command still fails, check OpenCode account/service state; TAKT does not fall back to API-key providers in subscription-only mode.',
+  ].join(' ');
+  return `${detail}\n${hint}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -233,21 +269,34 @@ function buildSubscriptionPolicy(config: {
   };
 }
 
+function resolveTaktSubscriptionPolicy(repoPath: string): SubscriptionOnlyPolicyConfig {
+  const config = resolveWorkflowConfigValues(repoPath, [
+    'subscriptionOnly',
+    'allowedProviders',
+    'forbiddenProviders',
+    'provider',
+  ]);
+  const policy = buildSubscriptionPolicy(config);
+  assertSubscriptionOnlyProvider(config.provider, 'TAKT config provider', policy);
+  return policy;
+}
+
+function isOpenCodeSdkProviderAllowed(repoPath: string): boolean {
+  try {
+    return getSubscriptionOnlyAllowedProviders(resolveTaktSubscriptionPolicy(repoPath)).has('opencode');
+  } catch {
+    return false;
+  }
+}
+
 function checkResolvedTaktConfig(repoPath: string): DevloopDoctorCheck {
   try {
-    const config = resolveWorkflowConfigValues(repoPath, [
-      'subscriptionOnly',
-      'allowedProviders',
-      'forbiddenProviders',
-      'provider',
-    ]);
-
+    const config = resolveWorkflowConfigValues(repoPath, ['subscriptionOnly']);
     if (config.subscriptionOnly !== true) {
       return makeCheck('fail', 'TAKT config', 'TAKT config must set subscription_only: true');
     }
 
-    const policy = buildSubscriptionPolicy(config);
-    assertSubscriptionOnlyProvider(config.provider, 'TAKT config provider', policy);
+    const policy = resolveTaktSubscriptionPolicy(repoPath);
 
     return makeCheck(
       'pass',
@@ -257,6 +306,129 @@ function checkResolvedTaktConfig(repoPath: string): DevloopDoctorCheck {
   } catch (error) {
     return makeCheck('fail', 'TAKT config', sanitizeDetail(getErrorMessage(error)));
   }
+}
+
+async function checkOpenCodeAuthStore(
+  repoPath: string,
+  env: NodeJS.ProcessEnv,
+  runner: DevloopDoctorCommandRunner,
+): Promise<DevloopDoctorCheck | undefined> {
+  if (!isOpenCodeSdkProviderAllowed(repoPath)) {
+    return undefined;
+  }
+
+  const commandPath = runner.resolveCommand('opencode', env);
+  if (commandPath === undefined) {
+    return makeCheck('fail', 'OpenCode auth store', 'cannot check OpenCode auth because opencode is missing');
+  }
+
+  const result = await runner.exec(commandPath, ['auth', 'list'], {
+    cwd: repoPath,
+    env: buildSubscriptionOnlyEnv(env),
+    timeoutMs: OPENCODE_AUTH_LIST_TIMEOUT_MS,
+  });
+  if (result.exitCode === 0) {
+    return makeCheck('pass', 'OpenCode auth store', 'opencode auth list succeeded');
+  }
+
+  return makeCheck(
+    'fail',
+    'OpenCode auth store',
+    'opencode auth list failed',
+    sanitizeDetail(result.stderr || result.stdout),
+  );
+}
+
+function resolveOpenCodeDataDir(env: NodeJS.ProcessEnv): string | undefined {
+  const home = env.HOME?.trim() === '' ? undefined : env.HOME;
+  const resolvedHome = home ?? homedir();
+  return resolvedHome === '' ? undefined : join(resolvedHome, '.local', 'share', 'opencode');
+}
+
+function listRecentOpenCodeLogPaths(logDir: string): string[] {
+  const cutoff = Date.now() - OPENCODE_RECENT_LOG_MAX_AGE_MS;
+  const entries: Array<{ filePath: string; mtimeMs: number }> = [];
+
+  try {
+    for (const entry of readdirSync(logDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.log')) {
+        continue;
+      }
+
+      const filePath = join(logDir, entry.name);
+      try {
+        const stat = statSync(filePath);
+        if (stat.isFile() && stat.mtimeMs >= cutoff) {
+          entries.push({ filePath, mtimeMs: stat.mtimeMs });
+        }
+      } catch {
+        // A rotating log can disappear between readdir and stat; another recent log is enough for doctor.
+      }
+    }
+  } catch {
+    return [];
+  }
+
+  return entries
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, OPENCODE_RECENT_LOG_LIMIT)
+    .map((entry) => entry.filePath);
+}
+
+function readUtf8Tail(filePath: string, maxBytes: number): string {
+  const stat = statSync(filePath);
+  if (stat.size <= maxBytes) {
+    return readFileSync(filePath, 'utf-8');
+  }
+
+  const fd = openSync(filePath, 'r');
+  try {
+    // Storage failures are appended near the end of OpenCode logs; reading the tail avoids loading large model traces.
+    const buffer = Buffer.allocUnsafe(maxBytes);
+    const bytesRead = readSync(fd, buffer, 0, maxBytes, stat.size - maxBytes);
+    return buffer.subarray(0, bytesRead).toString('utf-8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function containsOpenCodeSqliteStorageError(text: string): boolean {
+  return /session_message\.seq/i.test(text)
+    && /(SQLiteError|SQLITE_CONSTRAINT|constraint failed|NOT NULL)/i.test(text);
+}
+
+function checkOpenCodeRecentStorageErrors(repoPath: string, env: NodeJS.ProcessEnv): DevloopDoctorCheck | undefined {
+  if (!isOpenCodeSdkProviderAllowed(repoPath)) {
+    return undefined;
+  }
+
+  const dataDir = resolveOpenCodeDataDir(env);
+  if (dataDir === undefined) {
+    return undefined;
+  }
+
+  const logDir = join(dataDir, 'log');
+  if (!existsSync(logDir)) {
+    return undefined;
+  }
+
+  const logPaths = listRecentOpenCodeLogPaths(logDir);
+  for (const logPath of logPaths) {
+    try {
+      if (containsOpenCodeSqliteStorageError(readUtf8Tail(logPath, OPENCODE_LOG_TAIL_BYTES))) {
+        return makeCheck(
+          'warn',
+          'OpenCode storage',
+          'recent OpenCode log contains a SQLite storage error',
+          `OpenCode local database may need backup or repair before CLI/SDK smoke can pass: ${join(dataDir, 'opencode.db')}`,
+        );
+      }
+    } catch {
+      // Log readability is advisory; auth and direct smoke checks remain the source of pass/fail readiness.
+    }
+  }
+
+  return makeCheck('pass', 'OpenCode storage', 'no recent OpenCode SQLite storage errors found', logDir);
 }
 
 function checkProjectWorkflows(repoPath: string): DevloopDoctorCheck[] {
@@ -344,7 +516,7 @@ async function checkSubscriptionCliSmokeProvider(
     'fail',
     `smoke:${provider}`,
     `${provider} smoke run failed`,
-    sanitizeDetail(result.stderr || result.stdout),
+    appendSubscriptionCliSmokeHint(provider, sanitizeDetail(result.stderr || result.stdout)),
   );
 }
 
@@ -382,6 +554,14 @@ export async function runDevloopDoctor(options: RunDevloopDoctorOptions = {}): P
       checkResolvedTaktConfig(repoPath),
       ...checkProjectWorkflows(repoPath),
     );
+    const openCodeAuthCheck = await checkOpenCodeAuthStore(repoPath, env, runner);
+    if (openCodeAuthCheck !== undefined) {
+      checks.push(openCodeAuthCheck);
+    }
+    const openCodeStorageCheck = checkOpenCodeRecentStorageErrors(repoPath, env);
+    if (openCodeStorageCheck !== undefined) {
+      checks.push(openCodeStorageCheck);
+    }
   }
 
   if (options.smokeCli === true) {

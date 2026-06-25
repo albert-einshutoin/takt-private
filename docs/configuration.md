@@ -36,7 +36,8 @@ interactive_preview_steps: 3  # Step previews in interactive mode (0-10, default
 # When enabled, TAKT rejects API-key config and any provider outside allowed_providers.
 # subscription_only: true
 # allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
-# forbidden_providers: [codex, opencode, claude-sdk]
+# Add opencode explicitly only when using OpenCode's own auth store for OpenCode Go/Zen.
+# forbidden_providers: [codex, claude-sdk]
 
 # Runtime environment defaults (applies to all workflows unless workflow_config.runtime overrides)
 # runtime:
@@ -159,8 +160,8 @@ interactive_preview_steps: 3  # Step previews in interactive mode (0-10, default
 | `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-terminal"` \| `"codex"` \| `"codex-cli"` \| `"opencode"` \| `"opencode-cli"` \| `"cursor"` \| `"cursor-cli"` \| `"copilot"` \| `"kiro"` \| `"agy-cli"` \| `"mock"` | `"claude"` | Default AI provider (`claude` = headless CLI mode, `claude-sdk` = SDK/API mode, `*-cli` = external CLI login/session mode) |
 | `logging.trace` | boolean | `false` | Enable trace-level logging (suppresses high-frequency debug noise) |
 | `model` | string | - | Default model name (passed to provider as-is) |
-| `subscription_only` | boolean | `false` | Reject API-key config, SDK/API providers, workflow provider overrides, and execution-time provider overrides outside the subscription-only allowlist |
-| `allowed_providers` | provider[] | `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli`, `mock` | Allowlist used only when `subscription_only: true`; entries must themselves be subscription-safe providers |
+| `subscription_only` | boolean | `false` | Reject API-key config, non-allowlisted providers, workflow provider overrides, and execution-time provider overrides outside the subscription-only allowlist |
+| `allowed_providers` | provider[] | `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli`, `mock` | Allowlist used only when `subscription_only: true`; entries must themselves be subscription-safe providers. Add `opencode` explicitly only when using OpenCode's own credential store, such as OpenCode Go/Zen, without TAKT-managed `opencode_api_key` config |
 | `forbidden_providers` | string[] | `[]` | Additional provider names rejected when `subscription_only: true`; useful for documenting organization policy such as `codex`, `opencode`, or `claude-sdk` |
 | `branch_name_strategy` | `"romaji"` \| `"ai"` | `"romaji"` | Branch name generation strategy |
 | `prevent_sleep` | boolean | `false` | Prevent macOS idle sleep (caffeinate) |
@@ -284,7 +285,7 @@ Project config values override global config when both are set.
 
 TAKT supports Claude, Codex, OpenCode, Cursor, Copilot, Kiro, and Antigravity-style CLI providers. SDK/API providers such as `codex` and `opencode` can use API keys. CLI-only providers such as `codex-cli`, `opencode-cli`, `cursor-cli`, and `agy-cli` are intended for already-authenticated local CLI sessions; TAKT strips common API-key environment variables before launching them.
 
-When `subscription_only: true` is enabled, API key config fields and SDK/API providers are rejected before workflow execution. Use `codex-cli`, `cursor-cli`, `opencode-cli`, or `agy-cli` instead.
+When `subscription_only: true` is enabled, API key config fields and providers outside the allowlist are rejected before workflow execution. Use `codex-cli`, `cursor-cli`, `opencode-cli`, or `agy-cli` by default. You may explicitly allow `opencode` when you want the OpenCode SDK path to use OpenCode's own credential store, for example OpenCode Go/Zen; TAKT still rejects `opencode_api_key` and `TAKT_OPENCODE_API_KEY` in subscription-only mode.
 
 Before long runs, use `devloopd doctor --subscription-only` to verify required CLI tools, GitHub auth, forbidden API-key environment variables, TAKT config, and project workflow provider references. See the [devloopd Guide](./devloopd.md).
 

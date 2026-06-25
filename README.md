@@ -283,9 +283,10 @@ Subscription/login-session-only mode:
 subscription_only: true
 provider: codex-cli
 allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
+# Add opencode explicitly only when using OpenCode's own auth store for OpenCode Go/Zen.
 ```
 
-When `subscription_only` is enabled, TAKT rejects API-key config such as `openai_api_key`, SDK/API providers such as `codex` and `opencode`, workflow step overrides outside the allowlist, and execution-time `--provider` overrides outside the allowlist.
+When `subscription_only` is enabled, TAKT rejects API-key config such as `openai_api_key`, providers outside the allowlist, workflow step overrides outside the allowlist, and execution-time `--provider` overrides outside the allowlist. `opencode` can be allowlisted explicitly when you want the OpenCode SDK path to use OpenCode's own credential store, such as OpenCode Go/Zen; TAKT still rejects `opencode_api_key` and `TAKT_OPENCODE_API_KEY` in subscription-only mode.
 
 Validate that local CLI sessions and workflow files match this policy:
 

@@ -28,6 +28,17 @@
 
 ### Fixed
 
+- `subscription_only` 設定で、OpenCode Go/Zen など OpenCode 側の credential store を使いたい場合に
+  `opencode` SDK provider を明示的に allowlist へ追加できるようになりました。subscription-only mode では
+  TAKT 管理の `opencode_api_key` 設定と `TAKT_OPENCODE_API_KEY` は引き続き禁止され、`opencode` が
+  allowlist されている場合は `devloopd doctor` が `opencode auth list` を確認します。
+- `devloopd doctor --subscription-only` が、直近の OpenCode log に `session_message.seq` など既知の
+  local SQLite storage failure がある場合に warning を出すようになりました。OpenCode auth store の
+  readiness と OpenCode local database の修復作業を切り分けやすくします。
+- `devloopd doctor --subscription-only --smoke-cli` が、`smoke:opencode-cli` の server-side
+  `UnknownError` に OpenCode 固有の診断ヒントを追加するようになりました。直接 `opencode run`
+  での確認と inline `OPENCODE_CONFIG_CONTENT` による切り分け手順を表示し、subscription-only
+  利用者が TAKT 設定問題と OpenCode account / service 側の失敗を分離できます。
 - `opencode-cli` provider 実行で `opencode run` に `--model/-m` を渡すようになりました。OpenCode の provider/model CLI contract に沿った subscription-only smoke run ができます。
 - `devloopd doctor --subscription-only --smoke-cli` が `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli` の bounded な実 CLI smoke check を実行できるようになりました。通常の doctor は、明示的に smoke を要求しない限り、課金/生成を伴わない検査のままです。
 - `agy-cli` provider 実行で `provider_options.agy.print_timeout` を受け取り、`agy --print-timeout` として渡せるようになりました。Antigravity の subscription-only smoke run が CLI のデフォルト timeout まで待たず、bounded に失敗できます。

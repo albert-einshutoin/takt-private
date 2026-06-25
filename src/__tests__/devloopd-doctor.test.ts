@@ -143,6 +143,75 @@ describe('devloopd doctor', () => {
     });
   });
 
+  it('checks the OpenCode auth store when the OpenCode SDK provider is allowlisted', async () => {
+    writeProjectConfig(projectDir, [
+      'subscription_only: true',
+      'provider: opencode',
+      'model: opencode-go/kimi-k2.7-code',
+      'allowed_providers: [codex-cli, opencode, mock]',
+    ].join('\n'));
+    invalidateAllResolvedConfigCache();
+    const execCalls: string[] = [];
+    const runner: DevloopDoctorCommandRunner = {
+      resolveCommand(command) {
+        return command === 'agent' ? undefined : `/mock/bin/${command}`;
+      },
+      async exec(command, args) {
+        execCalls.push(`${command} ${args.join(' ')}`);
+        if (command === 'gh' && args.join(' ') === 'auth status') {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+        if (command.endsWith('/opencode') && args.join(' ') === 'auth list') {
+          return { exitCode: 0, stdout: 'OpenCode Go', stderr: '' };
+        }
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    };
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(report.passed).toBe(true);
+    expect(execCalls).toContain('/mock/bin/opencode auth list');
+    expect(formatDevloopDoctorReport(report, { verbose: true })).toContain('OpenCode auth store');
+  });
+
+  it('warns about recent OpenCode SQLite storage errors when the OpenCode SDK provider is allowlisted', async () => {
+    writeProjectConfig(projectDir, [
+      'subscription_only: true',
+      'provider: opencode',
+      'model: opencode-go/kimi-k2.7-code',
+      'allowed_providers: [codex-cli, opencode, mock]',
+    ].join('\n'));
+    const openCodeLogDir = join(projectDir, '.local', 'share', 'opencode', 'log');
+    mkdirSync(openCodeLogDir, { recursive: true });
+    writeFileSync(
+      join(openCodeLogDir, '2026-06-25T100242.log'),
+      'ERROR SQLiteError: NOT NULL constraint failed: session_message.seq\n',
+      'utf-8',
+    );
+    invalidateAllResolvedConfigCache();
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      env: { PATH: '/mock/bin', HOME: projectDir },
+      runner: makeRunner(),
+    });
+
+    expect(report.passed).toBe(true);
+    const storageCheck = report.checks.find((check) => check.name === 'OpenCode storage');
+    expect(storageCheck).toMatchObject({
+      status: 'warn',
+      message: expect.stringContaining('SQLite'),
+    });
+    expect(formatDevloopDoctorReport(report)).toContain('OpenCode storage');
+  });
+
   it('treats an absent optional global TAKT config as a passing skipped check', async () => {
     rmSync(join(globalConfigDir, 'config.yaml'));
     invalidateGlobalConfigCache();
@@ -240,6 +309,48 @@ describe('devloopd doctor', () => {
     expect(output).toContain('smoke:opencode-cli');
     expect(output).toContain('Unexpected server error');
     expect(output).not.toContain('\x1b');
+  });
+
+  it('adds OpenCode-specific smoke diagnostics for server-side UnknownError failures', async () => {
+    const runner: DevloopDoctorCommandRunner = {
+      resolveCommand(command) {
+        return command === 'agent' ? undefined : `/mock/bin/${command}`;
+      },
+      async exec(command, args) {
+        if (command === 'gh' && args.join(' ') === 'auth status') {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+        if (command.endsWith('/opencode')) {
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: JSON.stringify({
+              name: 'UnknownError',
+              data: {
+                message: 'Unexpected server error. Check server logs for details.',
+                ref: 'err_do_not_hide',
+              },
+            }),
+          };
+        }
+        return { exitCode: 0, stdout: 'Done', stderr: '' };
+      },
+    };
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      smokeCli: true,
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    const output = formatDevloopDoctorReport(report);
+    expect(report.passed).toBe(false);
+    expect(output).toContain('OpenCode returned a server-side UnknownError');
+    expect(output).toContain('opencode run');
+    expect(output).toContain('OPENCODE_CONFIG_CONTENT');
+    expect(output).toContain('check OpenCode account/service state');
   });
 
   it('skips optional CLI smoke checks when prerequisite doctor checks fail', async () => {

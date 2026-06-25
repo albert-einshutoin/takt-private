@@ -28,6 +28,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `subscription_only` configs can now explicitly allow the `opencode` SDK provider when users want
+  OpenCode's own credential store, such as OpenCode Go/Zen, instead of the `opencode-cli` path.
+  TAKT-managed `opencode_api_key` config and `TAKT_OPENCODE_API_KEY` remain forbidden in
+  subscription-only mode, and `devloopd doctor` checks `opencode auth list` when `opencode` is
+  allowlisted.
+- `devloopd doctor --subscription-only` now warns when recent OpenCode logs show a known local
+  SQLite storage failure such as `session_message.seq`, helping users separate OpenCode auth-store
+  readiness from local OpenCode database repair work.
+- `devloopd doctor --subscription-only --smoke-cli` now adds OpenCode-specific diagnostics when
+  `smoke:opencode-cli` fails with a server-side `UnknownError`, including direct `opencode run`
+  and inline `OPENCODE_CONFIG_CONTENT` checks so subscription-only users can separate TAKT config
+  issues from OpenCode account/service failures.
 - `opencode-cli` provider runs now pass `--model/-m` through to `opencode run`, matching OpenCode's provider/model CLI contract for subscription-only smoke runs.
 - `devloopd doctor --subscription-only --smoke-cli` now runs bounded real CLI smoke checks for `codex-cli`, `cursor-cli`, `opencode-cli`, and `agy-cli`. The default doctor remains non-billing/non-generating unless smoke is explicitly requested.
 - `agy-cli` provider runs now accept `provider_options.agy.print_timeout`, passed through as `agy --print-timeout`, so Antigravity subscription-only smoke runs can fail boundedly instead of waiting for the CLI default timeout.

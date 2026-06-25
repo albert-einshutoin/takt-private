@@ -27,6 +27,8 @@ devloopd doctor --subscription-only
 - 解決後の TAKT 設定で `subscription_only: true` が有効であること
 - global / project の TAKT config に API key config キーが含まれていないこと
 - `.takt/workflows/` 配下の project workflow が TAKT workflow doctor に通り、subscription-only provider チェックにも通ること
+- `opencode` が明示的に allowlist されている場合、`opencode auth list` で OpenCode credential store を読めること
+- `opencode` が明示的に allowlist されている場合、直近の OpenCode log に既知の local SQLite storage error が出ていないこと
 
 doctor は禁止された環境変数名と config キー名だけを表示します。secret 値は出力しません。
 
@@ -44,6 +46,30 @@ devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
 
 smoke check は prerequisite の doctor check が通った場合だけ実行されます。subscription-only
 環境 sanitizer を使い、CLI が timeout を超えた場合は hang せず failure として扱います。
+
+### Smoke failure の切り分け
+
+`smoke:opencode-cli` は、TAKT の設定、command discovery、subscription-only guard が正しくても、
+OpenCode 側の `UnknownError`（例: `Unexpected server error`）で失敗することがあります。
+その場合は、まず OpenCode を直接実行して切り分けます。
+
+```bash
+opencode run "Reply with exactly: Done"
+```
+
+直接実行でも同じ失敗になる場合は、OpenCode の account / service 状態を確認してください。
+`devloopd doctor` が `OpenCode storage` を報告する場合、OpenCode credential store は読めていますが、
+直近 log に `session_message.seq` など local SQLite storage 問題の兆候があります。CLI / SDK smoke
+を通す前に、OpenCode の local database をバックアップまたは修復してください。global OpenCode MCP 設定の影響を
+除外したい場合は、inline の OpenCode config override で疑わしい MCP server を一時的に無効化して再試行できます。
+
+```bash
+OPENCODE_CONFIG_CONTENT='{"mcp":{"pencil":{"enabled":false}}}' \
+  opencode run "Reply with exactly: Done"
+```
+
+TAKT は smoke check 中も subscription-only mode を維持します。ログイン済み CLI が失敗しても、
+SDK/API provider や API key credential へフォールバックしません。
 
 ### オプション
 
@@ -310,4 +336,10 @@ provider: codex-cli
 allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
 ```
 
-`subscription_only: true` が有効な場合、TAKT は `codex` や `opencode` のような SDK/API provider、`openai_api_key` のような API key 設定、allowlist 外の workflow step provider 上書き、allowlist 外の実行時 `--provider` 上書きを拒否します。
+`subscription_only: true` が有効な場合、TAKT は `openai_api_key` のような API key 設定、
+allowlist 外の workflow step provider 上書き、allowlist 外の実行時 `--provider` 上書きを拒否します。
+OpenCode Go/Zen など OpenCode 側の credential store を使って SDK 経路を使いたい場合は、
+`allowed_providers` に `opencode` を明示追加できます。この opt-in mode では、
+`devloopd doctor` も生成を伴わない credential-store check として `opencode auth list` を実行し、
+直近の OpenCode log に既知の local SQLite storage failure が出ていないか確認します。
+TAKT は引き続き `opencode_api_key` と `TAKT_OPENCODE_API_KEY` を拒否します。
