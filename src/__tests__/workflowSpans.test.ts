@@ -1046,7 +1046,7 @@ describe('workflow OpenTelemetry spans', () => {
         sanitizeText: (text: string) => text.replaceAll('secret', '[REDACTED]'),
         providerInfo: {
           provider: 'codex',
-          model: 'gpt-5',
+          model: 'gpt-5.4',
           providerSource: 'project',
           modelSource: 'global',
         },
@@ -1090,7 +1090,7 @@ describe('workflow OpenTelemetry spans', () => {
       'takt.phase.status': 'done',
       'takt.phase.result.content': '[REDACTED] content',
       'takt.provider.name': 'codex',
-      'takt.model.name': 'gpt-5',
+      'takt.model.name': 'gpt-5.4',
       'takt.usage.missing': false,
       'gen_ai.usage.input_tokens': 11,
       'gen_ai.usage.output_tokens': 7,
@@ -1119,7 +1119,7 @@ describe('workflow OpenTelemetry spans', () => {
         'takt.step.name': 'implement',
         'takt.phase.name': 'execute',
         'takt.provider.name': 'codex',
-        'takt.model.name': 'gpt-5',
+        'takt.model.name': 'gpt-5.4',
       }) as unknown,
     }));
     expect(metricRecords).toContainEqual(expect.objectContaining({
@@ -1130,7 +1130,7 @@ describe('workflow OpenTelemetry spans', () => {
         'takt.step.name': 'implement',
         'takt.phase.name': 'execute',
         'takt.provider.name': 'codex',
-        'takt.model.name': 'gpt-5',
+        'takt.model.name': 'gpt-5.4',
       }) as unknown,
     }));
     expect(metricRecords).toContainEqual(expect.objectContaining({
@@ -1141,7 +1141,19 @@ describe('workflow OpenTelemetry spans', () => {
         'takt.step.name': 'implement',
         'takt.phase.name': 'execute',
         'takt.provider.name': 'codex',
-        'takt.model.name': 'gpt-5',
+        'takt.model.name': 'gpt-5.4',
+      }) as unknown,
+    }));
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.token.estimated_cost_usd',
+      value: 0.00012575,
+      attributes: expect.objectContaining({
+        'takt.step.name': 'implement',
+        'takt.phase.name': 'execute',
+        'takt.provider.name': 'codex',
+        'takt.model.name': 'gpt-5.4',
+        'takt.token.pricing_key': 'openai:gpt-5.4',
       }) as unknown,
     }));
   });

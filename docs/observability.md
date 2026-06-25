@@ -44,12 +44,15 @@ TAKT emits these workflow metrics when observability is enabled:
 | `takt.token.input_tokens` | Provider input tokens for phases with usage data |
 | `takt.token.output_tokens` | Provider output tokens for phases with usage data |
 | `takt.token.cached_input_tokens` | Provider cached input tokens when the provider reports them |
+| `takt.token.estimated_cost_usd` | Estimated token cost in USD for priced provider/model combinations |
 | `takt.provider.errors` | Provider error count by provider, model, step, and normalized error type |
 | `takt.quality_gate.results` | Quality gate pass/fail count by gate name, gate type, and step |
 | `takt.workflow.loops_detected` | Consecutive same-step loop detector hits |
 | `takt.workflow.cycles_detected` | Loop monitor cycle threshold hits |
 
 Token metrics carry the same run-scoped workflow attributes used by the other metrics, including `takt.run.id`, `takt.workflow.name`, `takt.step.name`, `takt.phase.name`, `takt.provider.name`, and `takt.model.name`. Missing usage is not emitted as zero-token metric points.
+
+Estimated cost metrics use the built-in per-million-token table in `src/shared/pricing/tokenCost.ts` for direct OpenAI/Codex and Anthropic/Claude provider models. Unpriced providers or unknown model names do not emit `takt.token.estimated_cost_usd`; this avoids reporting misleading USD values for subscription, proxy, or custom-router providers. Claude cache creation is estimated at the 5-minute cache-write rate because TAKT usage records do not include cache duration.
 
 Provider error metrics use `takt.provider.error_type` to distinguish rate limits, provider-normalized failure categories, and runtime exceptions. Quality gate string directives are labeled as `ai_gate_<n>` instead of storing prompt text in metric attributes; command gates use their explicit `name` when configured or `command_gate_<n>` when unnamed.
 
