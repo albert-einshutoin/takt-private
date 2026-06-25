@@ -101,6 +101,10 @@ export const StepProviderOptionsObjectSchema = z.object({
     agent: z.string().min(1).optional(),
     ground_check: GroundCheckOptionsSchema,
   }).optional(),
+  agy: z.object({
+    print_timeout: z.string().min(1).optional(),
+    ground_check: GroundCheckOptionsSchema,
+  }).optional(),
 });
 
 export const StepProviderOptionsSchema = StepProviderOptionsObjectSchema.optional();

@@ -20,6 +20,7 @@ const PROVIDER_OPTIONS_ENV_SPEC_ENTRIES = [
   { path: 'provider_options.copilot.effort', type: 'string' },
   { path: 'provider_options.cursor.use_prompt_file', type: 'boolean' },
   { path: 'provider_options.kiro.agent', type: 'string' },
+  { path: 'provider_options.agy.print_timeout', type: 'string' },
 ] as const satisfies readonly EnvSpec[];
 
 const PROVIDER_OPTIONS_TRACE_PATH_ENTRIES = [
@@ -85,6 +86,13 @@ const PROVIDER_OPTIONS_TRACE_PATH_ENTRIES = [
   'provider_options.kiro.ground_check.provider',
   'provider_options.kiro.ground_check.model',
   'provider_options.kiro.ground_check.provider_options',
+  'provider_options.agy',
+  'provider_options.agy.print_timeout',
+  'provider_options.agy.ground_check',
+  'provider_options.agy.ground_check.enabled',
+  'provider_options.agy.ground_check.provider',
+  'provider_options.agy.ground_check.model',
+  'provider_options.agy.ground_check.provider_options',
 ] as const;
 
 const PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATH_ENTRIES = [
@@ -139,6 +147,11 @@ const PROVIDER_OPTIONS_INTERNAL_PATH_ENTRIES = [
   'kiro.groundCheck.provider',
   'kiro.groundCheck.model',
   'kiro.groundCheck.providerOptions',
+  'agy.printTimeout',
+  'agy.groundCheck.enabled',
+  'agy.groundCheck.provider',
+  'agy.groundCheck.model',
+  'agy.groundCheck.providerOptions',
 ] as const;
 
 export type ProviderOptionsTracePath = (typeof PROVIDER_OPTIONS_TRACE_PATH_ENTRIES)[number];
@@ -158,6 +171,7 @@ export const PROVIDER_OPTIONS_TRACKED_KEYS = [
   'provider_options.copilot',
   'provider_options.cursor',
   'provider_options.kiro',
+  'provider_options.agy',
   ...PROVIDER_OPTIONS_ENV_SPEC_ENTRIES.map((spec) => spec.path).filter((path) => path !== 'provider_options'),
   'provider_options.claude.allowed_tools',
 ] as const;

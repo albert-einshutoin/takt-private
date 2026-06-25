@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `agy-cli` provider runs now accept `provider_options.agy.print_timeout`, passed through as `agy --print-timeout`, so Antigravity subscription-only smoke runs can fail boundedly instead of waiting for the CLI default timeout.
+- `devloopd doctor --subscription-only` now auto-discovers `.takt/devloopd.yaml` and treats absent optional TAKT config files as skipped checks instead of warning. Project-local subscription-only readiness can now be green from a source checkout with no global TAKT config.
 - `devloopd doctor --subscription-only` now accepts a source checkout's adjacent `bin/takt` wrapper when `takt` is not installed on `PATH`. This lets local development checkouts verify subscription-only readiness before `npm link` or global installation.
 - Finding Contract ledgers now persist task-derived requirement matrices and reviewer finding acceptance criteria (#831). Review, supervise, and report instructions can reference requirement ids and acceptance criteria before approving a finding as resolved.
 - Runtime prepare presets now run on Windows when invoked through Git Bash or WSL bash (#443). TAKT no longer passes raw `C:\...` script paths directly to bash; it converts them with `cygpath` or `wslpath` inside bash before executing packaged `node` / `gradle` prepare scripts.

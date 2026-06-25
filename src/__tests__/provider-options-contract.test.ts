@@ -31,6 +31,7 @@ describe('providerOptionsContract', () => {
       'provider_options.copilot.effort',
       'provider_options.cursor.use_prompt_file',
       'provider_options.kiro.agent',
+      'provider_options.agy.print_timeout',
     ]));
     expect(PROVIDER_OPTIONS_TRACE_PATHS).toContain('provider_options.codex.base_url');
     expect(PROVIDER_OPTIONS_TRACE_PATHS).toContain('provider_options.claude.base_url');
@@ -43,6 +44,7 @@ describe('providerOptionsContract', () => {
     expect(PROVIDER_OPTIONS_TRACE_PATHS).toContain('provider_options.claude_terminal.timeout_ms');
     expect(PROVIDER_OPTIONS_TRACE_PATHS).toContain('provider_options.kiro');
     expect(PROVIDER_OPTIONS_TRACE_PATHS).toContain('provider_options.kiro.agent');
+    expect(PROVIDER_OPTIONS_TRACE_PATHS).toContain('provider_options.agy.print_timeout');
     expect(PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS).toEqual([
       'provider_options.codex.base_url',
       'provider_options.claude.base_url',
@@ -74,6 +76,8 @@ describe('providerOptionsContract', () => {
       .toBe('provider_options.cursor.use_prompt_file');
     expect(toProviderOptionsTracePath('kiro.agent'))
       .toBe('provider_options.kiro.agent');
+    expect(toProviderOptionsTracePath('agy.printTimeout'))
+      .toBe('provider_options.agy.print_timeout');
   });
 
   it('enumerates only present provider option leaves', () => {
@@ -92,6 +96,7 @@ describe('providerOptionsContract', () => {
       claudeTerminal: { backend: 'tmux', keepSession: false },
       copilot: { effort: 'high' },
       cursor: { usePromptFile: true },
+      agy: { printTimeout: '30s' },
     } as Parameters<typeof getPresentProviderOptionPaths>[0])).toEqual([
       'codex.baseUrl',
       'codex.networkAccess',
@@ -105,6 +110,7 @@ describe('providerOptionsContract', () => {
       'claudeTerminal.keepSession',
       'copilot.effort',
       'cursor.usePromptFile',
+      'agy.printTimeout',
     ]);
   });
 

@@ -41,6 +41,7 @@ export class SubscriptionCliProvider implements Provider {
           systemPrompt,
           permissionMode: options.permissionMode,
           commandPath: resolveCommandPath(this.providerType),
+          agyPrintTimeout: options.providerOptions?.agy?.printTimeout,
           onStream: options.onStream,
           childProcessEnv: options.childProcessEnv,
         });

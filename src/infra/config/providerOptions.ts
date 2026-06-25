@@ -66,6 +66,10 @@ type RawProviderOptions = {
     agent?: string;
     ground_check?: RawGroundCheckOptions;
   };
+  agy?: {
+    print_timeout?: string;
+    ground_check?: RawGroundCheckOptions;
+  };
 };
 
 type ProviderBaseUrlTrust = 'trusted' | 'loopback-only' | 'local-loopback-only';
@@ -320,6 +324,17 @@ export function normalizeProviderOptions(
       ...(groundCheck !== undefined ? { groundCheck } : {}),
     };
   }
+  if (options.agy?.print_timeout !== undefined || options.agy?.ground_check !== undefined) {
+    const groundCheck = normalizeGroundCheckOptions(
+      options.agy.ground_check,
+      `${normalizationOptions.pathPrefix ?? 'provider_options'}.agy.ground_check`,
+      normalizationOptions,
+    );
+    result.agy = {
+      ...(options.agy.print_timeout !== undefined ? { printTimeout: options.agy.print_timeout } : {}),
+      ...(groundCheck !== undefined ? { groundCheck } : {}),
+    };
+  }
   if (
     options.claude_terminal?.backend !== undefined
     || options.claude_terminal?.timeout_ms !== undefined
@@ -450,6 +465,16 @@ export function mergeProviderOptions(
         ...result.kiro,
         ...(layer.kiro.agent !== undefined
           ? { agent: layer.kiro.agent }
+          : {}),
+        ...(groundCheck !== undefined ? { groundCheck } : {}),
+      };
+    }
+    if (layer.agy) {
+      const groundCheck = mergeGroundCheckOptions(result.agy?.groundCheck, layer.agy.groundCheck);
+      result.agy = {
+        ...result.agy,
+        ...(layer.agy.printTimeout !== undefined
+          ? { printTimeout: layer.agy.printTimeout }
           : {}),
         ...(groundCheck !== undefined ? { groundCheck } : {}),
       };
@@ -763,6 +788,12 @@ export function resolveEffectiveProviderOptions(
     stepOptions?.kiro?.agent,
     resolveProviderOptionOrigin(originResolver, 'kiro.agent', source),
   );
+  const agyPrintTimeout = selectProviderValue(
+    resolvedConfigOptions.agy?.printTimeout,
+    personaOptions?.agy?.printTimeout,
+    stepOptions?.agy?.printTimeout,
+    resolveProviderOptionOrigin(originResolver, 'agy.printTimeout', source),
+  );
   const claudeTerminalBackend = selectProviderValue(
     resolvedConfigOptions.claudeTerminal?.backend,
     personaOptions?.claudeTerminal?.backend,
@@ -835,6 +866,14 @@ export function resolveEffectiveProviderOptions(
     personaOptions?.kiro?.groundCheck,
     stepOptions?.kiro?.groundCheck,
   );
+  const agyGroundCheck = resolveEffectiveGroundCheckOptions(
+    'agy',
+    source,
+    originResolver,
+    resolvedConfigOptions.agy?.groundCheck,
+    personaOptions?.agy?.groundCheck,
+    stepOptions?.agy?.groundCheck,
+  );
   const claudeTerminalGroundCheck = resolveEffectiveGroundCheckOptions(
     'claudeTerminal',
     source,
@@ -901,6 +940,13 @@ export function resolveEffectiveProviderOptions(
             ...(kiroGroundCheck !== undefined ? { groundCheck: kiroGroundCheck } : {}),
           }
         : undefined,
+    agy:
+      agyPrintTimeout !== undefined || agyGroundCheck !== undefined
+        ? {
+            ...(agyPrintTimeout !== undefined ? { printTimeout: agyPrintTimeout } : {}),
+            ...(agyGroundCheck !== undefined ? { groundCheck: agyGroundCheck } : {}),
+          }
+        : undefined,
     claudeTerminal:
       claudeTerminalBackend !== undefined
       || claudeTerminalTimeoutMs !== undefined
@@ -925,6 +971,7 @@ export function resolveEffectiveProviderOptions(
     || result.copilot
     || result.cursor
     || result.kiro
+    || result.agy
     || result.claudeTerminal
     ? result
     : undefined;
@@ -972,6 +1019,9 @@ function stripClaudeAllowedTools(
       : {}),
     ...(providerOptions.kiro !== undefined
       ? { kiro: { ...providerOptions.kiro } }
+      : {}),
+    ...(providerOptions.agy !== undefined
+      ? { agy: { ...providerOptions.agy } }
       : {}),
     ...(providerOptions.claudeTerminal !== undefined
       ? { claudeTerminal: { ...providerOptions.claudeTerminal } }
