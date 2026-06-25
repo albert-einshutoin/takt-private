@@ -46,6 +46,7 @@ export type {
   ClaudeProviderOptions,
   ClaudeTerminalProviderOptions,
   CopilotProviderOptions,
+  CursorProviderOptions,
   KiroProviderOptions,
   StepProviderOptions,
   WorkflowStepKind,

@@ -17,5 +17,7 @@ export interface CursorCallOptions {
   cursorApiKey?: string;
   /** Custom path to cursor-agent executable */
   cursorCliPath?: string;
+  /** Use a temporary prompt file so long task instructions do not exceed argv limits. */
+  usePromptFile?: boolean;
   childProcessEnv?: Readonly<Record<string, string>>;
 }

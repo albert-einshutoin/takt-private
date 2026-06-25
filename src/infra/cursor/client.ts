@@ -2,8 +2,11 @@
  * Cursor Agent CLI integration for agent interactions
  */
 
+import { randomUUID } from 'node:crypto';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { AgentResponse } from '../../core/models/index.js';
-import { crossSpawn, getErrorMessage } from '../../shared/utils/index.js';
+import { createLogger, crossSpawn, getErrorMessage } from '../../shared/utils/index.js';
 import { buildEnvWithNestedObservabilitySnapshot } from '../../shared/telemetry/index.js';
 import { AGENT_FAILURE_CATEGORIES, type AgentFailureCategory } from '../../shared/types/agent-failure.js';
 import type { CursorCallOptions } from './types.js';
@@ -18,6 +21,10 @@ const CURSOR_ERROR_DETAIL_MAX_LENGTH = 400;
 const CURSOR_CLI_CONFIG_RENAME_MAX_RETRIES = 8;
 const CURSOR_CLI_CONFIG_RENAME_RETRY_BASE_DELAY_MS = 1_000;
 const CURSOR_CLI_CONFIG_RENAME_RETRY_MAX_DELAY_MS = 30_000;
+const CURSOR_PROMPT_FILE_INSTRUCTION =
+  'Read the full task instruction from this file and follow it exactly:';
+
+const log = createLogger('cursor-client');
 
 function resolveForceKillDelayMs(): number {
   const raw = process.env.TAKT_CURSOR_FORCE_KILL_DELAY_MS;
@@ -45,6 +52,11 @@ type CursorExecError = Error & {
   signal?: NodeJS.Signals | null;
 };
 
+type CursorPromptPayload = {
+  promptArg: string;
+  cleanup?: () => Promise<void>;
+};
+
 function buildPrompt(prompt: string, systemPrompt?: string): string {
   if (!systemPrompt) {
     return prompt;
@@ -52,7 +64,31 @@ function buildPrompt(prompt: string, systemPrompt?: string): string {
   return `${systemPrompt}\n\n${prompt}`;
 }
 
-function buildArgs(prompt: string, options: CursorCallOptions): string[] {
+function buildPromptFileInstruction(filePath: string): string {
+  return `${CURSOR_PROMPT_FILE_INSTRUCTION} ${filePath}`;
+}
+
+async function preparePromptArg(prompt: string, options: CursorCallOptions): Promise<CursorPromptPayload> {
+  const fullPrompt = buildPrompt(prompt, options.systemPrompt);
+  if (options.usePromptFile !== true) {
+    return { promptArg: fullPrompt };
+  }
+
+  const promptDir = join(options.cwd, '.takt', 'tmp', 'cursor-prompts');
+  await mkdir(promptDir, { recursive: true });
+  const promptFilePath = join(promptDir, `${randomUUID()}.md`);
+  // Cursor receives prompts as argv; this opt-in file reference avoids command-line length limits.
+  await writeFile(promptFilePath, fullPrompt, { encoding: 'utf-8', mode: 0o600 });
+
+  return {
+    promptArg: buildPromptFileInstruction(promptFilePath),
+    cleanup: async () => {
+      await rm(promptFilePath, { force: true });
+    },
+  };
+}
+
+function buildArgs(promptArg: string, options: CursorCallOptions): string[] {
   const args = ['-p', '--trust', '--output-format', 'json', '--workspace', options.cwd];
 
   if (options.model) {
@@ -67,8 +103,19 @@ function buildArgs(prompt: string, options: CursorCallOptions): string[] {
     args.push('--force');
   }
 
-  args.push('--', buildPrompt(prompt, options.systemPrompt));
+  args.push('--', promptArg);
   return args;
+}
+
+async function cleanupPromptPayload(payload: CursorPromptPayload | undefined): Promise<void> {
+  if (!payload?.cleanup) {
+    return;
+  }
+  try {
+    await payload.cleanup();
+  } catch (error) {
+    log.debug('Failed to clean up cursor prompt file', { error: getErrorMessage(error) });
+  }
 }
 
 function buildEnv(options: CursorCallOptions): NodeJS.ProcessEnv {
@@ -495,62 +542,68 @@ function buildCursorErrorResponse(
  */
 export class CursorClient {
   async call(agentType: string, prompt: string, options: CursorCallOptions): Promise<AgentResponse> {
-    const args = buildArgs(prompt, options);
-    let cliConfigRenameRetryCount = 0;
+    let promptPayload: CursorPromptPayload | undefined;
+    try {
+      promptPayload = await preparePromptArg(prompt, options);
+      const args = buildArgs(promptPayload.promptArg, options);
+      let cliConfigRenameRetryCount = 0;
 
-    while (true) {
-      try {
-        const { stdout } = await execCursor(args, options);
-        const parsed = parseCursorOutput(stdout);
-        if ('error' in parsed) {
-          emitCursorErrorResult(options, parsed.error);
-          return buildCursorErrorResponse(agentType, parsed.error, options);
-        }
-
-        const sessionId = parsed.sessionId ?? options.sessionId;
-        if (options.onStream) {
-          options.onStream({ type: 'text', data: { text: parsed.content } });
-          options.onStream({
-            type: 'result',
-            data: {
-              result: parsed.content,
-              success: true,
-              sessionId: sessionId ?? '',
-            },
-          });
-        }
-
-        return {
-          persona: agentType,
-          status: 'done',
-          content: parsed.content,
-          timestamp: new Date(),
-          sessionId,
-        };
-      } catch (rawError) {
-        const error = toCursorExecError(rawError);
-        if (
-          isCursorCliConfigRenameEnoent(error)
-          && cliConfigRenameRetryCount < CURSOR_CLI_CONFIG_RENAME_MAX_RETRIES
-        ) {
-          cliConfigRenameRetryCount += 1;
-          try {
-            await waitForCursorCliConfigRenameRetryDelay(cliConfigRenameRetryCount, options.abortSignal);
-          } catch (delayError) {
-            const message = classifyExecutionError(toCursorExecError(delayError), options);
-            emitCursorErrorResult(options, message);
-            return buildCursorErrorResponse(agentType, message, options);
+      while (true) {
+        try {
+          const { stdout } = await execCursor(args, options);
+          const parsed = parseCursorOutput(stdout);
+          if ('error' in parsed) {
+            emitCursorErrorResult(options, parsed.error);
+            return buildCursorErrorResponse(agentType, parsed.error, options);
           }
-          continue;
-        }
 
-        const message = classifyExecutionError(error, options);
-        const failureCategory = isCursorCliConfigRenameEnoent(error)
-          ? AGENT_FAILURE_CATEGORIES.PROVIDER_ERROR
-          : undefined;
-        emitCursorErrorResult(options, message, failureCategory);
-        return buildCursorErrorResponse(agentType, message, options, failureCategory);
+          const sessionId = parsed.sessionId ?? options.sessionId;
+          if (options.onStream) {
+            options.onStream({ type: 'text', data: { text: parsed.content } });
+            options.onStream({
+              type: 'result',
+              data: {
+                result: parsed.content,
+                success: true,
+                sessionId: sessionId ?? '',
+              },
+            });
+          }
+
+          return {
+            persona: agentType,
+            status: 'done',
+            content: parsed.content,
+            timestamp: new Date(),
+            sessionId,
+          };
+        } catch (rawError) {
+          const error = toCursorExecError(rawError);
+          if (
+            isCursorCliConfigRenameEnoent(error)
+            && cliConfigRenameRetryCount < CURSOR_CLI_CONFIG_RENAME_MAX_RETRIES
+          ) {
+            cliConfigRenameRetryCount += 1;
+            try {
+              await waitForCursorCliConfigRenameRetryDelay(cliConfigRenameRetryCount, options.abortSignal);
+            } catch (delayError) {
+              const message = classifyExecutionError(toCursorExecError(delayError), options);
+              emitCursorErrorResult(options, message);
+              return buildCursorErrorResponse(agentType, message, options);
+            }
+            continue;
+          }
+
+          const message = classifyExecutionError(error, options);
+          const failureCategory = isCursorCliConfigRenameEnoent(error)
+            ? AGENT_FAILURE_CATEGORIES.PROVIDER_ERROR
+            : undefined;
+          emitCursorErrorResult(options, message, failureCategory);
+          return buildCursorErrorResponse(agentType, message, options, failureCategory);
+        }
       }
+    } finally {
+      await cleanupPromptPayload(promptPayload);
     }
   }
 

@@ -248,6 +248,28 @@ describe('config traced env overrides', () => {
     });
   });
 
+  it('project config は cursor.use_prompt_file の env override を traced-config 経由で反映する', () => {
+    const projectDir = join(testRoot, 'project-cursor-prompt-file-env');
+    const configDir = getProjectConfigDir(projectDir);
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, 'config.yaml'),
+      [
+        'provider_options:',
+        '  cursor:',
+        '    use_prompt_file: false',
+      ].join('\n'),
+      'utf-8',
+    );
+    process.env.TAKT_PROVIDER_OPTIONS_CURSOR_USE_PROMPT_FILE = 'true';
+
+    const config = loadProjectConfig(projectDir);
+
+    expect(config.providerOptions).toEqual({
+      cursor: { usePromptFile: true },
+    });
+  });
+
   it('global config は provider_options.kiro.agent を読み込む', () => {
     mkdirSync(globalTaktDir, { recursive: true });
     writeFileSync(

@@ -235,6 +235,41 @@ describe('resolveEffectiveProviderOptions', () => {
     });
   });
 
+  it('cursor.usePromptFile は step > persona > config の優先で解決される', () => {
+    expect(resolveEffectiveProviderOptions(
+      'project',
+      undefined,
+      { cursor: { usePromptFile: false } },
+      { cursor: { usePromptFile: true } },
+      { cursor: { usePromptFile: false } },
+    )).toEqual({
+      cursor: { usePromptFile: true },
+    });
+
+    expect(resolveEffectiveProviderOptions(
+      'project',
+      undefined,
+      { cursor: { usePromptFile: false } },
+      undefined,
+      { cursor: { usePromptFile: true } },
+    )).toEqual({
+      cursor: { usePromptFile: true },
+    });
+  });
+
+  it('env origin は cursor.usePromptFile の leaf にも適用される', () => {
+    const result = resolveEffectiveProviderOptions(
+      'project',
+      (path: string) => (path === 'cursor.usePromptFile' ? 'env' : 'local'),
+      { cursor: { usePromptFile: true } },
+      { cursor: { usePromptFile: false } },
+    );
+
+    expect(result).toEqual({
+      cursor: { usePromptFile: true },
+    });
+  });
+
   it('空 sandbox object は step の leaf を潰さない', () => {
     const result = resolveEffectiveProviderOptions(
       'project',

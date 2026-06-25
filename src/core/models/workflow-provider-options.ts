@@ -76,6 +76,10 @@ export interface CopilotProviderOptions {
   effort?: CopilotEffort;
 }
 
+export interface CursorProviderOptions {
+  usePromptFile?: boolean;
+}
+
 export interface KiroProviderOptions {
   agent?: string;
 }
@@ -86,6 +90,7 @@ export interface StepProviderOptions {
   claude?: ClaudeProviderOptions;
   claudeTerminal?: ClaudeTerminalProviderOptions;
   copilot?: CopilotProviderOptions;
+  cursor?: CursorProviderOptions;
   kiro?: KiroProviderOptions;
 }
 
