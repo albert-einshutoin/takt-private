@@ -18,6 +18,7 @@ export * from './streamDiagnostics.js';
 export * from './structuredOutput.js';
 export * from './taskPaths.js';
 export * from './text.js';
+export * from './timestamp.js';
 export * from './tmpdir.js';
 export * from './types.js';
 export * from './updateNotifier.js';

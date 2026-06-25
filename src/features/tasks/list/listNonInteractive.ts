@@ -20,6 +20,7 @@ import {
   syncBranchWithRoot,
 } from './taskActions.js';
 import { formatTaskStatusLabel, formatShortDate } from './taskStatusLabel.js';
+import { resolveConfigValue } from '../../../infra/config/resolveConfigValue.js';
 
 export interface ListNonInteractiveOptions {
   enabled: boolean;
@@ -33,7 +34,7 @@ function isValidAction(action: string): action is ListAction {
   return action === 'diff' || action === 'sync' || action === 'try' || action === 'merge' || action === 'delete';
 }
 
-function printNonInteractiveList(tasks: TaskListItem[], format?: string): void {
+function printNonInteractiveList(tasks: TaskListItem[], format?: string, timezone?: string): void {
   const outputFormat = format ?? 'text';
   if (outputFormat === 'json') {
     // stdout に直接出力（JSON パース用途のため UI ヘルパーを経由しない）
@@ -44,7 +45,7 @@ function printNonInteractiveList(tasks: TaskListItem[], format?: string): void {
   }
 
   for (const task of tasks) {
-    info(`${formatTaskStatusLabel(task)} - ${task.summary ?? task.content} (${formatShortDate(task.createdAt)})`);
+    info(`${formatTaskStatusLabel(task)} - ${task.summary ?? task.content} (${formatShortDate(task.createdAt, { timezone })})`);
   }
 }
 
@@ -68,7 +69,8 @@ export async function listTasksNonInteractive(
   }
 
   if (!nonInteractive.action) {
-    printNonInteractiveList(tasks, nonInteractive.format);
+    const timezone = resolveConfigValue(cwd, 'timezone');
+    printNonInteractiveList(tasks, nonInteractive.format, timezone);
     return;
   }
 

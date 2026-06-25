@@ -64,6 +64,17 @@ describe('listTasksNonInteractive', () => {
     expect(mockInfo).toHaveBeenCalledWith(expect.stringContaining('[failed] failed-task'));
   });
 
+  it('should format task dates using configured timezone in text format', async () => {
+    writeTasksFile(tmpDir);
+    const configDir = path.join(tmpDir, '.takt');
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, 'config.yaml'), 'timezone: Asia/Tokyo\n', 'utf-8');
+
+    await listTasksNonInteractive(tmpDir, { enabled: true, format: 'text' });
+
+    expect(mockInfo).toHaveBeenCalledWith(expect.stringContaining('(02/09 09:00)'));
+  });
+
   it('should output JSON when format=json', async () => {
     writeTasksFile(tmpDir);
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);

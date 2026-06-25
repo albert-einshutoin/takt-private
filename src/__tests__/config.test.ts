@@ -1949,6 +1949,22 @@ describe('saveProjectConfig snake_case denormalization', () => {
     expect(saved.concurrency).toBe(3);
   });
 
+  it('should persist timezone and reload correctly', () => {
+    saveProjectConfig(testDir, { timezone: 'Asia/Tokyo' });
+
+    const saved = loadProjectConfig(testDir);
+
+    expect(saved.timezone).toBe('Asia/Tokyo');
+  });
+
+  it('should reject invalid timezone values', () => {
+    const projectConfigDir = getProjectConfigDir(testDir);
+    mkdirSync(projectConfigDir, { recursive: true });
+    writeFileSync(join(projectConfigDir, 'config.yaml'), 'timezone: Mars/Phobos\n', 'utf-8');
+
+    expect(() => loadProjectConfig(testDir)).toThrow(/timezone/i);
+  });
+
   it('should not write camelCase keys to YAML file', () => {
     saveProjectConfig(testDir, { autoPr: true, draftPr: false, baseBranch: 'develop' });
 
@@ -2013,6 +2029,35 @@ describe('resolveConfigValue autoPr/draftPr/baseBranch/concurrency from project 
 
     expect(resolveConfigValue(testDir, 'allowGitHooks')).toBe(true);
     expect(resolveConfigValue(testDir, 'allowGitFilters')).toBe(true);
+  });
+
+  it('should resolve timezone from project config', () => {
+    const projectConfigDir = getProjectConfigDir(testDir);
+    mkdirSync(projectConfigDir, { recursive: true });
+    writeFileSync(join(projectConfigDir, 'config.yaml'), 'timezone: Asia/Tokyo\n');
+
+    expect(resolveConfigValue(testDir, 'timezone')).toBe('Asia/Tokyo');
+  });
+
+  it('should prefer TAKT_TIMEZONE over project config', () => {
+    const originalTimezone = process.env.TAKT_TIMEZONE;
+    const projectConfigDir = getProjectConfigDir(testDir);
+    mkdirSync(projectConfigDir, { recursive: true });
+    writeFileSync(join(projectConfigDir, 'config.yaml'), 'timezone: Asia/Tokyo\n');
+
+    try {
+      process.env.TAKT_TIMEZONE = 'Europe/London';
+      invalidateAllResolvedConfigCache();
+
+      expect(resolveConfigValue(testDir, 'timezone')).toBe('Europe/London');
+    } finally {
+      if (originalTimezone === undefined) {
+        delete process.env.TAKT_TIMEZONE;
+      } else {
+        process.env.TAKT_TIMEZONE = originalTimezone;
+      }
+      invalidateAllResolvedConfigCache();
+    }
   });
 
   it('should resolve baseBranch from project config written in snake_case YAML', () => {

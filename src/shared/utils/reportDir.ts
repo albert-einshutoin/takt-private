@@ -3,13 +3,10 @@
  */
 
 import { slugify } from './slug.js';
+import { formatTimestampForFilename, type TimestampFormatOptions } from './timestamp.js';
 
-export function generateReportDir(task: string): string {
-  const now = new Date();
-  const timestamp = now.toISOString()
-    .replace(/[-:T]/g, '')
-    .slice(0, 14)
-    .replace(/(\d{8})(\d{6})/, '$1-$2');
+export function generateReportDir(task: string, options: TimestampFormatOptions = {}): string {
+  const timestamp = formatTimestampForFilename(new Date(), options);
 
   const summary = slugify(task.slice(0, 80)) || 'task';
 

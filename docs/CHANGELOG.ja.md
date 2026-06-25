@@ -14,6 +14,7 @@
 - phase usage event record に workflow step の `persona` と `tags` 文脈を追加しました (#870)。workflow YAML を読み直さなくても、provider-routing tag ごとに token usage を絞り込めます。
 - Team leader step でフェーズ別の provider option layer をサポートしました (#878)。`team_leader.provider_options` は親の分解・追加計画 planner に、`team_leader.part_provider_options` は生成された子 part に適用され、どちらも親 step の `provider_options` を継承します。
 - Cursor prompt file mode を追加しました (#783)。`provider_options.cursor.use_prompt_file` により、Cursor provider call は full prompt を一時ファイル `.takt/tmp/cursor-prompts` に書き、argv には短いファイル参照 instruction だけを渡せます。デフォルトは従来どおり full prompt argv で、`TAKT_PROVIDER_OPTIONS_CURSOR_USE_PROMPT_FILE=true` でも opt-in できます。
+- 表示用 timestamp の timezone 設定を追加しました (#769)。グローバル設定・プロジェクト設定・`TAKT_TIMEZONE` で `timezone` を指定すると、生成される run directory 名と `takt list` の timestamp 表示に IANA timezone または `local` を使えます。保存される ISO timestamp は UTC のままです。
 - observability で usage を取得できた phase について、provider token usage counter（`takt.token.input_tokens`, `takt.token.output_tokens`, `takt.token.cached_input_tokens`）を送出するようにしました (#869)。既存の OpenTelemetry metric pipeline とローカル `monitor.json` に出力されます。
 - observability で単価を持つ direct OpenAI/Codex と Anthropic/Claude model usage について、推定 token cost counter（`takt.token.estimated_cost_usd`）を送出するようにしました (#869)。
 - observability で workflow operation 向けの provider error、quality gate result、loop detection、cycle detection counter（`takt.provider.errors`, `takt.quality_gate.results`, `takt.workflow.loops_detected`, `takt.workflow.cycles_detected`）を送出するようにしました (#869)。

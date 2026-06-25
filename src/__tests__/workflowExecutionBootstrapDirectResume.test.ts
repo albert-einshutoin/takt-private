@@ -10,12 +10,14 @@ const {
   mockCreateOutputFns,
   mockInitializeOtelFoundation,
   mockEnsureWorktreeTaktGitignore,
+  mockGenerateReportDir,
 } = vi.hoisted(() => ({
   mockWriteFileAtomic: vi.fn(),
   mockResolveWorkflowConfigValues: vi.fn(),
   mockCreateOutputFns: vi.fn(),
   mockInitializeOtelFoundation: vi.fn(),
   mockEnsureWorktreeTaktGitignore: vi.fn(),
+  mockGenerateReportDir: vi.fn(() => 'generated-run'),
 }));
 
 vi.mock('../infra/config/index.js', () => ({
@@ -70,7 +72,7 @@ vi.mock('../shared/utils/index.js', () => ({
     info: vi.fn(),
     error: vi.fn(),
   })),
-  generateReportDir: vi.fn(() => 'generated-run'),
+  generateReportDir: mockGenerateReportDir,
   getDebugPromptsLogFile: vi.fn(() => undefined),
   isValidReportDirName: vi.fn(() => true),
   preventSleep: vi.fn(),
@@ -176,6 +178,7 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
       observability: {},
       personaProviders: {},
       providerProfiles: undefined,
+      timezone: undefined,
     });
   });
 
@@ -206,6 +209,32 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
     };
     expect(meta.source_run_slug).toBe('20260524-source-run');
     expect(meta.resume_mode).toBe('retry');
+  });
+
+  it('Given timezone is configured, When bootstrap creates a generated run slug, Then timezone is passed to report dir generation', async () => {
+    mockResolveWorkflowConfigValues.mockReturnValueOnce({
+      provider: 'mock',
+      model: undefined,
+      language: 'en',
+      notificationSound: false,
+      notificationSoundEvents: {},
+      rateLimitFallback: undefined,
+      runtime: undefined,
+      preventSleep: false,
+      logging: {},
+      analytics: { enabled: false },
+      observability: {},
+      personaProviders: {},
+      providerProfiles: undefined,
+      timezone: 'Asia/Tokyo',
+    });
+
+    await createWorkflowExecutionBootstrap(workflowConfig, 'Timezone run', '/project', {
+      projectCwd: '/project',
+      provider: 'mock',
+    });
+
+    expect(mockGenerateReportDir).toHaveBeenCalledWith('Timezone run', { timezone: 'Asia/Tokyo' });
   });
 
   it('Given no tasks.yaml exists, When direct resume bootstrap runs, Then tasks.yaml is not created', async () => {
