@@ -21,6 +21,7 @@ export interface DecomposeTaskOptions {
   provider?: ProviderType;
   resolvedModel?: string;
   resolvedProvider?: ProviderType;
+  providerOptions?: RunAgentOptions['providerOptions'];
   onStream?: StreamCallback;
   workflowMeta?: RunAgentOptions['workflowMeta'];
   childProcessEnv?: RunAgentOptions['childProcessEnv'];
@@ -60,6 +61,7 @@ export async function decomposeTask(
     provider: options.provider,
     resolvedModel: options.resolvedModel,
     resolvedProvider: options.resolvedProvider,
+    providerOptions: options.providerOptions,
     allowedTools: options.inspectTools ?? [],
     permissionMode: 'readonly',
     ...buildMaxTurnsOption(options.provider, options.resolvedProvider, TEAM_LEADER_MAX_TURNS),
@@ -107,6 +109,7 @@ export async function requestMoreParts(
     provider: options.provider,
     resolvedModel: options.resolvedModel,
     resolvedProvider: options.resolvedProvider,
+    providerOptions: options.providerOptions,
     allowedTools: [],
     permissionMode: 'readonly',
     ...buildMaxTurnsOption(options.provider, options.resolvedProvider, TEAM_LEADER_MAX_TURNS),

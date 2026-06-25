@@ -97,6 +97,7 @@ export class TeamLeaderRunner {
       maxSteps,
     );
     const leaderBaseOptions = this.deps.optionsBuilder.buildBaseOptions(leaderStep);
+    const leaderProviderOptions = leaderBaseOptions.providerOptions;
     const leaderWorkflowMeta = this.deps.optionsBuilder.buildPhase1WorkflowMeta(
       leaderBaseOptions.workflowMeta,
     );
@@ -139,6 +140,7 @@ export class TeamLeaderRunner {
         provider: leaderProvider,
         resolvedModel: leaderModel,
         resolvedProvider: leaderProvider,
+        providerOptions: leaderProviderOptions,
         language: this.deps.engineOptions.language,
         inspectTools,
         workflowMeta: leaderWorkflowMeta,
@@ -268,6 +270,7 @@ export class TeamLeaderRunner {
               provider: leaderProvider,
               resolvedModel: leaderModel,
               resolvedProvider: leaderProvider,
+              providerOptions: leaderProviderOptions,
               workflowMeta: leaderWorkflowMeta,
               childProcessEnv: this.deps.engineOptions.childProcessEnv,
               onStream: this.deps.engineOptions.onStream,

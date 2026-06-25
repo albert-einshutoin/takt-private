@@ -19,6 +19,7 @@ import {
   formatTeamLeaderInspectTools,
   isTeamLeaderInspectTool,
 } from '../../../shared/team-leader-inspect-tools.js';
+import { resolveWorkflowProviderOptions } from './workflowProviderOptionsResolver.js';
 
 type RawStep = z.output<typeof WorkflowStepRawSchema>;
 
@@ -136,9 +137,19 @@ export function normalizeTeamLeader(
     refillThreshold: raw.refill_threshold ?? 0,
     timeoutMs: raw.timeout_ms ?? 900000,
     inspectTools: normalizeTeamLeaderInspectTools(raw.inspect_tools),
+    providerOptions: resolveWorkflowProviderOptions(
+      raw.provider_options as (Record<string, unknown> & { extends?: string }) | undefined,
+      workflowDir,
+      context,
+    ),
     partPersona,
     partPersonaPath,
     partTags,
+    partProviderOptions: resolveWorkflowProviderOptions(
+      raw.part_provider_options as (Record<string, unknown> & { extends?: string }) | undefined,
+      workflowDir,
+      context,
+    ),
     partAllowedTools: raw.part_allowed_tools,
     partEdit: raw.part_edit,
     partPermissionMode: raw.part_permission_mode,

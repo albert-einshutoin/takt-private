@@ -430,6 +430,28 @@ describe('agent-usecases', () => {
     }));
   });
 
+  it('decomposeTask は providerOptions を親分解 call に渡す', async () => {
+    vi.mocked(runAgent).mockResolvedValue(doneResponse('x', {
+      parts: [
+        { id: 'p1', title: 'Part 1', instruction: 'Do 1' },
+      ],
+    }));
+    const providerOptions = {
+      codex: { reasoningEffort: 'xhigh' },
+      claude: { effort: 'high' },
+    } as const;
+
+    await decomposeTask('instruction', 3, {
+      cwd: '/repo',
+      persona: 'team-leader',
+      providerOptions,
+    });
+
+    expect(runAgent).toHaveBeenCalledWith('team-leader', expect.any(String), expect.objectContaining({
+      providerOptions,
+    }));
+  });
+
   it('decomposeTask は構造化出力がない場合 parseParts にフォールバックする', async () => {
     vi.mocked(runAgent).mockResolvedValue(doneResponse('```json [] ```'));
     vi.mocked(parseParts).mockReturnValue([
@@ -614,6 +636,34 @@ describe('agent-usecases', () => {
       allowedTools: [],
       outputSchema: { type: 'more-parts', maxAdditionalParts: 2 },
       permissionMode: 'readonly',
+    }));
+  });
+
+  it('requestMoreParts は providerOptions を feedback planning call に渡す', async () => {
+    vi.mocked(runAgent).mockResolvedValue(doneResponse('x', {
+      done: true,
+      reasoning: 'Enough',
+      parts: [],
+    }));
+    const providerOptions = {
+      codex: { reasoningEffort: 'xhigh' },
+      claude: { effort: 'high' },
+    } as const;
+
+    await requestMoreParts(
+      'original instruction',
+      [{ id: 'p1', title: 'Part 1', status: 'done', content: 'done' }],
+      ['p1'],
+      2,
+      {
+        cwd: '/repo',
+        persona: 'team-leader',
+        providerOptions,
+      },
+    );
+
+    expect(runAgent).toHaveBeenCalledWith('team-leader', expect.any(String), expect.objectContaining({
+      providerOptions,
     }));
   });
 

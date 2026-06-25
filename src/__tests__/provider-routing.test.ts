@@ -7,7 +7,7 @@ import { validateWorkflowConfig } from '../core/workflow/engine/WorkflowValidato
 import type { PartDefinition, WorkflowStep } from '../core/models/types.js';
 import type { WorkflowEngineOptions } from '../core/workflow/types.js';
 import { resolveStepProviderModel } from '../core/workflow/provider-resolution.js';
-import { createPartStep } from '../core/workflow/engine/team-leader-common.js';
+import { createPartStep, createTeamLeaderPlanningStep } from '../core/workflow/engine/team-leader-common.js';
 import {
   denormalizeProviderRouting,
   normalizeProviderRouting,
@@ -538,6 +538,53 @@ describe('provider_routing provider_options resolution', () => {
         networkAccess: true,
         reasoningEffort: 'high',
       },
+    });
+  });
+
+  it('Given team_leader planning and part provider_options, When building options, Then each phase gets its own override layer', () => {
+    const parentStep = createStep({
+      name: 'implement',
+      persona: 'leader',
+      providerRoutingPersonaKey: 'leader',
+      providerOptions: {
+        codex: { networkAccess: false, reasoningEffort: 'low' },
+        claude: { effort: 'low', allowedTools: ['Read', 'Bash'] },
+      },
+      teamLeader: {
+        persona: 'planner',
+        maxConcurrency: 3,
+        maxTotalParts: 20,
+        refillThreshold: 0,
+        timeoutMs: 900000,
+        providerOptions: {
+          codex: { reasoningEffort: 'xhigh' },
+          claude: { effort: 'xhigh' },
+        },
+        partPersona: 'coder',
+        partProviderOptions: {
+          codex: { reasoningEffort: 'medium' },
+          claude: { effort: 'high' },
+        },
+      },
+    });
+    const part: PartDefinition = {
+      id: 'api',
+      title: 'API',
+      instruction: 'implement api',
+    };
+    const builder = createBuilder();
+
+    const planningStep = createTeamLeaderPlanningStep(parentStep);
+    const partStep = createPartStep(parentStep, part);
+
+    expect(builder.buildBaseOptions(planningStep).providerOptions).toEqual({
+      codex: { networkAccess: false, reasoningEffort: 'xhigh' },
+      claude: { effort: 'xhigh', allowedTools: ['Read', 'Bash'] },
+    });
+
+    expect(builder.buildBaseOptions(partStep).providerOptions).toEqual({
+      codex: { networkAccess: false, reasoningEffort: 'medium' },
+      claude: { effort: 'high', allowedTools: ['Read', 'Bash'] },
     });
   });
 

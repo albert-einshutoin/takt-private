@@ -238,8 +238,14 @@ The agent acts as a leader: it decomposes the task into independent sub-parts at
       max_total_parts: 8
       timeout_ms: 600000
       inspect_tools: [read, glob, grep]
+      provider_options:
+        codex:
+          reasoning_effort: xhigh
       part_tags: [coding]
       part_persona: coder
+      part_provider_options:
+        codex:
+          reasoning_effort: high
       part_edit: true
       part_permission_mode: edit
       part_allowed_tools: [Read, Glob, Grep, Edit, Write, Bash]
@@ -255,6 +261,8 @@ Useful for breaking one large task into independent units that can run in parall
 `max_concurrency` controls how many parts run at the same time. `max_total_parts` controls the total number of parts the leader may plan across the workflow step, up to 20. The older `max_parts` key is still accepted as the compatibility name for `max_concurrency`. `part_tags` sets provider routing tags on generated part steps. When omitted, parts inherit the parent step's `tags`. Empty and whitespace-only tags are invalid. `part_tags` is resolved through normal `provider_routing.tags`, so tag routing takes priority over persona routing from `part_persona`.
 
 `inspect_tools` allows only read-only inspection tools (`read`, `glob`, `grep`) during the parent Team Leader task decomposition phase. Invalid tool names fail workflow loading. It does not affect generated child parts; child part tools remain controlled separately by `part_allowed_tools`. Inspection tools are supported by providers that expose `allowedTools`, including Claude-family providers and OpenCode. Providers that do not support Team Leader inspection tools fail at runtime with a clear error.
+
+`team_leader.provider_options` applies only to the parent decomposition and feedback-planning calls. `team_leader.part_provider_options` applies to every generated child part. Both inherit the parent step `provider_options` first, then override matching provider option leaves for their own phase. When `part_allowed_tools` is set, it remains the source of truth for child part tool scope and TAKT strips inherited Claude `allowed_tools` from the part provider options to avoid conflicting tool policies.
 
 ### Workflow Call Step (subworkflow)
 

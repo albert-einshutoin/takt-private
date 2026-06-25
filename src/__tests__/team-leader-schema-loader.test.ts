@@ -208,6 +208,36 @@ describe('team_leader schema', () => {
     expect(result.data.team_leader?.inspect_tools).toEqual(['read', 'glob', 'grep']);
   });
 
+  it('Given team_leader provider option layers, When parsing a step, Then they are preserved', () => {
+    const raw = {
+      name: 'implement',
+      team_leader: {
+        provider_options: {
+          codex: { reasoning_effort: 'high' },
+        },
+        part_provider_options: {
+          codex: { reasoning_effort: 'medium' },
+          claude: { effort: 'high' },
+        },
+      },
+      instruction: 'decompose',
+    };
+
+    const result = WorkflowStepRawSchema.safeParse(raw);
+
+    expect(result.success).toBe(true);
+    if (!result.success) {
+      return;
+    }
+    expect(result.data.team_leader?.provider_options).toEqual({
+      codex: { reasoning_effort: 'high' },
+    });
+    expect(result.data.team_leader?.part_provider_options).toEqual({
+      codex: { reasoning_effort: 'medium' },
+      claude: { effort: 'high' },
+    });
+  });
+
   it('Given null team_leader.inspect_tools, When parsing a step, Then it fails schema validation', () => {
     const raw = {
       name: 'implement',
@@ -252,8 +282,15 @@ describe('normalizeWorkflowConfig team_leader', () => {
             max_total_parts: 5,
             timeout_ms: 90000,
             inspect_tools: [' Read ', 'Glob', 'grep'],
+            provider_options: {
+              codex: { reasoning_effort: 'xhigh' },
+            },
             part_tags: [' coding ', 'review'],
             part_persona: 'coder',
+            part_provider_options: {
+              codex: { reasoning_effort: 'medium' },
+              claude: { effort: 'high' },
+            },
             part_allowed_tools: ['Read', 'Edit'],
             part_edit: true,
             part_permission_mode: 'edit',
@@ -277,9 +314,16 @@ describe('normalizeWorkflowConfig team_leader', () => {
       refillThreshold: 0,
       timeoutMs: 90000,
       inspectTools: ['read', 'glob', 'grep'],
+      providerOptions: {
+        codex: { reasoningEffort: 'xhigh' },
+      },
       partTags: ['coding', 'review'],
       partPersona: 'coder',
       partPersonaPath: undefined,
+      partProviderOptions: {
+        codex: { reasoningEffort: 'medium' },
+        claude: { effort: 'high' },
+      },
       partAllowedTools: ['Read', 'Edit'],
       partEdit: true,
       partPermissionMode: 'edit',
