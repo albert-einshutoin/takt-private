@@ -17,6 +17,7 @@ import { REPERTOIRE_DIR_NAME } from './constants.js';
 import {
   getProjectConfigDir as resolveProjectConfigDir,
   getProjectConfigPath as resolveProjectConfigPath,
+  isProjectConfigDirDisabled as resolveIsProjectConfigDirDisabled,
 } from './project/projectConfigPaths.js';
 
 /** Facet types used in layer resolution */
@@ -99,6 +100,11 @@ export function getProjectProviderOptionsDir(projectDir: string): string {
 /** Get project config file path */
 export function getProjectConfigPath(projectDir: string): string {
   return resolveProjectConfigPath(projectDir);
+}
+
+/** Whether project-local config is disabled because it collides with the global config directory. */
+export function isProjectConfigDirDisabled(projectDir: string): boolean {
+  return resolveIsProjectConfigDirDisabled(projectDir);
 }
 
 /** Get project tasks directory */

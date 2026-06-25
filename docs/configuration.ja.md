@@ -209,6 +209,8 @@ interactive_preview_steps: 3  # インタラクティブモードでの step プ
 
 `.takt/config.yaml` でプロジェクト固有の設定を行います。このファイルはプロジェクトディレクトリで初めて TAKT を使用した際に作成されます。
 
+project `.takt` directory が global config directory と同じパスになる場合、TAKT はその directory を global 専用として扱い、project config の読み込みと初期化を無効化します。これにより、HOME 直下で TAKT を実行したときに `~/.takt/config.yaml` が project config として解釈されることを防ぎます。
+
 ```yaml
 # .takt/config.yaml
 provider: claude              # このプロジェクトの provider 上書き

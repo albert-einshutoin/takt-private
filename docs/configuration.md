@@ -209,6 +209,8 @@ interactive_preview_steps: 3  # Step previews in interactive mode (0-10, default
 
 Configure project-specific settings in `.takt/config.yaml`. This file is created when you first use TAKT in a project directory.
 
+When the project `.takt` directory is the same path as the global config directory, TAKT treats that directory as global-only and disables project config loading/initialization. This prevents `~/.takt/config.yaml` from being parsed as project config when running TAKT from your home directory.
+
 ```yaml
 # .takt/config.yaml
 provider: claude              # Override provider for this project

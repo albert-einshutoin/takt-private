@@ -32,7 +32,11 @@ import {
 } from '../configKeyAliases.js';
 import { invalidateResolvedConfigCache } from '../resolutionCache.js';
 import { expandOptionalHomePath } from '../pathExpansion.js';
-import { getProjectConfigDir, getProjectConfigPath } from './projectConfigPaths.js';
+import {
+  getProjectConfigDir,
+  getProjectConfigPath,
+  isProjectConfigDirDisabled,
+} from './projectConfigPaths.js';
 import {
   normalizeSubmodules,
   normalizeWithSubmodules,
@@ -71,7 +75,17 @@ export type { ProjectConfig as ProjectLocalConfig } from '../types.js';
 type ProviderType = NonNullable<ProjectConfig['provider']>;
 type RawProviderReference = ConfigProviderReference<ProviderType>;
 
+const DISABLED_PROJECT_CONFIG_TRACE: ConfigTrace = {
+  getOrigin: () => 'default',
+};
+
 export function loadProjectConfig(projectDir: string): ProjectConfig {
+  if (isProjectConfigDirDisabled(projectDir)) {
+    setCachedProjectConfigTrace(projectDir, DISABLED_PROJECT_CONFIG_TRACE);
+    setCachedProjectParsedConfig(projectDir, {});
+    return {};
+  }
+
   const configPath = getProjectConfigPath(projectDir);
   const { parsedConfig, rawConfig, trace } = loadProjectConfigTrace(
     configPath,
@@ -233,6 +247,11 @@ export function loadProjectConfigTraceState(projectDir: string): ConfigTrace {
 }
 
 export function saveProjectConfig(projectDir: string, config: ProjectConfig): void {
+  if (isProjectConfigDirDisabled(projectDir)) {
+    invalidateResolvedConfigCache(projectDir);
+    return;
+  }
+
   const configDir = getProjectConfigDir(projectDir);
   const configPath = getProjectConfigPath(projectDir);
   if (!existsSync(configDir)) {
