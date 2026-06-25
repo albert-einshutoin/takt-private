@@ -18,7 +18,7 @@ checkForUpdates();
 // Import in dependency order
 import { program, runPreActionHook } from './program.js';
 import './commands.js';
-import { executeDefaultAction } from './routing.js';
+import { executeInteractiveDefaultActionLoop } from './routing.js';
 
 (async () => {
   const args = process.argv.slice(2);
@@ -38,7 +38,7 @@ import { executeDefaultAction } from './routing.js';
   if (slashFallbackTask !== null) {
     try {
       await runPreActionHook();
-      await executeDefaultAction(slashFallbackTask);
+      await executeInteractiveDefaultActionLoop(slashFallbackTask);
     } finally {
       cleanupImmediateSigintExit();
     }

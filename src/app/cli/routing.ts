@@ -29,7 +29,53 @@ import { resolveAgentOverrides, resolveWorkflowCliOption } from './helpers.js';
 import { loadTaskHistory } from './taskHistory.js';
 import { resolveIssueInput, resolvePrInput } from './routing-inputs.js';
 
-export async function executeDefaultAction(task?: string): Promise<void> {
+export interface DefaultActionResult {
+  offerContinue: boolean;
+  continueQuestion?: string;
+  continueStatusMessage?: string;
+}
+
+export interface InteractiveDefaultActionLoopOptions {
+  isInteractiveTerminal?: () => boolean;
+  confirmContinue?: (message: string, defaultYes: boolean) => Promise<boolean>;
+  runDefaultAction?: (task?: string) => Promise<DefaultActionResult>;
+}
+
+function isInteractiveTerminal(): boolean {
+  return process.stdin.isTTY === true && process.stdout.isTTY === true;
+}
+
+async function confirmContinue(message: string, defaultYes: boolean): Promise<boolean> {
+  const { confirm } = await import('../../shared/prompt/index.js');
+  return confirm(message, defaultYes);
+}
+
+export async function executeInteractiveDefaultActionLoop(
+  task?: string,
+  options: InteractiveDefaultActionLoopOptions = {},
+): Promise<void> {
+  const canPrompt = options.isInteractiveTerminal ?? isInteractiveTerminal;
+  const askContinue = options.confirmContinue ?? confirmContinue;
+  const runDefaultAction = options.runDefaultAction ?? executeDefaultAction;
+  let nextTask = task;
+
+  while (true) {
+    const result = await runDefaultAction(nextTask);
+    if (!result.offerContinue || !canPrompt()) {
+      return;
+    }
+    if (result.continueStatusMessage) {
+      info(result.continueStatusMessage);
+    }
+    const shouldContinue = await askContinue(result.continueQuestion ?? 'Continue?', true);
+    if (!shouldContinue) {
+      return;
+    }
+    nextTask = undefined;
+  }
+}
+
+export async function executeDefaultAction(task?: string): Promise<DefaultActionResult> {
   const opts = program.opts();
   if (!pipelineMode && (opts.autoPr === true || opts.draft === true)) {
     logError('--auto-pr/--draft are supported only in --pipeline mode');
@@ -89,14 +135,14 @@ export async function executeDefaultAction(task?: string): Promise<void> {
     if (exitCode !== 0) {
       process.exit(exitCode);
     }
-    return;
+    return { offerContinue: false };
   }
 
   const taskFromOption = opts.task as string | undefined;
   if (taskFromOption) {
     selectOptions.skipTaskList = true;
     await selectAndExecuteTask(resolvedCwd, taskFromOption, selectOptions, agentOverrides);
-    return;
+    return { offerContinue: false };
   }
 
   let directTask: string | undefined = task;
@@ -149,7 +195,7 @@ export async function executeDefaultAction(task?: string): Promise<void> {
   const workflowId = await determineWorkflow(resolvedCwd, selectOptions.workflow);
   if (workflowId === null) {
     info(getLabel('interactive.ui.cancelled', lang));
-    return;
+    return { offerContinue: false };
   }
 
   const previewCount = globalConfig.interactivePreviewSteps;
@@ -165,7 +211,7 @@ export async function executeDefaultAction(task?: string): Promise<void> {
   );
   if (selectedMode === null) {
     info(getLabel('interactive.ui.cancelled', lang));
-    return;
+    return { offerContinue: false };
   }
 
   const workflowContext = {
@@ -182,6 +228,8 @@ export async function executeDefaultAction(task?: string): Promise<void> {
     }
     : undefined;
   let result: InteractiveModeResult;
+  let taskRunFinished = false;
+  let taskRunSucceeded = true;
 
   switch (selectedMode) {
     case 'assistant': {
@@ -252,10 +300,23 @@ export async function executeDefaultAction(task?: string): Promise<void> {
       selectOptions.workflow = workflowId;
       selectOptions.interactiveMetadata = { confirmed: true, task: confirmedTask };
       selectOptions.skipTaskList = true;
+      if (selectedMode !== 'quiet') {
+        selectOptions.exitOnFailure = false;
+      }
       if (result.attachments) {
         selectOptions.attachments = result.attachments;
       }
-      await selectAndExecuteTask(resolvedCwd, confirmedTask, selectOptions, agentOverrides);
+      try {
+        taskRunSucceeded = await selectAndExecuteTask(resolvedCwd, confirmedTask, selectOptions, agentOverrides);
+      } catch (err) {
+        taskRunSucceeded = false;
+        if (selectedMode === 'quiet') {
+          throw err;
+        }
+        logError(getErrorMessage(err));
+      } finally {
+        taskRunFinished = true;
+      }
     },
     create_issue: async ({ task: confirmedTask }) => {
       const labels = await promptLabelSelection(lang);
@@ -283,8 +344,16 @@ export async function executeDefaultAction(task?: string): Promise<void> {
     },
     cancel: () => undefined,
   });
+
+  return {
+    offerContinue: taskRunFinished && selectedMode !== 'quiet',
+    continueQuestion: getLabel('interactive.continueQuestion', lang),
+    continueStatusMessage: taskRunSucceeded
+      ? getLabel('interactive.runCompleted', lang)
+      : getLabel('interactive.runFailed', lang),
+  };
 }
 
 program
   .argument('[task]', 'Task to execute (or issue reference like "#6")')
-  .action(executeDefaultAction);
+  .action((task?: string) => executeInteractiveDefaultActionLoop(task));

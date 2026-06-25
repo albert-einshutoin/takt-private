@@ -217,4 +217,9 @@ export interface SelectAndExecuteOptions {
   attachments?: TaskAttachment[];
   /** Source metadata for direct trace discovery when no task record exists. */
   traceTaskContext?: TraceTaskContext;
+  /**
+   * Defaults to true for one-shot CLI compatibility. Interactive root flows
+   * set this false so they can return to the top-level prompt after failure.
+   */
+  exitOnFailure?: boolean;
 }

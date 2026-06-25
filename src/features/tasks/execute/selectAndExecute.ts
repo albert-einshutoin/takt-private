@@ -110,12 +110,12 @@ export async function selectAndExecuteTask(
   task: string,
   options?: SelectAndExecuteOptions,
   agentOverrides?: TaskExecutionOptions,
-): Promise<void> {
+): Promise<boolean> {
   const workflowIdentifier = await determineWorkflow(cwd, options?.workflow);
 
   if (workflowIdentifier === null) {
     info('Cancelled');
-    return;
+    return false;
   }
 
   const execCwd = cwd;
@@ -205,7 +205,8 @@ export async function selectAndExecuteTask(
     persistTaskResult(taskRunner, taskResult);
   }
 
-  if (!taskSuccess) {
+  if (!taskSuccess && options?.exitOnFailure !== false) {
     process.exit(1);
   }
+  return taskSuccess;
 }
