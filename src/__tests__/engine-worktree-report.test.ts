@@ -36,6 +36,7 @@ vi.mock('../shared/utils/index.js', async (importOriginal) => ({
 
 import { WorkflowEngine } from '../core/workflow/index.js';
 import { runReportPhase } from '../core/workflow/phase-runner.js';
+import { generateReportDir } from '../shared/utils/index.js';
 import {
   makeResponse,
   makeStep,
@@ -220,6 +221,18 @@ describe('WorkflowEngine: worktree reportDir resolution', () => {
     expect(reportPhaseMock).toHaveBeenCalled();
     const phaseCtx = reportPhaseMock.mock.calls[0][2] as { reportDir: string };
     expect(phaseCtx.reportDir).toBe(join(normalDir, '.takt/runs/20260201-015714-foptng/reports'));
+  });
+
+  it('should pass timezone when generating fallback reportDirName', () => {
+    const normalDir = projectCwd;
+    const config = buildSimpleConfig();
+
+    new WorkflowEngine(config, normalDir, 'test task', {
+      projectCwd: normalDir,
+      timezone: 'Asia/Tokyo',
+    });
+
+    expect(vi.mocked(generateReportDir)).toHaveBeenCalledWith('test task', { timezone: 'Asia/Tokyo' });
   });
 
   it('should reject invalid explicit reportDirName', () => {

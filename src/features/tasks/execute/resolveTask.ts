@@ -21,6 +21,7 @@ import { createLogger, getErrorMessage } from '../../../shared/utils/index.js';
 import { generateReportDir } from '../../../shared/utils/reportDir.js';
 import { generateExecutionReportDir } from '../../../core/workflow/run/run-slug.js';
 import { getTaskSlugFromTaskDir } from '../../../shared/utils/taskPaths.js';
+import { resolveConfigValue } from '../../../infra/config/resolveConfigValue.js';
 import { stageTaskSpecForExecution } from './taskSpecContext.js';
 import { resolveReusedWorktreeExecution } from './reusedWorktree.js';
 
@@ -192,6 +193,7 @@ export async function resolveTaskExecution(
   let branch: string | undefined;
   let worktreePath: string | undefined;
   let baseBranch: string | undefined;
+  const timezone = resolveConfigValue(defaultCwd, 'timezone');
   const preferredBaseBranch = resolveTaskDataBaseBranch(data);
   if (task.taskDir) {
     const taskSlug = getTaskSlugFromTaskDir(task.taskDir);
@@ -248,13 +250,13 @@ export async function resolveTaskExecution(
   }
 
   if (task.taskDir) {
-    reportDirName = generateExecutionReportDir(execCwd, task.content);
+    reportDirName = generateExecutionReportDir(execCwd, task.content, { timezone });
     const stagedTaskSpec = stageTaskSpecForExecution(defaultCwd, execCwd, task.taskDir, reportDirName);
     taskPrompt = stagedTaskSpec.taskPrompt;
     orderContent = stagedTaskSpec.orderContent;
   }
 
-  const resolvedReportDirName = reportDirName ?? generateReportDir(task.content);
+  const resolvedReportDirName = reportDirName ?? generateReportDir(task.content, { timezone });
   const needsWorkflowRetryContext = resumePoint !== undefined || data.exceeded_current_iteration !== undefined;
   const workflowConfig = needsWorkflowRetryContext
     ? loadWorkflowByIdentifier(workflowIdentifier, defaultCwd, { lookupCwd: execCwd })

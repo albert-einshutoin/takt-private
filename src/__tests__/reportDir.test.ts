@@ -22,6 +22,16 @@ describe('generateReportDir', () => {
     vi.useRealTimers();
   });
 
+  it('should generate timestamp in configured timezone', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-15T15:30:45.000Z'));
+
+    const result = generateReportDir('Add login feature', { timezone: 'Asia/Tokyo' });
+    expect(result).toBe('20250116-003045-add-login-feature');
+
+    vi.useRealTimers();
+  });
+
   it('should truncate long task descriptions to 30 characters', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));

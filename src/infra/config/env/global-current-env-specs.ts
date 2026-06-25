@@ -3,6 +3,7 @@ import type { EnvSpec } from './config-env-shared.js';
 
 export const GLOBAL_ENV_SPECS: readonly EnvSpec[] = [
   { path: 'language', type: 'string' },
+  { path: 'timezone', type: 'string' },
   { path: 'provider', type: 'string' },
   { path: 'model', type: 'string' },
   { path: 'logging', type: 'json' },

@@ -5,6 +5,7 @@
 # General settings
 # =====================================
 language: en        # UI language: en | ja
+# timezone: Asia/Tokyo # User-facing timestamps and generated run names (IANA ID or "local"; unset = UTC)
 
 # Default provider and model
 # provider: claude                    # Default provider: claude | claude-sdk | claude-terminal | codex | codex-cli | opencode | opencode-cli | cursor | cursor-cli | copilot | kiro | agy-cli | mock

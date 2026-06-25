@@ -12,6 +12,7 @@ Configure TAKT defaults in `~/.takt/config.yaml`. This file is created automatic
 ```yaml
 # ~/.takt/config.yaml
 language: en                  # UI language: 'en' or 'ja'
+timezone: Asia/Tokyo          # User-facing timestamps and generated run names (IANA ID or 'local'; unset = UTC)
 logging:
   level: info                 # Log level: debug, info, warn, error
 provider: claude              # Default provider: claude, claude-sdk, claude-terminal, codex, codex-cli, opencode, opencode-cli, cursor, cursor-cli, copilot, kiro, agy-cli, or mock
@@ -153,6 +154,7 @@ interactive_preview_steps: 3  # Step previews in interactive mode (0-10, default
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `language` | `"en"` \| `"ja"` | `"en"` | UI language |
+| `timezone` | IANA time zone ID \| `"local"` | UTC when unset | Time zone for user-facing timestamp display and generated run directory names. Stored ISO timestamps remain UTC. Can also be set with `TAKT_TIMEZONE`. |
 | `logging.level` | `"debug"` \| `"info"` \| `"warn"` \| `"error"` | `"info"` | Log level |
 | `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-terminal"` \| `"codex"` \| `"codex-cli"` \| `"opencode"` \| `"opencode-cli"` \| `"cursor"` \| `"cursor-cli"` \| `"copilot"` \| `"kiro"` \| `"agy-cli"` \| `"mock"` | `"claude"` | Default AI provider (`claude` = headless CLI mode, `claude-sdk` = SDK/API mode, `*-cli` = external CLI login/session mode) |
 | `logging.trace` | boolean | `false` | Enable trace-level logging (suppresses high-frequency debug noise) |
@@ -212,6 +214,7 @@ Configure project-specific settings in `.takt/config.yaml`. This file is created
 provider: claude              # Override provider for this project
 model: sonnet                 # Override model for this project
 auto_pr: true                 # Auto-create PR after worktree execution
+timezone: Asia/Tokyo          # Override user-facing timestamps and generated run names
 logging:
   level: info                 # Console log level: debug | info | warn | error
 concurrency: 2                # Parallel task count for takt run in this project (1-10)
@@ -255,6 +258,7 @@ concurrency: 2                # Parallel task count for takt run in this project
 | `subscription_only` | boolean | global value | Reject API-key config and providers outside the subscription-only allowlist for this project |
 | `allowed_providers` | provider[] | global value or built-in allowlist | Project-level subscription-only provider allowlist |
 | `forbidden_providers` | string[] | global value or `[]` | Project-level additional forbidden provider names |
+| `timezone` | IANA time zone ID \| `"local"` | global value or UTC when unset | Project override for user-facing timestamp display and generated run directory names. Stored ISO timestamps remain UTC. Can also be set with `TAKT_TIMEZONE`. |
 | `allow_git_hooks` | boolean | `false` | Allow git hooks during TAKT-managed auto-commit |
 | `allow_git_filters` | boolean | `false` | Allow git filters during TAKT-managed auto-commit |
 | `auto_pr` | boolean | - | Auto-create PR after worktree execution |

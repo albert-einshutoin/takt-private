@@ -283,6 +283,8 @@ export interface WorkflowEngineOptions {
   childProcessEnv?: Readonly<Record<string, string>>;
   /** Language for instruction metadata. Defaults to 'en'. */
   language?: Language;
+  /** Timezone for fallback generated run directory names. */
+  timezone?: string;
   provider?: ProviderType;
   providerSource?: ProviderResolutionSource;
   model?: string;

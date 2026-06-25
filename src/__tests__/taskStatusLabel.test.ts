@@ -78,6 +78,10 @@ describe('formatShortDate', () => {
     expect(formatShortDate('2025-02-18T14:30:00.000Z')).toBe('02/18 14:30');
   });
 
+  it('should format ISO string in configured timezone', () => {
+    expect(formatShortDate('2025-02-18T14:30:00.000Z', { timezone: 'Asia/Tokyo' })).toBe('02/18 23:30');
+  });
+
   it('should zero-pad single digit values', () => {
     expect(formatShortDate('2025-01-05T03:07:00.000Z')).toBe('01/05 03:07');
   });

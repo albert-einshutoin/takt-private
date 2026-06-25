@@ -104,7 +104,7 @@ export class WorkflowEngine extends EventEmitter {
       throw new Error(`Invalid reportDirName: ${options.reportDirName}`);
     }
 
-    const reportDirName = options.reportDirName ?? generateReportDir(task);
+    const reportDirName = options.reportDirName ?? generateReportDir(task, { timezone: options.timezone });
     const runPaths = buildRunPaths(cwd, reportDirName, options.runPathNamespace);
     const traceTaskMetadata = {
       ...options.traceTaskMetadata,

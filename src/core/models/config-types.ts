@@ -192,6 +192,8 @@ export interface ProjectConfig {
   forbiddenProviders?: SubscriptionOnlyForbiddenProvider[];
   /** UI / builtin resource language override for this project */
   language?: Language;
+  /** Timezone used for user-facing timestamp display and generated names */
+  timezone?: string;
   /** Provider selection for agent runtime */
   provider?: ProviderType;
   /** Model selection for agent runtime */

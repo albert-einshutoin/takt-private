@@ -9,6 +9,7 @@ import { statusLine } from '../../../shared/ui/StatusLine.js';
 import { createLogger } from '../../../shared/utils/index.js';
 import { generateExecutionReportDir } from '../../../core/workflow/run/run-slug.js';
 import { sanitizeTerminalText } from '../../../shared/utils/text.js';
+import { resolveConfigValue } from '../../../infra/config/resolveConfigValue.js';
 import { executeTask } from './taskExecution.js';
 import type { TaskExecutionOptions, WorktreeConfirmationResult, SelectAndExecuteOptions } from './types.js';
 import { selectWorkflow } from '../../workflowSelection/index.js';
@@ -109,12 +110,13 @@ export async function selectAndExecuteTask(
   let preparedSpec: ReturnType<typeof prepareTaskSpecDirectory> | undefined;
   let stagedSpec: StagedTaskSpec | undefined;
   let reportDirName: string | undefined;
+  const timezone = resolveConfigValue(cwd, 'timezone');
   try {
     preparedSpec = options?.attachments && options.attachments.length > 0
       ? prepareTaskSpecDirectory(cwd, task, options.attachments)
       : undefined;
     if (preparedSpec) {
-      reportDirName = generateExecutionReportDir(execCwd, task);
+      reportDirName = generateExecutionReportDir(execCwd, task, { timezone });
       stagedSpec = stageTaskSpecForExecution(cwd, execCwd, preparedSpec.taskDirRelative, reportDirName);
     }
   } catch (error) {

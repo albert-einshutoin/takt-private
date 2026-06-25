@@ -167,6 +167,7 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
     allowedProviders: allowed_providers as ProjectConfig['allowedProviders'],
     forbiddenProviders: forbidden_providers as ProjectConfig['forbiddenProviders'],
     language: language as ProjectConfig['language'],
+    timezone: parsedConfigResult.timezone as string | undefined,
     pipeline: normalizedPipeline,
     assistant: normalizeAssistantConfig(assistant),
     taktProviders: normalizedTaktProviders,
@@ -274,7 +275,7 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
   } else {
     delete savePayload.rate_limit_fallback;
   }
-  for (const [camel, snake] of [['subscriptionOnly', 'subscription_only'], ['allowedProviders', 'allowed_providers'], ['forbiddenProviders', 'forbidden_providers'], ['language', 'language'], ['autoPr', 'auto_pr'], ['draftPr', 'draft_pr'], ['allowGitHooks', 'allow_git_hooks'], ['allowGitFilters', 'allow_git_filters'], ['vcsProvider', 'vcs_provider'], ['baseBranch', 'base_branch'], ['branchNameStrategy', 'branch_name_strategy'], ['minimalOutput', 'minimal_output'], ['taskPollIntervalMs', 'task_poll_interval_ms'], ['interactivePreviewSteps', 'interactive_preview_steps'], ['syncProjectLocalTaktOnRetry', 'sync_project_local_takt_on_retry'], ['concurrency', 'concurrency']] as const) {
+  for (const [camel, snake] of [['subscriptionOnly', 'subscription_only'], ['allowedProviders', 'allowed_providers'], ['forbiddenProviders', 'forbidden_providers'], ['language', 'language'], ['timezone', 'timezone'], ['autoPr', 'auto_pr'], ['draftPr', 'draft_pr'], ['allowGitHooks', 'allow_git_hooks'], ['allowGitFilters', 'allow_git_filters'], ['vcsProvider', 'vcs_provider'], ['baseBranch', 'base_branch'], ['branchNameStrategy', 'branch_name_strategy'], ['minimalOutput', 'minimal_output'], ['taskPollIntervalMs', 'task_poll_interval_ms'], ['interactivePreviewSteps', 'interactive_preview_steps'], ['syncProjectLocalTaktOnRetry', 'sync_project_local_takt_on_retry'], ['concurrency', 'concurrency']] as const) {
     const value = config[camel];
     if (Array.isArray(value)) {
       if (value.length > 0) savePayload[snake] = value;

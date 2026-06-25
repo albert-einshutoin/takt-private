@@ -134,6 +134,7 @@ export class GlobalConfigManager {
       allowedProviders: parsed.allowed_providers as GlobalConfig['allowedProviders'],
       forbiddenProviders: parsed.forbidden_providers as GlobalConfig['forbiddenProviders'],
       language: parsed.language,
+      timezone: parsed.timezone,
       provider: normalizedProvider.provider,
       model: normalizedProvider.model,
       logging: parsed.logging ? {

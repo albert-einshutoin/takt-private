@@ -126,16 +126,6 @@ export async function createWorkflowExecutionBootstrap(
   const isWorktree = cwd !== projectCwd;
   log.debug('Session mode', { isRetry, isWorktree });
 
-  const runSlug = options.reportDirName ?? generateReportDir(task);
-  if (!isValidReportDirName(runSlug)) {
-    throw new Error(`Invalid reportDirName: ${runSlug}`);
-  }
-  if (isWorktree) {
-    ensureWorktreeTaktGitignore(cwd);
-  }
-
-  const runPaths = buildRunPaths(cwd, runSlug);
-  const sessionLog = createSessionLog(task, projectCwd, workflowConfig.name);
   const globalConfig = resolveWorkflowConfigValues(projectCwd, [
     'notificationSound',
     'notificationSoundEvents',
@@ -150,7 +140,18 @@ export async function createWorkflowExecutionBootstrap(
     'logging',
     'analytics',
     'observability',
+    'timezone',
   ]);
+  const runSlug = options.reportDirName ?? generateReportDir(task, { timezone: globalConfig.timezone });
+  if (!isValidReportDirName(runSlug)) {
+    throw new Error(`Invalid reportDirName: ${runSlug}`);
+  }
+  if (isWorktree) {
+    ensureWorktreeTaktGitignore(cwd);
+  }
+
+  const runPaths = buildRunPaths(cwd, runSlug);
+  const sessionLog = createSessionLog(task, projectCwd, workflowConfig.name);
   const traceReportMode = globalConfig.logging?.trace === true ? 'full' : 'redacted';
   const allowSensitiveData = traceReportMode === 'full';
   const sanitizeObservabilityText = (text: string): string => sanitizeTextForStorage(text, allowSensitiveData);

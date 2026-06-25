@@ -4,6 +4,7 @@
 
 import { z } from 'zod/v4';
 import { DEFAULT_LANGUAGE } from '../../shared/constants.js';
+import { isValidTimestampTimezone } from '../../shared/utils/timestamp.js';
 import { MAX_ASSISTANT_INIT_FILES } from './assistant-config.js';
 import { VCS_PROVIDER_TYPES } from './vcs-types.js';
 import {
@@ -86,12 +87,17 @@ export const WorkflowCategoryOverlaySchema = z.object({
   others_category_name: z.string().min(1).optional(),
 }).strict();
 
+const TimezoneSchema = z.string().min(1).refine(isValidTimestampTimezone, {
+  message: 'Must be an IANA time zone ID or "local".',
+});
+
 /** Project config schema */
 const ProjectConfigObjectSchema = z.object({
   subscription_only: z.boolean().optional(),
   allowed_providers: z.array(ProviderTypeSchema).min(1).optional(),
   forbidden_providers: z.array(ProviderTypeSchema).optional(),
   language: LanguageSchema.optional(),
+  timezone: TimezoneSchema.optional(),
   provider: ProviderReferenceSchema.optional(),
   model: z.string().optional(),
   analytics: AnalyticsConfigSchema.optional(),

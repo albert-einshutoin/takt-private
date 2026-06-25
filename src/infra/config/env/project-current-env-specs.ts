@@ -4,6 +4,7 @@ import type { EnvSpec } from './config-env-shared.js';
 export const PROJECT_ENV_SPECS: readonly EnvSpec[] = [
   { path: 'provider', type: 'string' },
   { path: 'model', type: 'string' },
+  { path: 'timezone', type: 'string' },
   { path: 'concurrency', type: 'number' },
   { path: 'pipeline', type: 'json' },
   { path: 'pipeline.default_branch_prefix', type: 'string' },

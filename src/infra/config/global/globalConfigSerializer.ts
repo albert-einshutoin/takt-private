@@ -26,6 +26,9 @@ export function serializeGlobalConfig(config: GlobalConfig): Record<string, unkn
   if (config.model) {
     raw.model = config.model;
   }
+  if (config.timezone) {
+    raw.timezone = config.timezone;
+  }
   if (config.logging && (
     config.logging.level !== undefined
     || config.logging.trace !== undefined

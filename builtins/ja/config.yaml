@@ -5,6 +5,7 @@
 # 通常設定
 # =====================================
 language: ja         # 表示言語: ja | en
+# timezone: Asia/Tokyo # 表示用 timestamp と run 名生成の timezone（IANA ID または "local"。未設定時は UTC）
 
 # デフォルトプロバイダー・モデル
 # provider: claude                    # デフォルトプロバイダー: claude | claude-sdk | claude-terminal | codex | opencode | cursor | copilot | kiro | mock
