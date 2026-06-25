@@ -49,6 +49,9 @@ interactive:
     prompt: "Select a run to reference:"
     noRuns: "No previous runs found."
   continueNoSession: "No previous assistant session found. Starting a new session."
+  continueQuestion: "Continue?"
+  runCompleted: "Task completed"
+  runFailed: "Task failed"
   resumeSessionLoaded: "Session loaded. Subsequent AI calls will use this session."
   sessionSelector:
     prompt: "Resume from a recent session?"
