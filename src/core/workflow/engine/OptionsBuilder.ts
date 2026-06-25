@@ -35,6 +35,7 @@ import { buildSessionKey } from '../session-key.js';
 import { resolveStepProviderModel } from '../provider-resolution.js';
 import { buildPhase1WorkflowMeta } from './workflow-meta.js';
 import type { FindingContractInstructionContext } from '../instruction/instruction-context.js';
+import { stripGroundCheckFromProviderOptions } from '../ground-check.js';
 
 export class OptionsBuilder {
   constructor(
@@ -150,6 +151,7 @@ export class OptionsBuilder {
 
     const providerOptions = mergedProviderOptions
       ?? this.resolveMergedProviderOptions(step, resolvedProvider, runtime);
+    const runtimeProviderOptions = stripGroundCheckFromProviderOptions(providerOptions);
     const workflowMeta: WorkflowMeta = {
       workflowName: this.getWorkflowName(),
       workflowDescription: this.getWorkflowDescription(),
@@ -169,8 +171,8 @@ export class OptionsBuilder {
         requiredPermissionMode: step.requiredPermissionMode,
         providerProfiles: this.engineOptions.providerProfiles,
       },
-      providerOptions,
-      resolvedProviderOptions: providerOptions,
+      providerOptions: runtimeProviderOptions,
+      resolvedProviderOptions: runtimeProviderOptions,
       language: this.getLanguage(),
       onStream: this.engineOptions.onStream,
       onPermissionRequest: this.engineOptions.onPermissionRequest,
