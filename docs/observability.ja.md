@@ -107,6 +107,8 @@ record は workflow phase ごとに分かれます。
 | `phase3_tag` | tag fallback による status judgment |
 | `phase3_fallback` | AI judge fallback による status judgment |
 
+各 record には workflow step の文脈として `step`, `step_type`, `persona`, `tags` も含まれます。`tags` は常に配列で出力されるため、後段の分析やフィルタで workflow YAML を読み直さずに routing tag ごとの usage を集計できます。
+
 usage を取得できない場合は `usage_missing: true` と reason を記録します。分析コマンドでは missing usage を 0 token として扱わず、token 統計から除外します。
 
 ## Usage を集計する

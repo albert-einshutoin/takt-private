@@ -161,6 +161,8 @@ describe('E2E: Observability file outputs (mock)', () => {
     expect([...phases].some((phase) => typeof phase === 'string' && phase.startsWith('phase3_'))).toBe(true);
     expect(phaseUsageRecords[0]).toEqual(expect.objectContaining({
       step: expect.any(String),
+      persona: expect.any(String),
+      tags: expect.any(Array),
       provider: 'mock',
       provider_model: expect.any(String),
       step_type: 'agent',

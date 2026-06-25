@@ -19,6 +19,8 @@ describe('phase usage event mapper', () => {
         'takt.provider.name': 'codex',
         'takt.model.name': 'gpt-5',
         'takt.step.name': 'implement',
+        'takt.step.persona': 'coder',
+        'takt.step.tags': JSON.stringify(['critical-path', 'backend']),
         'takt.step.type': 'agent',
         'takt.phase.number': 1,
         'takt.phase.name': 'execute',
@@ -40,6 +42,8 @@ describe('phase usage event mapper', () => {
       provider: 'codex',
       provider_model: 'gpt-5',
       step: 'implement',
+      persona: 'coder',
+      tags: ['critical-path', 'backend'],
       step_type: 'agent',
       phase: 'phase1_execute',
       phase_name: 'execute',
@@ -94,6 +98,8 @@ describe('phase usage event mapper', () => {
         'takt.provider.name': 'claude-sdk',
         'takt.model.name': 'claude-sonnet-4',
         'takt.step.name': 'implement',
+        'takt.step.persona': 'reviewer',
+        'takt.step.tags': 'not-json',
         'takt.step.type': 'agent',
         'takt.phase.execution_id': 'implement:3:1:1',
         'takt.judge.stage': 3,
@@ -105,6 +111,8 @@ describe('phase usage event mapper', () => {
     };
 
     expect(mapSpanEndToPhaseUsageEvent(span, context)).toEqual(expect.objectContaining({
+      persona: 'reviewer',
+      tags: [],
       phase: 'phase3_fallback',
       phase_name: 'judge',
       phase_execution_id: 'implement:3:1:1',

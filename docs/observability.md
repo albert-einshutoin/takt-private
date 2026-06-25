@@ -107,6 +107,8 @@ Records are grouped by workflow phase:
 | `phase3_tag` | Tag fallback status judgment |
 | `phase3_fallback` | AI judge fallback status judgment |
 
+Each record also includes the workflow step context: `step`, `step_type`, `persona`, and `tags`. `tags` is always emitted as an array so downstream filters can group phase usage by workflow routing tags without reading workflow YAML.
+
 Missing usage is recorded with `usage_missing: true` and a reason. Missing usage is not treated as zero tokens by the analysis command.
 
 ## Analyze Usage

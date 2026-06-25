@@ -911,7 +911,7 @@ describe('workflow OpenTelemetry spans', () => {
 
   it('creates phase spans as step children and records phase outcomes', async () => {
     const { module, spans, metricRecords } = await loadWorkflowSpansWithMockedApi();
-    const step = makeStep({ personaDisplayName: 'coder' });
+    const step = makeStep({ personaDisplayName: 'coder', tags: ['critical-path', 'backend'] });
 
     await module.runWithStepSpan({
       enabled: true,
@@ -964,6 +964,7 @@ describe('workflow OpenTelemetry spans', () => {
       'takt.workflow.name': 'test-workflow',
       'takt.step.name': 'implement',
       'takt.step.persona': 'coder',
+      'takt.step.tags': JSON.stringify(['critical-path', 'backend']),
       'takt.step.iteration': 3,
       'takt.phase.number': 1,
       'takt.phase.name': 'execute',
@@ -1053,7 +1054,7 @@ describe('workflow OpenTelemetry spans', () => {
 
   it('creates judge stage sub-spans under the active phase span', async () => {
     const { module, spans, metricRecords } = await loadWorkflowSpansWithMockedApi();
-    const step = makeStep({ personaDisplayName: 'conductor' });
+    const step = makeStep({ personaDisplayName: 'conductor', tags: ['judgment'] });
 
     await module.runWithPhaseSpan({
       enabled: true,
@@ -1103,6 +1104,7 @@ describe('workflow OpenTelemetry spans', () => {
     expect(spans[1]?.parentName).toBe('phase.implement.judge');
     expect(spans[1]?.attributes).toMatchObject({
       'takt.phase.execution_id': 'implement:3:4:1',
+      'takt.step.tags': JSON.stringify(['judgment']),
       'takt.judge.stage': 1,
       'takt.judge.method': 'structured_output',
       'takt.judge.status': 'done',

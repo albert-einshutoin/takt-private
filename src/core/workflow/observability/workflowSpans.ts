@@ -274,6 +274,7 @@ function buildStepAttributes(params: StepSpanParams): Attributes {
     ...workflowStackAttributes(params.workflowStack),
     'takt.step.name': params.step.name,
     'takt.step.persona': params.step.personaDisplayName,
+    ...stepTagsAttribute(params.step),
     'takt.step.type': getWorkflowStepKind(params.step),
     'takt.step.iteration': params.iteration,
     'takt.step.local_iteration': params.stepIteration,
@@ -312,6 +313,7 @@ function buildPhaseAttributes(params: PhaseSpanParams): Attributes {
     ...workflowStackAttributes(params.workflowStack),
     'takt.step.name': params.step.name,
     'takt.step.persona': params.step.personaDisplayName,
+    ...stepTagsAttribute(params.step),
     'takt.step.type': getWorkflowStepKind(params.step),
     'takt.step.iteration': params.iteration,
     'takt.phase.number': params.phase,
@@ -329,6 +331,7 @@ function buildJudgeStageAttributes(params: JudgeStageSpanParams): Attributes {
     ...workflowStackAttributes(params.workflowStack),
     'takt.step.name': params.step.name,
     'takt.step.persona': params.step.personaDisplayName,
+    ...stepTagsAttribute(params.step),
     'takt.step.type': getWorkflowStepKind(params.step),
     'takt.step.iteration': params.iteration,
     'takt.phase.number': 3,
@@ -522,6 +525,12 @@ function workflowStackAttributes(stack: WorkflowResumePointEntry[] | undefined):
       kind: entry.kind,
     }))),
   };
+}
+
+function stepTagsAttribute(step: WorkflowStep): AttributeInput {
+  return step.tags && step.tags.length > 0
+    ? { 'takt.step.tags': JSON.stringify(step.tags) }
+    : {};
 }
 
 function providerAttributes(providerInfo: StepProviderInfo | undefined): AttributeInput {
