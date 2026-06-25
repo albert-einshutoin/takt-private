@@ -12,6 +12,7 @@
 
 - phase usage event record に workflow step の `persona` と `tags` 文脈を追加しました (#870)。workflow YAML を読み直さなくても、provider-routing tag ごとに token usage を絞り込めます。
 - observability で usage を取得できた phase について、provider token usage counter（`takt.token.input_tokens`, `takt.token.output_tokens`, `takt.token.cached_input_tokens`）を送出するようにしました (#869)。既存の OpenTelemetry metric pipeline とローカル `monitor.json` に出力されます。
+- observability で workflow operation 向けの provider error、quality gate result、loop detection、cycle detection counter（`takt.provider.errors`, `takt.quality_gate.results`, `takt.workflow.loops_detected`, `takt.workflow.cycles_detected`）を送出するようにしました (#869)。
 
 ### Fixed
 

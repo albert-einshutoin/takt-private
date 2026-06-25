@@ -16,7 +16,13 @@ import { decrementStepIteration, incrementStepIteration } from './state-manager.
 import { handleBlocked } from './blocked-handler.js';
 import { isDelegatedWorkflowStep } from '../step-kind.js';
 import { resolvePromotionRuntime } from '../promotion/promotion-runtime.js';
-import { runWithStepSpan, type StepSpanParams } from '../observability/workflowSpans.js';
+import {
+  recordQualityGateResultMetrics,
+  recordWorkflowCycleDetectedMetric,
+  recordWorkflowLoopDetectedMetric,
+  runWithStepSpan,
+  type StepSpanParams,
+} from '../observability/workflowSpans.js';
 import type { QualityGateRunResult } from '../quality-gates/types.js';
 
 const log = createLogger('workflow-run-loop');
@@ -184,6 +190,54 @@ function withFallbackRuntime(
   };
 }
 
+function isObservabilityEnabled(deps: WorkflowRunLoopDeps): boolean {
+  return deps.options.observability?.enabled === true;
+}
+
+function recordQualityGateMetrics(
+  deps: WorkflowRunLoopDeps,
+  step: WorkflowStep,
+  result: QualityGateRunResult,
+): void {
+  recordQualityGateResultMetrics({
+    enabled: isObservabilityEnabled(deps),
+    runId: deps.options.observabilityRunId,
+    workflowName: deps.getWorkflowName(),
+    step,
+    results: result.results,
+  });
+}
+
+function recordLoopMetric(
+  deps: WorkflowRunLoopDeps,
+  step: WorkflowStep,
+  loopCount: number,
+): void {
+  recordWorkflowLoopDetectedMetric({
+    enabled: isObservabilityEnabled(deps),
+    runId: deps.options.observabilityRunId,
+    workflowName: deps.getWorkflowName(),
+    step,
+    loopCount,
+  });
+}
+
+function recordCycleMetric(
+  deps: WorkflowRunLoopDeps,
+  step: WorkflowStep,
+  monitor: LoopMonitorConfig | undefined,
+  cycleCount: number,
+): void {
+  recordWorkflowCycleDetectedMetric({
+    enabled: isObservabilityEnabled(deps),
+    runId: deps.options.observabilityRunId,
+    workflowName: deps.getWorkflowName(),
+    step,
+    cycleCount,
+    cycle: monitor?.cycle,
+  });
+}
+
 function advanceActiveStep(deps: WorkflowRunLoopDeps, nextStep: string, iteration: number): void {
   const resolvedStep = deps.getStep(nextStep);
   deps.state.currentStep = nextStep;
@@ -335,6 +389,9 @@ export async function runWorkflowToCompletion(deps: WorkflowRunLoopDeps): Promis
     deps.applyRuntimeEnvironment('step');
     const loopCheck = deps.loopDetectorCheck(step.name);
 
+    if (loopCheck.isLoop) {
+      recordLoopMetric(deps, step, loopCheck.count);
+    }
     if (loopCheck.shouldWarn) {
       deps.emit('step:loop_detected', step, loopCheck.count);
     }
@@ -447,6 +504,7 @@ export async function runWorkflowToCompletion(deps: WorkflowRunLoopDeps): Promis
         step,
         childProcessEnv: deps.options.childProcessEnv,
       });
+      recordQualityGateMetrics(deps, step, qualityGateResult);
       if (!qualityGateResult.ok) {
         applyQualityGateFailure(
           deps,
@@ -491,6 +549,7 @@ export async function runWorkflowToCompletion(deps: WorkflowRunLoopDeps): Promis
 
       const cycleCheck = deps.cycleDetectorRecordAndCheck(step.name);
       if (cycleCheck.triggered && cycleCheck.monitor) {
+        recordCycleMetric(deps, step, cycleCheck.monitor, cycleCheck.cycleCount);
         log.info('Loop monitor cycle threshold reached', {
           cycle: cycleCheck.monitor.cycle,
           cycleCount: cycleCheck.cycleCount,
@@ -530,6 +589,9 @@ async function runSingleWorkflowIterationCore(deps: WorkflowRunLoopDeps): Promis
   deps.applyRuntimeEnvironment('step');
   const loopCheck = deps.loopDetectorCheck(step.name);
 
+  if (loopCheck.isLoop) {
+    recordLoopMetric(deps, step, loopCheck.count);
+  }
   if (loopCheck.shouldAbort) {
     const abort = abortWorkflow(deps, 'loop_detected', ERROR_MESSAGES.LOOP_DETECTED(step.name, loopCheck.count));
     return {
@@ -643,6 +705,7 @@ async function runSingleWorkflowIterationCore(deps: WorkflowRunLoopDeps): Promis
     step,
     childProcessEnv: deps.options.childProcessEnv,
   });
+  recordQualityGateMetrics(deps, step, qualityGateResult);
   if (!qualityGateResult.ok) {
     applyQualityGateFailure(
       deps,

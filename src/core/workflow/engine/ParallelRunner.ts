@@ -27,7 +27,7 @@ import type { WorkflowEngineOptions, PhaseName, PhasePromptParts, JudgeStageEntr
 import type { RuntimeStepResolution } from '../types.js';
 import type { ParallelLoggerOptions } from './parallel-logger.js';
 import type { StructuredCaller } from '../../../agents/structured-caller.js';
-import { runWithPhaseSpan } from '../observability/workflowSpans.js';
+import { recordQualityGateResultMetrics, runWithPhaseSpan } from '../observability/workflowSpans.js';
 import type { QualityGateRunResult } from '../quality-gates/types.js';
 import { buildPhaseExecutionId } from '../../../shared/utils/phaseExecutionId.js';
 import { sanitizeSensitiveText } from '../../../shared/utils/sensitiveText.js';
@@ -354,6 +354,13 @@ export class ParallelRunner {
           projectRoot: this.deps.getCwd(),
           step: subStep,
           childProcessEnv: this.deps.engineOptions.childProcessEnv,
+        });
+        recordQualityGateResultMetrics({
+          enabled: this.deps.observabilityEnabled,
+          runId: this.deps.observabilityRunId,
+          workflowName: this.deps.getWorkflowName(),
+          step: subStep,
+          results: qualityGateResult.results,
         });
         if (!qualityGateResult.ok) {
           state.stepOutputs.set(subStep.name, qualityGateResult.response);

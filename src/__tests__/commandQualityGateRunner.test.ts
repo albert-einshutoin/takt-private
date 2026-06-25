@@ -603,6 +603,11 @@ describe('command quality gates', () => {
     });
 
     expect(result.ok).toBe(false);
+    expect(result.results).toEqual([
+      { gateName: 'ai_gate_1', gateType: 'ai', result: 'pass' },
+      { gateName: 'first', gateType: 'command', result: 'pass' },
+      { gateName: 'second', gateType: 'command', result: 'fail' },
+    ]);
     expect(readFileSync(logPath, 'utf-8')).toBe('first\nsecond\n');
     if (!result.ok) {
       expect(result.response.status).toBe('done');

@@ -32,11 +32,19 @@ export interface RunCommandQualityGateOptions {
   childProcessEnv?: Readonly<Record<string, string>>;
 }
 
+export interface QualityGateResultEntry {
+  gateName: string;
+  gateType: 'ai' | 'command';
+  result: 'pass' | 'fail';
+}
+
 export type QualityGateRunResult = {
   ok: true;
+  results?: readonly QualityGateResultEntry[];
 } | {
   ok: false;
   response: AgentResponse;
+  results?: readonly QualityGateResultEntry[];
 };
 
 export interface RunQualityGatesOptions {
