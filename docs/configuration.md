@@ -14,7 +14,7 @@ Configure TAKT defaults in `~/.takt/config.yaml`. This file is created automatic
 language: en                  # UI language: 'en' or 'ja'
 logging:
   level: info                 # Log level: debug, info, warn, error
-provider: claude              # Default provider: claude, claude-sdk, claude-terminal, codex, opencode, cursor, copilot, kiro, or mock
+provider: claude              # Default provider: claude, claude-sdk, claude-terminal, codex, codex-cli, opencode, opencode-cli, cursor, cursor-cli, copilot, kiro, agy-cli, or mock
 model: sonnet                 # Default model (optional, passed to provider as-is)
 branch_name_strategy: romaji  # Branch name generation: 'romaji' (fast) or 'ai' (slow)
 prevent_sleep: false          # Prevent macOS idle sleep during execution (caffeinate)
@@ -30,6 +30,12 @@ task_poll_interval_ms: 500    # Polling interval for new tasks during takt run (
 interactive_preview_steps: 3  # Step previews in interactive mode (0-10, default: 3)
 # auto_fetch: false           # Fetch remote before cloning (default: false)
 # base_branch: main           # Base branch for clone creation (default: remote default branch)
+
+# Subscription/login-session-only execution (optional)
+# When enabled, TAKT rejects API-key config and any provider outside allowed_providers.
+# subscription_only: true
+# allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
+# forbidden_providers: [codex, opencode, claude-sdk]
 
 # Runtime environment defaults (applies to all workflows unless workflow_config.runtime overrides)
 # runtime:
@@ -80,6 +86,7 @@ interactive_preview_steps: 3  # Step previews in interactive mode (0-10, default
 #     default_permission_mode: edit
 
 # API Key configuration (optional)
+# Do not set these when subscription_only is true.
 # Can be overridden by environment variables TAKT_ANTHROPIC_API_KEY / TAKT_OPENAI_API_KEY / TAKT_OPENCODE_API_KEY / TAKT_CURSOR_API_KEY / TAKT_COPILOT_GITHUB_TOKEN / TAKT_KIRO_API_KEY
 # anthropic_api_key: sk-ant-...  # For Claude (Anthropic)
 # openai_api_key: sk-...         # For Codex (OpenAI)
@@ -147,9 +154,12 @@ interactive_preview_steps: 3  # Step previews in interactive mode (0-10, default
 |-------|------|---------|-------------|
 | `language` | `"en"` \| `"ja"` | `"en"` | UI language |
 | `logging.level` | `"debug"` \| `"info"` \| `"warn"` \| `"error"` | `"info"` | Log level |
-| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-terminal"` \| `"codex"` \| `"opencode"` \| `"cursor"` \| `"copilot"` \| `"kiro"` \| `"mock"` | `"claude"` | Default AI provider (`claude` = headless CLI mode, `claude-sdk` = SDK/API mode, `claude-terminal` = experimental interactive terminal mode) |
+| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-terminal"` \| `"codex"` \| `"codex-cli"` \| `"opencode"` \| `"opencode-cli"` \| `"cursor"` \| `"cursor-cli"` \| `"copilot"` \| `"kiro"` \| `"agy-cli"` \| `"mock"` | `"claude"` | Default AI provider (`claude` = headless CLI mode, `claude-sdk` = SDK/API mode, `*-cli` = external CLI login/session mode) |
 | `logging.trace` | boolean | `false` | Enable trace-level logging (suppresses high-frequency debug noise) |
 | `model` | string | - | Default model name (passed to provider as-is) |
+| `subscription_only` | boolean | `false` | Reject API-key config, SDK/API providers, workflow provider overrides, and execution-time provider overrides outside the subscription-only allowlist |
+| `allowed_providers` | provider[] | `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli`, `mock` | Allowlist used only when `subscription_only: true`; entries must themselves be subscription-safe providers |
+| `forbidden_providers` | string[] | `[]` | Additional provider names rejected when `subscription_only: true`; useful for documenting organization policy such as `codex`, `opencode`, or `claude-sdk` |
 | `branch_name_strategy` | `"romaji"` \| `"ai"` | `"romaji"` | Branch name generation strategy |
 | `prevent_sleep` | boolean | `false` | Prevent macOS idle sleep (caffeinate) |
 | `notification_sound` | boolean | `true` | Enable notification sounds |
@@ -240,8 +250,11 @@ concurrency: 2                # Parallel task count for takt run in this project
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-terminal"` \| `"codex"` \| `"opencode"` \| `"cursor"` \| `"copilot"` \| `"kiro"` \| `"mock"` | - | Override provider |
+| `provider` | `"claude"` \| `"claude-sdk"` \| `"claude-terminal"` \| `"codex"` \| `"codex-cli"` \| `"opencode"` \| `"opencode-cli"` \| `"cursor"` \| `"cursor-cli"` \| `"copilot"` \| `"kiro"` \| `"agy-cli"` \| `"mock"` | - | Override provider |
 | `model` | string | - | Override model name (passed to provider as-is) |
+| `subscription_only` | boolean | global value | Reject API-key config and providers outside the subscription-only allowlist for this project |
+| `allowed_providers` | provider[] | global value or built-in allowlist | Project-level subscription-only provider allowlist |
+| `forbidden_providers` | string[] | global value or `[]` | Project-level additional forbidden provider names |
 | `allow_git_hooks` | boolean | `false` | Allow git hooks during TAKT-managed auto-commit |
 | `allow_git_filters` | boolean | `false` | Allow git filters during TAKT-managed auto-commit |
 | `auto_pr` | boolean | - | Auto-create PR after worktree execution |
@@ -263,7 +276,11 @@ Project config values override global config when both are set.
 
 ## API Key Configuration
 
-TAKT supports Claude, Codex, OpenCode, Cursor, Copilot, and Kiro providers. Claude/Codex/OpenCode/Kiro use API keys, Cursor can use either API key or existing `cursor-agent login` session, and Copilot uses a GitHub token.
+TAKT supports Claude, Codex, OpenCode, Cursor, Copilot, Kiro, and Antigravity-style CLI providers. SDK/API providers such as `codex` and `opencode` can use API keys. CLI-only providers such as `codex-cli`, `opencode-cli`, `cursor-cli`, and `agy-cli` are intended for already-authenticated local CLI sessions; TAKT strips common API-key environment variables before launching them.
+
+When `subscription_only: true` is enabled, API key config fields and SDK/API providers are rejected before workflow execution. Use `codex-cli`, `cursor-cli`, `opencode-cli`, or `agy-cli` instead.
+
+Before long runs, use `devloopd doctor --subscription-only` to verify required CLI tools, GitHub auth, forbidden API-key environment variables, TAKT config, and project workflow provider references. See the [devloopd Guide](./devloopd.md).
 
 ### Environment Variables (Recommended)
 
@@ -318,6 +335,7 @@ Environment variables take precedence over `config.yaml` settings.
 - Consider using environment variables instead.
 - Add `~/.takt/config.yaml` to your global `.gitignore` if needed.
 - Cursor provider can run without API key when `cursor-agent login` is already configured.
+- CLI-only providers (`codex-cli`, `opencode-cli`, `cursor-cli`, `agy-cli`) remove common API-key environment variables before subprocess launch and never intentionally fall back to SDK/API providers.
 - If you set an API key, installing the corresponding CLI tool (Claude Code, Codex, OpenCode) is not necessary. TAKT directly calls the respective API.
 - Copilot provider requires the `copilot` CLI to be installed. The GitHub token is used for authentication.
 - Kiro provider requires the `kiro-cli` CLI to be installed. `TAKT_KIRO_API_KEY` / `kiro_api_key` is passed to the child process as `KIRO_API_KEY`; if neither is set, TAKT uses the official `KIRO_API_KEY` environment variable.

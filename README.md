@@ -22,7 +22,7 @@ Instead of asking one agent to remember the whole process, TAKT gives each step 
 - Run plan → implement → review → fix loops as explicit workflow steps
 - Keep context focused with step-specific personas, policies, knowledge, instructions, and output contracts
 - Execute queued tasks in isolated worktrees and inspect logs and reports afterward
-- Use Claude Code, Claude SDK, Codex SDK, OpenCode SDK, Cursor, GitHub Copilot CLI, or Kiro as providers
+- Use Claude Code, Claude SDK, Codex SDK, OpenCode SDK, subscription/login-based CLI providers, Cursor, GitHub Copilot CLI, or Kiro as providers
 
 **T**AKT **A**gent **K**oordination **T**opology orchestrates multiple AI agents with structured review loops, managed prompts, and guardrails.
 
@@ -96,6 +96,17 @@ These providers require an external CLI:
 - `copilot` — [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli)
 - `cursor` — [Cursor Agent](https://docs.cursor.com/)
 - `kiro` — [Kiro CLI](https://kiro.dev/docs/cli/headless/)
+
+These CLI-only providers are intended for subscription or login-session operation. TAKT strips common API-key environment variables before launching them:
+
+- `codex-cli` — Codex CLI via `codex exec`
+- `opencode-cli` — OpenCode CLI via `opencode run`
+- `cursor-cli` — Cursor Agent CLI via `cursor-agent`
+- `agy-cli` — Antigravity CLI via `agy -p`
+
+Set `subscription_only: true` in config to make TAKT reject SDK/API providers and API-key config before workflow execution. The default subscription-only allowlist is `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli`, and `mock`.
+
+Run `devloopd doctor --subscription-only` before long workflow runs to verify the local subscription-only setup, required CLIs, GitHub auth, TAKT config, and project workflows.
 
 Optional:
 
@@ -241,6 +252,18 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `takt workflow init` | Create a new workflow scaffold |
 | `takt workflow doctor` | Validate workflow definitions |
 | `takt repertoire add` | Install a repertoire package from GitHub |
+| `devloopd doctor --subscription-only` | Validate local subscription-only provider readiness |
+| `devloopd run --issue N` | Run a GitHub Issue through TAKT after subscription-only checks |
+| `devloopd import-takt-run --latest --issue N` | Import TAKT run metadata into the devloop ledger |
+| `devloopd reconcile-runs` | Import missing completed TAKT runs into the devloop ledger |
+| `devloopd export-ledger --output .devloop/backup/ledger.jsonl` | Export filtered devloop ledger events to a JSONL backup |
+| `devloopd timeline --issue N` | Render imported TAKT run history |
+| `devloopd memory --write` | Write compact project memory from imported TAKT runs |
+| `devloopd merge-if-safe --pr N` | Enable GitHub auto-merge only after mechanical policy gates pass |
+| `devloopd scan-issues --repo owner/repo` | Scan open GitHub Issues and classify mechanical candidates |
+| `devloopd select-issue --repo owner/repo` | Select the safest mechanical issue candidate from a scan |
+| `devloopd active-runs` | Inspect currently running TAKT runs and stale state |
+| `devloopd start --repo owner/repo` | Run the daemon supervisor loop |
 
 See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 
@@ -249,9 +272,25 @@ See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 Minimal `~/.takt/config.yaml`:
 
 ```yaml
-provider: claude    # claude, claude-sdk, claude-terminal, codex, opencode, cursor, copilot, kiro, or mock
+provider: claude    # claude, claude-sdk, claude-terminal, codex, codex-cli, opencode, opencode-cli, cursor, cursor-cli, copilot, kiro, agy-cli, or mock
 model: sonnet       # passed directly to provider
 language: en        # en or ja
+```
+
+Subscription/login-session-only mode:
+
+```yaml
+subscription_only: true
+provider: codex-cli
+allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
+```
+
+When `subscription_only` is enabled, TAKT rejects API-key config such as `openai_api_key`, SDK/API providers such as `codex` and `opencode`, workflow step overrides outside the allowlist, and execution-time `--provider` overrides outside the allowlist.
+
+Validate that local CLI sessions and workflow files match this policy:
+
+```bash
+devloopd doctor --subscription-only
 ```
 
 Or use API keys directly (no CLI installation required for Claude, Codex, OpenCode):
@@ -265,7 +304,7 @@ export TAKT_COPILOT_GITHUB_TOKEN=ghp_...   # GitHub Copilot CLI
 export TAKT_KIRO_API_KEY=...               # Kiro CLI
 ```
 
-See the [Configuration Guide](./docs/configuration.md) for all options, provider profiles, and model resolution.
+See the [Configuration Guide](./docs/configuration.md) and [devloopd Guide](./docs/devloopd.md) for all options, provider profiles, model resolution, and subscription-only readiness checks.
 
 ## Customization
 

@@ -42,7 +42,14 @@ describe('pushBranch', () => {
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'git',
       ['push', 'origin', 'feature/my-branch'],
-      { cwd: '/project', stdio: 'pipe' },
+      {
+        cwd: '/project',
+        stdio: 'pipe',
+        env: expect.objectContaining({
+          GCM_INTERACTIVE: 'Never',
+          GIT_TERMINAL_PROMPT: '0',
+        }),
+      },
     );
   });
 
@@ -103,7 +110,14 @@ describe('pushHeadToOriginBranch', () => {
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'git',
       ['push', 'origin', 'HEAD:refs/heads/feature/my-branch'],
-      { cwd: '/clone', stdio: 'pipe' },
+      {
+        cwd: '/clone',
+        stdio: 'pipe',
+        env: expect.objectContaining({
+          GCM_INTERACTIVE: 'Never',
+          GIT_TERMINAL_PROMPT: '0',
+        }),
+      },
     );
   });
 
@@ -154,6 +168,28 @@ describe('materializeCloneHeadToRootBranch', () => {
       'git',
       ['fetch', '/clone', 'HEAD:refs/heads/feature/my-branch'],
       { cwd: '/project', stdio: 'pipe' },
+    );
+  });
+});
+
+describe('relayPushCloneToOrigin', () => {
+  it('should run the origin push non-interactively to avoid credential prompts', async () => {
+    const { relayPushCloneToOrigin } = await import('../infra/task/git.js');
+    mockExecFileSync.mockReturnValue(Buffer.from(''));
+
+    relayPushCloneToOrigin('/clone', '/project', 'feature/my-branch');
+
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'git',
+      ['push', 'origin', 'refs/takt-relay/feature/my-branch:refs/heads/feature/my-branch'],
+      expect.objectContaining({
+        cwd: '/project',
+        stdio: 'pipe',
+        env: expect.objectContaining({
+          GCM_INTERACTIVE: 'Never',
+          GIT_TERMINAL_PROMPT: '0',
+        }),
+      }),
     );
   });
 });

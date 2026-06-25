@@ -5,6 +5,10 @@ import { resolveLoopMonitorJudgeProviderModel, resolveStepProviderModel } from '
 import { validateProviderModelCompatibility } from '../provider-model-compatibility.js';
 import { getWorkflowStepKind, isWorkflowCallStep } from '../step-kind.js';
 import { isFindingsCondition, isInvalidManagerOutputRule } from '../evaluation/rule-utils.js';
+import {
+  assertSubscriptionOnlyProvider,
+  assertSubscriptionOnlyWorkflowConfig,
+} from '../../subscription-only/policy.js';
 
 function isFindingsRule(rule: WorkflowRule | LoopMonitorRule): boolean {
   if ('isAiCondition' in rule && rule.isAiCondition === true) {
@@ -58,6 +62,11 @@ function validateAgentStepProviderModel(
     providerRouting: options.providerRouting,
     personaProviders: options.personaProviders,
   });
+  assertSubscriptionOnlyProvider(providerInfo.provider, source, {
+    subscriptionOnly: options.subscriptionOnly,
+    allowedProviders: options.allowedProviders,
+    forbiddenProviders: options.forbiddenProviders,
+  });
   validateProviderModelCompatibility(
     providerInfo.provider,
     providerInfo.model,
@@ -92,6 +101,17 @@ function validateFindingContractInvalidManagerOutputRules(config: WorkflowConfig
 }
 
 export function validateWorkflowConfig(config: WorkflowConfig, options: WorkflowEngineOptions): void {
+  const subscriptionPolicy = {
+    subscriptionOnly: options.subscriptionOnly,
+    allowedProviders: options.allowedProviders,
+    forbiddenProviders: options.forbiddenProviders,
+  };
+  assertSubscriptionOnlyWorkflowConfig(config, subscriptionPolicy);
+  assertSubscriptionOnlyProvider(options.provider, 'resolved workflow provider', subscriptionPolicy);
+  for (const [index, entry] of options.rateLimitFallback?.switchChain.entries() ?? []) {
+    assertSubscriptionOnlyProvider(entry.provider, `resolved rate_limit_fallback.switch_chain[${index}]`, subscriptionPolicy);
+  }
+
   const initialStep = config.steps.find((step) => step.name === config.initialStep);
   if (!initialStep) {
     throw new Error(ERROR_MESSAGES.UNKNOWN_STEP(config.initialStep));

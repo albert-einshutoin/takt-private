@@ -19,11 +19,155 @@ This document provides a complete reference for all TAKT CLI commands and option
 | `--skip-git` | Skip branch creation, commit, and push (pipeline mode, workflow-only) |
 | `--repo <owner/repo>` | Specify repository (for PR creation) |
 | `-q, --quiet` | Minimal output mode: suppress AI output (for CI) |
-| `--provider <name>` | Override agent provider (claude\|claude-sdk\|claude-terminal\|codex\|opencode\|cursor\|copilot\|kiro\|mock) |
+| `--provider <name>` | Override agent provider (claude\|claude-sdk\|claude-terminal\|codex\|codex-cli\|opencode\|opencode-cli\|cursor\|cursor-cli\|copilot\|kiro\|agy-cli\|mock) |
 | `--model <name>` | Override agent model |
 | `--config <path>` | Path to global config file (default: `~/.takt/config.yaml`) |
 
 `--workflow` is the canonical option.
+
+## devloopd
+
+`devloopd` is a separate sidecar binary installed with TAKT. Use it to verify subscription/login-session-only readiness before running long workflows.
+
+```bash
+devloopd doctor --subscription-only
+devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
+devloopd run --issue 123 --repo owner/repo
+devloopd import-takt-run --latest --issue 123
+devloopd reconcile-runs
+devloopd export-ledger --output .devloop/backup/ledger.jsonl
+devloopd timeline --issue 123
+devloopd memory --write
+devloopd merge-if-safe --pr 456 --expected-head <sha>
+devloopd scan-issues --repo owner/repo
+devloopd select-issue --repo owner/repo
+devloopd active-runs
+devloopd start --repo owner/repo
+```
+
+`devloopd doctor` options:
+
+| Option | Description |
+|--------|-------------|
+| `--subscription-only` | Require subscription-only TAKT config and provider checks |
+| `--repo <path>` | Repository path to inspect |
+| `--policy <path>` | Optional devloop policy YAML path; `mode` must be `subscription_only` |
+| `--verbose` | Show passing checks |
+| `--skip-auth` | Skip `gh auth status` |
+
+`devloopd run` options:
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | GitHub Issue number to run through TAKT |
+| `--repo <owner/repo>` | Repository used by TAKT for PR operations |
+| `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
+| `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
+| `--skip-auth` | Skip `gh auth status` |
+| `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
+| `--no-quiet` | Do not pass `--quiet` to TAKT |
+
+`devloopd import-takt-run` options:
+
+| Option | Description |
+|--------|-------------|
+| `--latest` | Import the latest TAKT run from `.takt/runs/` |
+| `--run <slug>` | Import a specific TAKT run slug |
+| `--issue <number>` | Associate the imported run with a GitHub Issue number |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd reconcile-runs` options:
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | Associate imported runs with a GitHub Issue number |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd export-ledger` options:
+
+| Option | Description |
+|--------|-------------|
+| `--output <path>` | Output JSONL path. Relative paths must stay inside the repository |
+| `--force` | Overwrite an existing output file |
+| `--issue <number>` | Filter exported runs by GitHub Issue number |
+| `--run <slug>` | Filter exported runs by TAKT run slug |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd timeline` options:
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | Filter imported runs by GitHub Issue number |
+| `--run <slug>` | Filter imported runs by TAKT run slug |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+
+`devloopd memory` options:
+
+| Option | Description |
+|--------|-------------|
+| `--issue <number>` | Filter imported runs by GitHub Issue number |
+| `--limit <count>` | Maximum imported runs to include. Defaults to 20 |
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--output <path>` | Project-local memory output path. Defaults to `.devloop/memory.md` |
+| `--write` | Write the memory file instead of rendering only |
+
+`devloopd merge-if-safe` options:
+
+| Option | Description |
+|--------|-------------|
+| `--pr <number-or-url>` | Pull request number or URL |
+| `--repo <owner/repo>` | GitHub repository |
+| `--expected-head <sha>` | Expected PR head SHA. The gate denies merge if the current PR head differs |
+| `--cwd <path>` | Repository path to run `gh` from |
+
+`devloopd scan-issues` options:
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--cwd <path>` | Repository path to run `gh issue list` from |
+
+`devloopd select-issue` options:
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--cwd <path>` | Repository path to run `gh issue list` from |
+| `--max-selections <count>` | Maximum issue candidates to select. Defaults to 1 |
+| `--no-auto-pr-only` | Do not select medium-risk `auto_pr_only` candidates |
+
+`devloopd active-runs` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--stale-after-minutes <count>` | Minutes without metadata update before a run is stale. Defaults to 180 |
+
+`devloopd start` options:
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository |
+| `--once` | Run one finite scan/run/import cycle and exit |
+| `--max-cycles <count>` | Stop after a finite number of daemon cycles |
+| `--interval-seconds <count>` | Seconds to wait between daemon cycles. Defaults to 60 |
+| `--workflow <path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | Optional devloop policy YAML path passed to the subscription-only doctor |
+| `--cwd <path>` | Repository path to run in. Defaults to the current working directory |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--max-active-runs <count>` | Maximum active TAKT runs allowed before start refuses to scan. Defaults to 1 |
+| `--stale-after-minutes <count>` | Minutes without metadata update before active-runs marks a run stale. Defaults to 180 |
+| `--skip-auth` | Skip `gh auth status` |
+| `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
+| `--no-quiet` | Do not pass `--quiet` to TAKT |
+
+See the [devloopd Guide](./devloopd.md) for the full check list.
 
 ## Interactive Mode
 

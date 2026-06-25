@@ -64,7 +64,7 @@ Fields:
 | Field | Description |
 |-------|-------------|
 | `name` | AI-generated task slug |
-| `status` | `pending`, `running`, `completed`, `failed`, or `exceeded` |
+| `status` | `pending`, `running`, `completed`, `failed`, `exceeded`, or `pr_failed` |
 | `task_dir` | Path to the task directory containing `order.md` |
 | `workflow` | Workflow name to use for execution |
 | `worktree` | `true` (auto), a path string, or omitted (run in current directory) |
@@ -112,9 +112,11 @@ The `run` command claims pending tasks and executes them through the configured 
 2. Workflow execution in the clone/project directory
 3. Auto-commit and push (if worktree execution)
 4. Post-execution flow (PR creation if `auto_pr` is set)
-5. Status update in `tasks.yaml` (`completed`, `failed`, or `exceeded`)
+5. Status update in `tasks.yaml` (`completed`, `failed`, `exceeded`, or `pr_failed`)
 
 When a workflow reaches `max_steps`, the default `takt run` behavior stops the task with `exceeded` status and saves retry metadata such as `exceeded_max_steps`, `exceeded_current_iteration`, and `resume_point`. Passing `--ignore-exceed` makes `takt run` ignore only that iteration limit, continue the workflow, and skip writing exceeded retry metadata.
+
+If workflow execution and the local commit succeed but publishing or PR creation fails, the task is recorded as `pr_failed`. TAKT runs managed Git pushes non-interactively, so expired HTTPS credentials do not block the process at `Username:` or `Password:` prompts. The local branch and commit are preserved; fix authentication, then use `takt list` to inspect, sync/pull, instruct, merge, or retry publishing/PR work.
 
 ### Parallel Execution (Concurrency)
 
@@ -181,6 +183,18 @@ The list view shows all tasks organized by status (pending, running, completed, 
 |--------|-------------|
 | **Retry** | Open a retry conversation with failure context, then re-execute |
 | **Delete** | Remove the failed task record |
+
+### Actions for Publishing/PR Failed Tasks
+
+| Action | Description |
+|--------|-------------|
+| **View diff** | Show full diff against the default branch in a pager |
+| **Instruct** | Open an AI conversation to adjust the completed branch, then re-execute |
+| **Sync** | Sync the task branch with the root working tree |
+| **Pull** | Pull the task branch from the remote after publishing succeeds |
+| **Try merge** | Squash merge without committing, for manual review |
+| **Merge & cleanup** | Squash merge and delete the task record |
+| **Delete** | Remove the `pr_failed` task record |
 
 ### Actions for Pending Tasks
 

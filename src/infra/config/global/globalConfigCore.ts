@@ -30,6 +30,10 @@ import { sanitizeConfigValue } from './globalConfigLegacyMigration.js';
 import { serializeGlobalConfig } from './globalConfigSerializer.js';
 import { loadGlobalConfigTrace, type ConfigTrace } from '../traced/tracedConfigLoader.js';
 import { PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS } from '../providerOptionsContract.js';
+import {
+  assertNoForbiddenSubscriptionOnlyConfigKeys,
+  assertSubscriptionOnlyConfig,
+} from '../../../core/subscription-only/policy.js';
 export { validateCliPath } from './cliPathValidator.js';
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
@@ -76,6 +80,7 @@ export class GlobalConfigManager {
   private static instance: GlobalConfigManager | null = null;
   private cachedConfig: GlobalConfig | null = null;
   private cachedTrace: ConfigTrace | null = null;
+  private cachedParsedConfig: Record<string, unknown> | null = null;
   private constructor() {}
 
   static getInstance(): GlobalConfigManager {
@@ -92,6 +97,7 @@ export class GlobalConfigManager {
   invalidateCache(): void {
     this.cachedConfig = null;
     this.cachedTrace = null;
+    this.cachedParsedConfig = null;
   }
 
   load(): GlobalConfig {
@@ -114,6 +120,7 @@ export class GlobalConfigManager {
       },
       PROVIDER_OPTIONS_FILE_PREFERRED_ENV_PATHS,
     );
+    assertNoForbiddenSubscriptionOnlyConfigKeys(parsedConfig, configPath);
     assertValidGlobalConfig(parsedConfig, configPath, true);
     assertNoUnknownGlobalConfigKeys(rawConfig);
     const parsed = GlobalConfigSchema.parse(rawConfig);
@@ -123,6 +130,9 @@ export class GlobalConfigManager {
       parsed.provider_options as Record<string, unknown> | undefined,
     );
     const config: GlobalConfig = {
+      subscriptionOnly: parsed.subscription_only as boolean | undefined,
+      allowedProviders: parsed.allowed_providers as GlobalConfig['allowedProviders'],
+      forbiddenProviders: parsed.forbidden_providers as GlobalConfig['forbiddenProviders'],
       language: parsed.language,
       provider: normalizedProvider.provider,
       model: normalizedProvider.model,
@@ -243,9 +253,11 @@ export class GlobalConfigManager {
       interactivePreviewSteps: resolveAliasedPreviewCount(parsed as Record<string, unknown>),
       syncProjectLocalTaktOnRetry: parsed.sync_project_local_takt_on_retry as boolean | undefined,
     };
+    assertSubscriptionOnlyConfig(config);
     validateProviderModelCompatibility(config.provider, config.model);
     this.cachedConfig = config;
     this.cachedTrace = trace;
+    this.cachedParsedConfig = parsedConfig;
     return config;
   }
 
@@ -258,6 +270,10 @@ export class GlobalConfigManager {
       throw new Error('Global config trace is not available');
     }
     return this.cachedTrace;
+  }
+
+  peekParsedConfig(): Record<string, unknown> | undefined {
+    return this.cachedParsedConfig ?? undefined;
   }
 
   save(config: GlobalConfig): void {
@@ -289,4 +305,8 @@ export function saveGlobalConfig(config: GlobalConfig): void {
 
 export function loadGlobalConfigTraceState(): ConfigTrace {
   return GlobalConfigManager.getInstance().getTrace();
+}
+
+export function getCachedGlobalParsedConfigState(): Record<string, unknown> | undefined {
+  return GlobalConfigManager.getInstance().peekParsedConfig();
 }

@@ -11,6 +11,9 @@ import {
 } from '../providerOptionsContract.js';
 
 const PROJECT_TRACKED_KEYS = [
+  'subscription_only',
+  'allowed_providers',
+  'forbidden_providers',
   'language',
   'provider',
   'model',
@@ -96,6 +99,9 @@ const PROJECT_TRACKED_KEYS = [
 ] as const;
 
 const GLOBAL_TRACKED_KEYS = [
+  'subscription_only',
+  'allowed_providers',
+  'forbidden_providers',
   'language',
   'provider',
   'model',

@@ -12,7 +12,7 @@ vi.mock('../shared/ui/index.js', () => ({
 }));
 
 import { info } from '../shared/ui/index.js';
-import { persistExceededTaskResult } from '../features/tasks/execute/taskResultHandler.js';
+import { persistExceededTaskResult, persistPrFailedTaskResult } from '../features/tasks/execute/taskResultHandler.js';
 import { TaskRunner } from '../infra/task/runner.js';
 
 const mockInfo = vi.mocked(info);
@@ -134,5 +134,38 @@ describe('persistExceededTaskResult', () => {
     const row = tasks[0]!;
     expect(row.branch).toBe('takt/branch-only');
     expect(row.worktree_path).toBeUndefined();
+  });
+
+  it('should record publishing/PR failure wording while preserving branch for retry', () => {
+    runner.addTask('Publish feature');
+    const [task] = runner.claimNextTasks(1);
+    if (!task) {
+      throw new Error('expected claimed task');
+    }
+
+    persistPrFailedTaskResult(
+      runner,
+      {
+        task,
+        success: true,
+        response: 'Task completed successfully',
+        executionLog: [],
+        startedAt: '2026-06-24T00:00:00.000Z',
+        completedAt: '2026-06-24T00:01:00.000Z',
+        branch: 'takt/publish-feature',
+      },
+      'Workflow completed, but publishing failed.',
+    );
+
+    const { tasks } = loadTasksFile(testDir);
+    const row = tasks[0]!;
+    expect(row.status).toBe('pr_failed');
+    expect(row.branch).toBe('takt/publish-feature');
+    expect(row.failure).toEqual({
+      error: 'Publishing/PR failed: Workflow completed, but publishing failed.',
+    });
+    expect(mockInfo).toHaveBeenCalledWith(
+      `Task "${task.name}" completed (publishing/PR failed)`,
+    );
   });
 });

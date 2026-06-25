@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { CapabilityAwareStructuredCaller } from '../../../agents/structured-caller.js';
 import type { WorkflowConfig } from '../../../core/models/index.js';
 import type { ResolvedObservabilityConfig } from '../../../core/models/config-types.js';
+import type { ProviderType } from '../../../shared/types/provider.js';
 import { buildRunPaths } from '../../../core/workflow/run/run-paths.js';
 import { resolveRuntimeConfig } from '../../../core/runtime/runtime-environment.js';
 import {
@@ -70,6 +71,9 @@ export interface WorkflowExecutionBootstrap {
   currentProviderSource: ProviderResolutionSource;
   configuredModel: string | undefined;
   configuredModelSource: ProviderResolutionSource;
+  subscriptionOnly: boolean | undefined;
+  allowedProviders: ProviderType[] | undefined;
+  forbiddenProviders: string[] | undefined;
   effectiveWorkflowConfig: WorkflowConfig;
   providerEventLogger: ReturnType<typeof createProviderEventLogger>;
   usageEventLogger: ReturnType<typeof createUsageEventLogger>;
@@ -135,6 +139,9 @@ export async function createWorkflowExecutionBootstrap(
   const globalConfig = resolveWorkflowConfigValues(projectCwd, [
     'notificationSound',
     'notificationSoundEvents',
+    'subscriptionOnly',
+    'allowedProviders',
+    'forbiddenProviders',
     'provider',
     'rateLimitFallback',
     'runtime',
@@ -315,6 +322,9 @@ export async function createWorkflowExecutionBootstrap(
     currentProviderSource,
     configuredModel,
     configuredModelSource,
+    subscriptionOnly: globalConfig.subscriptionOnly,
+    allowedProviders: globalConfig.allowedProviders,
+    forbiddenProviders: globalConfig.forbiddenProviders,
     effectiveWorkflowConfig,
     providerEventLogger,
     usageEventLogger,

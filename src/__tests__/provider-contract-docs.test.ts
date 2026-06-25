@@ -8,10 +8,14 @@ const providerValues = [
   'claude-sdk',
   'claude-terminal',
   'codex',
+  'codex-cli',
   'opencode',
+  'opencode-cli',
   'cursor',
+  'cursor-cli',
   'copilot',
   'kiro',
+  'agy-cli',
   'mock',
 ] as const;
 

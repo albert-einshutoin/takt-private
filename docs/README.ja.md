@@ -22,7 +22,7 @@ TAKT は、AI コーディングエージェントを再現可能な開発ワー
 - 計画 → 実装 → レビュー → 修正ループを明示的な workflow step として実行
 - step ごとに persona、policy、knowledge、instruction、output contract を分け、コンテキストを肥大化させない
 - 積んだタスクを隔離された worktree で実行し、後からログとレポートを確認できる
-- Claude Code、Claude SDK、Codex SDK、OpenCode SDK、Cursor、GitHub Copilot CLI、Kiro を provider として利用できる
+- Claude Code、Claude SDK、Codex SDK、OpenCode SDK、サブスク/ログインセッション前提の CLI provider、Cursor、GitHub Copilot CLI、Kiro を provider として利用できる
 
 **T**AKT **A**gent **K**oordination **T**opology は、複数の AI エージェントをオーケストレーションし、レビューループ・プロンプト管理・ガードレールを与えるツールです。
 
@@ -96,6 +96,17 @@ takt list
 - `copilot` — [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli)
 - `cursor` — [Cursor Agent](https://docs.cursor.com/)
 - `kiro` — [Kiro CLI](https://kiro.dev/docs/cli/headless/)
+
+次の CLI-only provider は、サブスクまたはログイン済みセッションでの利用を想定しています。TAKT は起動前に一般的な API key 環境変数を取り除きます:
+
+- `codex-cli` — `codex exec` で Codex CLI を実行
+- `opencode-cli` — `opencode run` で OpenCode CLI を実行
+- `cursor-cli` — `cursor-agent` で Cursor Agent CLI を実行
+- `agy-cli` — `agy -p` で Antigravity CLI を実行
+
+設定で `subscription_only: true` を有効にすると、TAKT は workflow 実行前に SDK/API provider と API key 設定を拒否します。デフォルトの allowlist は `codex-cli`, `cursor-cli`, `opencode-cli`, `agy-cli`, `mock` です。
+
+長い workflow 実行の前に `devloopd doctor --subscription-only` を実行すると、ローカルの subscription-only 設定、必要な CLI、GitHub 認証、TAKT 設定、project workflow をまとめて確認できます。
 
 任意:
 
@@ -244,6 +255,18 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `takt workflow init` | カスタム workflow のひな形を作成します |
 | `takt workflow doctor` | カスタム workflow の定義を静的検証します |
 | `takt repertoire add` | GitHub から repertoire パッケージをインストールします |
+| `devloopd doctor --subscription-only` | subscription-only provider 前提のローカル環境を検証します |
+| `devloopd run --issue N` | subscription-only 検査後に GitHub Issue を TAKT pipeline で実行します |
+| `devloopd import-takt-run --latest --issue N` | TAKT run metadata を devloop ledger に取り込みます |
+| `devloopd reconcile-runs` | 未取り込みの完了済み TAKT run を devloop ledger に取り込みます |
+| `devloopd export-ledger --output .devloop/backup/ledger.jsonl` | devloop ledger event を JSONL backup として書き出します |
+| `devloopd timeline --issue N` | 取り込んだ TAKT run 履歴を表示します |
+| `devloopd memory --write` | 取り込んだ TAKT run から compact project memory を書き出します |
+| `devloopd merge-if-safe --pr N` | 機械的 policy gate 通過後だけ GitHub auto-merge を有効化します |
+| `devloopd scan-issues --repo owner/repo` | open GitHub Issue を読み取り、機械的候補を分類します |
+| `devloopd select-issue --repo owner/repo` | scan 結果から最も安全な機械的 Issue 候補を選択します |
+| `devloopd active-runs` | 実行中の TAKT run と stale state を確認します |
+| `devloopd start --repo owner/repo` | daemon supervisor loop を実行します |
 
 全コマンド・オプションは [CLI Reference](./cli-reference.ja.md) を参照してください。
 
@@ -252,9 +275,25 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 最小限の `~/.takt/config.yaml` は次の通りです。
 
 ```yaml
-provider: codex    # claude, claude-sdk, claude-terminal, codex, opencode, cursor, copilot, kiro, or mock
+provider: codex    # claude, claude-sdk, claude-terminal, codex, codex-cli, opencode, opencode-cli, cursor, cursor-cli, copilot, kiro, agy-cli, or mock
 model: gpt-5.5       # プロバイダーにそのまま渡されます
 language: ja        # en or ja
+```
+
+サブスク/ログインセッションだけで運用する場合:
+
+```yaml
+subscription_only: true
+provider: codex-cli
+allowed_providers: [codex-cli, cursor-cli, opencode-cli, agy-cli]
+```
+
+`subscription_only` が有効な場合、TAKT は `openai_api_key` のような API key 設定、`codex` や `opencode` のような SDK/API provider、allowlist 外の workflow step 上書き、実行時の `--provider` 上書きを拒否します。
+
+ローカル CLI セッションと workflow がこの方針に合っているか確認します。
+
+```bash
+devloopd doctor --subscription-only
 ```
 
 API Key を直接使う場合は、CLI のインストールは不要です（Claude、Codex、OpenCode が対象）。
@@ -268,7 +307,7 @@ export TAKT_COPILOT_GITHUB_TOKEN=ghp_...   # GitHub Copilot CLI
 export TAKT_KIRO_API_KEY=...               # Kiro CLI
 ```
 
-全設定項目・プロバイダープロファイル・モデル解決の詳細は [Configuration Guide](./configuration.ja.md) を参照してください。
+全設定項目・プロバイダープロファイル・モデル解決・subscription-only 環境確認の詳細は [Configuration Guide](./configuration.ja.md) と [devloopd Guide](./devloopd.ja.md) を参照してください。
 
 ## カスタマイズ
 

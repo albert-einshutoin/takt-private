@@ -94,10 +94,14 @@ export const ProviderProfileNameSchema = z.enum([
   'claude-sdk',
   'claude-terminal',
   'codex',
+  'codex-cli',
   'opencode',
+  'opencode-cli',
   'cursor',
+  'cursor-cli',
   'copilot',
   'kiro',
+  'agy-cli',
   'mock',
 ]);
 export const ProviderTypeSchema = ProviderProfileNameSchema;
@@ -191,10 +195,14 @@ export const ProviderPermissionProfilesSchema = z.object({
   'claude-sdk': ProviderPermissionProfileSchema.optional(),
   'claude-terminal': ProviderPermissionProfileSchema.optional(),
   codex: ProviderPermissionProfileSchema.optional(),
+  'codex-cli': ProviderPermissionProfileSchema.optional(),
   opencode: ProviderPermissionProfileSchema.optional(),
+  'opencode-cli': ProviderPermissionProfileSchema.optional(),
   cursor: ProviderPermissionProfileSchema.optional(),
+  'cursor-cli': ProviderPermissionProfileSchema.optional(),
   copilot: ProviderPermissionProfileSchema.optional(),
   kiro: ProviderPermissionProfileSchema.optional(),
+  'agy-cli': ProviderPermissionProfileSchema.optional(),
   mock: ProviderPermissionProfileSchema.optional(),
 }).strict().optional();
 

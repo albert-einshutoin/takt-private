@@ -42,6 +42,8 @@ export interface TaktProvidersConfig {
   assistant: TaktProviderConfigEntry;
 }
 
+export type SubscriptionOnlyForbiddenProvider = ProviderType | string;
+
 export interface AssistantConfig {
   initFiles?: string[];
 }
@@ -182,6 +184,12 @@ export interface NotificationSoundEventsConfig {
  * Project-level configuration stored in .takt/config.yaml.
  */
 export interface ProjectConfig {
+  /** Enforce subscription/login-session-only provider execution */
+  subscriptionOnly?: boolean;
+  /** Provider allowlist used when subscriptionOnly is enabled */
+  allowedProviders?: ProviderType[];
+  /** Additional provider names rejected when subscriptionOnly is enabled */
+  forbiddenProviders?: SubscriptionOnlyForbiddenProvider[];
   /** UI / builtin resource language override for this project */
   language?: Language;
   /** Provider selection for agent runtime */

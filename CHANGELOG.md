@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- TAKT-managed Git pushes now run non-interactively with terminal credential prompts disabled (#866). If publishing fails after workflow execution and local commit creation, TAKT preserves the branch/commit, records the task as `pr_failed`, skips PR creation, and reports a retryable publishing failure instead of hanging or marking the workflow implementation as failed.
+
 ## [0.48.0] - 2026-06-21
 
 ### Added

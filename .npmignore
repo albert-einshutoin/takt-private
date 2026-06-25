@@ -23,6 +23,7 @@ Thumbs.db
 
 # Local development
 .takt/
+.devloop/
 .env
 .env.*
 *.log

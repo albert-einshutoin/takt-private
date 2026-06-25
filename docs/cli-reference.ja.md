@@ -19,11 +19,155 @@
 | `--skip-git` | ブランチ作成、コミット、プッシュをスキップ（pipeline モード、workflow のみ実行） |
 | `--repo <owner/repo>` | リポジトリを指定（PR 作成用） |
 | `-q, --quiet` | 最小出力モード: AI 出力を抑制（CI 向け） |
-| `--provider <name>` | エージェント provider を上書き（claude\|claude-sdk\|claude-terminal\|codex\|opencode\|cursor\|copilot\|kiro\|mock） |
+| `--provider <name>` | エージェント provider を上書き（claude\|claude-sdk\|claude-terminal\|codex\|codex-cli\|opencode\|opencode-cli\|cursor\|cursor-cli\|copilot\|kiro\|agy-cli\|mock） |
 | `--model <name>` | エージェントモデルを上書き |
 | `--config <path>` | グローバル設定ファイルのパス（デフォルト: `~/.takt/config.yaml`） |
 
 正式オプションは `--workflow` です。
+
+## devloopd
+
+`devloopd` は TAKT と一緒にインストールされる別バイナリです。長い workflow を実行する前に、サブスク/ログイン済み CLI provider だけで運用できる状態か確認します。
+
+```bash
+devloopd doctor --subscription-only
+devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
+devloopd run --issue 123 --repo owner/repo
+devloopd import-takt-run --latest --issue 123
+devloopd reconcile-runs
+devloopd export-ledger --output .devloop/backup/ledger.jsonl
+devloopd timeline --issue 123
+devloopd memory --write
+devloopd merge-if-safe --pr 456 --expected-head <sha>
+devloopd scan-issues --repo owner/repo
+devloopd select-issue --repo owner/repo
+devloopd active-runs
+devloopd start --repo owner/repo
+```
+
+`devloopd doctor` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--subscription-only` | subscription-only の TAKT config と provider チェックを必須にします |
+| `--repo <path>` | 検査するリポジトリパス |
+| `--policy <path>` | 任意の devloop policy YAML パス。`mode` は `subscription_only` である必要があります |
+| `--verbose` | pass したチェックも表示します |
+| `--skip-auth` | `gh auth status` をスキップします |
+
+`devloopd run` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--issue <number>` | TAKT で実行する GitHub Issue 番号 |
+| `--repo <owner/repo>` | TAKT の PR 操作用リポジトリ |
+| `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
+| `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
+| `--skip-auth` | `gh auth status` をスキップします |
+| `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
+| `--no-quiet` | TAKT に `--quiet` を渡しません |
+
+`devloopd import-takt-run` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--latest` | `.takt/runs/` から最新 TAKT run を取り込みます |
+| `--run <slug>` | 指定した TAKT run slug を取り込みます |
+| `--issue <number>` | 取り込む run に GitHub Issue 番号を関連付けます |
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+`devloopd reconcile-runs` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--issue <number>` | 取り込む run に GitHub Issue 番号を関連付けます |
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+`devloopd export-ledger` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--output <path>` | JSONL 出力パス。相対パスはリポジトリ内に限定されます |
+| `--force` | 既存の出力ファイルを上書きします |
+| `--issue <number>` | GitHub Issue 番号で exported run を絞り込みます |
+| `--run <slug>` | TAKT run slug で exported run を絞り込みます |
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+`devloopd timeline` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--issue <number>` | GitHub Issue 番号で imported run を絞り込みます |
+| `--run <slug>` | TAKT run slug で imported run を絞り込みます |
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+
+`devloopd memory` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--issue <number>` | GitHub Issue 番号で imported run を絞り込みます |
+| `--limit <count>` | 含める imported run の最大数。デフォルトは 20 |
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--output <path>` | project 内の memory 出力パス。デフォルトは `.devloop/memory.md` |
+| `--write` | 表示だけでなく memory file を書き出します |
+
+`devloopd merge-if-safe` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--pr <number-or-url>` | Pull Request 番号または URL |
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--expected-head <sha>` | 期待する PR head SHA。現在の head と異なる場合は merge を拒否します |
+| `--cwd <path>` | `gh` を実行するリポジトリパス |
+
+`devloopd scan-issues` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+
+`devloopd select-issue` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--cwd <path>` | `gh issue list` を実行するリポジトリパス |
+| `--max-selections <count>` | 選択する Issue 候補の最大数。デフォルトは 1 |
+| `--no-auto-pr-only` | 中リスクの `auto_pr_only` 候補を選択しません |
+
+`devloopd active-runs` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--stale-after-minutes <count>` | metadata 更新がない run を stale とみなすまでの分数。デフォルトは 180 |
+
+`devloopd start` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--repo <owner/repo>` | GitHub リポジトリ |
+| `--once` | scan/run/import cycle を 1 回だけ実行して終了します |
+| `--max-cycles <count>` | 指定した daemon cycle 数で停止します |
+| `--interval-seconds <count>` | daemon cycle 間の待機秒数。デフォルトは 60 |
+| `--workflow <path>` | TAKT workflow 名またはパス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
+| `--policy <path>` | subscription-only doctor に渡す任意の devloop policy YAML パス |
+| `--cwd <path>` | 実行対象リポジトリパス。省略時はカレントディレクトリ |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--max-active-runs <count>` | scan を拒否する active TAKT run 数の上限。デフォルトは 1 |
+| `--stale-after-minutes <count>` | active-runs が run を stale とみなすまでの分数。デフォルトは 180 |
+| `--skip-auth` | `gh auth status` をスキップします |
+| `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
+| `--no-quiet` | TAKT に `--quiet` を渡しません |
+
+完全なチェック内容は [devloopd Guide](./devloopd.ja.md) を参照してください。
 
 ## インタラクティブモード
 

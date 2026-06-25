@@ -64,7 +64,7 @@ tasks:
 | フィールド | 説明 |
 |-----------|------|
 | `name` | AI が生成したタスクスラグ |
-| `status` | `pending`、`running`、`completed`、`failed`、または `exceeded` |
+| `status` | `pending`、`running`、`completed`、`failed`、`exceeded`、または `pr_failed` |
 | `task_dir` | `order.md` を含むタスクディレクトリのパス |
 | `workflow` | 実行に使用する workflow 名 |
 | `worktree` | `true`（自動）、パス文字列、または省略（カレントディレクトリで実行） |
@@ -112,9 +112,11 @@ takt run --ignore-exceed
 2. クローン/プロジェクトディレクトリでの workflow 実行
 3. 自動コミットとプッシュ（worktree 実行の場合）
 4. 実行後フロー（`auto_pr` 設定時は PR 作成）
-5. `tasks.yaml` のステータス更新（`completed`、`failed`、または `exceeded`）
+5. `tasks.yaml` のステータス更新（`completed`、`failed`、`exceeded`、または `pr_failed`）
 
 workflow が `max_steps` に到達した場合、通常の `takt run` はタスクを `exceeded` として停止し、`exceeded_max_steps`、`exceeded_current_iteration`、`resume_point` などの再実行メタデータを保存します。`--ignore-exceed` を付けると、この iteration limit だけを無視して workflow を継続し、exceeded 用の再実行メタデータは保存しません。
+
+workflow 実行とローカル commit は成功したが、publish または PR 作成に失敗した場合、タスクは `pr_failed` として記録されます。TAKT が管理する Git push は非対話で実行されるため、期限切れの HTTPS 認証情報による `Username:` / `Password:` プロンプトで処理が停止しません。ローカルブランチと commit は保持されるので、認証を直した後に `takt list` から差分確認、sync/pull、追加指示、merge、publish/PR 作業の再試行を行えます。
 
 ### 並列実行（Concurrency）
 
@@ -181,6 +183,18 @@ takt list
 |------|------|
 | **Retry** | 失敗コンテキスト付きのリトライ会話を開き、再実行 |
 | **Delete** | 失敗したタスクレコードを削除 |
+
+### Publish/PR 失敗タスクの操作
+
+| 操作 | 説明 |
+|------|------|
+| **View diff** | デフォルトブランチとの差分をページャで表示 |
+| **Instruct** | 完了済みブランチに追加指示を作成し、再実行 |
+| **Sync** | タスクブランチをルート作業ツリーと同期 |
+| **Pull** | publish 成功後に remote からタスクブランチを取得 |
+| **Try merge** | コミットせずにスカッシュマージし、手動レビューする |
+| **Merge & cleanup** | スカッシュマージしてタスクレコードを削除 |
+| **Delete** | `pr_failed` タスクレコードを削除 |
 
 ### Pending タスクの操作
 

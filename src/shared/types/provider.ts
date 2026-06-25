@@ -5,10 +5,14 @@ export const PROVIDER_TYPES = [
   'claude-sdk',
   'claude-terminal',
   'codex',
+  'codex-cli',
   'opencode',
+  'opencode-cli',
   'cursor',
+  'cursor-cli',
   'copilot',
   'kiro',
+  'agy-cli',
   'mock',
 ] as const;
 

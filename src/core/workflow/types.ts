@@ -289,6 +289,12 @@ export interface WorkflowEngineOptions {
   providerRouting?: ProviderRoutingConfig;
   /** Resolved provider permission profiles */
   providerProfiles?: ProviderPermissionProfiles;
+  /** Enforce subscription/login-session-only provider execution */
+  subscriptionOnly?: boolean;
+  /** Provider allowlist used when subscriptionOnly is enabled */
+  allowedProviders?: ProviderType[];
+  /** Additional provider names rejected when subscriptionOnly is enabled */
+  forbiddenProviders?: string[];
   /** Enable interactive-only rules and user-input transitions */
   interactive?: boolean;
   /** Rule tag index detector (required for rules evaluation) */

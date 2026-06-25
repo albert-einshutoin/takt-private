@@ -7,6 +7,7 @@ import { CursorProvider } from './cursor.js';
 import { CopilotProvider } from './copilot.js';
 import { KiroProvider } from './kiro.js';
 import { MockProvider } from './mock.js';
+import { SubscriptionCliProvider } from './subscription-cli.js';
 import type { Provider, ProviderType } from './types.js';
 
 export type { AgentSetup, ProviderCallOptions, ProviderAgent, Provider, ProviderType } from './types.js';
@@ -21,10 +22,14 @@ export class ProviderRegistry {
       claude: new ClaudeHeadlessProvider(),
       'claude-terminal': new ClaudeTerminalProvider(),
       codex: new CodexProvider(),
+      'codex-cli': new SubscriptionCliProvider('codex-cli'),
       opencode: new OpenCodeProvider(),
+      'opencode-cli': new SubscriptionCliProvider('opencode-cli'),
       cursor: new CursorProvider(),
+      'cursor-cli': new SubscriptionCliProvider('cursor-cli'),
       copilot: new CopilotProvider(),
       kiro: new KiroProvider(),
+      'agy-cli': new SubscriptionCliProvider('agy-cli'),
       mock: new MockProvider(),
     };
   }
