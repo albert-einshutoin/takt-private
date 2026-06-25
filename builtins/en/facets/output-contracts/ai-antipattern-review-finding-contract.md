@@ -18,9 +18,9 @@ Expected `family_tag` values: `hallucination`, `unvalidated-assumption`, `off-by
 When structured raw findings are requested, copy this table's `family_tag` value into the structured `familyTag` field.
 
 ## Observed Findings
-| # | family_tag | Category | Severity | Location | Issue | Fix Suggestion |
-|---|------------|----------|----------|----------|-------|----------------|
-| 1 | hallucination | Hallucinated API | high / medium / low | `src/file.ts:23` | Non-existent method | Replace with existing API |
+| # | family_tag | Category | Severity | Location | Issue | Fix Suggestion | Requirement Refs | Acceptance Criteria |
+|---|------------|----------|----------|----------|-------|----------------|---|---|
+| 1 | hallucination | Hallucinated API | high / medium / low | `src/file.ts:23` | Non-existent method | Replace with existing API | R-0001 | {Criteria that must be true before this finding is closed} |
 
 ## Rejection Gate
 - REJECT is valid only when at least one blocking finding is observed

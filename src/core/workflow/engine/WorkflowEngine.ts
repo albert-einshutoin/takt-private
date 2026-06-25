@@ -141,6 +141,7 @@ export class WorkflowEngine extends EventEmitter {
         workflowName: this.config.name,
         ledgerPath: this.config.findingContract.ledgerPath,
         rawFindingsPath: this.config.findingContract.rawFindingsPath,
+        task: this.task,
       });
       this.refreshFindingsState();
       this.findingLedgerStore.createRunCopy();

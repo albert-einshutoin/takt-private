@@ -203,6 +203,12 @@ workflow に `finding_contract` がある場合、各 parallel 親 step は Find
 
 `fix` へ向かう `ai("...")` rule は、この失敗経路では選択されません。許可される rule がない場合、workflow validation が実行前に失敗します。
 
+### Finding Contract requirement matrix
+
+Finding Contract の ledger は、タスク指示書から抽出した `requirements` matrix を永続化します。新しい ledger では、`Acceptance Criteria` / `Requirements` / `Goals` / `受け入れ条件` / `要件` / `必要なこと` などの section にある箇条書きを `R-0001`, `R-0002`, ... として保存し、出典 heading、期待結果、対象入口、明示的な例外条件、受け入れ条件を持たせます。
+
+Finding Contract workflow の reviewer raw finding には `requirementRefs` と `acceptanceCriteria` が含まれます。統合 ledger はこれらを各 tracked finding にコピーするため、後続の review / supervise / report phase は「修正差分があるか」だけではなく、元要件の期待結果に照らして `resolved` を判断できます。optional 化や対象外化は、タスク指示書、仕様、または明示的なユーザー指示で例外が正当化される場合だけ有効です。
+
 ### Arpeggio Step（データ駆動バッチ）
 
 CSV / JSON などのデータソースを反復し、同じ step テンプレートを各行に適用します。並列度には上限があります。

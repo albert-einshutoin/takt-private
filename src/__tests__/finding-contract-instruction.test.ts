@@ -45,6 +45,88 @@ describe('Finding Contract instruction context', () => {
     expect(instruction).not.toContain('raw findings schema');
   });
 
+  it('phase 1 instruction should expose requirement matrix and finding acceptance criteria', () => {
+    const step = makeStep({
+      name: 'review',
+      instruction: 'Review.',
+      outputContracts: [{ name: 'review.md', format: 'Write the report.' }],
+    });
+
+    const instruction = new InstructionBuilder(step, {
+      task: 'Review the changes.',
+      iteration: 1,
+      maxSteps: 3,
+      stepIteration: 1,
+      cwd: '/tmp/project',
+      projectCwd: '/tmp/project',
+      userInputs: [],
+      reportDir: '/tmp/project/.takt/runs/run/reports',
+      findingContract: {
+        ledgerCopyPath: '/tmp/project/.takt/runs/run/reports/findings-ledger.json',
+        ledgerSummary: JSON.stringify({
+          requirements: [
+            {
+              id: 'R-0001',
+              statement: 'Every entry point preserves Git metadata.',
+              expectedResult: 'Git metadata is available in every execution mode.',
+              acceptanceCriteria: ['Approval cites entry-point evidence for Git metadata.'],
+            },
+          ],
+          open: [{
+            id: 'F-0001',
+            severity: 'high',
+            title: 'Approval skipped original requirement',
+            requirementRefs: ['R-0001'],
+            acceptanceCriteria: ['Approval cites entry-point evidence for Git metadata.'],
+          }],
+        }, null, 2),
+        reportLedgerSummary: '{"openFindingIds":["F-0001"],"resolvedFindingIds":[],"conflictIds":[]}',
+      },
+    }).build();
+
+    expect(instruction).toContain('Review resolved findings against their requirement refs and acceptance criteria.');
+    expect(instruction).toContain('"requirements"');
+    expect(instruction).toContain('"R-0001"');
+    expect(instruction).toContain('Approval cites entry-point evidence for Git metadata.');
+  });
+
+  it('report phase instruction should expose requirement ids and acceptance criteria for approval reports', () => {
+    const step = makeStep({
+      name: 'supervise',
+      instruction: 'Supervise.',
+      outputContracts: [{ name: 'supervisor-validation.md', format: 'Write the report.' }],
+    });
+
+    const instruction = new ReportInstructionBuilder(step, {
+      cwd: '/tmp/project',
+      reportDir: '/tmp/project/.takt/runs/run/reports',
+      stepIteration: 1,
+      targetFile: 'supervisor-validation.md',
+      findingContract: {
+        ledgerCopyPath: '/tmp/project/.takt/runs/run/reports/findings-ledger.json',
+        ledgerSummary: '{"open":[],"resolved":[]}',
+        reportLedgerSummary: JSON.stringify({
+          requirements: [{
+            id: 'R-0001',
+            statement: 'Every entry point preserves Git metadata.',
+            acceptanceCriteria: ['Approval cites entry-point evidence for Git metadata.'],
+          }],
+          open: [{
+            id: 'F-0001',
+            requirementRefs: ['R-0001'],
+            acceptanceCriteria: ['Approval cites entry-point evidence for Git metadata.'],
+          }],
+          resolved: [],
+          conflicts: [],
+        }, null, 2),
+      },
+    }).build();
+
+    expect(instruction).toContain('Requirement and acceptance summary:');
+    expect(instruction).toContain('"R-0001"');
+    expect(instruction).toContain('Approval cites entry-point evidence for Git metadata.');
+  });
+
   it('phase 1 instruction should use a fence longer than backticks inside ledger summary', () => {
     const step = makeStep({
       name: 'review',

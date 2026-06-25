@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Finding Contract ledgers now persist task-derived requirement matrices and reviewer finding acceptance criteria (#831). Review, supervise, and report instructions can reference requirement ids and acceptance criteria before approving a finding as resolved.
 - Runtime prepare presets now run on Windows when invoked through Git Bash or WSL bash (#443). TAKT no longer passes raw `C:\...` script paths directly to bash; it converts them with `cygpath` or `wslpath` inside bash before executing packaged `node` / `gradle` prepare scripts.
 - `provider_profiles` resolution now follows provider/step-level traced-config keys (#621). Project profiles no longer drop global-only providers, and global step overrides remain effective above project provider defaults while project step overrides still win.
 - `claude-terminal` no longer passes long `systemPrompt` or structured output JSON schema values through Claude Code startup argv (#756). Role instructions and structured output guidance are now pasted with the step prompt, while TAKT keeps post-response schema extraction and validation.

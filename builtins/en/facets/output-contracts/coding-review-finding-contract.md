@@ -7,9 +7,9 @@
 {Summarize the review result in 1-2 sentences}
 
 ## Observed Findings
-| # | family_tag | Severity | Location | Issue | Impact | Fix Suggestion |
-|---|------------|----------|----------|-------|--------|----------------|
-| 1 | bug | High / Medium / Low | `src/file.ts:42` | {Issue} | {Impact} | {Fix suggestion} |
+| # | family_tag | Severity | Location | Issue | Impact | Fix Suggestion | Requirement Refs | Acceptance Criteria |
+|---|------------|----------|----------|-------|--------|----------------|---|---|
+| 1 | bug | High / Medium / Low | `src/file.ts:42` | {Issue} | {Impact} | {Fix suggestion} | R-0001 | {Criteria that must be true before this finding is closed} |
 
 ## Verification Evidence
 - Diff review: {What was checked}

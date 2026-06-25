@@ -89,6 +89,61 @@ describe('reconcileFindingLedger', () => {
     expect(ledger.rawFindings).toContainEqual(rawFinding);
   });
 
+  it('should persist raw finding requirement refs and acceptance criteria on new ledger findings', () => {
+    const rawFinding = makeRawFinding({
+      rawFindingId: 'raw-requirement-gap',
+      requirementRefs: ['R-0001'],
+      acceptanceCriteria: [
+        'Approval must cite evidence that every entry point preserves Git metadata.',
+      ],
+    });
+    const previousLedger = makeLedger({
+      nextId: 3,
+      requirements: [
+        {
+          id: 'R-0001',
+          source: 'task:acceptance-criteria',
+          statement: 'Every entry point preserves Git metadata.',
+          expectedResult: 'Git metadata is available in every execution mode.',
+          targetEntry: 'review approval',
+          exceptionConditions: [],
+          acceptanceCriteria: [
+            'Approval cites evidence that every entry point preserves Git metadata.',
+          ],
+        },
+      ],
+    });
+
+    const ledger = reconcileFindingLedger({
+      previousLedger,
+      rawFindings: [rawFinding],
+      managerOutput: makeManagerOutput({
+        newFindings: [{
+          rawFindingIds: ['raw-requirement-gap'],
+          title: 'Review approval skipped original task metadata requirement',
+          severity: 'high',
+        }],
+      }),
+      context: {
+        workflowName: 'peer-review',
+        stepName: 'peer-review',
+        runId: 'run-2',
+        timestamp: '2026-06-13T01:00:00.000Z',
+      },
+    });
+
+    expect(ledger.requirements).toEqual(previousLedger.requirements);
+    expect(ledger.findings).toContainEqual(
+      expect.objectContaining({
+        id: 'F-0003',
+        requirementRefs: ['R-0001'],
+        acceptanceCriteria: [
+          'Approval must cite evidence that every entry point preserves Git metadata.',
+        ],
+      }),
+    );
+  });
+
   it('should keep an unmentioned open finding open when the manager omits it', () => {
     const previousLedger = makeLedger({
       nextId: 2,

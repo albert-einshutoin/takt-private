@@ -16,9 +16,9 @@
 | Maintainability | ✅ | - |
 
 ## Observed Findings
-| # | family_tag | Category | Severity | Location | Issue | Fix Suggestion |
-|---|------------|----------|----------|----------|-------|----------------|
-| 1 | test-coverage | Testing | high / medium / low | `src/test.ts:42` | Missing negative test | Add failure-path test |
+| # | family_tag | Category | Severity | Location | Issue | Fix Suggestion | Requirement Refs | Acceptance Criteria |
+|---|------------|----------|----------|----------|-------|----------------|---|---|
+| 1 | test-coverage | Testing | high / medium / low | `src/test.ts:42` | Missing negative test | Add failure-path test | R-0001 | {Criteria that must be true before this finding is closed} |
 
 ## Verification Evidence
 - Build: {Verified target, what was checked, and observed result; or state that it was unverified}

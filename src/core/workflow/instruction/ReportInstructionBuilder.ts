@@ -127,8 +127,9 @@ export class ReportInstructionBuilder {
       `- Consolidated ledger copy: ${this.context.findingContract.ledgerCopyPath}`,
       '- Use existing finding IDs from the inline ledger summary when referring to tracked findings.',
       '- Do not assign final finding IDs.',
+      '- Report approval only when requirement refs and acceptance criteria are satisfied or explicitly out of scope.',
       '',
-      'Current finding ledger IDs:',
+      'Requirement and acceptance summary:',
       renderFencedJsonBlock(this.context.findingContract.reportLedgerSummary),
     ].join('\n');
 

@@ -239,6 +239,8 @@ export class InstructionBuilder {
       `- Consolidated ledger copy: ${this.context.findingContract.ledgerCopyPath}`,
       '- Use existing finding IDs from the ledger when referring to tracked findings.',
       '- Do not assign final finding IDs.',
+      '- Review resolved findings against their requirement refs and acceptance criteria.',
+      '- Treat optional scope reductions as valid only when the requirement matrix or explicit user instructions justify the exception.',
       '',
       'Current finding ledger summary:',
       renderFencedJsonBlock(this.context.findingContract.ledgerSummary),
@@ -250,6 +252,8 @@ export class InstructionBuilder {
         '- Report every issue you observe as structured raw findings.',
         '- Use rawFindingId values that are unique within this response.',
         '- Copy each Observed Findings family_tag value into the structured familyTag field.',
+        '- Fill requirementRefs from the ledger requirement ids when a finding maps to a task requirement.',
+        '- Fill acceptanceCriteria with concrete conditions that must be true before the finding can be resolved.',
         '- Return structured output matching this raw findings schema:',
         renderFencedJsonBlock(this.context.findingContract.rawFindingsJsonSchema),
       );

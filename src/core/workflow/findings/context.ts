@@ -4,6 +4,15 @@ export function renderFindingLedgerInstructionSummary(ledger: FindingLedger): st
   return JSON.stringify({
     version: ledger.version,
     workflowName: ledger.workflowName,
+    requirements: (ledger.requirements ?? []).map((requirement) => ({
+      id: requirement.id,
+      source: requirement.source,
+      statement: requirement.statement,
+      expectedResult: requirement.expectedResult,
+      targetEntry: requirement.targetEntry,
+      exceptionConditions: requirement.exceptionConditions,
+      acceptanceCriteria: requirement.acceptanceCriteria,
+    })),
     open: ledger.findings
       .filter((finding) => finding.status === 'open')
       .map((finding) => ({
@@ -14,6 +23,8 @@ export function renderFindingLedgerInstructionSummary(ledger: FindingLedger): st
         location: finding.location,
         description: finding.description,
         suggestion: finding.suggestion,
+        requirementRefs: finding.requirementRefs ?? [],
+        acceptanceCriteria: finding.acceptanceCriteria ?? [],
         reviewers: finding.reviewers,
       })),
     resolved: ledger.findings
@@ -23,6 +34,8 @@ export function renderFindingLedgerInstructionSummary(ledger: FindingLedger): st
         lifecycle: finding.lifecycle,
         severity: finding.severity,
         title: finding.title,
+        requirementRefs: finding.requirementRefs ?? [],
+        acceptanceCriteria: finding.acceptanceCriteria ?? [],
       })),
     conflicts: ledger.conflicts.map((conflict) => ({
       id: conflict.id,
@@ -36,13 +49,26 @@ export function renderFindingLedgerInstructionSummary(ledger: FindingLedger): st
 
 export function renderFindingLedgerReportSummary(ledger: FindingLedger): string {
   return JSON.stringify({
-    openFindingIds: ledger.findings
+    requirements: (ledger.requirements ?? []).map((requirement) => ({
+      id: requirement.id,
+      statement: requirement.statement,
+      acceptanceCriteria: requirement.acceptanceCriteria,
+    })),
+    open: ledger.findings
       .filter((finding) => finding.status === 'open')
-      .map((finding) => finding.id),
-    resolvedFindingIds: ledger.findings
+      .map((finding) => ({
+        id: finding.id,
+        requirementRefs: finding.requirementRefs ?? [],
+        acceptanceCriteria: finding.acceptanceCriteria ?? [],
+      })),
+    resolved: ledger.findings
       .filter((finding) => finding.status === 'resolved')
-      .map((finding) => finding.id),
-    conflictIds: ledger.conflicts.map((conflict) => conflict.id),
+      .map((finding) => ({
+        id: finding.id,
+        requirementRefs: finding.requirementRefs ?? [],
+        acceptanceCriteria: finding.acceptanceCriteria ?? [],
+      })),
+    conflicts: ledger.conflicts.map((conflict) => ({ id: conflict.id, status: conflict.status })),
   }, null, 2);
 }
 
@@ -67,6 +93,8 @@ export function buildFindingsRuleContext(ledger: FindingLedger): FindingsRuleCon
         ...(finding.location !== undefined ? { location: finding.location } : {}),
         ...(finding.description !== undefined ? { description: finding.description } : {}),
         ...(finding.suggestion !== undefined ? { suggestion: finding.suggestion } : {}),
+        requirementRefs: finding.requirementRefs ?? [],
+        acceptanceCriteria: finding.acceptanceCriteria ?? [],
         reviewers: finding.reviewers,
       })),
     },
