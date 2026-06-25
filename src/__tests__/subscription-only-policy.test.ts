@@ -9,7 +9,10 @@ import {
   invalidateAllResolvedConfigCache,
   invalidateGlobalConfigCache,
 } from '../infra/config/index.js';
-import { loadWorkflowFromFile } from '../infra/config/loaders/workflowFileLoader.js';
+import {
+  loadWorkflowFromFile,
+  loadWorkflowFromFileForDiscovery,
+} from '../infra/config/loaders/workflowFileLoader.js';
 import { inspectWorkflowFile } from '../infra/config/loaders/workflowDoctor.js';
 import { validateWorkflowConfig } from '../core/workflow/engine/WorkflowValidator.js';
 import { findForbiddenSubscriptionOnlyConfigKeyPaths } from '../core/subscription-only/policy.js';
@@ -144,6 +147,26 @@ steps:
 `);
 
     expect(() => loadWorkflowFromFile(workflowPath, projectDir)).toThrow(/step "plan".*codex/i);
+  });
+
+  it('keeps workflows discoverable when runtime subscription-only providers are disallowed', () => {
+    writeProjectConfig(projectDir, [
+      'subscription_only: true',
+      'provider: codex-cli',
+    ].join('\n'));
+    const workflowPath = writeWorkflow(projectDir, `name: subscription
+initial_step: plan
+steps:
+  - name: plan
+    provider: codex
+    rules:
+      - condition: done
+        next: COMPLETE
+`);
+
+    const workflow = loadWorkflowFromFileForDiscovery(workflowPath, projectDir);
+
+    expect(workflow.steps[0]?.provider).toBe('codex');
   });
 
   it('rejects global API key settings when project config enables effective subscription-only mode', () => {

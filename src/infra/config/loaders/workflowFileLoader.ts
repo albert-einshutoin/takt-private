@@ -91,7 +91,11 @@ function loadWorkflowFromFileInternal(
     loadMode,
     resolveWorkflowCommandGatesPolicy(globalConfig.workflowCommandGates, projectConfig.workflowCommandGates),
   );
-  assertSubscriptionOnlyWorkflowConfig(config, subscriptionOnlyPolicy);
+  if (loadMode === 'runtime') {
+    // Discovery must keep workflows visible so users can inspect why a workflow
+    // is unavailable; runtime execution remains the enforcement point.
+    assertSubscriptionOnlyWorkflowConfig(config, subscriptionOnlyPolicy);
+  }
   attachWorkflowOpaqueRef(config, buildOpaqueWorkflowRef(filePath, trustInfo));
   attachWorkflowSourcePath(config, filePath);
   attachWorkflowTrustInfo(config, trustInfo);

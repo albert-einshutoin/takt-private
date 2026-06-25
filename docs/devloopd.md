@@ -30,6 +30,10 @@ The command exits with status `0` when every required check passes. It exits wit
 
 The doctor reports forbidden environment variables and config keys by name only. It does not print secret values.
 
+When `devloopd` is run from a source checkout before `npm link` or global installation,
+the `takt` command check accepts the adjacent `bin/takt` wrapper under the inspected
+repository. Other provider CLIs must still be installed and discoverable on `PATH`.
+
 ### Options
 
 | Option | Description |

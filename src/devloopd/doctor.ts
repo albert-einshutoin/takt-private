@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   DEFAULT_SUBSCRIPTION_ONLY_ALLOWED_PROVIDERS,
@@ -106,12 +106,29 @@ function checkCommand(
   command: string,
   env: NodeJS.ProcessEnv,
   runner: DevloopDoctorCommandRunner,
+  repoPath: string,
 ): DevloopDoctorCheck {
-  const resolved = runner.resolveCommand(command, env);
+  const resolved = runner.resolveCommand(command, env) ?? resolveSourceCheckoutCommand(command, repoPath);
   if (resolved === undefined) {
     return makeCheck('fail', `command:${command}`, `command not found: ${command}`);
   }
   return makeCheck('pass', `command:${command}`, `found ${command}`, resolved);
+}
+
+function resolveSourceCheckoutCommand(command: string, repoPath: string): string | undefined {
+  if (command !== 'takt') {
+    return undefined;
+  }
+
+  const candidate = join(repoPath, 'bin', 'takt');
+  try {
+    // Source-checkout users often run bin/devloopd.mjs before npm link. Accept the
+    // adjacent wrapper so readiness checks verify this checkout instead of global PATH state.
+    accessSync(candidate, constants.X_OK);
+    return candidate;
+  } catch {
+    return undefined;
+  }
 }
 
 function checkCursorCommand(env: NodeJS.ProcessEnv, runner: DevloopDoctorCommandRunner): DevloopDoctorCheck {
@@ -241,7 +258,7 @@ export async function runDevloopDoctor(options: RunDevloopDoctorOptions = {}): P
     checkSubscriptionOnlyFlag(options.subscriptionOnly === true),
     checkDevloopPolicy(options.policyPath),
     checkForbiddenEnvironment(env),
-    ...REQUIRED_SUBSCRIPTION_COMMANDS.map((command) => checkCommand(command, env, runner)),
+    ...REQUIRED_SUBSCRIPTION_COMMANDS.map((command) => checkCommand(command, env, runner, repoPath)),
     checkCursorCommand(env, runner),
   ];
 
