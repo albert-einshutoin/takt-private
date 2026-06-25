@@ -915,12 +915,14 @@ describe('workflow OpenTelemetry spans', () => {
 
     await module.runWithStepSpan({
       enabled: true,
+      runId: 'run-token',
       workflowName: 'test-workflow',
       step,
       iteration: 3,
     }, async () => {
       await module.runWithPhaseSpan({
         enabled: true,
+        runId: 'run-token',
         workflowName: 'test-workflow',
         step,
         iteration: 3,
@@ -993,6 +995,40 @@ describe('workflow OpenTelemetry spans', () => {
         'takt.phase.number': 1,
         'takt.phase.name': 'execute',
         'takt.phase.status': 'done',
+      }) as unknown,
+    }));
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.token.input_tokens',
+      value: 11,
+      attributes: expect.objectContaining({
+        'takt.run.id': 'run-token',
+        'takt.step.name': 'implement',
+        'takt.phase.name': 'execute',
+        'takt.provider.name': 'codex',
+        'takt.model.name': 'gpt-5',
+      }) as unknown,
+    }));
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.token.output_tokens',
+      value: 7,
+      attributes: expect.objectContaining({
+        'takt.step.name': 'implement',
+        'takt.phase.name': 'execute',
+        'takt.provider.name': 'codex',
+        'takt.model.name': 'gpt-5',
+      }) as unknown,
+    }));
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.token.cached_input_tokens',
+      value: 3,
+      attributes: expect.objectContaining({
+        'takt.step.name': 'implement',
+        'takt.phase.name': 'execute',
+        'takt.provider.name': 'codex',
+        'takt.model.name': 'gpt-5',
       }) as unknown,
     }));
   });

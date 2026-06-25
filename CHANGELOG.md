@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Phase usage event records now include workflow step `persona` and `tags` context (#870). This makes token usage analysis filterable by provider-routing tags without re-reading workflow YAML.
+- Observability now emits provider token usage counters (`takt.token.input_tokens`, `takt.token.output_tokens`, and `takt.token.cached_input_tokens`) for phases that report usage (#869). These metrics are exported through the existing OpenTelemetry metric pipeline and local `monitor.json`.
 
 ### Fixed
 

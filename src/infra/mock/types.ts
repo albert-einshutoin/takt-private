@@ -3,6 +3,7 @@
  */
 
 import type { Status } from '../../core/models/status.js';
+import type { ProviderUsageSnapshot } from '../../core/models/response.js';
 import type { AgentFailureCategory } from '../../shared/types/agent-failure.js';
 import type { StreamCallback } from '../../shared/types/provider.js';
 
@@ -23,6 +24,8 @@ export interface MockCallOptions {
   error?: string;
   /** Machine-readable failure category returned with an error response */
   failureCategory?: AgentFailureCategory;
+  /** Provider usage snapshot returned with the mock response */
+  providerUsage?: ProviderUsageSnapshot;
 }
 
 /** A single entry in a mock scenario */
@@ -39,6 +42,8 @@ export interface ScenarioEntry {
   error?: string;
   /** Optional machine-readable failure category */
   failureCategory?: AgentFailureCategory;
+  /** Optional provider usage snapshot for observability and usage-event tests */
+  providerUsage?: ProviderUsageSnapshot;
   /** Artificial delay in ms before returning (respects abortSignal) */
   delayMs?: number;
 }

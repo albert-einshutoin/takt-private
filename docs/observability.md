@@ -33,6 +33,20 @@ When `observability.enabled: true` and `OTEL_EXPORTER_OTLP_ENDPOINT` is set, TAK
 
 Open Grafana at `http://127.0.0.1:3000` and inspect the `takt` service. Traces use the existing workflow span tree (`workflow.<name>` with `step.<name>` and phase or judge spans below it), and metrics are exported alongside the local `monitor.json` stream.
 
+TAKT emits these workflow metrics when observability is enabled:
+
+| Metric | Meaning |
+|--------|---------|
+| `takt.workflow.runs` / `takt.workflow.duration` | Workflow run count and duration |
+| `takt.workflow.step.runs` / `takt.workflow.step.duration` | Step run count and duration |
+| `takt.workflow.phase.runs` / `takt.workflow.phase.duration` | Phase run count and duration |
+| `takt.workflow.judge_stage.runs` | Status-judgment stage count |
+| `takt.token.input_tokens` | Provider input tokens for phases with usage data |
+| `takt.token.output_tokens` | Provider output tokens for phases with usage data |
+| `takt.token.cached_input_tokens` | Provider cached input tokens when the provider reports them |
+
+Token metrics carry the same run-scoped workflow attributes used by the other metrics, including `takt.run.id`, `takt.workflow.name`, `takt.step.name`, `takt.phase.name`, `takt.provider.name`, and `takt.model.name`. Missing usage is not emitted as zero-token metric points.
+
 While a workflow is still running, OpenTelemetry exporters can deliver completed child spans before the long-lived root `workflow.<name>` span has ended. To make those active traces discoverable in Tempo, TAKT also emits a short-lived `workflow_start.<workflowName>` span under the root workflow span. This helper span carries the workflow and run attributes, including `takt.workflow.status = running`, but it does not replace or rename the root, step, phase, or judge spans. It is used only for trace discovery and is not converted into a canonical shadow session log record.
 
 Useful Tempo TraceQL filters for active workflows include:
