@@ -801,6 +801,119 @@ describe('workflow OpenTelemetry spans', () => {
     }));
   });
 
+  it('records provider error metrics for failed step responses', async () => {
+    const { module, metricRecords } = await loadWorkflowSpansWithMockedApi();
+
+    await module.runWithStepSpan({
+      enabled: true,
+      runId: 'run-provider-error',
+      workflowName: 'test-workflow',
+      step: makeStep(),
+      iteration: 1,
+      providerInfo: {
+        provider: 'codex',
+        model: 'gpt-5',
+        providerSource: 'project',
+        modelSource: 'global',
+      },
+    }, async () => ({
+      response: {
+        persona: 'coder',
+        status: 'error',
+        content: 'provider failed',
+        failureCategory: 'tool_use',
+        timestamp: new Date('2026-05-18T00:00:00.000Z'),
+      },
+      instruction: 'Implement',
+    }));
+
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.provider.errors',
+      value: 1,
+      attributes: expect.objectContaining({
+        'takt.run.id': 'run-provider-error',
+        'takt.workflow.name': 'test-workflow',
+        'takt.step.name': 'implement',
+        'takt.step.status': 'error',
+        'takt.provider.name': 'codex',
+        'takt.model.name': 'gpt-5',
+        'takt.provider.error_type': 'tool_use',
+      }) as unknown,
+    }));
+  });
+
+  it('records quality gate, loop, and cycle workflow metrics', async () => {
+    const { module, metricRecords } = await loadWorkflowSpansWithMockedApi();
+
+    module.recordQualityGateResultMetrics({
+      enabled: true,
+      runId: 'run-gates',
+      workflowName: 'test-workflow',
+      step: makeStep(),
+      results: [
+        { gateName: 'lint', gateType: 'command', result: 'pass' },
+        { gateName: 'unit', gateType: 'command', result: 'fail' },
+      ],
+    });
+    module.recordWorkflowLoopDetectedMetric({
+      enabled: true,
+      runId: 'run-gates',
+      workflowName: 'test-workflow',
+      step: makeStep(),
+      loopCount: 4,
+    });
+    module.recordWorkflowCycleDetectedMetric({
+      enabled: true,
+      runId: 'run-gates',
+      workflowName: 'test-workflow',
+      step: makeStep(),
+      cycleCount: 2,
+      cycle: ['review', 'fix'],
+    });
+
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.quality_gate.results',
+      value: 1,
+      attributes: expect.objectContaining({
+        'takt.step.name': 'implement',
+        'takt.quality_gate.name': 'lint',
+        'takt.quality_gate.type': 'command',
+        'takt.quality_gate.result': 'pass',
+      }) as unknown,
+    }));
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.quality_gate.results',
+      value: 1,
+      attributes: expect.objectContaining({
+        'takt.step.name': 'implement',
+        'takt.quality_gate.name': 'unit',
+        'takt.quality_gate.result': 'fail',
+      }) as unknown,
+    }));
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.workflow.loops_detected',
+      value: 1,
+      attributes: expect.objectContaining({
+        'takt.step.name': 'implement',
+        'takt.workflow.loop.count': 4,
+      }) as unknown,
+    }));
+    expect(metricRecords).toContainEqual(expect.objectContaining({
+      instrument: 'counter',
+      name: 'takt.workflow.cycles_detected',
+      value: 1,
+      attributes: expect.objectContaining({
+        'takt.step.name': 'implement',
+        'takt.workflow.cycle.count': 2,
+        'takt.workflow.cycle': JSON.stringify(['review', 'fix']),
+      }) as unknown,
+    }));
+  });
+
   it('records task discovery metadata on step spans', async () => {
     const { module, spans } = await loadWorkflowSpansWithMockedApi();
 

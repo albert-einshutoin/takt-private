@@ -1,7 +1,8 @@
-import { context, metrics, SpanStatusCode, trace, type Attributes, type Span } from '@opentelemetry/api';
+import { context, metrics, SpanStatusCode, trace, type Attributes, type MetricOptions, type Span } from '@opentelemetry/api';
 import { getErrorMessage } from '../../../shared/utils/index.js';
 import type { ProviderUsageSnapshot } from '../../models/response.js';
 import type { WorkflowMaxSteps, WorkflowResumePointEntry, WorkflowStep } from '../../models/types.js';
+import type { QualityGateResultEntry } from '../quality-gates/types.js';
 import type {
   JudgeStageEntry,
   PhaseName,
@@ -55,6 +56,18 @@ const TOKEN_OUTPUT_COUNTER_OPTIONS = {
 const TOKEN_CACHED_INPUT_COUNTER_OPTIONS = {
   description: 'Workflow cached input tokens by provider, model, step, and phase',
   unit: 'tokens',
+};
+const PROVIDER_ERROR_COUNTER_OPTIONS = {
+  description: 'Provider errors by provider, model, step, and error type',
+};
+const QUALITY_GATE_RESULT_COUNTER_OPTIONS = {
+  description: 'Workflow quality gate results by gate and step',
+};
+const WORKFLOW_LOOPS_DETECTED_COUNTER_OPTIONS = {
+  description: 'Workflow loop detector hits by workflow and step',
+};
+const WORKFLOW_CYCLES_DETECTED_COUNTER_OPTIONS = {
+  description: 'Workflow cycle detector hits by workflow, step, and cycle',
 };
 
 type AttributeInput = Record<string, string | number | boolean | undefined>;
@@ -132,6 +145,31 @@ export interface JudgeStageSpanParams {
   entry: JudgeStageEntry;
   sanitizeText?: (text: string) => string;
   providerInfo?: StepProviderInfo;
+}
+
+export interface QualityGateResultMetricsParams {
+  enabled: boolean;
+  runId?: string;
+  workflowName: string;
+  step: WorkflowStep;
+  results: readonly QualityGateResultEntry[] | undefined;
+}
+
+export interface WorkflowLoopDetectedMetricParams {
+  enabled: boolean;
+  runId?: string;
+  workflowName: string;
+  step: WorkflowStep;
+  loopCount: number;
+}
+
+export interface WorkflowCycleDetectedMetricParams {
+  enabled: boolean;
+  runId?: string;
+  workflowName: string;
+  step: WorkflowStep;
+  cycleCount: number;
+  cycle: readonly string[] | undefined;
 }
 
 export async function runWithWorkflowSpan<T>(
@@ -252,6 +290,61 @@ export function recordJudgeStageSpan(params: JudgeStageSpanParams): void {
   } finally {
     span.end();
   }
+}
+
+export function recordQualityGateResultMetrics(params: QualityGateResultMetricsParams): void {
+  if (!params.enabled || !params.results || params.results.length === 0) {
+    return;
+  }
+
+  const meter = metrics.getMeter('takt.workflow');
+  const counter = meter.createCounter('takt.quality_gate.results', QUALITY_GATE_RESULT_COUNTER_OPTIONS);
+  for (const result of params.results) {
+    counter.add(1, compactAttributes({
+      'takt.run.id': params.runId,
+      'takt.workflow.name': params.workflowName,
+      'takt.step.name': params.step.name,
+      'takt.step.type': getWorkflowStepKind(params.step),
+      'takt.quality_gate.name': result.gateName,
+      'takt.quality_gate.type': result.gateType,
+      'takt.quality_gate.result': result.result,
+    }));
+  }
+}
+
+export function recordWorkflowLoopDetectedMetric(params: WorkflowLoopDetectedMetricParams): void {
+  if (!params.enabled) {
+    return;
+  }
+
+  metrics.getMeter('takt.workflow').createCounter(
+    'takt.workflow.loops_detected',
+    WORKFLOW_LOOPS_DETECTED_COUNTER_OPTIONS,
+  ).add(1, compactAttributes({
+    'takt.run.id': params.runId,
+    'takt.workflow.name': params.workflowName,
+    'takt.step.name': params.step.name,
+    'takt.step.type': getWorkflowStepKind(params.step),
+    'takt.workflow.loop.count': params.loopCount,
+  }));
+}
+
+export function recordWorkflowCycleDetectedMetric(params: WorkflowCycleDetectedMetricParams): void {
+  if (!params.enabled) {
+    return;
+  }
+
+  metrics.getMeter('takt.workflow').createCounter(
+    'takt.workflow.cycles_detected',
+    WORKFLOW_CYCLES_DETECTED_COUNTER_OPTIONS,
+  ).add(1, compactAttributes({
+    'takt.run.id': params.runId,
+    'takt.workflow.name': params.workflowName,
+    'takt.step.name': params.step.name,
+    'takt.step.type': getWorkflowStepKind(params.step),
+    'takt.workflow.cycle.count': params.cycleCount,
+    'takt.workflow.cycle': params.cycle ? JSON.stringify(params.cycle) : undefined,
+  }));
 }
 
 function recordWorkflowStartSpan(params: WorkflowSpanParams): void {
@@ -451,6 +544,7 @@ function recordStepMetrics(
   const meter = metrics.getMeter('takt.workflow');
   meter.createCounter('takt.workflow.step.runs', STEP_RUN_COUNTER_OPTIONS).add(1, attributes);
   meter.createHistogram('takt.workflow.step.duration', STEP_DURATION_HISTOGRAM_OPTIONS).record(durationMs, attributes);
+  recordProviderErrorMetric(params, result, providerInfo, errorMessage);
 }
 
 function recordPhaseOutcome(span: Span, params: PhaseSpanParams, outcome: PhaseSpanOutcome): void {
@@ -541,13 +635,49 @@ function addPositiveCounter(
   meter: ReturnType<typeof metrics.getMeter>,
   name: string,
   value: number | undefined,
-  options: typeof TOKEN_INPUT_COUNTER_OPTIONS,
+  options: MetricOptions,
   attributes: Attributes,
 ): void {
   if (value === undefined || !Number.isFinite(value) || value <= 0) {
     return;
   }
   meter.createCounter(name, options).add(value, attributes);
+}
+
+function recordProviderErrorMetric(
+  params: StepSpanParams,
+  result: StepRunResult | undefined,
+  providerInfo: StepProviderInfo | undefined,
+  errorMessage: string | undefined,
+): void {
+  const status = result?.response.status ?? (errorMessage ? 'error' : 'unknown');
+  if (status !== 'error' && status !== 'rate_limited') {
+    return;
+  }
+
+  metrics.getMeter('takt.workflow').createCounter(
+    'takt.provider.errors',
+    PROVIDER_ERROR_COUNTER_OPTIONS,
+  ).add(1, compactAttributes({
+    'takt.run.id': params.runId,
+    'takt.workflow.name': params.workflowName,
+    'takt.step.name': params.step.name,
+    'takt.step.type': getWorkflowStepKind(params.step),
+    'takt.step.status': status,
+    'takt.step.result.failure_category': result?.response.failureCategory,
+    'takt.provider.error_type': providerErrorType(result, errorMessage),
+    ...providerAttributes(providerInfo),
+  }));
+}
+
+function providerErrorType(result: StepRunResult | undefined, errorMessage: string | undefined): string {
+  if (result?.response.status === 'rate_limited' || result?.response.errorKind === 'rate_limit') {
+    return 'rate_limited';
+  }
+  if (result?.response.failureCategory) {
+    return result.response.failureCategory;
+  }
+  return errorMessage ? 'exception' : 'error';
 }
 
 const REDACTED_PLACEHOLDER = '[redacted]';
