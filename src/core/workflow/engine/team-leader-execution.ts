@@ -8,7 +8,7 @@ export interface TeamLeaderExecutionOptions {
   maxConcurrency: number;
   refillThreshold: number;
   maxTotalParts?: number;
-  runPart: (part: PartDefinition, partIndex: number) => Promise<PartResult>;
+  runPart: (part: PartDefinition, partIndex: number, abortSignal: AbortSignal) => Promise<PartResult>;
   requestMoreParts: (
     args: {
       partResults: PartResult[];
@@ -24,12 +24,19 @@ export interface TeamLeaderExecutionOptions {
   onPlanningDone?: (feedback: { reason: string; plannedParts: number; completedParts: number }) => void;
   onPlanningNoNewParts?: (feedback: { reason: string; plannedParts: number; completedParts: number }) => void;
   onPartsAdded?: (feedback: { parts: PartDefinition[]; reason: string; totalPlanned: number }) => void;
+  onPartsCanceled?: (feedback: { partIds: string[]; reason: string }) => void;
   onPlanningError?: (error: unknown) => void;
 }
 
 interface RunningPart {
   partId: string;
   result: PartResult;
+}
+
+interface RunningPartExecution {
+  partId: string;
+  promise: Promise<RunningPart>;
+  abortController: AbortController;
 }
 
 export interface TeamLeaderExecutionResult {
@@ -48,7 +55,7 @@ export async function runTeamLeaderExecution(
   const queue: PartDefinition[] = [...options.initialParts];
   const plannedParts: PartDefinition[] = [...options.initialParts];
   const partResults: PartResult[] = [];
-  const running = new Map<string, Promise<RunningPart>>();
+  const running = new Map<string, RunningPartExecution>();
   const scheduledIds = new Set(options.initialParts.map((part) => part.id));
 
   let nextPartIndex = 0;
@@ -59,6 +66,46 @@ export async function runTeamLeaderExecution(
     // Use the live queue/running state here so a done response cannot finish planning while
     // already-scheduled parts are still producing useful results.
     return queue.length > 0 || running.size > 0 || plannedParts.length > partResults.length;
+  };
+
+  const cancelScheduledParts = (partIds: string[] | undefined, reason: string): void => {
+    if (!partIds || partIds.length === 0) {
+      return;
+    }
+
+    const completedIds = new Set(partResults.map((result) => result.part.id));
+    const canceledPartIds: string[] = [];
+    for (const partId of new Set(partIds)) {
+      if (completedIds.has(partId)) {
+        continue;
+      }
+
+      const queueIndex = queue.findIndex((part) => part.id === partId);
+      const runningPart = running.get(partId);
+      const plannedIndex = plannedParts.findIndex((part) => part.id === partId);
+      if (queueIndex === -1 && !runningPart && plannedIndex === -1) {
+        continue;
+      }
+
+      if (queueIndex !== -1) {
+        queue.splice(queueIndex, 1);
+      }
+      if (runningPart) {
+        // Canceled running parts are intentionally ignored so obsolete aborts do not become false failures.
+        runningPart.abortController.abort(new Error(`Team leader canceled part: ${partId}`));
+        running.delete(partId);
+        void runningPart.promise.catch(() => undefined);
+      }
+      if (plannedIndex !== -1) {
+        plannedParts.splice(plannedIndex, 1);
+      }
+      canceledPartIds.push(partId);
+    }
+
+    if (canceledPartIds.length > 0) {
+      options.onPartsCanceled?.({ partIds: canceledPartIds, reason });
+      deferredDoneReason = undefined;
+    }
   };
 
   const tryPlanMoreParts = async (): Promise<void> => {
@@ -91,6 +138,8 @@ export async function runTeamLeaderExecution(
         runningPartCount: running.size,
         queuedPartCount: queue.length,
       });
+
+      cancelScheduledParts(feedback.cancelPartIds, feedback.reasoning);
 
       if (feedback.done) {
         if (hasUnfinishedScheduledWork()) {
@@ -155,12 +204,15 @@ export async function runTeamLeaderExecution(
       const partIndex = nextPartIndex;
       nextPartIndex += 1;
       options.onPartQueued?.(part, partIndex);
-      const runningPart = options.runPart(part, partIndex).then((result) => ({ partId: part.id, result }));
-      running.set(part.id, runningPart);
+      const abortController = new AbortController();
+      const promise = options
+        .runPart(part, partIndex, abortController.signal)
+        .then((result) => ({ partId: part.id, result }));
+      running.set(part.id, { partId: part.id, promise, abortController });
     }
 
     if (running.size > 0) {
-      const completed = await Promise.race(running.values());
+      const completed = await Promise.race([...running.values()].map((runningPart) => runningPart.promise));
       running.delete(completed.partId);
       partResults.push(completed.result);
       options.onPartCompleted?.(completed.result);
