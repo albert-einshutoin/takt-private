@@ -494,7 +494,9 @@ export function denormalizeProviderOptions(
     providerOptions.codex?.baseUrl !== undefined
     || providerOptions.codex?.networkAccess !== undefined
     || providerOptions.codex?.reasoningEffort !== undefined
+    || providerOptions.codex?.groundCheck !== undefined
   ) {
+    const groundCheck = denormalizeGroundCheckOptions(providerOptions.codex.groundCheck);
     raw.codex = {
       ...(providerOptions.codex.baseUrl !== undefined
         ? { base_url: providerOptions.codex.baseUrl }
@@ -505,13 +507,16 @@ export function denormalizeProviderOptions(
       ...(providerOptions.codex.reasoningEffort !== undefined
         ? { reasoning_effort: providerOptions.codex.reasoningEffort }
         : {}),
+      ...(groundCheck !== undefined ? { ground_check: groundCheck } : {}),
     };
   }
   if (
     providerOptions.opencode?.networkAccess !== undefined
     || providerOptions.opencode?.variant !== undefined
     || providerOptions.opencode?.allowedTools !== undefined
+    || providerOptions.opencode?.groundCheck !== undefined
   ) {
+    const groundCheck = denormalizeGroundCheckOptions(providerOptions.opencode.groundCheck);
     raw.opencode = {
       ...(providerOptions.opencode.networkAccess !== undefined
         ? { network_access: providerOptions.opencode.networkAccess }
@@ -522,6 +527,7 @@ export function denormalizeProviderOptions(
       ...(providerOptions.opencode.allowedTools !== undefined
         ? { allowed_tools: providerOptions.opencode.allowedTools }
         : {}),
+      ...(groundCheck !== undefined ? { ground_check: groundCheck } : {}),
     };
   }
   if (providerOptions.claude) {
@@ -545,18 +551,36 @@ export function denormalizeProviderOptions(
     if (Object.keys(sandbox).length > 0) {
       claude.sandbox = sandbox;
     }
+    const groundCheck = denormalizeGroundCheckOptions(providerOptions.claude.groundCheck);
+    if (groundCheck !== undefined) {
+      claude.ground_check = groundCheck;
+    }
     if (Object.keys(claude).length > 0) {
       raw.claude = claude;
     }
   }
-  if (providerOptions.copilot?.effort !== undefined) {
-    raw.copilot = { effort: providerOptions.copilot.effort };
+  if (providerOptions.copilot?.effort !== undefined || providerOptions.copilot?.groundCheck !== undefined) {
+    const groundCheck = denormalizeGroundCheckOptions(providerOptions.copilot.groundCheck);
+    raw.copilot = {
+      ...(providerOptions.copilot.effort !== undefined ? { effort: providerOptions.copilot.effort } : {}),
+      ...(groundCheck !== undefined ? { ground_check: groundCheck } : {}),
+    };
   }
-  if (providerOptions.cursor?.usePromptFile !== undefined) {
-    raw.cursor = { use_prompt_file: providerOptions.cursor.usePromptFile };
+  if (providerOptions.cursor?.usePromptFile !== undefined || providerOptions.cursor?.groundCheck !== undefined) {
+    const groundCheck = denormalizeGroundCheckOptions(providerOptions.cursor.groundCheck);
+    raw.cursor = {
+      ...(providerOptions.cursor.usePromptFile !== undefined
+        ? { use_prompt_file: providerOptions.cursor.usePromptFile }
+        : {}),
+      ...(groundCheck !== undefined ? { ground_check: groundCheck } : {}),
+    };
   }
-  if (providerOptions.kiro?.agent !== undefined) {
-    raw.kiro = { agent: providerOptions.kiro.agent };
+  if (providerOptions.kiro?.agent !== undefined || providerOptions.kiro?.groundCheck !== undefined) {
+    const groundCheck = denormalizeGroundCheckOptions(providerOptions.kiro.groundCheck);
+    raw.kiro = {
+      ...(providerOptions.kiro.agent !== undefined ? { agent: providerOptions.kiro.agent } : {}),
+      ...(groundCheck !== undefined ? { ground_check: groundCheck } : {}),
+    };
   }
   if (providerOptions.claudeTerminal) {
     const claudeTerminal: Record<string, unknown> = {};
@@ -572,9 +596,33 @@ export function denormalizeProviderOptions(
     if (providerOptions.claudeTerminal.transcriptPollIntervalMs !== undefined) {
       claudeTerminal.transcript_poll_interval_ms = providerOptions.claudeTerminal.transcriptPollIntervalMs;
     }
+    const groundCheck = denormalizeGroundCheckOptions(providerOptions.claudeTerminal.groundCheck);
+    if (groundCheck !== undefined) {
+      claudeTerminal.ground_check = groundCheck;
+    }
     if (Object.keys(claudeTerminal).length > 0) {
       raw.claude_terminal = claudeTerminal;
     }
+  }
+
+  return Object.keys(raw).length > 0 ? raw : undefined;
+}
+
+function denormalizeGroundCheckOptions(
+  groundCheck: NonNullable<NonNullable<StepProviderOptions['opencode']>['groundCheck']> | undefined,
+): Record<string, unknown> | undefined {
+  if (!groundCheck) {
+    return undefined;
+  }
+
+  const raw: Record<string, unknown> = {
+    ...(groundCheck.enabled !== undefined ? { enabled: groundCheck.enabled } : {}),
+    ...(groundCheck.provider !== undefined ? { provider: groundCheck.provider } : {}),
+    ...(groundCheck.model !== undefined ? { model: groundCheck.model } : {}),
+  };
+  const providerOptions = denormalizeProviderOptions(groundCheck.providerOptions);
+  if (providerOptions !== undefined) {
+    raw.provider_options = providerOptions;
   }
 
   return Object.keys(raw).length > 0 ? raw : undefined;

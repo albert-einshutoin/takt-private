@@ -544,6 +544,26 @@ This allows mixing providers and models within a single workflow while keeping d
 
 ### Provider-specific options in practice
 
+#### Reviewer ground-check (`ground_check`)
+
+Use `provider_options.<provider>.ground_check` to run a separate provider after a parallel reviewer report phase and verify that the report is grounded in the available evidence. `ground_check` is an orchestration setting and is not passed through to provider SDK calls.
+
+```yaml
+provider_options:
+  opencode:
+    ground_check:
+      enabled: true
+      provider: codex
+      model: gpt-5-mini
+      provider_options:
+        codex:
+          reasoning_effort: high
+```
+
+If `provider`, `model`, or `provider_options` are omitted, TAKT reuses the resolved reviewer step provider, model, and providerOptions. `enabled: false` disables a ground-check enabled by an outer layer. Priority is the normal provider option leaf order: step `provider_options` > `provider_routing.steps` > `provider_routing.tags` > `provider_routing.personas` > deprecated `persona_providers` > `workflow_config.provider_options` > project `.takt/config.yaml` > global `~/.takt/config.yaml`.
+
+The decision tag must be exactly one of `[GROUND_CHECK:VALID]` or `[GROUND_CHECK:NEED_RECHECK]`. Missing, duplicated, or unknown tags fail closed to `NEED_RECHECK`. Artifacts are written as `<report>.ground-check.md`, for example `security-review.ground-check.md` for `security-review.md`.
+
 #### Provider base URL (`base_url`)
 
 Use `base_url` to route supported providers through an OpenAI-compatible or Anthropic-compatible proxy:

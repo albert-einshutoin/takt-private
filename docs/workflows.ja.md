@@ -191,6 +191,42 @@ TAKT は 5 種類の step をサポートしています。必要な構造に応
 - サブ step の `rules` は取りうる結果を定義し、`next` は省略可能（親がルーティングを担当）
 - 並列サブ step は `promotion` をサポートしません
 
+### Parallel reviewer ground-check
+
+parallel sub-step が `output_contracts` で reviewer report を生成し、実行時に解決された provider の `provider_options.<provider>.ground_check.enabled: true` が設定されている場合、TAKT は report phase の直後に ground-check を実行します。ground-check は reviewer report と evidence bundle を照合し、report が根拠のないファイル/API/外部サービス/テスト結果/コード挙動を主張していないかを確認します。
+
+```yaml
+  - name: reviewers
+    parallel:
+      - name: api-review
+        persona: api-reviewer
+        provider: opencode
+        provider_options:
+          opencode:
+            ground_check:
+              enabled: true
+              provider: codex
+              model: gpt-5-mini
+              provider_options:
+                codex:
+                  reasoning_effort: high
+        output_contracts:
+          report:
+            - name: api-review.md
+              format: api-review
+```
+
+ground-check provider / model / provider_options を省略すると、元 reviewer step の解決済み provider / model / providerOptions を使います。`ground_check.enabled: false` はその layer で ground-check を明示的に無効化します。解決優先順位は通常の provider option leaf と同じで、step `provider_options` > `provider_routing.steps` > `provider_routing.tags` > `provider_routing.personas` > deprecated の `persona_providers` > `workflow_config.provider_options` > project `.takt/config.yaml` > global `~/.takt/config.yaml` です。
+
+ground-check report は次の decision tag を 1 つだけ返す必要があります。
+
+- `[GROUND_CHECK:VALID]`: reviewer report の重要な主張が evidence に根拠づいている
+- `[GROUND_CHECK:NEED_RECHECK]`: 根拠のない、または検証不能な重要主張がある
+
+tag がない、複数ある、または未知の tag の場合は fail closed として `NEED_RECHECK` と扱われます。`NEED_RECHECK` の場合、TAKT は元 reviewer に元 report、ground-check report、evidence bundle を渡して 1 回だけ report を再生成させ、その report を再度 ground-check します。再チェック後も `VALID` にならない場合、その sub-step は error になります。
+
+artifact は通常の report writer と同じ versioning を使います。`api-review.md` に対する ground-check は `api-review.ground-check.md` に保存され、recheck で同名ファイルが更新される場合は既存内容が timestamp 付き履歴ファイルへ退避されます。
+
 ### Finding Contract parallel の retry 失敗ルーティング
 
 workflow に `finding_contract` がある場合、各 parallel 親 step は Finding Manager output が retry 後も意味論的に invalid なときの決定的な rule を宣言する必要があります。この rule により、invalid manager output で workflow を abort したり ledger を更新したりしません。
@@ -359,6 +395,7 @@ promotion は並列サブ step ではサポートされません。
 | `provider_options.claude.effort` | - | Claude reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`（`xhigh` は Opus 4.7 が必要） |
 | `provider_options.opencode.allowed_tools` | - | OpenCode のツール許可リスト。ツール名は `read`, `glob`, `grep`, `bash`, `websearch`, `webfetch` のように lowercase |
 | `provider_options.opencode.variant` | - | OpenCode の model variant。プロバイダー / model 固有の文字列としてパススルー |
+| `provider_options.<provider>.ground_check` | - | parallel reviewer report の根拠確認。`enabled`、任意の `provider` / `model` / `provider_options`、decision tag、artifact は [Parallel reviewer ground-check](#parallel-reviewer-ground-check) 参照 |
 | `provider_options.codex.base_url` | - | Codex SDK constructor option 用の OpenAI 互換 base URL（[configuration ガイド](./configuration.ja.md#provider-base-url-base_url) 参照） |
 | `provider_options.codex.network_access` | - | Codex サンドボックスからのネットワークアクセスを許可（[configuration ガイド](./configuration.ja.md#ネットワークアクセス-network_access) 参照） |
 | `provider_options.claude.sandbox.allow_unsandboxed_commands` | - | Claude の Bash を macOS Seatbelt サンドボックス外で実行（[configuration ガイド](./configuration.ja.md#claude-code-の-sandbox-制御-allow_unsandboxed_commands) 参照） |

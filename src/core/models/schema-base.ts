@@ -54,38 +54,52 @@ export const ClaudeSandboxSchema = z.object({
   excluded_commands: z.array(z.string()).optional(),
 }).optional();
 
+const GroundCheckOptionsSchema = z.object({
+  enabled: z.boolean().optional(),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  provider_options: z.record(z.string(), z.unknown()).optional(),
+}).strict().optional();
+
 /** Provider-specific step options schema */
 export const StepProviderOptionsObjectSchema = z.object({
   codex: z.object({
     base_url: z.string().min(1).optional(),
     network_access: z.boolean().optional(),
     reasoning_effort: z.enum(CODEX_REASONING_EFFORT_VALUES).optional(),
+    ground_check: GroundCheckOptionsSchema,
   }).optional(),
   opencode: z.object({
     network_access: z.boolean().optional(),
     variant: z.string().min(1).optional(),
     allowed_tools: z.array(z.string()).optional(),
+    ground_check: GroundCheckOptionsSchema,
   }).optional(),
   claude: z.object({
     base_url: z.string().min(1).optional(),
     allowed_tools: z.array(z.string()).optional(),
     effort: z.enum(CLAUDE_EFFORT_VALUES).optional(),
     sandbox: ClaudeSandboxSchema,
+    ground_check: GroundCheckOptionsSchema,
   }).optional(),
   claude_terminal: z.object({
     backend: z.enum(['tmux']).optional(),
     timeout_ms: z.number().int().positive().optional(),
     keep_session: z.boolean().optional(),
     transcript_poll_interval_ms: z.number().int().positive().optional(),
+    ground_check: GroundCheckOptionsSchema,
   }).strict().optional(),
   copilot: z.object({
     effort: z.enum(COPILOT_EFFORT_VALUES).optional(),
+    ground_check: GroundCheckOptionsSchema,
   }).optional(),
   cursor: z.object({
     use_prompt_file: z.boolean().optional(),
+    ground_check: GroundCheckOptionsSchema,
   }).optional(),
   kiro: z.object({
     agent: z.string().min(1).optional(),
+    ground_check: GroundCheckOptionsSchema,
   }).optional(),
 });
 

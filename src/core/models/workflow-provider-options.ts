@@ -21,16 +21,25 @@ export interface McpHttpServerConfig {
 
 export type McpServerConfig = McpStdioServerConfig | McpSseServerConfig | McpHttpServerConfig;
 
+export interface GroundCheckProviderOptions {
+  enabled?: boolean;
+  provider?: ProviderType;
+  model?: string;
+  providerOptions?: StepProviderOptions;
+}
+
 export interface CodexProviderOptions {
   baseUrl?: string;
   networkAccess?: boolean;
   reasoningEffort?: CodexReasoningEffort;
+  groundCheck?: GroundCheckProviderOptions;
 }
 
 export interface OpenCodeProviderOptions {
   networkAccess?: boolean;
   variant?: string;
   allowedTools?: string[];
+  groundCheck?: GroundCheckProviderOptions;
 }
 
 export const RUNTIME_PREPARE_PRESETS = ['gradle', 'node'] as const;
@@ -63,6 +72,7 @@ export interface ClaudeProviderOptions {
   allowedTools?: string[];
   effort?: ClaudeEffort;
   sandbox?: ClaudeSandboxSettings;
+  groundCheck?: GroundCheckProviderOptions;
 }
 
 export interface ClaudeTerminalProviderOptions {
@@ -70,18 +80,22 @@ export interface ClaudeTerminalProviderOptions {
   timeoutMs?: number;
   keepSession?: boolean;
   transcriptPollIntervalMs?: number;
+  groundCheck?: GroundCheckProviderOptions;
 }
 
 export interface CopilotProviderOptions {
   effort?: CopilotEffort;
+  groundCheck?: GroundCheckProviderOptions;
 }
 
 export interface CursorProviderOptions {
   usePromptFile?: boolean;
+  groundCheck?: GroundCheckProviderOptions;
 }
 
 export interface KiroProviderOptions {
   agent?: string;
+  groundCheck?: GroundCheckProviderOptions;
 }
 
 export interface StepProviderOptions {

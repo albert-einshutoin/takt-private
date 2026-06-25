@@ -192,6 +192,42 @@ Sub-steps execute concurrently, and the parent aggregates sub-step matches via `
 - Sub-step `rules` define possible outcomes; `next` is optional (parent handles routing)
 - Parallel sub-steps do not support `promotion`
 
+### Parallel reviewer ground-check
+
+When a parallel sub-step writes reviewer reports through `output_contracts` and the resolved provider has `provider_options.<provider>.ground_check.enabled: true`, TAKT runs a ground-check immediately after the report phase. The ground-check compares the reviewer report with the evidence bundle and rejects ungrounded claims about files, APIs, external services, test results, or code behavior.
+
+```yaml
+  - name: reviewers
+    parallel:
+      - name: api-review
+        persona: api-reviewer
+        provider: opencode
+        provider_options:
+          opencode:
+            ground_check:
+              enabled: true
+              provider: codex
+              model: gpt-5-mini
+              provider_options:
+                codex:
+                  reasoning_effort: high
+        output_contracts:
+          report:
+            - name: api-review.md
+              format: api-review
+```
+
+If the ground-check provider, model, or provider_options are omitted, TAKT reuses the resolved reviewer step provider, model, and providerOptions. `ground_check.enabled: false` disables ground-check at that layer. Priority is the normal provider option leaf order: step `provider_options` > `provider_routing.steps` > `provider_routing.tags` > `provider_routing.personas` > deprecated `persona_providers` > `workflow_config.provider_options` > project `.takt/config.yaml` > global `~/.takt/config.yaml`.
+
+The ground-check report must contain exactly one decision tag:
+
+- `[GROUND_CHECK:VALID]`: all material reviewer claims are grounded in the evidence
+- `[GROUND_CHECK:NEED_RECHECK]`: at least one material claim is ungrounded or unverifiable
+
+Missing, duplicated, or unknown tags fail closed to `NEED_RECHECK`. On `NEED_RECHECK`, TAKT sends the original report, ground-check report, and evidence bundle back to the original reviewer once, regenerates the report, then ground-checks the regenerated report. If the regenerated report still does not become `VALID`, the sub-step ends as an error.
+
+Artifacts use the same versioning as the report writer. For `api-review.md`, TAKT writes `api-review.ground-check.md`; when recheck updates the same artifact, the previous content is moved to a timestamped history file.
+
 ### Finding Contract parallel retry failure routing
 
 When a workflow defines `finding_contract`, each parallel parent must declare a deterministic rule for a Finding Manager output that stays semantically invalid after retry. This rule prevents invalid manager output from aborting the workflow or updating the ledger.
@@ -360,6 +396,7 @@ Promotion is not supported on parallel sub-steps.
 | `provider_options.claude.effort` | - | Claude reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires Opus 4.7) |
 | `provider_options.opencode.allowed_tools` | - | OpenCode tool allowlist. Tool names are lowercase, for example `read`, `glob`, `grep`, `bash`, `websearch`, `webfetch` |
 | `provider_options.opencode.variant` | - | OpenCode model variant, passed through as a provider/model-specific string |
+| `provider_options.<provider>.ground_check` | - | Groundedness verification for parallel reviewer reports. See [Parallel reviewer ground-check](#parallel-reviewer-ground-check) for `enabled`, optional `provider` / `model` / `provider_options`, decision tags, and artifacts |
 | `provider_options.codex.base_url` | - | OpenAI-compatible base URL for Codex SDK constructor options (see [configuration guide](./configuration.md#provider-base-url-base_url)) |
 | `provider_options.codex.network_access` | - | Allow Codex sandbox to access the network (see [configuration guide](./configuration.md#network-access-network_access)) |
 | `provider_options.claude.sandbox.allow_unsandboxed_commands` | - | Run Claude Bash outside the macOS Seatbelt sandbox (see [configuration guide](./configuration.md#claude-code-sandbox-control-allow_unsandboxed_commands)) |

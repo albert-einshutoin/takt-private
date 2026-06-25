@@ -17,7 +17,7 @@ import { executeAgent } from '../../../agents/agent-usecases.js';
 import { ParallelLogger } from './parallel-logger.js';
 import { needsStatusJudgmentPhase, runReportPhase, runStatusJudgmentPhase } from '../phase-runner.js';
 import { detectMatchedRule } from '../evaluation/index.js';
-import type { StatusJudgmentPhaseResult } from '../phase-runner.js';
+import type { PhaseRunnerContext, StatusJudgmentPhaseResult } from '../phase-runner.js';
 import { incrementStepIteration } from './state-manager.js';
 import { createLogger, getErrorMessage } from '../../../shared/utils/index.js';
 import { buildSessionKey } from '../session-key.js';
@@ -40,8 +40,19 @@ import {
 } from '../findings/manager-runner.js';
 import { renderFindingLedgerInstructionSummary, renderFindingLedgerReportSummary } from '../findings/context.js';
 import { isNonAiReturnValueRule } from '../evaluation/rule-utils.js';
+import {
+  buildGroundCheckEvidenceBundle,
+  buildGroundCheckPrompt,
+  buildGroundCheckStep,
+  buildGroundRecheckPrompt,
+  parseGroundCheckDecision,
+  readReviewerReportSnapshots,
+  resolveGroundCheckConfig,
+} from '../ground-check.js';
+import { writeReportFile } from '../report-writer.js';
 
 const log = createLogger('parallel-runner');
+const GROUND_CHECK_MAX_RECHECKS = 1;
 
 type ParallelSubStepResult = {
   subStep: AgentWorkflowStep;
@@ -293,7 +304,7 @@ export class ParallelRunner {
         }
 
         // Phase 2/3 context resolves the same runtime-aware session key as Phase 1.
-        const phaseCtx = this.deps.optionsBuilder.buildPhaseRunnerContext(
+        let phaseCtx = this.deps.optionsBuilder.buildPhaseRunnerContext(
           state,
           subResponse.content,
           updatePersonaSession,
@@ -324,6 +335,32 @@ export class ParallelRunner {
             state.stepOutputs.set(subStep.name, rateLimitedResponse);
             return { subStep, response: rateLimitedResponse, instruction: phase1Instruction, providerInfo: subPm };
           }
+        }
+
+        const groundCheckResult = await this.runGroundCheckForSubStep({
+          subStep,
+          subIteration,
+          state,
+          task,
+          phase1Instruction,
+          providerInfo: subPm,
+          response: subResponse,
+          phaseCtx,
+          updatePersonaSession,
+          runtime,
+        });
+        if (groundCheckResult && 'terminalResponse' in groundCheckResult) {
+          state.stepOutputs.set(subStep.name, groundCheckResult.terminalResponse);
+          return {
+            subStep,
+            response: groundCheckResult.terminalResponse,
+            instruction: phase1Instruction,
+            providerInfo: subPm,
+          };
+        }
+        if (groundCheckResult && 'response' in groundCheckResult) {
+          subResponse = groundCheckResult.response;
+          phaseCtx = groundCheckResult.phaseCtx;
         }
 
         // Phase 3: status judgment for sub-step
@@ -557,6 +594,177 @@ export class ParallelRunner {
       this.deps.emitEvent('findings:ledger', result.ledger);
     }
     return result;
+  }
+
+  private async runGroundCheckForSubStep(params: {
+    subStep: AgentWorkflowStep;
+    subIteration: number;
+    state: WorkflowState;
+    task: string;
+    phase1Instruction: string;
+    providerInfo: NonNullable<StepRunResult['providerInfo']>;
+    response: AgentResponse;
+    phaseCtx: PhaseRunnerContext;
+    updatePersonaSession: (persona: string, sessionId: string | undefined) => void;
+    runtime?: RuntimeStepResolution;
+  }): Promise<{
+    response: AgentResponse;
+    phaseCtx: PhaseRunnerContext;
+  } | {
+    terminalResponse: AgentResponse;
+  } | undefined> {
+    if (!params.subStep.outputContracts || params.subStep.outputContracts.length === 0) {
+      return undefined;
+    }
+
+    const config = resolveGroundCheckConfig(params.providerInfo);
+    if (!config) {
+      return undefined;
+    }
+
+    const groundCheckStep = buildGroundCheckStep(params.subStep, config);
+    let currentResponse = params.response;
+    let currentPhaseCtx = params.phaseCtx;
+    let latestGroundCheckReport = '';
+
+    for (let recheckAttempt = 0; recheckAttempt <= GROUND_CHECK_MAX_RECHECKS; recheckAttempt++) {
+      const reports = readReviewerReportSnapshots(currentPhaseCtx.reportDir, params.subStep);
+      const evidenceBundle = buildGroundCheckEvidenceBundle({
+        task: params.task,
+        phase1Instruction: params.phase1Instruction,
+        reviewerResponse: currentResponse.content,
+        reports,
+      });
+      const groundCheckPrompt = buildGroundCheckPrompt({
+        language: currentPhaseCtx.language,
+        workflowName: this.deps.getWorkflowName(),
+        stepName: params.subStep.name,
+        evidenceBundle,
+      });
+      const groundCheckOptions = {
+        ...this.deps.optionsBuilder.buildAgentOptions(groundCheckStep, params.runtime),
+        permissionMode: 'readonly' as const,
+        allowedTools: [],
+        sessionId: undefined,
+      };
+      const groundCheckResponse = await executeAgent(groundCheckStep.persona, groundCheckPrompt, groundCheckOptions);
+      latestGroundCheckReport = groundCheckResponse.content;
+      for (const report of reports) {
+        writeReportFile(currentPhaseCtx.reportDir, report.groundCheckFileName, groundCheckResponse.content);
+      }
+
+      if (groundCheckResponse.status === 'blocked' || groundCheckResponse.status === 'rate_limited') {
+        return {
+          terminalResponse: {
+            ...groundCheckResponse,
+            persona: params.subStep.name,
+          },
+        };
+      }
+      if (groundCheckResponse.status === 'error') {
+        return {
+          terminalResponse: {
+            ...groundCheckResponse,
+            persona: params.subStep.name,
+            error: groundCheckResponse.error ?? `Ground-check failed for sub-step "${params.subStep.name}".`,
+          },
+        };
+      }
+
+      if (parseGroundCheckDecision(groundCheckResponse.content) === 'valid') {
+        return {
+          response: currentResponse,
+          phaseCtx: currentPhaseCtx,
+        };
+      }
+
+      if (recheckAttempt >= GROUND_CHECK_MAX_RECHECKS) {
+        return {
+          terminalResponse: {
+            persona: params.subStep.name,
+            status: 'error',
+            content: latestGroundCheckReport,
+            timestamp: new Date(),
+            error: `Ground-check requested recheck for sub-step "${params.subStep.name}" after ${GROUND_CHECK_MAX_RECHECKS} recheck attempt.`,
+          },
+        };
+      }
+
+      const recheckPrompt = buildGroundRecheckPrompt({
+        language: currentPhaseCtx.language,
+        workflowName: this.deps.getWorkflowName(),
+        stepName: params.subStep.name,
+        evidenceBundle,
+        groundCheckReport: groundCheckResponse.content,
+      });
+      const reviewerSessionKey = buildSessionKey(params.subStep, params.providerInfo.provider);
+      const recheckOptions = {
+        ...this.deps.optionsBuilder.buildAgentOptions(params.subStep, params.runtime),
+        permissionMode: 'readonly' as const,
+        allowedTools: [],
+        sessionId: params.state.personaSessions.get(reviewerSessionKey),
+      };
+      const recheckResponse = await executeAgent(params.subStep.persona, recheckPrompt, recheckOptions);
+
+      if (recheckResponse.status === 'blocked' || recheckResponse.status === 'rate_limited') {
+        return {
+          terminalResponse: {
+            ...recheckResponse,
+            persona: params.subStep.name,
+          },
+        };
+      }
+      if (recheckResponse.status === 'error') {
+        return {
+          terminalResponse: {
+            ...recheckResponse,
+            persona: params.subStep.name,
+            error: recheckResponse.error ?? `Ground-check recheck failed for sub-step "${params.subStep.name}".`,
+          },
+        };
+      }
+
+      currentResponse = recheckResponse;
+      params.updatePersonaSession(reviewerSessionKey, recheckResponse.sessionId);
+      currentPhaseCtx = this.deps.optionsBuilder.buildPhaseRunnerContext(
+        params.state,
+        currentResponse.content,
+        params.updatePersonaSession,
+        this.deps.onPhaseStart,
+        this.deps.onPhaseComplete,
+        this.deps.onJudgeStage,
+        params.state.iteration,
+        params.runtime,
+      );
+      const reportResult = await runReportPhase(params.subStep, params.subIteration, currentPhaseCtx);
+      if (reportResult && 'blocked' in reportResult) {
+        return {
+          terminalResponse: {
+            ...currentResponse,
+            status: 'blocked',
+            content: reportResult.response.content,
+          },
+        };
+      }
+      if (reportResult && 'rateLimited' in reportResult) {
+        return {
+          terminalResponse: {
+            ...reportResult.response,
+            persona: params.subStep.name,
+          },
+        };
+      }
+    }
+
+    return {
+      terminalResponse: {
+        persona: params.subStep.name,
+        status: 'error',
+        content: latestGroundCheckReport,
+        timestamp: new Date(),
+        error: `Ground-check failed to reach a terminal decision for sub-step "${params.subStep.name}".`,
+      },
+    };
   }
 
   private prepareFindingContractLedgerCopy(): string | undefined {
