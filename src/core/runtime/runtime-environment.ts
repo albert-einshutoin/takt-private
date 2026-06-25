@@ -18,6 +18,20 @@ const PRESET_SCRIPT_MAP: Record<RuntimePreparePreset, string> = {
   gradle: join(PRESET_SCRIPT_DIR, 'prepare-gradle.sh'),
   node: join(PRESET_SCRIPT_DIR, 'prepare-node.sh'),
 };
+const WINDOWS_BASH_PREPARE_SCRIPT = [
+  'script_path=$1',
+  'if command -v cygpath >/dev/null 2>&1; then',
+  '  script_path=$(cygpath -u "$script_path")',
+  'elif command -v wslpath >/dev/null 2>&1; then',
+  '  script_path=$(wslpath -u "$script_path")',
+  'fi',
+  'exec "$script_path"',
+].join('\n');
+
+export interface PrepareScriptCommand {
+  executable: string;
+  args: string[];
+}
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -91,6 +105,22 @@ function resolvePrepareScript(cwd: string, entry: RuntimePrepareEntry): string {
   return isAbsolute(entry) ? entry : resolve(cwd, entry);
 }
 
+export function buildPrepareScriptCommand(
+  scriptPath: string,
+  platform: NodeJS.Platform = process.platform,
+): PrepareScriptCommand {
+  if (platform !== 'win32') {
+    return { executable: 'bash', args: [scriptPath] };
+  }
+
+  // Raw Windows paths lose backslashes when passed directly to bash; convert inside bash
+  // so Git Bash (cygpath) and WSL (wslpath) can both run packaged preset scripts.
+  return {
+    executable: 'bash',
+    args: ['-lc', WINDOWS_BASH_PREPARE_SCRIPT, 'takt-runtime-prepare', scriptPath],
+  };
+}
+
 function hasPreparePreset(entries: RuntimePrepareEntry[], preset: RuntimePreparePreset): boolean {
   return entries.includes(preset);
 }
@@ -105,7 +135,8 @@ function runPrepareScript(
     throw new Error(`Runtime prepare script not found: ${scriptPath}`);
   }
 
-  const result = spawnSync('bash', [scriptPath], {
+  const command = buildPrepareScriptCommand(scriptPath);
+  const result = spawnSync(command.executable, command.args, {
     cwd,
     env: {
       ...process.env,
@@ -120,7 +151,7 @@ function runPrepareScript(
   });
 
   if (result.status !== 0) {
-    const stderr = (result.stderr ?? '').trim();
+    const stderr = (result.stderr ?? result.error?.message ?? '').trim();
     throw new Error(`Runtime prepare script failed: ${scriptPath}${stderr ? ` (${stderr})` : ''}`);
   }
 
