@@ -22,16 +22,19 @@ vi.mock('../shared/ui/index.js', () => ({
   success: (...args: unknown[]) => mockSuccess(...args),
   info: (...args: unknown[]) => mockInfo(...args),
   error: (...args: unknown[]) => mockError(...args),
+  warn: vi.fn(),
 }));
 
 vi.mock('../shared/prompt/index.js', () => ({
   confirm: (...args: unknown[]) => mockConfirm(...args),
   promptInput: (...args: unknown[]) => mockPromptInput(...args),
+  selectOption: vi.fn().mockResolvedValue('worktree'),
 }));
 
 vi.mock('../infra/task/index.js', () => ({
   getCurrentBranch: (...args: unknown[]) => mockGetCurrentBranch(...args),
   branchExists: (...args: unknown[]) => mockBranchExists(...args),
+  checkWorktreePreflight: vi.fn().mockReturnValue({ ok: true }),
 }));
 
 vi.mock('../shared/utils/index.js', async (importOriginal) => ({

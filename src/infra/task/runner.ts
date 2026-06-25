@@ -87,6 +87,7 @@ export class TaskRunner {
     execution: {
       runSlug: string;
       worktreePath?: string;
+      copyWorkspacePath?: string;
       branch?: string;
     },
   ): TaskInfo {

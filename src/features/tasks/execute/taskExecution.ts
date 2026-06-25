@@ -97,6 +97,7 @@ export async function executeTaskAndCompleteWithResult(
       reportDirName,
       branch,
       worktreePath,
+      copyWorkspacePath,
       baseBranch,
       startStep,
       retryNote,
@@ -114,6 +115,7 @@ export async function executeTaskAndCompleteWithResult(
     const executionTask = taskRunner.updateRunningTaskExecution(task.name, {
       runSlug: reportDirName,
       ...(worktreePath ? { worktreePath } : {}),
+      ...(copyWorkspacePath ? { copyWorkspacePath } : {}),
       ...(branch ? { branch } : {}),
     });
     taskForPersistence = executionTask;
@@ -142,6 +144,7 @@ export async function executeTaskAndCompleteWithResult(
         branch,
         baseBranch,
         worktreePath,
+        copyWorkspacePath,
         issueNumber,
       }),
     });
@@ -149,6 +152,7 @@ export async function executeTaskAndCompleteWithResult(
     if (taskRunResult.exceeded && taskRunResult.exceededInfo) {
       persistExceededTaskResult(taskRunner, executionTask, taskRunResult.exceededInfo, {
         worktreePath,
+        copyWorkspacePath,
         branch,
       });
       return false;
@@ -194,6 +198,7 @@ export async function executeTaskAndCompleteWithResult(
         successResponse: 'Task completed successfully',
         failureResponse: postExecutionTaskError,
         worktreePath,
+        copyWorkspacePath,
         branch,
       });
       persistTaskResult(taskRunner, taskResult);
@@ -207,6 +212,7 @@ export async function executeTaskAndCompleteWithResult(
       completedAt,
       branch,
       worktreePath,
+      copyWorkspacePath,
       prUrl,
     });
 

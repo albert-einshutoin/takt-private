@@ -12,6 +12,7 @@ export interface TaskInfo {
   createdAt: string;
   status: TaskStatus;
   worktreePath?: string;
+  copyWorkspacePath?: string;
   data: TaskFileData | null;
 }
 
@@ -26,6 +27,7 @@ export interface TaskResult {
   completedAt: string;
   branch?: string;
   worktreePath?: string;
+  copyWorkspacePath?: string;
   prUrl?: string;
 }
 
@@ -40,6 +42,14 @@ export interface WorktreeOptions {
 export interface WorktreeResult {
   path: string;
   branch: string;
+}
+
+export interface CopyWorkspaceOptions {
+  taskSlug: string;
+}
+
+export interface CopyWorkspaceResult {
+  path: string;
 }
 
 export interface BranchInfo {
@@ -72,6 +82,7 @@ export interface TaskListItem {
   runSlug?: string;
   branch?: string;
   worktreePath?: string;
+  copyWorkspacePath?: string;
   prUrl?: string;
   data?: TaskFileData;
   failure?: TaskFailure;

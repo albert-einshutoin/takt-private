@@ -582,6 +582,69 @@ describe('PR resolution in routing', () => {
       Object.defineProperty(programModule, 'pipelineMode', { value: originalPipelineMode, writable: true });
     });
 
+    it('should pass --copy-workspace to executePipeline as copy isolation', async () => {
+      const programModule = await import('../app/cli/program.js');
+      const originalPipelineMode = programModule.pipelineMode;
+      Object.defineProperty(programModule, 'pipelineMode', { value: true, writable: true });
+
+      mockOpts.workflow = 'default';
+      mockOpts.copyWorkspace = true;
+      mockExecutePipeline.mockResolvedValue(0);
+
+      await executeDefaultAction();
+
+      expect(mockExecutePipeline).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isolation: 'copy',
+        }),
+      );
+
+      Object.defineProperty(programModule, 'pipelineMode', { value: originalPipelineMode, writable: true });
+    });
+
+    it('should exit with error when --isolation is unknown in pipeline mode', async () => {
+      const programModule = await import('../app/cli/program.js');
+      const originalPipelineMode = programModule.pipelineMode;
+      Object.defineProperty(programModule, 'pipelineMode', { value: true, writable: true });
+
+      mockOpts.workflow = 'default';
+      mockOpts.isolation = 'sandbox';
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      await expect(executeDefaultAction()).rejects.toThrow('process.exit called');
+
+      expect(mockLogError).toHaveBeenCalledWith('--isolation must be one of: none, worktree, copy');
+      expect(mockExecutePipeline).not.toHaveBeenCalled();
+      mockExit.mockRestore();
+
+      Object.defineProperty(programModule, 'pipelineMode', { value: originalPipelineMode, writable: true });
+    });
+
+    it('should exit with error when --copy-workspace conflicts with --isolation', async () => {
+      const programModule = await import('../app/cli/program.js');
+      const originalPipelineMode = programModule.pipelineMode;
+      Object.defineProperty(programModule, 'pipelineMode', { value: true, writable: true });
+
+      mockOpts.workflow = 'default';
+      mockOpts.copyWorkspace = true;
+      mockOpts.isolation = 'worktree';
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      await expect(executeDefaultAction()).rejects.toThrow('process.exit called');
+
+      expect(mockLogError).toHaveBeenCalledWith(
+        '--copy-workspace cannot be combined with --isolation unless the isolation mode is copy',
+      );
+      expect(mockExecutePipeline).not.toHaveBeenCalled();
+      mockExit.mockRestore();
+
+      Object.defineProperty(programModule, 'pipelineMode', { value: originalPipelineMode, writable: true });
+    });
+
     it('should exit with error when workflow is omitted in pipeline mode', async () => {
       const programModule = await import('../app/cli/program.js');
       const originalPipelineMode = programModule.pipelineMode;

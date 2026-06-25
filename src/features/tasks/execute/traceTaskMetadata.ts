@@ -12,6 +12,7 @@ export interface TraceTaskContext {
   baseBranch?: string | undefined;
   taskSlug?: string | undefined;
   worktreePath?: string | undefined;
+  copyWorkspacePath?: string | undefined;
 }
 
 export interface BuildTraceTaskMetadataOptions extends TraceTaskContext {
@@ -36,6 +37,7 @@ export function buildTraceTaskMetadata(options: BuildTraceTaskMetadataOptions): 
     gitBranch: options.branch ?? options.task?.data?.branch,
     gitBaseBranch: options.baseBranch ?? options.task?.data?.base_branch,
     worktreePath: options.worktreePath ?? options.task?.worktreePath,
+    copyWorkspacePath: options.copyWorkspacePath ?? options.task?.copyWorkspacePath,
   });
 }
 

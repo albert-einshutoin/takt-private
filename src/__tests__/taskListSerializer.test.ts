@@ -12,6 +12,7 @@ describe('serializeTaskListItemForJson', () => {
       summary: 'summary',
       branch: 'feature/test',
       worktreePath: '/tmp/worktree',
+      copyWorkspacePath: '/tmp/takt-workspaces/copy',
       prUrl: 'https://example.com/pr/1',
       startedAt: '2026-02-09T00:01:00.000Z',
       completedAt: '2026-02-09T00:02:00.000Z',
@@ -21,6 +22,8 @@ describe('serializeTaskListItemForJson', () => {
       exceededCurrentIteration: 3,
       data: {
         task: 'task body',
+        isolation: 'copy',
+        copy_workspace_path: '/tmp/takt-workspaces/copy',
         workflow: 'workflow-alpha',
         start_step: 'implement',
         retry_note: 'retry',
@@ -45,6 +48,7 @@ describe('serializeTaskListItemForJson', () => {
       summary: 'summary',
       branch: 'feature/test',
       worktreePath: '/tmp/worktree',
+      copyWorkspacePath: '/tmp/takt-workspaces/copy',
       prUrl: 'https://example.com/pr/1',
       startedAt: '2026-02-09T00:01:00.000Z',
       completedAt: '2026-02-09T00:02:00.000Z',
@@ -54,6 +58,8 @@ describe('serializeTaskListItemForJson', () => {
       exceededCurrentIteration: 3,
       data: {
         task: 'task body',
+        isolation: 'copy',
+        copy_workspace_path: '/tmp/takt-workspaces/copy',
         workflow: 'workflow-alpha',
         start_step: 'implement',
         retry_note: 'retry',

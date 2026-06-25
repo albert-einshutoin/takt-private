@@ -16,6 +16,8 @@
 | `--pr <number>` | PR 番号を指定してレビューコメントを取得し修正を実行 |
 | `--auto-pr` | PR を作成（pipeline モードのみ） |
 | `--draft` | PR をドラフトとして作成（`--auto-pr` または `auto_pr` 設定が必要） |
+| `--isolation <none|worktree|copy>` | pipeline 実行の隔離方式を選択 |
+| `--copy-workspace` | コピーした workspace で pipeline を実行（`--isolation copy` の alias） |
 | `--skip-git` | ブランチ作成、コミット、プッシュをスキップ（pipeline モード、workflow のみ実行） |
 | `--repo <owner/repo>` | リポジトリを指定（PR 作成用） |
 | `-q, --quiet` | 最小出力モード: AI 出力を抑制（CI 向け） |
@@ -356,6 +358,9 @@ takt --pipeline --task "Fix bug" --auto-pr --repo owner/repo
 
 # workflow のみ実行（ブランチ作成、コミット、プッシュをスキップ）
 takt --pipeline --task "Fix bug" --skip-git
+
+# Git 不要の copy workspace で実行
+takt --pipeline --task "Fix bug" --copy-workspace
 
 # 最小出力モード（CI 向け）
 takt --pipeline --task "Fix bug" --quiet

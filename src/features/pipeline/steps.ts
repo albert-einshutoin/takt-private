@@ -6,7 +6,16 @@ import {
 } from '../../infra/git/index.js';
 import type { Issue } from '../../infra/git/index.js';
 import { resolveConfigValue } from '../../infra/config/index.js';
-import { stageAndCommit, resolveBaseBranch, resolveBaseBranchName, pushBranch, checkoutBranch, getCurrentBranch } from '../../infra/task/index.js';
+import {
+  createCopyWorkspaceAbortable,
+  stageAndCommit,
+  resolveBaseBranch,
+  resolveBaseBranchName,
+  pushBranch,
+  checkoutBranch,
+  getCurrentBranch,
+  summarizeTaskName,
+} from '../../infra/task/index.js';
 import { executeTask, confirmAndCreateWorktree, type ExecuteTaskOptions, type TaskExecutionOptions, type PipelineExecutionOptions } from '../tasks/index.js';
 import { prepareTaskSpecDirectory, cleanupPreparedTaskSpec, type TaskAttachment } from '../tasks/attachments.js';
 import { stageTaskSpecForExecution } from '../tasks/execute/taskSpecContext.js';
@@ -40,6 +49,7 @@ export interface SkipGitExecutionContext {
   isWorktree: false;
   branch?: string;
   baseBranch?: string;
+  copyWorkspacePath?: string;
 }
 
 export type ExecutionContext = GitExecutionContext | SkipGitExecutionContext;
@@ -198,13 +208,33 @@ export async function resolveTaskContent(options: PipelineExecutionOptions): Pro
 export async function resolveExecutionContext(
   cwd: string,
   task: string,
-  options: Pick<PipelineExecutionOptions, 'createWorktree' | 'skipGit' | 'branch' | 'issueNumber'>,
+  options: Pick<PipelineExecutionOptions, 'createWorktree' | 'skipGit' | 'branch' | 'issueNumber' | 'autoPr' | 'isolation'>,
   pipelineConfig: PipelineConfig | undefined,
   prBranch?: string,
   prBaseBranch?: string,
 ): Promise<ExecutionContext> {
-  if (options.createWorktree) {
-    const result = await confirmAndCreateWorktree(cwd, task, options.createWorktree, prBranch, prBaseBranch);
+  if (options.isolation === 'copy') {
+    if (options.autoPr) {
+      throw new Error('copy workspace does not support auto_pr');
+    }
+    if (options.branch) {
+      throw new Error('copy workspace does not support branch');
+    }
+    if (prBranch || prBaseBranch) {
+      throw new Error('copy workspace does not support PR branch checkout');
+    }
+    const taskSlug = await summarizeTaskName(task, { cwd });
+    const result = await createCopyWorkspaceAbortable(cwd, { taskSlug });
+    success(`Copy workspace created: ${sanitizeTerminalText(result.path)}`);
+    return {
+      execCwd: result.path,
+      isWorktree: false,
+      copyWorkspacePath: result.path,
+    };
+  }
+  if (options.createWorktree || options.isolation === 'worktree') {
+    const createWorktreeOverride = options.isolation === 'worktree' ? true : options.createWorktree;
+    const result = await confirmAndCreateWorktree(cwd, task, createWorktreeOverride, prBranch, prBaseBranch);
     if (result.cancelled) {
       throw new Error('Worktree creation cancelled');
     }
@@ -313,6 +343,7 @@ function buildPipelineTraceTaskContext(
     baseBranch: context.baseBranch,
     taskSlug: context.isWorktree ? context.taskSlug : undefined,
     worktreePath: context.isWorktree ? context.execCwd : undefined,
+    copyWorkspacePath: 'copyWorkspacePath' in context ? context.copyWorkspacePath : undefined,
   };
 }
 

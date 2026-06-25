@@ -15,13 +15,13 @@
 
 **Stop babysitting AI coding agents.**
 
-TAKT is an open-source CLI that turns AI coding agents into repeatable development workflows. Define planning, implementation, review, fix loops, human checkpoints, permissions, and output contracts in YAML, then run tasks with isolated worktrees and traceable logs.
+TAKT is an open-source CLI that turns AI coding agents into repeatable development workflows. Define planning, implementation, review, fix loops, human checkpoints, permissions, and output contracts in YAML, then run tasks with isolated worktrees or copy workspaces and traceable logs.
 
 Instead of asking one agent to remember the whole process, TAKT gives each step its own role, context, and transition rules. Agents can code, but the workflow decides what happens next.
 
 - Run plan → implement → review → fix loops as explicit workflow steps
 - Keep context focused with step-specific personas, policies, knowledge, instructions, and output contracts
-- Execute queued tasks in isolated worktrees and inspect logs and reports afterward
+- Execute queued tasks in isolated worktrees or copy workspaces and inspect logs and reports afterward
 - Use Claude Code, Claude SDK, Codex SDK, OpenCode SDK, subscription/login-based CLI providers, Cursor, GitHub Copilot CLI, or Kiro as providers
 
 **T**AKT **A**gent **K**oordination **T**opology orchestrates multiple AI agents with structured review loops, managed prompts, and guardrails.
@@ -42,7 +42,7 @@ TAKT treats AI agents as something to be controlled from the outside, not simply
 
 Workflows define the phases, and each step receives its own persona, policy, knowledge, instruction, and output contract. TAKT manages implementation, review, fix, and re-review flows declaratively. By separating responsibilities, knowledge, and constraints, then giving each agent only what it needs for the current step, TAKT improves task quality without bloating context.
 
-Reviews cannot be silently skipped. Findings route work back to fix steps, and human judgment can be requested when needed. Tasks run in isolated worktrees, and each step leaves logs and reports so the path from task to PR remains traceable.
+Reviews cannot be silently skipped. Findings route work back to fix steps, and human judgment can be requested when needed. Tasks run in isolated worktrees or copy workspaces, and each step leaves logs and reports so the path from task to result remains traceable.
 
 At its core, TAKT runs reusable agent processes built from roles, phases, judgments, and feedback loops.
 
@@ -58,7 +58,7 @@ npm install -g takt
 # Talk to AI, describe a task, use /go, then choose "Queue as task"
 takt
 
-# Execute queued tasks in isolated worktrees
+# Execute queued tasks in isolated worktrees or copy workspaces
 takt run
 
 # Review diffs, merge, retry, requeue, or delete task branches
@@ -75,7 +75,7 @@ If this is your first run, configure a provider in `~/.takt/config.yaml` or use 
 | Review steps can be forgotten or skipped | Review and fix loops are explicit transitions |
 | One long context keeps growing | Each step receives only the context it needs |
 | Implementation and review responsibilities blur | Personas, permissions, and output contracts separate responsibilities |
-| Work often lands directly in the current tree | Queued tasks run in isolated worktrees by default |
+| Work often lands directly in the current tree | Queued tasks can run in isolated worktrees or Git-free copy workspaces |
 | The path from task to result is hard to audit | Logs and reports preserve the path from task to PR |
 | The same process must be recreated by memory | Workflows are reusable, reviewable, and versionable |
 

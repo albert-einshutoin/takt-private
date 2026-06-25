@@ -187,6 +187,8 @@ export interface PipelineExecutionOptions {
   repo?: string;
   /** Skip branch creation, commit, and push (workflow-only execution) */
   skipGit?: boolean;
+  /** Execution isolation mode for pipeline runs. */
+  isolation?: 'none' | 'worktree' | 'copy';
   /** Working directory */
   cwd: string;
   provider?: ProviderType;

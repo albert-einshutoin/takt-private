@@ -55,6 +55,8 @@ program
   .option('--model <name>', 'Override agent model')
   .option('-t, --task <string>', 'Task content (as alternative to issue reference)')
   .option('--pipeline', 'Pipeline mode: non-interactive, no worktree, direct branch creation')
+  .option('--isolation <mode>', 'Execution isolation mode for pipeline runs (none|worktree|copy)')
+  .option('--copy-workspace', 'Run pipeline in a copied workspace (alias for --isolation copy)')
   .option('--skip-git', 'Skip branch creation, commit, and push (pipeline mode)')
   .option('-q, --quiet', 'Minimal output mode: suppress AI output (for CI)')
   .option('-c, --continue', 'Continue from the last assistant session');

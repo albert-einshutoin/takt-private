@@ -16,7 +16,9 @@ const ResumePointSchema = z.object({
 }).strict();
 
 export const TaskExecutionConfigObjectSchema = z.object({
+  isolation: z.enum(['none', 'worktree', 'copy']).optional(),
   worktree: z.union([z.boolean(), z.string()]).optional(),
+  copy_workspace_path: z.string().optional(),
   branch: z.string().optional(),
   base_branch: z.string().optional(),
   workflow: z.string().optional(),
@@ -47,7 +49,7 @@ export const TaskExecutionConfigObjectSchema = z.object({
       path: ['auto_pr'],
     });
   }
-  if (data.managed_pr === true && !data.worktree) {
+  if (data.managed_pr === true && !data.worktree && data.isolation !== 'worktree') {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: 'managed_pr requires worktree to be enabled',
