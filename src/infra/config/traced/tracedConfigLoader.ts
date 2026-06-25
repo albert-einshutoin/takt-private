@@ -13,6 +13,8 @@ type TraceEntry = {
   traced: TracedValue<unknown>;
 };
 
+type TracedSchemaProvider = SchemaShape | ((parsedConfig: Record<string, unknown>) => SchemaShape);
+
 export interface ConfigTrace {
   getOrigin(path: string): TracedOrigin;
 }
@@ -20,7 +22,7 @@ export interface ConfigTrace {
 interface LoadConfigTraceOptions {
   configPath: string;
   fileOrigin: 'global' | 'local';
-  schema: SchemaShape;
+  schema: TracedSchemaProvider;
   parseErrorPrefix?: string;
   rootObjectError?: string;
   sanitize?: (value: unknown) => unknown;
@@ -165,8 +167,11 @@ export function loadConfigTrace(options: LoadConfigTraceOptions): {
   const parsedConfig = existsSync(options.configPath)
     ? (parser(readFileSync(options.configPath, 'utf-8')) as Record<string, unknown>)
     : {};
-  const traceEntries = loadTraceEntriesViaRuntime(options.schema, options.fileOrigin, parsedConfig);
-  const rawConfig = buildRawConfig(Object.keys(options.schema), traceEntries, parsedConfig, filePreferredEnvPaths);
+  const schema = typeof options.schema === 'function'
+    ? options.schema(parsedConfig)
+    : options.schema;
+  const traceEntries = loadTraceEntriesViaRuntime(schema, options.fileOrigin, parsedConfig);
+  const rawConfig = buildRawConfig(Object.keys(schema), traceEntries, parsedConfig, filePreferredEnvPaths);
 
   const trace: ConfigTrace = {
     getOrigin(path: string): TracedOrigin {
@@ -195,7 +200,7 @@ export function loadGlobalConfigTrace(
   return loadConfigTrace({
     configPath,
     fileOrigin: 'global',
-    schema: getGlobalTracedSchema(),
+    schema: getGlobalTracedSchema,
     rootObjectError: 'Configuration error: ~/.takt/config.yaml must be a YAML object.',
     sanitize,
     filePreferredEnvPaths,
@@ -209,7 +214,7 @@ export function loadProjectConfigTrace(
   return loadConfigTrace({
     configPath,
     fileOrigin: 'local',
-    schema: getProjectTracedSchema(),
+    schema: getProjectTracedSchema,
     parseErrorPrefix: `Configuration error: failed to parse ${configPath}`,
     rootObjectError: `Configuration error: ${configPath} must be a YAML object.`,
     filePreferredEnvPaths,

@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- `provider_profiles` の解決を provider / step 単位の traced-config key に合わせました (#621)。project 側に一部 provider だけを定義しても global-only provider が落ちず、global step override は project provider default より優先され、project step override は従来どおり最優先されます。
 - `claude-terminal` が長い `systemPrompt` や structured output JSON schema を Claude Code 起動時の argv に渡さないようにしました (#756)。role instruction と structured output ガイダンスは step prompt と一緒に貼り付け、TAKT 側の応答後 schema 抽出・検証は維持します。
 - TAKT 管理の Git push を非対話化し、terminal credential prompt を無効化しました (#866)。workflow 実行とローカル commit 作成後に publish が失敗した場合でも、ブランチ/commit を保持し、タスクを `pr_failed` として記録し、PR 作成をスキップして、workflow 実装失敗ではなく再試行可能な publish failure として報告します。
 - traced-config runtime helper に subprocess timeout を追加しました (#688)。workflow step 遷移時に Node 起動や traced-config 解決が停止した場合、TAKT は helper を終了し、run 全体を無期限に固める代わりに明確な `traced-config helper timed out` エラーを報告します。デフォルトは 10 秒で、`TAKT_TRACED_CONFIG_HELPER_TIMEOUT_MS` で調整できます。

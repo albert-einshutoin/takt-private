@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `provider_profiles` resolution now follows provider/step-level traced-config keys (#621). Project profiles no longer drop global-only providers, and global step overrides remain effective above project provider defaults while project step overrides still win.
 - `claude-terminal` no longer passes long `systemPrompt` or structured output JSON schema values through Claude Code startup argv (#756). Role instructions and structured output guidance are now pasted with the step prompt, while TAKT keeps post-response schema extraction and validation.
 - TAKT-managed Git pushes now run non-interactively with terminal credential prompts disabled (#866). If publishing fails after workflow execution and local commit creation, TAKT preserves the branch/commit, records the task as `pr_failed`, skips PR creation, and reports a retryable publishing failure instead of hanging or marking the workflow implementation as failed.
 - The traced-config runtime helper now has a bounded subprocess timeout (#688). If Node startup or traced-config resolution stalls during a workflow step transition, TAKT terminates the helper and reports a clear `traced-config helper timed out` error instead of freezing the run indefinitely. The default is 10 seconds and can be tuned with `TAKT_TRACED_CONFIG_HELPER_TIMEOUT_MS`.

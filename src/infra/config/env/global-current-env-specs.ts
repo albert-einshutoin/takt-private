@@ -1,4 +1,5 @@
 import { PROVIDER_OPTIONS_ENV_SPECS } from '../providerOptionsContract.js';
+import { PROVIDER_PROFILES_ENV_SPECS } from '../providerProfilesContract.js';
 import type { EnvSpec } from './config-env-shared.js';
 
 export const GLOBAL_ENV_SPECS: readonly EnvSpec[] = [
@@ -43,7 +44,7 @@ export const GLOBAL_ENV_SPECS: readonly EnvSpec[] = [
   { path: 'bookmarks_file', type: 'string' },
   { path: 'workflow_categories_file', type: 'string' },
   ...PROVIDER_OPTIONS_ENV_SPECS,
-  { path: 'provider_profiles', type: 'json' },
+  ...PROVIDER_PROFILES_ENV_SPECS,
   { path: 'provider_routing', type: 'json' },
   { path: 'interactive_preview_steps', type: 'number' },
   { path: 'sync_project_local_takt_on_retry', type: 'boolean' },

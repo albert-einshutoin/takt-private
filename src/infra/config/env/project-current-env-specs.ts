@@ -1,4 +1,5 @@
 import { PROVIDER_OPTIONS_ENV_SPECS } from '../providerOptionsContract.js';
+import { PROVIDER_PROFILES_ENV_SPECS } from '../providerProfilesContract.js';
 import type { EnvSpec } from './config-env-shared.js';
 
 export const PROJECT_ENV_SPECS: readonly EnvSpec[] = [
@@ -27,7 +28,7 @@ export const PROJECT_ENV_SPECS: readonly EnvSpec[] = [
   { path: 'observability.session_log_exporter', type: 'boolean' },
   { path: 'observability.usage_events_phase', type: 'boolean' },
   ...PROVIDER_OPTIONS_ENV_SPECS,
-  { path: 'provider_profiles', type: 'json' },
+  ...PROVIDER_PROFILES_ENV_SPECS,
   { path: 'base_branch', type: 'string' },
   { path: 'workflow_runtime_prepare', type: 'json' },
   { path: 'workflow_runtime_prepare.custom_scripts', type: 'boolean' },
