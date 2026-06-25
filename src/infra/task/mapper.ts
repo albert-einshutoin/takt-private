@@ -41,7 +41,9 @@ export function resolveTaskContent(projectDir: string, task: TaskRecord): string
 function buildTaskFileData(task: TaskRecord, content: string): TaskFileData {
   return TaskFileSchema.parse({
     task: content,
+    isolation: task.isolation,
     worktree: task.worktree,
+    copy_workspace_path: task.copy_workspace_path,
     branch: task.branch,
     base_branch: task.base_branch,
     workflow: task.workflow,
@@ -77,6 +79,7 @@ export function toTaskInfo(projectDir: string, tasksFile: string, task: TaskReco
     createdAt: task.created_at,
     status: task.status,
     worktreePath: task.worktree_path,
+    copyWorkspacePath: task.copy_workspace_path,
     data: buildTaskFileData(task, content),
   };
 }
@@ -138,6 +141,7 @@ function toBaseTaskListItem(projectDir: string, tasksFile: string, task: TaskRec
     runSlug: task.run_slug,
     branch: task.branch,
     worktreePath: task.worktree_path,
+    copyWorkspacePath: task.copy_workspace_path,
     prUrl: task.pr_url,
     startedAt: task.started_at ?? undefined,
     completedAt: task.completed_at ?? undefined,

@@ -1,10 +1,11 @@
-import { confirm, promptInput } from '../../../shared/prompt/index.js';
-import { info, success, error } from '../../../shared/ui/index.js';
+import { confirm, promptInput, selectOption } from '../../../shared/prompt/index.js';
+import { info, success, error, warn } from '../../../shared/ui/index.js';
 import { getErrorMessage } from '../../../shared/utils/index.js';
-import { getCurrentBranch, branchExists } from '../../../infra/task/index.js';
+import { checkWorktreePreflight, getCurrentBranch, branchExists } from '../../../infra/task/index.js';
 import { sanitizeTerminalText } from '../../../shared/utils/text.js';
 
 export interface WorktreeSettings {
+  isolation?: 'none' | 'worktree' | 'copy';
   worktree?: boolean | string;
   branch?: string;
   baseBranch?: string;
@@ -22,6 +23,9 @@ export function displayTaskCreationResult(
   if (settings.worktree) {
     info(`  Worktree: ${typeof settings.worktree === 'string' ? sanitizeTerminalText(settings.worktree) : 'auto'}`);
   }
+  if (settings.isolation === 'copy') {
+    info('  Copy workspace: auto');
+  }
   if (settings.branch) {
     info(`  Branch: ${sanitizeTerminalText(settings.branch)}`);
   }
@@ -38,6 +42,25 @@ export function displayTaskCreationResult(
 }
 
 export async function promptWorktreeSettings(cwd: string): Promise<WorktreeSettings> {
+  const preflight = checkWorktreePreflight(cwd);
+  const isolationOptions: Array<{ label: string; value: 'worktree' | 'copy' | 'none' }> = [
+    ...(preflight.ok
+      ? [{ label: 'Worktree', value: 'worktree' as const }]
+      : []),
+    { label: 'Copy workspace', value: 'copy' as const },
+    { label: 'Direct', value: 'none' as const },
+  ];
+  if (!preflight.ok) {
+    warn(`${preflight.message} Worktree tasks are unavailable; use copy workspace for isolated non-git execution.`);
+  }
+  const isolation = await selectOption('Isolation mode', isolationOptions);
+  if (isolation === null || isolation === 'none') {
+    return { isolation: 'none' };
+  }
+  if (isolation === 'copy') {
+    return { isolation: 'copy' };
+  }
+
   let currentBranch: string | undefined;
   try {
     currentBranch = getCurrentBranch(cwd);
@@ -66,7 +89,7 @@ export async function promptWorktreeSettings(cwd: string): Promise<WorktreeSetti
   const autoPr = await confirm('Auto-create PR?', true);
   const draftPr = autoPr ? await confirm('Create as draft?', true) : false;
 
-  return { worktree, branch, baseBranch, autoPr, draftPr };
+  return { isolation: 'worktree', worktree, branch, baseBranch, autoPr, draftPr };
 }
 
 async function resolveExistingBaseBranch(cwd: string, initialBranch: string): Promise<string | undefined> {

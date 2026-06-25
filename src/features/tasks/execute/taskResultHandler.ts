@@ -10,6 +10,7 @@ interface BuildTaskResultParams {
   completedAt: string;
   branch?: string;
   worktreePath?: string;
+  copyWorkspacePath?: string;
   prUrl?: string;
 }
 
@@ -22,6 +23,7 @@ interface BuildBooleanTaskResultParams {
   failureResponse: string;
   branch?: string;
   worktreePath?: string;
+  copyWorkspacePath?: string;
 }
 
 interface PersistTaskResultOptions {
@@ -34,7 +36,7 @@ interface PersistTaskErrorOptions {
 }
 
 export function buildTaskResult(params: BuildTaskResultParams): TaskResult {
-  const { task, runResult, startedAt, completedAt, branch, worktreePath, prUrl } = params;
+  const { task, runResult, startedAt, completedAt, branch, worktreePath, copyWorkspacePath, prUrl } = params;
   const taskSuccess = runResult.success;
 
   if (!taskSuccess && !runResult.reason) {
@@ -52,6 +54,7 @@ export function buildTaskResult(params: BuildTaskResultParams): TaskResult {
     completedAt,
     ...(branch ? { branch } : {}),
     ...(worktreePath ? { worktreePath } : {}),
+    ...(copyWorkspacePath ? { copyWorkspacePath } : {}),
     ...(prUrl ? { prUrl } : {}),
   };
 }
@@ -66,6 +69,7 @@ export function buildBooleanTaskResult(params: BuildBooleanTaskResultParams): Ta
     failureResponse,
     branch,
     worktreePath,
+    copyWorkspacePath,
   } = params;
 
   return {
@@ -77,6 +81,7 @@ export function buildBooleanTaskResult(params: BuildBooleanTaskResultParams): Ta
     completedAt,
     ...(branch ? { branch } : {}),
     ...(worktreePath ? { worktreePath } : {}),
+    ...(copyWorkspacePath ? { copyWorkspacePath } : {}),
   };
 }
 
@@ -113,7 +118,7 @@ export function persistExceededTaskResult(
   taskRunner: TaskRunner,
   task: TaskInfo,
   exceeded: ExceededInfo,
-  context?: { worktreePath?: string; branch?: string },
+  context?: { worktreePath?: string; copyWorkspacePath?: string; branch?: string },
 ): void {
   taskRunner.exceedTask(task.name, {
     currentStep: exceeded.currentStep,
@@ -121,6 +126,7 @@ export function persistExceededTaskResult(
     currentIteration: exceeded.currentIteration,
     ...(exceeded.resumePoint ? { resumePoint: exceeded.resumePoint } : {}),
     ...(context?.worktreePath ? { worktreePath: context.worktreePath } : {}),
+    ...(context?.copyWorkspacePath ? { copyWorkspacePath: context.copyWorkspacePath } : {}),
     ...(context?.branch ? { branch: context.branch } : {}),
   });
   info(`Task "${task.name}" exceeded iteration limit at step "${exceeded.currentStep}"`);
@@ -145,6 +151,7 @@ export function persistTaskError(
     completedAt,
     ...(task.data?.branch ? { branch: task.data.branch } : {}),
     ...(task.worktreePath ? { worktreePath: task.worktreePath } : {}),
+    ...(task.copyWorkspacePath ? { copyWorkspacePath: task.copyWorkspacePath } : {}),
   });
 
   if (emitStatusLog) {

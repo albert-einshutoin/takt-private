@@ -3,7 +3,9 @@ import type { TaskListItem } from './types.js';
 
 export interface JsonTaskData {
   task: string;
+  isolation?: 'none' | 'worktree' | 'copy';
   worktree?: boolean | string;
+  copy_workspace_path?: string;
   branch?: string;
   base_branch?: string;
   workflow?: string;
@@ -33,6 +35,7 @@ export interface JsonTaskListItem {
   summary?: string;
   branch?: string;
   worktreePath?: string;
+  copyWorkspacePath?: string;
   prUrl?: string;
   data?: JsonTaskData;
   failure?: JsonTaskFailure;
@@ -51,7 +54,9 @@ function serializeTaskData(data: TaskFileData | undefined): JsonTaskData | undef
 
   return {
     task: data.task,
+    isolation: data.isolation,
     worktree: data.worktree,
+    copy_workspace_path: data.copy_workspace_path,
     branch: data.branch,
     base_branch: data.base_branch,
     workflow: data.workflow,
@@ -89,6 +94,7 @@ export function serializeTaskListItemForJson(task: TaskListItem): JsonTaskListIt
     summary: task.summary,
     branch: task.branch,
     worktreePath: task.worktreePath,
+    copyWorkspacePath: task.copyWorkspacePath,
     prUrl: task.prUrl,
     data: serializeTaskData(task.data),
     failure: serializeTaskFailure(task.failure),

@@ -67,7 +67,9 @@ Fields:
 | `status` | `pending`, `running`, `completed`, `failed`, `exceeded`, or `pr_failed` |
 | `task_dir` | Path to the task directory containing `order.md` |
 | `workflow` | Workflow name to use for execution |
+| `isolation` | `copy`, `worktree`, or `none` (optional explicit isolation mode) |
 | `worktree` | `true` (auto), a path string, or omitted (run in current directory) |
+| `copy_workspace_path` | Path recorded after `isolation: copy` execution |
 | `branch` | Branch name (auto-generated if omitted) |
 | `auto_pr` | Whether to auto-create a PR after execution |
 | `issue` | GitHub Issue number (if applicable) |
@@ -307,6 +309,23 @@ During worktree execution, TAKT maintains two directory references:
 | `projectCwd` (project root) | Where logs and session data are stored |
 
 Reports are written to `cwd/.takt/runs/{slug}/reports/` (inside the clone) to prevent agents from discovering the main repository path. Session resume is skipped when `cwd !== projectCwd` to avoid cross-directory contamination.
+
+## Isolated Execution (Copy Workspace)
+
+For non-Git directories or repositories without an initial commit, use `isolation: copy` to copy the current directory to `../takt-workspaces/{timestamp}-{slug}` before running the workflow.
+
+```yaml
+tasks:
+  - name: local-copy-task
+    status: pending
+    task: Clean up a local prototype
+    workflow: default
+    isolation: copy
+```
+
+A copy workspace is a directory copy, not a Git branch that TAKT can merge. Git-backed options such as `branch`, `auto_pr`, `draft_pr`, `managed_pr`, and `should_publish_branch_to_origin` are rejected for `copy` tasks. The execution location is recorded on the task as `copy_workspace_path`.
+
+To avoid huge or recursive copies, TAKT excludes `.git/`, `.takt/runs/`, `.takt/worktrees/`, `node_modules/`, `dist/`, `build/`, `coverage/`, and similar generated directories. Project-local runtime inputs such as `.takt/facets/` are copied.
 
 ## Session Logs
 

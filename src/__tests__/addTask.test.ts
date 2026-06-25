@@ -15,6 +15,7 @@ vi.mock('../features/interactive/index.js', () => ({
 vi.mock('../shared/prompt/index.js', () => ({
   promptInput: vi.fn(),
   confirm: vi.fn(),
+  selectOption: vi.fn().mockResolvedValue('worktree'),
 }));
 
 vi.mock('../shared/ui/index.js', () => ({
@@ -22,6 +23,7 @@ vi.mock('../shared/ui/index.js', () => ({
   info: vi.fn(),
   blankLine: vi.fn(),
   error: vi.fn(),
+  warn: vi.fn(),
   withProgress: vi.fn(async (_start, _done, operation) => operation()),
 }));
 
@@ -46,6 +48,7 @@ vi.mock('../infra/task/index.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   summarizeTaskName: vi.fn().mockResolvedValue('test-task'),
   getCurrentBranch: vi.fn().mockReturnValue('main'),
+  checkWorktreePreflight: vi.fn().mockReturnValue({ ok: true }),
 }));
 
 vi.mock('../infra/task/clone-base-branch.js', () => ({

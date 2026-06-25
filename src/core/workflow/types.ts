@@ -359,6 +359,7 @@ export interface WorkflowTraceTaskMetadata {
   gitBranch?: string | undefined;
   gitBaseBranch?: string | undefined;
   worktreePath?: string | undefined;
+  copyWorkspacePath?: string | undefined;
   runDir?: string | undefined;
 }
 

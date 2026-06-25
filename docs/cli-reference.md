@@ -16,6 +16,8 @@ This document provides a complete reference for all TAKT CLI commands and option
 | `--pr <number>` | PR number to fetch review comments and fix |
 | `--auto-pr` | Create PR after execution (pipeline mode only) |
 | `--draft` | Create PR as draft (requires `--auto-pr` or `auto_pr` config) |
+| `--isolation <none|worktree|copy>` | Choose pipeline execution isolation |
+| `--copy-workspace` | Run pipeline in a copied workspace (alias for `--isolation copy`) |
 | `--skip-git` | Skip branch creation, commit, and push (pipeline mode, workflow-only) |
 | `--repo <owner/repo>` | Specify repository (for PR creation) |
 | `-q, --quiet` | Minimal output mode: suppress AI output (for CI) |
@@ -356,6 +358,9 @@ takt --pipeline --task "Fix bug" --auto-pr --repo owner/repo
 
 # Workflow execution only (skip branch creation, commit, push)
 takt --pipeline --task "Fix bug" --skip-git
+
+# Run in a copied workspace without requiring Git
+takt --pipeline --task "Fix bug" --copy-workspace
 
 # Minimal output mode (for CI)
 takt --pipeline --task "Fix bug" --quiet

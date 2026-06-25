@@ -81,6 +81,10 @@ export async function executeDefaultAction(task?: string): Promise<DefaultAction
     logError('--auto-pr/--draft are supported only in --pipeline mode');
     process.exit(1);
   }
+  if (!pipelineMode && (opts.copyWorkspace === true || typeof opts.isolation === 'string')) {
+    logError('--copy-workspace/--isolation are supported only in --pipeline mode');
+    process.exit(1);
+  }
   const prNumber = opts.pr as number | undefined;
   const issueNumber = opts.issue as number | undefined;
 
@@ -112,6 +116,7 @@ export async function executeDefaultAction(task?: string): Promise<DefaultAction
   const resolvedPipelineDraftPr = opts.draft === true
     ? true
     : (resolveConfigValue(resolvedCwd, 'draftPr') ?? false);
+  const resolvedPipelineIsolation = resolvePipelineIsolation(opts as Record<string, unknown>);
   const selectOptions: SelectAndExecuteOptions = {
     workflow: resolvedWorkflow,
   };
@@ -127,6 +132,7 @@ export async function executeDefaultAction(task?: string): Promise<DefaultAction
       draftPr: resolvedPipelineDraftPr,
       repo: opts.repo as string | undefined,
       skipGit: opts.skipGit === true,
+      isolation: resolvedPipelineIsolation,
       cwd: resolvedCwd,
       provider: agentOverrides?.provider,
       model: agentOverrides?.model,
@@ -352,6 +358,24 @@ export async function executeDefaultAction(task?: string): Promise<DefaultAction
       ? getLabel('interactive.runCompleted', lang)
       : getLabel('interactive.runFailed', lang),
   };
+}
+
+function resolvePipelineIsolation(opts: Record<string, unknown>): 'none' | 'worktree' | 'copy' | undefined {
+  if (opts.copyWorkspace === true && typeof opts.isolation === 'string' && opts.isolation !== 'copy') {
+    logError('--copy-workspace cannot be combined with --isolation unless the isolation mode is copy');
+    process.exit(1);
+  }
+  if (opts.copyWorkspace === true) {
+    return 'copy';
+  }
+  if (opts.isolation === undefined) {
+    return undefined;
+  }
+  if (opts.isolation === 'none' || opts.isolation === 'worktree' || opts.isolation === 'copy') {
+    return opts.isolation;
+  }
+  logError('--isolation must be one of: none, worktree, copy');
+  process.exit(1);
 }
 
 program

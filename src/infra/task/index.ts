@@ -66,6 +66,12 @@ export {
   type CreateBaseBranchIfMissingConfig,
 } from './clone.js';
 export {
+  createCopyWorkspace,
+  createCopyWorkspaceAbortable,
+  type CopyWorkspaceOptions,
+  type CopyWorkspaceResult,
+} from './copyWorkspace.js';
+export {
   detectDefaultBranch,
   listTaktBranches,
   parseTaktBranches,

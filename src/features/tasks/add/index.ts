@@ -36,6 +36,7 @@ const log = createLogger('add-task');
 type SaveTaskOptions = {
   workflow?: string;
   issue?: number;
+  isolation?: 'none' | 'worktree' | 'copy';
   worktree?: boolean | string;
   branch?: string;
   baseBranch?: string;
@@ -50,6 +51,7 @@ type SaveTaskOptions = {
 function buildValidatedTaskConfig(options?: SaveTaskOptions): Omit<TaskFileData, 'task'> {
   const resolvedWorkflow = options ? resolveTaskWorkflowValue(options) : undefined;
   return TaskExecutionConfigSchema.parse({
+    ...(options?.isolation !== undefined && { isolation: options.isolation }),
     ...(options?.worktree !== undefined && { worktree: options.worktree }),
     ...(options?.branch && { branch: options.branch }),
     ...(options?.baseBranch && { base_branch: options.baseBranch }),

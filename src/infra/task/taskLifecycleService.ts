@@ -109,7 +109,7 @@ export class TaskLifecycleService {
     }
 
     const retryMetadata = readRetryMetadataByRunSlug(
-      task.worktree_path ?? this.projectDir,
+      task.worktree_path ?? task.copy_workspace_path ?? this.projectDir,
       task.run_slug,
       this.onWarning,
     );
@@ -148,6 +148,7 @@ export class TaskLifecycleService {
         failure: undefined,
         branch: result.branch ?? target.branch,
         worktree_path: result.worktreePath ?? target.worktree_path,
+        copy_workspace_path: result.copyWorkspacePath ?? target.copy_workspace_path,
         pr_url: result.prUrl ?? target.pr_url,
       });
       const tasks = [...current.tasks];
@@ -180,6 +181,7 @@ export class TaskLifecycleService {
         failure,
         branch: result.branch ?? target.branch,
         worktree_path: result.worktreePath ?? target.worktree_path,
+        copy_workspace_path: result.copyWorkspacePath ?? target.copy_workspace_path,
       }, this.readTerminalRetryMetadata(target));
       const tasks = [...current.tasks];
       tasks[index] = updated;
@@ -216,6 +218,7 @@ export class TaskLifecycleService {
     execution: {
       runSlug: string;
       worktreePath?: string;
+      copyWorkspacePath?: string;
       branch?: string;
     },
   ): TaskInfo {
@@ -232,6 +235,7 @@ export class TaskLifecycleService {
         ...target,
         run_slug: execution.runSlug,
         worktree_path: execution.worktreePath ?? target.worktree_path,
+        copy_workspace_path: execution.copyWorkspacePath ?? target.copy_workspace_path,
         branch: execution.branch ?? target.branch,
       };
 
@@ -264,6 +268,7 @@ export class TaskLifecycleService {
         failure,
         branch: result.branch ?? target.branch,
         worktree_path: result.worktreePath ?? target.worktree_path,
+        copy_workspace_path: result.copyWorkspacePath ?? target.copy_workspace_path,
         pr_url: result.prUrl ?? target.pr_url,
       }, this.readTerminalRetryMetadata(target));
       const tasks = [...current.tasks];

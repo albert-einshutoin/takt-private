@@ -25,11 +25,13 @@ vi.mock('../shared/ui/index.js', () => ({
   success: vi.fn(),
   info: vi.fn(),
   blankLine: vi.fn(),
+  warn: vi.fn(),
 }));
 
 vi.mock('../shared/prompt/index.js', () => ({
   confirm: vi.fn(),
   promptInput: vi.fn(),
+  selectOption: vi.fn().mockResolvedValue('worktree'),
 }));
 
 vi.mock('../shared/utils/index.js', async (importOriginal) => ({
@@ -45,6 +47,7 @@ vi.mock('../infra/task/index.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   getCurrentBranch: vi.fn().mockReturnValue('main'),
   branchExists: vi.fn().mockReturnValue(true),
+  checkWorktreePreflight: vi.fn().mockReturnValue({ ok: true }),
 }));
 
 vi.mock('../infra/git/index.js', () => ({

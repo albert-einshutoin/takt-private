@@ -6,6 +6,7 @@ import {
 import {
   type TaskInfo,
   checkWorktreePreflight,
+  createCopyWorkspaceAbortable,
   createSharedCloneAbortable,
   resolveBaseBranch,
   branchExists,
@@ -46,6 +47,7 @@ export interface ResolvedTaskExecution {
   orderContent?: string;
   branch?: string;
   worktreePath?: string;
+  copyWorkspacePath?: string;
   baseBranch?: string;
   startStep?: string;
   retryNote?: string;
@@ -141,6 +143,30 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
+function assertCopyWorkspaceCompatible(taskName: string, data: TaskInfo['data']): void {
+  if (!data) {
+    return;
+  }
+  const unsupportedFields = [
+    data.worktree ? 'worktree' : undefined,
+    data.branch ? 'branch' : undefined,
+    data.base_branch ? 'base_branch' : undefined,
+    data.auto_pr === true ? 'auto_pr' : undefined,
+    data.draft_pr === true ? 'draft_pr' : undefined,
+    data.managed_pr === true ? 'managed_pr' : undefined,
+    data.should_publish_branch_to_origin === true ? 'should_publish_branch_to_origin' : undefined,
+  ].filter((field): field is string => field !== undefined);
+
+  if (unsupportedFields.length > 0) {
+    throw new Error(`Task "${taskName}" copy workspace does not support ${unsupportedFields.join(', ')}.`);
+  }
+}
+
+function shouldUseWorktree(data: TaskInfo['data']): boolean {
+  return (data?.worktree !== undefined && data.worktree !== false)
+    || data?.isolation === 'worktree';
+}
+
 export function resolveTaskIssue(issueNumber: number | undefined, projectCwd: string): Issue[] | undefined {
   if (issueNumber === undefined) {
     return undefined;
@@ -193,6 +219,7 @@ export async function resolveTaskExecution(
   let orderContent: string | undefined;
   let branch: string | undefined;
   let worktreePath: string | undefined;
+  let copyWorkspacePath: string | undefined;
   let baseBranch: string | undefined;
   const timezone = resolveConfigValue(defaultCwd, 'timezone');
   const preferredBaseBranch = resolveTaskDataBaseBranch(data);
@@ -203,7 +230,23 @@ export async function resolveTaskExecution(
     }
   }
 
-  if (data.worktree) {
+  if (data.isolation === 'copy') {
+    assertCopyWorkspaceCompatible(task.name, data);
+    const taskSlug = task.slug ?? await withProgress(
+      'Generating workspace name...',
+      (slug) => `Workspace name generated: ${slug}`,
+      () => summarizeTaskName(task.content, { cwd: defaultCwd }),
+    );
+    throwIfAborted(abortSignal);
+    const result = await withProgress(
+      'Creating copy workspace...',
+      (workspaceResult) => `Copy workspace created: ${workspaceResult.path}`,
+      async () => createCopyWorkspaceAbortable(defaultCwd, { taskSlug }, abortSignal),
+    );
+    throwIfAborted(abortSignal);
+    execCwd = result.path;
+    copyWorkspacePath = result.path;
+  } else if (shouldUseWorktree(data)) {
     throwIfAborted(abortSignal);
     const preflight = checkWorktreePreflight(defaultCwd);
     if (!preflight.ok) {
@@ -240,7 +283,7 @@ export async function resolveTaskExecution(
           'Creating clone...',
           (cloneResult) => `Clone created: ${cloneResult.path} (branch: ${cloneResult.branch})`,
           async () => createSharedCloneAbortable(defaultCwd, {
-            worktree: data.worktree!,
+            worktree: data.worktree ?? true,
             branch: data.branch,
             ...(preferredBaseBranch ? { baseBranch: preferredBaseBranch } : {}),
             taskSlug,
@@ -302,6 +345,7 @@ export async function resolveTaskExecution(
     ...(orderContent !== undefined ? { orderContent } : {}),
     ...(branch ? { branch } : {}),
     ...(worktreePath ? { worktreePath } : {}),
+    ...(copyWorkspacePath ? { copyWorkspacePath } : {}),
     ...(baseBranch ? { baseBranch } : {}),
     ...(retryResume.startStep ? { startStep: retryResume.startStep } : {}),
     ...(resolvedRetryNote ? { retryNote: resolvedRetryNote } : {}),

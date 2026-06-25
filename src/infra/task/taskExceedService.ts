@@ -9,6 +9,7 @@ export interface ExceedTaskOptions {
   currentIteration: number;
   resumePoint?: WorkflowResumePoint;
   worktreePath?: string;
+  copyWorkspacePath?: string;
   branch?: string;
 }
 
@@ -36,6 +37,7 @@ export class TaskExceedService {
         exceeded_current_iteration: options.currentIteration,
         resume_point: options.resumePoint,
         ...(options.worktreePath ? { worktree_path: options.worktreePath } : {}),
+        ...(options.copyWorkspacePath ? { copy_workspace_path: options.copyWorkspacePath } : {}),
         ...(options.branch ? { branch: options.branch } : {}),
       };
 

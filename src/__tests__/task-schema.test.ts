@@ -106,6 +106,20 @@ describe('TaskExecutionConfigSchema', () => {
     expect(() => TaskExecutionConfigSchema.parse({ worktree: '/custom/path' })).not.toThrow();
   });
 
+  it('should accept copy workspace isolation fields without worktree compatibility fields', () => {
+    const config = TaskExecutionConfigSchema.parse({
+      isolation: 'copy',
+      copy_workspace_path: '/tmp/takt-workspaces/20260625-copy-task',
+    }) as Record<string, unknown>;
+
+    expect(config.isolation).toBe('copy');
+    expect(config.copy_workspace_path).toBe('/tmp/takt-workspaces/20260625-copy-task');
+  });
+
+  it('should reject unknown isolation values', () => {
+    expect(() => TaskExecutionConfigSchema.parse({ isolation: 'sandbox' })).toThrow();
+  });
+
   it('should reject negative issue number', () => {
     expect(() => TaskExecutionConfigSchema.parse({ issue: -1 })).toThrow();
   });
