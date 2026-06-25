@@ -167,6 +167,24 @@ function appendReviewSection(
   }
 }
 
+function appendPrContextSection(parts: string[], prReview: PrReviewData): void {
+  const baseRefName = prReview.baseRefName?.trim();
+  parts.push('');
+  parts.push('### PR Context');
+  parts.push('This task is derived from a PR. Judge the current PR-wide cumulative diff, not only a single commit, the current working tree, or an earlier gathered snapshot.');
+  parts.push('');
+  parts.push(`- PR: #${prReview.number}`);
+  parts.push(`- Base: ${baseRefName || '(unavailable)'}`);
+  parts.push(`- Head: ${prReview.headRefName}`);
+  parts.push(`- Diff range: ${baseRefName ? `${baseRefName}...${prReview.headRefName}` : '(unavailable)'}`);
+  if (!baseRefName) {
+    parts.push('- Base note: PR base branch was unavailable when this task was created; resolve the current PR base before relying on diff assumptions.');
+  }
+  // review-target.md is a gather-time artifact, so PR follow-up agents must not
+  // use it as a substitute for the latest base...head diff.
+  parts.push('Use the latest base...head diff as the primary evidence. Previous reports and review-target.md are snapshots/reference material only.');
+}
+
 /**
  * Format PR review data into task text for workflow execution.
  */
@@ -174,6 +192,7 @@ export function formatPrReviewAsTask(prReview: PrReviewData): string {
   const parts: string[] = [];
 
   parts.push(`## PR #${prReview.number} Review Comments: ${prReview.title}`);
+  appendPrContextSection(parts, prReview);
 
   if (prReview.body) {
     parts.push('');

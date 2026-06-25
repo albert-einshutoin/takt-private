@@ -1276,6 +1276,7 @@ describe('formatPrReviewAsTask', () => {
       body: 'PR description text',
       url: 'https://github.com/org/repo/pull/456',
       headRefName: 'fix/auth-bug',
+      baseRefName: 'release/main',
       comments: [
         { author: 'commenter1', body: 'Can you also update the tests?' },
       ],
@@ -1294,6 +1295,12 @@ describe('formatPrReviewAsTask', () => {
     };
     const result = formatPrReviewAsTask(prReview);
     expect(result).toContain('## PR #456 Review Comments: Fix auth bug');
+    expect(result).toContain('### PR Context');
+    expect(result).toContain('- PR: #456');
+    expect(result).toContain('- Base: release/main');
+    expect(result).toContain('- Head: fix/auth-bug');
+    expect(result).toContain('- Diff range: release/main...fix/auth-bug');
+    expect(result).toContain('review-target.md');
     expect(result).toContain('### PR Description');
     expect(result).toContain('PR description text');
     expect(result).toContain('### Review Policy');
@@ -1307,6 +1314,28 @@ describe('formatPrReviewAsTask', () => {
     expect(result).toContain('### Changed Files');
     expect(result).toContain('- src/auth.ts');
     expect(result).toContain('- src/auth.test.ts');
+  });
+
+  it('should make missing PR base explicit in PR context', () => {
+    const prReview: PrReviewData = {
+      number: 11,
+      title: 'Unknown base',
+      body: '',
+      url: 'https://github.com/org/repo/pull/11',
+      headRefName: 'fix/unknown-base',
+      comments: [],
+      reviews: [{ author: 'reviewer', body: 'Fix this' }],
+      files: [],
+    };
+
+    const result = formatPrReviewAsTask(prReview);
+
+    expect(result).toContain('### PR Context');
+    expect(result).toContain('- PR: #11');
+    expect(result).toContain('- Base: (unavailable)');
+    expect(result).toContain('- Head: fix/unknown-base');
+    expect(result).toContain('- Diff range: (unavailable)');
+    expect(result).toContain('PR base branch was unavailable');
   });
 
   it('should omit PR Description when body is empty', () => {

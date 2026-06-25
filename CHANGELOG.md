@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- PR-derived review tasks and Instruct follow-ups now carry an explicit PR context (#861). `takt add --pr`, CLI `--pr`, and pipeline `--pr` prompts identify PR number, base/head branches, and the intended base...head diff range, while task Instruct prefers the saved PR base branch over default-branch guessing and makes fallback explicit.
 - Interactive root runs can now return to the initial prompt after task completion or failure (#838). The continue prompt is limited to TTY interactive flows and is not shown for pipeline, direct `--task`, quiet, or non-TTY execution.
 - Instruction partial includes (#832). Instruction facets can now share Markdown snippets from `facets/partials/instructions/<name>.md` using `{name}` when the partial exists, or strict `{partial:name}` references when missing partials should fail fast. Package-local, project, global, and builtin layers are resolved in the same order as other facets, nested partials are supported, and cycles are rejected.
 - PR image attachments (#792). Markdown and HTML images hosted by GitHub in PR bodies, comments, and reviews are now downloaded into task attachments for `takt add --pr` and `takt pipeline --pr`, with task prompts rewritten to stable `[Image #N]` placeholders and run-context attachment paths.
