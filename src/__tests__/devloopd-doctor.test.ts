@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -93,6 +93,28 @@ describe('devloopd doctor', () => {
 
     expect(report.passed).toBe(true);
     expect(report.checks.filter((check) => check.status === 'fail')).toEqual([]);
+  });
+
+  it('uses the source checkout bin/takt when takt is not installed on PATH', async () => {
+    mkdirSync(join(projectDir, 'bin'), { recursive: true });
+    const localTakt = join(projectDir, 'bin', 'takt');
+    writeFileSync(localTakt, '#!/usr/bin/env node\n', 'utf-8');
+    chmodSync(localTakt, 0o755);
+
+    const report = await runDevloopDoctor({
+      repoPath: projectDir,
+      subscriptionOnly: true,
+      env: { PATH: '/mock/bin' },
+      runner: makeRunner(new Set(['gh', 'codex', 'cursor-agent', 'opencode', 'agy'])),
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.checks).toContainEqual({
+      status: 'pass',
+      name: 'command:takt',
+      message: 'found takt',
+      detail: localTakt,
+    });
   });
 
   it('hides passing check details unless verbose is enabled', () => {

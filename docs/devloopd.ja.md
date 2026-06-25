@@ -30,6 +30,10 @@ devloopd doctor --subscription-only
 
 doctor は禁止された環境変数名と config キー名だけを表示します。secret 値は出力しません。
 
+`npm link` や global install 前の source checkout から `devloopd` を実行する場合、
+`takt` コマンドのチェックは検査対象 repository 隣接の `bin/takt` wrapper を許容します。
+その他の provider CLI は引き続き `PATH` 上にインストールされている必要があります。
+
 ### オプション
 
 | オプション | 説明 |

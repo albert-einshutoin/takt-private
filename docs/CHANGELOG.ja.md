@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- `devloopd doctor --subscription-only` が、`PATH` に `takt` が未インストールでも source checkout 隣接の `bin/takt` wrapper を利用できるようになりました。`npm link` や global install 前のローカル開発 checkout でも subscription-only readiness を検証できます。
 - Finding Contract の ledger がタスク指示書由来の requirement matrix と reviewer finding の acceptance criteria を永続化するようになりました (#831)。review / supervise / report instruction は、finding を resolved として承認する前に requirement id と acceptance criteria を参照できます。
 - Windows で Git Bash または WSL bash 経由の runtime prepare preset が実行できるようになりました (#443)。TAKT は raw な `C:\...` script path を bash に直接渡さず、bash 内で `cygpath` または `wslpath` により変換してから packaged `node` / `gradle` prepare script を実行します。
 - `provider_profiles` の解決を provider / step 単位の traced-config key に合わせました (#621)。project 側に一部 provider だけを定義しても global-only provider が落ちず、global step override は project provider default より優先され、project step override は従来どおり最優先されます。

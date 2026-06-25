@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `devloopd doctor --subscription-only` now accepts a source checkout's adjacent `bin/takt` wrapper when `takt` is not installed on `PATH`. This lets local development checkouts verify subscription-only readiness before `npm link` or global installation.
 - Finding Contract ledgers now persist task-derived requirement matrices and reviewer finding acceptance criteria (#831). Review, supervise, and report instructions can reference requirement ids and acceptance criteria before approving a finding as resolved.
 - Runtime prepare presets now run on Windows when invoked through Git Bash or WSL bash (#443). TAKT no longer passes raw `C:\...` script paths directly to bash; it converts them with `cygpath` or `wslpath` inside bash before executing packaged `node` / `gradle` prepare scripts.
 - `provider_profiles` resolution now follows provider/step-level traced-config keys (#621). Project profiles no longer drop global-only providers, and global step overrides remain effective above project provider defaults while project step overrides still win.
