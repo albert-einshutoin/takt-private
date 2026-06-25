@@ -33,6 +33,20 @@ takt run
 
 Grafana は `http://127.0.0.1:3000` で開き、`takt` service を確認します。trace は既存の workflow span tree（`workflow.<name>` の下に `step.<name>`、さらに phase / judge span）として表示され、metric はローカルの `monitor.json` 出力と並走して送信されます。
 
+observability が有効な場合、TAKT は次の workflow metric を送出します。
+
+| Metric | 意味 |
+|--------|------|
+| `takt.workflow.runs` / `takt.workflow.duration` | workflow run 数と duration |
+| `takt.workflow.step.runs` / `takt.workflow.step.duration` | step run 数と duration |
+| `takt.workflow.phase.runs` / `takt.workflow.phase.duration` | phase run 数と duration |
+| `takt.workflow.judge_stage.runs` | status judgment stage 数 |
+| `takt.token.input_tokens` | usage を取得できた phase の provider input token |
+| `takt.token.output_tokens` | usage を取得できた phase の provider output token |
+| `takt.token.cached_input_tokens` | provider が報告した cached input token |
+
+token metric には他の metric と同じ run-scoped workflow attribute（`takt.run.id`, `takt.workflow.name`, `takt.step.name`, `takt.phase.name`, `takt.provider.name`, `takt.model.name` など）が付きます。usage を取得できない場合は 0 token の metric point としては送出しません。
+
 workflow がまだ実行中の場合、OpenTelemetry exporter は長時間生存する root `workflow.<name>` span が終了する前に、完了済みの child span を送信することがあります。Tempo でその active trace を見つけやすくするため、TAKT は root workflow span の下に短命の `workflow_start.<workflowName>` span も送信します。この補助 span は `takt.workflow.status = running` を含む workflow / run 属性を持ちますが、root、step、phase、judge span を置き換えたり改名したりしません。trace discovery 専用であり、shadow session log の canonical record には変換されません。
 
 active workflow を探す Tempo TraceQL filter 例:

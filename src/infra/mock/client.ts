@@ -103,6 +103,7 @@ export async function callMock(
     structuredOutput: scenarioEntry?.structuredOutput ?? options.structuredOutput,
     error: scenarioEntry?.error ?? options.error,
     failureCategory: scenarioEntry?.failureCategory ?? options.failureCategory,
+    providerUsage: scenarioEntry?.providerUsage ?? options.providerUsage,
   };
 }
 

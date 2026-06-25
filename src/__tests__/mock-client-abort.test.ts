@@ -207,6 +207,34 @@ describe('callMock: response content when no scenario is set', () => {
     expect(result.content).toBe('Custom fixed response');
   });
 
+  it('should pass provider usage through from the matched scenario entry', async () => {
+    setMockScenario([
+      {
+        status: 'done',
+        content: 'usage response',
+        providerUsage: {
+          usageMissing: false,
+          inputTokens: 11,
+          outputTokens: 7,
+          totalTokens: 18,
+          cachedInputTokens: 3,
+        },
+      },
+    ]);
+
+    const result = await callMock('coder', 'test prompt', {
+      cwd: '/tmp/project',
+    });
+
+    expect(result.providerUsage).toEqual({
+      usageMissing: false,
+      inputTokens: 11,
+      outputTokens: 7,
+      totalTokens: 18,
+      cachedInputTokens: 3,
+    });
+  });
+
   it('should use provided sessionId when given', async () => {
     const result = await callMock('coder', 'test prompt', {
       cwd: '/tmp/project',

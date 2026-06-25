@@ -9,6 +9,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import type { ScenarioEntry } from './types.js';
 import { STATUS_VALUES } from '../../core/models/status.js';
+import type { ProviderUsageSnapshot } from '../../core/models/response.js';
 import { AGENT_FAILURE_CATEGORIES } from '../../shared/types/agent-failure.js';
 
 export type { ScenarioEntry };
@@ -164,6 +165,7 @@ function validateEntry(entry: unknown, index: number): ScenarioEntry {
   ) {
     throw new Error(`Scenario entry [${index}] "failure_category" is invalid`);
   }
+  const providerUsage = validateProviderUsage(obj.provider_usage ?? obj.providerUsage, index);
 
   return {
     persona: obj.persona as string | undefined,
@@ -172,6 +174,58 @@ function validateEntry(entry: unknown, index: number): ScenarioEntry {
     structuredOutput: obj.structured_output as Record<string, unknown> | undefined,
     error: obj.error as string | undefined,
     failureCategory: obj.failure_category as ScenarioEntry['failureCategory'],
+    providerUsage,
     delayMs: obj.delay_ms as number | undefined,
   };
+}
+
+function validateProviderUsage(value: unknown, index: number): ProviderUsageSnapshot | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`Scenario entry [${index}] "provider_usage" must be an object if provided`);
+  }
+  const usage = value as Record<string, unknown>;
+  const usageMissing = getBoolean(usage, 'usageMissing', 'usage_missing');
+  if (usageMissing === undefined) {
+    throw new Error(`Scenario entry [${index}] "provider_usage.usage_missing" must be a boolean`);
+  }
+  if (usageMissing) {
+    return {
+      usageMissing: true,
+      reason: getString(usage, 'reason'),
+    };
+  }
+
+  const inputTokens = getNumber(usage, 'inputTokens', 'input_tokens');
+  const outputTokens = getNumber(usage, 'outputTokens', 'output_tokens');
+  const totalTokens = getNumber(usage, 'totalTokens', 'total_tokens');
+  if (inputTokens === undefined || outputTokens === undefined || totalTokens === undefined) {
+    throw new Error(`Scenario entry [${index}] "provider_usage" requires input/output/total tokens when usage_missing is false`);
+  }
+  return {
+    usageMissing: false,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cachedInputTokens: getNumber(usage, 'cachedInputTokens', 'cached_input_tokens'),
+    cacheCreationInputTokens: getNumber(usage, 'cacheCreationInputTokens', 'cache_creation_input_tokens'),
+    cacheReadInputTokens: getNumber(usage, 'cacheReadInputTokens', 'cache_read_input_tokens'),
+  };
+}
+
+function getBoolean(record: Record<string, unknown>, camelKey: string, snakeKey: string): boolean | undefined {
+  const value = record[camelKey] ?? record[snakeKey];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function getNumber(record: Record<string, unknown>, camelKey: string, snakeKey: string): number | undefined {
+  const value = record[camelKey] ?? record[snakeKey];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function getString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }

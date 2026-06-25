@@ -54,6 +54,21 @@ function monitorHasRunIdAttribute(monitor: JsonRecord): boolean {
   });
 }
 
+function monitorHasMetric(monitor: JsonRecord, metricName: string): boolean {
+  const scopeMetrics = monitor.scopeMetrics;
+  if (!Array.isArray(scopeMetrics)) {
+    return false;
+  }
+  return scopeMetrics.some((scopeMetric) => {
+    if (!isJsonRecord(scopeMetric) || !Array.isArray(scopeMetric.metrics)) {
+      return false;
+    }
+    return scopeMetric.metrics.some((metric) =>
+      isJsonRecord(metric) && metric.name === metricName
+    );
+  });
+}
+
 function firstRunRoot(repoPath: string): string {
   const runRoots = allRunRoots(repoPath);
   const runRoot = runRoots[0];
@@ -177,6 +192,9 @@ describe('E2E: Observability file outputs (mock)', () => {
     const monitor = JSON.parse(readFileSync(monitorPath, 'utf-8')) as JsonRecord;
     expect(monitor).toBeTruthy();
     expect(monitorHasRunIdAttribute(monitor)).toBe(true);
+    expect(monitorHasMetric(monitor, 'takt.token.input_tokens')).toBe(true);
+    expect(monitorHasMetric(monitor, 'takt.token.output_tokens')).toBe(true);
+    expect(monitorHasMetric(monitor, 'takt.token.cached_input_tokens')).toBe(true);
   }, 240_000);
 
   it('should propagate observability file outputs to a nested takt process launched by a command gate', () => {

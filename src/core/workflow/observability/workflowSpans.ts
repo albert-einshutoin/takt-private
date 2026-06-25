@@ -44,6 +44,18 @@ const PHASE_DURATION_HISTOGRAM_OPTIONS = {
 const JUDGE_STAGE_COUNTER_OPTIONS = {
   description: 'Workflow judge stage executions by status',
 };
+const TOKEN_INPUT_COUNTER_OPTIONS = {
+  description: 'Workflow input tokens by provider, model, step, and phase',
+  unit: 'tokens',
+};
+const TOKEN_OUTPUT_COUNTER_OPTIONS = {
+  description: 'Workflow output tokens by provider, model, step, and phase',
+  unit: 'tokens',
+};
+const TOKEN_CACHED_INPUT_COUNTER_OPTIONS = {
+  description: 'Workflow cached input tokens by provider, model, step, and phase',
+  unit: 'tokens',
+};
 
 type AttributeInput = Record<string, string | number | boolean | undefined>;
 
@@ -477,6 +489,7 @@ function recordPhaseMetrics(
   const meter = metrics.getMeter('takt.workflow');
   meter.createCounter('takt.workflow.phase.runs', PHASE_RUN_COUNTER_OPTIONS).add(1, attributes);
   meter.createHistogram('takt.workflow.phase.duration', PHASE_DURATION_HISTOGRAM_OPTIONS).record(durationMs, attributes);
+  recordTokenMetrics(params, outcome.providerUsage);
 }
 
 function recordJudgeStageMetrics(params: JudgeStageSpanParams): void {
@@ -494,6 +507,47 @@ function recordJudgeStageMetrics(params: JudgeStageSpanParams): void {
     'takt.judge.method': params.entry.method,
     'takt.judge.status': params.entry.status,
   }));
+}
+
+function recordTokenMetrics(
+  params: PhaseSpanParams,
+  usage: ProviderUsageSnapshot | undefined,
+): void {
+  if (!usage || usage.usageMissing) {
+    return;
+  }
+  const attributes = compactAttributes({
+    'takt.run.id': params.runId,
+    'takt.workflow.name': params.workflowName,
+    'takt.step.name': params.step.name,
+    'takt.step.type': getWorkflowStepKind(params.step),
+    'takt.phase.number': params.phase,
+    'takt.phase.name': params.phaseName,
+    ...providerAttributes(params.providerInfo),
+  });
+  const meter = metrics.getMeter('takt.workflow');
+  addPositiveCounter(meter, 'takt.token.input_tokens', usage.inputTokens, TOKEN_INPUT_COUNTER_OPTIONS, attributes);
+  addPositiveCounter(meter, 'takt.token.output_tokens', usage.outputTokens, TOKEN_OUTPUT_COUNTER_OPTIONS, attributes);
+  addPositiveCounter(
+    meter,
+    'takt.token.cached_input_tokens',
+    usage.cachedInputTokens,
+    TOKEN_CACHED_INPUT_COUNTER_OPTIONS,
+    attributes,
+  );
+}
+
+function addPositiveCounter(
+  meter: ReturnType<typeof metrics.getMeter>,
+  name: string,
+  value: number | undefined,
+  options: typeof TOKEN_INPUT_COUNTER_OPTIONS,
+  attributes: Attributes,
+): void {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) {
+    return;
+  }
+  meter.createCounter(name, options).add(value, attributes);
 }
 
 const REDACTED_PLACEHOLDER = '[redacted]';

@@ -151,6 +151,33 @@ describe('loadScenarioFile', () => {
     expect(entries[0].status).toBe('done');
   });
 
+  it('should normalize provider_usage into providerUsage snapshots', () => {
+    const scenario = [
+      {
+        content: 'Usage response',
+        provider_usage: {
+          usage_missing: false,
+          input_tokens: 11,
+          output_tokens: 7,
+          total_tokens: 18,
+          cached_input_tokens: 3,
+        },
+      },
+    ];
+    const filePath = join(tempDir, 'usage-scenario.json');
+    writeFileSync(filePath, JSON.stringify(scenario));
+
+    const entries = loadScenarioFile(filePath);
+
+    expect(entries[0]?.providerUsage).toEqual({
+      usageMissing: false,
+      inputTokens: 11,
+      outputTokens: 7,
+      totalTokens: 18,
+      cachedInputTokens: 3,
+    });
+  });
+
   it('should throw for non-existent file', () => {
     expect(() => loadScenarioFile('/nonexistent/file.json')).toThrow('Scenario file not found');
   });
