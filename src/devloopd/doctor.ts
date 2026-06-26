@@ -540,6 +540,7 @@ async function checkSubscriptionCliSmokeProvider(
   const invocation = buildSubscriptionCliInvocation(provider, CLI_SMOKE_PROMPT, {
     cwd: repoPath,
     commandPath: command.commandPath,
+    timeoutMs,
     agyPrintTimeout: `${Math.max(1, Math.ceil(timeoutMs / 1_000))}s`,
   });
   const result = await runner.exec(invocation.command, invocation.args, {

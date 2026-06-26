@@ -28,6 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `codex-cli` provider runs now have a bounded 15-minute subprocess timeout, so
+  stalled `codex exec` processes fail instead of blocking long-running dev loops
+  indefinitely. `devloopd doctor --smoke-timeout-ms` still controls smoke-check
+  timeouts.
 - `subscription_only` configs can now explicitly allow the `opencode` SDK provider when users want
   OpenCode's own credential store, such as OpenCode Go/Zen, instead of the `opencode-cli` path.
   TAKT-managed `opencode_api_key` config and `TAKT_OPENCODE_API_KEY` remain forbidden in

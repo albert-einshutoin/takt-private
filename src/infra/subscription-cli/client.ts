@@ -21,6 +21,7 @@ export interface SubscriptionCliInvocationOptions {
   permissionMode?: PermissionMode;
   commandPath?: string;
   outputPath?: string;
+  timeoutMs?: number;
   agyPrintTimeout?: string;
 }
 
@@ -54,6 +55,7 @@ type ExecError = Error & {
 const SUBSCRIPTION_CLI_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const SUBSCRIPTION_CLI_FORCE_KILL_DELAY_MS = 1_000;
 const SUBSCRIPTION_CLI_TIMEOUT_GRACE_MS = 1_000;
+const CODEX_CLI_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
 function isSubscriptionCliProvider(provider: ProviderType): provider is SubscriptionCliProviderType {
   return provider === 'codex-cli'
@@ -150,6 +152,9 @@ export function buildSubscriptionCliInvocation(
       args,
       stdin: fullPrompt,
       outputPath: options.outputPath,
+      // Codex CLI does not expose TAKT stream-idle events here, so the child
+      // process itself needs a hard bound to keep dev loops from waiting forever.
+      timeoutMs: options.timeoutMs ?? CODEX_CLI_DEFAULT_TIMEOUT_MS,
     };
   }
 
@@ -488,6 +493,7 @@ export async function callSubscriptionCli(
       permissionMode: options.permissionMode,
       commandPath: options.commandPath,
       outputPath,
+      timeoutMs: options.timeoutMs,
       agyPrintTimeout: options.agyPrintTimeout,
     });
 
