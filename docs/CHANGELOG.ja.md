@@ -28,6 +28,9 @@
 
 ### Fixed
 
+- `codex-cli` provider 実行に 15 分の subprocess timeout を追加しました。`codex exec`
+  が停止しても長時間の dev loop 全体を無期限に止めず、失敗として扱います。
+  `devloopd doctor --smoke-timeout-ms` は引き続き smoke check の timeout を優先します。
 - `subscription_only` 設定で、OpenCode Go/Zen など OpenCode 側の credential store を使いたい場合に
   `opencode` SDK provider を明示的に allowlist へ追加できるようになりました。subscription-only mode では
   TAKT 管理の `opencode_api_key` 設定と `TAKT_OPENCODE_API_KEY` は引き続き禁止され、`opencode` が

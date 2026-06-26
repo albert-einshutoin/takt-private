@@ -82,6 +82,17 @@ describe('subscription-only CLI providers', () => {
     ]);
     expect(invocation.args.join(' ')).not.toContain('dangerously-bypass');
     expect(invocation.stdin).toBe('Review this diff');
+    expect(invocation.timeoutMs).toBe(900_000);
+  });
+
+  it('allows Codex CLI callers to use a shorter subprocess timeout', () => {
+    const invocation = buildSubscriptionCliInvocation('codex-cli', 'Review this diff', {
+      cwd: '/repo',
+      permissionMode: 'readonly',
+      timeoutMs: 10_000,
+    });
+
+    expect(invocation.timeoutMs).toBe(10_000);
   });
 
   it('rejects Codex CLI full permission mode because it would disable local sandboxing', () => {
@@ -127,6 +138,29 @@ describe('subscription-only CLI providers', () => {
         cwd: tempDir,
         commandPath: slowCommand,
         agyPrintTimeout: '10ms',
+      });
+
+      expect(Date.now() - startedAt).toBeLessThan(4_000);
+      expect(response.status).toBe('error');
+      expect(response.error).toContain('subscription CLI timed out');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('kills stalled Codex CLI processes after the configured timeout', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'takt-codex-timeout-'));
+    try {
+      const slowCommand = join(tempDir, 'slow-codex');
+      writeFileSync(slowCommand, '#!/bin/sh\nsleep 5\n', 'utf-8');
+      chmodSync(slowCommand, 0o755);
+
+      const startedAt = Date.now();
+      const response = await callSubscriptionCli('planner', 'Reply Done', {
+        provider: 'codex-cli',
+        cwd: tempDir,
+        commandPath: slowCommand,
+        timeoutMs: 10,
       });
 
       expect(Date.now() - startedAt).toBeLessThan(4_000);
