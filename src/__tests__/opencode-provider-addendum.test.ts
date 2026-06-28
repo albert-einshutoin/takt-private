@@ -22,7 +22,7 @@ const agentRunnerMocks = vi.hoisted(() => {
       if (allowedTools !== undefined && allowedTools.length === 0) {
         return null;
       }
-      return 'OpenCode tool names are lowercase. Do not call run, list, todo, or todo_write.';
+      return 'OpenCode tool names are lowercase. Use bash for shell commands, glob for file discovery, grep for search, read for file reads, edit/write for changes, and todowrite for todos.';
     },
   );
   const providerCall = vi.fn().mockResolvedValue({
@@ -100,7 +100,7 @@ describe('OpenCodeProvider tool naming addendum', () => {
     agentRunnerMocks.getRuntimeInstructionsMock.mockImplementation(
       (allowedTools?: string[]) => {
         if (allowedTools === undefined) {
-          return 'OpenCode tool names are lowercase. Do not call run, list, todo, or todo_write.';
+          return 'OpenCode tool names are lowercase. Use bash for shell commands, glob for file discovery, grep for search, read for file reads, edit/write for changes, and todowrite for todos.';
         }
         if (allowedTools.length === 0) {
           return null;
@@ -134,7 +134,7 @@ describe('OpenCodeProvider tool naming addendum', () => {
     const runtimeInstructions = provider.getRuntimeInstructions();
 
     expect(runtimeInstructions).toContain('OpenCode tool names are lowercase.');
-    expect(runtimeInstructions).toContain('Do not call run, list, todo, or todo_write.');
+    expect(runtimeInstructions).toContain('Use bash for shell commands, glob for file discovery');
   });
 
   it('should return null when allowedTools is empty array (no-tools execution)', () => {
@@ -153,7 +153,7 @@ describe('OpenCodeProvider tool naming addendum', () => {
     const runtimeInstructions = provider.getRuntimeInstructions();
 
     expect(runtimeInstructions).toContain('OpenCode tool names are lowercase.');
-    expect(runtimeInstructions).toContain('Do not call run, list, todo, or todo_write.');
+    expect(runtimeInstructions).toContain('Use bash for shell commands, glob for file discovery');
   });
 
   it('should list only allowed tools when allowedTools is specified', () => {
@@ -259,7 +259,7 @@ describe('OpenCodeProvider tool naming addendum', () => {
       agentRunnerMocks.getRuntimeInstructionsMock.mockImplementation(
         (allowedTools?: string[]) => {
           if (allowedTools === undefined) {
-            return 'OpenCode tool names are lowercase. Do not call run, list, todo, or todo_write.';
+            return 'OpenCode tool names are lowercase. Use bash for shell commands, glob for file discovery, grep for search, read for file reads, edit/write for changes, and todowrite for todos.';
           }
           if (allowedTools.length === 0) {
             return null;

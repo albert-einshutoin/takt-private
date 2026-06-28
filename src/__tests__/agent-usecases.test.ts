@@ -405,9 +405,10 @@ describe('agent-usecases', () => {
     expect(runAgent).toHaveBeenCalledWith('team-leader', expect.any(String), expect.objectContaining({
       allowedTools: [],
       permissionMode: 'readonly',
-      maxTurns: 5,
       outputSchema: { type: 'decomposition', maxTotalParts: 3 },
     }));
+    const [, , callOptions] = vi.mocked(runAgent).mock.calls[0] ?? [];
+    expect(callOptions).not.toHaveProperty('maxTurns');
   });
 
   it('Given inspectTools, When decomposeTask runs, Then it passes them to the parent decomposition call only', async () => {
@@ -575,8 +576,9 @@ describe('agent-usecases', () => {
       allowedTools: [],
       outputSchema: { type: 'more-parts', maxAdditionalParts: 2 },
       permissionMode: 'readonly',
-      maxTurns: 5,
     }));
+    const [, , callOptions] = vi.mocked(runAgent).mock.calls[0] ?? [];
+    expect(callOptions).not.toHaveProperty('maxTurns');
   });
 
   it('requestMoreParts は running/queued 中の予定済み作業をプロンプトに含める', async () => {
