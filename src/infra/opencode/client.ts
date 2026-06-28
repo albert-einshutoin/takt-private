@@ -8,6 +8,8 @@
 import { createOpencode } from '@opencode-ai/sdk/v2';
 import { createServer } from 'node:net';
 import type { AgentResponse } from '../../core/models/index.js';
+import { loadTemplate } from '../../shared/prompts/index.js';
+import { mapsToOpenCodeEditPermission } from './allowedTools.js';
 import { AskUserQuestionDeniedError } from '../../core/workflow/ask-user-question-error.js';
 import { createLogger, getErrorMessage, createStreamDiagnostics, type StreamDiagnostics } from '../../shared/utils/index.js';
 import {
@@ -37,6 +39,24 @@ import { UnavailableToolLoopDetector } from './unavailable-tool-loop.js';
 import { buildRateLimitedResponseFields, containsRateLimitError } from '../rate-limit/detection.js';
 
 export type { OpenCodeCallOptions } from './types.js';
+
+const TAKT_AGENT = 'takt';
+const TAKT_AGENT_REVIEW = 'takt-review';
+const TAKT_AGENT_REPORT = 'takt-report';
+
+function selectTaktAgent(allowedTools: readonly string[] | undefined): string {
+  if (allowedTools !== undefined && allowedTools.length === 0) {
+    return TAKT_AGENT_REPORT;
+  }
+  const hasBash = allowedTools === undefined
+    || allowedTools.some((t) => t.trim().toLowerCase() === 'bash');
+  const hasEdit = allowedTools === undefined
+    || allowedTools.some((t) => mapsToOpenCodeEditPermission(t));
+  if (hasEdit && hasBash) {
+    return TAKT_AGENT;
+  }
+  return TAKT_AGENT_REVIEW;
+}
 
 const log = createLogger('opencode-sdk');
 const OPENCODE_STREAM_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -155,10 +175,32 @@ async function createSharedServer(
         model,
         small_model: model,
         ...(apiKey ? { provider: { opencode: { options: { apiKey } } } } : {}),
+        agent: {
+          [TAKT_AGENT]: {
+            prompt: loadTemplate('opencode_agent_prompt', 'en', {
+              listFilesMethod: 'runs bash ls to list files in the directory',
+            }),
+            tools: { task: false },
+          },
+          [TAKT_AGENT_REVIEW]: {
+            prompt: loadTemplate('opencode_review_agent_prompt', 'en', {
+              listFilesMethod: 'uses read tool on the directory to list files',
+            }),
+            tools: { task: false },
+          },
+          [TAKT_AGENT_REPORT]: {
+            prompt: loadTemplate('opencode_report_agent_prompt', 'en'),
+          },
+        },
       },
       timeout: OPENCODE_SERVER_START_TIMEOUT_MS,
     })
   );
+  log.debug('OpenCode server started with TAKT agents', {
+    agents: [TAKT_AGENT, TAKT_AGENT_REVIEW, TAKT_AGENT_REPORT],
+    model,
+    port,
+  });
 
   const closeServer = (): void => {
     try {
@@ -639,10 +681,16 @@ export class OpenCodeClient {
           });
         }
 
+        const agentName = selectTaktAgent(options.allowedTools);
+        log.debug('Selecting OpenCode agent', {
+          agentName,
+          allowedTools: options.allowedTools,
+        });
         const promptPayload: Record<string, unknown> = {
           sessionID: activeSessionId,
           directory: options.cwd,
           model: parsedModel,
+          ...(agentName !== undefined ? { agent: agentName } : {}),
           ...(options.variant !== undefined ? { variant: options.variant } : {}),
           ...(options.systemPrompt !== undefined ? { system: options.systemPrompt } : {}),
           parts: [{ type: 'text' as const, text: prompt }],
