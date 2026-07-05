@@ -1,0 +1,13 @@
+name: subscription-devloop
+description: Personal subscription-only devloop wrapper around the TAKT default workflow.
+max_steps: 50
+initial_step: takt_default
+steps:
+  - name: takt_default
+    kind: workflow_call
+    call: takt-default
+    rules:
+      - condition: COMPLETE
+        next: COMPLETE
+      - condition: ABORT
+        next: ABORT
