@@ -9,6 +9,10 @@ import type { Command } from 'commander';
 import { clearPersonaSessions, resolveConfigValue } from '../../infra/config/index.js';
 import { getGlobalConfigDir } from '../../infra/config/paths.js';
 import { success, info, error as logError } from '../../shared/ui/index.js';
+import {
+  collectReleaseProvenance,
+  formatReleaseProvenance,
+} from '../../shared/utils/releaseProvenance.js';
 import { runAllTasks, addTask, watchTasks, listTasks, resumeDirectRun } from '../../features/tasks/index.js';
 import {
   ejectBuiltin,
@@ -29,6 +33,17 @@ import { resolveAgentOverrides, resolveWorkflowCliOption } from './helpers.js';
 import { repertoireAddCommand } from '../../commands/repertoire/add.js';
 import { repertoireRemoveCommand } from '../../commands/repertoire/remove.js';
 import { repertoireListCommand } from '../../commands/repertoire/list.js';
+
+program
+  .command('release-info')
+  .description('Print package version, commit SHA, and personal release provenance')
+  .option('--json', 'Print machine-readable JSON')
+  .action((opts: { json?: boolean }) => {
+    const provenance = collectReleaseProvenance();
+    console.log(opts.json === true
+      ? JSON.stringify(provenance, null, 2)
+      : formatReleaseProvenance(provenance));
+  });
 
 program
   .command('run')

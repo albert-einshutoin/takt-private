@@ -81,6 +81,10 @@ import {
 } from '../../devloopd/soakHarness.js';
 import { formatDevloopStartReport, startDevloop } from '../../devloopd/supervisor.js';
 import { getErrorMessage } from '../../shared/utils/error.js';
+import {
+  collectReleaseProvenance,
+  formatReleaseProvenance,
+} from '../../shared/utils/releaseProvenance.js';
 
 const require = createRequire(import.meta.url);
 const { version: cliVersion } = require('../../../package.json') as { version: string };
@@ -139,6 +143,17 @@ program
   .name('devloopd')
   .description('devloopd sidecar utilities for TAKT subscription-only development loops')
   .version(cliVersion);
+
+program
+  .command('release-info')
+  .description('Print package version, commit SHA, and personal release provenance')
+  .option('--json', 'Print machine-readable JSON')
+  .action((options: { json?: boolean }) => {
+    const provenance = collectReleaseProvenance();
+    console.log(options.json === true
+      ? JSON.stringify(provenance, null, 2)
+      : formatReleaseProvenance(provenance));
+  });
 
 program
   .command('doctor')
