@@ -260,6 +260,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd status --cwd /path/to/repo` | Show daemon lifecycle, active runs, and staged ledger state |
 | `devloopd stop --cwd /path/to/repo` | Request a foreground devloopd loop to stop before the next cycle |
 | `devloopd reset --cwd /path/to/repo` | Clear personal daemon metadata and stop-request state |
+| `npm run check:personal` | Run the local personal automation readiness gate |
 | `devloopd soak --cwd /path/to/repo --cycles 5` | Run deterministic no-external-services loop stability checks |
 | `devloopd run --issue N` | Run a GitHub Issue through TAKT after subscription-only checks |
 | `devloopd import-takt-run --latest --issue N` | Import TAKT run metadata into the devloop ledger |
