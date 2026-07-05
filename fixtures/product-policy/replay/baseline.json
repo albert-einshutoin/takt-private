@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "description": "Curated product-policy replay cases. Cases must be sanitized and must set expectedImpact explicitly before becoming active.",
+  "cases": [
+    {
+      "id": "safe-dependency-patch",
+      "expectedImpact": "implementation",
+      "reason": "Patch-level test tooling update with no runtime behavior change.",
+      "input": {
+        "changedPaths": ["package.json", "package-lock.json"],
+        "title": "chore: update dev dependency patch version",
+        "body": "Automation updated a patch-level test dependency without runtime behavior changes.",
+        "diff": "diff --git a/package.json b/package.json\n@@\n+    \"vitest\": \"^3.2.8\""
+      }
+    },
+    {
+      "id": "public-cli-contract",
+      "expectedImpact": "product_policy",
+      "reason": "CLI option changes alter a public compatibility contract.",
+      "input": {
+        "changedPaths": ["src/app/cli/index.ts"],
+        "title": "feat: rename CLI option",
+        "body": "This changes a public command-line contract.",
+        "diff": "diff --git a/src/app/cli/index.ts b/src/app/cli/index.ts\n@@\n+program.option(\"--renamed-output <path>\");"
+      }
+    },
+    {
+      "id": "security-hardening-redaction",
+      "expectedImpact": "implementation",
+      "reason": "Secret redaction hardening does not lower public security posture.",
+      "input": {
+        "changedPaths": ["src/shared/utils/sensitiveText.ts"],
+        "title": "fix: strengthen token redaction",
+        "body": "Security hardening that redacts additional provider token formats.",
+        "diff": "diff --git a/src/shared/utils/sensitiveText.ts b/src/shared/utils/sensitiveText.ts\n@@\n+redactKnownProviderTokens(input);"
+      }
+    },
+    {
+      "id": "security-posture-downgrade",
+      "expectedImpact": "product_policy",
+      "reason": "Allowing unauthenticated access changes security posture and must stay human-reviewed.",
+      "input": {
+        "changedPaths": ["src/middleware/security.ts"],
+        "title": "feat: allow unauthenticated access for trial users",
+        "body": "Security posture tradeoff for onboarding.",
+        "diff": "diff --git a/src/middleware/security.ts b/src/middleware/security.ts\n@@\n+allowUnauthenticatedRequests = true;"
+      }
+    }
+  ]
+}

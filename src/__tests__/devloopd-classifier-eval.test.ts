@@ -35,6 +35,21 @@ describe('devloopd product-policy classifier eval', () => {
     expect(report.falseNegatives).toBe(1);
   });
 
+  it('does not let undefined threshold overrides disable the default replay gate', () => {
+    const report = runProductPolicyClassifierEval({
+      thresholds: {
+        maxFalsePositives: undefined,
+        maxFalseNegatives: undefined,
+      },
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.thresholds).toEqual({
+      maxFalsePositives: 0,
+      maxFalseNegatives: 0,
+    });
+  });
+
   it('builds sanitized live replay fixtures from ledger events', () => {
     const fixtures = buildProductPolicyReplayFixtures([
       {

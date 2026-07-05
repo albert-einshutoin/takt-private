@@ -154,6 +154,15 @@ const DEFAULT_THRESHOLDS: ProductPolicyClassifierEvalThresholds = {
   maxFalseNegatives: 0,
 };
 
+function resolveThresholds(
+  thresholds: Partial<ProductPolicyClassifierEvalThresholds> | undefined,
+): ProductPolicyClassifierEvalThresholds {
+  return {
+    maxFalsePositives: thresholds?.maxFalsePositives ?? DEFAULT_THRESHOLDS.maxFalsePositives,
+    maxFalseNegatives: thresholds?.maxFalseNegatives ?? DEFAULT_THRESHOLDS.maxFalseNegatives,
+  };
+}
+
 function isPolicy(impact: ProductPolicyImpact): boolean {
   return impact === 'product_policy' || impact === 'human_policy';
 }
@@ -222,15 +231,16 @@ export function buildProductPolicyReplayFixtures(
 
 export function runProductPolicyClassifierEval(options: {
   fixtures?: readonly ProductPolicyClassifierEvalFixture[];
+  replayFixtures?: readonly ProductPolicyClassifierEvalFixture[];
   replayEvents?: readonly DevloopLedgerEvent[];
   thresholds?: Partial<ProductPolicyClassifierEvalThresholds>;
 } = {}): ProductPolicyClassifierEvalReport {
   const fixtures = [
     ...(options.fixtures ?? PRODUCT_POLICY_CLASSIFIER_EVAL_FIXTURES),
-    ...PRODUCT_POLICY_CLASSIFIER_REPLAY_FIXTURES,
+    ...(options.replayFixtures ?? PRODUCT_POLICY_CLASSIFIER_REPLAY_FIXTURES),
     ...(options.replayEvents === undefined ? [] : buildProductPolicyReplayFixtures(options.replayEvents)),
   ];
-  const thresholds = { ...DEFAULT_THRESHOLDS, ...options.thresholds };
+  const thresholds = resolveThresholds(options.thresholds);
   const categoryCounts = emptyCategoryCounts();
   const mismatches = fixtures.flatMap((fixture) => {
     const actual = classifyProductPolicyImpact(fixture.input);

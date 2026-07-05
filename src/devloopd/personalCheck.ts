@@ -101,6 +101,12 @@ function buildCommandGates(options: RunPersonalCheckOptions): CommandGateDefinit
       skipped: options.skipMockE2e === true,
       skipMessage: 'mock E2E skipped by operator option',
     },
+    {
+      name: 'product-policy-replay',
+      command: 'node',
+      args: ['dist/app/devloopd/index.js', 'product-policy', 'replay', '--cwd', '.'],
+      required: true,
+    },
     { name: 'audit-high', command: 'npm', args: ['audit', '--audit-level=high'], required: true },
     { name: 'whitespace', command: 'git', args: ['diff', '--check'], required: true },
   ];
