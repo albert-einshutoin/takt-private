@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   scanIssues as defaultScanIssues,
@@ -19,6 +20,11 @@ import {
 import { inspectActiveRuns, type ActiveRunsReport } from './activeRuns.js';
 import { selectIssueCandidates } from './issueSelector.js';
 import type { DevloopCommandRunner } from './commandRunner.js';
+import {
+  clearPersonalDaemonState,
+  inspectPersonalLifecycle,
+  writePersonalDaemonState,
+} from './personalLifecycle.js';
 
 export interface DevloopStartDependencies {
   scanIssues(options: ScanIssuesOptions): Promise<IssueScanReport>;
@@ -68,7 +74,7 @@ export interface DevloopStartCycleReport {
 
 export interface DevloopStartReport extends DevloopStartCycleReport {
   cycles?: DevloopStartCycleReport[];
-  stoppedReason?: 'once' | 'max_cycles' | 'abort_signal' | 'fatal_cycle';
+  stoppedReason?: 'once' | 'max_cycles' | 'abort_signal' | 'fatal_cycle' | 'stop_requested';
 }
 
 const DEFAULT_DEPENDENCIES: DevloopStartDependencies = {
@@ -164,6 +170,32 @@ function aggregateCycleReports(
     cycles,
     stoppedReason,
   };
+}
+
+function makeStopRequestedReport(repoPath: string, cycles: DevloopStartCycleReport[] = []): DevloopStartReport {
+  const lifecycle = inspectPersonalLifecycle({ repoPath });
+  return {
+    passed: true,
+    message: lifecycle.stopRequest
+      ? `stop requested before daemon cycle: ${lifecycle.stopRequest.reason}`
+      : 'stop requested before daemon cycle',
+    selected: [],
+    runs: [],
+    cycles,
+    stoppedReason: 'stop_requested',
+  };
+}
+
+function writeLifecycleStateIfPossible(repoPath: string, cycleCount: number): void {
+  if (existsSync(repoPath)) {
+    writePersonalDaemonState({ repoPath, cycleCount });
+  }
+}
+
+function clearLifecycleStateIfPossible(repoPath: string): void {
+  if (existsSync(repoPath)) {
+    clearPersonalDaemonState({ repoPath });
+  }
 }
 
 function delayForNextCycle(cycle: DevloopStartCycleReport, intervalMilliseconds: number): number {
@@ -300,6 +332,7 @@ async function runDevloopCycle(options: StartDevloopOptions): Promise<DevloopSta
 }
 
 export async function startDevloop(options: StartDevloopOptions = {}): Promise<DevloopStartReport> {
+  const repoPath = resolve(options.repoPath ?? process.cwd());
   const intervalMilliseconds = normalizeIntervalMilliseconds(options.intervalSeconds);
   if (intervalMilliseconds === undefined) {
     return makeReport(`intervalSeconds must be a non-negative number: ${String(options.intervalSeconds)}`);
@@ -316,18 +349,27 @@ export async function startDevloop(options: StartDevloopOptions = {}): Promise<D
 
   const sleep = options.sleep ?? defaultSleep;
   const cycles: DevloopStartCycleReport[] = [];
-  while (options.abortSignal?.aborted !== true) {
-    const cycle = await runDevloopCycle(options);
-    cycles.push(cycle);
+  writeLifecycleStateIfPossible(repoPath, 0);
+  try {
+    while (options.abortSignal?.aborted !== true) {
+      if (existsSync(repoPath) && inspectPersonalLifecycle({ repoPath }).stopRequested) {
+        return makeStopRequestedReport(repoPath, cycles);
+      }
+      const cycle = await runDevloopCycle(options);
+      cycles.push(cycle);
+      writeLifecycleStateIfPossible(repoPath, cycles.length);
 
-    if (isFatalDaemonCycle(cycle)) {
-      return aggregateCycleReports(cycles, 'fatal_cycle');
-    }
-    if (maxCycles !== undefined && cycles.length >= maxCycles) {
-      return aggregateCycleReports(cycles, 'max_cycles');
-    }
+      if (isFatalDaemonCycle(cycle)) {
+        return aggregateCycleReports(cycles, 'fatal_cycle');
+      }
+      if (maxCycles !== undefined && cycles.length >= maxCycles) {
+        return aggregateCycleReports(cycles, 'max_cycles');
+      }
 
-    await sleep(delayForNextCycle(cycle, intervalMilliseconds), options.abortSignal);
+      await sleep(delayForNextCycle(cycle, intervalMilliseconds), options.abortSignal);
+    }
+  } finally {
+    clearLifecycleStateIfPossible(repoPath);
   }
 
   return aggregateCycleReports(cycles, 'abort_signal');

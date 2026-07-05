@@ -27,6 +27,19 @@ import { buildDevloopMemory, formatDevloopMemoryReport } from '../../devloopd/me
 import { formatIssueScanReport, scanIssues } from '../../devloopd/issueScanner.js';
 import { formatMergeGateReport, mergeIfSafe } from '../../devloopd/mergeGate.js';
 import {
+  formatPersonalLifecycleReport,
+  requestPersonalDaemonStop,
+  resetPersonalLifecycle,
+} from '../../devloopd/personalLifecycle.js';
+import {
+  formatPersonalReadinessReport,
+  runPersonalReadiness,
+} from '../../devloopd/personalReadiness.js';
+import {
+  formatPersonalStatusReport,
+  inspectPersonalStatus,
+} from '../../devloopd/personalStatus.js';
+import {
   formatDevloopAutomationStageReport,
   promotePullRequestAutoMerge,
   runDevloopAutomationStage,
@@ -334,6 +347,92 @@ program
     });
 
     console.log(formatDevloopMemoryReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('ready')
+  .description('Check personal local automation readiness before starting devloopd')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--repo <owner/repo>', 'GitHub repository used to verify automation labels')
+  .option('--workflow <path>', 'TAKT workflow path required before starting', '.takt/workflows/subscription-devloop.yaml')
+  .option('--skip-auth', 'Skip GitHub CLI auth status check')
+  .action(async (options: {
+    cwd: string;
+    repo?: string;
+    workflow: string;
+    skipAuth?: boolean;
+  }) => {
+    const report = await runPersonalReadiness({
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+      workflowPath: options.workflow,
+      skipAuth: options.skipAuth === true,
+    });
+
+    console.log(formatPersonalReadinessReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('status')
+  .description('Render personal automation lifecycle, active runs, and staged ledger state')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .option('--stale-after-minutes <count>', 'Minutes without metadata update before active-runs marks a run stale', (value: string) => Number(value))
+  .action((options: {
+    cwd: string;
+    ledger?: string;
+    staleAfterMinutes?: number;
+  }) => {
+    const report = inspectPersonalStatus({
+      repoPath: resolve(options.cwd),
+      ledgerPath: options.ledger,
+      staleAfterMinutes: Number.isFinite(options.staleAfterMinutes) ? options.staleAfterMinutes : undefined,
+    });
+
+    console.log(formatPersonalStatusReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('stop')
+  .description('Request a foreground personal devloopd start loop to stop before its next cycle')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--reason <text>', 'Operator-visible stop reason')
+  .action((options: {
+    cwd: string;
+    reason?: string;
+  }) => {
+    const report = requestPersonalDaemonStop({
+      repoPath: resolve(options.cwd),
+      reason: options.reason,
+    });
+
+    console.log(formatPersonalLifecycleReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('reset')
+  .description('Clear personal devloopd daemon metadata and stop-request state')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .action((options: {
+    cwd: string;
+  }) => {
+    const report = resetPersonalLifecycle({
+      repoPath: resolve(options.cwd),
+    });
+
+    console.log(formatPersonalLifecycleReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }

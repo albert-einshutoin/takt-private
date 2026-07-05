@@ -37,6 +37,10 @@ When `--pr` builds a task from review context, the generated order file starts w
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
+devloopd ready --cwd /path/to/repo --repo owner/repo
+devloopd status --cwd /path/to/repo
+devloopd stop --cwd /path/to/repo --reason "maintenance window"
+devloopd reset --cwd /path/to/repo
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
@@ -65,6 +69,38 @@ devloopd start --repo owner/repo
 | `--skip-auth` | Skip `gh auth status` |
 | `--smoke-cli` | Run bounded real CLI smoke checks for subscription-only providers |
 | `--smoke-timeout-ms <ms>` | Per-provider CLI smoke timeout. Defaults to 60000 |
+
+`devloopd ready` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--repo <owner/repo>` | GitHub repository used to verify required automation labels |
+| `--workflow <path>` | TAKT workflow path required before starting. Defaults to `.takt/workflows/subscription-devloop.yaml` |
+| `--skip-auth` | Skip `gh auth status` |
+
+`devloopd status` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--stale-after-minutes <count>` | Minutes without metadata update before active-runs marks a run stale. Defaults to 180 |
+
+`devloopd stop` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--reason <text>` | Operator-visible reason stored with the stop request |
+
+`devloopd stop` writes a stop-request file that a foreground `devloopd start` loop reads before the next cycle. `devloopd reset` clears only personal daemon metadata and stop-request state; it does not delete TAKT run artifacts or the devloop ledger.
+
+`devloopd reset` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
 
 `devloopd run` options:
 
