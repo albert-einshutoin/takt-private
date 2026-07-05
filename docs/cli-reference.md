@@ -45,6 +45,8 @@ devloopd recover-stale --cwd /path/to/repo --apply
 devloopd status --cwd /path/to/repo
 devloopd stop --cwd /path/to/repo --reason "maintenance window"
 devloopd reset --cwd /path/to/repo
+devloopd soak --cwd /path/to/repo --cycles 5
+npm run test:devloopd:soak
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
@@ -129,6 +131,19 @@ devloopd start --repo owner/repo
 | Option | Description |
 |--------|-------------|
 | `--cwd <path>` | Repository path to inspect |
+
+`devloopd soak` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to exercise. No live GitHub or provider calls are made |
+| `--cycles <count>` | Deterministic scheduler cycles to run. Defaults to 5 |
+| `--state <path>` | Structured staged scheduler state file |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` under `--cwd` |
+| `--report <path>` | JSON soak report path. Defaults next to the generated state file |
+| `--repeated-wait-limit <count>` | Consecutive identical wait/error reasons allowed before failing. Defaults to 3 |
+
+Use `npm run test:devloopd:soak` for the short local regression gate. It runs the deterministic harness plus focused scheduler, CI retry, and merge queue tests. Increase `--cycles` only for local extended soak. Adding live GitHub mutation or real private PR/comment fixtures to soak tests requires human review because it changes the safety and data-handling boundary.
 
 `devloopd run` options:
 
