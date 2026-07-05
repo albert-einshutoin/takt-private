@@ -37,6 +37,10 @@
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
+devloopd ready --cwd /path/to/repo --repo owner/repo
+devloopd status --cwd /path/to/repo
+devloopd stop --cwd /path/to/repo --reason "maintenance window"
+devloopd reset --cwd /path/to/repo
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
@@ -62,6 +66,38 @@ devloopd start --repo owner/repo
 | `--skip-auth` | `gh auth status` をスキップします |
 | `--smoke-cli` | subscription-only provider の bounded な実 CLI smoke check を実行します |
 | `--smoke-timeout-ms <ms>` | provider ごとの CLI smoke timeout。デフォルトは 60000 |
+
+`devloopd ready` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--repo <owner/repo>` | 必須 automation label を検査する GitHub リポジトリ |
+| `--workflow <path>` | start 前に必要な TAKT workflow パス。デフォルトは `.takt/workflows/subscription-devloop.yaml` |
+| `--skip-auth` | `gh auth status` をスキップします |
+
+`devloopd status` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--stale-after-minutes <count>` | active-runs が run を stale とみなすまでの分数。デフォルトは 180 |
+
+`devloopd stop` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--reason <text>` | 停止要求に保存する operator 向け理由 |
+
+`devloopd stop` は stop-request file を書き、foreground の `devloopd start` loop が次 cycle 前に読み取ります。`devloopd reset` は personal daemon metadata と stop-request state だけを消し、TAKT run artifact や devloop ledger は削除しません。
+
+`devloopd reset` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス |
 
 `devloopd run` のオプション:
 
