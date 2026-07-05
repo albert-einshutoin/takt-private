@@ -269,8 +269,10 @@ describe('devloopd doctor', () => {
     const newCleanLog = join(openCodeLogDir, 'opencode.log');
     writeFileSync(oldErrorLog, 'ERROR SQLiteError: NOT NULL constraint failed: session_message.seq\n', 'utf-8');
     writeFileSync(newCleanLog, 'timestamp=2026-06-25T10:20:11.636Z level=INFO message=stream providerID=opencode-go\n', 'utf-8');
-    utimesSync(oldErrorLog, new Date('2026-06-25T10:18:18Z'), new Date('2026-06-25T10:18:18Z'));
-    utimesSync(newCleanLog, new Date('2026-06-25T10:20:11Z'), new Date('2026-06-25T10:20:11Z'));
+    const newCleanLogTime = new Date();
+    const oldErrorLogTime = new Date(newCleanLogTime.getTime() - 60_000);
+    utimesSync(oldErrorLog, oldErrorLogTime, oldErrorLogTime);
+    utimesSync(newCleanLog, newCleanLogTime, newCleanLogTime);
     invalidateAllResolvedConfigCache();
 
     const report = await runDevloopDoctor({

@@ -13,6 +13,10 @@
 !quality-gates/**
 quality-gates/logs/
 
+# Devloop compatibility wrappers (runtime state stays ignored by default)
+!automation/
+!automation/**
+
 # Facets and pieces (version-controlled)
 !workflows/
 !workflows/**

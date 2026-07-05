@@ -3,6 +3,14 @@ import {
   createDefaultDevloopCommandRunner,
   type DevloopCommandRunner,
 } from './commandRunner.js';
+import {
+  evaluateDualLlmApproval,
+  type DualLlmApprovalReport,
+} from './prReviewGate.js';
+import {
+  classifyProductPolicyImpact,
+  type ProductPolicyClassification,
+} from './productPolicyClassifier.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 
 export type DevloopMergeCommandRunner = DevloopCommandRunner;
@@ -26,6 +34,8 @@ export interface MergeGatePolicy {
 export interface MergeGatePrSnapshot {
   url: string;
   number: number;
+  title?: string;
+  body?: string;
   headRefOid: string;
   labels: readonly string[];
   reviewDecision?: string;
@@ -41,6 +51,7 @@ export interface MergeGateEvaluationInput {
   changedPaths: readonly string[];
   checksPassed: boolean;
   expectedHeadSha?: string;
+  dualLlmApproval?: DualLlmApprovalReport;
   policy?: Partial<MergeGatePolicy>;
 }
 
@@ -52,6 +63,8 @@ export interface MergeGateReport {
   reasons: string[];
   mergeCommand?: readonly string[];
   detail?: string;
+  dualLlmApproval?: DualLlmApprovalReport;
+  productPolicyImpact?: ProductPolicyClassification;
 }
 
 export interface MergeIfSafeOptions {
@@ -99,6 +112,8 @@ const DEFAULT_POLICY: MergeGatePolicy = {
 interface GhPrViewResponse {
   url?: string;
   number?: number;
+  title?: string;
+  body?: string;
   headRefOid?: string;
   labels?: Array<{ name?: string }>;
   reviewDecision?: string;
@@ -107,6 +122,11 @@ interface GhPrViewResponse {
   changedFiles?: number;
   additions?: number;
   deletions?: number;
+}
+
+interface GhIssueComment {
+  body?: string;
+  created_at?: string;
 }
 
 function resolvePolicy(policy: Partial<MergeGatePolicy> | undefined): MergeGatePolicy {
@@ -151,11 +171,20 @@ function buildPolicyReasons(input: MergeGateEvaluationInput, policy: MergeGatePo
   humanReview: string[];
   requestChanges: string[];
   checksFailed: string[];
+  productPolicyImpact: ProductPolicyClassification;
 } {
   const policyDeny: string[] = [];
   const humanReview: string[] = [];
+  const dualLlmReviewRequired: string[] = [];
   const requestChanges: string[] = [];
   const checksFailed: string[] = [];
+  const productPolicyImpact = classifyProductPolicyImpact({
+    changedPaths: input.changedPaths,
+    title: input.pr.title,
+    body: input.pr.body,
+  });
+  const dualLlmApproved = input.dualLlmApproval?.approved === true
+    && input.dualLlmApproval.headSha === input.pr.headRefOid;
 
   if (input.expectedHeadSha !== undefined && input.pr.headRefOid !== input.expectedHeadSha) {
     policyDeny.push(`head SHA mismatch: expected ${input.expectedHeadSha}, got ${input.pr.headRefOid}`);
@@ -174,16 +203,22 @@ function buildPolicyReasons(input: MergeGateEvaluationInput, policy: MergeGatePo
   if (input.pr.reviewDecision === 'CHANGES_REQUESTED') {
     requestChanges.push(`review decision is ${input.pr.reviewDecision}`);
   } else if (input.pr.reviewDecision !== undefined && input.pr.reviewDecision !== 'APPROVED') {
-    humanReview.push(`review decision is ${input.pr.reviewDecision}`);
+    if (!dualLlmApproved) {
+      humanReview.push(`review decision is ${input.pr.reviewDecision}`);
+    }
   }
   if (input.pr.mergeStateStatus !== undefined && !['CLEAN', 'HAS_HOOKS', 'UNSTABLE'].includes(input.pr.mergeStateStatus)) {
     humanReview.push(`merge state is ${input.pr.mergeStateStatus}`);
   }
   if (input.pr.changedFiles > policy.maxFilesChanged) {
-    humanReview.push(`changed file count exceeds policy: ${input.pr.changedFiles} > ${policy.maxFilesChanged}`);
+    dualLlmReviewRequired.push(`changed file count exceeds policy: ${input.pr.changedFiles} > ${policy.maxFilesChanged}`);
   }
   if (input.pr.additions + input.pr.deletions > policy.maxLinesChanged) {
-    humanReview.push(`changed line count exceeds policy: ${input.pr.additions + input.pr.deletions} > ${policy.maxLinesChanged}`);
+    dualLlmReviewRequired.push(`changed line count exceeds policy: ${input.pr.additions + input.pr.deletions} > ${policy.maxLinesChanged}`);
+  }
+
+  if (productPolicyImpact.requiresHumanReview) {
+    humanReview.push(`product-policy impact: ${productPolicyImpact.reasons.join('; ')}`);
   }
 
   for (const path of input.changedPaths) {
@@ -193,12 +228,16 @@ function buildPolicyReasons(input: MergeGateEvaluationInput, policy: MergeGatePo
       continue;
     }
     const humanReviewPattern = pathMatches(path, policy.humanReviewPathPatterns);
-    if (humanReviewPattern !== undefined) {
-      humanReview.push(`human review path touched: ${path} (${humanReviewPattern})`);
+    if (humanReviewPattern !== undefined && !productPolicyImpact.requiresHumanReview) {
+      dualLlmReviewRequired.push(`human review path touched: ${path} (${humanReviewPattern})`);
     }
   }
 
-  return { policyDeny, humanReview, requestChanges, checksFailed };
+  if (!dualLlmApproved) {
+    humanReview.push(...dualLlmReviewRequired);
+  }
+
+  return { policyDeny, humanReview, requestChanges, checksFailed, productPolicyImpact };
 }
 
 export function evaluateMergeGate(input: MergeGateEvaluationInput): MergeGateReport {
@@ -212,6 +251,8 @@ export function evaluateMergeGate(input: MergeGateEvaluationInput): MergeGateRep
       pr: input.pr,
       changedPaths: input.changedPaths,
       reasons: reasons.policyDeny,
+      dualLlmApproval: input.dualLlmApproval,
+      productPolicyImpact: reasons.productPolicyImpact,
     };
   }
   if (reasons.checksFailed.length > 0) {
@@ -221,6 +262,8 @@ export function evaluateMergeGate(input: MergeGateEvaluationInput): MergeGateRep
       pr: input.pr,
       changedPaths: input.changedPaths,
       reasons: reasons.checksFailed,
+      dualLlmApproval: input.dualLlmApproval,
+      productPolicyImpact: reasons.productPolicyImpact,
     };
   }
   if (reasons.requestChanges.length > 0) {
@@ -230,6 +273,8 @@ export function evaluateMergeGate(input: MergeGateEvaluationInput): MergeGateRep
       pr: input.pr,
       changedPaths: input.changedPaths,
       reasons: reasons.requestChanges,
+      dualLlmApproval: input.dualLlmApproval,
+      productPolicyImpact: reasons.productPolicyImpact,
     };
   }
   if (reasons.humanReview.length > 0) {
@@ -239,6 +284,8 @@ export function evaluateMergeGate(input: MergeGateEvaluationInput): MergeGateRep
       pr: input.pr,
       changedPaths: input.changedPaths,
       reasons: reasons.humanReview,
+      dualLlmApproval: input.dualLlmApproval,
+      productPolicyImpact: reasons.productPolicyImpact,
     };
   }
 
@@ -248,6 +295,8 @@ export function evaluateMergeGate(input: MergeGateEvaluationInput): MergeGateRep
     pr: input.pr,
     changedPaths: input.changedPaths,
     reasons: [],
+    dualLlmApproval: input.dualLlmApproval,
+    productPolicyImpact: reasons.productPolicyImpact,
   };
 }
 
@@ -260,6 +309,8 @@ function parsePrView(raw: string, prRef: string): MergeGatePrSnapshot {
   return {
     url: parsed.url,
     number: parsed.number,
+    ...(parsed.title !== undefined ? { title: parsed.title } : {}),
+    ...(parsed.body !== undefined ? { body: parsed.body } : {}),
     headRefOid: parsed.headRefOid,
     labels: parsed.labels?.flatMap((label) => label.name ? [label.name] : []) ?? [],
     reviewDecision: parsed.reviewDecision,
@@ -284,7 +335,7 @@ async function loadPrSnapshot(
     'view',
     prRef,
     '--json',
-    'url,number,headRefOid,labels,reviewDecision,mergeStateStatus,isDraft,changedFiles,additions,deletions',
+    'url,number,title,body,headRefOid,labels,reviewDecision,mergeStateStatus,isDraft,changedFiles,additions,deletions',
   ];
   if (repo) {
     args.push('--repo', repo);
@@ -295,6 +346,64 @@ async function loadPrSnapshot(
     throw new Error(`gh pr view failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
   return parsePrView(result.stdout, prRef);
+}
+
+async function loadReviewComments(
+  runner: DevloopMergeCommandRunner,
+  ghCommand: string,
+  prNumber: number,
+  repoPath: string,
+  repo: string | undefined,
+  env: NodeJS.ProcessEnv,
+): Promise<Array<{ body: string; createdAt?: string }>> {
+  const resolvedRepo = repo ?? await resolveLocalRepoName(runner, ghCommand, repoPath, env);
+  if (resolvedRepo === undefined) {
+    return [];
+  }
+  const result = await runner.exec(
+    ghCommand,
+    ['api', `repos/${resolvedRepo}/issues/${prNumber}/comments`, '--paginate'],
+    { cwd: repoPath, env },
+  );
+  if (result.exitCode !== 0) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(result.stdout || '[]') as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.flatMap((item) => {
+      const comment = item as GhIssueComment;
+      if (comment.body === undefined) {
+        return [];
+      }
+      return [{
+        body: comment.body,
+        ...(comment.created_at !== undefined ? { createdAt: comment.created_at } : {}),
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function resolveLocalRepoName(
+  runner: DevloopMergeCommandRunner,
+  ghCommand: string,
+  repoPath: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+  const result = await runner.exec(
+    ghCommand,
+    ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
+    { cwd: repoPath, env },
+  );
+  if (result.exitCode !== 0) {
+    return undefined;
+  }
+  const repo = result.stdout.trim();
+  return repo.length > 0 ? repo : undefined;
 }
 
 async function loadChangedPaths(
@@ -369,11 +478,14 @@ export async function mergeIfSafe(options: MergeIfSafeOptions): Promise<MergeGat
     const pr = await loadPrSnapshot(runner, ghCommand, options.pr, repoPath, options.repo, env);
     const changedPaths = await loadChangedPaths(runner, ghCommand, options.pr, repoPath, options.repo, env);
     const checksPassed = await checkGithubChecks(runner, ghCommand, options.pr, repoPath, options.repo, env);
+    const comments = await loadReviewComments(runner, ghCommand, pr.number, repoPath, options.repo, env);
+    const dualLlmApproval = evaluateDualLlmApproval({ headSha: pr.headRefOid, comments });
     const report = evaluateMergeGate({
       pr,
       changedPaths,
       checksPassed,
       expectedHeadSha: options.expectedHeadSha,
+      dualLlmApproval,
       policy,
     });
 
@@ -418,6 +530,12 @@ export function formatMergeGateReport(report: MergeGateReport): string {
   }
   if (report.mergeCommand) {
     lines.push(`Merge command: ${report.mergeCommand.join(' ')}`);
+  }
+  if (report.productPolicyImpact) {
+    lines.push(`Product policy impact: ${report.productPolicyImpact.impact}`);
+  }
+  if (report.dualLlmApproval) {
+    lines.push(`Dual LLM approval: ${report.dualLlmApproval.approved ? 'approved' : 'not approved'}`);
   }
   if (report.detail) {
     lines.push(`Detail: ${report.detail}`);

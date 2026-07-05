@@ -260,10 +260,13 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd timeline --issue N` | Render imported TAKT run history |
 | `devloopd memory --write` | Write compact project memory from imported TAKT runs |
 | `devloopd merge-if-safe --pr N` | Enable GitHub auto-merge only after mechanical policy gates pass |
+| `devloopd promote-auto-merge --pr N` | Add the merge label only after agy and Codex approve the current head |
 | `devloopd scan-issues --repo owner/repo` | Scan open GitHub Issues and classify mechanical candidates |
 | `devloopd select-issue --repo owner/repo` | Select the safest mechanical issue candidate from a scan |
 | `devloopd active-runs` | Inspect currently running TAKT runs and stale state |
 | `devloopd start --repo owner/repo` | Run the daemon supervisor loop |
+| `devloopd stage pr-review --repo owner/repo` | Run one explicit automation stage |
+| `devloopd staged once --repo owner/repo` | Run staged devloop scheduling from devloopd |
 
 See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 

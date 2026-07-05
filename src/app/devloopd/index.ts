@@ -19,7 +19,19 @@ import {
 import { buildDevloopMemory, formatDevloopMemoryReport } from '../../devloopd/memory.js';
 import { formatIssueScanReport, scanIssues } from '../../devloopd/issueScanner.js';
 import { formatMergeGateReport, mergeIfSafe } from '../../devloopd/mergeGate.js';
+import {
+  formatDevloopAutomationStageReport,
+  promotePullRequestAutoMerge,
+  runDevloopAutomationStage,
+  type DevloopAutomationStage,
+} from '../../devloopd/prAutomation.js';
 import { formatDevloopRunReport, runDevloopIssue } from '../../devloopd/run.js';
+import {
+  DEVLOOP_AUTOMATION_STAGES,
+  formatStagedDevloopReport,
+  runStagedDevloop,
+  type StagedDevloopMode,
+} from '../../devloopd/stagedScheduler.js';
 import { formatDevloopStartReport, startDevloop } from '../../devloopd/supervisor.js';
 import { getErrorMessage } from '../../shared/utils/error.js';
 
@@ -27,6 +39,31 @@ const require = createRequire(import.meta.url);
 const { version: cliVersion } = require('../../../package.json') as { version: string };
 
 const program = new Command();
+
+function parsePositiveNumberOption(value: string | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function parseAutomationStage(value: string): DevloopAutomationStage {
+  if ((DEVLOOP_AUTOMATION_STAGES as readonly string[]).includes(value)) {
+    return value as DevloopAutomationStage;
+  }
+  throw new Error(`unknown devloopd stage: ${value}`);
+}
+
+function parseStagedModeOrStage(value: string | undefined): { mode: StagedDevloopMode; stage?: DevloopAutomationStage } {
+  if (value === undefined || value === 'once') {
+    return { mode: 'once' };
+  }
+  if (value === 'loop') {
+    return { mode: 'loop' };
+  }
+  return { mode: 'once', stage: parseAutomationStage(value) };
+}
 
 program
   .name('devloopd')
@@ -283,6 +320,46 @@ program
   });
 
 program
+  .command('promote-auto-merge')
+  .description('Add the auto-merge label only after current-head agy and Codex approvals')
+  .requiredOption('--pr <number>', 'Pull request number')
+  .option('--repo <owner/repo>', 'GitHub repository')
+  .option('--cwd <path>', 'Repository path to run gh from', process.cwd())
+  .option('--label <name>', 'Auto-merge label to add', 'agent:auto-merge')
+  .option('--dry-run', 'Do not mutate labels')
+  .action(async (options: {
+    pr: string;
+    repo?: string;
+    cwd: string;
+    label: string;
+    dryRun?: boolean;
+  }) => {
+    const report = await promotePullRequestAutoMerge({
+      pr: Number(options.pr),
+      repo: options.repo,
+      repoPath: resolve(options.cwd),
+      label: options.label,
+      dryRun: options.dryRun === true,
+    });
+    console.log(`${report.type}: ${report.status} - ${report.message}`);
+    if (report.dualLlmApproval) {
+      console.log(`Dual LLM approval: ${report.dualLlmApproval.approved ? 'approved' : 'not approved'}`);
+      for (const reason of report.dualLlmApproval.reasons) {
+        console.log(`- ${reason}`);
+      }
+    }
+    if (report.productPolicyImpact) {
+      console.log(`Product policy impact: ${report.productPolicyImpact.impact}`);
+      for (const reason of report.productPolicyImpact.reasons) {
+        console.log(`- ${reason}`);
+      }
+    }
+    if (report.status === 'failed' || report.status === 'blocked') {
+      process.exitCode = 1;
+    }
+  });
+
+program
   .command('scan-issues')
   .description('Scan GitHub issues and apply mechanical devloop backlog policy')
   .option('--repo <owner/repo>', 'GitHub repository')
@@ -325,6 +402,120 @@ program
     });
 
     console.log(formatIssueSelectionReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('stage')
+  .description('Run one explicit devloop automation stage')
+  .argument('<stage>', `Stage: ${DEVLOOP_AUTOMATION_STAGES.join(', ')}`)
+  .option('--repo <owner/repo>', 'GitHub repository')
+  .option('--cwd <path>', 'Repository path to run in', process.cwd())
+  .option('--workflow <path>', 'TAKT workflow name or path', '.takt/workflows/subscription-devloop.yaml')
+  .option('--policy <path>', 'devloopd policy YAML path')
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .option('--skip-auth', 'Skip GitHub CLI auth status check')
+  .option('--no-auto-pr', 'Do not pass --auto-pr to TAKT')
+  .option('--no-quiet', 'Do not pass --quiet to TAKT')
+  .option('--dry-run', 'Do not mutate GitHub state')
+  .action(async (stageValue: string, options: {
+    repo?: string;
+    cwd: string;
+    workflow: string;
+    policy?: string;
+    ledger?: string;
+    skipAuth?: boolean;
+    autoPr?: boolean;
+    quiet?: boolean;
+    dryRun?: boolean;
+  }) => {
+    const report = await runDevloopAutomationStage({
+      stage: parseAutomationStage(stageValue),
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+      workflow: options.workflow,
+      policyPath: options.policy ? resolve(options.policy) : undefined,
+      ledgerPath: options.ledger,
+      skipAuth: options.skipAuth === true,
+      autoPr: options.autoPr !== false,
+      quiet: options.quiet !== false,
+      dryRun: options.dryRun === true,
+    });
+
+    console.log(formatDevloopAutomationStageReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('staged')
+  .description('Run the staged devloop scheduler in devloopd')
+  .argument('[mode-or-stage]', 'once, loop, or an explicit stage', 'once')
+  .option('--repo <owner/repo>', 'GitHub repository')
+  .option('--cwd <path>', 'Repository path to run in', process.cwd())
+  .option('--workflow <path>', 'TAKT workflow name or path', '.takt/workflows/subscription-devloop.yaml')
+  .option('--policy <path>', 'devloopd policy YAML path')
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .option('--skip-auth', 'Skip GitHub CLI auth status check')
+  .option('--no-auto-pr', 'Do not pass --auto-pr to TAKT')
+  .option('--no-quiet', 'Do not pass --quiet to TAKT')
+  .option('--dry-run', 'Do not mutate GitHub state')
+  .option('--state <path>', 'Structured staged scheduler state file')
+  .option('--max-cycles <count>', 'Stop loop after a finite number of scheduler cycles', (value: string) => Number(value))
+  .option('--tick-seconds <count>', 'Seconds between loop ticks', (value: string) => Number(value))
+  .option('--issue-scout-interval <seconds>', 'issue-scout interval')
+  .option('--issue-to-pr-interval <seconds>', 'issue-to-pr interval')
+  .option('--pr-review-interval <seconds>', 'pr-review interval')
+  .option('--review-fix-interval <seconds>', 'review-fix interval')
+  .option('--pr-merge-interval <seconds>', 'pr-merge interval')
+  .action(async (modeOrStage: string, options: {
+    repo?: string;
+    cwd: string;
+    workflow: string;
+    policy?: string;
+    ledger?: string;
+    skipAuth?: boolean;
+    autoPr?: boolean;
+    quiet?: boolean;
+    dryRun?: boolean;
+    state?: string;
+    maxCycles?: number;
+    tickSeconds?: number;
+    issueScoutInterval?: string;
+    issueToPrInterval?: string;
+    prReviewInterval?: string;
+    reviewFixInterval?: string;
+    prMergeInterval?: string;
+  }) => {
+    const parsed = parseStagedModeOrStage(modeOrStage);
+    const report = await runStagedDevloop({
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+      workflow: options.workflow,
+      policyPath: options.policy ? resolve(options.policy) : undefined,
+      ledgerPath: options.ledger,
+      skipAuth: options.skipAuth === true,
+      autoPr: options.autoPr !== false,
+      quiet: options.quiet !== false,
+      dryRun: options.dryRun === true,
+      statePath: options.state ? resolve(options.state) : undefined,
+      maxCycles: options.maxCycles,
+      tickSeconds: options.tickSeconds,
+      mode: parsed.mode,
+      stage: parsed.stage,
+      intervals: {
+        'issue-scout': parsePositiveNumberOption(options.issueScoutInterval),
+        'issue-to-pr': parsePositiveNumberOption(options.issueToPrInterval),
+        'pr-review': parsePositiveNumberOption(options.prReviewInterval),
+        'review-fix': parsePositiveNumberOption(options.reviewFixInterval),
+        'pr-merge': parsePositiveNumberOption(options.prMergeInterval),
+      },
+    });
+
+    console.log(formatStagedDevloopReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }
