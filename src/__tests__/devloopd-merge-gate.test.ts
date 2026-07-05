@@ -212,4 +212,66 @@ describe('devloopd merge gate', () => {
     expect(report.result).toBe('HUMAN_REVIEW_REQUIRED');
     expect(report.reasons).toContain('changed file count exceeds policy: 13 > 12');
   });
+
+  it('allows non-product-policy package metadata changes after dual-LLM approval', () => {
+    const report = evaluateMergeGate({
+      pr: {
+        url: 'https://github.com/owner/repo/pull/12',
+        number: 12,
+        headRefOid: 'abc123',
+        labels: ['agent:auto-merge'],
+        reviewDecision: 'APPROVED',
+        mergeStateStatus: 'CLEAN',
+        isDraft: false,
+        changedFiles: 2,
+        additions: 40,
+        deletions: 20,
+      },
+      changedPaths: ['package.json', 'package-lock.json'],
+      checksPassed: true,
+      dualLlmApproval: {
+        approved: true,
+        headSha: 'abc123',
+        reasons: [],
+        reviewers: {
+          agy: { state: 'approved', headSha: 'abc123' },
+          codex: { state: 'approved', headSha: 'abc123' },
+        },
+      },
+    });
+
+    expect(report.result).toBe('SAFE_TO_MERGE');
+    expect(report.productPolicyImpact?.impact).toBe('implementation');
+  });
+
+  it('does not let dual-LLM approval override product-policy impact', () => {
+    const report = evaluateMergeGate({
+      pr: {
+        url: 'https://github.com/owner/repo/pull/12',
+        number: 12,
+        headRefOid: 'abc123',
+        labels: ['agent:auto-merge'],
+        reviewDecision: 'APPROVED',
+        mergeStateStatus: 'CLEAN',
+        isDraft: false,
+        changedFiles: 1,
+        additions: 12,
+        deletions: 2,
+      },
+      changedPaths: ['src/routes/auth.ts'],
+      checksPassed: true,
+      dualLlmApproval: {
+        approved: true,
+        headSha: 'abc123',
+        reasons: [],
+        reviewers: {
+          agy: { state: 'approved', headSha: 'abc123' },
+          codex: { state: 'approved', headSha: 'abc123' },
+        },
+      },
+    });
+
+    expect(report.result).toBe('HUMAN_REVIEW_REQUIRED');
+    expect(report.reasons.join('\n')).toContain('product-policy impact');
+  });
 });
