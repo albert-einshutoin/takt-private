@@ -5,6 +5,11 @@ import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { formatDevloopDoctorReport, runDevloopDoctor } from '../../devloopd/doctor.js';
 import { formatActiveRunsReport, inspectActiveRuns } from '../../devloopd/activeRuns.js';
+import {
+  formatAutomationStateReport,
+  summarizeAutomationState,
+  type AutomationStateEvent,
+} from '../../devloopd/automationState.js';
 import { formatIssueSelectionReport, selectIssueFromScan } from '../../devloopd/issueSelector.js';
 import { formatIssueScoutReport, runIssueScout, type IssueScoutSourceId } from '../../devloopd/issueScout.js';
 import {
@@ -15,6 +20,7 @@ import {
   formatTimelineReport,
   importTaktRun,
   reconcileTaktRuns,
+  readRawDevloopLedgerEvents,
   renderTimeline,
 } from '../../devloopd/ledger.js';
 import { buildDevloopMemory, formatDevloopMemoryReport } from '../../devloopd/memory.js';
@@ -64,6 +70,12 @@ function parseStagedModeOrStage(value: string | undefined): { mode: StagedDevloo
     return { mode: 'loop' };
   }
   return { mode: 'once', stage: parseAutomationStage(value) };
+}
+
+function isAutomationStateEvent(event: unknown): event is AutomationStateEvent {
+  return typeof event === 'object'
+    && event !== null
+    && (event as { eventType?: unknown }).eventType === 'devloop_automation_state';
 }
 
 program
@@ -205,6 +217,28 @@ program
     if (!report.passed) {
       process.exitCode = 1;
     }
+  });
+
+program
+  .command('automation-state')
+  .description('Render compact staged automation state from the devloop ledger')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .option('--recent <count>', 'Maximum recent events to include', (value: string) => Number(value))
+  .action((options: {
+    cwd: string;
+    ledger?: string;
+    recent?: number;
+  }) => {
+    const repoPath = resolve(options.cwd);
+    const ledgerPath = options.ledger ? resolve(repoPath, options.ledger) : undefined;
+    const events = readRawDevloopLedgerEvents(ledgerPath ?? resolve(repoPath, '.devloop', 'ledger.jsonl'))
+      .flatMap((event): AutomationStateEvent[] => isAutomationStateEvent(event) ? [event] : []);
+    const report = summarizeAutomationState(events, {
+      maxRecentEvents: Number.isFinite(options.recent) ? options.recent : undefined,
+    });
+
+    console.log(formatAutomationStateReport(report));
   });
 
 program
