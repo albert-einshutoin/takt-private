@@ -13,6 +13,7 @@ import { readRunMetaBySlug, type RunMeta } from '../core/workflow/run/run-meta.j
 import { listRecentRuns } from '../features/interactive/runSessionReader.js';
 import { isPathInside } from '../shared/utils/pathBoundary.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import { withDevloopFileLock, writeFileAtomic } from './stateStore.js';
 
 export interface ImportTaktRunOptions {
   repoPath?: string;
@@ -272,9 +273,11 @@ export function appendDevloopLedgerEvent<T extends DevloopLedgerEventBase>(ledge
   if (!ledgerDirExists) {
     chmodSync(ledgerDir, 0o700);
   }
-  const line = `${JSON.stringify(event)}\n`;
-  writeFileSync(ledgerPath, line, { encoding: 'utf-8', flag: 'a', mode: 0o600 });
-  chmodSync(ledgerPath, 0o600);
+  withDevloopFileLock(ledgerPath, () => {
+    const line = `${JSON.stringify(event)}\n`;
+    writeFileSync(ledgerPath, line, { encoding: 'utf-8', flag: 'a', mode: 0o600 });
+    chmodSync(ledgerPath, 0o600);
+  });
 }
 
 function appendLedgerEvent(ledgerPath: string, event: TaktRunImportedEvent): void {
@@ -437,8 +440,7 @@ export function exportDevloopLedger(options: ExportDevloopLedgerOptions): Export
     .filter((event) => options.issue === undefined || event.issueNumber === options.issue)
     .filter((event) => options.runSlug === undefined || event.runSlug === options.runSlug);
   const content = events.map((event) => JSON.stringify(event)).join('\n') + (events.length > 0 ? '\n' : '');
-  mkdirSync(resolve(resolvedOutput.outputPath, '..'), { recursive: true });
-  writeFileSync(resolvedOutput.outputPath, content, { encoding: 'utf-8', flag: 'w' });
+  writeFileAtomic(resolvedOutput.outputPath, content);
 
   return {
     passed: true,

@@ -9,6 +9,7 @@ import {
 interface ExecCall {
   command: string;
   args: readonly string[];
+  timeoutMs?: number;
 }
 
 function makeRunner(options: {
@@ -36,8 +37,8 @@ function makeRunner(options: {
     resolveCommand(command) {
       return command === 'gh' ? '/mock/bin/gh' : undefined;
     },
-    async exec(command, args) {
-      calls.push({ command, args });
+    async exec(command, args, execOptions) {
+      calls.push({ command, args, timeoutMs: execOptions?.timeoutMs });
       if (args[0] === 'pr' && args[1] === 'view') {
         return { exitCode: 0, stdout: JSON.stringify(prView), stderr: '' };
       }
@@ -70,9 +71,10 @@ describe('devloopd merge gate', () => {
     });
 
     expect(report.result).toBe('SAFE_TO_MERGE');
-    expect(runner.calls.at(-1)).toEqual({
+    expect(runner.calls.at(-1)).toMatchObject({
       command: '/mock/bin/gh',
       args: ['pr', 'merge', '12', '--auto', '--squash', '--delete-branch', '--match-head-commit', 'abc123'],
+      timeoutMs: 60_000,
     });
     expect(formatMergeGateReport(report)).toContain('SAFE_TO_MERGE');
   });
@@ -149,6 +151,7 @@ describe('devloopd merge gate', () => {
 
     const checksCall = runner.calls.find((call) => call.args[0] === 'pr' && call.args[1] === 'checks');
     expect(checksCall?.args).toEqual(['pr', 'checks', '12']);
+    expect(checksCall?.timeoutMs).toBe(60_000);
   });
 
   it('requires the auto-merge label', async () => {

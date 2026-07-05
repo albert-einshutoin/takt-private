@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import {
   createDefaultDevloopCommandRunner,
+  githubMetadataExecOptions,
   type DevloopCommandRunner,
 } from './commandRunner.js';
 import { getErrorMessage } from '../shared/utils/index.js';
@@ -273,7 +274,7 @@ export async function scanIssues(options: ScanIssuesOptions = {}): Promise<Issue
     args.push('--repo', options.repo);
   }
 
-  const result = await runner.exec(ghCommand, args, { cwd: repoPath, env });
+  const result = await runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: repoPath, env }));
   if (result.exitCode !== 0) {
     const detail = sanitizeText(result.stderr || result.stdout);
     if (isRateLimitText(detail)) {

@@ -17,6 +17,28 @@ export interface DevloopCommandRunner {
   ): Promise<DevloopCommandResult>;
 }
 
+export const DEFAULT_GITHUB_METADATA_TIMEOUT_MS = 60_000;
+export const GITHUB_METADATA_TIMEOUT_ENV = 'TAKT_LOOP_GH_TIMEOUT_MS';
+
+export function resolveGithubMetadataTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env[GITHUB_METADATA_TIMEOUT_ENV]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_GITHUB_METADATA_TIMEOUT_MS;
+}
+
+export function githubMetadataExecOptions(options: {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  stdin?: string;
+  timeoutMs?: number;
+}): { cwd: string; env: NodeJS.ProcessEnv; stdin?: string; timeoutMs: number } {
+  return {
+    cwd: options.cwd,
+    env: options.env,
+    ...(options.stdin !== undefined ? { stdin: options.stdin } : {}),
+    timeoutMs: options.timeoutMs ?? resolveGithubMetadataTimeoutMs(options.env),
+  };
+}
+
 function canExecute(filePath: string): boolean {
   try {
     accessSync(filePath, constants.X_OK);
