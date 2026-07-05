@@ -37,6 +37,8 @@
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
+devloopd onboard-repo --cwd /path/to/repo --repo owner/repo
+devloopd onboard-repo --cwd /path/to/repo --repo owner/repo --apply
 devloopd ready --cwd /path/to/repo --repo owner/repo
 devloopd status --cwd /path/to/repo
 devloopd stop --cwd /path/to/repo --reason "maintenance window"
@@ -66,6 +68,17 @@ devloopd start --repo owner/repo
 | `--skip-auth` | `gh auth status` をスキップします |
 | `--smoke-cli` | subscription-only provider の bounded な実 CLI smoke check を実行します |
 | `--smoke-timeout-ms <ms>` | provider ごとの CLI smoke timeout。デフォルトは 60000 |
+
+`devloopd onboard-repo` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 準備するリポジトリパス |
+| `--repo <owner/repo>` | automation label を検査または作成する GitHub リポジトリ |
+| `--apply` | file と label の変更を適用します。指定しない場合は dry-run report だけを表示します |
+| `--force` | Git repository 検出失敗時の続行と template file 上書きを許可します |
+
+`devloopd onboard-repo` は `--force` がない限り既存 `.takt` file を保持します。`--apply` mode のときだけ personal subscription-only config、devloop policy、default workflow wrapper、ignore rule、必須 `agent:*` label を作成します。
 
 `devloopd ready` のオプション:
 

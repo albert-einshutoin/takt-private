@@ -253,6 +253,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `takt workflow doctor` | Validate workflow definitions |
 | `takt repertoire add` | Install a repertoire package from GitHub |
 | `devloopd doctor --subscription-only` | Validate local subscription-only provider readiness |
+| `devloopd onboard-repo --cwd /path/to/repo --repo owner/repo` | Dry-run personal automation onboarding for a target repo |
 | `devloopd ready --cwd /path/to/repo --repo owner/repo` | Check personal automation readiness before starting a loop |
 | `devloopd status --cwd /path/to/repo` | Show daemon lifecycle, active runs, and staged ledger state |
 | `devloopd stop --cwd /path/to/repo` | Request a foreground devloopd loop to stop before the next cycle |

@@ -37,6 +37,8 @@ When `--pr` builds a task from review context, the generated order file starts w
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
+devloopd onboard-repo --cwd /path/to/repo --repo owner/repo
+devloopd onboard-repo --cwd /path/to/repo --repo owner/repo --apply
 devloopd ready --cwd /path/to/repo --repo owner/repo
 devloopd status --cwd /path/to/repo
 devloopd stop --cwd /path/to/repo --reason "maintenance window"
@@ -69,6 +71,17 @@ devloopd start --repo owner/repo
 | `--skip-auth` | Skip `gh auth status` |
 | `--smoke-cli` | Run bounded real CLI smoke checks for subscription-only providers |
 | `--smoke-timeout-ms <ms>` | Per-provider CLI smoke timeout. Defaults to 60000 |
+
+`devloopd onboard-repo` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to prepare |
+| `--repo <owner/repo>` | GitHub repository used to verify or create automation labels |
+| `--apply` | Apply file and label changes. Without this, only print a dry-run report |
+| `--force` | Allow onboarding outside a detected Git repository and overwrite template files |
+
+`devloopd onboard-repo` preserves existing `.takt` files unless `--force` is provided. It creates the personal subscription-only config, devloop policy, default workflow wrapper, ignore rules, and required `agent:*` labels only in `--apply` mode.
 
 `devloopd ready` options:
 

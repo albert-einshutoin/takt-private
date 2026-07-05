@@ -27,6 +27,10 @@ import { buildDevloopMemory, formatDevloopMemoryReport } from '../../devloopd/me
 import { formatIssueScanReport, scanIssues } from '../../devloopd/issueScanner.js';
 import { formatMergeGateReport, mergeIfSafe } from '../../devloopd/mergeGate.js';
 import {
+  formatPersonalOnboardingReport,
+  runPersonalOnboarding,
+} from '../../devloopd/personalOnboarding.js';
+import {
   formatPersonalLifecycleReport,
   requestPersonalDaemonStop,
   resetPersonalLifecycle,
@@ -347,6 +351,32 @@ program
     });
 
     console.log(formatDevloopMemoryReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('onboard-repo')
+  .description('Prepare a target repository for safe personal devloop automation')
+  .option('--cwd <path>', 'Repository path to prepare', process.cwd())
+  .option('--repo <owner/repo>', 'GitHub repository used to verify or create automation labels')
+  .option('--apply', 'Apply file and label changes. Without this, only print a dry-run report')
+  .option('--force', 'Allow onboarding outside a detected Git repository and overwrite template files')
+  .action(async (options: {
+    cwd: string;
+    repo?: string;
+    apply?: boolean;
+    force?: boolean;
+  }) => {
+    const report = await runPersonalOnboarding({
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+      apply: options.apply === true,
+      force: options.force === true,
+    });
+
+    console.log(formatPersonalOnboardingReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }
