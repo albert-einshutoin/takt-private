@@ -3,7 +3,7 @@ import {
   createDefaultDevloopCommandRunner,
   type DevloopCommandRunner,
 } from './commandRunner.js';
-import { buildAutomationStateEvent, type AutomationStateStatus } from './automationState.js';
+import { buildAutomationStateEvent, type AutomationStateStage, type AutomationStateStatus } from './automationState.js';
 import { runCiAutoRepairForPullRequest } from './ciRepair.js';
 import { runIssueScout } from './issueScout.js';
 import {
@@ -20,7 +20,13 @@ import {
 } from './prReviewGate.js';
 import { classifyProductPolicyImpact, type ProductPolicyClassification } from './productPolicyClassifier.js';
 import { mergeIfSafe } from './mergeGate.js';
-import { planMergeQueue, type MergeQueueDecision, type MergeQueuePullRequest } from './mergeQueue.js';
+import {
+  buildMergeQueueRepairPrompt,
+  planMergeQueue,
+  type MergeQueueDecision,
+  type MergeQueueEvictionContext,
+  type MergeQueuePullRequest,
+} from './mergeQueue.js';
 import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
@@ -119,6 +125,7 @@ interface GhPrViewForGate {
 const AUTOMATION_BRANCH_PATTERN = /^(takt|automation)\//u;
 const DEFAULT_AUTO_MERGE_LABEL = 'agent:auto-merge';
 const BLOCKED_LABEL = 'agent:blocked';
+const MAX_MERGE_QUEUE_DIFF_CONTEXT_CHARS = 8_000;
 
 function sanitizeDetail(text: string): string {
   return sanitizeSensitiveText(text).trim();
@@ -282,6 +289,37 @@ async function loadChangedPaths(options: {
     throw new Error(`gh pr diff failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
   return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+function truncateContext(text: string, maxLength: number): string {
+  const sanitized = sanitizeDetail(text);
+  if (sanitized.length <= maxLength) {
+    return sanitized;
+  }
+  return `${sanitized.slice(0, maxLength - 3)}...`;
+}
+
+async function loadDiffContext(options: {
+  pr: number;
+  repoPath: string;
+  repo?: string;
+  env: NodeJS.ProcessEnv;
+  runner: DevloopCommandRunner;
+}): Promise<string | undefined> {
+  const ghCommand = options.runner.resolveCommand('gh', options.env);
+  if (ghCommand === undefined) {
+    return undefined;
+  }
+
+  const args = ['pr', 'diff', String(options.pr), '--patch'];
+  if (options.repo !== undefined) {
+    args.push('--repo', options.repo);
+  }
+  const result = await options.runner.exec(ghCommand, args, { cwd: options.repoPath, env: options.env });
+  if (result.exitCode !== 0 || result.stdout.trim().length === 0) {
+    return undefined;
+  }
+  return truncateContext(result.stdout, MAX_MERGE_QUEUE_DIFF_CONTEXT_CHARS);
 }
 
 async function loadReviewComments(options: {
@@ -717,6 +755,84 @@ function makeStageReport(stage: DevloopAutomationStage, actions: DevloopAutomati
   };
 }
 
+function stageForAutomationState(stage: DevloopAutomationStage): AutomationStateStage {
+  if (stage === 'issue-scout') return 'scout';
+  if (stage === 'issue-to-pr') return 'run';
+  if (stage === 'pr-review') return 'review';
+  if (stage === 'review-fix') return 'fix';
+  return 'merge_queue';
+}
+
+function stageForAction(stage: DevloopAutomationStage, action: DevloopAutomationAction): AutomationStateStage {
+  if (action.productPolicyImpact?.requiresHumanReview === true || action.stopRule === 'Unsafe or too broad') {
+    return 'human_escalation';
+  }
+  if (action.type === 'ci-fix') return 'ci';
+  if (action.type === 'review-fix') return 'fix';
+  if (action.type === 'merge-if-safe' || action.type === 'merge-queue') return 'merge_queue';
+  if (action.type === 'agy-review' || action.type === 'codex-review' || action.type === 'promote-auto-merge') return 'review';
+  if (action.type === 'issue-scout') return 'scout';
+  if (action.type === 'issue-to-pr') return 'run';
+  return stageForAutomationState(stage);
+}
+
+function nextActionsForAction(action: DevloopAutomationAction): string[] {
+  if (action.productPolicyImpact?.requiresHumanReview === true || action.stopRule === 'Unsafe or too broad') {
+    return ['request human review for product-policy impact'];
+  }
+  if (action.status === 'passed') {
+    return action.pr === undefined ? ['continue staged automation'] : [`continue staged automation for PR #${action.pr}`];
+  }
+  if (action.status === 'skipped') {
+    return action.pr === undefined ? ['wait for the next eligible automation stage'] : [`wait before retrying PR #${action.pr}`];
+  }
+  return action.pr === undefined ? ['inspect blocked automation stage'] : [`inspect PR #${action.pr}`];
+}
+
+function appendStageAutomationStateEvents(options: {
+  repoPath: string;
+  ledgerPath?: string;
+  report: DevloopAutomationStageReport;
+}): void {
+  const ledgerPath = resolveDevloopLedgerPath(options.repoPath, options.ledgerPath);
+  if (options.report.actions.length === 0) {
+    appendDevloopLedgerEvent(ledgerPath, buildAutomationStateEvent({
+      stage: stageForAutomationState(options.report.stage),
+      status: 'skipped',
+      summary: options.report.message,
+      nextActions: ['wait for the next eligible automation stage'],
+    }));
+    return;
+  }
+
+  for (const action of options.report.actions) {
+    if (action.type === 'merge-queue') {
+      continue;
+    }
+    appendDevloopLedgerEvent(ledgerPath, buildAutomationStateEvent({
+      stage: stageForAction(options.report.stage, action),
+      status: action.status,
+      summary: action.message,
+      ...(action.pr !== undefined ? { prNumber: action.pr } : {}),
+      ...(action.stopRule !== undefined ? { stopRule: action.stopRule } : {}),
+      nextActions: nextActionsForAction(action),
+      artifacts: [
+        ...(action.productPolicyImpact !== undefined ? action.productPolicyImpact.reasons : []),
+        ...(action.dualLlmApproval !== undefined ? action.dualLlmApproval.reasons : []),
+      ],
+    }));
+  }
+}
+
+function recordStageReport(
+  repoPath: string,
+  ledgerPath: string | undefined,
+  report: DevloopAutomationStageReport,
+): DevloopAutomationStageReport {
+  appendStageAutomationStateEvents({ repoPath, ledgerPath, report });
+  return report;
+}
+
 function queueDecisionStatus(decision: MergeQueueDecision): AutomationStateStatus {
   if (decision.status === 'ready') return 'passed';
   if (decision.status === 'serialized') return 'skipped';
@@ -740,11 +856,14 @@ function appendMergeQueueStateEvents(options: {
   repoPath: string;
   ledgerPath?: string;
   decisions: readonly MergeQueueDecision[];
+  evictions: readonly MergeQueueEvictionContext[];
 }): void {
   const ledgerPath = resolveDevloopLedgerPath(options.repoPath, options.ledgerPath);
+  const evictionsByPr = new Map(options.evictions.map((eviction) => [eviction.prNumber, eviction]));
   for (const decision of options.decisions) {
+    const eviction = evictionsByPr.get(decision.prNumber);
     appendDevloopLedgerEvent(ledgerPath, buildAutomationStateEvent({
-      stage: 'merge_queue',
+      stage: eviction === undefined ? 'merge_queue' : 'eviction',
       status: queueDecisionStatus(decision),
       summary: decision.reasons.join('; ') || `PR #${decision.prNumber} ${decision.status}`,
       prNumber: decision.prNumber,
@@ -753,7 +872,13 @@ function appendMergeQueueStateEvents(options: {
         ? [`merge PR #${decision.prNumber}`]
         : decision.status === 'serialized'
           ? [`wait for overlapping PR(s) before PR #${decision.prNumber}`]
-          : [`inspect PR #${decision.prNumber} before merge`],
+          : eviction === undefined
+            ? [`inspect PR #${decision.prNumber} before merge`]
+            : [`repair evicted PR #${decision.prNumber} with captured merge-queue context`],
+      artifacts: eviction === undefined ? [] : [
+        buildMergeQueueRepairPrompt(eviction),
+        ...(eviction.diffContext !== undefined ? [eviction.diffContext] : []),
+      ],
     }));
   }
 }
@@ -773,6 +898,13 @@ async function buildMergeQueuePullRequest(options: {
     runner: options.runner,
   });
   const changedPaths = await loadChangedPaths({
+    pr: options.pr.number,
+    repoPath: options.repoPath,
+    repo: options.repo,
+    env: options.env,
+    runner: options.runner,
+  });
+  const diffContext = await loadDiffContext({
     pr: options.pr.number,
     repoPath: options.repoPath,
     repo: options.repo,
@@ -811,6 +943,7 @@ async function buildMergeQueuePullRequest(options: {
     productPolicyRequiresHumanReview: productPolicyImpact.requiresHumanReview,
     mergeStateStatus: metadata.mergeStateStatus,
     isDraft: options.pr.isDraft,
+    ...(diffContext !== undefined ? { diffContext } : {}),
   };
 }
 
@@ -828,12 +961,12 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
       env,
       runner,
     });
-    return makeStageReport(options.stage, [{
+    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [{
       type: 'issue-scout',
       status: scout.passed ? 'passed' : 'failed',
       message: scout.message,
       ...(scout.selected.length === 0 ? { stopRule: 'Duplicate or already covered' as const } : {}),
-    }], { passed: scout.passed });
+    }], { passed: scout.passed }));
   }
 
   if (options.stage === 'issue-to-pr') {
@@ -857,7 +990,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
       message: startReport.message,
       ...(startReport.message.includes('active run limit') ? { stopRule: 'active run limit' as const } : {}),
     };
-    return makeStageReport(options.stage, [action], { passed: startReport.passed, startReport });
+    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [action], { passed: startReport.passed, startReport }));
   }
 
   const prs = await listAutomationPullRequests({ repoPath, repo: options.repo, env, runner });
@@ -885,7 +1018,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         runner,
       }))),
     ];
-    return makeStageReport(options.stage, actions, { duplicateIssueCoverage });
+    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, actions, { duplicateIssueCoverage }));
   }
 
   if (options.stage === 'review-fix') {
@@ -908,10 +1041,10 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         ...(report.productPolicyImpact !== undefined ? { productPolicyImpact: report.productPolicyImpact } : {}),
       };
     }));
-    return makeStageReport(options.stage, [
+    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [
       ...duplicateActions,
       ...reviewFixActions,
-    ], { duplicateIssueCoverage });
+    ], { duplicateIssueCoverage }));
   }
 
   const promotionResults = await Promise.all(nonDuplicatePrs.map(async (pr) => ({
@@ -963,6 +1096,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
     repoPath,
     ledgerPath: options.ledgerPath,
     decisions: queuePlan.decisions,
+    evictions: queuePlan.evictions,
   });
   const readyPrNumbers = new Set(queuePlan.decisions
     .filter((decision) => decision.status === 'ready')
@@ -1007,7 +1141,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
     ...queueActions,
     ...mergeActions,
   ];
-  return makeStageReport(options.stage, actions, { duplicateIssueCoverage });
+  return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, actions, { duplicateIssueCoverage }));
 }
 
 export function formatDevloopAutomationStageReport(report: DevloopAutomationStageReport): string {

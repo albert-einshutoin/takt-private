@@ -123,4 +123,65 @@ describe('devloopd staged scheduler', () => {
     expect(calls).toEqual(['pr-review']);
     expect(report.stageReports.map((stage) => stage.stage)).toEqual(['pr-review']);
   });
+
+  it('stops before running stages when persisted safety budgets are exhausted', async () => {
+    const statePath = makeTempStatePath();
+    const calls: DevloopAutomationStage[] = [];
+
+    await import('node:fs').then(({ writeFileSync }) => writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      lastRunAt: {},
+      safety: {
+        startedAt: '2026-07-05T00:00:00.000Z',
+        runs: 2,
+        consecutiveNoopSignals: 2,
+      },
+    }), 'utf-8'));
+
+    const report = await runStagedDevloop({
+      repoPath: '/repo',
+      mode: 'once',
+      statePath,
+      safetyBudgets: { maxConsecutiveNoopSignals: 2 },
+      now: () => new Date('2026-07-05T00:05:00.000Z'),
+      dependencies: {
+        runStage: async (options) => {
+          calls.push(options.stage);
+          return { passed: true, stage: options.stage, message: `ran ${options.stage}`, actions: [] };
+        },
+      },
+    });
+
+    expect(report.passed).toBe(false);
+    expect(report.safetyReport?.stopRule).toBe('completion signal');
+    expect(report.message).toContain('automation safety stopped');
+    expect(calls).toEqual([]);
+  });
+
+  it('persists recursive safety counters after no-op stages', async () => {
+    const statePath = makeTempStatePath();
+
+    const report = await runStagedDevloop({
+      repoPath: '/repo',
+      stage: 'issue-scout',
+      statePath,
+      safetyBudgets: { maxConsecutiveNoopSignals: 3 },
+      now: () => new Date('2026-07-05T00:00:00.000Z'),
+      dependencies: {
+        runStage: async (options) => ({
+          passed: true,
+          stage: options.stage,
+          message: `ran ${options.stage}`,
+          actions: [],
+        }),
+      },
+    });
+
+    const state = JSON.parse(readFileSync(statePath, 'utf-8')) as {
+      safety?: { runs?: number; consecutiveNoopSignals?: number };
+    };
+    expect(report.passed).toBe(true);
+    expect(state.safety?.runs).toBe(1);
+    expect(state.safety?.consecutiveNoopSignals).toBe(1);
+  });
 });
