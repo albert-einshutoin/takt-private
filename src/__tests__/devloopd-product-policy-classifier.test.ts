@@ -8,6 +8,7 @@ describe('devloopd product-policy classifier', () => {
     });
 
     expect(result.impact).toBe('mechanical');
+    expect(result.policyCategory).toBe('mechanical');
     expect(result.requiresHumanReview).toBe(false);
   });
 
@@ -27,6 +28,7 @@ describe('devloopd product-policy classifier', () => {
     });
 
     expect(result.impact).toBe('implementation');
+    expect(result.policyCategory).toBe('auto_recursive');
     expect(result.requiresHumanReview).toBe(false);
     expect(result.evidencePaths).toContain('package.json');
   });
@@ -37,6 +39,7 @@ describe('devloopd product-policy classifier', () => {
     });
 
     expect(result.impact).toBe('product_policy');
+    expect(result.policyCategory).toBe('product_policy');
     expect(result.requiresHumanReview).toBe(true);
     expect(result.evidencePaths).toContain('src/routes/auth.ts');
   });
@@ -48,6 +51,17 @@ describe('devloopd product-policy classifier', () => {
 
     expect(result.impact).toBe('product_policy');
     expect(result.reasons.join('\n')).toContain('migration');
+  });
+
+  it('classifies automation policy taxonomy changes as human policy', () => {
+    const result = classifyProductPolicyImpact({
+      changedPaths: ['docs/devloopd.md'],
+      title: 'Define lane taxonomy and human review boundary',
+    });
+
+    expect(result.impact).toBe('human_policy');
+    expect(result.policyCategory).toBe('human_policy');
+    expect(result.requiresHumanReview).toBe(true);
   });
 
   it('classifies public API contract changes as product policy', () => {

@@ -3,6 +3,8 @@ import {
   createDefaultDevloopCommandRunner,
   type DevloopCommandRunner,
 } from './commandRunner.js';
+import { runCiAutoRepairForPullRequest } from './ciRepair.js';
+import { runIssueScout } from './issueScout.js';
 import {
   evaluateDualLlmApproval,
   formatReviewGateComment,
@@ -13,6 +15,7 @@ import {
 } from './prReviewGate.js';
 import { classifyProductPolicyImpact, type ProductPolicyClassification } from './productPolicyClassifier.js';
 import { mergeIfSafe } from './mergeGate.js';
+import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 
@@ -40,7 +43,7 @@ export interface DevloopAutomationAction {
   status: 'passed' | 'skipped' | 'blocked' | 'failed';
   message: string;
   pr?: number;
-  stopRule?: 'active run limit' | 'Duplicate or already covered' | 'Mergeable: NO';
+  stopRule?: 'active run limit' | 'Duplicate or already covered' | 'Mergeable: NO' | 'Unsafe or too broad' | 'checks failed' | 'attempt budget exhausted';
   dualLlmApproval?: DualLlmApprovalReport;
   productPolicyImpact?: ProductPolicyClassification;
 }
@@ -704,11 +707,20 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
 
   if (options.stage === 'issue-scout') {
+    const scout = await runIssueScout({
+      repoPath,
+      repo: options.repo,
+      ledgerPath: options.ledgerPath,
+      dryRun: options.dryRun,
+      env,
+      runner,
+    });
     return makeStageReport(options.stage, [{
       type: 'issue-scout',
-      status: 'skipped',
-      message: 'issue scouting is intentionally external; configure a product issue generator before dispatching this stage',
-    }]);
+      status: scout.passed ? 'passed' : 'failed',
+      message: scout.message,
+      ...(scout.selected.length === 0 ? { stopRule: 'Duplicate or already covered' as const } : {}),
+    }], { passed: scout.passed });
   }
 
   if (options.stage === 'issue-to-pr') {
@@ -765,24 +777,22 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
 
   if (options.stage === 'review-fix') {
     const reviewFixActions = await Promise.all(nonDuplicatePrs.map(async (pr): Promise<DevloopAutomationAction> => {
-      const metadata = await loadPrView({ pr: pr.number, repoPath, repo: options.repo, env, runner });
-      const headSha = metadata.headRefOid ?? pr.headRefOid;
-      const comments = await loadReviewComments({ pr: pr.number, repoPath, repo: options.repo, env, runner });
-      const blocker = findCurrentHeadBlockingReview({ headSha, comments });
-      if (blocker === undefined) {
-        return {
-          type: 'review-fix',
-          status: 'skipped',
-          pr: pr.number,
-          message: 'no current-head Mergeable: NO review found',
-        };
-      }
+      const report = await runReviewFixForPullRequest({
+        pr: pr.number,
+        repoPath,
+        repo: options.repo,
+        ledgerPath: options.ledgerPath,
+        dryRun: options.dryRun,
+        env,
+        runner,
+      });
       return {
         type: 'review-fix',
-        status: 'skipped',
+        status: report.status,
         pr: pr.number,
-        stopRule: 'Mergeable: NO',
-        message: `${blocker.reviewer} blocked current head ${headSha}; automatic fix dispatch is intentionally explicit`,
+        message: report.message,
+        ...(report.stopRule !== undefined ? { stopRule: report.stopRule } : {}),
+        ...(report.productPolicyImpact !== undefined ? { productPolicyImpact: report.productPolicyImpact } : {}),
       };
     }));
     return makeStageReport(options.stage, [
@@ -804,6 +814,25 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         runner,
       });
       if (promotion.status !== 'passed') {
+        if (promotion.status === 'skipped' && /checks/i.test(promotion.message)) {
+          const repair = await runCiAutoRepairForPullRequest({
+            pr: pr.number,
+            repoPath,
+            repo: options.repo,
+            ledgerPath: options.ledgerPath,
+            dryRun: options.dryRun,
+            env,
+            runner,
+          });
+          return {
+            type: 'ci-fix',
+            status: repair.status,
+            pr: pr.number,
+            message: repair.message,
+            ...(repair.stopRule !== undefined ? { stopRule: repair.stopRule } : {}),
+            ...(repair.productPolicyImpact !== undefined ? { productPolicyImpact: repair.productPolicyImpact } : {}),
+          };
+        }
         return promotion;
       }
       if (options.dryRun === true) {

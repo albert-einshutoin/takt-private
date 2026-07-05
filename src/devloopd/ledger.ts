@@ -46,6 +46,15 @@ export interface TaktRunImportedEvent {
   artifacts: DevloopArtifactRecord[];
 }
 
+export interface DevloopLedgerEventBase {
+  version: 1;
+  eventId: string;
+  eventType: string;
+  timestamp: string;
+}
+
+export type DevloopLedgerEvent = DevloopLedgerEventBase & Record<string, unknown>;
+
 export interface ImportTaktRunReport {
   passed: boolean;
   message: string;
@@ -256,7 +265,7 @@ function buildImportEvent(
   };
 }
 
-function appendLedgerEvent(ledgerPath: string, event: TaktRunImportedEvent): void {
+export function appendDevloopLedgerEvent<T extends DevloopLedgerEventBase>(ledgerPath: string, event: T): void {
   const ledgerDir = resolve(ledgerPath, '..');
   const ledgerDirExists = existsSync(ledgerDir);
   mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
@@ -268,7 +277,25 @@ function appendLedgerEvent(ledgerPath: string, event: TaktRunImportedEvent): voi
   chmodSync(ledgerPath, 0o600);
 }
 
-export function readDevloopLedgerEvents(ledgerPath: string): TaktRunImportedEvent[] {
+function appendLedgerEvent(ledgerPath: string, event: TaktRunImportedEvent): void {
+  appendDevloopLedgerEvent(ledgerPath, event as unknown as DevloopLedgerEvent);
+}
+
+export function buildDevloopLedgerEvent<T extends Record<string, unknown>>(
+  eventType: string,
+  payload: T,
+  now: Date = new Date(),
+): DevloopLedgerEventBase & T {
+  return {
+    version: 1,
+    eventId: `evt_${randomUUID()}`,
+    eventType,
+    timestamp: now.toISOString(),
+    ...payload,
+  };
+}
+
+export function readRawDevloopLedgerEvents(ledgerPath: string): DevloopLedgerEvent[] {
   if (!existsSync(ledgerPath)) {
     return [];
   }
@@ -279,12 +306,17 @@ export function readDevloopLedgerEvents(ledgerPath: string): TaktRunImportedEven
     .filter((line) => line.length > 0)
     .flatMap((line) => {
       try {
-        const event = JSON.parse(line) as TaktRunImportedEvent;
-        return event.eventType === 'takt_run_imported' ? [event] : [];
+        const event = JSON.parse(line) as DevloopLedgerEvent;
+        return typeof event.eventType === 'string' ? [event] : [];
       } catch {
         return [];
       }
     });
+}
+
+export function readDevloopLedgerEvents(ledgerPath: string): TaktRunImportedEvent[] {
+  return readRawDevloopLedgerEvents(ledgerPath)
+    .flatMap((event) => event.eventType === 'takt_run_imported' ? [event as unknown as TaktRunImportedEvent] : []);
 }
 
 export function importTaktRun(options: ImportTaktRunOptions): ImportTaktRunReport {

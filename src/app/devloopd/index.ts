@@ -6,6 +6,7 @@ import { Command } from 'commander';
 import { formatDevloopDoctorReport, runDevloopDoctor } from '../../devloopd/doctor.js';
 import { formatActiveRunsReport, inspectActiveRuns } from '../../devloopd/activeRuns.js';
 import { formatIssueSelectionReport, selectIssueFromScan } from '../../devloopd/issueSelector.js';
+import { formatIssueScoutReport, runIssueScout, type IssueScoutSourceId } from '../../devloopd/issueScout.js';
 import {
   exportDevloopLedger,
   formatExportDevloopLedgerReport,
@@ -374,6 +375,41 @@ program
     });
 
     console.log(formatIssueScanReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('issue-scout')
+  .description('Discover recursive maintenance work from typed devloopd issue sources')
+  .option('--repo <owner/repo>', 'GitHub repository')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .option('--source <id...>', 'Limit issue-scout to one or more source IDs')
+  .option('--max-selections <count>', 'Maximum generated issue candidates to select', (value: string) => Number(value))
+  .option('--dry-run', 'Print would-create issues without mutating GitHub')
+  .option('--create', 'Create selected GitHub issues. Use with care; dry-run remains non-mutating')
+  .action(async (options: {
+    repo?: string;
+    cwd: string;
+    ledger?: string;
+    source?: string[];
+    maxSelections?: number;
+    dryRun?: boolean;
+    create?: boolean;
+  }) => {
+    const report = await runIssueScout({
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+      ledgerPath: options.ledger,
+      sourceIds: options.source as IssueScoutSourceId[] | undefined,
+      maxSelections: Number.isFinite(options.maxSelections) ? options.maxSelections : undefined,
+      dryRun: options.dryRun === true,
+      createIssues: options.create === true,
+    });
+
+    console.log(formatIssueScoutReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }

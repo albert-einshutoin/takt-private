@@ -204,6 +204,121 @@ The JSONL ledger is the portable MVP event log. It is ignored by Git via `.devlo
 | `--output <path>` | Project-local memory output path. Defaults to `.devloop/memory.md` |
 | `--write` | Write the memory file instead of rendering only |
 
+## Autonomous Review Boundary
+
+`devloopd` separates human product judgment from recursive mechanical work. The
+machine-readable policy categories are:
+
+| Category | Merge behavior |
+|----------|----------------|
+| `product_policy` | Always stop for human review. Dual-LLM approval cannot override it |
+| `human_policy` | Stop for a human owner because the automation policy itself changes |
+| `auto_recursive` | Eligible for recursive agent work, dual-LLM review, quality gates, and auto-merge |
+| `mechanical` | Eligible for the fastest mechanical path when checks and review markers pass |
+
+Humans should review changes to product direction, user-facing commitments,
+pricing, billing, authentication, authorization, security posture, data
+retention, migrations, public compatibility contracts, deployment policy, and
+irreversible operational behavior. Changing this taxonomy or the recursive lane
+definitions is also `human_policy`.
+
+The following examples must stop for human review:
+
+- a pricing or billing behavior change
+- a public API contract or migration
+- an auth, permission, privacy, retention, or security-posture change
+- a release, deployment, or irreversible operations policy change
+- a change to the auto-merge, human-review, or lane taxonomy itself
+
+The following examples should not stop merely because they are code changes:
+
+- feature maintenance that preserves accepted product behavior
+- benchmark-backed performance or memory optimization
+- safe dependency updates with lockfile and verification evidence
+- security hardening that does not change public posture
+- language-idiomatic refactors and type-safety improvements
+- docs, tests, fixtures, lint, formatting, and local tooling
+
+Recursive automation lanes:
+
+| Lane | Auto scope | Escalates when |
+|------|------------|----------------|
+| `feature_improvement` | scoped improvements to accepted behavior | public behavior or product direction changes |
+| `performance` | benchmark-backed optimization | resource policy or observable behavior changes |
+| `dependencies` | safe library and lockfile updates | major migration, license, or privileged runtime risk appears |
+| `security_hardening` | safer implementation details | security posture, privacy, or compliance policy changes |
+| `idiomatic_refactor` | maintainability and type-safety refactors | public API or architecture direction changes |
+| `docs_tests_tooling` | documentation, tests, fixtures, lint, and tooling | docs alter product promises or CI/release policy changes |
+
+## Issue Scout
+
+`devloopd issue-scout` moves backlog discovery, maintenance issue generation,
+dedupe, priority scoring, and retry/backoff recording into devloopd:
+
+```bash
+devloopd issue-scout --repo owner/repo --dry-run
+devloopd issue-scout --repo owner/repo --source local_backlog todo_scan
+devloopd stage issue-scout --repo owner/repo --dry-run
+```
+
+Typed sources currently include `github_issues`, `local_backlog`, `todo_scan`,
+`dependency_report`, `security_report`, `benchmark_report`, `lint_type_debt`,
+and `ledger_events`. Every source returns deterministic observations with a
+status, summary, candidate work items, next actions, and artifacts. Missing
+sources produce warning observations instead of shell retry loops.
+
+Generated maintenance issues include acceptance criteria, verification commands,
+product-policy escalation criteria, and expected changed surfaces. Issue scout
+dedupes against open issues, open PRs, branch names, and prior ledger decisions,
+then scores remaining candidates by risk bucket, lane priority, verification
+cost, and expected changed surfaces. It keeps `Duplicate or already covered`,
+`active run limit`, and `Unsafe or too broad` as separate stop rules so later
+automation can explain why no work was selected.
+
+Every run appends a `devloop_issue_scout` event to `.devloop/ledger.jsonl`.
+Repeated no-op scans can be explained from the event payload, and retry/backoff
+timestamps are stored in a JSONL shape that can be copied into a future SQLite
+backend.
+
+### Issue Scout Options
+
+| Option | Description |
+|--------|-------------|
+| `--repo <owner/repo>` | GitHub repository used for issue and PR dedupe |
+| `--cwd <path>` | Repository path to inspect. Defaults to the current working directory |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--source <id...>` | Limit the scan to specific typed source IDs |
+| `--max-selections <count>` | Maximum generated issue candidates to select |
+| `--dry-run` | Print would-create issues without mutating GitHub |
+| `--create` | Create selected GitHub issues when not in dry-run mode |
+
+## Review-Fix And CI Repair
+
+`review-fix` is no longer detection-only. When a current-head `Mergeable: NO`
+review marker exists on a same-repository automation PR, devloopd can create an
+isolated worktree, run a scoped fixer, execute quality gates, commit, and push
+back to the PR branch. The fixer receives the review body, PR metadata, current
+diff paths, issue context, and strict scope limits.
+
+Before push, devloopd enforces:
+
+- same-repository automation branch eligibility
+- attempt budgets per PR head SHA and blocker fingerprint
+- configured `.takt/quality-gates/*` checks when present
+- `git diff --check`
+- no forbidden path changes
+- no product-policy or human-policy surfaces unless a human approval label is present
+- no changed files outside the original PR scope
+- expected-head verification before `git push --force-with-lease`
+
+When GitHub checks fail, the CI repair loop collects failed check runs, fetches
+bounded logs with `gh run view --log`, sanitizes secrets, stores summaries in
+the ledger, and classifies failures as `deterministic`, `flaky`, `infra`,
+`auth_permission`, `timeout`, or `unknown`. Deterministic and unknown failures
+enter the repair worktree path. Flaky, infrastructure, and timeout failures are
+retried with bounded backoff before code changes. Auth or permission failures
+stop for a human/operator.
+
 ## Staged Automation
 
 `devloopd staged` owns the portable devloop scheduler that used to live in shell.
