@@ -48,6 +48,11 @@ import {
   inspectPersonalStatus,
 } from '../../devloopd/personalStatus.js';
 import {
+  formatProviderSmokeMatrixReport,
+  parseProviderSmokeProviderList,
+  runProviderSmokeMatrix,
+} from '../../devloopd/providerSmoke.js';
+import {
   formatDevloopAutomationStageReport,
   promotePullRequestAutoMerge,
   runDevloopAutomationStage,
@@ -155,6 +160,35 @@ program
     });
 
     console.log(formatDevloopDoctorReport(report, { verbose: options.verbose === true }));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('provider-smoke')
+  .description('Run an explicit pass/fail/skip smoke matrix for configured local provider CLIs')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--workflow <name-or-path>', 'Selected workflow used to resolve provider config')
+  .option('--provider <name...>', 'Provider(s) to smoke-check instead of auto-detecting the configured provider')
+  .option('--prompt-smoke', 'Run a minimal non-mutating prompt. Disabled by default to avoid paid/network work')
+  .option('--timeout-ms <ms>', 'Per-probe timeout in milliseconds', (value: string) => Number(value))
+  .action(async (options: {
+    cwd: string;
+    workflow?: string;
+    provider?: string[];
+    promptSmoke?: boolean;
+    timeoutMs?: number;
+  }) => {
+    const report = await runProviderSmokeMatrix({
+      repoPath: resolve(options.cwd),
+      workflow: options.workflow,
+      providers: parseProviderSmokeProviderList(options.provider),
+      runPromptSmoke: options.promptSmoke === true,
+      timeoutMs: Number.isFinite(options.timeoutMs) ? options.timeoutMs : undefined,
+    });
+
+    console.log(formatProviderSmokeMatrixReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }
