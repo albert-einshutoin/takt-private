@@ -1,11 +1,13 @@
 import { resolve } from 'node:path';
 import {
   createDefaultDevloopCommandRunner,
+  githubMetadataExecOptions,
   type DevloopCommandRunner,
 } from './commandRunner.js';
 import {
   appendDevloopLedgerEvent,
   buildDevloopLedgerEvent,
+  readRawDevloopLedgerEvents,
   resolveDevloopLedgerPath,
 } from './ledger.js';
 import {
@@ -57,6 +59,8 @@ export interface CiRepairOptions {
   runner?: DevloopCommandRunner;
   dryRun?: boolean;
   maxAttempts?: number;
+  maxReruns?: number;
+  now?: Date;
 }
 
 interface GhPrCheck {
@@ -67,6 +71,9 @@ interface GhPrCheck {
   link?: string;
   description?: string;
 }
+
+const TRANSIENT_CI_FAILURE_KINDS = new Set<CiFailureKind>(['flaky', 'infra', 'timeout']);
+const DEFAULT_MAX_CI_RERUNS = 2;
 
 function sanitizeLog(text: string): string {
   return sanitizeSensitiveText(text)
@@ -290,6 +297,130 @@ function shouldBlockForOperator(failures: readonly CiFailureArtifact[]): boolean
   return failures.some((failure) => failure.kind === 'auth_permission');
 }
 
+function isTransientFailure(failure: CiFailureArtifact): boolean {
+  return TRANSIENT_CI_FAILURE_KINDS.has(failure.kind);
+}
+
+function parseActiveRetryAfter(value: unknown, now: Date): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || timestamp <= now.getTime()) {
+    return undefined;
+  }
+  return new Date(timestamp).toISOString();
+}
+
+function activeCiRetryBackoff(input: {
+  ledgerPath: string;
+  prNumber: number;
+  headSha: string;
+  now: Date;
+}): string | undefined {
+  return readRawDevloopLedgerEvents(input.ledgerPath)
+    .filter((event) => (event.eventType === 'devloop_ci_retry' || event.eventType === 'devloop_ci_rerun')
+      && event.prNumber === input.prNumber
+      && event.headSha === input.headSha)
+    .flatMap((event) => {
+      const retryAfter = parseActiveRetryAfter(event.retryAfter, input.now);
+      return retryAfter === undefined ? [] : [retryAfter];
+    })
+    .sort()
+    .at(-1);
+}
+
+function countRerunAttempts(input: {
+  ledgerPath: string;
+  prNumber: number;
+  headSha: string;
+  runId: string;
+}): number {
+  return readRawDevloopLedgerEvents(input.ledgerPath)
+    .filter((event) => event.eventType === 'devloop_ci_rerun'
+      && event.prNumber === input.prNumber
+      && event.headSha === input.headSha
+      && event.runId === input.runId)
+    .length;
+}
+
+async function rerunTransientCiFailures(input: {
+  pr: RepairPullRequestSnapshot;
+  failures: readonly CiFailureArtifact[];
+  repoPath: string;
+  repo?: string;
+  ledgerPath: string;
+  env: NodeJS.ProcessEnv;
+  runner: DevloopCommandRunner;
+  dryRun?: boolean;
+  maxReruns?: number;
+  now: Date;
+}): Promise<{ rerunCount: number; exhaustedCount: number; retryAfter: string }> {
+  const retryAfter = new Date(input.now.getTime() + 15 * 60_000).toISOString();
+  const maxReruns = input.maxReruns ?? DEFAULT_MAX_CI_RERUNS;
+  const transientFailures = input.failures.filter(isTransientFailure);
+  const ghCommand = input.runner.resolveCommand('gh', input.env);
+  if (ghCommand === undefined) {
+    return { rerunCount: 0, exhaustedCount: transientFailures.length, retryAfter };
+  }
+
+  let rerunCount = 0;
+  let exhaustedCount = 0;
+  for (const failure of transientFailures) {
+    if (failure.runId === undefined) {
+      exhaustedCount += 1;
+      continue;
+    }
+    const priorAttempts = countRerunAttempts({
+      ledgerPath: input.ledgerPath,
+      prNumber: input.pr.number,
+      headSha: input.pr.headRefOid,
+      runId: failure.runId,
+    });
+    if (priorAttempts >= maxReruns) {
+      exhaustedCount += 1;
+      appendDevloopLedgerEvent(input.ledgerPath, buildDevloopLedgerEvent('devloop_ci_rerun', {
+        repoPath: input.repoPath,
+        prNumber: input.pr.number,
+        headSha: input.pr.headRefOid,
+        checkName: failure.checkName,
+        runId: failure.runId,
+        failureKind: failure.kind,
+        attempt: priorAttempts + 1,
+        status: 'budget_exhausted',
+        retryAfter,
+      }, input.now));
+      continue;
+    }
+
+    const args = ['run', 'rerun', failure.runId, '--failed'];
+    if (input.repo !== undefined) {
+      args.push('--repo', input.repo);
+    }
+    const result = input.dryRun === true
+      ? { exitCode: 0, stdout: 'dry-run', stderr: '' }
+      : await input.runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: input.repoPath, env: input.env }));
+    const status = result.exitCode === 0 ? (input.dryRun === true ? 'dry_run' : 'rerun_requested') : 'rerun_failed';
+    appendDevloopLedgerEvent(input.ledgerPath, buildDevloopLedgerEvent('devloop_ci_rerun', {
+      repoPath: input.repoPath,
+      prNumber: input.pr.number,
+      headSha: input.pr.headRefOid,
+      checkName: failure.checkName,
+      runId: failure.runId,
+      failureKind: failure.kind,
+      attempt: priorAttempts + 1,
+      status,
+      retryAfter,
+    }, input.now));
+    if (result.exitCode === 0) {
+      rerunCount += 1;
+    } else {
+      exhaustedCount += 1;
+    }
+  }
+  return { rerunCount, exhaustedCount, retryAfter };
+}
+
 function buildCiContext(failures: readonly CiFailureArtifact[]): string {
   return failures.map((failure) => [
     `Check: ${failure.checkName}`,
@@ -326,6 +457,7 @@ export async function runCiAutoRepairForPullRequest(options: CiRepairOptions): P
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
+  const now = options.now ?? new Date();
   const pr = await loadRepairPullRequestSnapshot({
     pr: options.pr,
     repoPath,
@@ -341,6 +473,22 @@ export async function runCiAutoRepairForPullRequest(options: CiRepairOptions): P
       status: 'failed',
       message: 'unable to load PR metadata',
       ledgerPath,
+    });
+  }
+  const activeRetryAfter = activeCiRetryBackoff({
+    ledgerPath,
+    prNumber: pr.number,
+    headSha: pr.headRefOid,
+    now,
+  });
+  if (activeRetryAfter !== undefined) {
+    return makeSkippedRepairReport({
+      kind: 'ci-fix',
+      pr: pr.number,
+      status: 'skipped',
+      message: `CI retry backoff active until ${activeRetryAfter}; retry before code changes`,
+      ledgerPath,
+      stopRule: 'checks failed',
     });
   }
   const collection = await collectCiFailures({
@@ -382,18 +530,34 @@ export async function runCiAutoRepairForPullRequest(options: CiRepairOptions): P
     });
   }
   if (!shouldRepair(collection.failures)) {
+    const rerun = await rerunTransientCiFailures({
+      pr,
+      failures: collection.failures,
+      repoPath,
+      repo: options.repo,
+      ledgerPath,
+      env,
+      runner,
+      dryRun: options.dryRun,
+      maxReruns: options.maxReruns,
+      now,
+    });
     appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_ci_retry', {
       repoPath,
       prNumber: pr.number,
       headSha: pr.headRefOid,
       failureKinds: collection.failures.map((failure) => failure.kind),
-      retryAfter: new Date(Date.now() + 15 * 60_000).toISOString(),
-    }));
+      rerunCount: rerun.rerunCount,
+      exhaustedCount: rerun.exhaustedCount,
+      retryAfter: rerun.retryAfter,
+    }, now));
     return makeSkippedRepairReport({
       kind: 'ci-fix',
       pr: pr.number,
       status: 'skipped',
-      message: 'CI failure looks flaky or infrastructure-related; retry before code changes',
+      message: rerun.rerunCount > 0
+        ? `${options.dryRun === true ? 'dry-run: would rerun' : 'reran'} ${rerun.rerunCount} transient CI run(s); retry before code changes`
+        : 'CI failure looks flaky or infrastructure-related; retry before code changes',
       ledgerPath,
       stopRule: 'checks failed',
     });

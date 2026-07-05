@@ -13,6 +13,7 @@ import type { DevloopCommandRunner } from '../devloopd/commandRunner.js';
 interface Call {
   command: string;
   args: readonly string[];
+  timeoutMs?: number;
 }
 
 function makeRunner(log: string): DevloopCommandRunner & { calls: Call[] } {
@@ -22,8 +23,8 @@ function makeRunner(log: string): DevloopCommandRunner & { calls: Call[] } {
     resolveCommand(command) {
       return command === 'gh' || command === 'git' || command === 'codex' ? `/mock/bin/${command}` : undefined;
     },
-    async exec(command, args) {
-      calls.push({ command, args });
+    async exec(command, args, options) {
+      calls.push({ command, args, timeoutMs: options?.timeoutMs });
       if (command.endsWith('/gh') && args[0] === 'pr' && args[1] === 'view') {
         return {
           exitCode: 0,
@@ -58,6 +59,9 @@ function makeRunner(log: string): DevloopCommandRunner & { calls: Call[] } {
       }
       if (command.endsWith('/gh') && args[0] === 'run' && args[1] === 'view') {
         return { exitCode: 0, stdout: log, stderr: '' };
+      }
+      if (command.endsWith('/gh') && args[0] === 'run' && args[1] === 'rerun') {
+        return { exitCode: 0, stdout: 'rerun requested', stderr: '' };
       }
       if (command.endsWith('/gh') && args[0] === 'pr' && args[1] === 'diff') {
         return { exitCode: 0, stdout: 'src/devloopd/ciRepair.ts\nsrc/__tests__/devloopd-ci-fix.test.ts\n', stderr: '' };
@@ -142,6 +146,51 @@ describe('devloopd CI repair loop', () => {
     expect(report.status).toBe('skipped');
     expect(report.message).toContain('retry before code changes');
     expect(readFileSync(join(repoPath, '.devloop', 'ledger.jsonl'), 'utf-8')).toContain('devloop_ci_retry');
+  });
+
+  it('reruns transient CI failures with a bounded GitHub Actions rerun request', async () => {
+    const fake = makeRunner('ECONNRESET from registry 503 service unavailable');
+
+    const report = await runCiAutoRepairForPullRequest({
+      pr: 31,
+      repoPath,
+      repo: 'owner/repo',
+      runner: fake,
+      now: new Date('2026-07-05T00:00:00.000Z'),
+    });
+
+    expect(report.status).toBe('skipped');
+    expect(report.message).toContain('reran 1 transient CI run');
+    const rerunCall = fake.calls.find((call) => call.args[0] === 'run' && call.args[1] === 'rerun');
+    expect(rerunCall?.args).toEqual(['run', 'rerun', '123456', '--failed', '--repo', 'owner/repo']);
+    expect(rerunCall?.timeoutMs).toBe(60_000);
+    const ledger = readFileSync(join(repoPath, '.devloop', 'ledger.jsonl'), 'utf-8');
+    expect(ledger).toContain('devloop_ci_rerun');
+    expect(ledger).toContain('2026-07-05T00:15:00.000Z');
+  });
+
+  it('honors PR-head scoped CI retryAfter before collecting checks again', async () => {
+    const fake = makeRunner('ECONNRESET from registry 503 service unavailable');
+
+    await runCiAutoRepairForPullRequest({
+      pr: 31,
+      repoPath,
+      repo: 'owner/repo',
+      runner: fake,
+      now: new Date('2026-07-05T00:00:00.000Z'),
+    });
+    fake.calls.length = 0;
+    const blocked = await runCiAutoRepairForPullRequest({
+      pr: 31,
+      repoPath,
+      repo: 'owner/repo',
+      runner: fake,
+      now: new Date('2026-07-05T00:05:00.000Z'),
+    });
+
+    expect(blocked.status).toBe('skipped');
+    expect(blocked.message).toContain('CI retry backoff active');
+    expect(fake.calls.some((call) => call.args[0] === 'pr' && call.args[1] === 'checks')).toBe(false);
   });
 
   it('blocks auth or permission failures for human/operator action', async () => {
