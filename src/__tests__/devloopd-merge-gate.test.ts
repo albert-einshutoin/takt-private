@@ -42,7 +42,10 @@ function makeRunner(options: {
         return { exitCode: 0, stdout: JSON.stringify(prView), stderr: '' };
       }
       if (args[0] === 'pr' && args[1] === 'diff') {
-        return { exitCode: 0, stdout: options.diff ?? 'src/app.ts\nsrc/app.test.ts\n', stderr: '' };
+        if (args.includes('--name-only')) {
+          return { exitCode: 0, stdout: options.diff ?? 'src/app.ts\nsrc/app.test.ts\n', stderr: '' };
+        }
+        return { exitCode: 0, stdout: options.diff ?? 'diff --git a/src/app.ts b/src/app.ts\n@@\n+const value = 1;\n', stderr: '' };
       }
       if (args[0] === 'pr' && args[1] === 'checks') {
         return { exitCode: options.checksExitCode ?? 0, stdout: options.checksStdout ?? 'All checks were successful', stderr: '' };
@@ -273,5 +276,37 @@ describe('devloopd merge gate', () => {
 
     expect(report.result).toBe('HUMAN_REVIEW_REQUIRED');
     expect(report.reasons.join('\n')).toContain('product-policy impact');
+  });
+
+  it('does not let dual-LLM approval override semantic diff product-policy impact', () => {
+    const report = evaluateMergeGate({
+      pr: {
+        url: 'https://github.com/owner/repo/pull/12',
+        number: 12,
+        headRefOid: 'abc123',
+        labels: ['agent:auto-merge'],
+        reviewDecision: 'APPROVED',
+        mergeStateStatus: 'CLEAN',
+        isDraft: false,
+        changedFiles: 1,
+        additions: 3,
+        deletions: 1,
+      },
+      changedPaths: ['src/settings.ts'],
+      diff: 'diff --git a/src/settings.ts b/src/settings.ts\n@@\n+enableBillingPlanChange();',
+      checksPassed: true,
+      dualLlmApproval: {
+        approved: true,
+        headSha: 'abc123',
+        reasons: [],
+        reviewers: {
+          agy: { state: 'approved', headSha: 'abc123' },
+          codex: { state: 'approved', headSha: 'abc123' },
+        },
+      },
+    });
+
+    expect(report.result).toBe('HUMAN_REVIEW_REQUIRED');
+    expect(report.productPolicyImpact?.evidenceHunks).toHaveLength(1);
   });
 });

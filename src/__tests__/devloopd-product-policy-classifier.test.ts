@@ -72,4 +72,38 @@ describe('devloopd product-policy classifier', () => {
     expect(result.impact).toBe('product_policy');
     expect(result.reasons.join('\n')).toContain('public API');
   });
+
+  it('uses semantic diff hunks to detect product-policy impact beyond paths and titles', () => {
+    const result = classifyProductPolicyImpact({
+      changedPaths: ['src/settings.ts'],
+      title: 'feat: update settings panel',
+      diff: [
+        'diff --git a/src/settings.ts b/src/settings.ts',
+        '@@ -10,6 +10,7 @@',
+        '+if (account.role === "admin") enableBillingPlanChange();',
+      ].join('\n'),
+    });
+
+    expect(result.impact).toBe('product_policy');
+    expect(result.evidencePaths).toContain('src/settings.ts');
+    expect(result.evidenceHunks[0]).toMatchObject({
+      path: 'src/settings.ts',
+      reason: 'diff changes auth, billing, entitlement, or data-retention behavior',
+    });
+  });
+
+  it('keeps ordinary security hardening eligible for automation when posture is unchanged', () => {
+    const result = classifyProductPolicyImpact({
+      changedPaths: ['src/shared/utils/sensitiveText.ts'],
+      title: 'fix: improve secret redaction',
+      diff: [
+        'diff --git a/src/shared/utils/sensitiveText.ts b/src/shared/utils/sensitiveText.ts',
+        '@@ -1,3 +1,4 @@',
+        '+const value = sanitize(input).replace(tokenPattern, "[REDACTED]");',
+      ].join('\n'),
+    });
+
+    expect(result.impact).toBe('implementation');
+    expect(result.requiresHumanReview).toBe(false);
+  });
 });
