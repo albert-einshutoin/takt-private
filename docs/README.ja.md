@@ -258,6 +258,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `devloopd doctor --subscription-only` | subscription-only provider 前提のローカル環境を検証します |
 | `devloopd onboard-repo --cwd /path/to/repo --repo owner/repo` | target repo の personal automation onboarding を dry-run します |
 | `devloopd ready --cwd /path/to/repo --repo owner/repo` | loop 開始前に個人利用 automation readiness を検査します |
+| `devloopd recover-stale --cwd /path/to/repo` | stale な local automation state の recovery を dry-run します |
 | `devloopd status --cwd /path/to/repo` | daemon lifecycle、active run、staged ledger state をまとめて表示します |
 | `devloopd stop --cwd /path/to/repo` | foreground の devloopd loop に次 cycle 前の停止を要求します |
 | `devloopd reset --cwd /path/to/repo` | personal daemon metadata と stop-request state を消します |
