@@ -11,6 +11,8 @@ export type MergeQueueStopRule =
 export interface MergeQueuePullRequest {
   number: number;
   title: string;
+  workUnitId?: string;
+  dagLayer?: number;
   headRefOid: string;
   expectedHeadSha?: string;
   changedPaths: readonly string[];
@@ -41,6 +43,8 @@ export interface MergeQueueDecision {
   reasons: readonly string[];
   stopRule?: MergeQueueStopRule;
   layer?: number;
+  workUnitId?: string;
+  dagLayer?: number;
   overlapsWith?: readonly number[];
 }
 
@@ -61,6 +65,18 @@ export interface MergeQueuePlan {
 }
 
 const CONFLICTING_MERGE_STATES = new Set(['DIRTY', 'BLOCKED', 'BEHIND', 'UNKNOWN']);
+
+function withQueueContext(
+  pr: MergeQueuePullRequest,
+  decision: Omit<MergeQueueDecision, 'prNumber' | 'workUnitId' | 'dagLayer'>,
+): MergeQueueDecision {
+  return {
+    prNumber: pr.number,
+    ...decision,
+    ...(pr.workUnitId !== undefined ? { workUnitId: pr.workUnitId } : {}),
+    ...(pr.dagLayer !== undefined ? { dagLayer: pr.dagLayer } : {}),
+  };
+}
 
 function overlapPaths(left: readonly string[], right: readonly string[]): string[] {
   const rightSet = new Set(right);
@@ -88,36 +104,32 @@ export function buildChangedFileGraph(prs: readonly Pick<MergeQueuePullRequest, 
 
 function firstBlockingReason(pr: MergeQueuePullRequest): MergeQueueDecision | undefined {
   if (pr.expectedHeadSha !== undefined && pr.expectedHeadSha !== pr.headRefOid) {
-    return {
-      prNumber: pr.number,
+    return withQueueContext(pr, {
       status: 'blocked',
       stopRule: 'head mismatch',
       reasons: [`head SHA mismatch: expected ${pr.expectedHeadSha}, got ${pr.headRefOid}`],
-    };
+    });
   }
   if (!pr.checksPassed) {
-    return {
-      prNumber: pr.number,
+    return withQueueContext(pr, {
       status: 'blocked',
       stopRule: 'checks failed',
       reasons: ['GitHub checks did not pass'],
-    };
+    });
   }
   if (!pr.dualLlmApproved) {
-    return {
-      prNumber: pr.number,
+    return withQueueContext(pr, {
       status: 'blocked',
       stopRule: 'Mergeable: NO',
       reasons: ['dual-LLM approval is missing for current head'],
-    };
+    });
   }
   if (pr.productPolicyRequiresHumanReview === true || pr.isDraft === true) {
-    return {
-      prNumber: pr.number,
+    return withQueueContext(pr, {
       status: 'blocked',
       stopRule: 'Unsafe or too broad',
       reasons: [pr.isDraft === true ? 'PR is draft' : 'product-policy impact requires human review'],
-    };
+    });
   }
   return undefined;
 }
@@ -156,12 +168,11 @@ export function planMergeQueue(prs: readonly MergeQueuePullRequest[]): MergeQueu
     const eviction = evictionFor(pr);
     if (eviction !== undefined) {
       evictions.push(eviction);
-      decisions.set(pr.number, {
-        prNumber: pr.number,
+      decisions.set(pr.number, withQueueContext(pr, {
         status: 'evicted',
         stopRule: 'conflict eviction',
         reasons: [eviction.reason],
-      });
+      }));
       continue;
     }
     const blocked = firstBlockingReason(pr);
@@ -175,25 +186,26 @@ export function planMergeQueue(prs: readonly MergeQueuePullRequest[]): MergeQueu
   for (const pr of eligible) {
     const overlaps = overlapNeighbors(pr.number, graph).filter((neighbor) => eligible.some((candidate) => candidate.number === neighbor));
     const previousOverlaps = overlaps.filter((neighbor) => neighbor < pr.number);
-    const layer = previousOverlaps.length === 0
+    const overlapLayer = previousOverlaps.length === 0
       ? 0
       : Math.max(...previousOverlaps.map((neighbor) => decisions.get(neighbor)?.layer ?? 0)) + 1;
+    const layer = Math.max(pr.dagLayer ?? 0, overlapLayer);
     if (layer > 0) {
-      decisions.set(pr.number, {
-        prNumber: pr.number,
+      decisions.set(pr.number, withQueueContext(pr, {
         status: 'serialized',
         stopRule: 'overlap serialization',
-        reasons: [`changed files overlap with PR(s): ${previousOverlaps.map((value) => `#${value}`).join(', ')}`],
+        reasons: previousOverlaps.length > 0
+          ? [`changed files overlap with PR(s): ${previousOverlaps.map((value) => `#${value}`).join(', ')}`]
+          : [`waiting for DAG layer ${layer}`],
         layer,
         overlapsWith: previousOverlaps,
-      });
+      }));
     } else {
-      decisions.set(pr.number, {
-        prNumber: pr.number,
+      decisions.set(pr.number, withQueueContext(pr, {
         status: 'ready',
         reasons: [],
         layer,
-      });
+      }));
     }
     layers[layer] ??= [];
     layers[layer]!.push(pr.number);
@@ -202,7 +214,7 @@ export function planMergeQueue(prs: readonly MergeQueuePullRequest[]): MergeQueu
   return {
     decisions: sorted.map((pr) => decisions.get(pr.number)!),
     graph,
-    layers,
+    layers: Array.from({ length: layers.length }, (_value, index) => layers[index] ?? []),
     evictions,
   };
 }

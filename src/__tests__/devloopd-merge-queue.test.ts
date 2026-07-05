@@ -111,4 +111,29 @@ describe('devloopd merge queue', () => {
     });
     expect(buildMergeQueueRepairPrompt(plan.evictions[0]!)).toContain('CONFLICT (content)');
   });
+
+  it('preserves DAG work-unit metadata and waits for later DAG layers', () => {
+    const plan = planMergeQueue([
+      {
+        number: 50,
+        title: 'layer one',
+        workUnitId: 'queue-layer-1',
+        dagLayer: 1,
+        headRefOid: 'a1',
+        changedPaths: ['src/devloopd/workUnitPlanner.ts'],
+        checksPassed: true,
+        dualLlmApproved: true,
+      },
+    ]);
+
+    expect(plan.layers).toEqual([[], [50]]);
+    expect(plan.decisions[0]).toMatchObject({
+      prNumber: 50,
+      workUnitId: 'queue-layer-1',
+      dagLayer: 1,
+      layer: 1,
+      status: 'serialized',
+    });
+    expect(plan.decisions[0]?.reasons).toContain('waiting for DAG layer 1');
+  });
 });

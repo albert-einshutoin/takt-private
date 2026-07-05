@@ -331,7 +331,8 @@ wrapper として `devloopd` に委譲できます。
 
 ```bash
 devloopd staged once --repo owner/repo
-devloopd staged loop --repo owner/repo --max-cycles 3
+devloopd staged loop --repo owner/repo --safety-profile safe-default
+devloopd staged loop --repo owner/repo --safety-profile smoke --max-cycles 3
 devloopd staged pr-review --repo owner/repo
 devloopd stage pr-merge --repo owner/repo
 ```
@@ -357,10 +358,14 @@ interval 環境変数も引き続き使えます。
 | `TAKT_LOOP_REVIEW_FIX_INTERVAL` | `review-fix` |
 | `TAKT_LOOP_PR_MERGE_INTERVAL` | `pr-merge` |
 
-同じ state file には recursive safety counter も保存されます。デフォルトでは
-3 回連続の no-op cycle、3 回の classifier disagreement、5 回の CI flake loop、
-3 回の review-fix failure、5 回の product-policy escalation で止まります。
-必要に応じて次の環境変数で上書きできます。
+同じ state file には recursive safety counter も保存されます。デフォルトの
+safety profile は `safe-default` で、stage execution 数、経過時間、PR touch 数、
+retry 数、circuit breaker で daemon 的な実行を bounded にします。短い local/CI
+確認には `smoke` を使います。`daemon` は外部監視がある長時間実行を明示したい
+場合だけ選びます。
+
+profile は `--safety-profile <smoke|safe-default|daemon>` または
+`TAKT_LOOP_SAFETY_PROFILE` で指定できます。個別 budget は次の環境変数で上書きできます。
 
 | 環境変数 | safety budget |
 |---------|---------------|
@@ -376,6 +381,22 @@ interval 環境変数も引き続き使えます。
 | `TAKT_LOOP_MAX_CI_FLAKES` | CI flake circuit breaker |
 | `TAKT_LOOP_MAX_REVIEW_FIX_FAILURES` | review-fix circuit breaker |
 | `TAKT_LOOP_MAX_PRODUCT_POLICY_ESCALATIONS` | human escalation circuit breaker |
+
+GitHub metadata call はデフォルトで timeout 付きです。`TAKT_LOOP_GH_TIMEOUT_MS`
+で `gh pr view`、`gh pr diff`、`gh pr checks`、issue scan、comment、merge
+metadata call のデフォルト 60000ms timeout を変更できます。
+
+ledger と staged scheduler state は portable な JSONL/JSON file のままです。
+複数の `devloopd` process が同時に動いても state を部分上書きしないように、
+短い file lock と atomic replacement で保護します。lock contention は無限 wait
+ではなく、明示的な失敗として表面化します。
+
+`issue-scout` は eligible work がない場合に top-level `retryAfter` ledger event を
+書き、staged scheduler はそれを stage-level backoff として扱います。candidate
+backoff と CI repair backoff は candidate または PR/head SHA に scoped されるため、
+無関係な automation は継続できます。flaky、infrastructure、timeout と分類された
+CI failure は bounded な `gh run rerun --failed` を要求できます。auth、permission、
+policy、unknown failure は引き続き human/operator action で止めます。
 
 `devloopd stage <stage>` は interval state を見ずに単一 stage を即時実行します。
 cron、launchd、手動復旧など、scheduler を起動せず 1 action だけ走らせたい場合に使います。
@@ -402,6 +423,10 @@ layer を決め、test は implementation surface と同じ unit に残します
 plan は human-review-required になります。safety budget は max runs、PR 数、retry 数、cost proxy、
 duration、changed files、changed lines、no-op completion signal、classifier disagreement、
 CI flake loop、review-fix failure、product-policy escalation loop で recursive loop を止めます。
+
+product-policy classifier の変更は replay eval fixture で確認します。replay case は sanitize 済み
+summary、changed path、最小限の diff snippet を使います。human-review routing や threshold を
+減らす変更は human review が必要です。
 
 ## Merge Gate
 
