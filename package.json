@@ -32,6 +32,7 @@
     "test:devloopd:soak": "vitest run src/__tests__/devloopd-soak-harness.test.ts src/__tests__/devloopd-staged-scheduler.test.ts src/__tests__/devloopd-ci-fix.test.ts src/__tests__/devloopd-merge-queue.test.ts",
     "lint": "eslint src/",
     "check:personal": "npm run build && node dist/app/devloopd/index.js check-personal --cwd . --skip-build",
+    "release:personal:check": "npm run check:personal && npm pack --dry-run && node dist/app/devloopd/index.js release-info --json",
     "check:release": "npm run build && npm run lint && npm run test && npm run test:e2e:all; code=$?; if [ \"$code\" -eq 0 ]; then msg='check:release passed'; else msg=\"check:release failed (exit=$code)\"; fi; if command -v osascript >/dev/null 2>&1; then osascript -e \"display notification \\\"$msg\\\" with title \\\"takt\\\" subtitle \\\"Release Check\\\"\" >/dev/null 2>&1 || true; fi; echo \"[takt] $msg\"; exit $code",
     "prepublishOnly": "npm run lint && npm run build && npm run test"
   },
