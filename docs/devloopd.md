@@ -412,6 +412,45 @@ permission, policy, and unknown failures still stop for human/operator action.
 Use it for cron, launchd, or a manual recovery command when you want a single
 automation action without starting the scheduler.
 
+### Personal scheduler templates
+
+Use `devloopd schedule-template` to render repo-local launchd and cron snippets
+for personal automation. The generated command runs `npm run check:personal`
+before any automation work, then runs stale-state recovery, then starts a
+bounded staged loop with `--max-cycles 1 --safety-profile safe-default`.
+
+```bash
+devloopd schedule-template --kind launchd --cwd /path/to/repo --repo owner/repo
+devloopd schedule-template --kind cron --cwd /path/to/repo --repo owner/repo
+```
+
+The formatted output includes the exact install, status, uninstall, and dry-run
+commands. For macOS launchd, install from the generated repo-local plist:
+
+```bash
+mkdir -p /path/to/repo/.devloop/schedules /path/to/repo/.devloop/logs
+devloopd schedule-template --kind launchd --cwd /path/to/repo --repo owner/repo --template-only > /path/to/repo/.devloop/schedules/com.takt.devloopd.owner-repo.plist
+launchctl bootstrap gui/$(id -u) /path/to/repo/.devloop/schedules/com.takt.devloopd.owner-repo.plist
+launchctl print gui/$(id -u)/com.takt.devloopd.owner-repo
+launchctl bootout gui/$(id -u) /path/to/repo/.devloop/schedules/com.takt.devloopd.owner-repo.plist
+```
+
+For cron, install and remove the generated snippet with the label marker:
+
+```bash
+mkdir -p /path/to/repo/.devloop/schedules /path/to/repo/.devloop/logs
+devloopd schedule-template --kind cron --cwd /path/to/repo --repo owner/repo --template-only > /path/to/repo/.devloop/schedules/com.takt.devloopd.owner-repo.cron
+(crontab -l 2>/dev/null | grep -v com.takt.devloopd.owner-repo; cat /path/to/repo/.devloop/schedules/com.takt.devloopd.owner-repo.cron) | crontab -
+crontab -l | grep com.takt.devloopd.owner-repo
+(crontab -l 2>/dev/null | grep -v com.takt.devloopd.owner-repo) | crontab -
+```
+
+Run the printed dry-run command before installing a scheduler. launchd and cron
+do not reliably load interactive shell startup files, so the template sets an
+explicit `PATH`, `TAKT_LOOP_GH_TIMEOUT_MS`, and `TAKT_LOOP_SAFETY_PROFILE`.
+Generated snippets and logs should stay under `.devloop/`, which is ignored by
+Git.
+
 `pr-review` discovers non-draft automation PRs, keeps duplicate issue coverage
 as a distinct `Duplicate or already covered` stop rule, runs current-head review
 gates when needed, and promotes the PR to `agent:auto-merge` only after both

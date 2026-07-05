@@ -52,6 +52,8 @@ devloopd reset --cwd /path/to/repo
 npm run check:personal
 devloopd check-personal --cwd /path/to/repo
 devloopd check-personal --cwd /path/to/repo --require-provider-smoke
+devloopd schedule-template --kind launchd --cwd /path/to/repo --repo owner/repo
+devloopd schedule-template --kind cron --cwd /path/to/repo --repo owner/repo --template-only
 devloopd soak --cwd /path/to/repo --cycles 5
 npm run test:devloopd:soak
 devloopd run --issue 123 --repo owner/repo
@@ -165,6 +167,29 @@ The provider smoke matrix always prints `pass`, `fail`, or `skip` for every prov
 | `--json` | Print the machine-readable summary JSON to stdout |
 
 Use `npm run check:personal` for daily local automation readiness. It runs build, lint, focused devloopd soak, full unit tests, mock E2E, high-severity audit, whitespace checks, and the provider smoke matrix. `check:personal` is stricter than a quick edit loop but does not require every live external provider E2E credential by default. Use `check:release` when preparing a broader release gate that includes all provider E2E checks. The personal gate writes a JSON summary under `.devloop/` for auditability.
+
+`devloopd schedule-template` options:
+
+| Option | Description |
+|--------|-------------|
+| `--kind <kind>` | Template kind: `launchd`, `cron`, or `all`. Defaults to `all` |
+| `--cwd <path>` | Repository path to schedule |
+| `--repo <owner/repo>` | GitHub repository passed to staged automation |
+| `--workflow <name-or-path>` | TAKT workflow name or path. Defaults to `.takt/workflows/subscription-devloop.yaml` |
+| `--log-dir <path>` | Log directory. Defaults to `.devloop/logs` under `--cwd` |
+| `--label <label>` | launchd label / cron marker. Defaults to `com.takt.devloopd.<repo>` |
+| `--interval-seconds <count>` | launchd `StartInterval` seconds. Defaults to `3600` |
+| `--cron-schedule <expr>` | Cron schedule expression. Defaults to `17 * * * *` |
+| `--safety-profile <profile>` | Safety profile: `smoke`, `safe-default`, or `daemon`. Defaults to `safe-default` |
+| `--max-cycles <count>` | Maximum staged loop cycles per scheduled run. Defaults to `1` |
+| `--gh-timeout-ms <count>` | Bounded GitHub metadata timeout. Defaults to `60000` |
+| `--path-env <value>` | Explicit `PATH` used by launchd/cron |
+| `--shell <path>` | Shell path used by scheduler templates. Defaults to `/bin/zsh` |
+| `--devloopd-command <path>` | `devloopd` command or absolute binary path |
+| `--npm-command <path>` | `npm` command or absolute binary path |
+| `--template-only` | Print only the selected template content. Requires `--kind launchd` or `--kind cron` |
+
+The rendered command runs `npm run check:personal`, then `devloopd recover-stale --apply`, then `devloopd staged loop --max-cycles 1 --safety-profile safe-default`. This keeps scheduled automation bounded by default while still writing predictable logs under `.devloop/logs`. The formatted output includes install, status, uninstall, and dry-run commands. Keep generated plist/cron snippets under `.devloop/schedules` so they stay repo-local and ignored by Git.
 
 `devloopd soak` options:
 
