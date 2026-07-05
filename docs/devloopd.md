@@ -204,9 +204,53 @@ The JSONL ledger is the portable MVP event log. It is ignored by Git via `.devlo
 | `--output <path>` | Project-local memory output path. Defaults to `.devloop/memory.md` |
 | `--write` | Write the memory file instead of rendering only |
 
+## Staged Automation
+
+`devloopd staged` owns the portable devloop scheduler that used to live in shell.
+It runs independent stages, persists last-run timestamps as JSON, and can be
+used by thin `.takt/automation/*.sh` compatibility wrappers.
+
+```bash
+devloopd staged once --repo owner/repo
+devloopd staged loop --repo owner/repo --max-cycles 3
+devloopd staged pr-review --repo owner/repo
+devloopd stage pr-merge --repo owner/repo
+```
+
+Stages run in this order:
+
+- `issue-scout`
+- `issue-to-pr`
+- `pr-review`
+- `review-fix`
+- `pr-merge`
+
+The scheduler stores state in `.takt/staged-devloop-state.json` by default.
+Set `TAKT_LOOP_STAGE_STATE` or pass `--state <path>` to move it. Existing
+interval environment variables remain supported:
+
+| Environment variable | Stage |
+|----------------------|-------|
+| `TAKT_LOOP_TICK_SECONDS` | loop tick |
+| `TAKT_LOOP_ISSUE_SCOUT_INTERVAL` | `issue-scout` |
+| `TAKT_LOOP_ISSUE_TO_PR_INTERVAL` | `issue-to-pr` |
+| `TAKT_LOOP_PR_REVIEW_INTERVAL` | `pr-review` |
+| `TAKT_LOOP_REVIEW_FIX_INTERVAL` | `review-fix` |
+| `TAKT_LOOP_PR_MERGE_INTERVAL` | `pr-merge` |
+
+`devloopd stage <stage>` runs one stage immediately and ignores interval state.
+Use it for cron, launchd, or a manual recovery command when you want a single
+automation action without starting the scheduler.
+
+`pr-review` discovers non-draft automation PRs, keeps duplicate issue coverage
+as a distinct `Duplicate or already covered` stop rule, runs current-head review
+gates when needed, and promotes the PR to `agent:auto-merge` only after both
+agy and Codex have approved the current head. `pr-merge` still calls
+`devloopd merge-if-safe --expected-head`; the label is not a direct merge bypass.
+
 ## Merge Gate
 
-`devloopd merge-if-safe` is the mechanical merge executor. LLM output alone never merges a PR. The command reads PR metadata with `gh pr view`, changed files with `gh pr diff --name-only`, waits for checks with `gh pr checks --watch`, and only then enables auto-merge:
+`devloopd merge-if-safe` is the mechanical merge executor. LLM output alone never merges a PR. The command reads PR metadata with `gh pr view`, changed files with `gh pr diff --name-only`, checks GitHub status with `gh pr checks`, and only then enables auto-merge:
 
 ```bash
 devloopd merge-if-safe --pr 456 --expected-head <sha>
@@ -223,11 +267,40 @@ The MVP gate denies or stops before merge when:
 - the required `agent:auto-merge` label is missing
 - the PR is draft
 - GitHub checks do not pass
-- review decision is not `APPROVED`
+- review decision is not `APPROVED`, unless current-head agy and Codex approvals are present
 - `--expected-head` does not match the current PR head SHA
 - forbidden paths are touched, such as `.github/**`, `infra/**`, `terraform/**`, `migrations/**`, `auth/**`, `billing/**`, `payments/**`, `.env*`, `*secret*`, or `*credential*`
-- human-review paths are touched, such as lockfiles, `Dockerfile`, `src/middleware*`, `src/routes*`, or `src/config*`
-- diff size exceeds the default policy of 12 files or 500 changed lines
+- product-policy impact is detected, such as product direction, public API contracts, auth, billing, security posture, retention, migrations, or irreversible operational behavior
+- human-review paths such as lockfiles, `Dockerfile`, `src/middleware*`, `src/routes*`, or `src/config*` are touched without current-head dual-LLM approval
+- diff size exceeds the default policy of 12 files or 500 changed lines without current-head dual-LLM approval
+
+Path guards remain conservative, but they no longer force human review by
+themselves when the classifier finds a mechanical or scoped implementation
+change and both reviewers approved the exact head SHA. `product_policy` is
+sticky: dual-LLM approval cannot override it.
+
+## Dual-LLM Promotion
+
+`devloopd promote-auto-merge` checks the current PR head for machine-readable
+review comments from agy and Codex. If both approve the same head, the command
+adds `agent:auto-merge`; if either reviewer is missing, stale, or blocking, it
+leaves the PR outside the merge lane.
+
+```bash
+devloopd promote-auto-merge --pr 456 --repo owner/repo
+devloopd promote-auto-merge --pr 456 --repo owner/repo --dry-run
+```
+
+Review comments include both legacy markers and a structured marker:
+
+```text
+<!-- takt-loop-review-gate:v1 reviewer=agy decision=approved head=<sha> -->
+<!-- takt-loop-mergeability-review -->
+Head SHA: `<sha>`
+```
+
+Codex comments use the same structured marker with `reviewer=codex` and keep
+the legacy `<!-- takt-loop-codex-human-review -->` marker for compatibility.
 
 ### Merge Options
 
