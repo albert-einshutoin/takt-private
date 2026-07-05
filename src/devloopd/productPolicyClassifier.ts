@@ -1,4 +1,6 @@
-export type ProductPolicyImpact = 'mechanical' | 'implementation' | 'product_policy';
+import type { AutomationPolicyCategory } from './autonomyPolicy.js';
+
+export type ProductPolicyImpact = 'mechanical' | 'implementation' | 'product_policy' | 'human_policy';
 
 export interface ProductPolicyClassificationInput {
   changedPaths: readonly string[];
@@ -8,6 +10,7 @@ export interface ProductPolicyClassificationInput {
 
 export interface ProductPolicyClassification {
   impact: ProductPolicyImpact;
+  policyCategory: AutomationPolicyCategory;
   requiresHumanReview: boolean;
   reasons: string[];
   evidencePaths: string[];
@@ -58,6 +61,15 @@ const PRODUCT_POLICY_TEXT_TOKENS = [
   'public api',
   'migration',
   'roadmap',
+];
+
+const HUMAN_POLICY_TEXT_TOKENS = [
+  'human review',
+  'lane taxonomy',
+  'auto-merge policy',
+  'merge policy',
+  'review gate',
+  'product-policy boundary',
 ];
 
 const PACKAGE_METADATA_PATHS = new Set([
@@ -126,18 +138,34 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
     }
   }
 
+  const humanPolicyReasons = HUMAN_POLICY_TEXT_TOKENS
+    .filter((token) => summary.includes(token))
+    .map((token) => `PR summary mentions human-policy token: ${token}`);
+
   if (productPolicyReasons.length > 0) {
     return {
       impact: 'product_policy',
+      policyCategory: 'product_policy',
       requiresHumanReview: true,
       reasons: unique(productPolicyReasons),
       evidencePaths: unique(productPolicyPaths),
     };
   }
 
+  if (humanPolicyReasons.length > 0) {
+    return {
+      impact: 'human_policy',
+      policyCategory: 'human_policy',
+      requiresHumanReview: true,
+      reasons: unique(humanPolicyReasons),
+      evidencePaths: changedPaths,
+    };
+  }
+
   if (changedPaths.length > 0 && changedPaths.every((path) => isDocsPath(path) || isTestPath(path))) {
     return {
       impact: 'mechanical',
+      policyCategory: 'mechanical',
       requiresHumanReview: false,
       reasons: ['only docs, tests, fixtures, or examples changed'],
       evidencePaths: changedPaths,
@@ -147,6 +175,7 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
   if (changedPaths.length > 0 && changedPaths.every((path) => isLowRiskToolingPath(path) || isDocsPath(path) || isTestPath(path))) {
     return {
       impact: 'implementation',
+      policyCategory: 'auto_recursive',
       requiresHumanReview: false,
       reasons: ['tooling or package metadata changed without product-policy indicators'],
       evidencePaths: changedPaths.filter(isLowRiskToolingPath),
@@ -155,6 +184,7 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
 
   return {
     impact: 'implementation',
+    policyCategory: 'auto_recursive',
     requiresHumanReview: false,
     // Keep non-policy behavior changes eligible for the dual-LLM gate; humans
     // should spend time on product direction, not routine scoped implementation.
