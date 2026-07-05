@@ -481,6 +481,31 @@ Product-policy classifier changes should be checked with replay eval fixtures.
 Replay cases use sanitized summaries, changed paths, and minimal diff snippets;
 reducing human-review routing or classifier thresholds requires human review.
 
+Use the replay corpus commands to keep that fixture set tied to real local
+automation decisions:
+
+```bash
+devloopd product-policy collect-replay-cases --cwd /path/to/repo
+devloopd product-policy replay --cwd /path/to/repo
+devloopd product-policy replay --cwd /path/to/repo --json
+```
+
+`collect-replay-cases` reads the devloop ledger and writes sanitized candidates
+to `.devloop/product-policy-replay-candidates.json` by default. Candidate cases
+intentionally keep `expectedImpact: null`; they are not active fixtures until a
+human reviews the redaction, writes the expected label, and moves the case into
+`fixtures/product-policy/replay/*.json`. Store only changed paths, short
+summaries, classifier decision context, human override result, reason, and
+anonymized diff shape. Do not store raw private diffs, local filesystem paths,
+credentials, customer data, or proprietary issue bodies.
+
+`product-policy replay` validates active fixture labels and reports total cases,
+false positives, false negatives, mismatch reasons, and impact distribution.
+`npm run check:personal` includes this replay gate and fails on fixture
+validation errors or false negatives. Human review is required before relabeling
+active fixtures, lowering thresholds, removing categories, or reducing
+human-review routing.
+
 ## Merge Gate
 
 `devloopd merge-if-safe` is the mechanical merge executor. LLM output alone never merges a PR. The command reads PR metadata with `gh pr view`, changed files with `gh pr diff --name-only`, full diff hunks with `gh pr diff`, checks GitHub status with `gh pr checks`, and only then enables auto-merge:

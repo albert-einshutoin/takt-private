@@ -54,6 +54,9 @@ devloopd check-personal --cwd /path/to/repo
 devloopd check-personal --cwd /path/to/repo --require-provider-smoke
 devloopd release-info
 devloopd release-info --json
+devloopd product-policy collect-replay-cases --cwd /path/to/repo
+devloopd product-policy replay --cwd /path/to/repo
+devloopd product-policy replay --cwd /path/to/repo --json
 devloopd schedule-template --kind launchd --cwd /path/to/repo --repo owner/repo
 devloopd schedule-template --kind cron --cwd /path/to/repo --repo owner/repo --template-only
 devloopd soak --cwd /path/to/repo --cycles 5
@@ -177,6 +180,30 @@ Use `npm run check:personal` for daily local automation readiness. It runs build
 | `--json` | Print package version, commit SHA, metadata source, package root, dirty state, runtime, and artifact boundary as JSON |
 
 Use `npm run release:personal:check` before installing or tagging a personal release. It runs `check:personal`, `npm pack --dry-run`, and `devloopd release-info --json` without publishing to npm. See [Personal Release Workflow](./personal-release.md) for update, rollback, and release notes guidance.
+
+`devloopd product-policy collect-replay-cases` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` under `--cwd` |
+| `--output <path>` | Candidate JSON output path. Defaults to `.devloop/product-policy-replay-candidates.json` |
+| `--limit <count>` | Maximum recent candidate cases to collect |
+| `--json` | Print the candidate file JSON |
+
+Candidate files are intentionally written under `.devloop/` by default. They keep `expectedImpact: null` so they cannot become active CI fixtures until a human reviews the sanitized case and sets an explicit label.
+
+`devloopd product-policy replay` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--fixtures <path>` | Active replay fixture directory. Defaults to `fixtures/product-policy/replay` |
+| `--max-false-positives <count>` | Allowed false positives. Defaults to `0` |
+| `--max-false-negatives <count>` | Allowed false negatives. Defaults to `0` |
+| `--json` | Print the machine-readable replay report |
+
+`npm run check:personal` runs the replay gate and fails on fixture validation errors or classifier false negatives. Add a replay case after a manual override, incident, unexpected `human:review`, unexpected auto-mergeable decision, or classifier threshold change. Do not store raw private diffs, credentials, customer data, local filesystem paths, or proprietary issue bodies in fixtures.
 
 `devloopd schedule-template` options:
 
