@@ -48,6 +48,11 @@ import {
   runPersonalRecovery,
 } from '../../devloopd/personalRecovery.js';
 import {
+  formatPersonalScheduleReport,
+  runPersonalScheduleTemplates,
+  type PersonalScheduleSelection,
+} from '../../devloopd/personalSchedule.js';
+import {
   formatPersonalStatusReport,
   inspectPersonalStatus,
 } from '../../devloopd/personalStatus.js';
@@ -105,6 +110,13 @@ function parseSafetyProfileOption(value: string | undefined): StagedDevloopSafet
     return value;
   }
   throw new Error(`invalid safety profile: ${value}`);
+}
+
+function parsePersonalScheduleKind(value: string | undefined): PersonalScheduleSelection {
+  if (value === undefined || value === 'all' || value === 'launchd' || value === 'cron') {
+    return value ?? 'all';
+  }
+  throw new Error(`invalid schedule template kind: ${value}`);
 }
 
 function parseStagedModeOrStage(value: string | undefined): { mode: StagedDevloopMode; stage?: DevloopAutomationStage } {
@@ -235,6 +247,71 @@ program
     if (!report.passed) {
       process.exitCode = 1;
     }
+  });
+
+program
+  .command('schedule-template')
+  .description('Render safe launchd or cron templates for personal automation')
+  .option('--kind <kind>', 'Template kind: launchd, cron, or all', 'all')
+  .option('--cwd <path>', 'Repository path to schedule', process.cwd())
+  .option('--repo <owner/repo>', 'GitHub repository passed to staged automation')
+  .option('--workflow <name-or-path>', 'TAKT workflow name or path', '.takt/workflows/subscription-devloop.yaml')
+  .option('--log-dir <path>', 'Log directory. Defaults to .devloop/logs under --cwd')
+  .option('--label <label>', 'launchd label / cron marker')
+  .option('--interval-seconds <count>', 'launchd StartInterval seconds', (value: string) => Number(value))
+  .option('--cron-schedule <expr>', 'Cron schedule expression', '17 * * * *')
+  .option('--safety-profile <profile>', 'Safety profile: smoke, safe-default, or daemon')
+  .option('--max-cycles <count>', 'Maximum staged loop cycles per scheduled run', (value: string) => Number(value))
+  .option('--gh-timeout-ms <count>', 'Bounded GitHub metadata timeout', (value: string) => Number(value))
+  .option('--path-env <value>', 'Explicit PATH used by launchd/cron')
+  .option('--shell <path>', 'Shell path used by scheduler templates')
+  .option('--devloopd-command <path>', 'devloopd command or absolute binary path')
+  .option('--npm-command <path>', 'npm command or absolute binary path')
+  .option('--template-only', 'Print only the selected template content')
+  .action((options: {
+    kind?: string;
+    cwd: string;
+    repo?: string;
+    workflow?: string;
+    logDir?: string;
+    label?: string;
+    intervalSeconds?: number;
+    cronSchedule?: string;
+    safetyProfile?: string;
+    maxCycles?: number;
+    ghTimeoutMs?: number;
+    pathEnv?: string;
+    shell?: string;
+    devloopdCommand?: string;
+    npmCommand?: string;
+    templateOnly?: boolean;
+  }) => {
+    const kind = parsePersonalScheduleKind(options.kind);
+    if (options.templateOnly === true && kind === 'all') {
+      throw new Error('--template-only requires --kind launchd or --kind cron');
+    }
+    const report = runPersonalScheduleTemplates({
+      repoPath: resolve(options.cwd),
+      repo: options.repo,
+      workflow: options.workflow,
+      logDir: options.logDir,
+      label: options.label,
+      intervalSeconds: options.intervalSeconds,
+      cronSchedule: options.cronSchedule,
+      safetyProfile: parseSafetyProfileOption(options.safetyProfile),
+      maxCycles: options.maxCycles,
+      ghTimeoutMs: options.ghTimeoutMs,
+      pathEnv: options.pathEnv,
+      shellPath: options.shell,
+      devloopdCommand: options.devloopdCommand,
+      npmCommand: options.npmCommand,
+      kind,
+    });
+    if (options.templateOnly === true) {
+      console.log(report.templates[0]?.content.trimEnd() ?? '');
+      return;
+    }
+    console.log(formatPersonalScheduleReport(report));
   });
 
 program
