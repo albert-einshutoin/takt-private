@@ -185,6 +185,25 @@ recovery が保持するもの:
    - false negative は release/readiness blocker です。
    - fixture relabel や threshold 低下には human review が必要です。
 
+## Personal Readiness Roadmap Closeout
+
+personal-use roadmap は、次の merged PR が `main` にある場合に local single-developer automation として完了です。
+
+| Area | Issue | Merged PR |
+| --- | --- | --- |
+| Target repository onboarding | #82 | #96 |
+| Readiness, lifecycle, and status controls | #83, #84, #87 | #95 |
+| Stale-state recovery | #86 | #97 |
+| No-wait-loop soak coverage | #88 | #98 |
+| Provider smoke matrix | #90 | #99 |
+| Personal readiness release gate | #89 | #100 |
+| Safe scheduler templates | #85 | #101 |
+| Release provenance and update check | #91 | #102 |
+| Product-policy replay corpus | #92 | #103 |
+| Personal-use operations runbook | #93 | #104 |
+
+#94 は roadmap closeout checkpoint として扱います。tracker 自体は runtime behavior を追加しないため、上記すべてが merge 済みで、`main` 上の `npm run check:personal` が pass し、personal-use readiness slice に未処理 PR / branch が残っていない場合に完了です。
+
 ## Update and Rollback
 
 versioned update / rollback は release runbook を使います。
