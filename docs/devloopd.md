@@ -250,6 +250,15 @@ Recursive automation lanes:
 | `idiomatic_refactor` | maintainability and type-safety refactors | public API or architecture direction changes |
 | `docs_tests_tooling` | documentation, tests, fixtures, lint, and tooling | docs alter product promises or CI/release policy changes |
 
+The product-policy classifier reads both changed paths and diff hunks. It
+records sticky evidence for public API or CLI compatibility, auth, billing,
+retention, migrations, irreversible operations, security posture, and
+user-facing commitments. Security hardening such as redaction, sanitization, or
+safer validation stays eligible for automation when it does not change public
+posture. The classifier eval fixtures cover mechanical, implementation, and
+product-policy examples; regressions fail when false positives or false
+negatives exceed the configured thresholds.
+
 ## Issue Scout
 
 `devloopd issue-scout` moves backlog discovery, maintenance issue generation,
@@ -268,12 +277,17 @@ status, summary, candidate work items, next actions, and artifacts. Missing
 sources produce warning observations instead of shell retry loops.
 
 Generated maintenance issues include acceptance criteria, verification commands,
-product-policy escalation criteria, and expected changed surfaces. Issue scout
-dedupes against open issues, open PRs, branch names, and prior ledger decisions,
-then scores remaining candidates by risk bucket, lane priority, verification
-cost, and expected changed surfaces. It keeps `Duplicate or already covered`,
-`active run limit`, and `Unsafe or too broad` as separate stop rules so later
-automation can explain why no work was selected.
+product-policy escalation criteria, lane evidence, and expected changed
+surfaces. JSON report sources can provide benchmark baselines and targets,
+dependency versions, changelog or advisory URLs, security threat evidence, and
+custom verification commands. Major or breaking dependency updates are
+classified as `human_policy`; patch and minor updates remain recursive when
+quality gates pass. Issue scout dedupes against open issues, open PRs, branch
+names, and prior ledger decisions, then scores remaining candidates by risk
+bucket, lane priority, verification cost, and expected changed surfaces. It
+keeps `Duplicate or already covered`, `active run limit`, and `Unsafe or too
+broad` as separate stop rules so later automation can explain why no work was
+selected.
 
 Every run appends a `devloop_issue_scout` event to `.devloop/ledger.jsonl`.
 Repeated no-op scans can be explained from the event payload, and retry/backoff
@@ -363,9 +377,28 @@ gates when needed, and promotes the PR to `agent:auto-merge` only after both
 agy and Codex have approved the current head. `pr-merge` still calls
 `devloopd merge-if-safe --expected-head`; the label is not a direct merge bypass.
 
+Before merge, `pr-merge` builds a changed-file queue for promoted automation
+PRs. Non-overlapping PRs can land in the same queue layer. Overlapping PRs are
+serialized, and dirty, conflicted, or base-drifted PRs are evicted with
+conflicting files, merge-tree output when available, landed PR references, and a
+repair prompt for a follow-up review-fix or CI-fix worktree. Queue decisions are
+written as `devloop_automation_state` ledger events and can be summarized with:
+
+```bash
+devloopd automation-state --cwd /path/to/repo
+```
+
+Large backlog slices can be decomposed into DAG work units: explicit
+dependencies and file-overlap dependencies determine layers, while tests stay in
+the same unit as their implementation surface. Product-policy work units mark
+the whole plan as human-review-required. Safety budgets stop recursive loops on
+max runs, PRs, retries, cost proxy, duration, changed files, changed lines,
+repeated no-op completion signals, classifier disagreement, CI flake loops,
+review-fix failures, or product-policy escalation loops.
+
 ## Merge Gate
 
-`devloopd merge-if-safe` is the mechanical merge executor. LLM output alone never merges a PR. The command reads PR metadata with `gh pr view`, changed files with `gh pr diff --name-only`, checks GitHub status with `gh pr checks`, and only then enables auto-merge:
+`devloopd merge-if-safe` is the mechanical merge executor. LLM output alone never merges a PR. The command reads PR metadata with `gh pr view`, changed files with `gh pr diff --name-only`, full diff hunks with `gh pr diff`, checks GitHub status with `gh pr checks`, and only then enables auto-merge:
 
 ```bash
 devloopd merge-if-safe --pr 456 --expected-head <sha>
