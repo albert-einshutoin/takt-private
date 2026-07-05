@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  appendDevloopLedgerEvent,
+  buildDevloopLedgerEvent,
   exportDevloopLedger,
   formatExportDevloopLedgerReport,
   formatImportTaktRunReport,
@@ -11,6 +13,7 @@ import {
   formatTimelineReport,
   importTaktRun,
   reconcileTaktRuns,
+  readRawDevloopLedgerEvents,
   renderTimeline,
 } from '../devloopd/ledger.js';
 
@@ -89,6 +92,18 @@ describe('devloopd ledger import and timeline', () => {
     expect(event.issueNumber).toBe(123);
     expect(event.artifacts.some((artifact) => artifact.kind === 'report' && artifact.path.endsWith('summary.md'))).toBe(true);
     expect(event.artifacts.every((artifact) => artifact.sha256.length === 64)).toBe(true);
+  });
+
+  it('appends generic devloop events without changing TAKT timeline imports', () => {
+    const ledgerPath = join(repoPath, '.devloop', 'ledger.jsonl');
+    appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_issue_scout', {
+      repoPath,
+      candidates: 2,
+      selected: ['candidate-a'],
+    }));
+
+    expect(readRawDevloopLedgerEvents(ledgerPath)).toHaveLength(1);
+    expect(renderTimeline({ repoPath }).events).toEqual([]);
   });
 
   it('imports the latest run when no run slug is specified', () => {
