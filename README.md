@@ -261,6 +261,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd stop --cwd /path/to/repo` | Request a foreground devloopd loop to stop before the next cycle |
 | `devloopd reset --cwd /path/to/repo` | Clear personal daemon metadata and stop-request state |
 | `npm run check:personal` | Run the local personal automation readiness gate |
+| `devloopd schedule-template --kind launchd --cwd /path/to/repo` | Render safe launchd/cron templates for personal automation |
 | `devloopd soak --cwd /path/to/repo --cycles 5` | Run deterministic no-external-services loop stability checks |
 | `devloopd run --issue N` | Run a GitHub Issue through TAKT after subscription-only checks |
 | `devloopd import-takt-run --latest --issue N` | Import TAKT run metadata into the devloop ledger |
