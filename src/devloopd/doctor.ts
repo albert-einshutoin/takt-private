@@ -35,6 +35,7 @@ import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import { stripAnsi } from '../shared/utils/text.js';
 import {
   createDefaultDevloopCommandRunner,
+  githubMetadataExecOptions,
   type DevloopCommandResult,
   type DevloopCommandRunner,
 } from './commandRunner.js';
@@ -235,7 +236,7 @@ async function checkGitHubAuth(
     return makeCheck('fail', 'gh auth', 'cannot check GitHub auth because gh is missing');
   }
 
-  const result = await runner.exec('gh', ['auth', 'status'], { cwd: repoPath, env });
+  const result = await runner.exec('gh', ['auth', 'status'], githubMetadataExecOptions({ cwd: repoPath, env }));
   if (result.exitCode === 0) {
     return makeCheck('pass', 'gh auth', 'GitHub CLI is authenticated');
   }

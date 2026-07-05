@@ -31,6 +31,22 @@ export interface DagWorkUnitPlan {
   humanReviewRequired: boolean;
 }
 
+export type WorkUnitIsolationStrategy = 'worktree';
+export type ExecutableWorkUnitStatus = 'ready' | 'waiting' | 'paused';
+
+export interface ExecutablePlannedWorkUnit extends PlannedWorkUnit {
+  status: ExecutableWorkUnitStatus;
+  isolation: WorkUnitIsolationStrategy;
+  expectedChangedPaths: readonly string[];
+  qualityGates: readonly string[];
+  mergeQueueLayer: number;
+  pausedReason?: string;
+}
+
+export interface ExecutableDagWorkUnitPlan extends DagWorkUnitPlan {
+  executableUnits: readonly ExecutablePlannedWorkUnit[];
+}
+
 function unique(values: readonly string[]): string[] {
   return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
@@ -99,6 +115,29 @@ function topologicalLayers(units: readonly PlannedWorkUnit[]): string[][] {
   return layers;
 }
 
+function defaultQualityGates(unit: PlannedWorkUnit): string[] {
+  const gates = ['npm run build', 'npm run lint'];
+  if (unit.changedSurfaces.some((surface) => surface.includes('__tests__') || surface.endsWith('.test.ts'))) {
+    gates.push('npm test -- changed test files');
+  } else {
+    gates.push('npm test -- focused devloopd tests');
+  }
+  if (unit.lane === 'security_hardening') {
+    gates.push('security self-review: verify no secrets or weaker posture');
+  }
+  return gates;
+}
+
+function layerByUnitId(layers: readonly (readonly string[])[]): Map<string, number> {
+  const result = new Map<string, number>();
+  layers.forEach((layer, index) => {
+    for (const id of layer) {
+      result.set(id, index);
+    }
+  });
+  return result;
+}
+
 export function planDagWorkUnits(items: readonly BacklogWorkItem[]): DagWorkUnitPlan {
   const planned: PlannedWorkUnit[] = [];
   items.forEach((item, index) => {
@@ -122,5 +161,32 @@ export function planDagWorkUnits(items: readonly BacklogWorkItem[]): DagWorkUnit
     units: planned,
     layers: topologicalLayers(planned),
     humanReviewRequired: planned.some((unit) => unit.humanReviewRequired),
+  };
+}
+
+export function buildExecutableDagWorkUnitPlan(items: readonly BacklogWorkItem[]): ExecutableDagWorkUnitPlan {
+  const plan = planDagWorkUnits(items);
+  const layerMap = layerByUnitId(plan.layers);
+  const executableUnits = plan.units.map((unit): ExecutablePlannedWorkUnit => {
+    const mergeQueueLayer = layerMap.get(unit.id) ?? 0;
+    const status: ExecutableWorkUnitStatus = unit.humanReviewRequired
+      ? 'paused'
+      : unit.deps.length > 0
+        ? 'waiting'
+        : 'ready';
+    return {
+      ...unit,
+      status,
+      isolation: 'worktree',
+      expectedChangedPaths: unit.changedSurfaces,
+      qualityGates: defaultQualityGates(unit),
+      mergeQueueLayer,
+      ...(unit.humanReviewRequired ? { pausedReason: 'human review required before implementation' } : {}),
+    };
+  });
+
+  return {
+    ...plan,
+    executableUnits,
   };
 }

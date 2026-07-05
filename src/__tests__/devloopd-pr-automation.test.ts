@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { DevloopCommandRunner } from '../devloopd/commandRunner.js';
 import { readRawDevloopLedgerEvents } from '../devloopd/ledger.js';
 import {
+  attachDagPlanToMergeQueuePullRequests,
   findCurrentHeadBlockingReview,
   findDuplicateIssueCoverage,
   parseAutomationPullRequests,
@@ -13,8 +14,9 @@ import {
 } from '../devloopd/prAutomation.js';
 import { formatReviewGateComment } from '../devloopd/prReviewGate.js';
 
-function makePrMergeRunner(): DevloopCommandRunner & { calls: string[] } {
+function makePrMergeRunner(): DevloopCommandRunner & { calls: string[]; timeouts: Array<number | undefined> } {
   const calls: string[] = [];
+  const timeouts: Array<number | undefined> = [];
   const approvalComments = [
     {
       body: formatReviewGateComment({
@@ -36,11 +38,13 @@ function makePrMergeRunner(): DevloopCommandRunner & { calls: string[] } {
 
   return {
     calls,
+    timeouts,
     resolveCommand(command) {
       return command === 'gh' ? '/mock/bin/gh' : undefined;
     },
-    async exec(_command, args) {
+    async exec(_command, args, options) {
       calls.push(args.join(' '));
+      timeouts.push(options?.timeoutMs);
       if (args.slice(0, 2).join(' ') === 'pr list') {
         return {
           exitCode: 0,
@@ -228,5 +232,30 @@ describe('devloopd PR automation orchestration', () => {
       }),
     ]));
     expect(JSON.stringify(events)).toContain('diff --git');
+    expect(runner.timeouts.every((timeout) => timeout === 60_000)).toBe(true);
+  });
+
+  it('attaches executable DAG work-unit metadata before merge queue planning', () => {
+    const planned = attachDagPlanToMergeQueuePullRequests([
+      {
+        number: 50,
+        title: 'first scheduler change',
+        headRefOid: 'a1',
+        changedPaths: ['src/devloopd/stagedScheduler.ts'],
+        checksPassed: true,
+        dualLlmApproved: true,
+      },
+      {
+        number: 51,
+        title: 'second scheduler change',
+        headRefOid: 'b2',
+        changedPaths: ['src/devloopd/stagedScheduler.ts'],
+        checksPassed: true,
+        dualLlmApproved: true,
+      },
+    ]);
+
+    expect(planned[0]).toMatchObject({ workUnitId: 'pr-50', dagLayer: 0 });
+    expect(planned[1]).toMatchObject({ workUnitId: 'pr-51', dagLayer: 1 });
   });
 });

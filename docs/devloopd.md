@@ -341,7 +341,8 @@ used by thin `.takt/automation/*.sh` compatibility wrappers.
 
 ```bash
 devloopd staged once --repo owner/repo
-devloopd staged loop --repo owner/repo --max-cycles 3
+devloopd staged loop --repo owner/repo --safety-profile safe-default
+devloopd staged loop --repo owner/repo --safety-profile smoke --max-cycles 3
 devloopd staged pr-review --repo owner/repo
 devloopd stage pr-merge --repo owner/repo
 ```
@@ -367,10 +368,14 @@ interval environment variables remain supported:
 | `TAKT_LOOP_REVIEW_FIX_INTERVAL` | `review-fix` |
 | `TAKT_LOOP_PR_MERGE_INTERVAL` | `pr-merge` |
 
-The same state file also stores recursive safety counters. Defaults stop after
-three consecutive no-op cycles, three classifier disagreements, five CI flake
-loops, three review-fix failures, or five product-policy escalations. Override
-them with:
+The same state file also stores recursive safety counters. `safe-default` is
+the default safety profile and bounds daemon-like runs by stage count, elapsed
+duration, PR touches, retries, and circuit breakers. Use `smoke` for short local
+or CI checks. Use `daemon` only when an intentionally long-running operator has
+external supervision.
+
+Set the profile with `--safety-profile <smoke|safe-default|daemon>` or
+`TAKT_LOOP_SAFETY_PROFILE`. Override individual budgets with:
 
 | Environment variable | Safety budget |
 |----------------------|---------------|
@@ -386,6 +391,22 @@ them with:
 | `TAKT_LOOP_MAX_CI_FLAKES` | CI flake circuit breaker |
 | `TAKT_LOOP_MAX_REVIEW_FIX_FAILURES` | review-fix circuit breaker |
 | `TAKT_LOOP_MAX_PRODUCT_POLICY_ESCALATIONS` | human escalation circuit breaker |
+
+GitHub metadata calls are timeout-bounded by default. Set
+`TAKT_LOOP_GH_TIMEOUT_MS` to change the default 60000ms timeout for `gh pr view`,
+`gh pr diff`, `gh pr checks`, issue scans, comments, and merge metadata calls.
+
+Ledger and staged scheduler state remain portable JSONL/JSON files. Writes are
+protected by short file locks and atomic replacement so multiple `devloopd`
+processes cannot partially overwrite state. Lock contention fails visibly rather
+than waiting forever.
+
+`issue-scout` writes top-level `retryAfter` ledger entries when no eligible work
+exists, and the staged scheduler treats those as a stage-level backoff. Candidate
+backoff and CI repair backoff are scoped to the relevant candidate or PR/head SHA
+so unrelated automation can continue. CI failures classified as flaky,
+infrastructure, or timeout can request bounded `gh run rerun --failed`; auth,
+permission, policy, and unknown failures still stop for human/operator action.
 
 `devloopd stage <stage>` runs one stage immediately and ignores interval state.
 Use it for cron, launchd, or a manual recovery command when you want a single
@@ -416,6 +437,10 @@ the whole plan as human-review-required. Safety budgets stop recursive loops on
 max runs, PRs, retries, cost proxy, duration, changed files, changed lines,
 repeated no-op completion signals, classifier disagreement, CI flake loops,
 review-fix failures, or product-policy escalation loops.
+
+Product-policy classifier changes should be checked with replay eval fixtures.
+Replay cases use sanitized summaries, changed paths, and minimal diff snippets;
+reducing human-review routing or classifier thresholds requires human review.
 
 ## Merge Gate
 

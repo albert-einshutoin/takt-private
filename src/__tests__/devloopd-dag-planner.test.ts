@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { planDagWorkUnits } from '../devloopd/workUnitPlanner.js';
+import { buildExecutableDagWorkUnitPlan, planDagWorkUnits } from '../devloopd/workUnitPlanner.js';
 
 describe('devloopd DAG work-unit planner', () => {
   it('keeps implementation and characterization tests in the same work unit', () => {
@@ -60,6 +60,39 @@ describe('devloopd DAG work-unit planner', () => {
     expect(plan.units[0]).toMatchObject({
       humanReviewRequired: true,
       tier: 'large',
+    });
+  });
+
+  it('builds an executable DAG plan with worktree isolation, quality gates, and paused policy units', () => {
+    const plan = buildExecutableDagWorkUnitPlan([
+      {
+        id: 'safe-refactor',
+        title: 'Refactor scheduler helper',
+        body: 'Scoped implementation refactor',
+        lane: 'idiomatic_refactor',
+        changedSurfaces: ['src/devloopd/stagedScheduler.ts'],
+        acceptanceCriteria: ['Behavior stays the same'],
+      },
+      {
+        id: 'policy-change',
+        title: 'Change public API contract',
+        body: 'Product direction decision',
+        lane: 'feature_improvement',
+        policyCategory: 'product_policy',
+        changedSurfaces: ['src/public-api/client.ts'],
+        acceptanceCriteria: ['Human approves the contract'],
+      },
+    ]);
+
+    expect(plan.executableUnits.find((unit) => unit.id === 'safe-refactor')).toMatchObject({
+      status: 'ready',
+      isolation: 'worktree',
+      mergeQueueLayer: 0,
+    });
+    expect(plan.executableUnits.find((unit) => unit.id === 'safe-refactor')?.qualityGates).toContain('npm run build');
+    expect(plan.executableUnits.find((unit) => unit.id === 'policy-change')).toMatchObject({
+      status: 'paused',
+      pausedReason: 'human review required before implementation',
     });
   });
 });

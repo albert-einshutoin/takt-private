@@ -38,6 +38,7 @@ import {
   formatStagedDevloopReport,
   runStagedDevloop,
   type StagedDevloopMode,
+  type StagedDevloopSafetyProfile,
 } from '../../devloopd/stagedScheduler.js';
 import { formatDevloopStartReport, startDevloop } from '../../devloopd/supervisor.js';
 import { getErrorMessage } from '../../shared/utils/error.js';
@@ -60,6 +61,16 @@ function parseAutomationStage(value: string): DevloopAutomationStage {
     return value as DevloopAutomationStage;
   }
   throw new Error(`unknown devloopd stage: ${value}`);
+}
+
+function parseSafetyProfileOption(value: string | undefined): StagedDevloopSafetyProfile | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === 'smoke' || value === 'safe-default' || value === 'daemon') {
+    return value;
+  }
+  throw new Error(`invalid safety profile: ${value}`);
 }
 
 function parseStagedModeOrStage(value: string | undefined): { mode: StagedDevloopMode; stage?: DevloopAutomationStage } {
@@ -534,6 +545,7 @@ program
   .option('--no-quiet', 'Do not pass --quiet to TAKT')
   .option('--dry-run', 'Do not mutate GitHub state')
   .option('--state <path>', 'Structured staged scheduler state file')
+  .option('--safety-profile <profile>', 'Safety profile: smoke, safe-default, or daemon')
   .option('--max-cycles <count>', 'Stop loop after a finite number of scheduler cycles', (value: string) => Number(value))
   .option('--tick-seconds <count>', 'Seconds between loop ticks', (value: string) => Number(value))
   .option('--issue-scout-interval <seconds>', 'issue-scout interval')
@@ -552,6 +564,7 @@ program
     quiet?: boolean;
     dryRun?: boolean;
     state?: string;
+    safetyProfile?: string;
     maxCycles?: number;
     tickSeconds?: number;
     issueScoutInterval?: string;
@@ -572,6 +585,7 @@ program
       quiet: options.quiet !== false,
       dryRun: options.dryRun === true,
       statePath: options.state ? resolve(options.state) : undefined,
+      safetyProfile: parseSafetyProfileOption(options.safetyProfile),
       maxCycles: options.maxCycles,
       tickSeconds: options.tickSeconds,
       mode: parsed.mode,

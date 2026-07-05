@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   runDevloopAutomationStage,
   type DevloopAutomationStage,
@@ -12,6 +12,8 @@ import {
   type AutomationSafetyReport,
   type AutomationSafetyState,
 } from './automationSafety.js';
+import { readRawDevloopLedgerEvents, resolveDevloopLedgerPath } from './ledger.js';
+import { writeFileAtomic } from './stateStore.js';
 
 export { type DevloopAutomationStage } from './prAutomation.js';
 
@@ -24,6 +26,7 @@ export const DEVLOOP_AUTOMATION_STAGES = [
 ] as const satisfies readonly DevloopAutomationStage[];
 
 export type StagedDevloopMode = 'once' | 'loop';
+export type StagedDevloopSafetyProfile = 'smoke' | 'safe-default' | 'daemon';
 
 export interface StagedDevloopState {
   version: 1;
@@ -53,6 +56,7 @@ export interface StagedDevloopStageReport {
   reason: string;
   lastRunAt?: string;
   nextRunAt?: string;
+  retryAfter?: string;
   report?: DevloopAutomationStageReport;
 }
 
@@ -65,6 +69,8 @@ export interface StagedDevloopReport {
   cycles?: StagedDevloopReport[];
   stateWarning?: string;
   safetyReport?: AutomationSafetyReport;
+  safetyProfile?: StagedDevloopSafetyProfile;
+  safetyBudgets?: AutomationSafetyBudgets;
 }
 
 export interface StagedDevloopDependencies {
@@ -88,6 +94,7 @@ export interface RunStagedDevloopOptions {
   maxCycles?: number;
   tickSeconds?: number;
   intervals?: Partial<Record<DevloopAutomationStage, number>>;
+  safetyProfile?: StagedDevloopSafetyProfile;
   safetyBudgets?: AutomationSafetyBudgets;
   statePath?: string;
   now?: () => Date;
@@ -119,6 +126,28 @@ const DEFAULT_SAFETY_BUDGETS: AutomationSafetyBudgets = {
   maxCiFlakes: 5,
   maxReviewFixFailures: 3,
   maxProductPolicyEscalations: 5,
+};
+
+const SAFETY_PROFILE_ENV_KEY = 'TAKT_LOOP_SAFETY_PROFILE';
+
+const SAFETY_PROFILE_BUDGETS: Record<StagedDevloopSafetyProfile, AutomationSafetyBudgets> = {
+  smoke: {
+    ...DEFAULT_SAFETY_BUDGETS,
+    maxRuns: 5,
+    maxDurationSeconds: 5 * 60,
+    maxPullRequests: 3,
+    maxRetries: 5,
+  },
+  'safe-default': {
+    ...DEFAULT_SAFETY_BUDGETS,
+    maxRuns: 100,
+    maxDurationSeconds: 8 * 60 * 60,
+    maxPullRequests: 25,
+    maxRetries: 50,
+  },
+  daemon: {
+    ...DEFAULT_SAFETY_BUDGETS,
+  },
 };
 
 const SAFETY_BUDGET_ENV_KEYS: Record<keyof AutomationSafetyBudgets, string> = {
@@ -172,11 +201,33 @@ function resolveIntervals(
   return intervals;
 }
 
+function isSafetyProfile(value: string | undefined): value is StagedDevloopSafetyProfile {
+  return value === 'smoke' || value === 'safe-default' || value === 'daemon';
+}
+
+function resolveSafetyProfile(
+  env: NodeJS.ProcessEnv,
+  explicit: StagedDevloopSafetyProfile | undefined,
+): { profile: StagedDevloopSafetyProfile } | { error: string } {
+  if (explicit !== undefined) {
+    return { profile: explicit };
+  }
+  const envProfile = env[SAFETY_PROFILE_ENV_KEY];
+  if (envProfile === undefined || envProfile.trim() === '') {
+    return { profile: 'safe-default' };
+  }
+  if (isSafetyProfile(envProfile)) {
+    return { profile: envProfile };
+  }
+  return { error: `invalid ${SAFETY_PROFILE_ENV_KEY}: ${envProfile}` };
+}
+
 function resolveSafetyBudgets(
   env: NodeJS.ProcessEnv,
   explicit: AutomationSafetyBudgets | undefined,
+  profile: StagedDevloopSafetyProfile,
 ): AutomationSafetyBudgets {
-  const budgets: AutomationSafetyBudgets = { ...DEFAULT_SAFETY_BUDGETS };
+  const budgets: AutomationSafetyBudgets = { ...SAFETY_PROFILE_BUDGETS[profile] };
   for (const [key, envKey] of Object.entries(SAFETY_BUDGET_ENV_KEYS) as Array<[keyof AutomationSafetyBudgets, string]>) {
     const envValue = parsePositiveNumber(env[envKey]);
     const explicitValue = explicit?.[key];
@@ -247,10 +298,9 @@ function readState(statePath: string, now: Date = new Date()): { state: StagedDe
 }
 
 function writeState(statePath: string, state: StagedDevloopState): void {
-  mkdirSync(dirname(statePath), { recursive: true });
   // The scheduler uses JSON instead of shell-sourced env so a crashed loop can
   // resume deterministically without executing untrusted state file content.
-  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  writeFileAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
 function parseTimestamp(value: string | undefined): Date | undefined {
@@ -273,6 +323,56 @@ function isDue(lastRunAt: Date | undefined, intervalSeconds: number, now: Date):
     return true;
   }
   return now.getTime() - lastRunAt.getTime() >= intervalSeconds * 1000;
+}
+
+interface ActiveRetryAfter {
+  retryAfter: string;
+  eventType: string;
+  reason: string;
+}
+
+function parseFutureTimestamp(value: unknown, now: Date): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || timestamp <= now.getTime()) {
+    return undefined;
+  }
+  return new Date(timestamp).toISOString();
+}
+
+function activeRetryAfterForStage(input: {
+  stage: DevloopAutomationStage;
+  repoPath: string;
+  ledgerPath?: string;
+  now: Date;
+}): ActiveRetryAfter | undefined {
+  const ledgerPath = resolveDevloopLedgerPath(input.repoPath, input.ledgerPath);
+  const events = readRawDevloopLedgerEvents(ledgerPath).slice().reverse();
+  for (const event of events) {
+    if (input.stage === 'issue-scout' && event.eventType === 'devloop_issue_scout') {
+      const retryAfter = parseFutureTimestamp(event.retryAfter, input.now);
+      if (retryAfter !== undefined) {
+        return {
+          retryAfter,
+          eventType: event.eventType,
+          reason: 'issue-scout ledger retryAfter is active',
+        };
+      }
+    }
+    if (input.stage === 'pr-merge' && event.eventType === 'devloop_ci_retry' && event.prNumber === undefined) {
+      const retryAfter = parseFutureTimestamp(event.retryAfter, input.now);
+      if (retryAfter !== undefined) {
+        return {
+          retryAfter,
+          eventType: event.eventType,
+          reason: 'unscoped CI retryAfter is active',
+        };
+      }
+    }
+  }
+  return undefined;
 }
 
 function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -352,7 +452,17 @@ async function runStagedDevloopCycle(options: RunStagedDevloopOptions): Promise<
   const mode = options.mode ?? 'once';
   const statePath = resolve(options.statePath ?? env.TAKT_LOOP_STAGE_STATE ?? defaultStatePath(repoPath));
   const intervals = resolveIntervals(env, options.intervals);
-  const safetyBudgets = resolveSafetyBudgets(env, options.safetyBudgets);
+  const profile = resolveSafetyProfile(env, options.safetyProfile);
+  if ('error' in profile) {
+    return {
+      passed: false,
+      mode,
+      message: profile.error,
+      statePath,
+      stageReports: [],
+    };
+  }
+  const safetyBudgets = resolveSafetyBudgets(env, options.safetyBudgets, profile.profile);
   const dependencies = resolveDependencies(options.dependencies);
   const now = options.now?.() ?? new Date();
   const { state, warning } = readState(statePath, now);
@@ -371,6 +481,8 @@ async function runStagedDevloopCycle(options: RunStagedDevloopOptions): Promise<
       statePath,
       stageReports: [],
       safetyReport: initialSafetyReport,
+      safetyProfile: profile.profile,
+      safetyBudgets,
       ...(warning !== undefined ? { stateWarning: warning } : {}),
     };
   }
@@ -380,7 +492,25 @@ async function runStagedDevloopCycle(options: RunStagedDevloopOptions): Promise<
   for (const stage of targetStages) {
     const lastRun = parseTimestamp(state.lastRunAt[stage]);
     const stageNextRunAt = nextRunAt(lastRun, intervals[stage]);
+    const activeRetryAfter = activeRetryAfterForStage({
+      stage,
+      repoPath,
+      ledgerPath: options.ledgerPath,
+      now,
+    });
     const due = options.stage !== undefined || isDue(lastRun, intervals[stage], now);
+    if (activeRetryAfter !== undefined && options.stage === undefined) {
+      stageReports.push({
+        stage,
+        status: 'skipped',
+        due: false,
+        reason: `${activeRetryAfter.reason} until ${activeRetryAfter.retryAfter}`,
+        retryAfter: activeRetryAfter.retryAfter,
+        ...(lastRun !== undefined ? { lastRunAt: lastRun.toISOString() } : {}),
+        nextRunAt: activeRetryAfter.retryAfter,
+      });
+      continue;
+    }
     if (!due) {
       stageReports.push({
         stage,
@@ -436,6 +566,8 @@ async function runStagedDevloopCycle(options: RunStagedDevloopOptions): Promise<
     statePath,
     stageReports,
     safetyReport,
+    safetyProfile: profile.profile,
+    safetyBudgets,
     ...(warning !== undefined ? { stateWarning: warning } : {}),
   };
 }
@@ -490,6 +622,8 @@ export async function runStagedDevloop(options: RunStagedDevloopOptions = {}): P
     statePath: lastCycle?.statePath ?? resolve(options.statePath ?? defaultStatePath(resolve(options.repoPath ?? process.cwd()))),
     stageReports: lastCycle?.stageReports ?? [],
     cycles,
+    ...(lastCycle?.safetyProfile !== undefined ? { safetyProfile: lastCycle.safetyProfile } : {}),
+    ...(lastCycle?.safetyBudgets !== undefined ? { safetyBudgets: lastCycle.safetyBudgets } : {}),
     ...(lastCycle?.stateWarning !== undefined ? { stateWarning: lastCycle.stateWarning } : {}),
   };
 }
@@ -502,6 +636,9 @@ export function formatStagedDevloopReport(report: StagedDevloopReport): string {
   ];
   if (report.stateWarning !== undefined) {
     lines.push(`State warning: ${report.stateWarning}`);
+  }
+  if (report.safetyProfile !== undefined) {
+    lines.push(`Safety profile: ${report.safetyProfile}`);
   }
   if (report.safetyReport !== undefined && !report.safetyReport.allowed) {
     lines.push(`Safety stop: ${report.safetyReport.stopRule ?? 'unknown'} - ${report.safetyReport.reasons.join('; ')}`);

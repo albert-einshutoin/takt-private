@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import {
   createDefaultDevloopCommandRunner,
+  githubMetadataExecOptions,
   type DevloopCommandRunner,
 } from './commandRunner.js';
 import {
@@ -343,7 +344,7 @@ async function loadPrSnapshot(
     args.push('--repo', repo);
   }
 
-  const result = await runner.exec(ghCommand, args, { cwd: repoPath, env });
+  const result = await runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: repoPath, env }));
   if (result.exitCode !== 0) {
     throw new Error(`gh pr view failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
@@ -365,7 +366,7 @@ async function loadReviewComments(
   const result = await runner.exec(
     ghCommand,
     ['api', `repos/${resolvedRepo}/issues/${prNumber}/comments`, '--paginate'],
-    { cwd: repoPath, env },
+    githubMetadataExecOptions({ cwd: repoPath, env }),
   );
   if (result.exitCode !== 0) {
     return [];
@@ -399,7 +400,7 @@ async function resolveLocalRepoName(
   const result = await runner.exec(
     ghCommand,
     ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
-    { cwd: repoPath, env },
+    githubMetadataExecOptions({ cwd: repoPath, env }),
   );
   if (result.exitCode !== 0) {
     return undefined;
@@ -420,7 +421,7 @@ async function loadChangedPaths(
   if (repo) {
     args.push('--repo', repo);
   }
-  const result = await runner.exec(ghCommand, args, { cwd: repoPath, env });
+  const result = await runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: repoPath, env }));
   if (result.exitCode !== 0) {
     throw new Error(`gh pr diff failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
@@ -439,7 +440,7 @@ async function loadFullDiff(
   if (repo) {
     args.push('--repo', repo);
   }
-  const result = await runner.exec(ghCommand, args, { cwd: repoPath, env });
+  const result = await runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: repoPath, env }));
   return result.exitCode === 0 ? result.stdout : '';
 }
 
@@ -455,7 +456,7 @@ async function checkGithubChecks(
   if (repo) {
     args.push('--repo', repo);
   }
-  const result = await runner.exec(ghCommand, args, { cwd: repoPath, env });
+  const result = await runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: repoPath, env }));
   return result.exitCode === 0;
 }
 
@@ -514,7 +515,7 @@ export async function mergeIfSafe(options: MergeIfSafeOptions): Promise<MergeGat
     }
 
     const mergeArgs = buildMergeArgs(options.pr, pr.headRefOid, policy, options.repo);
-    const result = await runner.exec(ghCommand, mergeArgs, { cwd: repoPath, env });
+    const result = await runner.exec(ghCommand, mergeArgs, githubMetadataExecOptions({ cwd: repoPath, env }));
     if (result.exitCode !== 0) {
       return {
         ...report,

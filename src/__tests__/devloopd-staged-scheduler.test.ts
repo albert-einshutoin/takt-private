@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { appendDevloopLedgerEvent, buildDevloopLedgerEvent, resolveDevloopLedgerPath } from '../devloopd/ledger.js';
 import {
   DEVLOOP_AUTOMATION_STAGES,
   runStagedDevloop,
@@ -183,5 +184,81 @@ describe('devloopd staged scheduler', () => {
     expect(report.passed).toBe(true);
     expect(state.safety?.runs).toBe(1);
     expect(state.safety?.consecutiveNoopSignals).toBe(1);
+  });
+
+  it('uses safe-default safety profile unless a shorter smoke profile is requested', async () => {
+    const statePath = makeTempStatePath();
+
+    const report = await runStagedDevloop({
+      repoPath: '/repo',
+      mode: 'once',
+      stage: 'issue-scout',
+      statePath,
+      safetyProfile: 'smoke',
+      now: () => new Date('2026-07-05T00:00:00.000Z'),
+      dependencies: {
+        runStage: async (options) => ({
+          passed: true,
+          stage: options.stage,
+          message: `ran ${options.stage}`,
+          actions: [],
+        }),
+      },
+    });
+
+    expect(report.safetyProfile).toBe('smoke');
+    expect(report.safetyBudgets?.maxRuns).toBe(5);
+    expect(report.safetyBudgets?.maxDurationSeconds).toBe(300);
+  });
+
+  it('rejects unknown safety profiles from the environment', async () => {
+    const report = await runStagedDevloop({
+      repoPath: '/repo',
+      statePath: makeTempStatePath(),
+      env: { TAKT_LOOP_SAFETY_PROFILE: 'forever' },
+      dependencies: {
+        runStage: async (options) => ({
+          passed: true,
+          stage: options.stage,
+          message: `ran ${options.stage}`,
+          actions: [],
+        }),
+      },
+    });
+
+    expect(report.passed).toBe(false);
+    expect(report.message).toContain('invalid TAKT_LOOP_SAFETY_PROFILE');
+  });
+
+  it('honors active top-level issue-scout retryAfter ledger events without running the stage', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-staged-retry-'));
+    const statePath = join(repoPath, 'state.json');
+    const ledgerPath = resolveDevloopLedgerPath(repoPath, undefined);
+    const calls: DevloopAutomationStage[] = [];
+    appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_issue_scout', {
+      repoPath,
+      retryAfter: '2026-07-05T01:00:00.000Z',
+    }, new Date('2026-07-05T00:00:00.000Z')));
+
+    const report = await runStagedDevloop({
+      repoPath,
+      mode: 'once',
+      statePath,
+      now: () => new Date('2026-07-05T00:30:00.000Z'),
+      dependencies: {
+        runStage: async (options) => {
+          calls.push(options.stage);
+          return { passed: true, stage: options.stage, message: `ran ${options.stage}`, actions: [] };
+        },
+      },
+    });
+
+    expect(report.stageReports.find((stage) => stage.stage === 'issue-scout')).toMatchObject({
+      status: 'skipped',
+      due: false,
+      retryAfter: '2026-07-05T01:00:00.000Z',
+    });
+    expect(calls).not.toContain('issue-scout');
+    expect(calls).toContain('pr-merge');
   });
 });

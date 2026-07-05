@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import {
   createDefaultDevloopCommandRunner,
+  githubMetadataExecOptions,
   type DevloopCommandRunner,
 } from './commandRunner.js';
 import { buildAutomationStateEvent, type AutomationStateStage, type AutomationStateStatus } from './automationState.js';
@@ -27,6 +28,7 @@ import {
   type MergeQueueEvictionContext,
   type MergeQueuePullRequest,
 } from './mergeQueue.js';
+import { buildExecutableDagWorkUnitPlan, type BacklogWorkItem } from './workUnitPlanner.js';
 import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
@@ -231,7 +233,7 @@ async function listAutomationPullRequests(options: {
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
   }
-  const result = await options.runner.exec(ghCommand, args, { cwd: options.repoPath, env: options.env });
+  const result = await options.runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }));
   if (result.exitCode !== 0) {
     throw new Error(`gh pr list failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
@@ -261,7 +263,7 @@ async function loadPrView(options: {
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
   }
-  const result = await options.runner.exec(ghCommand, args, { cwd: options.repoPath, env: options.env });
+  const result = await options.runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }));
   if (result.exitCode !== 0) {
     throw new Error(`gh pr view failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
@@ -284,7 +286,7 @@ async function loadChangedPaths(options: {
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
   }
-  const result = await options.runner.exec(ghCommand, args, { cwd: options.repoPath, env: options.env });
+  const result = await options.runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }));
   if (result.exitCode !== 0) {
     throw new Error(`gh pr diff failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
@@ -315,7 +317,7 @@ async function loadDiffContext(options: {
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
   }
-  const result = await options.runner.exec(ghCommand, args, { cwd: options.repoPath, env: options.env });
+  const result = await options.runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }));
   if (result.exitCode !== 0 || result.stdout.trim().length === 0) {
     return undefined;
   }
@@ -346,7 +348,7 @@ async function loadReviewComments(options: {
   const result = await options.runner.exec(
     ghCommand,
     ['api', `repos/${repo}/issues/${options.pr}/comments`, '--paginate'],
-    { cwd: options.repoPath, env: options.env },
+    githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }),
   );
   if (result.exitCode !== 0) {
     return [];
@@ -373,7 +375,7 @@ async function resolveLocalRepoName(options: {
   const result = await options.runner.exec(
     options.ghCommand,
     ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'],
-    { cwd: options.repoPath, env: options.env },
+    githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }),
   );
   if (result.exitCode !== 0) {
     return undefined;
@@ -411,7 +413,7 @@ async function checkGithubChecks(options: {
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
   }
-  const result = await options.runner.exec(ghCommand, args, { cwd: options.repoPath, env: options.env });
+  const result = await options.runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }));
   return result.exitCode === 0;
 }
 
@@ -432,7 +434,7 @@ async function addAutoMergeLabel(options: {
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
   }
-  const result = await options.runner.exec(ghCommand, args, { cwd: options.repoPath, env: options.env });
+  const result = await options.runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }));
   if (result.exitCode !== 0) {
     throw new Error(`gh pr edit failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
@@ -454,7 +456,7 @@ async function postReviewComment(options: {
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
   }
-  const result = await options.runner.exec(ghCommand, args, { cwd: options.repoPath, env: options.env });
+  const result = await options.runner.exec(ghCommand, args, githubMetadataExecOptions({ cwd: options.repoPath, env: options.env }));
   if (result.exitCode !== 0) {
     throw new Error(`gh pr comment failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
@@ -947,6 +949,43 @@ async function buildMergeQueuePullRequest(options: {
   };
 }
 
+function queueItemToBacklogWorkItem(item: MergeQueuePullRequest): BacklogWorkItem {
+  return {
+    id: `pr-${item.number}`,
+    title: item.title,
+    body: [
+      `PR #${item.number}`,
+      `Head SHA: ${item.headRefOid}`,
+      item.productPolicyRequiresHumanReview === true
+        ? 'Product-policy impact requires human review before implementation or merge.'
+        : 'Automation PR already passed promotion preconditions.',
+    ].join('\n'),
+    lane: 'feature_improvement',
+    ...(item.productPolicyRequiresHumanReview === true ? { policyCategory: 'product_policy' as const } : {}),
+    changedSurfaces: item.changedPaths,
+    acceptanceCriteria: [
+      'GitHub checks pass for the current head SHA',
+      'Dual-LLM approval matches the current head SHA',
+      'Merge queue layer has no unresolved predecessor',
+    ],
+  };
+}
+
+export function attachDagPlanToMergeQueuePullRequests(
+  items: readonly MergeQueuePullRequest[],
+): MergeQueuePullRequest[] {
+  const plan = buildExecutableDagWorkUnitPlan(items.map(queueItemToBacklogWorkItem));
+  const unitsByPr = new Map(plan.executableUnits.map((unit) => [Number(unit.id.replace(/^pr-/u, '')), unit]));
+  return items.map((item) => {
+    const unit = unitsByPr.get(item.number);
+    return {
+      ...item,
+      ...(unit !== undefined ? { workUnitId: unit.id, dagLayer: unit.mergeQueueLayer } : {}),
+      productPolicyRequiresHumanReview: item.productPolicyRequiresHumanReview === true || unit?.humanReviewRequired === true,
+    };
+  });
+}
+
 export async function runDevloopAutomationStage(options: RunDevloopAutomationStageOptions): Promise<DevloopAutomationStageReport> {
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
@@ -1091,7 +1130,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
     env,
     runner,
   })));
-  const queuePlan = planMergeQueue(queueItems);
+  const queuePlan = planMergeQueue(attachDagPlanToMergeQueuePullRequests(queueItems));
   appendMergeQueueStateEvents({
     repoPath,
     ledgerPath: options.ledgerPath,
