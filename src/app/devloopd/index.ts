@@ -61,6 +61,10 @@ import {
   type StagedDevloopMode,
   type StagedDevloopSafetyProfile,
 } from '../../devloopd/stagedScheduler.js';
+import {
+  formatDevloopSoakHarnessReport,
+  runDevloopSoakHarness,
+} from '../../devloopd/soakHarness.js';
 import { formatDevloopStartReport, startDevloop } from '../../devloopd/supervisor.js';
 import { getErrorMessage } from '../../shared/utils/error.js';
 
@@ -765,6 +769,39 @@ program
     });
 
     console.log(formatStagedDevloopReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('soak')
+  .description('Run a deterministic no-external-services soak harness for staged devloop automation')
+  .option('--cwd <path>', 'Repository path to exercise', process.cwd())
+  .option('--cycles <count>', 'Deterministic scheduler cycles to run', (value: string) => Number(value))
+  .option('--state <path>', 'Structured staged scheduler state file')
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .option('--report <path>', 'JSON soak report path. Defaults next to the generated state file')
+  .option('--repeated-wait-limit <count>', 'Consecutive identical wait/error reasons allowed before failing', (value: string) => Number(value))
+  .action(async (options: {
+    cwd: string;
+    cycles?: number;
+    state?: string;
+    ledger?: string;
+    report?: string;
+    repeatedWaitLimit?: number;
+  }) => {
+    const repoPath = resolve(options.cwd);
+    const report = await runDevloopSoakHarness({
+      repoPath,
+      cycles: Number.isFinite(options.cycles) ? options.cycles : undefined,
+      statePath: options.state ? resolve(options.state) : undefined,
+      ledgerPath: options.ledger,
+      reportPath: options.report ? resolve(options.report) : undefined,
+      repeatedWaitLimit: Number.isFinite(options.repeatedWaitLimit) ? options.repeatedWaitLimit : undefined,
+    });
+
+    console.log(formatDevloopSoakHarnessReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }
