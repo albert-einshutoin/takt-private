@@ -429,9 +429,21 @@ async function runAgyReview(options: {
       message: 'command not found: agy',
     };
   }
+  const prompt = [
+    options.prompt,
+    '',
+    'Return exactly this contract:',
+    '',
+    'Mergeable: YES|NO',
+    'Reason: one concise sentence',
+    'Blockers:',
+    '- none, or concrete blockers with file paths/commands',
+    'Verification:',
+    '- evidence used',
+  ].join('\n');
   const result = await options.runner.exec(
     agyCommand,
-    ['--model', options.env.TAKT_LOOP_AGY_MODEL ?? 'gpt-5', '--print-timeout', options.env.TAKT_LOOP_AGY_PRINT_TIMEOUT ?? '900', '-p', options.prompt],
+    ['--model', options.env.TAKT_LOOP_AGY_MODEL ?? 'gpt-5', '--print-timeout', options.env.TAKT_LOOP_AGY_PRINT_TIMEOUT ?? '900', '-p', prompt],
     { cwd: options.repoPath, env: options.env },
   );
   const rawReview = result.exitCode === 0
@@ -479,6 +491,18 @@ async function runCodexReview(options: {
       message: 'command not found: codex',
     };
   }
+  const prompt = [
+    options.prompt,
+    '',
+    'Return exactly this contract:',
+    '',
+    'Codex-Human-Review: APPROVED|BLOCKED',
+    'Reason: one concise sentence',
+    'Blockers:',
+    '- none, or concrete blockers with file paths/commands',
+    'Verification:',
+    '- evidence used',
+  ].join('\n');
   const result = await options.runner.exec(
     codexCommand,
     [
@@ -495,7 +519,7 @@ async function runCodexReview(options: {
       'approval_policy="never"',
       '-',
     ],
-    { cwd: options.repoPath, env: options.env, stdin: options.prompt },
+    { cwd: options.repoPath, env: options.env, stdin: prompt },
   );
   const rawReview = result.exitCode === 0
     ? result.stdout
