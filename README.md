@@ -262,6 +262,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd reset --cwd /path/to/repo` | Clear personal daemon metadata and stop-request state |
 | `npm run check:personal` | Run the local personal automation readiness gate |
 | `devloopd release-info --json` | Print package version, commit SHA, and personal release provenance |
+| `devloopd product-policy replay --cwd /path/to/repo` | Replay active product-policy classifier fixtures |
 | `devloopd schedule-template --kind launchd --cwd /path/to/repo` | Render safe launchd/cron templates for personal automation |
 | `devloopd soak --cwd /path/to/repo --cycles 5` | Run deterministic no-external-services loop stability checks |
 | `devloopd run --issue N` | Run a GitHub Issue through TAKT after subscription-only checks |

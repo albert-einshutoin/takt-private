@@ -62,6 +62,12 @@ import {
   runProviderSmokeMatrix,
 } from '../../devloopd/providerSmoke.js';
 import {
+  formatProductPolicyReplayCandidateFile,
+  formatProductPolicyReplayCorpusReport,
+  runProductPolicyReplayCorpus,
+  writeProductPolicyReplayCandidateFile,
+} from '../../devloopd/productPolicyReplayCorpus.js';
+import {
   formatDevloopAutomationStageReport,
   promotePullRequestAutoMerge,
   runDevloopAutomationStage,
@@ -327,6 +333,68 @@ program
       return;
     }
     console.log(formatPersonalScheduleReport(report));
+  });
+
+const productPolicy = program
+  .command('product-policy')
+  .description('Product-policy classifier replay corpus utilities');
+
+productPolicy
+  .command('collect-replay-cases')
+  .description('Collect sanitized product-policy replay candidates from the devloop ledger')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--ledger <path>', 'Ledger path. Defaults to .devloop/ledger.jsonl under --cwd')
+  .option('--output <path>', 'Candidate JSON output path. Defaults to .devloop/product-policy-replay-candidates.json')
+  .option('--limit <count>', 'Maximum recent candidate cases to collect', (value: string) => Number(value))
+  .option('--json', 'Print the candidate file JSON')
+  .action((options: {
+    cwd: string;
+    ledger?: string;
+    output?: string;
+    limit?: number;
+    json?: boolean;
+  }) => {
+    const result = writeProductPolicyReplayCandidateFile({
+      repoPath: resolve(options.cwd),
+      ledgerPath: options.ledger,
+      outputPath: options.output,
+      limit: Number.isFinite(options.limit) ? options.limit : undefined,
+    });
+    console.log(options.json === true
+      ? JSON.stringify(result.file, null, 2)
+      : formatProductPolicyReplayCandidateFile(result.path, result.file));
+  });
+
+productPolicy
+  .command('replay')
+  .description('Replay active product-policy classifier fixtures')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--fixtures <path>', 'Active replay fixture directory. Defaults to fixtures/product-policy/replay')
+  .option('--max-false-positives <count>', 'Allowed false positives', (value: string) => Number(value))
+  .option('--max-false-negatives <count>', 'Allowed false negatives', (value: string) => Number(value))
+  .option('--json', 'Print the machine-readable replay report')
+  .action((options: {
+    cwd: string;
+    fixtures?: string;
+    maxFalsePositives?: number;
+    maxFalseNegatives?: number;
+    json?: boolean;
+  }) => {
+    const thresholds = {
+      ...(Number.isFinite(options.maxFalsePositives) ? { maxFalsePositives: options.maxFalsePositives } : {}),
+      ...(Number.isFinite(options.maxFalseNegatives) ? { maxFalseNegatives: options.maxFalseNegatives } : {}),
+    };
+    const report = runProductPolicyReplayCorpus({
+      repoPath: resolve(options.cwd),
+      fixtureDir: options.fixtures,
+      thresholds,
+    });
+    console.log(options.json === true
+      ? JSON.stringify(report, null, 2)
+      : formatProductPolicyReplayCorpusReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
   });
 
 program

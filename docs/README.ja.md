@@ -265,6 +265,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `devloopd reset --cwd /path/to/repo` | personal daemon metadata と stop-request state を消します |
 | `npm run check:personal` | local personal automation readiness gate を実行します |
 | `devloopd release-info --json` | package version、commit SHA、personal release provenance を表示します |
+| `devloopd product-policy replay --cwd /path/to/repo` | active な product-policy classifier fixture を replay します |
 | `devloopd schedule-template --kind launchd --cwd /path/to/repo` | personal automation 用の safe な launchd/cron template を出力します |
 | `devloopd soak --cwd /path/to/repo --cycles 5` | 外部サービスなしの deterministic loop stability check を実行します |
 | `devloopd run --issue N` | subscription-only 検査後に GitHub Issue を TAKT pipeline で実行します |

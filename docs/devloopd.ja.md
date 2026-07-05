@@ -466,6 +466,28 @@ product-policy classifier の変更は replay eval fixture で確認します。
 summary、changed path、最小限の diff snippet を使います。human-review routing や threshold を
 減らす変更は human review が必要です。
 
+replay corpus command を使うと、この fixture set を実際の local automation decision に紐付けて
+保守できます。
+
+```bash
+devloopd product-policy collect-replay-cases --cwd /path/to/repo
+devloopd product-policy replay --cwd /path/to/repo
+devloopd product-policy replay --cwd /path/to/repo --json
+```
+
+`collect-replay-cases` は devloop ledger を読み、sanitize 済み candidate をデフォルトで
+`.devloop/product-policy-replay-candidates.json` に書きます。candidate case は意図的に
+`expectedImpact: null` のままです。人間が redaction を確認し、expected label を明示し、
+`fixtures/product-policy/replay/*.json` に移すまで active fixture にはなりません。保存するのは
+changed path、短い summary、classifier decision context、human override result、reason、
+anonymized diff shape だけです。raw private diff、local filesystem path、credential、customer data、
+proprietary issue body は保存しません。
+
+`product-policy replay` は active fixture label を検証し、total cases、false positive、false
+negative、mismatch reason、impact distribution を報告します。`npm run check:personal` はこの
+replay gate を含み、fixture validation error または false negative で失敗します。active fixture の
+relabel、threshold 低下、category 削除、human-review routing の削減は human review が必要です。
+
 ## Merge Gate
 
 `devloopd merge-if-safe` は機械的な merge 実行者です。LLM output だけで PR を merge しません。このコマンドは `gh pr view` で PR metadata、`gh pr diff --name-only` で変更ファイル、`gh pr diff` で full diff hunk、`gh pr checks` で GitHub checks を確認し、通過した場合だけ auto-merge を有効化します。
