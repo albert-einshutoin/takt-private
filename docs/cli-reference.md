@@ -40,6 +40,8 @@ devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
 devloopd onboard-repo --cwd /path/to/repo --repo owner/repo
 devloopd onboard-repo --cwd /path/to/repo --repo owner/repo --apply
 devloopd ready --cwd /path/to/repo --repo owner/repo
+devloopd recover-stale --cwd /path/to/repo
+devloopd recover-stale --cwd /path/to/repo --apply
 devloopd status --cwd /path/to/repo
 devloopd stop --cwd /path/to/repo --reason "maintenance window"
 devloopd reset --cwd /path/to/repo
@@ -99,6 +101,19 @@ devloopd start --repo owner/repo
 | `--cwd <path>` | Repository path to inspect |
 | `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
 | `--stale-after-minutes <count>` | Minutes without metadata update before active-runs marks a run stale. Defaults to 180 |
+
+`devloopd recover-stale` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--ledger <path>` | Ledger path. Defaults to `.devloop/ledger.jsonl` |
+| `--apply` | Apply conservative cleanup. Without this, only print a dry-run report |
+| `--stale-after-minutes <count>` | Minutes without metadata update before active runs are stale. Defaults to 180 |
+| `--lock-stale-minutes <count>` | Minutes before lock files are stale. Defaults to 10 |
+| `--worktree-stale-minutes <count>` | Minutes before non-git worktree directories are stale. Defaults to 1440 |
+
+`devloopd recover-stale --apply` marks stale running metadata as aborted, removes stale lock files, clears dead daemon metadata, and prunes stale non-git worktree directories. It preserves ledgers, reports, logs, and Git worktrees.
 
 `devloopd stop` options:
 

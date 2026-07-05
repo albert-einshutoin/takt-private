@@ -40,6 +40,8 @@ devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
 devloopd onboard-repo --cwd /path/to/repo --repo owner/repo
 devloopd onboard-repo --cwd /path/to/repo --repo owner/repo --apply
 devloopd ready --cwd /path/to/repo --repo owner/repo
+devloopd recover-stale --cwd /path/to/repo
+devloopd recover-stale --cwd /path/to/repo --apply
 devloopd status --cwd /path/to/repo
 devloopd stop --cwd /path/to/repo --reason "maintenance window"
 devloopd reset --cwd /path/to/repo
@@ -96,6 +98,19 @@ devloopd start --repo owner/repo
 | `--cwd <path>` | 検査するリポジトリパス |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
 | `--stale-after-minutes <count>` | active-runs が run を stale とみなすまでの分数。デフォルトは 180 |
+
+`devloopd recover-stale` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
+| `--apply` | 保守的な cleanup を適用します。指定しない場合は dry-run report だけを表示します |
+| `--stale-after-minutes <count>` | active run を stale とみなすまでの分数。デフォルトは 180 |
+| `--lock-stale-minutes <count>` | lock file を stale とみなすまでの分数。デフォルトは 10 |
+| `--worktree-stale-minutes <count>` | non-git worktree directory を stale とみなすまでの分数。デフォルトは 1440 |
+
+`devloopd recover-stale --apply` は stale な running metadata を aborted にし、stale lock file、dead daemon metadata、stale non-git worktree directory を片付けます。ledger、report、log、Git worktree は保持します。
 
 `devloopd stop` のオプション:
 

@@ -40,6 +40,10 @@ import {
   runPersonalReadiness,
 } from '../../devloopd/personalReadiness.js';
 import {
+  formatPersonalRecoveryReport,
+  runPersonalRecovery,
+} from '../../devloopd/personalRecovery.js';
+import {
   formatPersonalStatusReport,
   inspectPersonalStatus,
 } from '../../devloopd/personalStatus.js';
@@ -403,6 +407,38 @@ program
     });
 
     console.log(formatPersonalReadinessReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('recover-stale')
+  .description('Recover stale local personal automation state without deleting audit evidence')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--ledger <path>', 'Ledger path relative to cwd or absolute path')
+  .option('--apply', 'Apply conservative cleanup. Without this, only print a dry-run report')
+  .option('--stale-after-minutes <count>', 'Minutes without metadata update before active runs are stale', (value: string) => Number(value))
+  .option('--lock-stale-minutes <count>', 'Minutes before lock files are stale', (value: string) => Number(value))
+  .option('--worktree-stale-minutes <count>', 'Minutes before non-git worktree directories are stale', (value: string) => Number(value))
+  .action((options: {
+    cwd: string;
+    ledger?: string;
+    apply?: boolean;
+    staleAfterMinutes?: number;
+    lockStaleMinutes?: number;
+    worktreeStaleMinutes?: number;
+  }) => {
+    const report = runPersonalRecovery({
+      repoPath: resolve(options.cwd),
+      ledgerPath: options.ledger,
+      apply: options.apply === true,
+      staleAfterMinutes: Number.isFinite(options.staleAfterMinutes) ? options.staleAfterMinutes : undefined,
+      lockStaleMinutes: Number.isFinite(options.lockStaleMinutes) ? options.lockStaleMinutes : undefined,
+      worktreeStaleMinutes: Number.isFinite(options.worktreeStaleMinutes) ? options.worktreeStaleMinutes : undefined,
+    });
+
+    console.log(formatPersonalRecoveryReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }

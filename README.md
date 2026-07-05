@@ -255,6 +255,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `devloopd doctor --subscription-only` | Validate local subscription-only provider readiness |
 | `devloopd onboard-repo --cwd /path/to/repo --repo owner/repo` | Dry-run personal automation onboarding for a target repo |
 | `devloopd ready --cwd /path/to/repo --repo owner/repo` | Check personal automation readiness before starting a loop |
+| `devloopd recover-stale --cwd /path/to/repo` | Dry-run recovery for stale local automation state |
 | `devloopd status --cwd /path/to/repo` | Show daemon lifecycle, active runs, and staged ledger state |
 | `devloopd stop --cwd /path/to/repo` | Request a foreground devloopd loop to stop before the next cycle |
 | `devloopd reset --cwd /path/to/repo` | Clear personal daemon metadata and stop-request state |
