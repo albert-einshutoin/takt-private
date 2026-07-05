@@ -186,6 +186,25 @@ Routine feature improvements, performance work, dependency patches, security har
    - False negatives block release/readiness.
    - Relabeling fixtures or lowering thresholds requires human review.
 
+## Personal Readiness Roadmap Closeout
+
+The personal-use roadmap is complete for local single-developer automation when these merged PRs are present on `main`.
+
+| Area | Issue | Merged PR |
+| --- | --- | --- |
+| Target repository onboarding | #82 | #96 |
+| Readiness, lifecycle, and status controls | #83, #84, #87 | #95 |
+| Stale-state recovery | #86 | #97 |
+| No-wait-loop soak coverage | #88 | #98 |
+| Provider smoke matrix | #90 | #99 |
+| Personal readiness release gate | #89 | #100 |
+| Safe scheduler templates | #85 | #101 |
+| Release provenance and update check | #91 | #102 |
+| Product-policy replay corpus | #92 | #103 |
+| Personal-use operations runbook | #93 | #104 |
+
+Keep #94 as the roadmap closeout checkpoint because the tracker itself does not add runtime behavior. It is complete only when every item above is merged, `npm run check:personal` passes on `main`, and no open PR or branch is required for the personal-use readiness slice.
+
 ## Update and Rollback
 
 Use the release runbook for versioned update and rollback:
