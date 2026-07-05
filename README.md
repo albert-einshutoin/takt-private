@@ -411,6 +411,7 @@ See [External Integrations](./docs/external-integrations.md) for other community
 | [Repertoire Packages](./docs/repertoire.md) | Installing and sharing packages |
 | [Task Management](./docs/task-management.md) | Task queuing, execution, isolation |
 | [CI/CD Integration](./docs/ci-cd.md) | GitHub Actions and pipeline mode |
+| [Personal Use Runbook](./docs/personal-use-runbook.md) | Quickstart, safe defaults, lifecycle, recovery, and troubleshooting |
 | [Personal Release Workflow](./docs/personal-release.md) | Local release checklist, provenance, update, and rollback |
 | [External Integrations](./docs/external-integrations.md) | Community examples that extend TAKT without modifying core (audit trails, etc.) |
 | [Changelog](./CHANGELOG.md) ([日本語](./docs/CHANGELOG.ja.md)) | Version history |

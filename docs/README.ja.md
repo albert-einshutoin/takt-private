@@ -414,6 +414,7 @@ npx create-takt-sdd
 | [Repertoire Packages](./repertoire.ja.md) | パッケージのインストール・共有 |
 | [Task Management](./task-management.ja.md) | タスクの追加・実行・隔離 |
 | [CI/CD Integration](./ci-cd.ja.md) | GitHub Actions・パイプラインモード |
+| [Personal Use Runbook](./personal-use-runbook.ja.md) | quickstart、safe default、lifecycle、recovery、troubleshooting |
 | [Personal Release Workflow](./personal-release.ja.md) | local release checklist、provenance、update、rollback |
 | [External Integrations](./external-integrations.ja.md) | TAKT コアを変更せずに機能を拡張するコミュニティサンプル（監査ログ等） |
 | [Changelog](../CHANGELOG.md) ([日本語](./CHANGELOG.ja.md)) | バージョン履歴 |
