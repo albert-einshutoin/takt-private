@@ -52,6 +52,8 @@ devloopd reset --cwd /path/to/repo
 npm run check:personal
 devloopd check-personal --cwd /path/to/repo
 devloopd check-personal --cwd /path/to/repo --require-provider-smoke
+devloopd release-info
+devloopd release-info --json
 devloopd schedule-template --kind launchd --cwd /path/to/repo --repo owner/repo
 devloopd schedule-template --kind cron --cwd /path/to/repo --repo owner/repo --template-only
 devloopd soak --cwd /path/to/repo --cycles 5
@@ -167,6 +169,14 @@ The provider smoke matrix always prints `pass`, `fail`, or `skip` for every prov
 | `--json` | Print the machine-readable summary JSON to stdout |
 
 Use `npm run check:personal` for daily local automation readiness. It runs build, lint, focused devloopd soak, full unit tests, mock E2E, high-severity audit, whitespace checks, and the provider smoke matrix. `check:personal` is stricter than a quick edit loop but does not require every live external provider E2E credential by default. Use `check:release` when preparing a broader release gate that includes all provider E2E checks. The personal gate writes a JSON summary under `.devloop/` for auditability.
+
+`devloopd release-info` / `takt release-info` options:
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Print package version, commit SHA, metadata source, package root, dirty state, runtime, and artifact boundary as JSON |
+
+Use `npm run release:personal:check` before installing or tagging a personal release. It runs `check:personal`, `npm pack --dry-run`, and `devloopd release-info --json` without publishing to npm. See [Personal Release Workflow](./personal-release.md) for update, rollback, and release notes guidance.
 
 `devloopd schedule-template` options:
 

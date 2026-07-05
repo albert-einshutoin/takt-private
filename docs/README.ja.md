@@ -264,6 +264,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `devloopd stop --cwd /path/to/repo` | foreground の devloopd loop に次 cycle 前の停止を要求します |
 | `devloopd reset --cwd /path/to/repo` | personal daemon metadata と stop-request state を消します |
 | `npm run check:personal` | local personal automation readiness gate を実行します |
+| `devloopd release-info --json` | package version、commit SHA、personal release provenance を表示します |
 | `devloopd schedule-template --kind launchd --cwd /path/to/repo` | personal automation 用の safe な launchd/cron template を出力します |
 | `devloopd soak --cwd /path/to/repo --cycles 5` | 外部サービスなしの deterministic loop stability check を実行します |
 | `devloopd run --issue N` | subscription-only 検査後に GitHub Issue を TAKT pipeline で実行します |
@@ -412,6 +413,7 @@ npx create-takt-sdd
 | [Repertoire Packages](./repertoire.ja.md) | パッケージのインストール・共有 |
 | [Task Management](./task-management.ja.md) | タスクの追加・実行・隔離 |
 | [CI/CD Integration](./ci-cd.ja.md) | GitHub Actions・パイプラインモード |
+| [Personal Release Workflow](./personal-release.ja.md) | local release checklist、provenance、update、rollback |
 | [External Integrations](./external-integrations.ja.md) | TAKT コアを変更せずに機能を拡張するコミュニティサンプル（監査ログ等） |
 | [Changelog](../CHANGELOG.md) ([日本語](./CHANGELOG.ja.md)) | バージョン履歴 |
 
