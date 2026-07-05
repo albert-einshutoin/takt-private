@@ -60,6 +60,26 @@ export interface IssueScoutCandidate {
   escalationCriteria: readonly string[];
   expectedChangedSurfaces: readonly string[];
   labels: readonly string[];
+  laneEvidence: readonly string[];
+}
+
+export type DependencyUpdateKind = 'patch' | 'minor' | 'major' | 'breaking' | 'unknown';
+
+export interface RecursiveLaneCandidateInput {
+  sourceId: IssueScoutSourceId;
+  title: string;
+  summary: string;
+  lane: RecursiveAutomationLane;
+  evidence?: readonly IssueScoutArtifact[];
+  baselineMetric?: string;
+  targetMetric?: string;
+  verificationCommand?: string;
+  changelogUrls?: readonly string[];
+  advisoryUrls?: readonly string[];
+  currentVersion?: string;
+  targetVersion?: string;
+  updateKind?: DependencyUpdateKind;
+  threatEvidence?: string;
 }
 
 export interface IssueScoutObservation {
@@ -206,6 +226,116 @@ function unique(values: readonly string[]): string[] {
   return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readStringField(record: Record<string, unknown> | undefined, names: readonly string[]): string | undefined {
+  if (record === undefined) return undefined;
+  for (const name of names) {
+    const value = record[name];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return sanitizeText(value);
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+  }
+  return undefined;
+}
+
+function readStringArrayField(record: Record<string, unknown> | undefined, names: readonly string[]): string[] {
+  if (record === undefined) return [];
+  const values: string[] = [];
+  for (const name of names) {
+    const value = record[name];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      values.push(sanitizeText(value));
+      continue;
+    }
+    if (Array.isArray(value)) {
+      values.push(...value.flatMap((item) => {
+        if (typeof item === 'string' && item.trim().length > 0) {
+          return [sanitizeText(item)];
+        }
+        if (typeof item === 'number' || typeof item === 'boolean') {
+          return [String(item)];
+        }
+        return [];
+      }));
+    }
+  }
+  return unique(values);
+}
+
+function parseReportRecord(raw: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (isRecord(parsed)) return parsed;
+    if (Array.isArray(parsed)) {
+      return parsed.find(isRecord);
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function normalizeDependencyUpdateKind(value: string | undefined): DependencyUpdateKind | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.toLowerCase().replace(/[^a-z]+/gu, '_').replace(/^_+|_+$/gu, '');
+  if (normalized === 'patch' || normalized === 'minor' || normalized === 'major' || normalized === 'breaking' || normalized === 'unknown') {
+    return normalized;
+  }
+  return undefined;
+}
+
+function readRecursiveLane(value: unknown): RecursiveAutomationLane | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase().replaceAll('-', '_');
+  if (
+    normalized === 'feature_improvement'
+    || normalized === 'performance'
+    || normalized === 'dependencies'
+    || normalized === 'security_hardening'
+    || normalized === 'idiomatic_refactor'
+    || normalized === 'docs_tests_tooling'
+  ) {
+    return normalized;
+  }
+  return undefined;
+}
+
+function parseVersionMajorMinorPatch(version: string | undefined): [number, number, number] | undefined {
+  if (version === undefined) return undefined;
+  const match = /(\d+)\.(\d+)\.(\d+)/u.exec(version);
+  if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+export function classifyDependencyUpdateKind(input: {
+  currentVersion?: string;
+  targetVersion?: string;
+  summary?: string;
+  updateKind?: DependencyUpdateKind;
+}): DependencyUpdateKind {
+  if (input.updateKind !== undefined && input.updateKind !== 'unknown') {
+    return input.updateKind;
+  }
+  if (/\b(breaking|major migration|incompatible)\b/iu.test(input.summary ?? '')) {
+    return 'breaking';
+  }
+  const current = parseVersionMajorMinorPatch(input.currentVersion);
+  const target = parseVersionMajorMinorPatch(input.targetVersion);
+  if (current === undefined || target === undefined) {
+    return 'unknown';
+  }
+  if (target[0] > current[0]) return 'major';
+  if (target[1] > current[1]) return 'minor';
+  if (target[2] > current[2]) return 'patch';
+  return 'unknown';
+}
+
 function labelsForLane(lane: RecursiveAutomationLane, category: AutomationPolicyCategory): string[] {
   const label = lane.replaceAll('_', '-');
   return unique([
@@ -244,6 +374,9 @@ export function buildIssueScoutCandidate(input: {
   acceptanceCriteria?: readonly string[];
   verificationCommands?: readonly string[];
   expectedChangedSurfaces?: readonly string[];
+  policyCategory?: AutomationPolicyCategory;
+  riskBucket?: IssueScoutRiskBucket;
+  laneEvidence?: readonly string[];
 }): IssueScoutCandidate {
   const laneClassification = classifyRecursiveAutomationLane({
     title: input.title,
@@ -252,8 +385,8 @@ export function buildIssueScoutCandidate(input: {
   });
   const lane = input.lane ?? laneClassification.lane;
   const definition = getRecursiveAutomationLaneDefinition(lane);
-  const policyCategory = laneClassification.requiresHumanReview ? 'human_policy' : definition.policyCategory;
-  const riskBucket = riskForCandidate({
+  const policyCategory = input.policyCategory ?? (laneClassification.requiresHumanReview ? 'human_policy' : definition.policyCategory);
+  const riskBucket = input.riskBucket ?? riskForCandidate({
     lane,
     policyCategory,
     title: input.title,
@@ -278,7 +411,101 @@ export function buildIssueScoutCandidate(input: {
     escalationCriteria: definition.humanReviewEscalation,
     expectedChangedSurfaces: input.expectedChangedSurfaces ?? definition.expectedChangedSurfaces,
     labels: labelsForLane(lane, policyCategory),
+    laneEvidence: input.laneEvidence ?? [],
   };
+}
+
+function laneSpecificAcceptance(input: RecursiveLaneCandidateInput, updateKind: DependencyUpdateKind): string[] {
+  switch (input.lane) {
+    case 'feature_improvement':
+      return [
+        'Use only concrete evidence from failing UX tests, accepted TODOs, issue comments, or narrow behavior-gap reports.',
+        'Keep the improvement scoped to existing accepted behavior.',
+        'Create follow-up improvement issues only when new concrete evidence remains after the PR.',
+        'Escalate product direction, new commitments, pricing, public API, auth, or security-posture changes to human review.',
+      ];
+    case 'performance':
+      return [
+        `Record baseline metric: ${input.baselineMetric ?? 'required before implementation'}.`,
+        `Record target metric: ${input.targetMetric ?? 'required before implementation'}.`,
+        'Preserve public behavior and API compatibility.',
+        'Include before/after performance evidence in the PR body or devloop ledger.',
+      ];
+    case 'dependencies':
+      return [
+        `Classify update kind as ${updateKind}; breaking or major updates require human review.`,
+        'Include changelog or advisory links when available.',
+        'Run tests, build, lint, and relevant smoke checks for safe updates.',
+        'Document rollback criteria for failed compatibility or security checks.',
+      ];
+    case 'security_hardening':
+      return [
+        `Record threat/risk evidence: ${input.threatEvidence ?? 'static analysis, advisory, unsafe default, secret hygiene, or hardening gap required'}.`,
+        'Distinguish security posture changes from implementation hardening.',
+        'Escalate posture changes to human review.',
+        'Include verification commands that prove the hardening behavior.',
+      ];
+    case 'idiomatic_refactor':
+      return [
+        'Start from lint/type debt, duplicated patterns, obsolete APIs, unnecessary complexity, or language-specific best-practice evidence.',
+        'Require characterization tests or existing tests before behavior-preserving refactors.',
+        'Add why-comments only for business logic, memory, efficiency, or non-obvious implementation choices.',
+        'Escalate any product behavior change to human review.',
+      ];
+    case 'docs_tests_tooling':
+      return [
+        'Keep changes mechanical and limited to docs, tests, fixtures, linting, formatting, or local tooling.',
+        'Escalate docs that change product promises or tooling that changes release/security policy.',
+      ];
+  }
+}
+
+function laneSpecificVerification(input: RecursiveLaneCandidateInput): string[] {
+  if (input.verificationCommand !== undefined) {
+    return [input.verificationCommand];
+  }
+  switch (input.lane) {
+    case 'dependencies':
+      return ['npm run lint', 'npm run build', 'npm test', 'npm audit --audit-level=high'];
+    case 'performance':
+      return ['npm test -- issue-scout', 'npm run build'];
+    case 'security_hardening':
+      return ['npm test -- issue-scout product-policy-classifier', 'npm audit --audit-level=high'];
+    default:
+      return [...getRecursiveAutomationLaneDefinition(input.lane).defaultVerification];
+  }
+}
+
+function laneEvidence(input: RecursiveLaneCandidateInput, updateKind: DependencyUpdateKind): string[] {
+  return [
+    input.baselineMetric !== undefined ? `baseline=${input.baselineMetric}` : undefined,
+    input.targetMetric !== undefined ? `target=${input.targetMetric}` : undefined,
+    input.currentVersion !== undefined ? `current=${input.currentVersion}` : undefined,
+    input.targetVersion !== undefined ? `targetVersion=${input.targetVersion}` : undefined,
+    updateKind !== 'unknown' ? `updateKind=${updateKind}` : undefined,
+    ...(input.changelogUrls ?? []).map((url) => `changelog=${url}`),
+    ...(input.advisoryUrls ?? []).map((url) => `advisory=${url}`),
+    input.threatEvidence !== undefined ? `threat=${input.threatEvidence}` : undefined,
+  ].filter((value): value is string => value !== undefined);
+}
+
+export function buildRecursiveLaneCandidate(input: RecursiveLaneCandidateInput): IssueScoutCandidate {
+  const updateKind = input.lane === 'dependencies'
+    ? classifyDependencyUpdateKind(input)
+    : 'unknown';
+  const humanReviewedDependency = updateKind === 'major' || updateKind === 'breaking';
+  return buildIssueScoutCandidate({
+    sourceId: input.sourceId,
+    title: input.title,
+    summary: input.summary,
+    lane: input.lane,
+    evidence: input.evidence,
+    acceptanceCriteria: laneSpecificAcceptance(input, updateKind),
+    verificationCommands: laneSpecificVerification(input),
+    policyCategory: humanReviewedDependency ? 'human_policy' : undefined,
+    riskBucket: humanReviewedDependency ? 'high' : undefined,
+    laneEvidence: laneEvidence(input, updateKind),
+  });
 }
 
 function makeObservation(input: {
@@ -451,13 +678,43 @@ function readReportSource(sourceId: Extract<IssueScoutSourceId, 'dependency_repo
           nextActions: [`write ${config.path} before enabling ${sourceId}`],
         });
       }
-      const raw = sanitizeText(readFileSync(filePath, 'utf-8')).slice(0, 2_000);
-      const candidate = buildIssueScoutCandidate({
+      const rawContent = readFileSync(filePath, 'utf-8');
+      const record = parseReportRecord(rawContent);
+      const rawSummary = sanitizeText(rawContent).slice(0, 2_000);
+      // Report producers are intentionally schema-light; accepting common field aliases keeps the loop
+      // useful while preserving typed lane evidence in the generated issue.
+      const candidate = buildRecursiveLaneCandidate({
         sourceId,
-        title: config.title,
-        summary: raw || `${config.path} exists but is empty`,
+        title: readStringField(record, ['title', 'name']) ?? config.title,
+        summary: (readStringField(record, ['summary', 'description', 'reason', 'finding']) ?? rawSummary)
+          || `${config.path} exists but is empty`,
         lane: config.lane,
         evidence: [{ kind: 'file', path: config.path, summary: `${sourceId} report` }],
+        baselineMetric: config.lane === 'performance'
+          ? readStringField(record, ['baselineMetric', 'baseline_metric', 'baseline'])
+          : undefined,
+        targetMetric: config.lane === 'performance'
+          ? readStringField(record, ['targetMetric', 'target_metric', 'target'])
+          : undefined,
+        verificationCommand: readStringField(record, ['verificationCommand', 'verification_command', 'verification', 'verify']),
+        changelogUrls: config.lane === 'dependencies'
+          ? readStringArrayField(record, ['changelogUrls', 'changelog_urls', 'changelogs', 'changelog'])
+          : undefined,
+        advisoryUrls: config.lane === 'dependencies' || config.lane === 'security_hardening'
+          ? readStringArrayField(record, ['advisoryUrls', 'advisory_urls', 'advisories', 'advisory'])
+          : undefined,
+        currentVersion: config.lane === 'dependencies'
+          ? readStringField(record, ['currentVersion', 'current_version', 'current'])
+          : undefined,
+        targetVersion: config.lane === 'dependencies'
+          ? readStringField(record, ['targetVersion', 'target_version', 'target', 'newVersion', 'new_version'])
+          : undefined,
+        updateKind: config.lane === 'dependencies'
+          ? normalizeDependencyUpdateKind(readStringField(record, ['updateKind', 'update_kind', 'kind']))
+          : undefined,
+        threatEvidence: config.lane === 'security_hardening'
+          ? readStringField(record, ['threatEvidence', 'threat_evidence', 'threat', 'risk'])
+          : undefined,
       });
       return makeObservation({
         sourceId,
@@ -475,13 +732,37 @@ function scanLedgerEvents(context: IssueScoutSourceContext): IssueScoutObservati
   const repairFailures = events
     .filter((event) => event.eventType === 'devloop_repair_attempt' && event.status === 'failed')
     .slice(-5);
-  const candidates = repairFailures.map((event) => buildIssueScoutCandidate({
+  const repairCandidates = repairFailures.map((event) => buildRecursiveLaneCandidate({
     sourceId: 'ledger_events',
     title: `Investigate repeated repair failure for PR #${String(event.prNumber ?? 'unknown')}`,
     summary: String(event.reason ?? event.blockerSummary ?? 'repair attempt failed'),
     lane: 'idiomatic_refactor',
     evidence: [{ kind: 'ledger', summary: `ledger event ${event.eventId}` }],
   }));
+  const followUpCandidates = events
+    .filter((event) => event.eventType === 'devloop_follow_up_evidence' || event.eventType === 'devloop_recursive_follow_up')
+    .slice(-10)
+    .map((event) => {
+      const lane = readRecursiveLane(event.lane) ?? 'feature_improvement';
+      const evidence = readStringField(event, ['evidence', 'evidencePath', 'evidence_path', 'source']) ?? `ledger event ${event.eventId}`;
+      return buildRecursiveLaneCandidate({
+        sourceId: 'ledger_events',
+        title: readStringField(event, ['title']) ?? `Follow up ${String(event.eventId)}`,
+        summary: readStringField(event, ['summary', 'reason', 'description']) ?? evidence,
+        lane,
+        evidence: [{ kind: 'ledger', summary: evidence }],
+        baselineMetric: readStringField(event, ['baselineMetric', 'baseline_metric', 'baseline']),
+        targetMetric: readStringField(event, ['targetMetric', 'target_metric', 'target']),
+        verificationCommand: readStringField(event, ['verificationCommand', 'verification_command', 'verification', 'verify']),
+        changelogUrls: readStringArrayField(event, ['changelogUrls', 'changelog_urls', 'changelog']),
+        advisoryUrls: readStringArrayField(event, ['advisoryUrls', 'advisory_urls', 'advisory']),
+        currentVersion: readStringField(event, ['currentVersion', 'current_version', 'current']),
+        targetVersion: readStringField(event, ['targetVersion', 'target_version', 'target']),
+        updateKind: normalizeDependencyUpdateKind(readStringField(event, ['updateKind', 'update_kind', 'kind'])),
+        threatEvidence: readStringField(event, ['threatEvidence', 'threat_evidence', 'threat', 'risk']),
+      });
+    });
+  const candidates = [...repairCandidates, ...followUpCandidates];
 
   return makeObservation({
     sourceId: 'ledger_events',
@@ -576,6 +857,13 @@ export function generateMaintenanceIssue(candidate: IssueScoutCandidate): Genera
       ? candidate.evidence.map((item) => `- ${item.path ?? item.url ?? item.kind}: ${item.summary}`).join('\n')
       : '- issue-scout generated this from a typed source observation',
     '',
+    ...(candidate.laneEvidence.length > 0
+      ? [
+          '## Lane Evidence',
+          candidate.laneEvidence.map((item) => `- ${item}`).join('\n'),
+          '',
+        ]
+      : []),
     '## Acceptance Criteria',
     candidate.acceptanceCriteria.map((item) => `- ${item}`).join('\n'),
     '',

@@ -42,6 +42,7 @@ devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
 devloopd export-ledger --output .devloop/backup/ledger.jsonl
 devloopd timeline --issue 123
+devloopd automation-state --cwd /path/to/repo
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
 devloopd scan-issues --repo owner/repo

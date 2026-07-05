@@ -3,8 +3,13 @@ import {
   createDefaultDevloopCommandRunner,
   type DevloopCommandRunner,
 } from './commandRunner.js';
+import { buildAutomationStateEvent, type AutomationStateStatus } from './automationState.js';
 import { runCiAutoRepairForPullRequest } from './ciRepair.js';
 import { runIssueScout } from './issueScout.js';
+import {
+  appendDevloopLedgerEvent,
+  resolveDevloopLedgerPath,
+} from './ledger.js';
 import {
   evaluateDualLlmApproval,
   formatReviewGateComment,
@@ -15,6 +20,7 @@ import {
 } from './prReviewGate.js';
 import { classifyProductPolicyImpact, type ProductPolicyClassification } from './productPolicyClassifier.js';
 import { mergeIfSafe } from './mergeGate.js';
+import { planMergeQueue, type MergeQueueDecision, type MergeQueuePullRequest } from './mergeQueue.js';
 import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
@@ -43,7 +49,16 @@ export interface DevloopAutomationAction {
   status: 'passed' | 'skipped' | 'blocked' | 'failed';
   message: string;
   pr?: number;
-  stopRule?: 'active run limit' | 'Duplicate or already covered' | 'Mergeable: NO' | 'Unsafe or too broad' | 'checks failed' | 'attempt budget exhausted';
+  stopRule?:
+    | 'active run limit'
+    | 'Duplicate or already covered'
+    | 'Mergeable: NO'
+    | 'Unsafe or too broad'
+    | 'checks failed'
+    | 'attempt budget exhausted'
+    | 'head mismatch'
+    | 'overlap serialization'
+    | 'conflict eviction';
   dualLlmApproval?: DualLlmApprovalReport;
   productPolicyImpact?: ProductPolicyClassification;
 }
@@ -95,6 +110,7 @@ interface GhPrViewForGate {
   title?: string;
   body?: string;
   headRefOid?: string;
+  mergeStateStatus?: string;
   changedFiles?: number;
   additions?: number;
   deletions?: number;
@@ -233,7 +249,7 @@ async function loadPrView(options: {
     'view',
     String(options.pr),
     '--json',
-    'number,title,body,headRefOid,changedFiles,additions,deletions',
+    'number,title,body,headRefOid,mergeStateStatus,changedFiles,additions,deletions',
   ];
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
@@ -701,6 +717,103 @@ function makeStageReport(stage: DevloopAutomationStage, actions: DevloopAutomati
   };
 }
 
+function queueDecisionStatus(decision: MergeQueueDecision): AutomationStateStatus {
+  if (decision.status === 'ready') return 'passed';
+  if (decision.status === 'serialized') return 'skipped';
+  return 'blocked';
+}
+
+function queueDecisionAction(decision: MergeQueueDecision): DevloopAutomationAction | undefined {
+  if (decision.status === 'ready') {
+    return undefined;
+  }
+  return {
+    type: 'merge-queue',
+    status: decision.status === 'serialized' ? 'skipped' : 'blocked',
+    pr: decision.prNumber,
+    message: decision.reasons.join('; ') || decision.status,
+    ...(decision.stopRule !== undefined ? { stopRule: decision.stopRule } : {}),
+  };
+}
+
+function appendMergeQueueStateEvents(options: {
+  repoPath: string;
+  ledgerPath?: string;
+  decisions: readonly MergeQueueDecision[];
+}): void {
+  const ledgerPath = resolveDevloopLedgerPath(options.repoPath, options.ledgerPath);
+  for (const decision of options.decisions) {
+    appendDevloopLedgerEvent(ledgerPath, buildAutomationStateEvent({
+      stage: 'merge_queue',
+      status: queueDecisionStatus(decision),
+      summary: decision.reasons.join('; ') || `PR #${decision.prNumber} ${decision.status}`,
+      prNumber: decision.prNumber,
+      ...(decision.stopRule !== undefined ? { stopRule: decision.stopRule } : {}),
+      nextActions: decision.status === 'ready'
+        ? [`merge PR #${decision.prNumber}`]
+        : decision.status === 'serialized'
+          ? [`wait for overlapping PR(s) before PR #${decision.prNumber}`]
+          : [`inspect PR #${decision.prNumber} before merge`],
+    }));
+  }
+}
+
+async function buildMergeQueuePullRequest(options: {
+  pr: AutomationPrSnapshot;
+  repoPath: string;
+  repo?: string;
+  env: NodeJS.ProcessEnv;
+  runner: DevloopCommandRunner;
+}): Promise<MergeQueuePullRequest> {
+  const metadata = await loadPrView({
+    pr: options.pr.number,
+    repoPath: options.repoPath,
+    repo: options.repo,
+    env: options.env,
+    runner: options.runner,
+  });
+  const changedPaths = await loadChangedPaths({
+    pr: options.pr.number,
+    repoPath: options.repoPath,
+    repo: options.repo,
+    env: options.env,
+    runner: options.runner,
+  });
+  const comments = await loadReviewComments({
+    pr: options.pr.number,
+    repoPath: options.repoPath,
+    repo: options.repo,
+    env: options.env,
+    runner: options.runner,
+  });
+  const checksPassed = await checkGithubChecks({
+    pr: options.pr.number,
+    repoPath: options.repoPath,
+    repo: options.repo,
+    env: options.env,
+    runner: options.runner,
+  });
+  const dualLlmApproval = evaluateDualLlmApproval({ headSha: options.pr.headRefOid, comments });
+  const productPolicyImpact = classifyProductPolicyImpact({
+    changedPaths,
+    title: metadata.title ?? options.pr.title,
+    body: metadata.body ?? options.pr.body,
+  });
+
+  return {
+    number: options.pr.number,
+    title: metadata.title ?? options.pr.title,
+    headRefOid: metadata.headRefOid ?? options.pr.headRefOid,
+    expectedHeadSha: options.pr.headRefOid,
+    changedPaths,
+    checksPassed,
+    dualLlmApproved: dualLlmApproval.approved && dualLlmApproval.headSha === options.pr.headRefOid,
+    productPolicyRequiresHumanReview: productPolicyImpact.requiresHumanReview,
+    mergeStateStatus: metadata.mergeStateStatus,
+    isDraft: options.pr.isDraft,
+  };
+}
+
 export async function runDevloopAutomationStage(options: RunDevloopAutomationStageOptions): Promise<DevloopAutomationStageReport> {
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
@@ -801,67 +914,98 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
     ], { duplicateIssueCoverage });
   }
 
-  const actions = [
-    ...duplicateActions,
-    ...await Promise.all(nonDuplicatePrs.map(async (pr): Promise<DevloopAutomationAction> => {
-      const promotion = await promotePullRequestAutoMerge({
-        pr: pr.number,
+  const promotionResults = await Promise.all(nonDuplicatePrs.map(async (pr) => ({
+    pr,
+    promotion: await promotePullRequestAutoMerge({
+      pr: pr.number,
+      repoPath,
+      repo: options.repo,
+      label: options.autoMergeLabel,
+      dryRun: options.dryRun,
+      env,
+      runner,
+    }),
+  })));
+  const preQueueActions = await Promise.all(promotionResults.flatMap((result) => {
+    if (result.promotion.status === 'passed') {
+      return [];
+    }
+    if (result.promotion.status === 'skipped' && /checks/i.test(result.promotion.message)) {
+      return [runCiAutoRepairForPullRequest({
+        pr: result.pr.number,
         repoPath,
         repo: options.repo,
-        label: options.autoMergeLabel,
+        ledgerPath: options.ledgerPath,
         dryRun: options.dryRun,
         env,
         runner,
-      });
-      if (promotion.status !== 'passed') {
-        if (promotion.status === 'skipped' && /checks/i.test(promotion.message)) {
-          const repair = await runCiAutoRepairForPullRequest({
-            pr: pr.number,
-            repoPath,
-            repo: options.repo,
-            ledgerPath: options.ledgerPath,
-            dryRun: options.dryRun,
-            env,
-            runner,
-          });
-          return {
-            type: 'ci-fix',
-            status: repair.status,
-            pr: pr.number,
-            message: repair.message,
-            ...(repair.stopRule !== undefined ? { stopRule: repair.stopRule } : {}),
-            ...(repair.productPolicyImpact !== undefined ? { productPolicyImpact: repair.productPolicyImpact } : {}),
-          };
-        }
-        return promotion;
-      }
+      }).then((repair): DevloopAutomationAction => ({
+        type: 'ci-fix',
+        status: repair.status,
+        pr: result.pr.number,
+        message: repair.message,
+        ...(repair.stopRule !== undefined ? { stopRule: repair.stopRule } : {}),
+        ...(repair.productPolicyImpact !== undefined ? { productPolicyImpact: repair.productPolicyImpact } : {}),
+      }))];
+    }
+    return [Promise.resolve(result.promotion)];
+  }));
+  const queueCandidates = promotionResults.filter((result) => result.promotion.status === 'passed');
+  const queueItems = await Promise.all(queueCandidates.map((result) => buildMergeQueuePullRequest({
+    pr: result.pr,
+    repoPath,
+    repo: options.repo,
+    env,
+    runner,
+  })));
+  const queuePlan = planMergeQueue(queueItems);
+  appendMergeQueueStateEvents({
+    repoPath,
+    ledgerPath: options.ledgerPath,
+    decisions: queuePlan.decisions,
+  });
+  const readyPrNumbers = new Set(queuePlan.decisions
+    .filter((decision) => decision.status === 'ready')
+    .map((decision) => decision.prNumber));
+  const queueActions = queuePlan.decisions.flatMap((decision) => {
+    const action = queueDecisionAction(decision);
+    return action === undefined ? [] : [action];
+  });
+  const mergeActions = await Promise.all(queueCandidates
+    .filter((result) => readyPrNumbers.has(result.pr.number))
+    .map(async (result): Promise<DevloopAutomationAction> => {
       if (options.dryRun === true) {
         return {
           type: 'merge-if-safe',
           status: 'passed',
-          pr: pr.number,
+          pr: result.pr.number,
           message: 'dry-run: would call merge-if-safe',
-          dualLlmApproval: promotion.dualLlmApproval,
-          productPolicyImpact: promotion.productPolicyImpact,
+          dualLlmApproval: result.promotion.dualLlmApproval,
+          productPolicyImpact: result.promotion.productPolicyImpact,
         };
       }
       const mergeReport = await mergeIfSafe({
-        pr: String(pr.number),
+        pr: String(result.pr.number),
         repoPath,
         repo: options.repo,
-        expectedHeadSha: pr.headRefOid,
+        expectedHeadSha: result.pr.headRefOid,
         env,
         runner,
       });
       return {
         type: 'merge-if-safe',
         status: mergeReport.passed ? 'passed' : 'blocked',
-        pr: pr.number,
+        pr: result.pr.number,
         message: mergeReport.result,
-        dualLlmApproval: promotion.dualLlmApproval,
-        productPolicyImpact: promotion.productPolicyImpact,
+        dualLlmApproval: result.promotion.dualLlmApproval,
+        productPolicyImpact: result.promotion.productPolicyImpact,
       };
-    })),
+    }));
+  const actions = [
+    ...duplicateActions,
+    ...preQueueActions,
+    ...queueActions,
+    ...mergeActions,
   ];
   return makeStageReport(options.stage, actions, { duplicateIssueCoverage });
 }

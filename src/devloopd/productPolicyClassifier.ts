@@ -6,6 +6,13 @@ export interface ProductPolicyClassificationInput {
   changedPaths: readonly string[];
   title?: string;
   body?: string;
+  diff?: string;
+}
+
+export interface ProductPolicyEvidenceHunk {
+  path: string;
+  reason: string;
+  snippet: string;
 }
 
 export interface ProductPolicyClassification {
@@ -14,10 +21,17 @@ export interface ProductPolicyClassification {
   requiresHumanReview: boolean;
   reasons: string[];
   evidencePaths: string[];
+  evidenceHunks: ProductPolicyEvidenceHunk[];
 }
 
 interface PathRule {
   test(path: string): boolean;
+  reason: string;
+}
+
+interface SemanticDiffRule {
+  name: string;
+  test(text: string, path: string): boolean;
   reason: string;
 }
 
@@ -63,6 +77,17 @@ const PRODUCT_POLICY_TEXT_TOKENS = [
   'roadmap',
 ];
 
+const SECURITY_HARDENING_TOKENS = [
+  'redact',
+  'sanitize',
+  'validate input',
+  'escape',
+  'constant-time',
+  'constant time',
+  'rate limit',
+  'least privilege',
+];
+
 const HUMAN_POLICY_TEXT_TOKENS = [
   'human review',
   'lane taxonomy',
@@ -70,6 +95,36 @@ const HUMAN_POLICY_TEXT_TOKENS = [
   'merge policy',
   'review gate',
   'product-policy boundary',
+];
+
+const SEMANTIC_DIFF_RULES: readonly SemanticDiffRule[] = [
+  {
+    name: 'user-facing-commitment',
+    test: (text) => /\b(guarantee|commit(?:ment)?|sla|available|unlimited|we will|users can|customers can|supports?)\b/iu.test(text),
+    reason: 'diff changes a user-facing commitment',
+  },
+  {
+    name: 'public-api-contract',
+    test: (text, path) => /(^|\/)(openapi|public-api|api-contracts?|contracts?|cli|commands?)(\/|\.|$)/u.test(path)
+      || /\b(public api|breaking change|deprecated|remove(?:d)? option|rename(?:d)? option|export interface|export type|export function)\b/iu.test(text),
+    reason: 'diff changes a public API or CLI compatibility contract',
+  },
+  {
+    name: 'auth-billing-retention',
+    test: (text) => /(auth|authentication|authorization|permission|rbac|role|billing|pricing|payment|subscription|entitlement|retention|delete after|deleteafter|ttl)/iu.test(text),
+    reason: 'diff changes auth, billing, entitlement, or data-retention behavior',
+  },
+  {
+    name: 'security-posture',
+    test: (text) => /\b(security posture|allow unauthenticated|disable csrf|disable auth|skip permission|bypass auth|public access|risk accepted|permit all|default allow)\b/iu.test(text),
+    reason: 'diff changes security posture rather than ordinary hardening',
+  },
+  {
+    name: 'migration-or-irreversible',
+    test: (text, path) => /(^|\/)(migrations?|schema-migrations|db\/migrations?)(\/|$)/u.test(path)
+      || /\b(drop table|truncate|destructive|irreversible|backfill|schema migration|data migration)\b/iu.test(text),
+    reason: 'diff changes migration or irreversible operational behavior',
+  },
 ];
 
 const PACKAGE_METADATA_PATHS = new Set([
@@ -118,10 +173,64 @@ function summarizeText(input: ProductPolicyClassificationInput): string {
   return [input.title, input.body].filter((value): value is string => value !== undefined).join('\n').toLowerCase();
 }
 
+function currentDiffPath(line: string): string | undefined {
+  const match = /^diff --git a\/.+ b\/(.+)$/u.exec(line);
+  return match?.[1];
+}
+
+function isAddedSemanticLine(line: string): boolean {
+  return line.startsWith('+') && !line.startsWith('+++');
+}
+
+function parseDiffEvidence(diff: string | undefined): ProductPolicyEvidenceHunk[] {
+  if (diff === undefined || diff.trim().length === 0) {
+    return [];
+  }
+
+  const evidence: ProductPolicyEvidenceHunk[] = [];
+  let path = 'unknown';
+  let hunkHeader = '';
+  const lines = diff.split('\n');
+  for (const line of lines) {
+    const nextPath = currentDiffPath(line);
+    if (nextPath !== undefined) {
+      path = normalizePath(nextPath);
+      hunkHeader = '';
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      hunkHeader = line.trim();
+      continue;
+    }
+    if (!isAddedSemanticLine(line)) {
+      continue;
+    }
+    const text = line.slice(1).trim();
+    if (text.length === 0) {
+      continue;
+    }
+    for (const rule of SEMANTIC_DIFF_RULES) {
+      if (!rule.test(text, path)) {
+        continue;
+      }
+      if (rule.name === 'security-posture' && SECURITY_HARDENING_TOKENS.some((token) => text.toLowerCase().includes(token))) {
+        continue;
+      }
+      evidence.push({
+        path,
+        reason: rule.reason,
+        snippet: [hunkHeader, text].filter(Boolean).join(' '),
+      });
+    }
+  }
+  return evidence;
+}
+
 export function classifyProductPolicyImpact(input: ProductPolicyClassificationInput): ProductPolicyClassification {
   const changedPaths = unique(input.changedPaths.map(normalizePath).filter((path) => path.length > 0));
   const productPolicyReasons: string[] = [];
   const productPolicyPaths: string[] = [];
+  const semanticEvidence = parseDiffEvidence(input.diff);
 
   for (const path of changedPaths) {
     const rule = PRODUCT_POLICY_PATH_RULES.find((candidate) => candidate.test(path));
@@ -129,6 +238,10 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
       productPolicyReasons.push(rule.reason);
       productPolicyPaths.push(path);
     }
+  }
+  for (const hunk of semanticEvidence) {
+    productPolicyReasons.push(hunk.reason);
+    productPolicyPaths.push(hunk.path);
   }
 
   const summary = summarizeText(input);
@@ -149,6 +262,7 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
       requiresHumanReview: true,
       reasons: unique(productPolicyReasons),
       evidencePaths: unique(productPolicyPaths),
+      evidenceHunks: semanticEvidence,
     };
   }
 
@@ -159,6 +273,7 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
       requiresHumanReview: true,
       reasons: unique(humanPolicyReasons),
       evidencePaths: changedPaths,
+      evidenceHunks: [],
     };
   }
 
@@ -169,6 +284,7 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
       requiresHumanReview: false,
       reasons: ['only docs, tests, fixtures, or examples changed'],
       evidencePaths: changedPaths,
+      evidenceHunks: [],
     };
   }
 
@@ -179,6 +295,7 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
       requiresHumanReview: false,
       reasons: ['tooling or package metadata changed without product-policy indicators'],
       evidencePaths: changedPaths.filter(isLowRiskToolingPath),
+      evidenceHunks: [],
     };
   }
 
@@ -190,5 +307,6 @@ export function classifyProductPolicyImpact(input: ProductPolicyClassificationIn
     // should spend time on product direction, not routine scoped implementation.
     reasons: ['scoped implementation change without product-policy indicators'],
     evidencePaths: changedPaths,
+    evidenceHunks: [],
   };
 }

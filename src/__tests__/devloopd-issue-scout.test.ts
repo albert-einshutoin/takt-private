@@ -9,6 +9,8 @@ import {
   resolveDevloopLedgerPath,
 } from '../devloopd/ledger.js';
 import {
+  buildRecursiveLaneCandidate,
+  classifyDependencyUpdateKind,
   buildIssueScoutCandidate,
   formatIssueScoutReport,
   generateMaintenanceIssue,
@@ -84,19 +86,133 @@ describe('devloopd issue-scout', () => {
   });
 
   it('generates recursive maintenance issue templates with escalation criteria', () => {
-    const candidate = buildIssueScoutCandidate({
+    const candidate = buildRecursiveLaneCandidate({
       sourceId: 'dependency_report',
       title: 'Update dependency lockfile evidence',
       summary: 'Patch dependency update from a report',
       lane: 'dependencies',
+      currentVersion: '1.2.3',
+      targetVersion: '1.2.4',
+      changelogUrls: ['https://example.com/changelog'],
+      advisoryUrls: ['https://example.com/advisory'],
     });
 
     const draft = generateMaintenanceIssue(candidate);
 
     expect(draft.labels).toContain('lane:dependencies');
+    expect(draft.body).toContain('## Lane Evidence');
+    expect(draft.body).toContain('updateKind=patch');
+    expect(draft.body).toContain('https://example.com/changelog');
     expect(draft.body).toContain('## Acceptance Criteria');
     expect(draft.body).toContain('## Product-Policy Escalation');
     expect(draft.body).toContain('## Expected Changed Surfaces');
+  });
+
+  it('classifies major dependency updates for human review before automation', async () => {
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(join(repoPath, '.devloop', 'dependency-report.json'), JSON.stringify({
+      title: 'Upgrade workflow-runtime to v3',
+      summary: 'Major dependency migration with public compatibility risk',
+      currentVersion: '2.8.0',
+      targetVersion: '3.0.0',
+      changelogUrls: ['https://example.com/runtime-v3'],
+    }), 'utf-8');
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['dependency_report'],
+      existingWork: [],
+      now: new Date('2026-07-05T00:00:00.000Z'),
+    });
+
+    expect(classifyDependencyUpdateKind({ currentVersion: '2.8.0', targetVersion: '3.0.0' })).toBe('major');
+    expect(report.selected).toEqual([]);
+    expect(report.skipped[0]).toMatchObject({
+      stopRule: 'Unsafe or too broad',
+    });
+    expect(report.skipped[0]?.candidate.policyCategory).toBe('human_policy');
+  });
+
+  it('turns safe dependency report JSON into lane evidence and verification', async () => {
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(join(repoPath, '.devloop', 'dependency-report.json'), JSON.stringify({
+      title: 'Patch semver advisory',
+      summary: 'Patch dependency update from advisory evidence',
+      currentVersion: '7.6.2',
+      targetVersion: '7.6.3',
+      changelogUrls: ['https://example.com/semver/changelog'],
+      advisoryUrls: ['https://example.com/advisories/CVE-2026-0001'],
+      verificationCommand: 'npm test -- dependency-report',
+    }), 'utf-8');
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['dependency_report'],
+      existingWork: [],
+      dryRun: true,
+      createIssues: true,
+      now: new Date('2026-07-05T00:00:00.000Z'),
+    });
+
+    expect(report.selected).toHaveLength(1);
+    expect(report.wouldCreate[0]?.body).toContain('updateKind=patch');
+    expect(report.wouldCreate[0]?.body).toContain('changelog=https://example.com/semver/changelog');
+    expect(report.wouldCreate[0]?.body).toContain('advisory=https://example.com/advisories/CVE-2026-0001');
+    expect(report.wouldCreate[0]?.body).toContain('`npm test -- dependency-report`');
+  });
+
+  it('requires benchmark evidence for performance lane candidates', async () => {
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(join(repoPath, '.devloop', 'benchmark-report.json'), JSON.stringify({
+      title: 'Reduce planner latency regression',
+      summary: 'Benchmark p95 latency regressed in devloop planner',
+      baselineMetric: 'p95=420ms',
+      targetMetric: 'p95<=320ms',
+      verificationCommand: 'npm test -- planner-benchmark',
+    }), 'utf-8');
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['benchmark_report'],
+      existingWork: [],
+      dryRun: true,
+      createIssues: true,
+      now: new Date('2026-07-05T00:00:00.000Z'),
+    });
+
+    expect(report.selected).toHaveLength(1);
+    expect(report.wouldCreate[0]?.body).toContain('baseline=p95=420ms');
+    expect(report.wouldCreate[0]?.body).toContain('target=p95<=320ms');
+    expect(report.wouldCreate[0]?.body).toContain('Include before/after performance evidence');
+  });
+
+  it('creates recursive feature-improvement follow-up candidates from ledger evidence', async () => {
+    const ledgerPath = resolveDevloopLedgerPath(repoPath, undefined);
+    appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_follow_up_evidence', {
+      title: 'Improve approval inbox empty state',
+      summary: 'Accepted UX test shows the empty state is unclear after all PRs are merged',
+      lane: 'feature_improvement',
+      evidence: 'tests/approval-inbox-empty-state.test.ts',
+      verificationCommand: 'npm test -- approval-inbox-empty-state',
+    }, new Date('2026-07-05T00:00:00.000Z')));
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['ledger_events'],
+      existingWork: [],
+      dryRun: true,
+      createIssues: true,
+      now: new Date('2026-07-05T00:10:00.000Z'),
+    });
+
+    expect(report.selected[0]?.candidate.lane).toBe('feature_improvement');
+    expect(report.wouldCreate[0]?.title).toBe('Improve approval inbox empty state');
+    expect(report.wouldCreate[0]?.body).toContain('tests/approval-inbox-empty-state.test.ts');
+    expect(report.wouldCreate[0]?.body).toContain('`npm test -- approval-inbox-empty-state`');
   });
 
   it('scores low-risk docs and tooling work ahead of broader feature work', () => {

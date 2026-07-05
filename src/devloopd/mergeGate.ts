@@ -49,6 +49,7 @@ export interface MergeGatePrSnapshot {
 export interface MergeGateEvaluationInput {
   pr: MergeGatePrSnapshot;
   changedPaths: readonly string[];
+  diff?: string;
   checksPassed: boolean;
   expectedHeadSha?: string;
   dualLlmApproval?: DualLlmApprovalReport;
@@ -182,6 +183,7 @@ function buildPolicyReasons(input: MergeGateEvaluationInput, policy: MergeGatePo
     changedPaths: input.changedPaths,
     title: input.pr.title,
     body: input.pr.body,
+    diff: input.diff,
   });
   const dualLlmApproved = input.dualLlmApproval?.approved === true
     && input.dualLlmApproval.headSha === input.pr.headRefOid;
@@ -425,6 +427,22 @@ async function loadChangedPaths(
   return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
+async function loadFullDiff(
+  runner: DevloopMergeCommandRunner,
+  ghCommand: string,
+  prRef: string,
+  repoPath: string,
+  repo: string | undefined,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const args = ['pr', 'diff', prRef];
+  if (repo) {
+    args.push('--repo', repo);
+  }
+  const result = await runner.exec(ghCommand, args, { cwd: repoPath, env });
+  return result.exitCode === 0 ? result.stdout : '';
+}
+
 async function checkGithubChecks(
   runner: DevloopMergeCommandRunner,
   ghCommand: string,
@@ -477,12 +495,14 @@ export async function mergeIfSafe(options: MergeIfSafeOptions): Promise<MergeGat
     const policy = resolvePolicy(options.policy);
     const pr = await loadPrSnapshot(runner, ghCommand, options.pr, repoPath, options.repo, env);
     const changedPaths = await loadChangedPaths(runner, ghCommand, options.pr, repoPath, options.repo, env);
+    const diff = await loadFullDiff(runner, ghCommand, options.pr, repoPath, options.repo, env);
     const checksPassed = await checkGithubChecks(runner, ghCommand, options.pr, repoPath, options.repo, env);
     const comments = await loadReviewComments(runner, ghCommand, pr.number, repoPath, options.repo, env);
     const dualLlmApproval = evaluateDualLlmApproval({ headSha: pr.headRefOid, comments });
     const report = evaluateMergeGate({
       pr,
       changedPaths,
+      diff,
       checksPassed,
       expectedHeadSha: options.expectedHeadSha,
       dualLlmApproval,
