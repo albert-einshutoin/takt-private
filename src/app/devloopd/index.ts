@@ -31,6 +31,10 @@ import {
   runPersonalOnboarding,
 } from '../../devloopd/personalOnboarding.js';
 import {
+  formatPersonalCheckReport,
+  runPersonalCheck,
+} from '../../devloopd/personalCheck.js';
+import {
   formatPersonalLifecycleReport,
   requestPersonalDaemonStop,
   resetPersonalLifecycle,
@@ -189,6 +193,45 @@ program
     });
 
     console.log(formatProviderSmokeMatrixReport(report));
+    if (!report.passed) {
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('check-personal')
+  .description('Run the local personal automation readiness gate')
+  .option('--cwd <path>', 'Repository path to inspect', process.cwd())
+  .option('--summary <path>', 'Machine-readable JSON summary path')
+  .option('--workflow <name-or-path>', 'Selected workflow used by provider smoke')
+  .option('--skip-build', 'Skip build because an outer wrapper already ran it')
+  .option('--skip-mock-e2e', 'Skip mock E2E. This keeps the required gate red unless the caller accepts failure')
+  .option('--skip-provider-smoke', 'Do not run the optional provider smoke matrix')
+  .option('--require-provider-smoke', 'Make provider smoke failures block the personal gate')
+  .option('--json', 'Print the machine-readable summary JSON to stdout')
+  .action(async (options: {
+    cwd: string;
+    summary?: string;
+    workflow?: string;
+    skipBuild?: boolean;
+    skipMockE2e?: boolean;
+    skipProviderSmoke?: boolean;
+    requireProviderSmoke?: boolean;
+    json?: boolean;
+  }) => {
+    const report = await runPersonalCheck({
+      repoPath: resolve(options.cwd),
+      summaryPath: options.summary ? resolve(options.summary) : undefined,
+      workflow: options.workflow,
+      skipBuild: options.skipBuild === true,
+      skipMockE2e: options.skipMockE2e === true,
+      providerSmoke: options.skipProviderSmoke !== true,
+      requireProviderSmoke: options.requireProviderSmoke === true,
+    });
+
+    console.log(options.json === true
+      ? JSON.stringify(report, null, 2)
+      : formatPersonalCheckReport(report));
     if (!report.passed) {
       process.exitCode = 1;
     }
