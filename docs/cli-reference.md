@@ -49,6 +49,9 @@ devloopd recover-stale --cwd /path/to/repo --apply
 devloopd status --cwd /path/to/repo
 devloopd stop --cwd /path/to/repo --reason "maintenance window"
 devloopd reset --cwd /path/to/repo
+npm run check:personal
+devloopd check-personal --cwd /path/to/repo
+devloopd check-personal --cwd /path/to/repo --require-provider-smoke
 devloopd soak --cwd /path/to/repo --cycles 5
 npm run test:devloopd:soak
 devloopd run --issue 123 --repo owner/repo
@@ -147,6 +150,21 @@ The provider smoke matrix always prints `pass`, `fail`, or `skip` for every prov
 | Option | Description |
 |--------|-------------|
 | `--cwd <path>` | Repository path to inspect |
+
+`devloopd check-personal` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--summary <path>` | Machine-readable JSON summary path. Defaults to `.devloop/check-personal-summary.json` |
+| `--workflow <name-or-path>` | Selected workflow used by provider smoke |
+| `--skip-build` | Skip build because an outer wrapper already ran it |
+| `--skip-mock-e2e` | Skip mock E2E. This keeps the required gate red unless the caller accepts failure |
+| `--skip-provider-smoke` | Do not run the optional provider smoke matrix |
+| `--require-provider-smoke` | Make provider smoke failures block the personal gate |
+| `--json` | Print the machine-readable summary JSON to stdout |
+
+Use `npm run check:personal` for daily local automation readiness. It runs build, lint, focused devloopd soak, full unit tests, mock E2E, high-severity audit, whitespace checks, and the provider smoke matrix. `check:personal` is stricter than a quick edit loop but does not require every live external provider E2E credential by default. Use `check:release` when preparing a broader release gate that includes all provider E2E checks. The personal gate writes a JSON summary under `.devloop/` for auditability.
 
 `devloopd soak` options:
 
