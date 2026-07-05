@@ -37,6 +37,10 @@ When `--pr` builds a task from review context, the generated order file starts w
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
+devloopd provider-smoke --cwd /path/to/repo
+devloopd provider-smoke --cwd /path/to/repo --workflow subscription-devloop
+devloopd provider-smoke --cwd /path/to/repo --provider codex-cli opencode-cli
+devloopd provider-smoke --cwd /path/to/repo --provider opencode-cli --prompt-smoke
 devloopd onboard-repo --cwd /path/to/repo --repo owner/repo
 devloopd onboard-repo --cwd /path/to/repo --repo owner/repo --apply
 devloopd ready --cwd /path/to/repo --repo owner/repo
@@ -75,6 +79,18 @@ devloopd start --repo owner/repo
 | `--skip-auth` | Skip `gh auth status` |
 | `--smoke-cli` | Run bounded real CLI smoke checks for subscription-only providers |
 | `--smoke-timeout-ms <ms>` | Per-provider CLI smoke timeout. Defaults to 60000 |
+
+`devloopd provider-smoke` options:
+
+| Option | Description |
+|--------|-------------|
+| `--cwd <path>` | Repository path to inspect |
+| `--workflow <name-or-path>` | Selected workflow used to resolve provider config before project/global config |
+| `--provider <name...>` | Provider(s) to smoke-check instead of auto-detecting the configured provider |
+| `--prompt-smoke` | Run a minimal non-mutating prompt. Disabled by default to avoid paid or network work |
+| `--timeout-ms <ms>` | Per-probe timeout in milliseconds. Defaults to 15000 |
+
+The provider smoke matrix always prints `pass`, `fail`, or `skip` for every provider. Configured CLI providers fail on missing commands, incompatible version/help commands, or failed auth status probes. Unconfigured providers are skipped with an explicit reason. Live prompt smoke is opt-in; adding repository content, private PR/comment fixtures, or live mutation to this gate requires human review.
 
 `devloopd onboard-repo` options:
 

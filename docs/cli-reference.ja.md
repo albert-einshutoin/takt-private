@@ -37,6 +37,10 @@
 devloopd doctor --subscription-only
 devloopd doctor --subscription-only --repo /path/to/repo --policy .takt/devloopd.yaml
 devloopd doctor --subscription-only --smoke-cli --smoke-timeout-ms 60000
+devloopd provider-smoke --cwd /path/to/repo
+devloopd provider-smoke --cwd /path/to/repo --workflow subscription-devloop
+devloopd provider-smoke --cwd /path/to/repo --provider codex-cli opencode-cli
+devloopd provider-smoke --cwd /path/to/repo --provider opencode-cli --prompt-smoke
 devloopd onboard-repo --cwd /path/to/repo --repo owner/repo
 devloopd onboard-repo --cwd /path/to/repo --repo owner/repo --apply
 devloopd ready --cwd /path/to/repo --repo owner/repo
@@ -72,6 +76,18 @@ devloopd start --repo owner/repo
 | `--skip-auth` | `gh auth status` をスキップします |
 | `--smoke-cli` | subscription-only provider の bounded な実 CLI smoke check を実行します |
 | `--smoke-timeout-ms <ms>` | provider ごとの CLI smoke timeout。デフォルトは 60000 |
+
+`devloopd provider-smoke` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検査するリポジトリパス |
+| `--workflow <name-or-path>` | project/global config より優先して provider config を解決する selected workflow |
+| `--provider <name...>` | auto-detect した configured provider の代わりに smoke-check する provider |
+| `--prompt-smoke` | 最小の non-mutating prompt を実行します。paid/network work を避けるためデフォルトは無効です |
+| `--timeout-ms <ms>` | probe ごとの timeout。デフォルトは 15000 |
+
+provider smoke matrix は全 provider について `pass`、`fail`、`skip` を表示します。configured CLI provider は command missing、version/help command 不整合、auth status failure で失敗します。unconfigured provider は理由つきで skip されます。live prompt smoke は opt-in です。この gate に repository content、private PR/comment fixture、live mutation を追加する変更は human review が必要です。
 
 `devloopd onboard-repo` のオプション:
 

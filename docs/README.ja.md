@@ -256,6 +256,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `takt workflow doctor` | カスタム workflow の定義を静的検証します |
 | `takt repertoire add` | GitHub から repertoire パッケージをインストールします |
 | `devloopd doctor --subscription-only` | subscription-only provider 前提のローカル環境を検証します |
+| `devloopd provider-smoke --cwd /path/to/repo` | configured local provider CLI の pass/fail/skip を表示します |
 | `devloopd onboard-repo --cwd /path/to/repo --repo owner/repo` | target repo の personal automation onboarding を dry-run します |
 | `devloopd ready --cwd /path/to/repo --repo owner/repo` | loop 開始前に個人利用 automation readiness を検査します |
 | `devloopd recover-stale --cwd /path/to/repo` | stale な local automation state の recovery を dry-run します |
