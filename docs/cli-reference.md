@@ -45,6 +45,9 @@ devloopd timeline --issue 123
 devloopd automation-state --cwd /path/to/repo
 devloopd memory --write
 devloopd merge-if-safe --pr 456 --expected-head <sha>
+devloopd staged once --repo owner/repo
+devloopd staged loop --repo owner/repo --max-cycles 3
+devloopd stage pr-merge --repo owner/repo
 devloopd scan-issues --repo owner/repo
 devloopd select-issue --repo owner/repo
 devloopd active-runs

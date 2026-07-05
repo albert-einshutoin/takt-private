@@ -367,6 +367,26 @@ interval environment variables remain supported:
 | `TAKT_LOOP_REVIEW_FIX_INTERVAL` | `review-fix` |
 | `TAKT_LOOP_PR_MERGE_INTERVAL` | `pr-merge` |
 
+The same state file also stores recursive safety counters. Defaults stop after
+three consecutive no-op cycles, three classifier disagreements, five CI flake
+loops, three review-fix failures, or five product-policy escalations. Override
+them with:
+
+| Environment variable | Safety budget |
+|----------------------|---------------|
+| `TAKT_LOOP_MAX_RUNS` | stage executions |
+| `TAKT_LOOP_MAX_PULL_REQUESTS` | PR touches |
+| `TAKT_LOOP_MAX_RETRIES` | repair attempts |
+| `TAKT_LOOP_MAX_COST_PROXY` | external cost proxy |
+| `TAKT_LOOP_MAX_DURATION_SECONDS` | elapsed loop duration |
+| `TAKT_LOOP_MAX_CHANGED_FILES` | changed file budget |
+| `TAKT_LOOP_MAX_CHANGED_LINES` | changed line budget |
+| `TAKT_LOOP_MAX_CONSECUTIVE_NOOP_SIGNALS` | completion no-op cycles |
+| `TAKT_LOOP_MAX_CLASSIFIER_DISAGREEMENTS` | classifier circuit breaker |
+| `TAKT_LOOP_MAX_CI_FLAKES` | CI flake circuit breaker |
+| `TAKT_LOOP_MAX_REVIEW_FIX_FAILURES` | review-fix circuit breaker |
+| `TAKT_LOOP_MAX_PRODUCT_POLICY_ESCALATIONS` | human escalation circuit breaker |
+
 `devloopd stage <stage>` runs one stage immediately and ignores interval state.
 Use it for cron, launchd, or a manual recovery command when you want a single
 automation action without starting the scheduler.
@@ -380,9 +400,10 @@ agy and Codex have approved the current head. `pr-merge` still calls
 Before merge, `pr-merge` builds a changed-file queue for promoted automation
 PRs. Non-overlapping PRs can land in the same queue layer. Overlapping PRs are
 serialized, and dirty, conflicted, or base-drifted PRs are evicted with
-conflicting files, merge-tree output when available, landed PR references, and a
-repair prompt for a follow-up review-fix or CI-fix worktree. Queue decisions are
-written as `devloop_automation_state` ledger events and can be summarized with:
+conflicting files, PR diff context from `gh pr diff --patch`, merge-tree output
+when available, landed PR references, and a repair prompt for a follow-up
+review-fix or CI-fix worktree. Stage actions and queue decisions are written as
+`devloop_automation_state` ledger events and can be summarized with:
 
 ```bash
 devloopd automation-state --cwd /path/to/repo

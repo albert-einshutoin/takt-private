@@ -6,6 +6,12 @@ import {
   type DevloopAutomationStageReport,
   type RunDevloopAutomationStageOptions,
 } from './prAutomation.js';
+import {
+  evaluateAutomationSafety,
+  type AutomationSafetyBudgets,
+  type AutomationSafetyReport,
+  type AutomationSafetyState,
+} from './automationSafety.js';
 
 export { type DevloopAutomationStage } from './prAutomation.js';
 
@@ -22,6 +28,22 @@ export type StagedDevloopMode = 'once' | 'loop';
 export interface StagedDevloopState {
   version: 1;
   lastRunAt: Partial<Record<DevloopAutomationStage, string>>;
+  safety?: StagedDevloopSafetyState;
+}
+
+export interface StagedDevloopSafetyState {
+  startedAt: string;
+  runs: number;
+  pullRequests: number;
+  retries: number;
+  costProxy: number;
+  changedFiles: number;
+  changedLines: number;
+  consecutiveNoopSignals: number;
+  classifierDisagreements: number;
+  ciFlakes: number;
+  reviewFixFailures: number;
+  productPolicyEscalations: number;
 }
 
 export interface StagedDevloopStageReport {
@@ -42,6 +64,7 @@ export interface StagedDevloopReport {
   stageReports: StagedDevloopStageReport[];
   cycles?: StagedDevloopReport[];
   stateWarning?: string;
+  safetyReport?: AutomationSafetyReport;
 }
 
 export interface StagedDevloopDependencies {
@@ -65,6 +88,7 @@ export interface RunStagedDevloopOptions {
   maxCycles?: number;
   tickSeconds?: number;
   intervals?: Partial<Record<DevloopAutomationStage, number>>;
+  safetyBudgets?: AutomationSafetyBudgets;
   statePath?: string;
   now?: () => Date;
   sleep?: StagedDevloopSleep;
@@ -87,6 +111,29 @@ const INTERVAL_ENV_KEYS: Record<DevloopAutomationStage, string> = {
   'pr-review': 'TAKT_LOOP_PR_REVIEW_INTERVAL',
   'review-fix': 'TAKT_LOOP_REVIEW_FIX_INTERVAL',
   'pr-merge': 'TAKT_LOOP_PR_MERGE_INTERVAL',
+};
+
+const DEFAULT_SAFETY_BUDGETS: AutomationSafetyBudgets = {
+  maxConsecutiveNoopSignals: 3,
+  maxClassifierDisagreements: 3,
+  maxCiFlakes: 5,
+  maxReviewFixFailures: 3,
+  maxProductPolicyEscalations: 5,
+};
+
+const SAFETY_BUDGET_ENV_KEYS: Record<keyof AutomationSafetyBudgets, string> = {
+  maxRuns: 'TAKT_LOOP_MAX_RUNS',
+  maxPullRequests: 'TAKT_LOOP_MAX_PULL_REQUESTS',
+  maxRetries: 'TAKT_LOOP_MAX_RETRIES',
+  maxCostProxy: 'TAKT_LOOP_MAX_COST_PROXY',
+  maxDurationSeconds: 'TAKT_LOOP_MAX_DURATION_SECONDS',
+  maxChangedFiles: 'TAKT_LOOP_MAX_CHANGED_FILES',
+  maxChangedLines: 'TAKT_LOOP_MAX_CHANGED_LINES',
+  maxConsecutiveNoopSignals: 'TAKT_LOOP_MAX_CONSECUTIVE_NOOP_SIGNALS',
+  maxClassifierDisagreements: 'TAKT_LOOP_MAX_CLASSIFIER_DISAGREEMENTS',
+  maxCiFlakes: 'TAKT_LOOP_MAX_CI_FLAKES',
+  maxReviewFixFailures: 'TAKT_LOOP_MAX_REVIEW_FIX_FAILURES',
+  maxProductPolicyEscalations: 'TAKT_LOOP_MAX_PRODUCT_POLICY_ESCALATIONS',
 };
 
 const DEFAULT_DEPENDENCIES: StagedDevloopDependencies = {
@@ -125,6 +172,23 @@ function resolveIntervals(
   return intervals;
 }
 
+function resolveSafetyBudgets(
+  env: NodeJS.ProcessEnv,
+  explicit: AutomationSafetyBudgets | undefined,
+): AutomationSafetyBudgets {
+  const budgets: AutomationSafetyBudgets = { ...DEFAULT_SAFETY_BUDGETS };
+  for (const [key, envKey] of Object.entries(SAFETY_BUDGET_ENV_KEYS) as Array<[keyof AutomationSafetyBudgets, string]>) {
+    const envValue = parsePositiveNumber(env[envKey]);
+    const explicitValue = explicit?.[key];
+    if (explicitValue !== undefined && Number.isFinite(explicitValue) && explicitValue >= 0) {
+      budgets[key] = explicitValue;
+    } else if (envValue !== undefined) {
+      budgets[key] = envValue;
+    }
+  }
+  return budgets;
+}
+
 function defaultStatePath(repoPath: string): string {
   return resolve(repoPath, '.takt/staged-devloop-state.json');
 }
@@ -136,7 +200,32 @@ function emptyState(): StagedDevloopState {
   };
 }
 
-function readState(statePath: string): { state: StagedDevloopState; warning?: string } {
+function normalizeNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function normalizeSafetyState(value: unknown, now: Date): StagedDevloopSafetyState {
+  const candidate = typeof value === 'object' && value !== null ? value as Partial<StagedDevloopSafetyState> : {};
+  const startedAt = typeof candidate.startedAt === 'string' && !Number.isNaN(Date.parse(candidate.startedAt))
+    ? candidate.startedAt
+    : now.toISOString();
+  return {
+    startedAt,
+    runs: normalizeNumber(candidate.runs),
+    pullRequests: normalizeNumber(candidate.pullRequests),
+    retries: normalizeNumber(candidate.retries),
+    costProxy: normalizeNumber(candidate.costProxy),
+    changedFiles: normalizeNumber(candidate.changedFiles),
+    changedLines: normalizeNumber(candidate.changedLines),
+    consecutiveNoopSignals: normalizeNumber(candidate.consecutiveNoopSignals),
+    classifierDisagreements: normalizeNumber(candidate.classifierDisagreements),
+    ciFlakes: normalizeNumber(candidate.ciFlakes),
+    reviewFixFailures: normalizeNumber(candidate.reviewFixFailures),
+    productPolicyEscalations: normalizeNumber(candidate.productPolicyEscalations),
+  };
+}
+
+function readState(statePath: string, now: Date = new Date()): { state: StagedDevloopState; warning?: string } {
   if (!existsSync(statePath)) {
     return { state: emptyState() };
   }
@@ -149,6 +238,7 @@ function readState(statePath: string): { state: StagedDevloopState; warning?: st
       state: {
         version: 1,
         lastRunAt: parsed.lastRunAt,
+        ...(parsed.safety !== undefined ? { safety: normalizeSafetyState(parsed.safety, now) } : {}),
       },
     };
   } catch {
@@ -206,15 +296,84 @@ function validateMaxCycles(value: number | undefined): number | undefined {
   return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
+function toAutomationSafetyState(safety: StagedDevloopSafetyState, now: Date): AutomationSafetyState {
+  return {
+    ...safety,
+    now: now.toISOString(),
+  };
+}
+
+function isNoopStageReport(report: DevloopAutomationStageReport): boolean {
+  return report.actions.length === 0
+    || report.actions.every((action) => action.status === 'skipped'
+      && (action.stopRule === 'Duplicate or already covered' || /no actions|no eligible|not passing yet/iu.test(action.message)));
+}
+
+function updateSafetyAfterStage(
+  safety: StagedDevloopSafetyState,
+  report: DevloopAutomationStageReport,
+): StagedDevloopSafetyState {
+  const prNumbers = new Set(report.actions.flatMap((action) => action.pr === undefined ? [] : [action.pr]));
+  const reviewFixFailures = report.actions.filter((action) => action.type === 'review-fix' && (action.status === 'failed' || action.status === 'blocked')).length;
+  const ciFlakes = report.actions.filter((action) => action.type === 'ci-fix' && /flaky|infra|retry/iu.test(action.message)).length;
+  const productPolicyEscalations = report.actions.filter((action) => action.productPolicyImpact?.requiresHumanReview === true
+    || action.stopRule === 'Unsafe or too broad').length;
+
+  return {
+    ...safety,
+    runs: safety.runs + 1,
+    pullRequests: safety.pullRequests + prNumbers.size,
+    retries: safety.retries + report.actions.filter((action) => action.type === 'review-fix' || action.type === 'ci-fix').length,
+    ciFlakes: safety.ciFlakes + ciFlakes,
+    reviewFixFailures: safety.reviewFixFailures + reviewFixFailures,
+    productPolicyEscalations: safety.productPolicyEscalations + productPolicyEscalations,
+  };
+}
+
+function updateCycleNoopSignal(
+  safety: StagedDevloopSafetyState,
+  stageReports: readonly StagedDevloopStageReport[],
+): StagedDevloopSafetyState {
+  const ranReports = stageReports.flatMap((stageReport) => stageReport.report === undefined ? [] : [stageReport.report]);
+  if (ranReports.length === 0) {
+    return safety;
+  }
+  return {
+    ...safety,
+    // Completion is a property of a whole scheduler cycle. Counting every
+    // no-op stage would stop a healthy five-stage cycle before the next tick.
+    consecutiveNoopSignals: ranReports.every(isNoopStageReport) ? safety.consecutiveNoopSignals + 1 : 0,
+  };
+}
+
 async function runStagedDevloopCycle(options: RunStagedDevloopOptions): Promise<StagedDevloopReport> {
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const mode = options.mode ?? 'once';
   const statePath = resolve(options.statePath ?? env.TAKT_LOOP_STAGE_STATE ?? defaultStatePath(repoPath));
   const intervals = resolveIntervals(env, options.intervals);
+  const safetyBudgets = resolveSafetyBudgets(env, options.safetyBudgets);
   const dependencies = resolveDependencies(options.dependencies);
   const now = options.now?.() ?? new Date();
-  const { state, warning } = readState(statePath);
+  const { state, warning } = readState(statePath, now);
+  let safety = normalizeSafetyState(state.safety, now);
+  const initialSafetyReport = evaluateAutomationSafety({
+    budgets: safetyBudgets,
+    state: toAutomationSafetyState(safety, now),
+  });
+  if (!initialSafetyReport.allowed) {
+    state.safety = safety;
+    writeState(statePath, state);
+    return {
+      passed: false,
+      mode,
+      message: `automation safety stopped: ${initialSafetyReport.reasons.join('; ')}`,
+      statePath,
+      stageReports: [],
+      safetyReport: initialSafetyReport,
+      ...(warning !== undefined ? { stateWarning: warning } : {}),
+    };
+  }
   const targetStages = options.stage === undefined ? DEVLOOP_AUTOMATION_STAGES : [options.stage];
   const stageReports: StagedDevloopStageReport[] = [];
 
@@ -247,7 +406,9 @@ async function runStagedDevloopCycle(options: RunStagedDevloopOptions): Promise<
       dryRun: options.dryRun,
       env,
     });
+    safety = updateSafetyAfterStage(safety, stageReport);
     state.lastRunAt[stage] = now.toISOString();
+    state.safety = safety;
     stageReports.push({
       stage,
       status: stageReport.passed ? 'ran' : 'failed',
@@ -258,14 +419,23 @@ async function runStagedDevloopCycle(options: RunStagedDevloopOptions): Promise<
     });
   }
 
+  safety = updateCycleNoopSignal(safety, stageReports);
+  state.safety = safety;
   writeState(statePath, state);
+  const safetyReport = evaluateAutomationSafety({
+    budgets: safetyBudgets,
+    state: toAutomationSafetyState(safety, now),
+  });
   const passed = stageReports.every((stageReport) => stageReport.status !== 'failed');
   return {
-    passed,
+    passed: passed && safetyReport.allowed,
     mode,
-    message: `${stageReports.filter((stageReport) => stageReport.status === 'ran').length} staged devloop stage(s) ran`,
+    message: safetyReport.allowed
+      ? `${stageReports.filter((stageReport) => stageReport.status === 'ran').length} staged devloop stage(s) ran`
+      : `automation safety stopped: ${safetyReport.reasons.join('; ')}`,
     statePath,
     stageReports,
+    safetyReport,
     ...(warning !== undefined ? { stateWarning: warning } : {}),
   };
 }
@@ -332,6 +502,9 @@ export function formatStagedDevloopReport(report: StagedDevloopReport): string {
   ];
   if (report.stateWarning !== undefined) {
     lines.push(`State warning: ${report.stateWarning}`);
+  }
+  if (report.safetyReport !== undefined && !report.safetyReport.allowed) {
+    lines.push(`Safety stop: ${report.safetyReport.stopRule ?? 'unknown'} - ${report.safetyReport.reasons.join('; ')}`);
   }
   for (const stage of report.stageReports) {
     lines.push(`- ${stage.stage}: ${stage.status} - ${stage.reason}`);
