@@ -45,6 +45,8 @@ devloopd recover-stale --cwd /path/to/repo --apply
 devloopd status --cwd /path/to/repo
 devloopd stop --cwd /path/to/repo --reason "maintenance window"
 devloopd reset --cwd /path/to/repo
+devloopd soak --cwd /path/to/repo --cycles 5
+npm run test:devloopd:soak
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
@@ -126,6 +128,19 @@ devloopd start --repo owner/repo
 | オプション | 説明 |
 |-----------|------|
 | `--cwd <path>` | 検査するリポジトリパス |
+
+`devloopd soak` のオプション:
+
+| オプション | 説明 |
+|-----------|------|
+| `--cwd <path>` | 検証するリポジトリパス。live GitHub や provider は呼びません |
+| `--cycles <count>` | deterministic scheduler cycle 数。デフォルトは 5 |
+| `--state <path>` | structured staged scheduler state file |
+| `--ledger <path>` | ledger パス。デフォルトは `--cwd` 配下の `.devloop/ledger.jsonl` |
+| `--report <path>` | JSON soak report の出力先。デフォルトは生成された state file の隣 |
+| `--repeated-wait-limit <count>` | 同じ wait/error 理由の連続許容数。デフォルトは 3 |
+
+短い local regression gate には `npm run test:devloopd:soak` を使います。これは deterministic harness と focused な scheduler、CI retry、merge queue test を実行します。長時間寄りに見る場合だけ `--cycles` を増やしてください。soak test に live GitHub mutation や実 private PR/comment fixture を入れる変更は、安全境界とデータ取扱いが変わるため human review が必要です。
 
 `devloopd run` のオプション:
 

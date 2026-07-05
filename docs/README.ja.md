@@ -262,6 +262,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 | `devloopd status --cwd /path/to/repo` | daemon lifecycle、active run、staged ledger state をまとめて表示します |
 | `devloopd stop --cwd /path/to/repo` | foreground の devloopd loop に次 cycle 前の停止を要求します |
 | `devloopd reset --cwd /path/to/repo` | personal daemon metadata と stop-request state を消します |
+| `devloopd soak --cwd /path/to/repo --cycles 5` | 外部サービスなしの deterministic loop stability check を実行します |
 | `devloopd run --issue N` | subscription-only 検査後に GitHub Issue を TAKT pipeline で実行します |
 | `devloopd import-takt-run --latest --issue N` | TAKT run metadata を devloop ledger に取り込みます |
 | `devloopd reconcile-runs` | 未取り込みの完了済み TAKT run を devloop ledger に取り込みます |
