@@ -13,6 +13,7 @@ import {
   type AutomationSafetyState,
 } from './automationSafety.js';
 import { readRawDevloopLedgerEvents, resolveDevloopLedgerPath } from './ledger.js';
+import { inspectPersonalLifecycle } from './personalLifecycle.js';
 import { writeFileAtomic } from './stateStore.js';
 
 export { type DevloopAutomationStage } from './prAutomation.js';
@@ -71,6 +72,7 @@ export interface StagedDevloopReport {
   safetyReport?: AutomationSafetyReport;
   safetyProfile?: StagedDevloopSafetyProfile;
   safetyBudgets?: AutomationSafetyBudgets;
+  stoppedReason?: 'max_cycles' | 'abort_signal' | 'stop_requested' | 'failed_cycle';
 }
 
 export interface StagedDevloopDependencies {
@@ -242,6 +244,11 @@ function resolveSafetyBudgets(
 
 function defaultStatePath(repoPath: string): string {
   return resolve(repoPath, '.takt/staged-devloop-state.json');
+}
+
+function resolveStatePath(options: RunStagedDevloopOptions, repoPath: string): string {
+  const env = options.env ?? process.env;
+  return resolve(options.statePath ?? env.TAKT_LOOP_STAGE_STATE ?? defaultStatePath(repoPath));
 }
 
 function emptyState(): StagedDevloopState {
@@ -446,11 +453,33 @@ function updateCycleNoopSignal(
   };
 }
 
+function makeStopRequestedReport(
+  repoPath: string,
+  statePath: string,
+  cycles: StagedDevloopReport[] = [],
+): StagedDevloopReport {
+  const lifecycle = inspectPersonalLifecycle({ repoPath });
+  return {
+    passed: true,
+    mode: 'loop',
+    message: lifecycle.stopRequest
+      ? `stop requested before staged cycle: ${lifecycle.stopRequest.reason}`
+      : 'stop requested before staged cycle',
+    statePath,
+    stageReports: cycles.at(-1)?.stageReports ?? [],
+    cycles,
+    stoppedReason: 'stop_requested',
+    ...(cycles.at(-1)?.safetyProfile !== undefined ? { safetyProfile: cycles.at(-1)?.safetyProfile } : {}),
+    ...(cycles.at(-1)?.safetyBudgets !== undefined ? { safetyBudgets: cycles.at(-1)?.safetyBudgets } : {}),
+    ...(cycles.at(-1)?.stateWarning !== undefined ? { stateWarning: cycles.at(-1)?.stateWarning } : {}),
+  };
+}
+
 async function runStagedDevloopCycle(options: RunStagedDevloopOptions): Promise<StagedDevloopReport> {
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const mode = options.mode ?? 'once';
-  const statePath = resolve(options.statePath ?? env.TAKT_LOOP_STAGE_STATE ?? defaultStatePath(repoPath));
+  const statePath = resolveStatePath(options, repoPath);
   const intervals = resolveIntervals(env, options.intervals);
   const profile = resolveSafetyProfile(env, options.safetyProfile);
   if ('error' in profile) {
@@ -578,13 +607,15 @@ export async function runStagedDevloop(options: RunStagedDevloopOptions = {}): P
     return runStagedDevloopCycle({ ...options, mode: 'once' });
   }
 
+  const repoPath = resolve(options.repoPath ?? process.cwd());
+  const statePath = resolveStatePath(options, repoPath);
   const maxCycles = validateMaxCycles(options.maxCycles);
   if (options.maxCycles !== undefined && maxCycles === undefined) {
     return {
       passed: false,
       mode,
       message: `maxCycles must be a positive integer: ${String(options.maxCycles)}`,
-      statePath: resolve(options.statePath ?? defaultStatePath(resolve(options.repoPath ?? process.cwd()))),
+      statePath,
       stageReports: [],
     };
   }
@@ -595,7 +626,7 @@ export async function runStagedDevloop(options: RunStagedDevloopOptions = {}): P
       passed: false,
       mode,
       message: `tickSeconds must be a non-negative number: ${String(tickSeconds)}`,
-      statePath: resolve(options.statePath ?? defaultStatePath(resolve(options.repoPath ?? process.cwd()))),
+      statePath,
       stageReports: [],
     };
   }
@@ -603,6 +634,9 @@ export async function runStagedDevloop(options: RunStagedDevloopOptions = {}): P
   const sleep = options.sleep ?? defaultSleep;
   const cycles: StagedDevloopReport[] = [];
   while (options.abortSignal?.aborted !== true) {
+    if (existsSync(repoPath) && inspectPersonalLifecycle({ repoPath }).stopRequested) {
+      return makeStopRequestedReport(repoPath, statePath, cycles);
+    }
     const cycle = await runStagedDevloopCycle({ ...options, mode });
     cycles.push(cycle);
     if (!cycle.passed) {
@@ -619,9 +653,16 @@ export async function runStagedDevloop(options: RunStagedDevloopOptions = {}): P
     passed: cycles.length > 0 && cycles.every((cycle) => cycle.passed),
     mode,
     message: `staged devloop stopped after ${cycles.length} cycle(s)`,
-    statePath: lastCycle?.statePath ?? resolve(options.statePath ?? defaultStatePath(resolve(options.repoPath ?? process.cwd()))),
+    statePath: lastCycle?.statePath ?? statePath,
     stageReports: lastCycle?.stageReports ?? [],
     cycles,
+    stoppedReason: options.abortSignal?.aborted === true
+      ? 'abort_signal'
+      : lastCycle?.passed === false
+        ? 'failed_cycle'
+        : maxCycles !== undefined && cycles.length >= maxCycles
+          ? 'max_cycles'
+          : undefined,
     ...(lastCycle?.safetyProfile !== undefined ? { safetyProfile: lastCycle.safetyProfile } : {}),
     ...(lastCycle?.safetyBudgets !== undefined ? { safetyBudgets: lastCycle.safetyBudgets } : {}),
     ...(lastCycle?.stateWarning !== undefined ? { stateWarning: lastCycle.stateWarning } : {}),

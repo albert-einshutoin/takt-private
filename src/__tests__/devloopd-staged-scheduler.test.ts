@@ -1,17 +1,35 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { appendDevloopLedgerEvent, buildDevloopLedgerEvent, resolveDevloopLedgerPath } from '../devloopd/ledger.js';
+import { requestPersonalDaemonStop } from '../devloopd/personalLifecycle.js';
 import {
   DEVLOOP_AUTOMATION_STAGES,
   runStagedDevloop,
   type DevloopAutomationStage,
 } from '../devloopd/stagedScheduler.js';
 
+const cleanupDirs = new Set<string>();
+
 function makeTempStatePath(): string {
-  return join(mkdtempSync(join(tmpdir(), 'takt-staged-')), 'state.json');
+  const dir = mkdtempSync(join(tmpdir(), 'takt-staged-'));
+  cleanupDirs.add(dir);
+  return join(dir, 'state.json');
 }
+
+function makeTempRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'takt-staged-repo-'));
+  cleanupDirs.add(dir);
+  return dir;
+}
+
+afterEach(() => {
+  for (const dir of cleanupDirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  cleanupDirs.clear();
+});
 
 describe('devloopd staged scheduler', () => {
   it('runs due stages in deterministic order and persists structured state', async () => {
@@ -123,6 +141,59 @@ describe('devloopd staged scheduler', () => {
     expect(report.passed).toBe(true);
     expect(calls).toEqual(['pr-review']);
     expect(report.stageReports.map((stage) => stage.stage)).toEqual(['pr-review']);
+  });
+
+  it('stops loop before running stages when a stop request already exists', async () => {
+    const repoPath = makeTempRepo();
+    requestPersonalDaemonStop({ repoPath, reason: 'maintenance window' });
+    const calls: DevloopAutomationStage[] = [];
+
+    const report = await runStagedDevloop({
+      repoPath,
+      mode: 'loop',
+      maxCycles: 2,
+      tickSeconds: 0,
+      statePath: join(repoPath, 'state.json'),
+      dependencies: {
+        runStage: async (options) => {
+          calls.push(options.stage);
+          return { passed: true, stage: options.stage, message: `ran ${options.stage}`, actions: [] };
+        },
+      },
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.stoppedReason).toBe('stop_requested');
+    expect(report.message).toContain('maintenance window');
+    expect(report.cycles).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it('stops loop before the next cycle when a stop request appears during sleep', async () => {
+    const repoPath = makeTempRepo();
+    const calls: DevloopAutomationStage[] = [];
+
+    const report = await runStagedDevloop({
+      repoPath,
+      mode: 'loop',
+      maxCycles: 3,
+      tickSeconds: 1,
+      statePath: join(repoPath, 'state.json'),
+      sleep: async () => {
+        requestPersonalDaemonStop({ repoPath, reason: 'operator requested stop' });
+      },
+      dependencies: {
+        runStage: async (options) => {
+          calls.push(options.stage);
+          return { passed: true, stage: options.stage, message: `ran ${options.stage}`, actions: [] };
+        },
+      },
+    });
+
+    expect(report.passed).toBe(true);
+    expect(report.stoppedReason).toBe('stop_requested');
+    expect(report.cycles).toHaveLength(1);
+    expect(calls).toEqual([...DEVLOOP_AUTOMATION_STAGES]);
   });
 
   it('stops before running stages when persisted safety budgets are exhausted', async () => {
