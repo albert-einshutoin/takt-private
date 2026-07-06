@@ -150,7 +150,7 @@ The provider smoke matrix always prints `pass`, `fail`, or `skip` for every prov
 | `--cwd <path>` | Repository path to inspect |
 | `--reason <text>` | Operator-visible reason stored with the stop request |
 
-`devloopd stop` writes a stop-request file that a foreground `devloopd start` loop reads before the next cycle. `devloopd reset` clears only personal daemon metadata and stop-request state; it does not delete TAKT run artifacts or the devloop ledger.
+`devloopd stop` writes a stop-request file that foreground `devloopd start` and `devloopd staged loop` processes read before the next cycle. `devloopd reset` clears only personal daemon metadata and stop-request state; it does not delete TAKT run artifacts or the devloop ledger.
 
 `devloopd reset` options:
 
