@@ -75,8 +75,10 @@ const DEFAULT_POLICY: IssueScanPolicy = {
   labelsAny: ['agent:ready', 'bug', 'tests', 'docs'],
   labelsForbidden: [
     'human-required',
+    'human:review',
     'security-sensitive',
     'blocked',
+    'agent:blocked',
     'do-not-touch',
     'billing',
     'payments',

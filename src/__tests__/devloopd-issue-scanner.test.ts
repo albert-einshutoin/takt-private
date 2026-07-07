@@ -57,6 +57,32 @@ describe('devloopd issue scanner', () => {
     expect(candidate.reason).toContain('forbidden label: billing');
   });
 
+  it('keeps blocked and human-review issues out of automation intake', () => {
+    const blocked = classifyIssue({
+      number: 126,
+      title: 'Retry blocked automation',
+      body: 'Needs operator decision first.',
+      url: 'https://github.com/owner/repo/issues/126',
+      labels: ['agent:ready', 'agent:blocked'],
+      updatedAt: '2026-06-24T00:00:00Z',
+      comments: 0,
+    });
+    const humanReview = classifyIssue({
+      number: 127,
+      title: 'Decide product direction',
+      body: 'Needs product review first.',
+      url: 'https://github.com/owner/repo/issues/127',
+      labels: ['agent:ready', 'human:review'],
+      updatedAt: '2026-06-24T00:00:00Z',
+      comments: 0,
+    });
+
+    expect(blocked.mode).toBe('skip');
+    expect(blocked.reason).toContain('forbidden label: agent:blocked');
+    expect(humanReview.mode).toBe('skip');
+    expect(humanReview.reason).toContain('forbidden label: human:review');
+  });
+
   it('marks secret, CI bypass, and admin requests as human required', () => {
     const candidate = classifyIssue({
       number: 125,

@@ -442,8 +442,10 @@ interactive shell startup file を安定して読み込まないため、templat
 `pr-review` は non-draft の automation PR を検出し、duplicate issue coverage を
 `Duplicate or already covered` stop rule として扱います。必要に応じて current-head
 review gate を走らせ、agy と Codex の両方が同じ head SHA を承認した場合だけ
-`agent:auto-merge` に昇格します。`pr-merge` は引き続き
-`devloopd merge-if-safe --expected-head` を呼ぶため、label は直接 merge bypass ではありません。
+`agent:auto-merge` に昇格します。`agent:blocked` があっても current head に対応する
+blocking review comment がなければ stale block として label を外し、review に戻します。
+`human:review` がある PR は、人間がその label を外すまで automation の対象外に残します。
+`pr-merge` は引き続き `devloopd merge-if-safe --expected-head` を呼ぶため、label は直接 merge bypass ではありません。
 
 merge 前に、`pr-merge` は promote 済み automation PR から changed-file queue を作ります。
 file overlap がない PR は同じ queue layer で merge 可能です。overlap がある PR は直列化し、
@@ -524,6 +526,7 @@ human review 固定にはしません。`product_policy` 判定は sticky で、
 `devloopd promote-auto-merge` は、現在の PR head に対する agy と Codex の machine-readable
 review comment を確認します。両方が同じ head を承認している場合だけ
 `agent:auto-merge` label を追加し、どちらかが missing / stale / blocking の場合は merge lane に入れません。
+product-policy または human-policy impact がある場合は `human:review` を追加し、人間の判断があるまで automation を再開しません。
 
 ```bash
 devloopd promote-auto-merge --pr 456 --repo owner/repo
@@ -566,7 +569,7 @@ Issue body と comments は untrusted input です。scanner はそれらを req
 デフォルトの候補分類:
 
 - `agent:ready`, `bug`, `tests`, `docs` label がある Issue は機械的検討対象になる
-- `human-required`, `security-sensitive`, `blocked`, `do-not-touch`, `billing`, `payments`, `infra` のような forbidden label がある Issue は skip する
+- `human-required`, `human:review`, `security-sensitive`, `blocked`, `agent:blocked`, `do-not-touch`, `billing`, `payments`, `infra` のような forbidden label がある Issue は skip する
 - `docs` や `tests` のような低リスク label は `auto_merge_candidate` になり得る
 - その他の eligible Issue は `auto_pr_only` になる。merge には引き続き `devloopd merge-if-safe` が必要
 

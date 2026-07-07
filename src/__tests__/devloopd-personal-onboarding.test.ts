@@ -84,6 +84,7 @@ describe('devloopd personal onboarding', () => {
       'would_change:github label agent:ready',
       'would_change:github label agent:auto-merge',
       'would_change:github label agent:blocked',
+      'would_change:github label human:review',
     ]);
     expect(existsSync(join(repoPath, '.takt'))).toBe(false);
     expect(runner.calls).not.toContain('gh label create agent:ready --repo owner/repo --color 0e8a16 --description Issue is safe for mechanical devloop consideration');
@@ -111,13 +112,14 @@ describe('devloopd personal onboarding', () => {
     expect(readFileSync(join(repoPath, '.takt', 'workflows', 'subscription-devloop.yaml'), 'utf-8')).toContain('call: takt-default');
     expect(runner.calls).toContain('gh label create agent:auto-merge --repo owner/repo --color 5319e7 --description PR passed dual LLM review and is eligible for mechanical merge gates');
     expect(runner.calls).toContain('gh label create agent:blocked --repo owner/repo --color d93f0b --description Automation is blocked and needs operator attention');
+    expect(runner.calls).toContain('gh label create human:review --repo owner/repo --color fbca04 --description Human product or policy decision is required before automation resumes');
   });
 
   it('preserves existing target workflow unless force is explicit', async () => {
     const repoPath = makeTempRepo();
     mkdirSync(join(repoPath, '.takt', 'workflows'), { recursive: true });
     writeFileSync(join(repoPath, '.takt', 'workflows', 'subscription-devloop.yaml'), 'custom: true\n', 'utf-8');
-    const runner = makeRunner(['agent:ready', 'agent:auto-merge', 'agent:blocked']);
+    const runner = makeRunner(['agent:ready', 'agent:auto-merge', 'agent:blocked', 'human:review']);
 
     const report = await runPersonalOnboarding({
       repoPath,

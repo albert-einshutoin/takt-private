@@ -66,7 +66,8 @@ export interface DevloopAutomationAction {
     | 'attempt budget exhausted'
     | 'head mismatch'
     | 'overlap serialization'
-    | 'conflict eviction';
+    | 'conflict eviction'
+    | 'human review required';
   dualLlmApproval?: DualLlmApprovalReport;
   productPolicyImpact?: ProductPolicyClassification;
 }
@@ -127,6 +128,7 @@ interface GhPrViewForGate {
 const AUTOMATION_BRANCH_PATTERN = /^(takt|automation)\//u;
 const DEFAULT_AUTO_MERGE_LABEL = 'agent:auto-merge';
 const BLOCKED_LABEL = 'agent:blocked';
+const HUMAN_REVIEW_LABEL = 'human:review';
 const MAX_MERGE_QUEUE_DIFF_CONTEXT_CHARS = 8_000;
 
 function sanitizeDetail(text: string): string {
@@ -167,15 +169,23 @@ export function parseAutomationPullRequests(raw: string): AutomationPrSnapshot[]
 
 export function selectAutomationPullRequests(
   prs: readonly AutomationPrSnapshot[],
-  options: { branchPattern?: RegExp; blockedLabel?: string } = {},
+  options: {
+    branchPattern?: RegExp;
+    blockedLabel?: string;
+    humanReviewLabel?: string;
+    includeBlocked?: boolean;
+    includeHumanReview?: boolean;
+  } = {},
 ): AutomationPrSnapshot[] {
   const branchPattern = options.branchPattern ?? AUTOMATION_BRANCH_PATTERN;
   const blockedLabel = options.blockedLabel ?? BLOCKED_LABEL;
+  const humanReviewLabel = options.humanReviewLabel ?? HUMAN_REVIEW_LABEL;
   return prs.filter((pr) => {
     return !pr.isDraft
       && pr.authorLogin !== 'dependabot[bot]'
       && branchPattern.test(pr.headRefName)
-      && !pr.labels.includes(blockedLabel);
+      && (options.includeBlocked === true || !pr.labels.includes(blockedLabel))
+      && (options.includeHumanReview === true || !pr.labels.includes(humanReviewLabel));
   });
 }
 
@@ -238,7 +248,10 @@ async function listAutomationPullRequests(options: {
     throw new Error(`gh pr list failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
 
-  return selectAutomationPullRequests(parseAutomationPullRequests(result.stdout));
+  return selectAutomationPullRequests(parseAutomationPullRequests(result.stdout), {
+    includeBlocked: true,
+    includeHumanReview: true,
+  });
 }
 
 async function loadPrView(options: {
@@ -397,6 +410,91 @@ export function findCurrentHeadBlockingReview(options: {
     .at(-1);
 }
 
+export async function prepareAutomationPullRequests(options: {
+  prs: readonly AutomationPrSnapshot[];
+  repoPath: string;
+  repo?: string;
+  dryRun?: boolean;
+  blockedLabel?: string;
+  humanReviewLabel?: string;
+  env: NodeJS.ProcessEnv;
+  runner: DevloopCommandRunner;
+}): Promise<{ prs: AutomationPrSnapshot[]; actions: DevloopAutomationAction[] }> {
+  const blockedLabel = options.blockedLabel ?? BLOCKED_LABEL;
+  const humanReviewLabel = options.humanReviewLabel ?? HUMAN_REVIEW_LABEL;
+  const prepared: AutomationPrSnapshot[] = [];
+  const actions: DevloopAutomationAction[] = [];
+
+  for (const pr of options.prs) {
+    if (pr.labels.includes(humanReviewLabel)) {
+      actions.push({
+        type: 'human-review-hold',
+        status: 'blocked',
+        pr: pr.number,
+        stopRule: 'human review required',
+        message: `${humanReviewLabel} is present; waiting for human product decision`,
+      });
+      continue;
+    }
+
+    if (!pr.labels.includes(blockedLabel)) {
+      prepared.push(pr);
+      continue;
+    }
+
+    const comments = await loadReviewComments({
+      pr: pr.number,
+      repoPath: options.repoPath,
+      repo: options.repo,
+      env: options.env,
+      runner: options.runner,
+    });
+    const currentHeadBlocker = findCurrentHeadBlockingReview({
+      headSha: pr.headRefOid,
+      comments,
+    });
+
+    if (currentHeadBlocker !== undefined) {
+      actions.push({
+        type: 'current-head-blocked',
+        status: 'blocked',
+        pr: pr.number,
+        stopRule: 'Mergeable: NO',
+        message: `current head ${pr.headRefOid} is still blocked by ${currentHeadBlocker.reviewer} review`,
+      });
+      continue;
+    }
+
+    if (options.dryRun !== true) {
+      // agent:blocked is a latch for the exact reviewed head SHA. Once a fix
+      // commit moves the head, the loop should re-enter review instead of
+      // inheriting a stale block forever.
+      await removePrLabel({
+        pr: pr.number,
+        repoPath: options.repoPath,
+        repo: options.repo,
+        label: blockedLabel,
+        env: options.env,
+        runner: options.runner,
+      });
+    }
+    actions.push({
+      type: 'stale-block-unlock',
+      status: 'passed',
+      pr: pr.number,
+      message: options.dryRun === true
+        ? `dry-run: would remove stale ${blockedLabel}; head has no current blocking review`
+        : `removed stale ${blockedLabel}; head has no current blocking review`,
+    });
+    prepared.push({
+      ...pr,
+      labels: pr.labels.filter((label) => label !== blockedLabel),
+    });
+  }
+
+  return { prs: prepared, actions };
+}
+
 async function checkGithubChecks(options: {
   pr: number;
   repoPath: string;
@@ -417,11 +515,12 @@ async function checkGithubChecks(options: {
   return result.exitCode === 0;
 }
 
-async function addAutoMergeLabel(options: {
+async function editPrLabel(options: {
   pr: number;
   repoPath: string;
   repo?: string;
   label: string;
+  operation: '--add-label' | '--remove-label';
   env: NodeJS.ProcessEnv;
   runner: DevloopCommandRunner;
 }): Promise<void> {
@@ -430,7 +529,7 @@ async function addAutoMergeLabel(options: {
     throw new Error('command not found: gh');
   }
 
-  const args = ['pr', 'edit', String(options.pr), '--add-label', options.label];
+  const args = ['pr', 'edit', String(options.pr), options.operation, options.label];
   if (options.repo !== undefined) {
     args.push('--repo', options.repo);
   }
@@ -438,6 +537,14 @@ async function addAutoMergeLabel(options: {
   if (result.exitCode !== 0) {
     throw new Error(`gh pr edit failed: ${sanitizeDetail(result.stderr || result.stdout)}`);
   }
+}
+
+async function addPrLabel(options: Omit<Parameters<typeof editPrLabel>[0], 'operation'>): Promise<void> {
+  await editPrLabel({ ...options, operation: '--add-label' });
+}
+
+async function removePrLabel(options: Omit<Parameters<typeof editPrLabel>[0], 'operation'>): Promise<void> {
+  await editPrLabel({ ...options, operation: '--remove-label' });
 }
 
 async function postReviewComment(options: {
@@ -664,11 +771,24 @@ export async function promotePullRequestAutoMerge(options: {
     body: metadata.body,
   });
   if (productPolicyImpact.requiresHumanReview) {
+    if (options.dryRun !== true) {
+      await addPrLabel({
+        pr: options.pr,
+        repoPath,
+        repo: options.repo,
+        label: HUMAN_REVIEW_LABEL,
+        env,
+        runner,
+      });
+    }
     return {
       type: 'promote-auto-merge',
       status: 'blocked',
       pr: options.pr,
-      message: 'product-policy impact requires human review',
+      stopRule: 'human review required',
+      message: options.dryRun === true
+        ? `dry-run: would add ${HUMAN_REVIEW_LABEL}; product-policy impact requires human review`
+        : `added ${HUMAN_REVIEW_LABEL}; product-policy impact requires human review`,
       productPolicyImpact,
     };
   }
@@ -727,7 +847,7 @@ export async function promotePullRequestAutoMerge(options: {
     };
   }
 
-  await addAutoMergeLabel({
+  await addPrLabel({
     pr: options.pr,
     repoPath,
     repo: options.repo,
@@ -766,7 +886,9 @@ function stageForAutomationState(stage: DevloopAutomationStage): AutomationState
 }
 
 function stageForAction(stage: DevloopAutomationStage, action: DevloopAutomationAction): AutomationStateStage {
-  if (action.productPolicyImpact?.requiresHumanReview === true || action.stopRule === 'Unsafe or too broad') {
+  if (action.productPolicyImpact?.requiresHumanReview === true
+    || action.stopRule === 'Unsafe or too broad'
+    || action.stopRule === 'human review required') {
     return 'human_escalation';
   }
   if (action.type === 'ci-fix') return 'ci';
@@ -779,7 +901,9 @@ function stageForAction(stage: DevloopAutomationStage, action: DevloopAutomation
 }
 
 function nextActionsForAction(action: DevloopAutomationAction): string[] {
-  if (action.productPolicyImpact?.requiresHumanReview === true || action.stopRule === 'Unsafe or too broad') {
+  if (action.productPolicyImpact?.requiresHumanReview === true
+    || action.stopRule === 'Unsafe or too broad'
+    || action.stopRule === 'human review required') {
     return ['request human review for product-policy impact'];
   }
   if (action.status === 'passed') {
@@ -1032,7 +1156,16 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
     return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [action], { passed: startReport.passed, startReport }));
   }
 
-  const prs = await listAutomationPullRequests({ repoPath, repo: options.repo, env, runner });
+  const discoveredPrs = await listAutomationPullRequests({ repoPath, repo: options.repo, env, runner });
+  const preparedPullRequests = await prepareAutomationPullRequests({
+    prs: discoveredPrs,
+    repoPath,
+    repo: options.repo,
+    dryRun: options.dryRun,
+    env,
+    runner,
+  });
+  const prs = preparedPullRequests.prs;
   const duplicateIssueCoverage = findDuplicateIssueCoverage(prs);
   const duplicatePrNumbers = new Set(duplicateIssueCoverage.flatMap((duplicate) => duplicate.prNumbers));
   const duplicateActions: DevloopAutomationAction[] = duplicateIssueCoverage.flatMap((duplicate) => duplicate.prNumbers.map((pr) => ({
@@ -1046,6 +1179,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
 
   if (options.stage === 'pr-review') {
     const actions = [
+      ...preparedPullRequests.actions,
       ...duplicateActions,
       ...await Promise.all(nonDuplicatePrs.map((pr) => promotePullRequestAutoMerge({
         pr: pr.number,
@@ -1081,6 +1215,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
       };
     }));
     return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [
+      ...preparedPullRequests.actions,
       ...duplicateActions,
       ...reviewFixActions,
     ], { duplicateIssueCoverage }));
@@ -1175,6 +1310,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
       };
     }));
   const actions = [
+    ...preparedPullRequests.actions,
     ...duplicateActions,
     ...preQueueActions,
     ...queueActions,

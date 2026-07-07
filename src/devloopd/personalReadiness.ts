@@ -32,7 +32,7 @@ export interface RunPersonalReadinessOptions {
 }
 
 const REQUIRED_IGNORES = ['.devloop/', '.takt/runs/'] as const;
-const REQUIRED_GITHUB_LABELS = ['agent:ready', 'agent:auto-merge', 'agent:blocked'] as const;
+const REQUIRED_GITHUB_LABELS = ['agent:ready', 'agent:auto-merge', 'agent:blocked', 'human:review'] as const;
 const DEFAULT_SUBSCRIPTION_WORKFLOW = '.takt/workflows/subscription-devloop.yaml';
 
 function makeCheck(
