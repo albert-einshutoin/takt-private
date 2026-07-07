@@ -111,7 +111,7 @@ The provider smoke matrix always prints `pass`, `fail`, or `skip` for every prov
 | `--apply` | Apply file and label changes. Without this, only print a dry-run report |
 | `--force` | Allow onboarding outside a detected Git repository and overwrite template files |
 
-`devloopd onboard-repo` preserves existing `.takt` files unless `--force` is provided. It creates the personal subscription-only config, devloop policy, default workflow wrapper, ignore rules, and required `agent:*` labels only in `--apply` mode.
+`devloopd onboard-repo` preserves existing `.takt` files unless `--force` is provided. It creates the personal subscription-only config, devloop policy, default workflow wrapper, ignore rules, and required automation labels (`agent:ready`, `agent:auto-merge`, `agent:blocked`, `human:review`) only in `--apply` mode.
 
 `devloopd ready` options:
 

@@ -50,7 +50,7 @@ function makeRunner(options: {
       if (invocation === 'gh label list --repo owner/repo --json name --limit 200') {
         return {
           exitCode: 0,
-          stdout: JSON.stringify((options.labels ?? ['agent:ready', 'agent:auto-merge', 'agent:blocked'])
+          stdout: JSON.stringify((options.labels ?? ['agent:ready', 'agent:auto-merge', 'agent:blocked', 'human:review'])
             .map((name) => ({ name }))),
           stderr: '',
         };
@@ -126,7 +126,7 @@ describe('devloopd personal readiness', () => {
       status: 'fail',
       name: 'github labels',
       message: 'required automation labels are missing',
-      detail: 'missing labels: agent:auto-merge, agent:blocked',
+      detail: 'missing labels: agent:auto-merge, agent:blocked, human:review',
     });
   });
 

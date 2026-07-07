@@ -454,7 +454,10 @@ Git.
 `pr-review` discovers non-draft automation PRs, keeps duplicate issue coverage
 as a distinct `Duplicate or already covered` stop rule, runs current-head review
 gates when needed, and promotes the PR to `agent:auto-merge` only after both
-agy and Codex have approved the current head. `pr-merge` still calls
+agy and Codex have approved the current head. If `agent:blocked` exists but the
+current head no longer has a blocking review comment, the stage removes the
+stale block and re-enters review. If `human:review` exists, the PR stays outside
+automation until a human removes that label. `pr-merge` still calls
 `devloopd merge-if-safe --expected-head`; the label is not a direct merge bypass.
 
 Before merge, `pr-merge` builds a changed-file queue for promoted automation
@@ -542,7 +545,8 @@ sticky: dual-LLM approval cannot override it.
 `devloopd promote-auto-merge` checks the current PR head for machine-readable
 review comments from agy and Codex. If both approve the same head, the command
 adds `agent:auto-merge`; if either reviewer is missing, stale, or blocking, it
-leaves the PR outside the merge lane.
+leaves the PR outside the merge lane. Product-policy or human-policy impact adds
+`human:review` and requires a human decision before automation resumes.
 
 ```bash
 devloopd promote-auto-merge --pr 456 --repo owner/repo
@@ -585,7 +589,7 @@ When `gh issue list` reports GitHub API rate limiting or secondary rate limiting
 Default candidate behavior:
 
 - labels `agent:ready`, `bug`, `tests`, or `docs` make an issue eligible for mechanical consideration
-- forbidden labels such as `human-required`, `security-sensitive`, `blocked`, `do-not-touch`, `billing`, `payments`, and `infra` skip the issue
+- forbidden labels such as `human-required`, `human:review`, `security-sensitive`, `blocked`, `agent:blocked`, `do-not-touch`, `billing`, `payments`, and `infra` skip the issue
 - low-risk labels such as `docs` or `tests` can classify as `auto_merge_candidate`
 - other eligible issues classify as `auto_pr_only`; merge still requires `devloopd merge-if-safe`
 
