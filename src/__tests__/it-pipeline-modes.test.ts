@@ -26,6 +26,7 @@ const {
   mockCreatePullRequestSafely,
   mockPushBranch,
   mockStripTaktManagedPrMarker,
+  mockExecFileSync,
 } = vi.hoisted(() => ({
   mockFetchIssue: vi.fn(),
   mockFormatIssueAsTask: vi.fn(),
@@ -36,6 +37,7 @@ const {
   })),
   mockCreatePullRequestSafely: vi.fn(),
   mockPushBranch: vi.fn(),
+  mockExecFileSync: vi.fn(),
   mockStripTaktManagedPrMarker: vi.fn((body: string) => body
     .split('<!-- takt:managed -->')
     .join('')
@@ -44,7 +46,7 @@ const {
 }));
 
 vi.mock('node:child_process', () => ({
-  execFileSync: vi.fn(),
+  execFileSync: mockExecFileSync,
 }));
 
 vi.mock('../infra/git/index.js', () => ({
@@ -423,6 +425,7 @@ describe('Pipeline Modes IT: --auto-pr', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue('base-commit\n');
     const setup = createTestWorkflowDir();
     testDir = setup.dir;
     workflowPath = setup.workflowPath;
