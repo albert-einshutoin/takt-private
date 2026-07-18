@@ -196,6 +196,12 @@ describe('executePipeline', () => {
 
   it('should return exit code 0 on successful task-only execution', async () => {
     mockExecuteTask.mockResolvedValueOnce(true);
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'symbolic-ref' && args[1] === 'refs/remotes/origin/HEAD') {
+        return 'refs/remotes/origin/main\n';
+      }
+      return 'abc1234\n';
+    });
 
     const exitCode = await executePipeline({
       task: 'Fix the bug',
@@ -223,6 +229,44 @@ describe('executePipeline', () => {
     expect(mockSuccess).toHaveBeenCalledWith("Workflow 'default' completed");
     expect(mockStatus).toHaveBeenCalledWith('Workflow', 'default');
     expect(mockStatus).toHaveBeenCalledWith('Result', 'Success', 'green');
+    const checkoutCall = mockExecFileSync.mock.calls.find(
+      (call: unknown[]) => call[0] === 'git'
+        && (call[1] as string[]).slice(0, 2).join(' ') === 'checkout -b',
+    );
+    expect(checkoutCall?.[1]).toEqual([
+      'checkout',
+      '-b',
+      expect.stringMatching(/^takt\/pipeline-/),
+      'origin/main',
+    ]);
+  });
+
+  it('should stop before workflow execution when a new branch does not match its resolved base', async () => {
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'symbolic-ref' && args[1] === 'refs/remotes/origin/HEAD') {
+        return 'refs/remotes/origin/main\n';
+      }
+      if (args[0] === 'rev-parse' && args[1] === 'origin/main^{commit}') {
+        return 'base-commit\n';
+      }
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD^{commit}') {
+        return 'unexpected-head\n';
+      }
+      return 'abc1234\n';
+    });
+
+    const exitCode = await executePipeline({
+      task: 'Fix the bug',
+      workflow: 'default',
+      autoPr: false,
+      cwd: '/tmp/test',
+    });
+
+    expect(exitCode).toBe(4);
+    expect(mockExecuteTask).not.toHaveBeenCalled();
+    expect(mockError).toHaveBeenCalledWith(expect.stringContaining(
+      'did not start from base main',
+    ));
   });
 
   it('should report workflow status for issue execution success', async () => {

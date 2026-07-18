@@ -14,6 +14,7 @@ import {
   pushBranch,
   checkoutBranch,
   getCurrentBranch,
+  remoteBranchExists,
   summarizeTaskName,
 } from '../../infra/task/index.js';
 import { executeTask, confirmAndCreateWorktree, type ExecuteTaskOptions, type TaskExecutionOptions, type PipelineExecutionOptions } from '../tasks/index.js';
@@ -56,6 +57,11 @@ export type ExecutionContext = GitExecutionContext | SkipGitExecutionContext;
 
 type PipelineTraceTaskContext = NonNullable<ExecuteTaskOptions['traceTaskContext']>;
 
+interface ExecutionBase {
+  branch: string;
+  startPoint: string;
+}
+
 function requireBaseBranch(baseBranch: string | undefined, context: string): string {
   if (!baseBranch) {
     throw new Error(`Base branch is required (${context})`);
@@ -95,9 +101,34 @@ export function buildCommitMessage(
     : `takt: ${taskText ?? 'pipeline task'}`;
 }
 
-function resolveExecutionBaseBranch(cwd: string, preferredBaseBranch?: string): string {
-  const { branch } = resolveBaseBranch(cwd, preferredBaseBranch);
-  return requireBaseBranch(branch, 'execution context');
+function resolveExecutionBase(cwd: string, preferredBaseBranch?: string): ExecutionBase {
+  const resolved = resolveBaseBranch(cwd, preferredBaseBranch);
+  const branch = requireBaseBranch(resolved.branch, 'execution context');
+  const startPoint = resolved.fetchedCommit
+    ?? (remoteBranchExists(cwd, branch) ? `origin/${branch}` : branch);
+  return { branch, startPoint };
+}
+
+function resolveGitCommit(cwd: string, ref: string): string {
+  return execFileSync('git', ['rev-parse', `${ref}^{commit}`], {
+    cwd,
+    encoding: 'utf-8',
+    stdio: 'pipe',
+  }).trim();
+}
+
+function createBranchFromBase(cwd: string, branch: string, base: ExecutionBase): void {
+  execFileSync('git', ['checkout', '-b', branch, base.startPoint], { cwd, stdio: 'pipe' });
+
+  // Verify the branch before agent work starts so a future checkout regression
+  // cannot silently reintroduce unrelated commits from the caller's current HEAD.
+  const expectedHead = resolveGitCommit(cwd, base.startPoint);
+  const actualHead = resolveGitCommit(cwd, 'HEAD');
+  if (actualHead !== expectedHead) {
+    throw new Error(
+      `Branch ${sanitizeTerminalText(branch)} did not start from base ${sanitizeTerminalText(base.branch)}.`,
+    );
+  }
 }
 
 function resolveReadOnlyBaseBranch(cwd: string): string {
@@ -264,7 +295,7 @@ export async function resolveExecutionContext(
     info(`Fetching and checking out PR branch: ${safePrBranch}`);
     checkoutBranch(cwd, prBranch);
     success(`Checked out PR branch: ${safePrBranch}`);
-    const baseBranch = resolveExecutionBaseBranch(cwd, prBaseBranch);
+    const baseBranch = resolveExecutionBase(cwd, prBaseBranch).branch;
     return {
       execCwd: cwd,
       branch: prBranch,
@@ -272,13 +303,13 @@ export async function resolveExecutionContext(
       isWorktree: false,
     };
   }
-  const baseBranch = resolveExecutionBaseBranch(cwd);
+  const base = resolveExecutionBase(cwd);
   const branch = options.branch ?? generatePipelineBranchName(pipelineConfig, options.issueNumber);
   const safeBranch = sanitizeTerminalText(branch);
   info(`Creating branch: ${safeBranch}`);
-  execFileSync('git', ['checkout', '-b', branch], { cwd, stdio: 'pipe' });
+  createBranchFromBase(cwd, branch, base);
   success(`Branch created: ${safeBranch}`);
-  return { execCwd: cwd, branch, baseBranch, isWorktree: false };
+  return { execCwd: cwd, branch, baseBranch: base.branch, isWorktree: false };
 }
 
 export async function runWorkflow(
