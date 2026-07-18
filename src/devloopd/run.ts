@@ -62,6 +62,8 @@ function buildTaktIssueArgs(options: {
 }): string[] {
   const args = [
     '--pipeline',
+    '--isolation',
+    'worktree',
     '--issue',
     options.issue,
     '--workflow',
