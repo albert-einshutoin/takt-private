@@ -34,7 +34,7 @@ import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from 
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import { DecisionStore } from './decisionStore.js';
 import { parseDecisionEvent } from './decisionEvents.js';
-import { inspectProcessIdentity } from './repoExecutionClaim.js';
+import { resolveProcessStartToken } from './repoExecutionClaim.js';
 import {
   ensureDecisionForAutomationActions,
   isAutomationActionDecisionEligible,
@@ -1021,10 +1021,12 @@ export async function continuePullRequestAutomationStage(
     parsed.success
     && parsed.data.eventType === 'devloop_decision_apply_started'
     && parsed.data.decisionId === options.decisionId);
+  const callerStartToken = resolveProcessStartToken(process.pid);
   if (
     projection === undefined
     || projection.answer === undefined
-    || (projection.status !== 'answered' && projection.status !== 'applying')
+    || projection.status !== 'applying'
+    || projection.applyResult?.status !== 'applying'
     || projection.request.decisionVersion !== options.expectedDecisionVersion
     || projection.request.contextHash !== options.expectedContextHash
     || guard?.strategy !== 'pr_automation_stage'
@@ -1048,11 +1050,14 @@ export async function continuePullRequestAutomationStage(
     || applyEvent === undefined
     || !applyEvent.success
     || applyEvent.data.eventType !== 'devloop_decision_apply_started'
+    || projection.applyResult.eventId !== applyEvent.data.eventId
     || applyEvent.data.operationId !== options.applyOperationId
     || applyEvent.data.ownerPid !== options.applyOwnerPid
     || applyEvent.data.ownerStartToken !== options.applyOwnerStartToken
     || applyEvent.data.answerEventId !== projection.answer.eventId
-    || inspectProcessIdentity(options.applyOwnerPid, options.applyOwnerStartToken) !== 'alive'
+    || options.applyOwnerPid !== process.pid
+    || callerStartToken === undefined
+    || applyEvent.data.ownerStartToken !== callerStartToken
   ) {
     return {
       passed: false,

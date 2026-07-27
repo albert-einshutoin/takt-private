@@ -9,9 +9,19 @@ import { dirname, join } from 'node:path';
 
 export interface RepoExecutionClaim {
   readonly operationId: string;
-  release(): void;
+  release(): RepoExecutionClaimReleaseResult;
 }
 
+export type RepoExecutionClaimReleaseResult = 'released' | 'not_owner';
+
+export class RepoExecutionClaimReleaseError extends Error {
+  readonly code = 'claim_release_unavailable';
+
+  constructor() {
+    super('Repository execution claim release could not be verified');
+    this.name = 'RepoExecutionClaimReleaseError';
+  }
+}
 interface ClaimOwner {
   readonly pid: number;
   readonly startToken: string;
@@ -72,8 +82,14 @@ if (action === 'acquire') {
     process.stdout.write('acquired');
   } finally { if (fd !== undefined) closeSync(fd); }
 } else if (action === 'release') {
+  if (!existsSync(claimPath)) {
+    process.stdout.write('not_owner');
+    process.exit(0);
+  }
   const owner = parseOwner();
-  if (owner && owner.pid === pid && owner.startToken === startToken && owner.operationId === operationId) {
+  if (!owner) {
+    process.stdout.write('invalid_owner');
+  } else if (owner.pid === pid && owner.startToken === startToken && owner.operationId === operationId) {
     unlinkSync(claimPath);
     process.stdout.write('released');
   } else {
@@ -139,7 +155,7 @@ function runClaimTransition(
   claimPath: string,
   action: 'acquire' | 'release',
   owner: ClaimOwner,
-): 'acquired' | 'busy' | 'released' | 'not_owner' | undefined {
+): 'acquired' | 'busy' | 'released' | 'not_owner' | 'invalid_owner' | undefined {
   const advisory = advisoryLockCommand();
   if (advisory === undefined) return undefined;
   try {
@@ -157,7 +173,7 @@ function runClaimTransition(
       encoding: 'utf8',
       timeout: 10_000,
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() as 'acquired' | 'busy' | 'released' | 'not_owner';
+    }).trim() as 'acquired' | 'busy' | 'released' | 'not_owner' | 'invalid_owner';
   } catch {
     return undefined;
   }
@@ -195,12 +211,18 @@ export function tryAcquireRepoExecutionClaim(
   let released = false;
   return Object.freeze({
     operationId,
-    release(): void {
-      if (released) return;
-      released = true;
+    release(): RepoExecutionClaimReleaseResult {
+      if (released) return 'not_owner';
       // Release is serialized by the same kernel advisory lock and checks the
       // complete owner tuple, so an old handle cannot unlink a replacement.
-      runClaimTransition(claimPath, 'release', owner);
+      const result = runClaimTransition(claimPath, 'release', owner);
+      if (result !== 'released' && result !== 'not_owner') {
+        // Do not poison this handle: a transient advisory-lock/helper failure
+        // must be observable and the caller must be able to retry cleanup.
+        throw new RepoExecutionClaimReleaseError();
+      }
+      released = true;
+      return result;
     },
   });
 }

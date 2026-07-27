@@ -1,4 +1,5 @@
 import { mkdtempSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -7,6 +8,7 @@ import { DecisionStore } from '../devloopd/decisionStore.js';
 import { appendDevloopLedgerEvent, readRawDevloopLedgerEvents } from '../devloopd/ledger.js';
 import {
   createDecisionAppliedEvent,
+  createDecisionApplyFailedEvent,
   createDecisionApplyStartedEvent,
 } from '../devloopd/decisionEvents.js';
 import { resolveProcessStartToken } from '../devloopd/repoExecutionClaim.js';
@@ -34,7 +36,9 @@ function createAnsweredPrDecision(options: {
   stage: 'pr-review' | 'pr-merge';
   headSha: string;
   optionId?: 'approve_current_head' | 'request_changes' | 'stop';
-  claimState?: 'none' | 'applying' | 'applied';
+  claimState?: 'none' | 'applying' | 'applied' | 'failed';
+  applyOwnerPid?: number;
+  applyOwnerStartToken?: string;
 }) {
   const store = new DecisionStore(options.repoPath, 'ledger.jsonl');
   const projection = ensureDecisionForAutomationActions(store, [{
@@ -61,7 +65,9 @@ function createAnsweredPrDecision(options: {
   const answered = store.get(projection.request.decisionId);
   if (answered?.answer === undefined) throw new Error('answer missing');
   const applyOperationId = `op_${projection.request.decisionId}`;
-  const applyOwnerStartToken = resolveProcessStartToken(process.pid);
+  const applyOwnerPid = options.applyOwnerPid ?? process.pid;
+  const applyOwnerStartToken = options.applyOwnerStartToken
+    ?? resolveProcessStartToken(applyOwnerPid);
   if (applyOwnerStartToken === undefined) throw new Error('process identity unavailable');
   if (options.claimState !== 'none') {
     appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent({
@@ -71,7 +77,7 @@ function createAnsweredPrDecision(options: {
       answerEventId: answered.answer.eventId,
       sanitizedSummary: 'test apply claim',
       operationId: applyOperationId,
-      ownerPid: process.pid,
+      ownerPid: applyOwnerPid,
       ownerStartToken: applyOwnerStartToken,
     }));
   }
@@ -84,10 +90,20 @@ function createAnsweredPrDecision(options: {
       sanitizedSummary: 'test apply completed',
     }));
   }
+  if (options.claimState === 'failed') {
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyFailedEvent({
+      decisionId: projection.request.decisionId,
+      decisionVersion: projection.request.decisionVersion,
+      contextHash: projection.request.contextHash,
+      answerEventId: answered.answer.eventId,
+      errorCode: 'test_apply_failed',
+      sanitizedError: 'test apply failed',
+    }));
+  }
   return {
     ...projection.request,
     applyOperationId,
-    applyOwnerPid: process.pid,
+    applyOwnerPid,
     applyOwnerStartToken,
   };
 }
@@ -456,7 +472,7 @@ describe('devloopd PR automation orchestration', () => {
     expect(runner.calls).toEqual([]);
   });
 
-  it.each(['none', 'applied'] as const)(
+  it.each(['none', 'applied', 'failed'] as const)(
     'rejects a %s apply claim before any GitHub mutation',
     async (claimState) => {
       const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-claim-state-'));
@@ -491,6 +507,50 @@ describe('devloopd PR automation orchestration', () => {
       expect(runner.calls).toEqual([]);
     },
   );
+
+  it('rejects a live apply owner that is not the calling process', async () => {
+    const child = spawn(process.execPath, ['-e', 'process.stdout.write(String(process.pid)); setInterval(() => {}, 1000)'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const childPid = await new Promise<number>((resolve, reject) => {
+      child.once('error', reject);
+      child.stdout.once('data', (chunk) => resolve(Number(String(chunk))));
+    });
+    const childToken = resolveProcessStartToken(childPid);
+    if (childToken === undefined) throw new Error('child identity unavailable');
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-foreign-owner-'));
+    const decision = createAnsweredPrDecision({
+      repoPath,
+      repository: 'owner/repo',
+      pr: 42,
+      stage: 'pr-review',
+      headSha: 'a'.repeat(40),
+      applyOwnerPid: childPid,
+      applyOwnerStartToken: childToken,
+    });
+    const runner = makeProductPolicyPromotionRunner();
+    try {
+      const report = await continuePullRequestAutomationStage({
+        pr: 42,
+        stage: 'pr-review',
+        expectedHeadSha: 'a'.repeat(40),
+        repoPath,
+        repo: 'owner/repo',
+        ledgerPath: 'ledger.jsonl',
+        runner,
+        decisionId: decision.decisionId,
+        expectedDecisionVersion: decision.decisionVersion,
+        expectedContextHash: decision.contextHash,
+        applyOperationId: decision.applyOperationId,
+        applyOwnerPid: childPid,
+        applyOwnerStartToken: childToken,
+      });
+      expect(report.reasonCode).toBe('human_approval_mismatch');
+      expect(runner.calls).toEqual([]);
+    } finally {
+      child.kill();
+    }
+  });
   it.each([
     ['checks failed', { type: 'ci-fix', status: 'blocked', stopRule: 'checks failed', message: 'checks failed' }],
     ['head mismatch', { type: 'merge-if-safe', status: 'blocked', stopRule: 'head mismatch', message: 'head mismatch' }],

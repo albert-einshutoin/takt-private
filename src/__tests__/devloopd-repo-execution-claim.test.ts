@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { tryAcquireRepoExecutionClaim } from '../devloopd/repoExecutionClaim.js';
+import {
+  RepoExecutionClaimReleaseError,
+  tryAcquireRepoExecutionClaim,
+} from '../devloopd/repoExecutionClaim.js';
 
 describe('repository execution claim', () => {
   it('allows only one start boundary owner and releases explicitly', () => {
@@ -22,6 +25,20 @@ describe('repository execution claim', () => {
     } finally {
       rmSync(repoPath, { recursive: true, force: true });
     }
+  });
+
+  it('keeps a failed cleanup retryable until the helper verifies release', () => {
+    const repoPath = join(tmpdir(), `takt-repo-claim-release-retry-${randomUUID()}`);
+    const movedPath = `${repoPath}-moved`;
+    mkdirSync(repoPath, { recursive: true });
+    const claim = tryAcquireRepoExecutionClaim(repoPath, 'retry_release');
+    expect(claim).toBeDefined();
+    renameSync(repoPath, movedPath);
+    expect(() => claim?.release()).toThrow(RepoExecutionClaimReleaseError);
+    renameSync(movedPath, repoPath);
+    expect(claim?.release()).toBe('released');
+    expect(existsSync(join(repoPath, '.takt', 'devloop', 'repo-execution.claim'))).toBe(false);
+    rmSync(repoPath, { recursive: true, force: true });
   });
 
   it('does not treat a reused live PID with a different start token as the owner', () => {
@@ -54,11 +71,28 @@ describe('repository execution claim', () => {
     const moduleUrl = new URL('../devloopd/repoExecutionClaim.ts', import.meta.url).href;
     const childSource = `
       import { tryAcquireRepoExecutionClaim } from ${JSON.stringify(moduleUrl)};
-      const claim = tryAcquireRepoExecutionClaim(process.argv[1], process.argv[2]);
-      process.stdout.write(claim ? 'acquired' : 'busy');
-      if (claim) setTimeout(() => { claim.release(); }, 250);
+      let claim;
+      let pending = '';
+      process.stdout.write('ready\\n');
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (chunk) => {
+        pending += chunk;
+        let newline;
+        while ((newline = pending.indexOf('\\n')) >= 0) {
+          const command = pending.slice(0, newline);
+          pending = pending.slice(newline + 1);
+          if (command === 'go') {
+            claim = tryAcquireRepoExecutionClaim(process.argv[1], process.argv[2]);
+            process.stdout.write((claim ? 'acquired' : 'busy') + '\\n');
+            if (!claim) process.exit(0);
+          } else if (command === 'release' && claim) {
+            process.stdout.write(claim.release() + '\\n');
+            process.exit(0);
+          }
+        }
+      });
     `;
-    const runChild = (operationId: string) => new Promise<string>((resolve, reject) => {
+    const runChild = (operationId: string) => {
       const child = spawn(process.execPath, [
         '--experimental-strip-types',
         '--input-type=module',
@@ -66,22 +100,40 @@ describe('repository execution claim', () => {
         childSource,
         repoPath,
         operationId,
-      ], { stdio: ['ignore', 'pipe', 'pipe'] });
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (chunk) => { stdout += String(chunk); });
-      child.stderr.on('data', (chunk) => { stderr += String(chunk); });
-      child.on('error', reject);
-      child.on('close', (code) => {
-        if (code === 0) resolve(stdout);
-        else reject(new Error(stderr));
+      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+      let pending = '';
+      const messages: string[] = [];
+      const waiters: Array<(message: string) => void> = [];
+      child.stdout.on('data', (chunk) => {
+        pending += String(chunk);
+        let newline;
+        while ((newline = pending.indexOf('\n')) >= 0) {
+          const message = pending.slice(0, newline);
+          pending = pending.slice(newline + 1);
+          const waiter = waiters.shift();
+          if (waiter === undefined) messages.push(message);
+          else waiter(message);
+        }
       });
-    });
+      return {
+        child,
+        next: () => messages.length > 0
+          ? Promise.resolve(messages.shift() as string)
+          : new Promise<string>((resolve) => waiters.push(resolve)),
+      };
+    };
 
     try {
-      const results = await Promise.all([runChild('contender_a'), runChild('contender_b')]);
+      const contenders = [runChild('contender_a'), runChild('contender_b')];
+      await Promise.all(contenders.map((contender) => expect(contender.next()).resolves.toBe('ready')));
+      contenders.forEach((contender) => contender.child.stdin.write('go\n'));
+      const results = await Promise.all(contenders.map((contender) => contender.next()));
       expect(results.filter((result) => result === 'acquired')).toHaveLength(1);
       expect(results.filter((result) => result === 'busy')).toHaveLength(1);
+      const winner = contenders[results.indexOf('acquired')];
+      if (winner === undefined) throw new Error('winner missing');
+      winner.child.stdin.write('release\n');
+      await expect(winner.next()).resolves.toBe('released');
     } finally {
       rmSync(repoPath, { recursive: true, force: true });
     }
