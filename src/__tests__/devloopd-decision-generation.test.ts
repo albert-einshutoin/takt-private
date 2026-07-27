@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   classifyIssueScoutDecision,
   ensureDecisionForAutomationAction,
+  ensureDecisionForAutomationActions,
   ensureDecisionForIssueScoutCandidate,
   isAutomationActionDecisionEligible,
 } from '../devloopd/decisionGeneration.js';
@@ -649,5 +650,147 @@ describe('ensureDecisionForAutomationAction', () => {
 
     expect(projection.request.why.riskCategory).toBe('high_risk');
     expect(projection.request.why.reasons.join('\n')).toContain('authoritative PR');
+  });
+
+  it('aggregates same-guard actions into one Decision with every blocking reason', () => {
+    const actions = [
+      action({
+        type: 'human-review-hold',
+        message: 'Product owner approval is missing.',
+      }),
+      action({
+        type: 'current-head-blocked',
+        productPolicyImpact: undefined,
+        stopRule: 'Mergeable: NO',
+        message: 'Current-head security review remains blocked.',
+        dualLlmApproval: {
+          approved: false,
+          headSha,
+          reasons: ['Codex review requires a narrower permission boundary.'],
+          approvals: [],
+        },
+      }),
+    ];
+
+    const projection = ensureDecisionForAutomationActions(store, actions, context());
+    const repeated = ensureDecisionForAutomationActions(store, actions, context());
+    const serializedWhy = JSON.stringify(projection.request.why);
+
+    expect(repeated.request.decisionId).toBe(projection.request.decisionId);
+    expect(serializedWhy).toContain('Product owner approval is missing.');
+    expect(serializedWhy).toContain('Current-head security review remains blocked.');
+    expect(serializedWhy).toContain('narrower permission boundary');
+    const requested = readFileSync(store.ledgerPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { eventType: string })
+      .filter((event) => event.eventType === 'devloop_decision_requested');
+    expect(requested).toHaveLength(1);
+  });
+
+  it('opens a deterministic recurrence after an applied Decision without reusing approval', () => {
+    const first = ensureDecisionForAutomationAction(store, action(), context());
+    const answer = store.answer({
+      decisionId: first.request.decisionId,
+      expectedDecisionVersion: first.request.decisionVersion,
+      expectedContextHash: first.request.contextHash,
+      value: { optionId: 'approve_current_head' },
+      rationale: 'Approve this exact head after review.',
+      idempotencyKey: 'answer-pr-first',
+    }, 'reviewer');
+    const identity = {
+      decisionId: first.request.decisionId,
+      decisionVersion: first.request.decisionVersion,
+      contextHash: first.request.contextHash,
+      answerEventId: answer.eventId,
+      sanitizedSummary: 'Applied current-head approval.',
+    };
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent(identity));
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionAppliedEvent(identity));
+
+    const recurrence = ensureDecisionForAutomationAction(store, action(), context());
+    const repeated = ensureDecisionForAutomationAction(store, action(), context());
+
+    expect(recurrence.status).toBe('open');
+    expect(recurrence.answer).toBeUndefined();
+    expect(recurrence.request.decisionId).toMatch(
+      new RegExp(`^${first.request.decisionId}_r1$`, 'u'),
+    );
+    expect(repeated.request.decisionId).toBe(recurrence.request.decisionId);
+
+    const recurrenceAnswer = store.answer({
+      decisionId: recurrence.request.decisionId,
+      expectedDecisionVersion: recurrence.request.decisionVersion,
+      expectedContextHash: recurrence.request.contextHash,
+      value: { optionId: 'request_changes' },
+      rationale: 'The same stop recurred and now requires changes.',
+      idempotencyKey: 'answer-pr-recurrence',
+    }, 'reviewer');
+    const recurrenceIdentity = {
+      decisionId: recurrence.request.decisionId,
+      decisionVersion: recurrence.request.decisionVersion,
+      contextHash: recurrence.request.contextHash,
+      answerEventId: recurrenceAnswer.eventId,
+      sanitizedSummary: 'Applied recurrence answer.',
+    };
+    appendDevloopLedgerEvent(
+      store.ledgerPath,
+      createDecisionApplyStartedEvent(recurrenceIdentity),
+    );
+    appendDevloopLedgerEvent(
+      store.ledgerPath,
+      createDecisionAppliedEvent(recurrenceIdentity),
+    );
+
+    const secondRecurrence = ensureDecisionForAutomationAction(store, action(), context());
+    expect(secondRecurrence.status).toBe('open');
+    expect(secondRecurrence.request.decisionId).toBe(`${first.request.decisionId}_r2`);
+  });
+
+  it('fails closed when the deterministic recurrence id is occupied by another request', () => {
+    const first = ensureDecisionForAutomationAction(store, action(), context());
+    if (first.request.kind !== 'choice') throw new Error('expected choice Decision');
+    const answer = store.answer({
+      decisionId: first.request.decisionId,
+      expectedDecisionVersion: first.request.decisionVersion,
+      expectedContextHash: first.request.contextHash,
+      value: { optionId: 'approve_current_head' },
+      rationale: 'Approve this exact head after review.',
+      idempotencyKey: 'answer-pr-collision-base',
+    }, 'reviewer');
+    const identity = {
+      decisionId: first.request.decisionId,
+      decisionVersion: first.request.decisionVersion,
+      contextHash: first.request.contextHash,
+      answerEventId: answer.eventId,
+      sanitizedSummary: 'Applied current-head approval.',
+    };
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent(identity));
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionAppliedEvent(identity));
+
+    const occupiedRecurrence = createDecisionRequest({
+      kind: 'choice',
+      subject: {
+        ...first.request.subject,
+        title: 'Conflicting recurrence request',
+      },
+      question: first.request.question,
+      why: first.request.why,
+      how: first.request.how,
+      options: first.request.options,
+      answerRequirements: first.request.answerRequirements,
+      resumeGuard: first.request.resumeGuard,
+    }, {
+      decisionId: `${first.request.decisionId}_r1`,
+    });
+    store.request(occupiedRecurrence);
+
+    expect(() => ensureDecisionForAutomationAction(
+      store,
+      action(),
+      context(),
+    )).toThrowError(expect.objectContaining({
+      code: 'request_conflict',
+    }));
   });
 });

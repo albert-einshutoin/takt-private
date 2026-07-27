@@ -34,7 +34,7 @@ import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from 
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import { DecisionStore } from './decisionStore.js';
 import {
-  ensureDecisionForAutomationAction,
+  ensureDecisionForAutomationActions,
   isAutomationActionDecisionEligible,
 } from './decisionGeneration.js';
 
@@ -981,15 +981,24 @@ function recordStageReport(
 
 function decisionGenerationFailure(
   action: DevloopAutomationAction,
-  reason: 'action batch limit exceeded' | 'PR snapshot unavailable' | 'PR snapshot head invalid' | 'repository unavailable' | 'request rejected',
+  reason:
+    | 'action_batch_limit'
+    | 'pr_snapshot_unavailable'
+    | 'pr_head_unavailable'
+    | 'repository_unavailable'
+    | 'decision_ledger_unavailable'
+    | 'decision_request_rejected',
 ): DevloopAutomationAction {
+  const failedAction = { ...action };
+  Reflect.deleteProperty(failedAction, 'decisionId');
   return {
-    ...action,
-    message: `${action.message}; decision generation failed: ${reason}`,
+    ...failedAction,
+    status: 'failed',
+    message: `decision generation failed: ${reason}`,
   };
 }
 
-async function attachAutomationDecisions(options: {
+export async function attachAutomationDecisions(options: {
   store: DecisionStore;
   report: DevloopAutomationStageReport;
   prs: readonly AutomationPrSnapshot[];
@@ -999,16 +1008,40 @@ async function attachAutomationDecisions(options: {
   runner: DevloopCommandRunner;
 }): Promise<DevloopAutomationStageReport> {
   const snapshotsByPr = new Map(options.prs.map((pr) => [pr.number, pr]));
-  let repositoryResolved = false;
-  let repository = options.repository;
-  const resolveRepositoryOnce = async (): Promise<string | undefined> => {
-    if (repositoryResolved) return repository;
-    repositoryResolved = true;
-    if (repository !== undefined) {
-      return REPOSITORY_PATTERN.test(repository) ? repository : undefined;
+  const eligibleIndexes = options.report.actions.flatMap((action, index) =>
+    automationActionRequiresDecision(action) ? [index] : []);
+  if (eligibleIndexes.length === 0) return options.report;
+
+  const actions = [...options.report.actions];
+  const failIndexes = (
+    indexes: readonly number[],
+    reason: Parameters<typeof decisionGenerationFailure>[1],
+  ): void => {
+    for (const index of indexes) {
+      const action = actions[index];
+      if (action !== undefined) actions[index] = decisionGenerationFailure(action, reason);
     }
+  };
+  const finish = (): DevloopAutomationStageReport => ({
+    ...options.report,
+    passed: options.report.passed && !actions.some((action) => action.status === 'failed'),
+    actions,
+  });
+
+  // Reject the whole eligible batch before metadata or ledger writes so a
+  // scheduler cannot partially create policy decisions beyond the safety bound.
+  if (eligibleIndexes.length > MAX_DECISION_ACTIONS_PER_STAGE) {
+    failIndexes(eligibleIndexes, 'action_batch_limit');
+    return finish();
+  }
+
+  let repository = options.repository;
+  if (repository === undefined) {
     const ghCommand = options.runner.resolveCommand('gh', options.env);
-    if (ghCommand === undefined) return undefined;
+    if (ghCommand === undefined) {
+      failIndexes(eligibleIndexes, 'repository_unavailable');
+      return finish();
+    }
     const resolvedRepository = await resolveLocalRepoName({
       repoPath: options.repoPath,
       env: options.env,
@@ -1018,56 +1051,99 @@ async function attachAutomationDecisions(options: {
     repository = resolvedRepository !== undefined && REPOSITORY_PATTERN.test(resolvedRepository)
       ? resolvedRepository
       : undefined;
-    return repository;
-  };
+  }
+  if (repository === undefined || !REPOSITORY_PATTERN.test(repository)) {
+    failIndexes(eligibleIndexes, 'repository_unavailable');
+    return finish();
+  }
 
-  let decisionCandidateCount = 0;
-  const actions: DevloopAutomationAction[] = [];
-  for (const action of options.report.actions) {
-    if (!automationActionRequiresDecision(action)) {
-      actions.push(action);
+  let projections: Map<string, ReturnType<DecisionStore['list']>[number]>;
+  try {
+    projections = new Map(
+      options.store.list().map((projection) => [projection.request.decisionId, projection]),
+    );
+  } catch {
+    failIndexes(eligibleIndexes, 'decision_ledger_unavailable');
+    return finish();
+  }
+
+  const indexesByPr = new Map<number, number[]>();
+  for (const index of eligibleIndexes) {
+    const action = actions[index];
+    if (
+      action?.pr === undefined
+      || snapshotsByPr.get(action.pr) === undefined
+    ) {
+      failIndexes([index], 'pr_snapshot_unavailable');
       continue;
     }
-    decisionCandidateCount += 1;
-    if (decisionCandidateCount > MAX_DECISION_ACTIONS_PER_STAGE) {
-      actions.push(decisionGenerationFailure(action, 'action batch limit exceeded'));
-      continue;
-    }
-    const snapshot = action.pr === undefined ? undefined : snapshotsByPr.get(action.pr);
-    if (snapshot === undefined) {
-      actions.push(decisionGenerationFailure(action, 'PR snapshot unavailable'));
-      continue;
-    }
-    if (!HEAD_SHA_PATTERN.test(snapshot.headRefOid)) {
-      actions.push(decisionGenerationFailure(action, 'PR snapshot head invalid'));
-      continue;
-    }
-    const resolvedRepository = await resolveRepositoryOnce();
-    if (resolvedRepository === undefined) {
-      actions.push(decisionGenerationFailure(action, 'repository unavailable'));
-      continue;
-    }
+    indexesByPr.set(action.pr, [...(indexesByPr.get(action.pr) ?? []), index]);
+  }
+
+  const headByPr = new Map<number, string>();
+  for (const [pr, indexes] of indexesByPr) {
     try {
-      const projection = ensureDecisionForAutomationAction(options.store, action, {
+      const metadata = await loadPrView({
+        pr,
         repoPath: options.repoPath,
-        repository: resolvedRepository,
-        headSha: snapshot.headRefOid,
-        stage: options.report.stage,
+        repo: repository,
+        env: options.env,
+        runner: options.runner,
       });
-      actions.push({
-        ...action,
-        decisionId: projection.request.decisionId,
-        headSha: snapshot.headRefOid,
-      });
+      if (metadata.headRefOid === undefined || !HEAD_SHA_PATTERN.test(metadata.headRefOid)) {
+        failIndexes(indexes, 'pr_head_unavailable');
+        continue;
+      }
+      headByPr.set(pr, metadata.headRefOid);
     } catch {
-      actions.push(decisionGenerationFailure(action, 'request rejected'));
+      failIndexes(indexes, 'pr_head_unavailable');
     }
   }
 
-  return {
-    ...options.report,
-    actions,
-  };
+  const groups = new Map<string, number[]>();
+  for (const [pr, indexes] of indexesByPr) {
+    const headSha = headByPr.get(pr);
+    if (headSha === undefined) continue;
+    const key = `${repository}\0${pr}\0${headSha}\0${options.report.stage}`;
+    groups.set(key, indexes);
+  }
+  if (groups.size > MAX_DECISION_ACTIONS_PER_STAGE) {
+    failIndexes(eligibleIndexes, 'action_batch_limit');
+    return finish();
+  }
+
+  for (const indexes of groups.values()) {
+    const groupActions = indexes.flatMap((index) => {
+      const action = actions[index];
+      return action === undefined ? [] : [action];
+    });
+    const first = groupActions[0];
+    const headSha = first?.pr === undefined ? undefined : headByPr.get(first.pr);
+    if (first === undefined || headSha === undefined) continue;
+    try {
+      const projection = ensureDecisionForAutomationActions(options.store, groupActions, {
+        repoPath: options.repoPath,
+        repository,
+        headSha,
+        stage: options.report.stage,
+      }, new Date(), {
+        projections,
+      });
+      for (const index of indexes) {
+        const action = actions[index];
+        if (action === undefined) continue;
+        actions[index] = {
+          ...action,
+          decisionId: projection.request.decisionId,
+          headSha,
+        };
+      }
+    } catch {
+      failIndexes(indexes, 'decision_request_rejected');
+    }
+  }
+
+  return finish();
 }
 
 function queueDecisionStatus(decision: MergeQueueDecision): AutomationStateStatus {

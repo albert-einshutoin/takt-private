@@ -247,6 +247,28 @@ describe('DecisionStore', () => {
     expect(readFileSync(ledgerPath, 'utf8').trim().split('\n')).toHaveLength(1);
   });
 
+  it('atomically requests and returns a projection without calling list()', () => {
+    const store = new DecisionStore(repoPath);
+    const request = makeRequest(repoPath, { decisionId: 'dec_atomic' });
+    let listCalls = 0;
+    store.list = () => {
+      listCalls += 1;
+      return [];
+    };
+
+    const created = store.requestAndGet(request, { eventId: 'evt_atomic' });
+    const repeated = store.requestAndGet(request, { eventId: 'evt_atomic_retry' });
+
+    expect(created).toMatchObject({
+      status: 'open',
+      request: { decisionId: 'dec_atomic' },
+    });
+    expect(repeated.request.decisionId).toBe(created.request.decisionId);
+    expect(listCalls).toBe(0);
+    expect(readFileSync(store.ledgerPath, 'utf8').match(/devloop_decision_requested/gu))
+      .toHaveLength(1);
+  });
+
   it('returns the original answer for an identical idempotent retry without appending', () => {
     const request = makeRequest(repoPath);
     const store = new DecisionStore(repoPath);

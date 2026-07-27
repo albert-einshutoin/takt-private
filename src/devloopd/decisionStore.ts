@@ -324,6 +324,39 @@ export class DecisionStore {
     );
   }
 
+  requestAndGet(
+    request: DecisionRequest,
+    options: DecisionStoreWriteOptions = {},
+  ): DecisionProjection {
+    return atStoreBoundary(() =>
+      withLockedDevloopLedgerTransaction(this.ledgerPath, (transaction) => {
+        const normalized = this.normalizeRequest(request);
+        const strict = parseStrictDecisionLedger(this.ledgerPath);
+        if (strict.fold.fatal) fail('ledger_incompatible');
+        if (strict.fold.quarantinedDecisionIds.includes(normalized.decisionId)) {
+          fail('decision_quarantined');
+        }
+
+        const existing = strict.fold.get(normalized.decisionId);
+        if (existing !== undefined) {
+          if (
+            !projectionBelongsToRepo(existing, this.repoPath)
+            || !sameRequest(this.normalizeRequest(existing.request), normalized)
+          ) {
+            fail('request_conflict');
+          }
+          return existing;
+        }
+
+        transaction.append(createDecisionRequestedEvent(normalized, options));
+        return Object.freeze({
+          request: normalized,
+          status: 'open' as const,
+        });
+      }, options.lock),
+    );
+  }
+
   answer(
     input: DecisionAnswerInput,
     actor: string,

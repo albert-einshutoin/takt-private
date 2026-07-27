@@ -395,6 +395,19 @@ function sameRequestIgnoringTime(
   return JSON.stringify(leftWithoutTime) === JSON.stringify(rightWithoutTime);
 }
 
+function sameRequestIgnoringIdentity(
+  left: DecisionRequest,
+  right: DecisionRequest,
+): boolean {
+  const leftSemantic = { ...left } as Partial<DecisionRequest>;
+  const rightSemantic = { ...right } as Partial<DecisionRequest>;
+  Reflect.deleteProperty(leftSemantic, 'createdAt');
+  Reflect.deleteProperty(leftSemantic, 'decisionId');
+  Reflect.deleteProperty(rightSemantic, 'createdAt');
+  Reflect.deleteProperty(rightSemantic, 'decisionId');
+  return JSON.stringify(leftSemantic) === JSON.stringify(rightSemantic);
+}
+
 function ensureDeterministicDecision(
   store: DecisionStore,
   input: CreateDecisionRequestInput,
@@ -403,8 +416,8 @@ function ensureDeterministicDecision(
   const provisional = createDecisionRequest(input, { now });
   const decisionId = `dec_${provisional.contextHash}`;
   const request = createDecisionRequest(input, { decisionId, now });
-  // The semantic hash fully determines the ID. Direct lookup keeps repeated
-  // scheduler ticks O(1) while collisions still fail closed.
+  // The semantic hash determines the lookup key. DecisionStore currently folds
+  // the ledger for each direct lookup, so batch callers use the indexed path below.
   const sameIdentity = store.get(decisionId);
   if (sameIdentity !== undefined) {
     if (sameRequestIgnoringTime(sameIdentity.request, request)) return sameIdentity;
@@ -465,7 +478,7 @@ export function ensureDecisionForIssueScoutCandidate(
   );
 }
 
-const RAW_COMMAND_PATTERN = /\b(?:npm|pnpm|yarn|git|gh|codex|agy|node|bash|sh|curl)\s+[^\n.;]*/giu;
+const RAW_COMMAND_PATTERN = /(?:^|\b(?:run|execute|command)\s+)(?:npm|pnpm|yarn|git|gh|bash|sh|curl)\s+[^\n.;]*/gimu;
 const RAW_COMMAND_FIELD_PATTERN = /\b(?:command|args)\s*[:=]\s*[^\n.;]*/giu;
 const RAW_DIFF_PATTERN = /(?:^|\s)(?:diff --git|@@\s|---\s+[ab]\/|\+\+\+\s+[ab]\/)[^\n]*/giu;
 const LOCAL_PATH_PATTERN = /(?:\/(?:[^/\s]+\/)+[^,\s.;)\]}]*|[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*)/gu;
@@ -501,16 +514,21 @@ function sanitizeAutomationDecisionText(
 }
 
 function automationDecisionInput(
-  action: DevloopAutomationAction & { readonly pr: number },
+  actions: readonly (DevloopAutomationAction & { readonly pr: number })[],
   context: AutomationActionDecisionContext,
 ): CreateDecisionRequestInput {
-  const sourceReasons = [
-    ...(action.stopRule === undefined ? [] : [`Stop rule: ${action.stopRule}.`]),
-    ...(action.productPolicyImpact?.reasons ?? []),
-    ...(action.dualLlmApproval?.reasons ?? []),
-  ];
+  const action = actions[0];
+  if (action === undefined) {
+    throw new DecisionGenerationError('candidate_invalid');
+  }
+  const sourceReasons = [...new Set(actions.flatMap((item) => [
+    `Automation action ${item.type}: ${item.message}`,
+    ...(item.stopRule === undefined ? [] : [`Stop rule: ${item.stopRule}.`]),
+    ...(item.productPolicyImpact?.reasons ?? []),
+    ...(item.dualLlmApproval?.reasons ?? []),
+  ]))].sort();
   const sanitizedMessage = sanitizeAutomationDecisionText(
-    action.message,
+    actions.map((item) => item.message).join(' '),
     MAX_CANDIDATE_TEXT_LENGTH - 400,
   );
   const sanitizedReasons = sourceReasons.slice(0, MAX_CANDIDATE_ARRAY_LENGTH - 1)
@@ -525,7 +543,9 @@ function automationDecisionInput(
   if (incomplete) {
     reasons.push('Public context was bounded or truncated; inspect the authoritative PR and review records before answering.');
   }
-  const productPolicy = action.productPolicyImpact?.requiresHumanReview === true;
+  const productPolicy = actions.some(
+    (item) => item.productPolicyImpact?.requiresHumanReview === true,
+  );
 
   return {
     kind: 'choice',
@@ -613,25 +633,76 @@ export function ensureDecisionForAutomationAction(
   context: AutomationActionDecisionContext,
   now: Date = new Date(),
 ): DecisionProjection {
-  if (!isAutomationActionDecisionEligible(action)) {
+  return ensureDecisionForAutomationActions(store, [action], context, now);
+}
+
+export interface EnsureAutomationDecisionOptions {
+  readonly projections?: Map<string, DecisionProjection>;
+}
+
+export function ensureDecisionForAutomationActions(
+  store: DecisionStore,
+  actions: readonly DevloopAutomationAction[],
+  context: AutomationActionDecisionContext,
+  now: Date = new Date(),
+  options: EnsureAutomationDecisionOptions = {},
+): DecisionProjection {
+  if (
+    actions.length === 0
+    || actions.some((action) => !isAutomationActionDecisionEligible(action))
+  ) {
     throw new DecisionGenerationError('automation_action_not_escalated');
   }
+  const pr = actions[0]?.pr;
   if (
-    action.pr === undefined
+    pr === undefined
+    || actions.some((action) => action.pr !== pr)
     || !REPOSITORY_PATTERN.test(context.repository)
     || !HEAD_SHA_PATTERN.test(context.headSha)
   ) {
     throw new DecisionGenerationError('candidate_invalid');
   }
-  let input: CreateDecisionRequestInput;
+
   try {
-    input = automationDecisionInput({ ...action, pr: action.pr }, {
-      ...context,
-      repoPath: store.repoPath,
-    });
-    return ensureDeterministicDecision(store, input, now);
+    const input = automationDecisionInput(
+      actions.map((action) => ({ ...action, pr })),
+      { ...context, repoPath: store.repoPath },
+    );
+    const provisional = createDecisionRequest(input, { now });
+    const projections = options.projections ?? new Map(
+      store.list().map((projection) => [projection.request.decisionId, projection]),
+    );
+    const sameContext = [...projections.values()].filter((projection) =>
+      projection.request.contextHash === provisional.contextHash
+      && sameRequestIgnoringIdentity(projection.request, provisional));
+    const active = sameContext.filter((projection) => projection.status !== 'applied');
+    if (active.length > 1) throw new DecisionStoreError('request_conflict');
+    if (active[0] !== undefined) return active[0];
+
+    const appliedCount = sameContext.filter(
+      (projection) => projection.status === 'applied',
+    ).length;
+    const baseDecisionId = `dec_${provisional.contextHash}`;
+    const decisionId = appliedCount === 0
+      ? baseDecisionId
+      : `${baseDecisionId}_r${appliedCount}`;
+    const occupied = projections.get(decisionId);
+    if (occupied !== undefined) throw new DecisionStoreError('request_conflict');
+
+    const request = createDecisionRequest(input, { decisionId, now });
+    const projection = store.requestAndGet(request, { now });
+    if (projection.status === 'applied') {
+      throw new DecisionStoreError('request_conflict');
+    }
+    projections.set(decisionId, projection);
+    return projection;
   } catch (error) {
-    if (error instanceof DecisionStoreError) throw error;
+    if (
+      error instanceof DecisionStoreError
+      || error instanceof DecisionGenerationError
+    ) {
+      throw error;
+    }
     throw new DecisionGenerationError('candidate_invalid');
   }
 }
