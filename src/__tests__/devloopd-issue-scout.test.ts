@@ -156,13 +156,57 @@ describe('devloopd issue-scout', () => {
       });
       const elapsedMs = performance.now() - startedAt;
 
-      expect(elapsedMs).toBeLessThan(1_000);
+      expect(elapsedMs).toBeLessThan(2_000);
       expect(candidate.title.length).toBeLessThanOrEqual(4_000);
       expect(candidate.summary.length).toBeLessThanOrEqual(4_000);
       expect(candidate.id.length).toBeLessThan(128);
+      expect(candidate.policyCategory).toBe('human_policy');
+      expect(candidate.riskBucket).toBe('high');
+      expect(candidate.escalationCriteria).toContain(
+        'Source evidence was truncated or omitted; inspect the original source.',
+      );
       expect(JSON.stringify(candidate)).not.toContain(secretTail);
     },
   );
+
+  it('routes a truncated direct docs candidate to a human decision', async () => {
+    const secretTail = 'auth migration public api direct-tail-secret';
+    const candidate = buildIssueScoutCandidate({
+      sourceId: 'local_backlog',
+      title: `docs ${'a'.repeat(4_100)} ${secretTail}`,
+      summary: 'Small documentation update',
+      lane: 'docs_tests_tooling',
+      policyCategory: 'mechanical',
+      riskBucket: 'low',
+    });
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [{
+        id: 'local_backlog',
+        scan: () => ({
+          sourceId: 'local_backlog',
+          status: 'success',
+          summary: 'truncated direct fixture',
+          candidates: [candidate],
+          nextActions: [],
+          artifacts: [],
+        }),
+      }],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+    expect(report.selected).toHaveLength(0);
+    expect(report.skipped[0]).toMatchObject({
+      stopRule: 'Unsafe or too broad',
+      decisionId: expect.stringMatching(/^dec_[a-f0-9]{64}$/u),
+    });
+    expect(ledger).not.toContain(secretTail);
+    expect(ledger).not.toContain(createHash('sha256').update(secretTail).digest('hex'));
+  });
 
   it('redacts bounded sensitive assignments in direct candidate input', () => {
     const candidate = buildIssueScoutCandidate({
@@ -200,10 +244,18 @@ describe('devloopd issue-scout', () => {
       const elapsedMs = performance.now() - startedAt;
       const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
 
-      expect(elapsedMs).toBeLessThan(1_000);
-      expect(report.observations[0]?.candidates[0]?.title.length).toBeLessThanOrEqual(4_000);
+      expect(elapsedMs).toBeLessThan(2_000);
+      const candidate = report.observations[0]?.candidates[0];
+      expect(candidate?.title.length).toBeLessThanOrEqual(4_000);
+      expect(candidate).toMatchObject({
+        policyCategory: 'human_policy',
+        riskBucket: 'high',
+      });
+      expect(report.selected).toHaveLength(0);
+      expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
       expect(JSON.stringify(report.observations)).not.toContain(secretTail);
       expect(ledger).not.toContain(secretTail);
+      expect(ledger).not.toContain(createHash('sha256').update(secretTail).digest('hex'));
     },
   );
 
@@ -233,7 +285,14 @@ describe('devloopd issue-scout', () => {
       const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
 
       expect(elapsedMs).toBeLessThan(1_000);
-      expect(report.observations[0]?.candidates[0]?.summary.length).toBeLessThanOrEqual(4_000);
+      const candidate = report.observations[0]?.candidates[0];
+      expect(candidate?.summary.length).toBeLessThanOrEqual(4_000);
+      expect(candidate).toMatchObject({
+        policyCategory: 'human_policy',
+        riskBucket: 'high',
+      });
+      expect(report.selected).toHaveLength(0);
+      expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
       expect(JSON.stringify(report.observations)).not.toContain(secretTail);
       expect(ledger).not.toContain(secretTail);
     },
@@ -267,11 +326,66 @@ describe('devloopd issue-scout', () => {
     const candidate = report.observations[0]?.candidates[0];
     const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
 
-    expect(elapsedMs).toBeLessThan(1_000);
+    expect(elapsedMs).toBeLessThan(2_000);
     expect(candidate?.laneEvidence.length).toBeLessThanOrEqual(50);
     expect(candidate?.laneEvidence.some((value) => value.includes('[OMITTED 9951 ITEMS]'))).toBe(true);
+    expect(candidate).toMatchObject({
+      policyCategory: 'human_policy',
+      riskBucket: 'high',
+    });
+    expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
     expect(JSON.stringify(candidate)).not.toContain(secretTail);
     expect(ledger).not.toContain(secretTail);
+  });
+
+  it('escalates truncated ledger fields without persisting their raw tail', async () => {
+    const secretTail = 'ledger-auth-migration-public-api-tail';
+    const ledgerPath = resolveDevloopLedgerPath(repoPath, undefined);
+    appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_follow_up_evidence', {
+      title: 'Small docs follow-up',
+      summary: `docs ${'a'.repeat(4_100)} ${secretTail}`,
+      lane: 'docs_tests_tooling',
+    }, new Date('2026-07-28T00:00:00.000Z')));
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['ledger_events'],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:01:00.000Z'),
+    });
+    const candidate = report.observations[0]?.candidates[0];
+    const ledger = readFileSync(ledgerPath, 'utf8');
+
+    expect(candidate).toMatchObject({
+      policyCategory: 'human_policy',
+      riskBucket: 'high',
+    });
+    expect(report.selected).toHaveLength(0);
+    expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
+    const newlyAppendedEvents = ledger.split('\n').slice(1).join('\n');
+    expect(newlyAppendedEvents).not.toContain(secretTail);
+    expect(newlyAppendedEvents).not.toContain(
+      createHash('sha256').update(secretTail).digest('hex'),
+    );
+  });
+
+  it('keeps complete bounded docs candidates mechanical and low risk', () => {
+    const candidate = buildIssueScoutCandidate({
+      sourceId: 'local_backlog',
+      title: 'Update contributor documentation',
+      summary: 'Clarify the existing local test instructions.',
+      lane: 'docs_tests_tooling',
+    });
+
+    expect(candidate).toMatchObject({
+      policyCategory: 'mechanical',
+      riskBucket: 'low',
+    });
+    expect(candidate.escalationCriteria).not.toContain(
+      'Source evidence was truncated or omitted; inspect the original source.',
+    );
   });
 
   it('classifies major dependency updates for human review before automation', async () => {

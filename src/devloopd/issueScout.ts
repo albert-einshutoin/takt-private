@@ -204,6 +204,9 @@ const ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY = 50;
 const ISSUE_SCOUT_SUMMARY_TEXT_LENGTH = 512;
 const SOURCE_TEXT_TRUNCATION_MARKER = ' [TRUNCATED]';
 const SOURCE_ARRAY_OMISSION_MARKER = (count: number) => `[OMITTED ${count} ITEMS]`;
+const SOURCE_EVIDENCE_INCOMPLETE_REASON =
+  'Source evidence was truncated or omitted; inspect the original source.';
+const ISSUE_SCOUT_MAX_SOURCE_TEXT_LENGTH = 3_000;
 
 const REPORT_FILES: Readonly<Record<Extract<IssueScoutSourceId, 'dependency_report' | 'security_report' | 'benchmark_report' | 'lint_type_debt'>, {
   path: string;
@@ -247,11 +250,28 @@ const RISK_SCORE: Readonly<Record<IssueScoutRiskBucket, number>> = {
   high: 100,
 };
 
-function boundSourceText(text: string): string {
-  if (text.length <= ISSUE_SCOUT_MAX_CANDIDATE_TEXT_LENGTH) return text;
-  const prefixLength = ISSUE_SCOUT_MAX_CANDIDATE_TEXT_LENGTH
+function sourceTextIsIncomplete(text: string): boolean {
+  return text.includes(SOURCE_TEXT_TRUNCATION_MARKER.trim())
+    || /\[OMITTED \d+ ITEMS\]/u.test(text);
+}
+
+function boundSourceTextWithStatus(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  if (text.length <= ISSUE_SCOUT_MAX_SOURCE_TEXT_LENGTH) {
+    return { text, truncated: sourceTextIsIncomplete(text) };
+  }
+  const prefixLength = ISSUE_SCOUT_MAX_SOURCE_TEXT_LENGTH
     - SOURCE_TEXT_TRUNCATION_MARKER.length;
-  return `${text.slice(0, prefixLength)}${SOURCE_TEXT_TRUNCATION_MARKER}`;
+  return {
+    text: `${text.slice(0, prefixLength)}${SOURCE_TEXT_TRUNCATION_MARKER}`,
+    truncated: true,
+  };
+}
+
+function boundSourceText(text: string): string {
+  return boundSourceTextWithStatus(text).text;
 }
 
 function sanitizeText(text: string): string {
@@ -565,6 +585,65 @@ function riskForCandidate(input: {
   return 'low';
 }
 
+function normalizeCandidateSourceText(value: string): {
+  text: string;
+  incomplete: boolean;
+} {
+  const bounded = boundSourceTextWithStatus(value);
+  return {
+    text: sanitizeText(bounded.text),
+    incomplete: bounded.truncated,
+  };
+}
+
+function normalizeCandidateSourceArray(values: readonly string[]): {
+  values: string[];
+  incomplete: boolean;
+} {
+  const oversized = values.length > ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH;
+  const sampleCount = oversized
+    ? ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH - 1
+    : values.length;
+  let incomplete = oversized;
+  const normalized = values.slice(0, sampleCount).map((value) => {
+    const item = normalizeCandidateSourceText(value);
+    incomplete ||= item.incomplete;
+    return item.text;
+  });
+  if (oversized) {
+    normalized.push(SOURCE_ARRAY_OMISSION_MARKER(values.length - sampleCount));
+  }
+  return { values: normalized, incomplete };
+}
+
+function normalizeCandidateEvidence(values: readonly IssueScoutArtifact[]): {
+  values: IssueScoutArtifact[];
+  incomplete: boolean;
+} {
+  const oversized = values.length > ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH;
+  const sampleCount = oversized
+    ? ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH - 1
+    : values.length;
+  let incomplete = oversized;
+  const normalized = values.slice(0, sampleCount).map((artifact) => {
+    const summary = normalizeCandidateSourceText(artifact.summary);
+    const path = artifact.path === undefined
+      ? undefined
+      : normalizeCandidateSourceText(artifact.path);
+    const url = artifact.url === undefined
+      ? undefined
+      : normalizeCandidateSourceText(artifact.url);
+    incomplete ||= summary.incomplete || path?.incomplete === true || url?.incomplete === true;
+    return {
+      kind: artifact.kind,
+      summary: summary.text,
+      ...(path === undefined ? {} : { path: path.text }),
+      ...(url === undefined ? {} : { url: url.text }),
+    };
+  });
+  return { values: normalized, incomplete };
+}
+
 export function buildIssueScoutCandidate(input: {
   sourceId: IssueScoutSourceId;
   title: string;
@@ -578,8 +657,10 @@ export function buildIssueScoutCandidate(input: {
   riskBucket?: IssueScoutRiskBucket;
   laneEvidence?: readonly string[];
 }): IssueScoutCandidate {
-  const title = sanitizeText(boundSourceText(input.title));
-  const summary = sanitizeText(boundSourceText(input.summary));
+  const normalizedTitle = normalizeCandidateSourceText(input.title);
+  const normalizedSummary = normalizeCandidateSourceText(input.summary);
+  const title = normalizedTitle.text;
+  const summary = normalizedSummary.text;
   const laneClassification = classifyRecursiveAutomationLane({
     title,
     body: summary,
@@ -587,15 +668,78 @@ export function buildIssueScoutCandidate(input: {
   });
   const lane = input.lane ?? laneClassification.lane;
   const definition = getRecursiveAutomationLaneDefinition(lane);
-  const policyCategory = input.policyCategory ?? (laneClassification.requiresHumanReview ? 'human_policy' : definition.policyCategory);
-  const riskBucket = input.riskBucket ?? riskForCandidate({
-    lane,
-    policyCategory,
-    title,
-    summary,
-  });
+  const evidence = normalizeCandidateEvidence(input.evidence ?? []);
+  const acceptanceCriteria = normalizeCandidateSourceArray(input.acceptanceCriteria ?? [
+    'Keep the change scoped to the evidence in this issue.',
+    'Add or update tests/docs for the changed behavior.',
+    'Do not change product direction, public contracts, pricing, auth, retention, or security posture without human approval.',
+  ]);
+  const verificationCommands = normalizeCandidateSourceArray(
+    input.verificationCommands ?? definition.defaultVerification,
+  );
+  const expectedChangedSurfaces = normalizeCandidateSourceArray(
+    input.expectedChangedSurfaces ?? definition.expectedChangedSurfaces,
+  );
+  const laneEvidence = normalizeCandidateSourceArray(input.laneEvidence ?? []);
+  const sourceEvidenceIncomplete = normalizedTitle.incomplete
+    || normalizedSummary.incomplete
+    || evidence.incomplete
+    || acceptanceCriteria.incomplete
+    || verificationCommands.incomplete
+    || expectedChangedSurfaces.incomplete
+    || laneEvidence.incomplete;
+  const policyCategory = sourceEvidenceIncomplete
+    ? 'human_policy'
+    : input.policyCategory
+      ?? (laneClassification.requiresHumanReview ? 'human_policy' : definition.policyCategory);
+  const riskBucket = sourceEvidenceIncomplete
+    ? 'high'
+    : input.riskBucket ?? riskForCandidate({
+      lane,
+      policyCategory,
+      title,
+      summary,
+    });
+  const decisionAcceptanceCriteria = sourceEvidenceIncomplete
+    ? acceptanceCriteria.values.slice(0, 20)
+    : acceptanceCriteria.values;
+  const decisionExpectedChangedSurfaces = sourceEvidenceIncomplete
+    ? expectedChangedSurfaces.values.slice(0, 10)
+    : expectedChangedSurfaces.values;
+  const evidenceCapacity = ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH
+    - decisionAcceptanceCriteria.length
+    - decisionExpectedChangedSurfaces.length;
+  const decisionEvidence = sourceEvidenceIncomplete
+    ? [
+      ...evidence.values.slice(0, Math.max(0, evidenceCapacity - 1)),
+      { kind: 'ledger' as const, summary: SOURCE_EVIDENCE_INCOMPLETE_REASON },
+    ]
+    : evidence.values;
+  const escalationCriteria = sourceEvidenceIncomplete
+    ? [...definition.humanReviewEscalation, SOURCE_EVIDENCE_INCOMPLETE_REASON]
+    : definition.humanReviewEscalation;
+  const laneEvidenceCapacity = ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH
+    - 2
+    - escalationCriteria.length
+    - (decisionExpectedChangedSurfaces.length > 0 ? 1 : 0);
+  const explicitIncompleteLaneEvidence = laneEvidence.values.find(sourceTextIsIncomplete);
+  const decisionLaneEvidence = sourceEvidenceIncomplete
+    ? [
+      ...laneEvidence.values
+        .filter((value) => !sourceTextIsIncomplete(value))
+        .slice(0, Math.max(
+          0,
+          laneEvidenceCapacity - (explicitIncompleteLaneEvidence === undefined ? 1 : 2),
+        )),
+      ...(explicitIncompleteLaneEvidence === undefined ? [] : [explicitIncompleteLaneEvidence]),
+      'sourceEvidence=truncated_or_omitted',
+    ]
+    : laneEvidence.values;
 
   return {
+    // A bounded prefix can collide with another truncated source. Such
+    // candidates are always human/high-risk, so the ID can route review but
+    // can never authorize automatic issue creation.
     id: `${input.sourceId}:${slugFromSanitizedText(title)}`,
     sourceId: input.sourceId,
     title,
@@ -603,17 +747,13 @@ export function buildIssueScoutCandidate(input: {
     lane,
     policyCategory,
     riskBucket,
-    evidence: input.evidence ?? [],
-    acceptanceCriteria: input.acceptanceCriteria ?? [
-      'Keep the change scoped to the evidence in this issue.',
-      'Add or update tests/docs for the changed behavior.',
-      'Do not change product direction, public contracts, pricing, auth, retention, or security posture without human approval.',
-    ],
-    verificationCommands: input.verificationCommands ?? definition.defaultVerification,
-    escalationCriteria: definition.humanReviewEscalation,
-    expectedChangedSurfaces: input.expectedChangedSurfaces ?? definition.expectedChangedSurfaces,
+    evidence: decisionEvidence,
+    acceptanceCriteria: decisionAcceptanceCriteria,
+    verificationCommands: verificationCommands.values,
+    escalationCriteria,
+    expectedChangedSurfaces: decisionExpectedChangedSurfaces,
     labels: labelsForLane(lane, policyCategory),
-    laneEvidence: input.laneEvidence ?? [],
+    laneEvidence: decisionLaneEvidence,
   };
 }
 
@@ -883,7 +1023,14 @@ function readReportSource(sourceId: Extract<IssueScoutSourceId, 'dependency_repo
       }
       const rawContent = readFileSync(filePath, 'utf-8');
       const record = parseReportRecord(rawContent);
-      const rawSummary = sanitizeText(boundSourceText(rawContent)).slice(0, 2_000);
+      const boundedRawSummary = boundSourceTextWithStatus(rawContent);
+      const sanitizedRawSummary = sanitizeText(boundedRawSummary.text);
+      const rawSummary = boundedRawSummary.truncated
+        ? `${sanitizedRawSummary.slice(
+          0,
+          2_000 - SOURCE_TEXT_TRUNCATION_MARKER.length,
+        )}${SOURCE_TEXT_TRUNCATION_MARKER}`
+        : sanitizedRawSummary.slice(0, 2_000);
       // Report producers are intentionally schema-light; accepting common field aliases keeps the loop
       // useful while preserving typed lane evidence in the generated issue.
       const candidate = buildRecursiveLaneCandidate({
