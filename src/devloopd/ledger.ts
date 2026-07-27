@@ -2,13 +2,14 @@ import {
   existsSync,
   chmodSync,
   mkdirSync,
+  lstatSync,
   readFileSync,
   readdirSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { readRunMetaBySlug, type RunMeta } from '../core/workflow/run/run-meta.js';
 import { listRecentRuns } from '../features/interactive/runSessionReader.js';
 import { isPathInside } from '../shared/utils/pathBoundary.js';
@@ -55,6 +56,11 @@ export interface DevloopLedgerEventBase {
 }
 
 export type DevloopLedgerEvent = DevloopLedgerEventBase & Record<string, unknown>;
+
+export interface DevloopLedgerAppendEvent {
+  eventId: string;
+  eventType: string;
+}
 
 export interface ImportTaktRunReport {
   passed: boolean;
@@ -266,22 +272,46 @@ function buildImportEvent(
   };
 }
 
-export function appendDevloopLedgerEvent<T extends DevloopLedgerEventBase>(ledgerPath: string, event: T): void {
-  const ledgerDir = resolve(ledgerPath, '..');
+function ensureLedgerDirectory(ledgerPath: string): void {
+  const ledgerDir = dirname(ledgerPath);
   const ledgerDirExists = existsSync(ledgerDir);
   mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
   if (!ledgerDirExists) {
     chmodSync(ledgerDir, 0o700);
   }
+}
+
+export function appendDevloopLedgerEventUnlocked<T extends DevloopLedgerAppendEvent>(
+  ledgerPath: string,
+  event: T,
+): void {
+  ensureLedgerDirectory(ledgerPath);
+  if (existsSync(ledgerPath)) {
+    const ledgerStat = lstatSync(ledgerPath);
+    if (ledgerStat.isSymbolicLink() || !ledgerStat.isFile()) {
+      throw new Error('Devloop ledger must be a regular file');
+    }
+  }
+  const line = `${JSON.stringify(event)}\n`;
+  writeFileSync(ledgerPath, line, { encoding: 'utf-8', flag: 'a', mode: 0o600 });
+  chmodSync(ledgerPath, 0o600);
+}
+
+export function appendDevloopLedgerEvent<T extends DevloopLedgerAppendEvent>(
+  ledgerPath: string,
+  event: T,
+): void {
+  ensureLedgerDirectory(ledgerPath);
   withDevloopFileLock(ledgerPath, () => {
-    const line = `${JSON.stringify(event)}\n`;
-    writeFileSync(ledgerPath, line, { encoding: 'utf-8', flag: 'a', mode: 0o600 });
-    chmodSync(ledgerPath, 0o600);
+    // DecisionStore must validate and append under one lock. This unlocked helper
+    // prevents a nested self-deadlock, but is unsafe unless the caller already
+    // owns the ledger lock for the entire read/validate/append transaction.
+    appendDevloopLedgerEventUnlocked(ledgerPath, event);
   });
 }
 
 function appendLedgerEvent(ledgerPath: string, event: TaktRunImportedEvent): void {
-  appendDevloopLedgerEvent(ledgerPath, event as unknown as DevloopLedgerEvent);
+  appendDevloopLedgerEvent(ledgerPath, event);
 }
 
 export function buildDevloopLedgerEvent<T extends Record<string, unknown>>(
