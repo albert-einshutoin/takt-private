@@ -4,7 +4,12 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { DevloopCommandRunner } from '../devloopd/commandRunner.js';
 import { DecisionStore } from '../devloopd/decisionStore.js';
-import { readRawDevloopLedgerEvents } from '../devloopd/ledger.js';
+import { appendDevloopLedgerEvent, readRawDevloopLedgerEvents } from '../devloopd/ledger.js';
+import {
+  createDecisionAppliedEvent,
+  createDecisionApplyStartedEvent,
+} from '../devloopd/decisionEvents.js';
+import { resolveProcessStartToken } from '../devloopd/repoExecutionClaim.js';
 import {
   automationActionRequiresDecision,
   attachAutomationDecisions,
@@ -20,6 +25,72 @@ import {
   formatDevloopAutomationStageReport,
 } from '../devloopd/prAutomation.js';
 import { formatReviewGateComment } from '../devloopd/prReviewGate.js';
+import { ensureDecisionForAutomationActions } from '../devloopd/decisionGeneration.js';
+
+function createAnsweredPrDecision(options: {
+  repoPath: string;
+  repository: string;
+  pr: number;
+  stage: 'pr-review' | 'pr-merge';
+  headSha: string;
+  optionId?: 'approve_current_head' | 'request_changes' | 'stop';
+  claimState?: 'none' | 'applying' | 'applied';
+}) {
+  const store = new DecisionStore(options.repoPath, 'ledger.jsonl');
+  const projection = ensureDecisionForAutomationActions(store, [{
+    type: 'human-review-hold',
+    status: 'blocked',
+    pr: options.pr,
+    headSha: options.headSha,
+    stopRule: 'human review required',
+    message: 'Product owner approval is required.',
+  }], {
+    repoPath: options.repoPath,
+    repository: options.repository,
+    stage: options.stage,
+    headSha: options.headSha,
+  });
+  store.answer({
+    decisionId: projection.request.decisionId,
+    expectedDecisionVersion: projection.request.decisionVersion,
+    expectedContextHash: projection.request.contextHash,
+    value: { optionId: options.optionId ?? 'approve_current_head' },
+    rationale: 'Reviewed the exact current head and policy scope.',
+    idempotencyKey: `answer_${projection.request.decisionId}`,
+  }, 'test_operator');
+  const answered = store.get(projection.request.decisionId);
+  if (answered?.answer === undefined) throw new Error('answer missing');
+  const applyOperationId = `op_${projection.request.decisionId}`;
+  const applyOwnerStartToken = resolveProcessStartToken(process.pid);
+  if (applyOwnerStartToken === undefined) throw new Error('process identity unavailable');
+  if (options.claimState !== 'none') {
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent({
+      decisionId: projection.request.decisionId,
+      decisionVersion: projection.request.decisionVersion,
+      contextHash: projection.request.contextHash,
+      answerEventId: answered.answer.eventId,
+      sanitizedSummary: 'test apply claim',
+      operationId: applyOperationId,
+      ownerPid: process.pid,
+      ownerStartToken: applyOwnerStartToken,
+    }));
+  }
+  if (options.claimState === 'applied') {
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionAppliedEvent({
+      decisionId: projection.request.decisionId,
+      decisionVersion: projection.request.decisionVersion,
+      contextHash: projection.request.contextHash,
+      answerEventId: answered.answer.eventId,
+      sanitizedSummary: 'test apply completed',
+    }));
+  }
+  return {
+    ...projection.request,
+    applyOperationId,
+    applyOwnerPid: process.pid,
+    applyOwnerStartToken,
+  };
+}
 
 function makePrMergeRunner(): DevloopCommandRunner & { calls: string[]; timeouts: Array<number | undefined> } {
   const calls: string[] = [];
@@ -181,6 +252,7 @@ function makeProductPolicyPromotionRunner(): DevloopCommandRunner & { calls: str
 describe('devloopd PR automation orchestration', () => {
   it('uses an exact typed human approval without skipping checks, reviews, or head recheck', async () => {
     const headSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-approval-'));
     const calls: string[] = [];
     const comments = [
       {
@@ -238,20 +310,27 @@ describe('devloopd PR automation orchestration', () => {
       },
     };
 
+    const decision = createAnsweredPrDecision({
+      repoPath,
+      repository: 'owner/repo',
+      pr: 42,
+      stage: 'pr-review',
+      headSha,
+    });
     const report = await continuePullRequestAutomationStage({
       pr: 42,
       stage: 'pr-review',
       expectedHeadSha: headSha,
-      repoPath: '/repo',
+      repoPath,
       repo: 'owner/repo',
       runner,
-      humanApproval: {
-        decisionId: 'dec_policy_42',
-        decisionVersion: 1,
-        pr: 42,
-        stage: 'pr-review',
-        expectedHeadSha: headSha,
-      },
+      decisionId: decision.decisionId,
+      expectedDecisionVersion: decision.decisionVersion,
+      expectedContextHash: decision.contextHash,
+      ledgerPath: 'ledger.jsonl',
+      applyOperationId: decision.applyOperationId,
+      applyOwnerPid: decision.applyOwnerPid,
+      applyOwnerStartToken: decision.applyOwnerStartToken,
     });
 
     expect(report.passed).toBe(true);
@@ -264,6 +343,7 @@ describe('devloopd PR automation orchestration', () => {
   });
 
   it('continues only the exact PR and requires revalidation when its head changed', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-head-change-'));
     const calls: string[] = [];
     const runner: DevloopCommandRunner = {
       resolveCommand(command) {
@@ -285,18 +365,25 @@ describe('devloopd PR automation orchestration', () => {
       },
     };
 
+    const decision = createAnsweredPrDecision({
+      repoPath,
+      repository: 'owner/repo',
+      pr: 42,
+      stage: 'pr-review',
+      headSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
     const report = await continuePullRequestAutomationStage({
       pr: 42,
       stage: 'pr-review',
       expectedHeadSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      humanApproval: {
-        decisionId: 'dec_pr_42',
-        decisionVersion: 1,
-        pr: 42,
-        stage: 'pr-review',
-        expectedHeadSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-      },
-      repoPath: '/repo',
+      decisionId: decision.decisionId,
+      expectedDecisionVersion: decision.decisionVersion,
+      expectedContextHash: decision.contextHash,
+      ledgerPath: 'ledger.jsonl',
+      applyOperationId: decision.applyOperationId,
+      applyOwnerPid: decision.applyOwnerPid,
+      applyOwnerStartToken: decision.applyOwnerStartToken,
+      repoPath,
       repo: 'owner/repo',
       runner,
     });
@@ -311,6 +398,99 @@ describe('devloopd PR automation orchestration', () => {
     ]);
     expect(calls.some((call) => call.startsWith('pr list'))).toBe(false);
   });
+
+  it.each([
+    ['missing decision', undefined, {}],
+    ['NO answer', 'request_changes' as const, {}],
+    ['wrong version', 'approve_current_head' as const, { expectedDecisionVersion: 99 }],
+    ['wrong context', 'approve_current_head' as const, { expectedContextHash: 'f'.repeat(64) }],
+    ['wrong repository', 'approve_current_head' as const, { repo: 'other/repo' }],
+    ['wrong PR', 'approve_current_head' as const, { pr: 43 }],
+    ['wrong stage', 'approve_current_head' as const, { stage: 'pr-merge' as const }],
+    ['wrong head', 'approve_current_head' as const, { expectedHeadSha: 'b'.repeat(40) }],
+    ['wrong operation', 'approve_current_head' as const, { applyOperationId: 'op_forged' }],
+  ])('rejects ledger-unbound approval: %s', async (_case, answer, overrides) => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-invalid-approval-'));
+    const headSha = 'a'.repeat(40);
+    const decision = answer === undefined
+      ? {
+        decisionId: 'dec_missing',
+        decisionVersion: 1,
+        contextHash: '0'.repeat(64),
+        applyOperationId: 'op_missing',
+        applyOwnerPid: process.pid,
+        applyOwnerStartToken: resolveProcessStartToken(process.pid) ?? 'unknown_test',
+      }
+      : createAnsweredPrDecision({
+        repoPath,
+        repository: 'owner/repo',
+        pr: 42,
+        stage: 'pr-review',
+        headSha,
+        optionId: answer,
+      });
+    const runner = makeProductPolicyPromotionRunner();
+
+    const report = await continuePullRequestAutomationStage({
+      pr: 42,
+      stage: 'pr-review',
+      expectedHeadSha: headSha,
+      repoPath,
+      repo: 'owner/repo',
+      ledgerPath: 'ledger.jsonl',
+      runner,
+      decisionId: decision.decisionId,
+      expectedDecisionVersion: decision.decisionVersion,
+      expectedContextHash: decision.contextHash,
+      applyOperationId: decision.applyOperationId,
+      applyOwnerPid: decision.applyOwnerPid,
+      applyOwnerStartToken: decision.applyOwnerStartToken,
+      ...overrides,
+    });
+
+    expect(report).toMatchObject({
+      passed: false,
+      revalidationRequired: true,
+      reasonCode: 'human_approval_mismatch',
+    });
+    expect(runner.calls).toEqual([]);
+  });
+
+  it.each(['none', 'applied'] as const)(
+    'rejects a %s apply claim before any GitHub mutation',
+    async (claimState) => {
+      const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-claim-state-'));
+      const headSha = 'a'.repeat(40);
+      const decision = createAnsweredPrDecision({
+        repoPath,
+        repository: 'owner/repo',
+        pr: 42,
+        stage: 'pr-review',
+        headSha,
+        claimState,
+      });
+      const runner = makeProductPolicyPromotionRunner();
+
+      const report = await continuePullRequestAutomationStage({
+        pr: 42,
+        stage: 'pr-review',
+        expectedHeadSha: headSha,
+        repoPath,
+        repo: 'owner/repo',
+        ledgerPath: 'ledger.jsonl',
+        runner,
+        decisionId: decision.decisionId,
+        expectedDecisionVersion: decision.decisionVersion,
+        expectedContextHash: decision.contextHash,
+        applyOperationId: decision.applyOperationId,
+        applyOwnerPid: decision.applyOwnerPid,
+        applyOwnerStartToken: decision.applyOwnerStartToken,
+      });
+
+      expect(report.reasonCode).toBe('human_approval_mismatch');
+      expect(runner.calls).toEqual([]);
+    },
+  );
   it.each([
     ['checks failed', { type: 'ci-fix', status: 'blocked', stopRule: 'checks failed', message: 'checks failed' }],
     ['head mismatch', { type: 'merge-if-safe', status: 'blocked', stopRule: 'head mismatch', message: 'head mismatch' }],
@@ -684,6 +864,44 @@ describe('devloopd PR automation orchestration', () => {
     expect(inconsistent.actions.every((action) => action.decisionId === undefined)).toBe(true);
     expect(readRawDevloopLedgerEvents(join(repoPath, 'ledger.jsonl'))
       .filter((event) => event.eventType === 'devloop_decision_requested')).toHaveLength(1);
+  });
+
+  it('keeps the production review-fix attachment branch ledger-free and without decision IDs', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-review-fix-no-decision-'));
+    const store = new DecisionStore(repoPath, 'ledger.jsonl');
+    const report = await attachAutomationDecisions({
+      store,
+      report: {
+        passed: true,
+        stage: 'review-fix',
+        message: 'review fix remains blocked',
+        actions: [{
+          type: 'review-fix',
+          status: 'blocked',
+          pr: 42,
+          headSha: 'a'.repeat(40),
+          stopRule: 'Unsafe or too broad',
+          message: 'Human scope policy is required.',
+        }],
+      },
+      prs: [{
+        number: 42,
+        title: 'policy repair',
+        body: '',
+        headRefName: 'takt/policy-repair',
+        headRefOid: 'a'.repeat(40),
+        isDraft: false,
+        authorLogin: 'dev',
+        labels: [],
+      }],
+      repoPath,
+      repository: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner: makePreparationRunner({}),
+    });
+
+    expect(report.actions[0]).not.toHaveProperty('decisionId');
+    expect(readRawDevloopLedgerEvents(store.ledgerPath)).toEqual([]);
   });
 
   it('clears a stale Decision id when current-head metadata validation fails', async () => {

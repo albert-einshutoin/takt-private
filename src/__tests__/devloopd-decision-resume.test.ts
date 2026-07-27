@@ -493,6 +493,29 @@ describe('guarded decision resume', () => {
     expect(resume).not.toHaveBeenCalled();
   });
 
+  it('never treats a persisted unknown process token as dead or replays its side effect', async () => {
+    const projection = store.get(context.decisionId);
+    if (projection?.answer === undefined) throw new Error('answer missing');
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent({
+      decisionId: context.decisionId,
+      decisionVersion: context.expectedDecisionVersion,
+      contextHash: context.expectedContextHash,
+      answerEventId: projection.answer.eventId,
+      sanitizedSummary: 'apply owner could not read process start time',
+      operationId: 'op_unknown_owner',
+      ownerPid: process.pid,
+      ownerStartToken: 'unknown_ps_unavailable',
+    }));
+
+    const result = await applyDecision(context, { adapters: [adapter] });
+
+    expect(result).toMatchObject({
+      status: 'revalidation_required',
+      reasonCode: 'apply_owner_unknown',
+    });
+    expect(resume).not.toHaveBeenCalled();
+  });
+
   it('records a sanitized failure and does not retry the same answer', async () => {
     resume.mockRejectedValueOnce(new Error('token=secret internal path /private/repo'));
 

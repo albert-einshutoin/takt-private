@@ -1,16 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
-  closeSync,
-  constants,
   existsSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
-  openSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -24,6 +17,72 @@ interface ClaimOwner {
   readonly startToken: string;
   readonly operationId: string;
 }
+
+const CLAIM_TRANSITION_SCRIPT = String.raw`
+const { createHash } = require('node:crypto');
+const { execFileSync } = require('node:child_process');
+const { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync } = require('node:fs');
+const [action, claimPath, operationId, pidText, startToken] = process.argv.slice(1);
+const pid = Number(pidText);
+function tokenFor(targetPid) {
+  const ps = ['/bin/ps', '/usr/bin/ps'].find(existsSync);
+  if (!ps) return undefined;
+  try {
+    const started = execFileSync(ps, ['-p', String(targetPid), '-o', 'lstart='], {
+      encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return started === '' ? undefined : createHash('sha256').update(String(targetPid) + '\0' + started, 'utf8').digest('hex');
+  } catch { return undefined; }
+}
+function parseOwner() {
+  let fd;
+  try {
+    fd = openSync(claimPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = fstatSync(fd);
+    const uid = process.getuid?.();
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 4096 || (uid !== undefined && stat.uid !== uid)) return undefined;
+    const value = JSON.parse(readFileSync(fd, 'utf8'));
+    return Number.isInteger(value.pid) && value.pid > 0
+      && typeof value.startToken === 'string'
+      && (/^[a-f0-9]{64}$/.test(value.startToken) || /^unknown_[A-Za-z0-9._:-]+$/.test(value.startToken))
+      && typeof value.operationId === 'string'
+      ? value : undefined;
+  } catch { return undefined; } finally { if (fd !== undefined) closeSync(fd); }
+}
+function state(owner) {
+  if (owner.startToken.startsWith('unknown_')) return 'unknown';
+  const token = tokenFor(owner.pid);
+  if (token !== undefined) return token === owner.startToken ? 'alive' : 'dead';
+  try { process.kill(owner.pid, 0); return 'unknown'; }
+  catch (error) { return error && error.code === 'ESRCH' ? 'dead' : 'unknown'; }
+}
+if (action === 'acquire') {
+  if (existsSync(claimPath)) {
+    const owner = parseOwner();
+    if (owner === undefined || state(owner) !== 'dead') {
+      process.stdout.write('busy');
+      process.exit(0);
+    }
+    unlinkSync(claimPath);
+  }
+  let fd;
+  try {
+    fd = openSync(claimPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(fd, JSON.stringify({ pid, startToken, operationId }));
+    process.stdout.write('acquired');
+  } finally { if (fd !== undefined) closeSync(fd); }
+} else if (action === 'release') {
+  const owner = parseOwner();
+  if (owner && owner.pid === pid && owner.startToken === startToken && owner.operationId === operationId) {
+    unlinkSync(claimPath);
+    process.stdout.write('released');
+  } else {
+    process.stdout.write('not_owner');
+  }
+} else {
+  process.exit(2);
+}
+`;
 
 export function resolveProcessStartToken(pid: number): string | undefined {
   const psPath = ['/bin/ps', '/usr/bin/ps'].find(existsSync);
@@ -42,14 +101,11 @@ export function resolveProcessStartToken(pid: number): string | undefined {
   }
 }
 
-function ownerState(owner: ClaimOwner): 'alive' | 'dead' | 'unknown' {
-  return inspectProcessIdentity(owner.pid, owner.startToken);
-}
-
 export function inspectProcessIdentity(
   pid: number,
   expectedStartToken: string,
 ): 'alive' | 'dead' | 'unknown' {
+  if (expectedStartToken.startsWith('unknown_')) return 'unknown';
   const token = resolveProcessStartToken(pid);
   if (token !== undefined) return token === expectedStartToken ? 'alive' : 'dead';
   try {
@@ -63,32 +119,47 @@ export function inspectProcessIdentity(
   }
 }
 
-function parseOwner(path: string): ClaimOwner | undefined {
-  let fd: number | undefined;
+function advisoryLockCommand(): { command: string; args: (lockPath: string) => string[] } | undefined {
+  if (existsSync('/usr/bin/lockf')) {
+    return {
+      command: '/usr/bin/lockf',
+      args: (lockPath) => ['-t', '5', lockPath],
+    };
+  }
+  if (existsSync('/usr/bin/flock')) {
+    return {
+      command: '/usr/bin/flock',
+      args: (lockPath) => ['-x', '-w', '5', lockPath],
+    };
+  }
+  return undefined;
+}
+
+function runClaimTransition(
+  claimPath: string,
+  action: 'acquire' | 'release',
+  owner: ClaimOwner,
+): 'acquired' | 'busy' | 'released' | 'not_owner' | undefined {
+  const advisory = advisoryLockCommand();
+  if (advisory === undefined) return undefined;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = fstatSync(fd);
-    const uid = process.getuid?.();
-    if (
-      !stat.isFile()
-      || stat.nlink !== 1
-      || stat.size > 4_096
-      || (uid !== undefined && stat.uid !== uid)
-    ) {
-      return undefined;
-    }
-    const value = JSON.parse(readFileSync(fd, 'utf8')) as Partial<ClaimOwner>;
-    return Number.isInteger(value.pid)
-      && (value.pid ?? 0) > 0
-      && typeof value.startToken === 'string'
-      && /^[a-f0-9]{64}$/u.test(value.startToken)
-      && typeof value.operationId === 'string'
-      ? value as ClaimOwner
-      : undefined;
+    return execFileSync(advisory.command, [
+      ...advisory.args(`${claimPath}.transition-lock`),
+      process.execPath,
+      '-e',
+      CLAIM_TRANSITION_SCRIPT,
+      action,
+      claimPath,
+      owner.operationId,
+      String(owner.pid),
+      owner.startToken,
+    ], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim() as 'acquired' | 'busy' | 'released' | 'not_owner';
   } catch {
     return undefined;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -117,59 +188,19 @@ export function tryAcquireRepoExecutionClaim(
 ): RepoExecutionClaim | undefined {
   const claimPath = join(repoPath, '.takt', 'devloop', 'repo-execution.claim');
   secureClaimDirectory(claimPath);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    let fd: number;
-    try {
-      fd = openSync(
-        claimPath,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-        0o600,
-      );
-    } catch (error) {
-      const code = error instanceof Error && 'code' in error
-        ? String((error as NodeJS.ErrnoException).code)
-        : '';
-      if (code !== 'EEXIST') throw error;
-      const owner = parseOwner(claimPath);
-      if (owner === undefined || ownerState(owner) !== 'dead') return undefined;
-      // Dead ownership, not elapsed time, is the only automatic cleanup rule.
-      // This prevents a slow but live operation from being replayed.
-      try {
-        unlinkSync(claimPath);
-      } catch {
-        return undefined;
-      }
-      continue;
-    }
-
-    const token = resolveProcessStartToken(process.pid);
-    if (token === undefined) {
-      closeSync(fd);
-      unlinkSync(claimPath);
-      return undefined;
-    }
-    writeFileSync(fd, JSON.stringify({ pid: process.pid, startToken: token, operationId }));
-    const inode = fstatSync(fd).ino;
-    let released = false;
-    return Object.freeze({
-      operationId,
-      release(): void {
-        if (released) return;
-        released = true;
-        try {
-          closeSync(fd);
-        } finally {
-          try {
-            const current = lstatSync(claimPath);
-            if (current.isFile() && !current.isSymbolicLink() && current.ino === inode) {
-              unlinkSync(claimPath);
-            }
-          } catch {
-            // A missing/replaced claim must not be unlinked or mask the operation.
-          }
-        }
-      },
-    });
-  }
-  return undefined;
+  const token = resolveProcessStartToken(process.pid);
+  if (token === undefined) return undefined;
+  const owner = Object.freeze({ pid: process.pid, startToken: token, operationId });
+  if (runClaimTransition(claimPath, 'acquire', owner) !== 'acquired') return undefined;
+  let released = false;
+  return Object.freeze({
+    operationId,
+    release(): void {
+      if (released) return;
+      released = true;
+      // Release is serialized by the same kernel advisory lock and checks the
+      // complete owner tuple, so an old handle cannot unlink a replacement.
+      runClaimTransition(claimPath, 'release', owner);
+    },
+  });
 }

@@ -40,6 +40,8 @@ export interface ResumeContext {
 export interface ResolvedResumeContext extends ResumeContext {
   readonly projection: DecisionProjection;
   readonly strategy: ResumeStrategy;
+  readonly applyOperationId: string;
+  readonly applyOwner: ApplyOperationOwner;
 }
 
 export type RevalidationResult =
@@ -320,17 +322,24 @@ function claimApplication(
 
     // The claim is persisted before any external check or side effect. A second
     // process therefore observes "applying" and cannot execute the adapter.
+    const operationId = `op_${randomUUID()}`;
     transaction.append(createDecisionApplyStartedEvent({
       ...transitionIdentity(projection),
       sanitizedSummary: FIXED_MESSAGES.applyStarted,
-      operationId: `op_${randomUUID()}`,
+      operationId,
       ownerPid: owner.pid,
       ownerStartToken: owner.startToken,
     }));
     return {
       kind: 'claimed',
       adapter,
-      context: Object.freeze({ ...context, projection, strategy }),
+      context: Object.freeze({
+        ...context,
+        projection,
+        strategy,
+        applyOperationId: operationId,
+        applyOwner: owner,
+      }),
     };
   });
 }
@@ -388,6 +397,14 @@ function reconcileInterruptedApply(
       context,
       'apply_owner_terminated',
       'The apply owner terminated; external effects will not be replayed.',
+      'applying',
+    );
+  }
+  if (ownerState === 'unknown') {
+    return appendRevalidation(
+      context,
+      'apply_owner_unknown',
+      'The interrupted apply owner cannot be verified; external effects will not be replayed.',
       'applying',
     );
   }
@@ -767,13 +784,13 @@ export function createDefaultResumeAdapters(
           pr: guard.prNumber,
           stage: guard.stage,
           expectedHeadSha: guard.expectedHeadSha,
-          humanApproval: {
-            decisionId: context.projection.request.decisionId,
-            decisionVersion: context.projection.request.decisionVersion,
-            pr: guard.prNumber,
-            stage: guard.stage,
-            expectedHeadSha: guard.expectedHeadSha,
-          },
+          decisionId: context.projection.request.decisionId,
+          expectedDecisionVersion: context.projection.request.decisionVersion,
+          expectedContextHash: context.projection.request.contextHash,
+          ledgerPath: context.store.ledgerPath,
+          applyOperationId: context.applyOperationId,
+          applyOwnerPid: context.applyOwner.pid,
+          applyOwnerStartToken: context.applyOwner.startToken,
           runner,
         });
         if (report.revalidationRequired) {

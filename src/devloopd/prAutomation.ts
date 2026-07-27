@@ -33,6 +33,8 @@ import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import { DecisionStore } from './decisionStore.js';
+import { parseDecisionEvent } from './decisionEvents.js';
+import { inspectProcessIdentity } from './repoExecutionClaim.js';
 import {
   ensureDecisionForAutomationActions,
   isAutomationActionDecisionEligible,
@@ -763,17 +765,22 @@ function buildReviewPrompt(options: {
   ].join('\n');
 }
 
-export async function promotePullRequestAutoMerge(options: {
+interface PromotePullRequestAutoMergeOptions {
   pr: number;
   repoPath?: string;
   repo?: string;
   expectedHeadSha?: string;
-  humanApproval?: PullRequestHumanApproval;
   label?: string;
   dryRun?: boolean;
   env?: NodeJS.ProcessEnv;
   runner?: DevloopCommandRunner;
-}): Promise<DevloopAutomationAction> {
+}
+
+const HUMAN_APPROVAL_CAPABILITY = Symbol('ledger-bound-human-approval');
+
+async function promotePullRequestAutoMergeInternal(
+  options: PromotePullRequestAutoMergeOptions & { readonly [HUMAN_APPROVAL_CAPABILITY]?: true },
+): Promise<DevloopAutomationAction> {
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
@@ -804,11 +811,8 @@ export async function promotePullRequestAutoMerge(options: {
     title: metadata.title,
     body: metadata.body,
   });
-  const validHumanApproval = options.humanApproval !== undefined
-    && options.expectedHeadSha !== undefined
-    && options.humanApproval.pr === options.pr
-    && options.humanApproval.expectedHeadSha === options.expectedHeadSha
-    && options.humanApproval.decisionVersion > 0;
+  const validHumanApproval = options[HUMAN_APPROVAL_CAPABILITY] === true
+    && options.expectedHeadSha !== undefined;
   if (productPolicyImpact.requiresHumanReview && !validHumanApproval) {
     if (options.dryRun !== true) {
       if (options.expectedHeadSha !== undefined) {
@@ -966,6 +970,12 @@ export async function promotePullRequestAutoMerge(options: {
   };
 }
 
+export async function promotePullRequestAutoMerge(
+  options: PromotePullRequestAutoMergeOptions,
+): Promise<DevloopAutomationAction> {
+  return promotePullRequestAutoMergeInternal(options);
+}
+
 export interface ContinuePullRequestAutomationStageOptions {
   readonly pr: number;
   readonly stage: DevloopAutomationStage;
@@ -974,15 +984,13 @@ export interface ContinuePullRequestAutomationStageOptions {
   readonly repo?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly runner?: DevloopCommandRunner;
-  readonly humanApproval: PullRequestHumanApproval;
-}
-
-export interface PullRequestHumanApproval {
   readonly decisionId: string;
-  readonly decisionVersion: number;
-  readonly pr: number;
-  readonly stage: DevloopAutomationStage;
-  readonly expectedHeadSha: string;
+  readonly expectedDecisionVersion: number;
+  readonly expectedContextHash: string;
+  readonly ledgerPath?: string;
+  readonly applyOperationId: string;
+  readonly applyOwnerPid: number;
+  readonly applyOwnerStartToken: string;
 }
 
 export interface ContinuePullRequestAutomationStageReport {
@@ -999,11 +1007,52 @@ export async function continuePullRequestAutomationStage(
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
+  const store = new DecisionStore(repoPath, options.ledgerPath);
+  const projection = store.get(options.decisionId);
+  const guard = projection?.request.resumeGuard;
+  const parsedEvents = store.readStrict().events.map((event) => parseDecisionEvent(event));
+  const answerEvent = projection?.answer === undefined
+    ? undefined
+    : parsedEvents.find((parsed) =>
+        parsed.success
+        && parsed.data.eventType === 'devloop_decision_answered'
+        && parsed.data.eventId === projection.answer?.eventId);
+  const applyEvent = [...parsedEvents].reverse().find((parsed) =>
+    parsed.success
+    && parsed.data.eventType === 'devloop_decision_apply_started'
+    && parsed.data.decisionId === options.decisionId);
   if (
-    options.humanApproval.pr !== options.pr
-    || options.humanApproval.stage !== options.stage
-    || options.humanApproval.expectedHeadSha !== options.expectedHeadSha
-    || options.humanApproval.decisionVersion <= 0
+    projection === undefined
+    || projection.answer === undefined
+    || (projection.status !== 'answered' && projection.status !== 'applying')
+    || projection.request.decisionVersion !== options.expectedDecisionVersion
+    || projection.request.contextHash !== options.expectedContextHash
+    || guard?.strategy !== 'pr_automation_stage'
+    || guard.repository !== options.repo
+    || guard.prNumber !== options.pr
+    || guard.stage !== options.stage
+    || guard.expectedHeadSha !== options.expectedHeadSha
+    || projection.request.subject.repoPath !== store.repoPath
+    || projection.request.subject.repository !== options.repo
+    || projection.request.subject.prNumber !== options.pr
+    || projection.request.subject.step !== options.stage
+    || projection.request.subject.headSha !== options.expectedHeadSha
+    || !('optionId' in projection.answer.value)
+    || projection.answer.value.optionId !== 'approve_current_head'
+    || answerEvent === undefined
+    || !answerEvent.success
+    || answerEvent.data.eventType !== 'devloop_decision_answered'
+    || answerEvent.data.decisionId !== options.decisionId
+    || answerEvent.data.decisionVersion !== options.expectedDecisionVersion
+    || answerEvent.data.contextHash !== options.expectedContextHash
+    || applyEvent === undefined
+    || !applyEvent.success
+    || applyEvent.data.eventType !== 'devloop_decision_apply_started'
+    || applyEvent.data.operationId !== options.applyOperationId
+    || applyEvent.data.ownerPid !== options.applyOwnerPid
+    || applyEvent.data.ownerStartToken !== options.applyOwnerStartToken
+    || applyEvent.data.answerEventId !== projection.answer.eventId
+    || inspectProcessIdentity(options.applyOwnerPid, options.applyOwnerStartToken) !== 'alive'
   ) {
     return {
       passed: false,
@@ -1043,12 +1092,12 @@ export async function continuePullRequestAutomationStage(
     };
   }
 
-  const promotion = await promotePullRequestAutoMerge({
+  const promotion = await promotePullRequestAutoMergeInternal({
     pr: options.pr,
     repoPath,
     repo: options.repo,
     expectedHeadSha: options.expectedHeadSha,
-    humanApproval: options.humanApproval,
+    [HUMAN_APPROVAL_CAPABILITY]: true,
     env,
     runner,
   });
