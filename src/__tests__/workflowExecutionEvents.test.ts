@@ -230,6 +230,23 @@ describe('bindWorkflowExecutionEvents', () => {
     );
   });
 
+  it('run meta abort finalization failureをcaller fallbackへ伝播する', () => {
+    const { bridge, engine, runMetaManager } = createBridgeHarness();
+    runMetaManager.finalize.mockImplementation(() => {
+      throw new Error('run meta finalize failed');
+    });
+
+    expect(() => engine.emit(
+      'workflow:abort',
+      { iteration: 2 },
+      'Step "review" failed',
+    )).toThrowError('run meta finalize failed');
+
+    expect(runMetaManager.finalize).toHaveBeenCalledWith('aborted', 2);
+    expect(bridge.state.abortReason).toBe('Step "review" failed');
+    expect(bridge.state.sessionLog.status).toBe('aborted');
+  });
+
   it('finding ledger analytics の書き込み失敗後も workflow complete を処理する', () => {
     const analyticsPath = join(tmpdir(), `takt-test-ledger-analytics-failure-${Date.now()}`);
     writeFileSync(analyticsPath, 'not a directory', 'utf-8');
@@ -835,7 +852,7 @@ describe('bindWorkflowExecutionEvents', () => {
     }
   });
 
-  it('keeps step:blocked no-throw when run meta and diagnostics fail', () => {
+  it('keeps Decision materialization no-throw when run meta and its diagnostic fail', () => {
     const projectCwd = join(tmpdir(), `takt-workflow-events-no-throw-${randomUUID()}`);
     mkdirSync(projectCwd, { recursive: true });
     const store = new DecisionStore(projectCwd);
@@ -848,10 +865,7 @@ describe('bindWorkflowExecutionEvents', () => {
       harness.runMetaManager.recordBlocked.mockImplementation(() => {
         throw new Error('raw /private/path from metadata writer');
       });
-      harness.out.info.mockImplementation(() => {
-        throw new Error('EPIPE');
-      });
-      harness.out.error.mockImplementation(() => {
+      harness.out.error.mockImplementationOnce(() => {
         throw new Error('EPIPE');
       });
       const step = {

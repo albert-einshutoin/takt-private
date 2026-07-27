@@ -536,45 +536,40 @@ export function bindWorkflowExecutionEvents(
       materializePendingDecision(pending);
     }
 
-    try {
-      interruptAllQueries();
-      syncLatestResumePoint();
-      if (deps.displayRef.current) {
-        deps.displayRef.current.flush();
-        deps.displayRef.current = null;
-      }
-      deps.prefixWriter?.flush();
-      state.abortReason = reason;
-      state.sessionLog = finalizeWorkflowAbort(
-        state.sessionLog,
-        reason,
-        deps.task,
-        deps.workflowConfig.name,
-        state.lastStepName,
-        deps.projectCwd,
-        deps.out.warn,
-      );
-      deps.sessionLogger.onWorkflowAbort(workflowState, reason);
-      deps.runMetaManager.finalize('aborted', workflowState.iteration);
-      deps.writeTraceReportOnce({
-        status: 'aborted',
-        iterations: workflowState.iteration,
-        reason,
-        endTime: new Date().toISOString(),
-      });
-      reportWorkflowAbort(
-        deps.out,
-        state.sessionLog,
-        workflowState.iteration,
-        reason,
-        deps.ndjsonLogPath,
-        deps.shouldNotifyWorkflowAbort,
-        deps.traceDiscovery,
-      );
-    } catch {
-      // EventEmitter callbacks are synchronous. Terminal reporting is
-      // best-effort so an output/logging failure cannot escape engine.emit().
+    interruptAllQueries();
+    syncLatestResumePoint();
+    if (deps.displayRef.current) {
+      deps.displayRef.current.flush();
+      deps.displayRef.current = null;
     }
+    deps.prefixWriter?.flush();
+    state.abortReason = reason;
+    state.sessionLog = finalizeWorkflowAbort(
+      state.sessionLog,
+      reason,
+      deps.task,
+      deps.workflowConfig.name,
+      state.lastStepName,
+      deps.projectCwd,
+      deps.out.warn,
+    );
+    deps.sessionLogger.onWorkflowAbort(workflowState, reason);
+    deps.runMetaManager.finalize('aborted', workflowState.iteration);
+    deps.writeTraceReportOnce({
+      status: 'aborted',
+      iterations: workflowState.iteration,
+      reason,
+      endTime: new Date().toISOString(),
+    });
+    reportWorkflowAbort(
+      deps.out,
+      state.sessionLog,
+      workflowState.iteration,
+      reason,
+      deps.ndjsonLogPath,
+      deps.shouldNotifyWorkflowAbort,
+      deps.traceDiscovery,
+    );
   });
 
   return {
