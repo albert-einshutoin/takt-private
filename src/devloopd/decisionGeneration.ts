@@ -73,22 +73,36 @@ export type IssueScoutDecisionOutcome =
 const WORKFLOW_DECISION_TEXT_MAX = 2_000;
 const WORKFLOW_DECISION_REASON_MAX = 20;
 const WORKFLOW_DECISION_EVIDENCE_MAX = 20;
+const WORKFLOW_DECISION_AGGREGATE_BYTES_MAX = 64 * 1_024;
+const WORKFLOW_DECISION_NODE_MAX = 512;
+const WORKFLOW_DECISION_DEPTH_MAX = 8;
+const WORKFLOW_DECISION_ARRAY_MAX = 50;
+const WORKFLOW_DECISION_OBJECT_KEYS_MAX = 50;
 // Reject instead of cleaning structured blocker fields. Cleaning can change the
 // meaning of a human question, while accepting provider prose would make the
 // feature bridge guess whether a blocked step is asking for authorization.
 // eslint-disable-next-line no-control-regex
 const WORKFLOW_UNSAFE_CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]|\p{Cf}/u;
-const WORKFLOW_SECRET_PATTERN = /(?:\b(?:api[_-]?key|authorization|bearer|password|secret|token)\s*[:=]|\b(?:sk-(?:proj-)?|gh[opusr]_)[A-Za-z0-9_-]{8,})/iu;
-const WORKFLOW_LOCAL_PATH_PATTERN = /(?:^|[\s("'=])(?:\/(?!\/)\S+|[A-Za-z]:[\\/]\S+)/u;
+const WORKFLOW_SECRET_PATTERN = /(?:\b(?:api[_-]?key|authorization|bearer|cookie|password|private[_-]?key|secret|session(?:[_-]?id)?|token)\s*[:=]|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:sk-(?:proj-)?|gh[opusr]_|xox[baprs]-)[A-Za-z0-9_-]{8,}|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)/iu;
+const WORKFLOW_LOCAL_PATH_PATTERN = /(?:\bfile:\/\/\/|\b(?:path|cwd)\s*:\s*(?:\/|[A-Za-z]:[\\/]|\\\\)|(?:^|[\s("'=])(?:\/(?!\/)\S+|[A-Za-z]:[\\/]\S+|\\\\[^\\\s]+\\\S+))/iu;
+const WORKFLOW_URL_QUERY_PATTERN = /\bhttps:\/\/[^\s?#]+[?#][^\s]*/iu;
 const WORKFLOW_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|git|gh|bash|sh|curl)\s+\S+/iu;
+
+function isWorkflowDecisionTextSafe(value: string): boolean {
+  return (
+    !WORKFLOW_UNSAFE_CONTROL_PATTERN.test(value)
+    && !WORKFLOW_SECRET_PATTERN.test(value)
+    && !WORKFLOW_LOCAL_PATH_PATTERN.test(value)
+    && !WORKFLOW_URL_QUERY_PATTERN.test(value)
+    && !WORKFLOW_COMMAND_PATTERN.test(value)
+    && sanitizeSensitiveText(value) === value
+  );
+}
 
 const WorkflowDecisionPublicTextSchema = z.string()
   .min(1)
   .max(WORKFLOW_DECISION_TEXT_MAX)
-  .refine((value) => !WORKFLOW_UNSAFE_CONTROL_PATTERN.test(value), 'unsafe control')
-  .refine((value) => !WORKFLOW_SECRET_PATTERN.test(value), 'secret-bearing text')
-  .refine((value) => !WORKFLOW_LOCAL_PATH_PATTERN.test(value), 'local path')
-  .refine((value) => !WORKFLOW_COMMAND_PATTERN.test(value), 'command text');
+  .refine(isWorkflowDecisionTextSafe, 'unsafe workflow decision text');
 
 const WorkflowDecisionEvidenceSchema = z.object({
   kind: z.enum(['run', 'report', 'changed_path', 'check', 'issue', 'pr', 'policy']),
@@ -170,33 +184,173 @@ export interface WorkflowBlockDecisionInput {
   readonly issueNumber?: number;
 }
 
+function isPlainDataRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+type HumanDecisionPayloadRead =
+  | { readonly status: 'found'; readonly value: unknown }
+  | { readonly status: 'missing' }
+  | { readonly status: 'invalid' };
+
+function readHumanDecisionPayload(structuredOutput: unknown): HumanDecisionPayloadRead {
+  if (structuredOutput === undefined) return { status: 'missing' };
+  if (!isPlainDataRecord(structuredOutput)) return { status: 'invalid' };
+  const descriptors = Object.getOwnPropertyDescriptors(structuredOutput);
+  const keys = Reflect.ownKeys(descriptors);
+  if (
+    keys.length > WORKFLOW_DECISION_OBJECT_KEYS_MAX
+    || keys.some((key) => typeof key !== 'string')
+    || keys.some((key) => {
+      const descriptor = descriptors[key as string];
+      return descriptor === undefined
+        || !Object.hasOwn(descriptor, 'value')
+        || !descriptor.enumerable;
+    })
+  ) {
+    return { status: 'invalid' };
+  }
+  const descriptor = descriptors.humanDecision;
+  if (descriptor === undefined) return { status: 'missing' };
+  return { status: 'found', value: descriptor.value };
+}
+
+function isBoundedSafeWorkflowDecisionPayload(root: unknown): boolean {
+  const stack: Array<{ readonly value: unknown; readonly depth: number }> = [{
+    value: root,
+    depth: 0,
+  }];
+  const seen = new WeakSet<object>();
+  let nodes = 0;
+  let bytes = 0;
+
+  while (stack.length > 0) {
+    const entry = stack.pop();
+    if (entry === undefined) break;
+    nodes += 1;
+    if (
+      nodes > WORKFLOW_DECISION_NODE_MAX
+      || entry.depth > WORKFLOW_DECISION_DEPTH_MAX
+    ) {
+      return false;
+    }
+
+    const value = entry.value;
+    if (typeof value === 'string') {
+      bytes += Buffer.byteLength(JSON.stringify(value), 'utf8');
+      if (
+        bytes > WORKFLOW_DECISION_AGGREGATE_BYTES_MAX
+        || !isWorkflowDecisionTextSafe(value)
+      ) {
+        return false;
+      }
+      continue;
+    }
+    if (
+      value === null
+      || typeof value === 'boolean'
+      || (typeof value === 'number' && Number.isFinite(value))
+    ) {
+      bytes += Buffer.byteLength(String(value), 'utf8');
+      if (bytes > WORKFLOW_DECISION_AGGREGATE_BYTES_MAX) return false;
+      continue;
+    }
+    if (typeof value !== 'object' || seen.has(value)) return false;
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      if (value.length > WORKFLOW_DECISION_ARRAY_MAX) return false;
+      bytes += 2 + Math.max(0, value.length - 1);
+      if (bytes > WORKFLOW_DECISION_AGGREGATE_BYTES_MAX) return false;
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const keys = Reflect.ownKeys(descriptors);
+      if (
+        Object.getPrototypeOf(value) !== Array.prototype
+        || keys.length !== value.length + 1
+        || keys.some((key) => typeof key !== 'string')
+      ) {
+        return false;
+      }
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = descriptors[String(index)];
+        if (
+          descriptor === undefined
+          || !Object.hasOwn(descriptor, 'value')
+          || !descriptor.enumerable
+        ) {
+          return false;
+        }
+        stack.push({ value: descriptor.value, depth: entry.depth + 1 });
+      }
+      continue;
+    }
+
+    if (!isPlainDataRecord(value)) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (
+      keys.length > WORKFLOW_DECISION_OBJECT_KEYS_MAX
+      || keys.some((key) => typeof key !== 'string')
+    ) {
+      return false;
+    }
+    bytes += 2 + Math.max(0, keys.length - 1);
+    for (const key of keys as string[]) {
+      bytes += Buffer.byteLength(JSON.stringify(key), 'utf8') + 1;
+      const descriptor = descriptors[key];
+      if (
+        bytes > WORKFLOW_DECISION_AGGREGATE_BYTES_MAX
+        || descriptor === undefined
+        || !Object.hasOwn(descriptor, 'value')
+        || !descriptor.enumerable
+      ) {
+        return false;
+      }
+      stack.push({ value: descriptor.value, depth: entry.depth + 1 });
+    }
+  }
+
+  return true;
+}
+
 export function classifyWorkflowDecisionBlock(
   response: AgentResponse,
 ): WorkflowDecisionClassification {
-  if (response.status !== 'blocked') {
-    return { eligible: false, issue: 'not_blocked' };
-  }
-  if (
-    response.error !== undefined
-    || response.errorKind !== undefined
-    || response.failureCategory !== undefined
-  ) {
-    return { eligible: false, issue: 'provider_runtime_failure' };
-  }
-  if (
-    response.structuredOutput === undefined
-    || !Object.hasOwn(response.structuredOutput, 'humanDecision')
-  ) {
-    return { eligible: false, issue: 'missing_structured_output' };
-  }
+  try {
+    if (response.status !== 'blocked') {
+      return { eligible: false, issue: 'not_blocked' };
+    }
+    if (
+      response.error !== undefined
+      || response.errorKind !== undefined
+      || response.failureCategory !== undefined
+      || response.rateLimitInfo !== undefined
+    ) {
+      return { eligible: false, issue: 'provider_runtime_failure' };
+    }
 
-  const parsed = WorkflowHumanDecisionSchema.safeParse(
-    response.structuredOutput.humanDecision,
-  );
-  if (!parsed.success) {
+    const payload = readHumanDecisionPayload(response.structuredOutput);
+    if (payload.status === 'missing') {
+      return { eligible: false, issue: 'missing_structured_output' };
+    }
+    if (
+      payload.status === 'invalid'
+      || !isBoundedSafeWorkflowDecisionPayload(payload.value)
+    ) {
+      return { eligible: false, issue: 'invalid_structured_output' };
+    }
+    const parsed = WorkflowHumanDecisionSchema.safeParse(payload.value);
+    if (!parsed.success) {
+      return { eligible: false, issue: 'invalid_structured_output' };
+    }
+    return { eligible: true, decision: parsed.data };
+  } catch {
+    // Provider-owned objects can contain proxies or hostile accessors. Parsing
+    // failure must remain a local classification issue, never a workflow crash.
     return { eligible: false, issue: 'invalid_structured_output' };
   }
-  return { eligible: true, decision: parsed.data };
 }
 
 export function parseWorkflowHumanDecision(

@@ -854,6 +854,17 @@ const workflowWhy = {
   }],
 };
 
+function workflowHumanDecision(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 1,
+    category: 'permission',
+    question: 'May the workflow continue with the requested external action?',
+    why: workflowWhy,
+    answer: { kind: 'yes_no', rationaleRequired: true },
+    ...overrides,
+  };
+}
+
 describe('ensureDecisionForWorkflowBlock', () => {
   let repoPath: string;
   let store: DecisionStore;
@@ -976,6 +987,43 @@ describe('ensureDecisionForWorkflowBlock', () => {
   });
 
   it.each([
+    ['null', null],
+    ['array', []],
+    ['date', new Date('2026-07-28T00:00:00.000Z')],
+    ['inherited object', Object.create({ humanDecision: workflowHumanDecision() })],
+  ])('rejects a non-plain structuredOutput without throwing: %s', (_name, structuredOutput) => {
+    const response = {
+      ...blockedResponse(),
+      structuredOutput,
+    } as AgentResponse;
+
+    expect(() => classifyWorkflowDecisionBlock(response)).not.toThrow();
+    expect(classifyWorkflowDecisionBlock(response)).toEqual({
+      eligible: false,
+      issue: 'invalid_structured_output',
+    });
+    expect(ensureDecisionForWorkflowBlock(store, {
+      response,
+      stepName: 'plan',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-non-plain',
+    })).toBeUndefined();
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('accepts a null-prototype structuredOutput containing an own humanDecision', () => {
+    const structuredOutput = Object.create(null) as Record<string, unknown>;
+    structuredOutput.humanDecision = workflowHumanDecision();
+    const response = {
+      ...blockedResponse(),
+      structuredOutput,
+    };
+
+    expect(classifyWorkflowDecisionBlock(response).eligible).toBe(true);
+  });
+
+  it.each([
     { error: 'provider failed' },
     { errorKind: 'rate_limit' as const },
     { failureCategory: 'provider_error' as const },
@@ -999,6 +1047,30 @@ describe('ensureDecisionForWorkflowBlock', () => {
       workflowName: 'takt-default',
       repoPath,
       runSlug: 'run-provider',
+    })).toBeUndefined();
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('rejects rateLimitInfo even without errorKind or failureCategory', () => {
+    const response = {
+      ...blockedResponse(workflowHumanDecision()),
+      rateLimitInfo: {
+        provider: 'mock' as const,
+        detectedAt: new Date('2026-07-28T00:00:00.000Z'),
+        source: 'sdk_error' as const,
+      },
+    };
+
+    expect(classifyWorkflowDecisionBlock(response)).toEqual({
+      eligible: false,
+      issue: 'provider_runtime_failure',
+    });
+    expect(ensureDecisionForWorkflowBlock(store, {
+      response,
+      stepName: 'plan',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-rate-info',
     })).toBeUndefined();
     expect(existsSync(store.ledgerPath)).toBe(false);
   });
@@ -1086,5 +1158,128 @@ describe('ensureDecisionForWorkflowBlock', () => {
       });
     }
     expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it.each([
+    ['question', (value: string) => workflowHumanDecision({ question: value })],
+    ['why summary', (value: string) => workflowHumanDecision({
+      why: { ...workflowWhy, summary: value },
+    })],
+    ['reason', (value: string) => workflowHumanDecision({
+      why: { ...workflowWhy, reasons: [value] },
+    })],
+    ['evidence reference', (value: string) => workflowHumanDecision({
+      why: {
+        ...workflowWhy,
+        evidence: [{ ...workflowWhy.evidence[0], reference: value }],
+      },
+    })],
+    ['evidence summary', (value: string) => workflowHumanDecision({
+      why: {
+        ...workflowWhy,
+        evidence: [{ ...workflowWhy.evidence[0], summary: value }],
+      },
+    })],
+  ])('applies the same safe text policy to %s', (_field, buildDecision) => {
+    const unsafeValues = [
+      'AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF',
+      'token=workflow-secret',
+      'password: workflow-secret',
+      'Cookie: session=workflow-secret',
+      'Authorization: Bearer workflow-secret',
+      '-----BEGIN PRIVATE KEY-----',
+      'file:///Users/private/workflow.txt',
+      'path:/Users/private/workflow.txt',
+      'cwd:/root/private-workflow',
+      '/root/private-workflow',
+      String.raw`C:\Users\private\workflow.txt`,
+      String.raw`\\server\share\workflow.txt`,
+      'https://user:password@github.com/example/repo',
+      'https://github.com/example/repo?token=workflow-secret',
+      '\u001b[31munsafe\u001b[0m',
+      'unsafe\u202Etext',
+    ];
+
+    for (const value of unsafeValues) {
+      const response = blockedResponse(buildDecision(value));
+      expect(classifyWorkflowDecisionBlock(response)).toEqual({
+        eligible: false,
+        issue: 'invalid_structured_output',
+      });
+      expect(ensureDecisionForWorkflowBlock(store, {
+        response,
+        stepName: 'plan',
+        workflowName: 'takt-default',
+        repoPath,
+        runSlug: 'run-unsafe-field',
+      })).toBeUndefined();
+    }
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('rejects cyclic, accessor-bearing, and aggregate-oversized payloads without throwing', () => {
+    const cyclic = workflowHumanDecision() as Record<string, unknown>;
+    cyclic.cycle = cyclic;
+    let getterCalls = 0;
+    const accessor = workflowHumanDecision();
+    Object.defineProperty(accessor, 'hidden', {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error('must not execute provider getter');
+      },
+    });
+    const oversized = {
+      ...workflowHumanDecision(),
+      padding: Array.from({ length: 140 }, () => 'x'.repeat(2_000)),
+    };
+    expect(Buffer.byteLength(JSON.stringify(oversized), 'utf8')).toBeGreaterThan(280_000);
+
+    for (const humanDecision of [cyclic, accessor, oversized]) {
+      const response = blockedResponse(humanDecision);
+      expect(() => classifyWorkflowDecisionBlock(response)).not.toThrow();
+      expect(classifyWorkflowDecisionBlock(response)).toEqual({
+        eligible: false,
+        issue: 'invalid_structured_output',
+      });
+      expect(ensureDecisionForWorkflowBlock(store, {
+        response,
+        stepName: 'plan',
+        workflowName: 'takt-default',
+        repoPath,
+        runSlug: 'run-untrusted-payload',
+      })).toBeUndefined();
+    }
+    expect(getterCalls).toBe(0);
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('accepts a bounded aggregate payload near the workflow contract limit', () => {
+    const repeatedSafeText = 'Context remains ambiguous and needs an explicit owner choice. ';
+    const decision = workflowHumanDecision({
+      question: repeatedSafeText.repeat(20),
+      why: {
+        summary: repeatedSafeText.repeat(20),
+        reasons: Array.from({ length: 19 }, () => repeatedSafeText.repeat(20)),
+        evidence: Array.from({ length: 15 }, (_, index) => ({
+          kind: 'run',
+          reference: `bounded-evidence-${index + 1}`,
+          summary: repeatedSafeText.repeat(20),
+        })),
+      },
+    });
+    const response = blockedResponse(decision);
+
+    const aggregateBytes = Buffer.byteLength(JSON.stringify(decision), 'utf8');
+    expect(aggregateBytes).toBeGreaterThan(40 * 1_024);
+    expect(aggregateBytes).toBeLessThan(64 * 1_024);
+    expect(classifyWorkflowDecisionBlock(response).eligible).toBe(true);
+    expect(ensureDecisionForWorkflowBlock(store, {
+      response,
+      stepName: 'plan',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-bounded-aggregate',
+    })?.status).toBe('open');
   });
 });
