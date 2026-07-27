@@ -138,6 +138,7 @@ export interface IssueScoutReport {
 
 export type IssueScoutBatchFailureCode =
   | 'candidate_count_exceeded'
+  | 'candidate_invalid'
   | 'candidate_bytes_exceeded';
 
 export interface IssueScoutBatchFailure {
@@ -195,6 +196,9 @@ const DEFAULT_BACKLOG_FILES = [
 
 export const ISSUE_SCOUT_MAX_CANDIDATES = 256;
 export const ISSUE_SCOUT_MAX_BATCH_BYTES = 256 * 1024;
+export const ISSUE_SCOUT_MAX_CANDIDATE_TEXT_LENGTH = 4_000;
+const ISSUE_SCOUT_MAX_CANDIDATE_TEXT_BYTES = 16 * 1024;
+const ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH = 50;
 const ISSUE_SCOUT_MAX_SKIPPED_SUMMARY = 50;
 const ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY = 50;
 const ISSUE_SCOUT_SUMMARY_TEXT_LENGTH = 512;
@@ -269,37 +273,76 @@ function sanitizeBatchText(text: string): string {
     .trim();
 }
 
-function normalizedCandidateForBudget(candidate: IssueScoutCandidate): unknown {
-  const strings = (values: readonly string[]) => values.map(sanitizeBatchText);
-  return {
-    sourceId: candidate.sourceId,
-    title: sanitizeBatchText(candidate.title),
-    summary: sanitizeBatchText(candidate.summary),
-    lane: candidate.lane,
-    policyCategory: candidate.policyCategory,
-    riskBucket: candidate.riskBucket,
-    evidence: candidate.evidence.map((artifact) => ({
-      kind: artifact.kind,
-      path: artifact.path === undefined ? undefined : '[REDACTED PATH]',
-      url: artifact.url === undefined ? undefined : '[REDACTED URL]',
-      summary: sanitizeBatchText(artifact.summary),
-    })),
-    acceptanceCriteria: strings(candidate.acceptanceCriteria),
-    verificationCommands: strings(candidate.verificationCommands),
-    escalationCriteria: strings(candidate.escalationCriteria),
-    expectedChangedSurfaces: strings(candidate.expectedChangedSurfaces),
-    labels: strings(candidate.labels),
-    laneEvidence: strings(candidate.laneEvidence),
-  };
+class IssueScoutCandidatePreflightError extends Error {
+  readonly code: IssueScoutBatchFailureCode;
+  readonly candidateBytes?: number;
+
+  constructor(code: IssueScoutBatchFailureCode, candidateBytes?: number) {
+    super(`Issue Scout candidate preflight failed: ${code}`);
+    this.name = 'IssueScoutCandidatePreflightError';
+    this.code = code;
+    this.candidateBytes = candidateBytes;
+  }
 }
 
 export function measureIssueScoutCandidateBatchBytes(
   candidates: readonly IssueScoutCandidate[],
 ): number {
-  let bytes = 2;
-  for (const [index, candidate] of candidates.entries()) {
-    if (index > 0) bytes += 1;
-    bytes += Buffer.byteLength(JSON.stringify(normalizedCandidateForBudget(candidate)), 'utf8');
+  if (candidates.length > ISSUE_SCOUT_MAX_CANDIDATES) {
+    throw new IssueScoutCandidatePreflightError('candidate_count_exceeded');
+  }
+  let bytes = 0;
+  const addString = (value: unknown): void => {
+    // Length and array shape checks intentionally precede sanitization. This
+    // prevents broad secret-matching regexes from receiving attacker-sized text.
+    if (typeof value !== 'string' || value.length > ISSUE_SCOUT_MAX_CANDIDATE_TEXT_LENGTH) {
+      throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+    }
+    const valueBytes = Buffer.byteLength(value, 'utf8');
+    if (valueBytes > ISSUE_SCOUT_MAX_CANDIDATE_TEXT_BYTES) {
+      throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+    }
+    bytes += valueBytes;
+    if (bytes > ISSUE_SCOUT_MAX_BATCH_BYTES) {
+      throw new IssueScoutCandidatePreflightError('candidate_bytes_exceeded', bytes);
+    }
+  };
+  const addStringArray = (values: unknown): void => {
+    if (!Array.isArray(values) || values.length > ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) {
+      throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+    }
+    for (const value of values) addString(value);
+  };
+
+  for (const candidate of candidates) {
+    addString(candidate.id);
+    addString(candidate.sourceId);
+    addString(candidate.title);
+    addString(candidate.summary);
+    addString(candidate.lane);
+    addString(candidate.policyCategory);
+    addString(candidate.riskBucket);
+    if (
+      !Array.isArray(candidate.evidence)
+      || candidate.evidence.length > ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH
+    ) {
+      throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+    }
+    for (const artifact of candidate.evidence) {
+      if (artifact === null || typeof artifact !== 'object') {
+        throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+      }
+      addString(artifact.kind);
+      if (artifact.path !== undefined) addString(artifact.path);
+      if (artifact.url !== undefined) addString(artifact.url);
+      addString(artifact.summary);
+    }
+    addStringArray(candidate.acceptanceCriteria);
+    addStringArray(candidate.verificationCommands);
+    addStringArray(candidate.escalationCriteria);
+    addStringArray(candidate.expectedChangedSurfaces);
+    addStringArray(candidate.labels);
+    addStringArray(candidate.laneEvidence);
   }
   return bytes;
 }
@@ -1122,9 +1165,16 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   const candidates = candidateCount <= ISSUE_SCOUT_MAX_CANDIDATES
     ? observations.flatMap((observation) => observation.candidates)
     : [];
-  const candidateBytes = candidateCount <= ISSUE_SCOUT_MAX_CANDIDATES
-    ? measureIssueScoutCandidateBatchBytes(candidates)
-    : undefined;
+  let preflightFailure: IssueScoutCandidatePreflightError | undefined;
+  if (candidateCount <= ISSUE_SCOUT_MAX_CANDIDATES) {
+    try {
+      measureIssueScoutCandidateBatchBytes(candidates);
+    } catch (error) {
+      preflightFailure = error instanceof IssueScoutCandidatePreflightError
+        ? error
+        : new IssueScoutCandidatePreflightError('candidate_invalid');
+    }
+  }
   const batchFailure: IssueScoutBatchFailure | undefined = (
     candidateCount > ISSUE_SCOUT_MAX_CANDIDATES
       ? {
@@ -1133,11 +1183,13 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
         maxCandidateCount: ISSUE_SCOUT_MAX_CANDIDATES,
         maxBatchBytes: ISSUE_SCOUT_MAX_BATCH_BYTES,
       }
-      : candidateBytes !== undefined && candidateBytes > ISSUE_SCOUT_MAX_BATCH_BYTES
+      : preflightFailure !== undefined
         ? {
-          code: 'candidate_bytes_exceeded',
-          candidateCount: candidates.length,
-          candidateBytes,
+          code: preflightFailure.code,
+          candidateCount,
+          ...(preflightFailure.candidateBytes === undefined
+            ? {}
+            : { candidateBytes: preflightFailure.candidateBytes }),
           maxCandidateCount: ISSUE_SCOUT_MAX_CANDIDATES,
           maxBatchBytes: ISSUE_SCOUT_MAX_BATCH_BYTES,
         }

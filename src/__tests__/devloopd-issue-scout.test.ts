@@ -449,18 +449,27 @@ describe('devloopd issue-scout', () => {
   });
 
   it('rejects a sanitized aggregate just over the byte budget without partial processing', async () => {
-    const base = buildIssueScoutCandidate({
+    const baseCandidates = Array.from({ length: 100 }, (_, index) => buildIssueScoutCandidate({
       sourceId: 'local_backlog',
-      title: 'Aggregate byte boundary',
+      title: `Aggregate byte boundary ${index}`,
       summary: '',
       lane: 'docs_tests_tooling',
-      policyCategory: 'product_policy',
-      riskBucket: 'high',
+    }));
+    let remainingBytes = ISSUE_SCOUT_MAX_BATCH_BYTES
+      - measureIssueScoutCandidateBatchBytes(baseCandidates);
+    const atLimit = baseCandidates.map((candidate) => {
+      const fill = Math.min(4_000, remainingBytes);
+      remainingBytes -= fill;
+      return { ...candidate, summary: 'x'.repeat(fill) };
     });
-    const overhead = measureIssueScoutCandidateBatchBytes([base]);
-    const atLimit = { ...base, summary: 'x'.repeat(ISSUE_SCOUT_MAX_BATCH_BYTES - overhead) };
-    expect(measureIssueScoutCandidateBatchBytes([atLimit])).toBe(ISSUE_SCOUT_MAX_BATCH_BYTES);
-    const overLimit = { ...atLimit, summary: `${atLimit.summary}x` };
+    expect(remainingBytes).toBe(0);
+    expect(measureIssueScoutCandidateBatchBytes(atLimit)).toBe(ISSUE_SCOUT_MAX_BATCH_BYTES);
+    const expandableIndex = atLimit.findIndex((candidate) => candidate.summary.length < 4_000);
+    const overLimit = atLimit.map((candidate, index) => (
+      index === expandableIndex
+        ? { ...candidate, summary: `${candidate.summary}x` }
+        : candidate
+    ));
 
     const exactReport = await runIssueScout({
       repoPath,
@@ -471,7 +480,7 @@ describe('devloopd issue-scout', () => {
           sourceId: 'local_backlog',
           status: 'success',
           summary: 'aggregate exact boundary',
-          candidates: [atLimit],
+          candidates: atLimit,
           nextActions: [],
           artifacts: [],
         }),
@@ -491,7 +500,7 @@ describe('devloopd issue-scout', () => {
           sourceId: 'local_backlog',
           status: 'success',
           summary: 'aggregate byte boundary',
-          candidates: [overLimit],
+          candidates: overLimit,
           nextActions: [],
           artifacts: [],
         }),
@@ -506,7 +515,7 @@ describe('devloopd issue-scout', () => {
       passed: false,
       batchFailure: {
         code: 'candidate_bytes_exceeded',
-        candidateCount: 1,
+        candidateCount: 100,
         candidateBytes: ISSUE_SCOUT_MAX_BATCH_BYTES + 1,
       },
     });
@@ -611,6 +620,99 @@ describe('devloopd issue-scout', () => {
         createHash('sha256').update(secret, 'utf8').digest('hex'),
       );
     }
+  });
+
+  it.each([32 * 1024, 64 * 1024])(
+    'preflights %i-character token-bearing fields before sanitization',
+    async (length) => {
+      const secret = 'dictionary-token-value';
+      const oversized = `${'a'.repeat(length / 2)}token=${secret}${'a'.repeat(length / 2)}`;
+      const base = buildIssueScoutCandidate({
+        sourceId: 'local_backlog',
+        title: 'Raw preflight candidate',
+        summary: 'bounded fixture',
+        lane: 'feature_improvement',
+        policyCategory: 'product_policy',
+        riskBucket: 'high',
+      });
+      const candidates = Array.from({ length: 4 }, (_, index) => ({
+        ...base,
+        id: `${base.id}-${index}`,
+        summary: oversized,
+      }));
+      const startedAt = performance.now();
+      const report = await runIssueScout({
+        repoPath,
+        runner: runner(),
+        sources: [{
+          id: 'local_backlog',
+          scan: () => ({
+            sourceId: 'local_backlog',
+            status: 'success',
+            summary: 'raw preflight fixture',
+            candidates,
+            nextActions: [],
+            artifacts: [],
+          }),
+        }],
+        existingWork: [],
+        dryRun: true,
+        now: new Date('2026-07-28T00:00:00.000Z'),
+      });
+      const elapsedMs = performance.now() - startedAt;
+      const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+      expect(report).toMatchObject({
+        passed: false,
+        batchFailure: {
+          code: 'candidate_invalid',
+          candidateCount: 4,
+        },
+      });
+      expect(elapsedMs).toBeLessThan(1_000);
+      expect(ledger.split('\n').filter(Boolean)).toHaveLength(1);
+      expect(ledger).not.toContain(secret);
+      expect(ledger).not.toContain('"eventType":"devloop_decision_requested"');
+    },
+  );
+
+  it('preflights oversized candidate arrays before sanitizing their elements', async () => {
+    const secret = 'array-element-secret';
+    const candidate = {
+      ...buildIssueScoutCandidate({
+        sourceId: 'local_backlog',
+        title: 'Raw array preflight candidate',
+        summary: 'bounded fixture',
+        lane: 'feature_improvement',
+        policyCategory: 'product_policy',
+        riskBucket: 'high',
+      }),
+      laneEvidence: Array.from({ length: 51 }, () => `token=${secret}`),
+    };
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [{
+        id: 'local_backlog',
+        scan: () => ({
+          sourceId: 'local_backlog',
+          status: 'success',
+          summary: 'raw array preflight fixture',
+          candidates: [candidate],
+          nextActions: [],
+          artifacts: [],
+        }),
+      }],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+    expect(report.batchFailure?.code).toBe('candidate_invalid');
+    expect(ledger).not.toContain(secret);
+    expect(ledger).not.toContain('"eventType":"devloop_decision_requested"');
   });
 
   it('does not create decisions for low-risk, duplicate, or backoff candidates', async () => {
