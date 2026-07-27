@@ -12,6 +12,7 @@ import {
   type DecisionStoreErrorCode,
 } from '../../devloopd/decisionStore.js';
 import { applyDecision } from '../../devloopd/decisionResume.js';
+import { syncDecisionToGithub } from '../../devloopd/decisionGithubSync.js';
 
 const MAX_STDIN_JSON_BYTES = 1024 * 1024;
 const CONTEXT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -38,6 +39,7 @@ type DecisionCliLocalErrorCode =
   | 'empty_stdin'
   | 'invalid_answer_input'
   | 'invalid_apply_input'
+  | 'invalid_sync_input'
   | 'invalid_status'
   | 'invalid_stdin_json'
   | 'missing_decision_id'
@@ -52,6 +54,7 @@ const CLI_ERROR_MESSAGES: Readonly<Record<DecisionCliLocalErrorCode, string>> = 
   empty_stdin: '標準入力に回答JSONがありません。',
   invalid_answer_input: '回答JSONの形式が正しくありません。',
   invalid_apply_input: '適用条件の形式が正しくありません。',
+  invalid_sync_input: 'GitHub同期対象の形式が正しくありません。',
   invalid_status: '指定された状態は利用できません。',
   invalid_stdin_json: '標準入力をJSONとして解析できません。',
   missing_decision_id: '判断IDを指定してください。',
@@ -385,5 +388,64 @@ export function registerDecisionsCommand(program: Command): void {
       } catch (error) {
         writeError(storeFailure(error), options.json === true);
       }
+    });
+
+  decisions
+    .command('sync-github')
+    .description('判断状態の安全な要約を任意でGitHubへ同期する')
+    .option('--cwd <path>', '対象リポジトリ', process.cwd())
+    .option('--id <decision-id>', '判断ID')
+    .option('--json', '機械可読JSONを表示する')
+    .action(async (options: { cwd: string; id?: string; json?: boolean }) => {
+      if (
+        options.id === undefined
+        || options.id.length > 200
+        || !IDENTIFIER_PATTERN.test(options.id)
+      ) {
+        writeError(failure('invalid_sync_input'), options.json === true);
+        return;
+      }
+      const repoPath = resolveExistingRepository(options.cwd);
+      if (repoPath === undefined) {
+        writeError(failure('repository_unavailable'), options.json === true);
+        return;
+      }
+
+      let result;
+      try {
+        result = await syncDecisionToGithub({
+          store: new DecisionStore(repoPath),
+          decisionId: options.id,
+        });
+      } catch (error) {
+        writeError(storeFailure(error), options.json === true);
+        return;
+      }
+      if (options.json === true) {
+        // GitHub output and private ledger fields are never reflected. Stable
+        // identifiers and fixed status/error codes are sufficient for TaktDesk.
+        console.log(JSON.stringify(result.status === 'synced'
+          ? {
+            schemaVersion: 1,
+            ok: true,
+            decisionId: result.decisionId,
+            status: result.status,
+            existing: result.existing,
+            commentId: result.commentId,
+          }
+          : {
+            schemaVersion: 1,
+            ok: false,
+            decisionId: result.decisionId,
+            status: result.status,
+            errorCode: result.errorCode,
+            sanitizedError: result.sanitizedError,
+          }, null, 2));
+      } else if (result.status === 'synced') {
+        console.log(`判断 ${result.decisionId} の状態をGitHubへ同期しました。`);
+      } else {
+        console.error(`判断 ${result.decisionId} のGitHub同期に失敗しました。`);
+      }
+      if (result.status !== 'synced') process.exitCode = 1;
     });
 }

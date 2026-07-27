@@ -202,6 +202,41 @@ describe('devloopd decisions CLI', () => {
     });
   });
 
+  it('fails GitHub sync with fixed output when no typed subject target exists', () => {
+    const syncStore = new DecisionStore(repoPath);
+    syncStore.answer({
+      decisionId: request.decisionId,
+      expectedDecisionVersion: request.decisionVersion,
+      expectedContextHash: request.contextHash,
+      value: { text: 'private sync answer' },
+      rationale: 'private sync rationale',
+      idempotencyKey: 'cli-sync-answer',
+    }, 'local:test', { eventId: 'evt_cli_sync_answered' });
+
+    const result = runCli([
+      'decisions',
+      'sync-github',
+      '--cwd',
+      repoPath,
+      '--id',
+      request.decisionId,
+      '--json',
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).not.toContain('private sync answer');
+    expect(result.stdout).not.toContain('private sync rationale');
+    expect(JSON.parse(result.stdout)).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      decisionId: request.decisionId,
+      status: 'failed',
+      errorCode: 'github_target_unavailable',
+      sanitizedError: 'GitHub同期に失敗しました。',
+    });
+  });
+
   it('applies a manual-only answer without reflecting the answer body', () => {
     const yesNoRequest = makeRequest(repoPath, 'dec_cli_apply', 'yes_no');
     const applyStore = new DecisionStore(repoPath);

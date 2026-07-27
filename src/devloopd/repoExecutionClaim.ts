@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
@@ -35,6 +35,15 @@ export interface RepoExecutionClaimOptions {
    */
   readonly beforeReleaseAttempt?: (attempt: number) => void;
   readonly maxReleaseAttempts?: number;
+}
+
+export class RepoKernelAdvisoryLockError extends Error {
+  readonly code = 'kernel_advisory_lock_unavailable';
+
+  constructor() {
+    super('Repository kernel advisory lock is unavailable');
+    this.name = 'RepoKernelAdvisoryLockError';
+  }
 }
 
 const DEFAULT_RELEASE_ATTEMPTS = 3;
@@ -146,17 +155,19 @@ export function inspectProcessIdentity(
   }
 }
 
-function advisoryLockCommand(): { command: string; args: (lockPath: string) => string[] } | undefined {
+function advisoryLockCommand(
+  timeoutSeconds = 5,
+): { command: string; args: (lockPath: string) => string[] } | undefined {
   if (existsSync('/usr/bin/lockf')) {
     return {
       command: '/usr/bin/lockf',
-      args: (lockPath) => ['-t', '5', lockPath],
+      args: (lockPath) => ['-t', String(timeoutSeconds), lockPath],
     };
   }
   if (existsSync('/usr/bin/flock')) {
     return {
       command: '/usr/bin/flock',
-      args: (lockPath) => ['-x', '-w', '5', lockPath],
+      args: (lockPath) => ['-x', '-w', String(timeoutSeconds), lockPath],
     };
   }
   return undefined;
@@ -206,6 +217,90 @@ function secureClaimDirectory(path: string): void {
     || (stat.mode & 0o022) !== 0
   ) {
     throw new Error('Repository execution claim directory is not secure');
+  }
+}
+
+const ADVISORY_LOCK_HOLDER_SCRIPT = String.raw`
+process.stdout.write('ready\n');
+process.stdin.resume();
+process.stdin.once('end', () => process.exit(0));
+`;
+
+/**
+ * Holds a kernel-managed repository lock across an asynchronous external
+ * operation. The helper owns the descriptor, so process death closes it and
+ * releases the lock without inspecting or unlinking another owner's file.
+ */
+export async function withRepoKernelAdvisoryLock<T>(
+  repoPath: string,
+  lockName: string,
+  operation: () => Promise<T>,
+  timeoutMs = 60_000,
+): Promise<T> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(lockName)) {
+    throw new RepoKernelAdvisoryLockError();
+  }
+  const lockPath = join(repoPath, '.takt', 'devloop', `${lockName}.kernel-lock`);
+  secureClaimDirectory(lockPath);
+  const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1_000));
+  const advisory = advisoryLockCommand(timeoutSeconds);
+  if (advisory === undefined) throw new RepoKernelAdvisoryLockError();
+
+  const child = spawn(advisory.command, [
+    ...advisory.args(lockPath),
+    process.execPath,
+    '-e',
+    ADVISORY_LOCK_HOLDER_SCRIPT,
+  ], {
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+
+  await new Promise<void>((resolveReady, rejectReady) => {
+    let settled = false;
+    let stdout = '';
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      rejectReady(new RepoKernelAdvisoryLockError());
+    }, timeoutMs + 2_000);
+    const finish = (error?: RepoKernelAdvisoryLockError): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error === undefined) resolveReady();
+      else rejectReady(error);
+    };
+    child.once('error', () => finish(new RepoKernelAdvisoryLockError()));
+    child.once('exit', () => finish(new RepoKernelAdvisoryLockError()));
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+      if (stdout === 'ready\n') finish();
+      else if (stdout.length > 6 || !'ready\n'.startsWith(stdout)) {
+        child.kill('SIGKILL');
+        finish(new RepoKernelAdvisoryLockError());
+      }
+    });
+  });
+
+  try {
+    return await operation();
+  } finally {
+    child.stdin?.end();
+    await new Promise<void>((resolveExit) => {
+      if (child.exitCode !== null) {
+        resolveExit();
+        return;
+      }
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        resolveExit();
+      }, 2_000);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        resolveExit();
+      });
+    });
   }
 }
 
