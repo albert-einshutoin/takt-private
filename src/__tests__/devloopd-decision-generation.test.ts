@@ -1158,6 +1158,27 @@ describe('ensureDecisionForWorkflowBlock', () => {
   });
 
   it.each([
+    '_http://localhost/callback?code=oauth-prefixed',
+    'prefix_http://localhost/callback?code=oauth-prefixed',
+    '(http://localhost/callback?code=oauth-prefixed)',
+  ])('rejects a prefixed HTTP OAuth callback without persisting it: %s', (question) => {
+    const response = blockedResponse(workflowHumanDecision({ question }));
+
+    expect(classifyWorkflowDecisionBlock(response)).toMatchObject({
+      classification: 'invalid_contract',
+      issue: 'invalid_structured_output',
+    });
+    expect(ensureDecisionForWorkflowBlock(store, {
+      response,
+      stepName: 'review',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-prefixed-oauth-url',
+    })).toBeUndefined();
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it.each([
     ['unknown schema', { schemaVersion: 2 }],
     ['extra command', { command: 'npm publish' }],
     ['invalid answer kind', { answer: { kind: 'choice' } }],

@@ -1,3 +1,4 @@
+import { types as nodeTypes } from 'node:util';
 import { interruptAllQueries } from '../../../infra/claude/query-manager.js';
 import type { WorkflowResumePointEntry } from '../../../core/models/index.js';
 import type { WorkflowEngine } from '../../../core/workflow/index.js';
@@ -22,13 +23,10 @@ import {
 } from './workflowExecutionReporting.js';
 import {
   classifyWorkflowDecisionBlock,
-  DecisionGenerationError,
   ensureDecisionForWorkflowBlock,
+  type WorkflowHumanDecision,
 } from '../../../devloopd/decisionGeneration.js';
-import {
-  DecisionStore,
-  DecisionStoreError,
-} from '../../../devloopd/decisionStore.js';
+import { DecisionStore } from '../../../devloopd/decisionStore.js';
 
 export interface WorkflowExecutionEventState {
   abortReason?: string;
@@ -166,6 +164,72 @@ function resolveDisplayProgress(
   };
 }
 
+const BLOCKED_WORKFLOW_ABORT_REASON = 'Workflow blocked and no user input provided';
+const DECISION_STORE_ERROR_CODES = new Set([
+  'ledger_malformed',
+  'ledger_incompatible',
+  'ledger_unavailable',
+  'ledger_capacity_exceeded',
+  'decision_not_found',
+  'decision_quarantined',
+  'repository_mismatch',
+  'stale_version',
+  'stale_context',
+  'decision_not_open',
+  'invalid_answer',
+  'rationale_required',
+  'idempotency_conflict',
+  'request_conflict',
+  'invalid_identifier',
+]);
+const DECISION_GENERATION_ERROR_CODES = new Set([
+  'candidate_not_escalated',
+  'candidate_invalid',
+  'decision_invalid',
+  'automation_action_not_escalated',
+]);
+
+function readOwnString(error: object, key: string): string | undefined {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, key);
+    return descriptor !== undefined
+      && Object.hasOwn(descriptor, 'value')
+      && typeof descriptor.value === 'string'
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function classifyDecisionMaterializationError(error: unknown): string {
+  if (
+    error === null
+    || (typeof error !== 'object' && typeof error !== 'function')
+    || nodeTypes.isProxy(error)
+  ) {
+    return 'decision_generation_failed';
+  }
+  const name = readOwnString(error, 'name');
+  const code = readOwnString(error, 'code');
+  if (name === 'DecisionStoreError' && code !== undefined && DECISION_STORE_ERROR_CODES.has(code)) {
+    return `decision_store_${code}`;
+  }
+  if (
+    name === 'DecisionGenerationError'
+    && code !== undefined
+    && DECISION_GENERATION_ERROR_CODES.has(code)
+  ) {
+    return `decision_generation_${code}`;
+  }
+  return 'decision_generation_failed';
+}
+
+interface PendingWorkflowDecision {
+  readonly stepName: string;
+  readonly decision: WorkflowHumanDecision;
+}
+
 export function bindWorkflowExecutionEvents(
   deps: WorkflowExecutionEventBridgeDeps,
 ): WorkflowExecutionEventBridge {
@@ -184,6 +248,7 @@ export function bindWorkflowExecutionEvents(
   };
   const stepIterations = new Map<string, number>();
   let decisionStore: DecisionStore | undefined;
+  let pendingWorkflowDecision: PendingWorkflowDecision | undefined;
   const getDecisionStore = (): DecisionStore => {
     decisionStore ??= deps.decisionStoreFactory?.(deps.projectCwd)
       ?? new DecisionStore(deps.projectCwd);
@@ -338,57 +403,34 @@ export function bindWorkflowExecutionEvents(
     notifyWarning('TAKT', message);
   });
 
-  deps.engine.on('step:blocked', (step, response) => {
-    state.lastDecisionId = undefined;
-    state.decisionGenerationError = undefined;
-    const bestEffortDiagnostic = (write: () => void): void => {
-      try {
-        write();
-      } catch {
-        // Broken output streams (for example EPIPE) must not change blocked
-        // workflow control flow or hide the stable state code.
-      }
-    };
-    const reportError = (code: string): void => {
-      state.decisionGenerationError = code;
-      bestEffortDiagnostic(() => {
-        deps.out.error(`Decision generation failed: ${code}`);
-      });
-    };
-    let blockedDecisionId: string | undefined;
-    let blockedCategory:
-      | 'requirements_ambiguity'
-      | 'permission'
-      | 'external_dependency'
-      | undefined;
-    const recordBlocked = (): void => {
-      try {
-        deps.runMetaManager.recordBlocked({
-          blockedStep: step.name,
-          ...(blockedDecisionId === undefined ? {} : { blockedDecisionId }),
-          ...(blockedCategory === undefined ? {} : { blockedCategory }),
-        });
-      } catch {
-        reportError('run_meta_record_failed');
-      }
-    };
-
+  const bestEffortDiagnostic = (write: () => void): void => {
     try {
-      const classification = classifyWorkflowDecisionBlock(response);
-      // Core reports every blocked response. Ordinary provider/plain blocks are
-      // persisted as terminal run facts, but only the explicit typed contract
-      // may create a Decision.
-      if (classification.classification === 'ordinary_ineligible') {
-        return;
-      }
-      if (classification.classification === 'invalid_contract') {
-        reportError('decision_contract_invalid');
-        return;
-      }
-      blockedCategory = classification.decision.category;
+      write();
+    } catch {
+      // Broken output streams (for example EPIPE) must not change terminal
+      // workflow control flow or hide the stable state code.
+    }
+  };
+  const reportDecisionError = (code: string): void => {
+    state.decisionGenerationError = code;
+    bestEffortDiagnostic(() => {
+      deps.out.error(`Decision generation failed: ${code}`);
+    });
+  };
+  const materializePendingDecision = (pending: PendingWorkflowDecision): void => {
+    try {
+      const response = {
+        persona: 'workflow',
+        status: 'blocked' as const,
+        content: '',
+        timestamp: new Date(0),
+        structuredOutput: {
+          humanDecision: pending.decision,
+        },
+      };
       const projection = ensureDecisionForWorkflowBlock(getDecisionStore(), {
         response,
-        stepName: step.name,
+        stepName: pending.stepName,
         workflowName: deps.workflowConfig.name,
         repoPath: deps.projectCwd,
         runSlug: deps.runSlug,
@@ -396,25 +438,57 @@ export function bindWorkflowExecutionEvents(
           ? {}
           : { issueNumber: deps.currentTaskIssueNumber }),
       });
-      if (projection !== undefined) {
-        blockedDecisionId = projection.request.decisionId;
-        state.lastDecisionId = blockedDecisionId;
-        bestEffortDiagnostic(() => {
-          deps.out.info(`Decision required: ${blockedDecisionId}`);
-        });
+      if (projection === undefined) {
+        reportDecisionError('decision_generation_failed');
+        return;
       }
+      const decisionId = projection.request.decisionId;
+      try {
+        deps.runMetaManager.recordBlocked({
+          blockedStep: pending.stepName,
+          blockedDecisionId: decisionId,
+          blockedCategory: pending.decision.category,
+        });
+      } catch {
+        reportDecisionError('run_meta_record_failed');
+        return;
+      }
+      state.lastDecisionId = decisionId;
+      bestEffortDiagnostic(() => {
+        deps.out.info(`Decision required: ${decisionId}`);
+      });
     } catch (error) {
-      const code = error instanceof DecisionStoreError
-        ? `decision_store_${error.code}`
-        : error instanceof DecisionGenerationError
-          ? `decision_generation_${error.code}`
-          : 'decision_generation_failed';
-      // Never include the underlying filesystem/provider exception: it may
+      // Never inspect a Proxy or include the underlying exception: it may
       // contain a local path, token, or raw provider payload.
-      reportError(code);
-    } finally {
-      recordBlocked();
+      reportDecisionError(classifyDecisionMaterializationError(error));
     }
+  };
+
+  deps.engine.on('step:blocked', (step, response) => {
+    pendingWorkflowDecision = undefined;
+    state.lastDecisionId = undefined;
+    state.decisionGenerationError = undefined;
+    try {
+      const classification = classifyWorkflowDecisionBlock(response);
+      if (classification.classification === 'invalid_contract') {
+        reportDecisionError('decision_contract_invalid');
+        return;
+      }
+      if (classification.classification === 'eligible') {
+        // Retain only the validated, deeply frozen contract. The provider-owned
+        // response is not safe to keep alive until terminal workflow outcome.
+        pendingWorkflowDecision = {
+          stepName: step.name,
+          decision: classification.decision,
+        };
+      }
+    } catch {
+      reportDecisionError('decision_generation_failed');
+    }
+  });
+
+  deps.engine.on('step:user_input', () => {
+    pendingWorkflowDecision = undefined;
   });
 
   deps.engine.on('step:report', (_step, filePath, fileName) => {
@@ -427,6 +501,7 @@ export function bindWorkflowExecutionEvents(
   });
 
   deps.engine.on('workflow:complete', (workflowState) => {
+    pendingWorkflowDecision = undefined;
     syncLatestResumePoint();
     state.sessionLog = finalizeWorkflowSuccess(
       state.sessionLog,
@@ -455,40 +530,51 @@ export function bindWorkflowExecutionEvents(
   });
 
   deps.engine.on('workflow:abort', (workflowState, reason) => {
-    interruptAllQueries();
-    syncLatestResumePoint();
-    if (deps.displayRef.current) {
-      deps.displayRef.current.flush();
-      deps.displayRef.current = null;
+    const pending = pendingWorkflowDecision;
+    pendingWorkflowDecision = undefined;
+    if (pending !== undefined && reason === BLOCKED_WORKFLOW_ABORT_REASON) {
+      materializePendingDecision(pending);
     }
-    deps.prefixWriter?.flush();
-    state.abortReason = reason;
-    state.sessionLog = finalizeWorkflowAbort(
-      state.sessionLog,
-      reason,
-      deps.task,
-      deps.workflowConfig.name,
-      state.lastStepName,
-      deps.projectCwd,
-      deps.out.warn,
-    );
-    deps.sessionLogger.onWorkflowAbort(workflowState, reason);
-    deps.runMetaManager.finalize('aborted', workflowState.iteration);
-    deps.writeTraceReportOnce({
-      status: 'aborted',
-      iterations: workflowState.iteration,
-      reason,
-      endTime: new Date().toISOString(),
-    });
-    reportWorkflowAbort(
-      deps.out,
-      state.sessionLog,
-      workflowState.iteration,
-      reason,
-      deps.ndjsonLogPath,
-      deps.shouldNotifyWorkflowAbort,
-      deps.traceDiscovery,
-    );
+
+    try {
+      interruptAllQueries();
+      syncLatestResumePoint();
+      if (deps.displayRef.current) {
+        deps.displayRef.current.flush();
+        deps.displayRef.current = null;
+      }
+      deps.prefixWriter?.flush();
+      state.abortReason = reason;
+      state.sessionLog = finalizeWorkflowAbort(
+        state.sessionLog,
+        reason,
+        deps.task,
+        deps.workflowConfig.name,
+        state.lastStepName,
+        deps.projectCwd,
+        deps.out.warn,
+      );
+      deps.sessionLogger.onWorkflowAbort(workflowState, reason);
+      deps.runMetaManager.finalize('aborted', workflowState.iteration);
+      deps.writeTraceReportOnce({
+        status: 'aborted',
+        iterations: workflowState.iteration,
+        reason,
+        endTime: new Date().toISOString(),
+      });
+      reportWorkflowAbort(
+        deps.out,
+        state.sessionLog,
+        workflowState.iteration,
+        reason,
+        deps.ndjsonLogPath,
+        deps.shouldNotifyWorkflowAbort,
+        deps.traceDiscovery,
+      );
+    } catch {
+      // EventEmitter callbacks are synchronous. Terminal reporting is
+      // best-effort so an output/logging failure cannot escape engine.emit().
+    }
   });
 
   return {

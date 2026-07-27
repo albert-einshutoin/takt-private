@@ -89,27 +89,12 @@ const WORKFLOW_DECISION_OBJECT_KEYS_MAX = 50;
 const WORKFLOW_UNSAFE_CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]|\p{Cf}/u;
 const WORKFLOW_SECRET_PATTERN = /(?:\b(?:api[_-]?key|authorization|bearer|cookie|password|private[_-]?key|secret|session(?:[_-]?id)?|token)\s*[:=]|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:sk-(?:proj-)?|gh[opusr]_|xox[baprs]-)[A-Za-z0-9_-]{8,}|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)/iu;
 const WORKFLOW_LOCAL_PATH_PATTERN = /(?:\bfile:\/\/\/|\b(?:path|cwd)\s*:\s*(?:\/|[A-Za-z]:[\\/]|\\\\)|(?:^|[\s("'=])(?:\/(?!\/)\S+|[A-Za-z]:[\\/]\S+|\\\\[^\\\s]+\\\S+))/iu;
-const WORKFLOW_URL_LIKE_PATTERN = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s]+/gu;
 const WORKFLOW_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|git|gh|bash|sh|curl)\s+\S+/iu;
 
 function hasUnsafeWorkflowDecisionUrl(value: string): boolean {
-  for (const match of value.matchAll(WORKFLOW_URL_LIKE_PATTERN)) {
-    try {
-      const url = new URL(match[0]);
-      if (
-        url.protocol !== 'https:'
-        || url.username !== ''
-        || url.password !== ''
-        || url.search !== ''
-        || url.hash !== ''
-      ) {
-        return true;
-      }
-    } catch {
-      return true;
-    }
-  }
-  return false;
+  // Decision public text does not need URLs. Reject the scheme delimiter at
+  // any position so prefixes such as "_http://" cannot evade a word boundary.
+  return value.includes('://');
 }
 
 function isWorkflowDecisionTextSafe(value: string): boolean {
