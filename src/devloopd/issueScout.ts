@@ -202,6 +202,8 @@ const ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH = 50;
 const ISSUE_SCOUT_MAX_SKIPPED_SUMMARY = 50;
 const ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY = 50;
 const ISSUE_SCOUT_SUMMARY_TEXT_LENGTH = 512;
+const SOURCE_TEXT_TRUNCATION_MARKER = ' [TRUNCATED]';
+const SOURCE_ARRAY_OMISSION_MARKER = (count: number) => `[OMITTED ${count} ITEMS]`;
 
 const REPORT_FILES: Readonly<Record<Extract<IssueScoutSourceId, 'dependency_report' | 'security_report' | 'benchmark_report' | 'lint_type_debt'>, {
   path: string;
@@ -245,8 +247,17 @@ const RISK_SCORE: Readonly<Record<IssueScoutRiskBucket, number>> = {
   high: 100,
 };
 
+function boundSourceText(text: string): string {
+  if (text.length <= ISSUE_SCOUT_MAX_CANDIDATE_TEXT_LENGTH) return text;
+  const prefixLength = ISSUE_SCOUT_MAX_CANDIDATE_TEXT_LENGTH
+    - SOURCE_TEXT_TRUNCATION_MARKER.length;
+  return `${text.slice(0, prefixLength)}${SOURCE_TEXT_TRUNCATION_MARKER}`;
+}
+
 function sanitizeText(text: string): string {
-  return sanitizeSensitiveText(text).replace(/\s+/g, ' ').trim();
+  // Bound raw source text before any broad secret or normalization regex runs.
+  // The deterministic marker contains no attacker-controlled suffix.
+  return sanitizeSensitiveText(boundSourceText(text)).replace(/\s+/g, ' ').trim();
 }
 
 function sanitizeBatchText(text: string): string {
@@ -386,8 +397,16 @@ function normalizeKey(text: string): string {
   return sanitizeText(text).toLowerCase().replace(/[^a-z0-9]+/gu, ' ').trim();
 }
 
+function normalizeSanitizedKey(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/gu, ' ').trim();
+}
+
 function slug(text: string): string {
   return normalizeKey(text).replaceAll(' ', '-').slice(0, 64);
+}
+
+function slugFromSanitizedText(text: string): string {
+  return normalizeSanitizedKey(text).replaceAll(' ', '-').slice(0, 64);
 }
 
 function unique(values: readonly string[]): string[] {
@@ -402,8 +421,9 @@ function readStringField(record: Record<string, unknown> | undefined, names: rea
   if (record === undefined) return undefined;
   for (const name of names) {
     const value = record[name];
-    if (typeof value === 'string' && value.trim().length > 0) {
-      return sanitizeText(value);
+    if (typeof value === 'string') {
+      const bounded = boundSourceText(value);
+      if (bounded.trim().length > 0) return sanitizeText(bounded);
     }
     if (typeof value === 'number' || typeof value === 'boolean') {
       return String(value);
@@ -416,21 +436,31 @@ function readStringArrayField(record: Record<string, unknown> | undefined, names
   if (record === undefined) return [];
   const values: string[] = [];
   for (const name of names) {
+    if (values.length >= ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) break;
     const value = record[name];
-    if (typeof value === 'string' && value.trim().length > 0) {
-      values.push(sanitizeText(value));
+    if (typeof value === 'string') {
+      const bounded = boundSourceText(value);
+      if (bounded.trim().length > 0) values.push(sanitizeText(bounded));
       continue;
     }
     if (Array.isArray(value)) {
-      values.push(...value.flatMap((item) => {
-        if (typeof item === 'string' && item.trim().length > 0) {
-          return [sanitizeText(item)];
+      const remaining = ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH - values.length;
+      const sampleCount = value.length > remaining
+        ? Math.max(0, remaining - 1)
+        : remaining;
+      for (let index = 0; index < Math.min(value.length, sampleCount); index += 1) {
+        const item = value[index];
+        if (typeof item === 'string') {
+          const bounded = boundSourceText(item);
+          if (bounded.trim().length > 0) values.push(sanitizeText(bounded));
+        } else if (typeof item === 'number' || typeof item === 'boolean') {
+          values.push(String(item));
         }
-        if (typeof item === 'number' || typeof item === 'boolean') {
-          return [String(item)];
-        }
-        return [];
-      }));
+      }
+      const omittedCount = value.length - sampleCount;
+      if (omittedCount > 0 && values.length < ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) {
+        values.push(SOURCE_ARRAY_OMISSION_MARKER(omittedCount));
+      }
     }
   }
   return unique(values);
@@ -490,7 +520,9 @@ export function classifyDependencyUpdateKind(input: {
   if (input.updateKind !== undefined && input.updateKind !== 'unknown') {
     return input.updateKind;
   }
-  if (/\b(breaking|major migration|incompatible)\b/iu.test(input.summary ?? '')) {
+  if (/\b(breaking|major migration|incompatible)\b/iu.test(
+    boundSourceText(input.summary ?? ''),
+  )) {
     return 'breaking';
   }
   const current = parseVersionMajorMinorPatch(input.currentVersion);
@@ -546,9 +578,11 @@ export function buildIssueScoutCandidate(input: {
   riskBucket?: IssueScoutRiskBucket;
   laneEvidence?: readonly string[];
 }): IssueScoutCandidate {
+  const title = sanitizeText(boundSourceText(input.title));
+  const summary = sanitizeText(boundSourceText(input.summary));
   const laneClassification = classifyRecursiveAutomationLane({
-    title: input.title,
-    body: input.summary,
+    title,
+    body: summary,
     labels: input.lane === undefined ? [] : [`lane:${input.lane}`],
   });
   const lane = input.lane ?? laneClassification.lane;
@@ -557,15 +591,15 @@ export function buildIssueScoutCandidate(input: {
   const riskBucket = input.riskBucket ?? riskForCandidate({
     lane,
     policyCategory,
-    title: input.title,
-    summary: input.summary,
+    title,
+    summary,
   });
 
   return {
-    id: `${input.sourceId}:${slug(input.title)}`,
+    id: `${input.sourceId}:${slugFromSanitizedText(title)}`,
     sourceId: input.sourceId,
-    title: sanitizeText(input.title),
-    summary: sanitizeText(input.summary),
+    title,
+    summary,
     lane,
     policyCategory,
     riskBucket,
@@ -753,7 +787,8 @@ function scanLocalBacklog(context: IssueScoutSourceContext): IssueScoutObservati
     const content = readFileSync(filePath, 'utf-8');
     artifacts.push({ kind: 'file', path: relativePath, summary: `local backlog file ${relativePath}` });
     content.split('\n').forEach((line, index) => {
-      const title = parseBacklogLine(line);
+      const boundedLine = boundSourceText(line);
+      const title = parseBacklogLine(boundedLine);
       if (title === undefined) {
         return;
       }
@@ -761,7 +796,7 @@ function scanLocalBacklog(context: IssueScoutSourceContext): IssueScoutObservati
         sourceId: 'local_backlog',
         title,
         summary: `${relativePath}:${index + 1} backlog item`,
-        evidence: [{ kind: 'file', path: `${relativePath}:${index + 1}`, summary: sanitizeText(line) }],
+        evidence: [{ kind: 'file', path: `${relativePath}:${index + 1}`, summary: sanitizeText(boundedLine) }],
       }));
     });
   }
@@ -809,7 +844,7 @@ async function scanTodoComments(context: IssueScoutSourceContext): Promise<Issue
   }
 
   const candidates = result.stdout.split('\n')
-    .map((line) => line.trim())
+    .map((line) => boundSourceText(line).trim())
     .filter(Boolean)
     .slice(0, 25)
     .map((line) => {
@@ -848,7 +883,7 @@ function readReportSource(sourceId: Extract<IssueScoutSourceId, 'dependency_repo
       }
       const rawContent = readFileSync(filePath, 'utf-8');
       const record = parseReportRecord(rawContent);
-      const rawSummary = sanitizeText(rawContent).slice(0, 2_000);
+      const rawSummary = sanitizeText(boundSourceText(rawContent)).slice(0, 2_000);
       // Report producers are intentionally schema-light; accepting common field aliases keeps the loop
       // useful while preserving typed lane evidence in the generated issue.
       const candidate = buildRecursiveLaneCandidate({

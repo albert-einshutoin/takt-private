@@ -142,6 +142,138 @@ describe('devloopd issue-scout', () => {
     expect(draft.body).toContain('## Expected Changed Surfaces');
   });
 
+  it.each([16 * 1024, 32 * 1024])(
+    'bounds direct %i-character candidate input before classification and sanitization',
+    (length) => {
+      const secretTail = 'direct-tail-secret';
+      const raw = `${'a'.repeat(length)}tokenlike-${secretTail}`;
+      const startedAt = performance.now();
+      const candidate = buildIssueScoutCandidate({
+        sourceId: 'local_backlog',
+        title: raw,
+        summary: raw,
+        lane: 'docs_tests_tooling',
+      });
+      const elapsedMs = performance.now() - startedAt;
+
+      expect(elapsedMs).toBeLessThan(1_000);
+      expect(candidate.title.length).toBeLessThanOrEqual(4_000);
+      expect(candidate.summary.length).toBeLessThanOrEqual(4_000);
+      expect(candidate.id.length).toBeLessThan(128);
+      expect(JSON.stringify(candidate)).not.toContain(secretTail);
+    },
+  );
+
+  it('redacts bounded sensitive assignments in direct candidate input', () => {
+    const candidate = buildIssueScoutCandidate({
+      sourceId: 'local_backlog',
+      title: 'Rotate token=bounded-secret safely',
+      summary: 'password=bounded-password',
+      lane: 'docs_tests_tooling',
+    });
+
+    expect(candidate.title).toContain('token=[REDACTED]');
+    expect(candidate.summary).toContain('password=[REDACTED]');
+    expect(JSON.stringify(candidate)).not.toContain('bounded-secret');
+    expect(JSON.stringify(candidate)).not.toContain('bounded-password');
+  });
+
+  it.each([16 * 1024, 32 * 1024])(
+    'bounds a %i-character BACKLOG line before source sanitization',
+    async (length) => {
+      const secretTail = 'backlog-tail-secret';
+      writeFileSync(
+        join(repoPath, 'BACKLOG.md'),
+        `- [ ] ${'a'.repeat(length)}tokenlike-${secretTail}\n`,
+        'utf8',
+      );
+      const startedAt = performance.now();
+      const report = await runIssueScout({
+        repoPath,
+        runner: runner(),
+        sourceIds: ['local_backlog'],
+        backlogFiles: ['BACKLOG.md'],
+        existingWork: [],
+        dryRun: true,
+        now: new Date('2026-07-28T00:00:00.000Z'),
+      });
+      const elapsedMs = performance.now() - startedAt;
+      const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+      expect(elapsedMs).toBeLessThan(1_000);
+      expect(report.observations[0]?.candidates[0]?.title.length).toBeLessThanOrEqual(4_000);
+      expect(JSON.stringify(report.observations)).not.toContain(secretTail);
+      expect(ledger).not.toContain(secretTail);
+    },
+  );
+
+  it.each(['field', 'fallback'] as const)(
+    'bounds token-like report %s text before sanitization',
+    async (variant) => {
+      const secretTail = `report-${variant}-tail-secret`;
+      const raw = `${'a'.repeat(32 * 1024)}tokenlike-${secretTail}`;
+      mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+      writeFileSync(
+        join(repoPath, '.devloop', 'dependency-report.json'),
+        variant === 'field'
+          ? JSON.stringify({ title: 'Bound report field', summary: raw })
+          : raw,
+        'utf8',
+      );
+      const startedAt = performance.now();
+      const report = await runIssueScout({
+        repoPath,
+        runner: runner(),
+        sourceIds: ['dependency_report'],
+        existingWork: [],
+        dryRun: true,
+        now: new Date('2026-07-28T00:00:00.000Z'),
+      });
+      const elapsedMs = performance.now() - startedAt;
+      const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+      expect(elapsedMs).toBeLessThan(1_000);
+      expect(report.observations[0]?.candidates[0]?.summary.length).toBeLessThanOrEqual(4_000);
+      expect(JSON.stringify(report.observations)).not.toContain(secretTail);
+      expect(ledger).not.toContain(secretTail);
+    },
+  );
+
+  it('samples oversized report arrays without iterating secret-bearing tails', async () => {
+    const secretTail = 'report-array-tail-secret';
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(
+      join(repoPath, '.devloop', 'dependency-report.json'),
+      JSON.stringify({
+        title: 'Bound report array',
+        summary: 'Bound a large changelog array',
+        changelogUrls: [
+          ...Array.from({ length: 9_999 }, (_, index) => `https://example.com/${index}`),
+          `https://example.com/${secretTail}`,
+        ],
+      }),
+      'utf8',
+    );
+    const startedAt = performance.now();
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['dependency_report'],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const elapsedMs = performance.now() - startedAt;
+    const candidate = report.observations[0]?.candidates[0];
+    const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+    expect(elapsedMs).toBeLessThan(1_000);
+    expect(candidate?.laneEvidence.length).toBeLessThanOrEqual(50);
+    expect(candidate?.laneEvidence.some((value) => value.includes('[OMITTED 9951 ITEMS]'))).toBe(true);
+    expect(JSON.stringify(candidate)).not.toContain(secretTail);
+    expect(ledger).not.toContain(secretTail);
+  });
+
   it('classifies major dependency updates for human review before automation', async () => {
     mkdirSync(join(repoPath, '.devloop'), { recursive: true });
     writeFileSync(join(repoPath, '.devloop', 'dependency-report.json'), JSON.stringify({
