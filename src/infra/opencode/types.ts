@@ -308,3 +308,12 @@ export interface OpenCodeCallOptions {
   interactionTimeoutMs?: number;
   childProcessEnv?: Readonly<Record<string, string>>;
 }
+
+export interface OpenCodeCompactSessionOptions {
+  cwd: string;
+  sessionId: string;
+  model: string;
+  abortSignal?: AbortSignal;
+  opencodeApiKey?: string;
+  childProcessEnv?: Readonly<Record<string, string>>;
+}

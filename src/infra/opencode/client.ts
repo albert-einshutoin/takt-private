@@ -20,6 +20,7 @@ import { parseProviderModel } from '../../shared/utils/providerModel.js';
 import {
   buildOpenCodePermissionRuleset,
   resolveOpenCodePermissionReply,
+  type OpenCodeCompactSessionOptions,
   type OpenCodeCallOptions,
 } from './types.js';
 import {
@@ -64,6 +65,9 @@ const OPENCODE_STREAM_ABORTED_MESSAGE = 'OpenCode execution aborted';
 const OPENCODE_RETRY_MAX_ATTEMPTS = 3;
 const OPENCODE_RETRY_BASE_DELAY_MS = 250;
 const OPENCODE_INTERACTION_TIMEOUT_MS = 5000;
+// Summarization can legitimately take much longer than permission replies,
+// especially for large sessions, so it needs its own interaction budget.
+const OPENCODE_SESSION_COMPACTION_TIMEOUT_MS = 2 * 60 * 1000;
 const OPENCODE_SERVER_START_TIMEOUT_MS = 60000;
 const OPENCODE_RETRYABLE_ERROR_PATTERNS = [
   'stream disconnected before completion',
@@ -280,6 +284,29 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
+function createExternalAbortPromise(
+  controller: AbortController,
+  externalAbortSignal: AbortSignal | undefined,
+): { promise?: Promise<never>; removeListener?: () => void } {
+  if (externalAbortSignal === undefined) {
+    return {};
+  }
+  let removeListener: (() => void) | undefined;
+  const promise = new Promise<never>((_, reject) => {
+    const onExternalAbort = (): void => {
+      reject(new Error(OPENCODE_STREAM_ABORTED_MESSAGE));
+      controller.abort();
+    };
+    if (externalAbortSignal.aborted) {
+      onExternalAbort();
+      return;
+    }
+    externalAbortSignal.addEventListener('abort', onExternalAbort, { once: true });
+    removeListener = () => externalAbortSignal.removeEventListener('abort', onExternalAbort);
+  });
+  return { promise, removeListener };
+}
+
 function createReleaseHandle(server: SharedServer): () => void {
   let released = false;
   return () => {
@@ -300,24 +327,37 @@ async function withTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
   timeoutErrorMessage: string,
+  externalAbortSignal?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController();
+  let timedOut = false;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
+      timedOut = true;
       controller.abort();
       reject(new Error(timeoutErrorMessage));
     }, timeoutMs);
   });
+  const externalAbort = createExternalAbortPromise(controller, externalAbortSignal);
   try {
-    return await Promise.race([
-      operation(controller.signal),
-      timeoutPromise,
-    ]);
+    const operationPromise = operation(controller.signal).catch((error: unknown) => {
+      if (timedOut) {
+        return new Promise<never>(() => {
+          // The timeout promise owns the rejection after aborting the SDK call.
+        });
+      }
+      throw error;
+    });
+    const racePromises = externalAbort.promise !== undefined
+      ? [operationPromise, timeoutPromise, externalAbort.promise]
+      : [operationPromise, timeoutPromise];
+    return await Promise.race(racePromises);
   } finally {
     if (timeoutId !== undefined) {
       clearTimeout(timeoutId);
     }
+    externalAbort.removeListener?.();
   }
 }
 
@@ -1102,6 +1142,34 @@ export class OpenCodeClient {
     throw new Error('Unreachable: OpenCode retry loop exhausted without returning');
   }
 
+  async compactSession(options: OpenCodeCompactSessionOptions): Promise<void> {
+    const parsedModel = parseProviderModel(options.model, 'OpenCode model');
+    const fullModel = `${parsedModel.providerID}/${parsedModel.modelID}`;
+    const acquired = await acquireClient(
+      fullModel,
+      options.opencodeApiKey,
+      options.childProcessEnv,
+      options.abortSignal,
+    );
+
+    try {
+      await withTimeout(
+        (signal) => acquired.client.session.summarize({
+          sessionID: options.sessionId,
+          directory: options.cwd,
+          providerID: parsedModel.providerID,
+          modelID: parsedModel.modelID,
+          auto: false,
+        }, { signal }),
+        OPENCODE_SESSION_COMPACTION_TIMEOUT_MS,
+        'OpenCode session summarize timed out',
+        options.abortSignal,
+      );
+    } finally {
+      acquired.release();
+    }
+  }
+
   /** Call OpenCode with a custom agent configuration (system prompt + prompt) */
   async callCustom(
     agentName: string,
@@ -1133,4 +1201,8 @@ export async function callOpenCodeCustom(
   options: OpenCodeCallOptions,
 ): Promise<AgentResponse> {
   return defaultClient.callCustom(agentName, prompt, systemPrompt, options);
+}
+
+export async function compactOpenCodeSession(options: OpenCodeCompactSessionOptions): Promise<void> {
+  return defaultClient.compactSession(options);
 }

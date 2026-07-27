@@ -115,7 +115,6 @@ steps:
     policy:
       - coding
       - testing
-    session: refresh
     knowledge:
       - takt
       - architecture
