@@ -3,9 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ensureDecisionForIssueScoutCandidate } from '../devloopd/decisionGeneration.js';
+import {
+  classifyIssueScoutDecision,
+  ensureDecisionForIssueScoutCandidate,
+} from '../devloopd/decisionGeneration.js';
 import { createDecisionRequest } from '../devloopd/decisionRequest.js';
 import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
+import {
+  createDecisionAppliedEvent,
+  createDecisionApplyStartedEvent,
+} from '../devloopd/decisionEvents.js';
+import { appendDevloopLedgerEvent } from '../devloopd/ledger.js';
 import type { IssueScoutCandidate } from '../devloopd/issueScout.js';
 
 function candidate(
@@ -52,6 +60,57 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
     if (existsSync(repoPath)) {
       rmSync(repoPath, { recursive: true, force: true });
     }
+  });
+
+  function applyDecision(optionId: 'approve_scope' | 'revise_scope' | 'skip') {
+    const projection = ensureDecisionForIssueScoutCandidate(
+      store,
+      candidate(),
+      { repoPath },
+      new Date('2026-07-28T00:00:00.000Z'),
+    );
+    const answer = store.answer({
+      decisionId: projection.request.decisionId,
+      expectedDecisionVersion: projection.request.decisionVersion,
+      expectedContextHash: projection.request.contextHash,
+      value: { optionId },
+      rationale: `Choose ${optionId} for this candidate.`,
+      idempotencyKey: `answer-${optionId}`,
+    }, 'reviewer', {
+      eventId: `evt-answer-${optionId}`,
+      now: new Date('2026-07-28T00:01:00.000Z'),
+    });
+    const identity = {
+      decisionId: projection.request.decisionId,
+      decisionVersion: projection.request.decisionVersion,
+      contextHash: projection.request.contextHash,
+      answerEventId: answer.eventId,
+      sanitizedSummary: `Applied ${optionId}.`,
+    };
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent(identity, {
+      eventId: `evt-start-${optionId}`,
+      now: new Date('2026-07-28T00:02:00.000Z'),
+    }));
+    const applying = store.get(projection.request.decisionId);
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionAppliedEvent(identity, {
+      eventId: `evt-applied-${optionId}`,
+      now: new Date('2026-07-28T00:03:00.000Z'),
+    }));
+    const applied = store.get(projection.request.decisionId);
+    if (applying === undefined || applied === undefined) throw new Error('projection missing');
+    return { projection, applying, applied };
+  }
+
+  it.each([
+    ['approve_scope', 'approved'],
+    ['revise_scope', 'revision_requested'],
+    ['skip', 'skipped'],
+  ] as const)('classifies applied %s decisions as %s', (optionId, expected) => {
+    const { projection, applying, applied } = applyDecision(optionId);
+
+    expect(classifyIssueScoutDecision(projection)).toBe('pending');
+    expect(classifyIssueScoutDecision(applying)).toBe('pending');
+    expect(classifyIssueScoutDecision(applied)).toBe(expected);
   });
 
   it('creates a concrete three-option product-policy decision', () => {
@@ -130,6 +189,85 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
     expect(existsSync(store.ledgerPath)).toBe(false);
   });
 
+  it('rejects candidates whose generated reason list exceeds the schema bound', () => {
+    const oversized = {
+      ...candidate(),
+      laneEvidence: Array.from({ length: 49 }, (_, index) => `evidence-${index}`),
+    };
+
+    expect(() => ensureDecisionForIssueScoutCandidate(
+      store,
+      oversized,
+      { repoPath },
+      new Date('2026-07-28T00:00:00.000Z'),
+    )).toThrowError(expect.objectContaining({
+      name: 'DecisionGenerationError',
+      code: 'candidate_invalid',
+    }));
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it.each([
+    ['single text bound', {
+      ...candidate(),
+      summary: 'x'.repeat(4_001),
+    }],
+    ['aggregate UTF-8 bound', {
+      ...candidate(),
+      labels: Array.from({ length: 50 }, () => 'あ'.repeat(4_000)),
+    }],
+  ])('rejects candidates beyond the %s', (_case, invalidCandidate) => {
+    expect(() => ensureDecisionForIssueScoutCandidate(
+      store,
+      invalidCandidate,
+      { repoPath },
+      new Date('2026-07-28T00:00:00.000Z'),
+    )).toThrowError(expect.objectContaining({
+      code: 'candidate_invalid',
+    }));
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('keeps safe references and replaces unsafe references with opaque digests', () => {
+    const withReferences = {
+      ...candidate(),
+      evidence: [
+        {
+          kind: 'file' as const,
+          path: 'docs/release-policy.md',
+          summary: 'Repository policy file',
+        },
+        {
+          kind: 'github' as const,
+          url: 'https://user:password@github.com/albert-einshutoin/takt-private/issues/42?token=secret#note',
+          summary: 'Tracked GitHub issue',
+        },
+        {
+          kind: 'file' as const,
+          path: '/Users/private/secret.txt',
+          summary: 'External file reference',
+        },
+      ],
+    };
+
+    const projection = ensureDecisionForIssueScoutCandidate(
+      store,
+      withReferences,
+      { repoPath },
+      new Date('2026-07-28T00:00:00.000Z'),
+    );
+    const serialized = JSON.stringify(projection.request.why.evidence);
+    const references = projection.request.why.evidence.map((item) => item.reference);
+
+    expect(references).toContain('docs/release-policy.md');
+    expect(references).toContain('https://github.com/albert-einshutoin/takt-private/issues/42');
+    expect(references.some((reference) => /^redacted-local_backlog-file-3-[a-f0-9]{64}$/u.test(reference))).toBe(true);
+    expect(serialized).toContain('reference redacted');
+    expect(serialized).not.toContain('token=secret');
+    expect(serialized).not.toContain('user:password');
+    expect(serialized).not.toContain('/Users/private');
+  });
+
   it('deduplicates scheduler ticks with a deterministic decision ID', () => {
     const first = ensureDecisionForIssueScoutCandidate(
       store,
@@ -152,6 +290,24 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
       .map((line) => JSON.parse(line) as { eventType: string })
       .filter((event) => event.eventType === 'devloop_decision_requested');
     expect(requestedLines).toHaveLength(1);
+  });
+
+  it('uses deterministic lookup without scanning every decision projection', () => {
+    let getCalls = 0;
+    const originalGet = store.get.bind(store);
+    store.get = (decisionId) => {
+      getCalls += 1;
+      return originalGet(decisionId);
+    };
+
+    ensureDecisionForIssueScoutCandidate(
+      store,
+      candidate(),
+      { repoPath },
+      new Date('2026-07-28T00:00:00.000Z'),
+    );
+
+    expect(getCalls).toBe(2);
   });
 
   it('converges when another caller persists the same request immediately before a conflict', () => {

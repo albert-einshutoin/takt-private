@@ -19,8 +19,13 @@ import {
 } from './commandRunner.js';
 import { scanIssues } from './issueScanner.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
-import { ensureDecisionForIssueScoutCandidate } from './decisionGeneration.js';
-import { DecisionStore } from './decisionStore.js';
+import {
+  classifyIssueScoutDecision,
+  DecisionGenerationError,
+  ensureDecisionForIssueScoutCandidate,
+  validateIssueScoutDecisionCandidate,
+} from './decisionGeneration.js';
+import { DecisionStore, DecisionStoreError } from './decisionStore.js';
 
 export type IssueScoutSourceId =
   | 'github_issues'
@@ -38,6 +43,9 @@ export type IssueScoutStopRule =
   | 'Duplicate or already covered'
   | 'active run limit'
   | 'Unsafe or too broad'
+  | 'human revision requested'
+  | 'human decision skipped'
+  | 'decision generation failed'
   | 'backoff active'
   | 'no candidates';
 
@@ -992,6 +1000,22 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   const ledgerEvents = readRawDevloopLedgerEvents(ledgerPath);
   const skipped: SkippedIssueScoutCandidate[] = [];
   const eligible: IssueScoutCandidate[] = [];
+  const decisionStore = new DecisionStore(repoPath, ledgerPath);
+  const invalidDecisionCandidates = new Set<IssueScoutCandidate>();
+  for (const candidate of candidates) {
+    if (
+      candidate.policyCategory !== 'product_policy'
+      && candidate.policyCategory !== 'human_policy'
+      && candidate.riskBucket !== 'high'
+    ) {
+      continue;
+    }
+    try {
+      validateIssueScoutDecisionCandidate(candidate);
+    } catch {
+      invalidDecisionCandidates.add(candidate);
+    }
+  }
 
   for (const candidate of candidates) {
     const retryAfter = latestBackoff(candidate, ledgerEvents, now);
@@ -1004,23 +1028,67 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
       continue;
     }
     if (candidate.policyCategory === 'product_policy' || candidate.policyCategory === 'human_policy' || candidate.riskBucket === 'high') {
-      // dryRun controls GitHub mutation, but the local decision ledger is the
-      // durable human-approval boundary and must exist before this skip returns.
-      const decision = ensureDecisionForIssueScoutCandidate(
-        new DecisionStore(repoPath, ledgerPath),
-        candidate,
-        {
-          repoPath,
-          ...(options.repo === undefined ? {} : { repository: options.repo }),
-        },
-        now,
-      );
-      skipped.push({
-        candidate,
-        stopRule: 'Unsafe or too broad',
-        reason: `${candidate.policyCategory} work requires human review`,
-        decisionId: decision.request.decisionId,
-      });
+      if (invalidDecisionCandidates.has(candidate)) {
+        skipped.push({
+          candidate,
+          stopRule: 'decision generation failed',
+          reason: 'decision generation failed: candidate_invalid',
+        });
+        continue;
+      }
+      try {
+        // dryRun controls GitHub mutation, but the local decision ledger is the
+        // durable human-approval boundary and must exist before this skip returns.
+        const decision = ensureDecisionForIssueScoutCandidate(
+          decisionStore,
+          candidate,
+          {
+            repoPath,
+            ...(options.repo === undefined ? {} : { repository: options.repo }),
+          },
+          now,
+        );
+        const outcome = classifyIssueScoutDecision(decision);
+        if (outcome === 'approved') {
+          eligible.push(candidate);
+          keys.add(candidateKey(candidate));
+          continue;
+        }
+        if (outcome === 'revision_requested') {
+          skipped.push({
+            candidate,
+            stopRule: 'human revision requested',
+            reason: 'the applied decision requires a revised candidate scope',
+            decisionId: decision.request.decisionId,
+          });
+          continue;
+        }
+        if (outcome === 'skipped') {
+          skipped.push({
+            candidate,
+            stopRule: 'human decision skipped',
+            reason: 'the applied decision skips this candidate',
+            decisionId: decision.request.decisionId,
+          });
+          continue;
+        }
+        skipped.push({
+          candidate,
+          stopRule: 'Unsafe or too broad',
+          reason: `${candidate.policyCategory} work requires human review`,
+          decisionId: decision.request.decisionId,
+        });
+      } catch (error) {
+        const errorCode = (
+          error instanceof DecisionGenerationError
+          || error instanceof DecisionStoreError
+        ) ? error.code : 'unknown';
+        skipped.push({
+          candidate,
+          stopRule: 'decision generation failed',
+          reason: `decision generation failed: ${errorCode}`,
+        });
+      }
       continue;
     }
     eligible.push(candidate);
@@ -1044,6 +1112,9 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   }
 
   const retryAfter = selected.length === 0 ? new Date(now.getTime() + 60 * 60 * 1000).toISOString() : undefined;
+  const decisionFailureCount = skipped.filter(
+    (item) => item.stopRule === 'decision generation failed',
+  ).length;
   appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_issue_scout', {
     repoPath,
     observations: observations.map((observation) => ({
@@ -1069,13 +1140,18 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
     })),
     stopRule: selected.length === 0 ? 'no candidates' : undefined,
     retryAfter,
+    decisionFailureCount,
   }, now));
 
+  const baseMessage = selected.length > 0
+    ? `issue-scout selected ${selected.length} candidate(s)`
+    : 'issue-scout found no eligible candidates';
   return {
-    passed: observations.every((observation) => observation.status !== 'error'),
-    message: selected.length > 0
-      ? `issue-scout selected ${selected.length} candidate(s)`
-      : 'issue-scout found no eligible candidates',
+    passed: observations.every((observation) => observation.status !== 'error')
+      && decisionFailureCount === 0,
+    message: decisionFailureCount === 0
+      ? baseMessage
+      : `${baseMessage}; isolated ${decisionFailureCount} decision generation failure(s)`,
     observations,
     selected,
     skipped,
@@ -1106,7 +1182,11 @@ export function formatIssueScoutReport(report: IssueScoutReport): string {
     lines.push('Skipped:');
     lines.push(...report.skipped.map((item) => (
       `- ${item.candidate.title}: ${item.stopRule} - ${item.reason}`
-      + (item.decisionId === undefined ? '' : ` (Decision: ${item.decisionId})`)
+      + (item.decisionId === undefined
+        ? ''
+        : item.stopRule === 'Unsafe or too broad'
+          ? ` (Decision: ${item.decisionId}; status: pending)`
+          : ` (Decision: ${item.decisionId}; outcome: ${item.stopRule})`)
     )));
   }
   return lines.join('\n');

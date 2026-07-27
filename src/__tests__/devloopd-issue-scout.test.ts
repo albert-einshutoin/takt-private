@@ -19,6 +19,11 @@ import {
   type IssueScoutSource,
 } from '../devloopd/issueScout.js';
 import type { DevloopCommandRunner } from '../devloopd/commandRunner.js';
+import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
+import {
+  createDecisionAppliedEvent,
+  createDecisionApplyStartedEvent,
+} from '../devloopd/decisionEvents.js';
 
 function runner(): DevloopCommandRunner {
   return {
@@ -196,6 +201,213 @@ describe('devloopd issue-scout', () => {
       .filter((event) => event.eventType === 'devloop_issue_scout')
       .every((event) => event.skipped?.[0]?.decisionId === first.skipped[0]?.decisionId))
       .toBe(true);
+  });
+
+  it.each([
+    ['approve_scope', 'approved'],
+    ['revise_scope', 'human revision requested'],
+    ['skip', 'human decision skipped'],
+  ] as const)('routes applied %s outcomes as %s without another request', async (optionId, expected) => {
+    const title = `Route terminal ${optionId} candidate`;
+    const first = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [riskySource(title)],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const decisionId = first.skipped[0]?.decisionId;
+    if (decisionId === undefined) throw new Error('decision missing');
+    const store = new DecisionStore(repoPath);
+    const projection = store.get(decisionId);
+    if (projection === undefined) throw new Error('projection missing');
+    const answer = store.answer({
+      decisionId,
+      expectedDecisionVersion: projection.request.decisionVersion,
+      expectedContextHash: projection.request.contextHash,
+      value: { optionId },
+      rationale: `Route ${optionId}.`,
+      idempotencyKey: `answer-${optionId}`,
+    }, 'reviewer', {
+      eventId: `evt-answer-${optionId}`,
+      now: new Date('2026-07-28T00:01:00.000Z'),
+    });
+    const identity = {
+      decisionId,
+      decisionVersion: projection.request.decisionVersion,
+      contextHash: projection.request.contextHash,
+      answerEventId: answer.eventId,
+      sanitizedSummary: `Applied ${optionId}.`,
+    };
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent(identity, {
+      eventId: `evt-start-${optionId}`,
+      now: new Date('2026-07-28T00:02:00.000Z'),
+    }));
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionAppliedEvent(identity, {
+      eventId: `evt-applied-${optionId}`,
+      now: new Date('2026-07-28T00:03:00.000Z'),
+    }));
+
+    const second = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [riskySource(title)],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T01:00:00.000Z'),
+    });
+    const requestedCount = readFileSync(store.ledgerPath, 'utf8')
+      .split('\n')
+      .filter((line) => line.includes('"eventType":"devloop_decision_requested"'))
+      .length;
+
+    expect(requestedCount).toBe(1);
+    if (optionId === 'approve_scope') {
+      expect(second.selected).toHaveLength(1);
+      expect(second.wouldCreate).toHaveLength(1);
+      expect(second.skipped).toHaveLength(0);
+    } else {
+      expect(second.selected).toHaveLength(0);
+      expect(second.skipped[0]).toMatchObject({
+        stopRule: expected,
+        decisionId,
+      });
+      expect(formatIssueScoutReport(second)).not.toContain('Unsafe or too broad');
+    }
+  });
+
+  it('isolates an invalid later candidate and still records the final scout summary', async () => {
+    const valid = buildIssueScoutCandidate({
+      sourceId: 'local_backlog',
+      title: 'Valid product decision',
+      summary: 'A valid product-policy decision candidate',
+      lane: 'feature_improvement',
+      policyCategory: 'product_policy',
+      riskBucket: 'high',
+    });
+    const invalid = {
+      ...buildIssueScoutCandidate({
+        sourceId: 'local_backlog',
+        title: 'Invalid product decision',
+        summary: 'An invalid product-policy decision with token=supersecret',
+        lane: 'feature_improvement',
+        policyCategory: 'product_policy',
+        riskBucket: 'high',
+      }),
+      laneEvidence: Array.from({ length: 49 }, (_, index) => `lane-${index}`),
+    };
+    const multiSource: IssueScoutSource = {
+      id: 'local_backlog',
+      scan: () => ({
+        sourceId: 'local_backlog',
+        status: 'success',
+        summary: 'multiple candidates',
+        candidates: [valid, invalid],
+        nextActions: [],
+        artifacts: [],
+      }),
+    };
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [multiSource],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+    expect(report.passed).toBe(false);
+    expect(report.skipped).toHaveLength(2);
+    expect(report.skipped[0]?.decisionId).toBeDefined();
+    expect(report.skipped[1]).toMatchObject({
+      stopRule: 'decision generation failed',
+    });
+    expect(report.skipped[1]?.decisionId).toBeUndefined();
+    expect(ledger.match(/"eventType":"devloop_decision_requested"/gu)).toHaveLength(1);
+    expect(ledger.match(/"eventType":"devloop_issue_scout"/gu)).toHaveLength(1);
+    expect(ledger).not.toContain('supersecret');
+  });
+
+  it('reuses one DecisionStore for multiple risky candidates', async () => {
+    const first = buildIssueScoutCandidate({
+      sourceId: 'local_backlog',
+      title: 'First risky candidate',
+      summary: 'First product-policy decision',
+      lane: 'feature_improvement',
+      policyCategory: 'product_policy',
+      riskBucket: 'high',
+    });
+    const second = buildIssueScoutCandidate({
+      sourceId: 'local_backlog',
+      title: 'Second risky candidate',
+      summary: 'Second product-policy decision',
+      lane: 'feature_improvement',
+      policyCategory: 'product_policy',
+      riskBucket: 'high',
+    });
+    const instances = new Set<DecisionStore>();
+    const originalGet = DecisionStore.prototype.get;
+    DecisionStore.prototype.get = function getWithInstance(decisionId) {
+      instances.add(this);
+      return originalGet.call(this, decisionId);
+    };
+    try {
+      await runIssueScout({
+        repoPath,
+        runner: runner(),
+        sources: [{
+          id: 'local_backlog',
+          scan: () => ({
+            sourceId: 'local_backlog',
+            status: 'success',
+            summary: 'two risky candidates',
+            candidates: [first, second],
+            nextActions: [],
+            artifacts: [],
+          }),
+        }],
+        existingWork: [],
+        dryRun: true,
+        now: new Date('2026-07-28T00:00:00.000Z'),
+      });
+    } finally {
+      DecisionStore.prototype.get = originalGet;
+    }
+
+    expect(instances).toHaveLength(1);
+  });
+
+  it('isolates a DecisionStore capacity failure and records the scout summary', async () => {
+    const originalRequest = DecisionStore.prototype.request;
+    DecisionStore.prototype.request = () => {
+      throw new DecisionStoreError('ledger_capacity_exceeded');
+    };
+    let report: Awaited<ReturnType<typeof runIssueScout>> | undefined;
+    try {
+      report = await runIssueScout({
+        repoPath,
+        runner: runner(),
+        sources: [riskySource('Capacity constrained candidate')],
+        existingWork: [],
+        dryRun: true,
+        now: new Date('2026-07-28T00:00:00.000Z'),
+      });
+    } finally {
+      DecisionStore.prototype.request = originalRequest;
+    }
+    if (report === undefined) throw new Error('report missing');
+    const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+    expect(report.passed).toBe(false);
+    expect(report.skipped[0]).toMatchObject({
+      stopRule: 'decision generation failed',
+      reason: 'decision generation failed: ledger_capacity_exceeded',
+    });
+    expect(ledger).toContain('"eventType":"devloop_issue_scout"');
+    expect(ledger).not.toContain('"eventType":"devloop_decision_requested"');
   });
 
   it('does not create decisions for low-risk, duplicate, or backoff candidates', async () => {
