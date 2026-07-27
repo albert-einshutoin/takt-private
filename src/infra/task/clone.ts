@@ -25,6 +25,7 @@ import {
 } from './clone-exec.js';
 import { loadCloneMeta, removeCloneMeta as removeCloneMetaFile, saveCloneMeta as saveCloneMetaFile } from './clone-meta.js';
 import { syncProjectLocalTaktForRetry } from './projectLocalTaktSync.js';
+import { createTaskClonePath, createTempClonePath } from './clone-path.js';
 
 export type { WorktreeOptions, WorktreeResult };
 export {
@@ -117,16 +118,6 @@ export class CloneManager {
 
   private static resolveClonePath(projectDir: string, options: WorktreeOptions): string {
     const timestamp = CloneManager.generateTimestamp();
-    const slug = options.taskSlug;
-
-    let dirName: string;
-    if (options.issueNumber !== undefined && slug) {
-      dirName = `${timestamp}-${options.issueNumber}-${slug}`;
-    } else if (slug) {
-      dirName = `${timestamp}-${slug}`;
-    } else {
-      dirName = timestamp;
-    }
 
     if (typeof options.worktree === 'string') {
       return path.isAbsolute(options.worktree)
@@ -134,16 +125,12 @@ export class CloneManager {
         : path.resolve(projectDir, options.worktree);
     }
 
-    return CloneManager.reserveAvailableClonePath(
+    return createTaskClonePath(
       CloneManager.resolveCloneBaseDir(projectDir),
-      dirName,
+      timestamp,
+      options.issueNumber,
+      options.taskSlug,
     );
-  }
-
-  private static reserveAvailableClonePath(baseDir: string, dirName: string): string {
-    fs.mkdirSync(baseDir, { recursive: true });
-    // Existence checks race when parallel tasks choose the same minute+slug path.
-    return fs.mkdtempSync(path.join(baseDir, `${dirName}-`));
   }
 
   private static resolveBranchName(options: WorktreeOptions): string {
@@ -272,9 +259,9 @@ export class CloneManager {
     CloneManager.resolveBaseBranch(projectDir);
 
     const timestamp = CloneManager.generateTimestamp();
-    const clonePath = CloneManager.reserveAvailableClonePath(
+    const clonePath = createTempClonePath(
       CloneManager.resolveCloneBaseDir(projectDir),
-      `tmp-${timestamp}`,
+      timestamp,
     );
 
     log.info('Creating temp clone for branch', { path: clonePath, branch });
