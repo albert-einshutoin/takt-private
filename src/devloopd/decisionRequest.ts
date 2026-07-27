@@ -1,25 +1,67 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod/v4';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import { stripAnsi } from '../shared/utils/text.js';
 
-const LOCAL_PATH_PATTERN = /(^|[\s("'=])(?:\/(?:Users|home|Volumes|private|tmp|var|opt)\/[^\s,;)"']+|[A-Za-z]:\\[^\s,;)"']+)/gu;
+const MAX_PUBLIC_TEXT_LENGTH = 4_000;
+const LOCAL_PATH_PATTERN = /(^|[\s("'=])(?:\/(?!\/)[^\s,;)"']*|[A-Za-z]:[\\/][^\s,;)"']*)/gu;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/gu;
+const FORMAT_CONTROL_PATTERN = /\p{Cf}/gu;
 
-const PublicTextSchema = z.string().transform((value) => (
-  sanitizeSensitiveText(value)
+const PublicTextSchema = z.string().max(MAX_PUBLIC_TEXT_LENGTH).transform((value) => {
+  const controlsRemoved = stripAnsi(value)
+    .replace(CONTROL_CHARACTER_PATTERN, ' ')
+    .replace(FORMAT_CONTROL_PATTERN, '');
+
+  return sanitizeSensitiveText(controlsRemoved)
     .replace(LOCAL_PATH_PATTERN, '$1[LOCAL_PATH]')
     .replace(/\s+/gu, ' ')
-    .trim()
-)).pipe(z.string().min(1));
+    .trim();
+}).pipe(z.string().min(1).max(MAX_PUBLIC_TEXT_LENGTH));
 
-const IdentifierSchema = z.string().trim().min(1).max(200);
+const IdentifierSchema = z.string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
+const RepositorySchema = z.string()
+  .min(3)
+  .max(200)
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u);
+const StageSchema = z.string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z][a-z0-9_]*$/u);
+
+function containsUnsafeControl(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (
+      (codePoint >= 0x00 && codePoint <= 0x1f)
+      || (codePoint >= 0x7f && codePoint <= 0x9f)
+    ) {
+      return true;
+    }
+  }
+  return /\p{Cf}/u.test(value);
+}
+
+const RepoPathSchema = z.string()
+  .min(1)
+  .max(4_096)
+  .regex(/^(?:\/|[A-Za-z]:[\\/])/u)
+  .refine(
+    (value) => !containsUnsafeControl(value),
+    'repoPath contains unsafe control characters',
+  );
 const PublicTextListSchema = z.array(PublicTextSchema).max(50);
 
 export const DecisionKindSchema = z.enum(['yes_no', 'choice', 'text']);
 export type DecisionKind = z.infer<typeof DecisionKindSchema>;
 
 export const DecisionSubjectSchema = z.object({
-  repoPath: z.string().trim().min(1),
-  repository: IdentifierSchema.optional(),
+  repoPath: RepoPathSchema,
+  repository: RepositorySchema.optional(),
   runSlug: IdentifierSchema.optional(),
   workflow: PublicTextSchema.optional(),
   step: PublicTextSchema.optional(),
@@ -97,10 +139,10 @@ const DirectRunResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
 
 const PrAutomationStageResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
   strategy: z.literal('pr_automation_stage'),
-  repository: IdentifierSchema,
+  repository: RepositorySchema,
   prNumber: z.number().int().positive(),
-  stage: IdentifierSchema,
-  expectedHeadSha: z.string().trim().regex(/^[a-f0-9]{40}$/iu),
+  stage: StageSchema,
+  expectedHeadSha: z.string().regex(/^[a-f0-9]{40}$/iu),
 }).strict();
 
 export const DecisionResumeGuardSchema = z.discriminatedUnion('strategy', [
@@ -165,14 +207,101 @@ const TextDecisionRequestSchema = z.object({
   kind: z.literal('text'),
 }).strict();
 
+const RATIONALE_REQUIRED_RISK_CATEGORIES = new Set<DecisionWhy['riskCategory']>([
+  'product_policy',
+  'human_policy',
+  'security',
+  'permission',
+  'high_risk',
+]);
+
+interface DecisionSafetyContext {
+  subject: DecisionSubject;
+  why: DecisionWhy;
+  answerRequirements: DecisionAnswerRequirements;
+  resumeGuard: DecisionResumeGuard;
+}
+
+function validateDecisionSafetyContext(
+  value: DecisionSafetyContext,
+  context: z.RefinementCtx,
+): void {
+  if (
+    RATIONALE_REQUIRED_RISK_CATEGORIES.has(value.why.riskCategory)
+    && !value.answerRequirements.rationaleRequired
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['answerRequirements', 'rationaleRequired'],
+      message: `rationaleRequired must be true for ${value.why.riskCategory}`,
+    });
+  }
+
+  if (value.resumeGuard.strategy === 'direct_run') {
+    if (
+      value.subject.runSlug === undefined
+      || value.subject.runSlug !== value.resumeGuard.runSlug
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['subject', 'runSlug'],
+        message: 'subject.runSlug must match the direct-run resume guard',
+      });
+    }
+    return;
+  }
+
+  if (
+    value.subject.repository === undefined
+    || value.subject.repository !== value.resumeGuard.repository
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['subject', 'repository'],
+      message: 'subject.repository must match the PR automation resume guard',
+    });
+  }
+  if (
+    value.subject.prNumber === undefined
+    || value.subject.prNumber !== value.resumeGuard.prNumber
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['subject', 'prNumber'],
+      message: 'subject.prNumber must match the PR automation resume guard',
+    });
+  }
+}
+
 // Strict unions keep an answer shape tied to its decision kind, so an ambiguous
 // payload can never resume automation through the wrong adapter.
-export const DecisionRequestSchema = z.discriminatedUnion('kind', [
+const DecisionRequestUnionSchema = z.discriminatedUnion('kind', [
   YesNoDecisionRequestSchema,
   ChoiceDecisionRequestSchema,
   TextDecisionRequestSchema,
 ]);
-export type DecisionRequest = z.infer<typeof DecisionRequestSchema>;
+export const DecisionRequestSchema = DecisionRequestUnionSchema.superRefine((value, context) => {
+  validateDecisionSafetyContext(value, context);
+  if (value.decisionVersion !== value.resumeGuard.expectedDecisionVersion) {
+    context.addIssue({
+      code: 'custom',
+      path: ['decisionVersion'],
+      message: 'decisionVersion must match resumeGuard.expectedDecisionVersion',
+    });
+  }
+});
+
+type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly unknown[]
+    ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
+
+// The factory returns an immutable domain value even though direct schema parsing
+// intentionally remains a validation-only operation.
+export type DecisionRequest = DeepReadonly<z.infer<typeof DecisionRequestSchema>>;
 
 const CreateDecisionRequestCommonShape = {
   subject: DecisionSubjectSchema,
@@ -183,7 +312,7 @@ const CreateDecisionRequestCommonShape = {
   resumeGuard: DecisionResumeGuardSchema,
 };
 
-export const CreateDecisionRequestInputSchema = z.discriminatedUnion('kind', [
+const CreateDecisionRequestInputUnionSchema = z.discriminatedUnion('kind', [
   z.object({
     ...CreateDecisionRequestCommonShape,
     kind: z.literal('yes_no'),
@@ -208,7 +337,27 @@ export const CreateDecisionRequestInputSchema = z.discriminatedUnion('kind', [
     kind: z.literal('text'),
   }).strict(),
 ]);
+export const CreateDecisionRequestInputSchema = CreateDecisionRequestInputUnionSchema
+  .superRefine(validateDecisionSafetyContext);
 export type CreateDecisionRequestInput = z.input<typeof CreateDecisionRequestInputSchema>;
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalize);
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.keys(value)
+      .sort()
+      .reduce<Record<string, unknown>>((result, key) => {
+        const item = (value as Record<string, unknown>)[key];
+        if (item !== undefined) {
+          result[key] = canonicalize(item);
+        }
+        return result;
+      }, {});
+  }
+  return value;
+}
 
 function hashDecisionContext(input: z.output<typeof CreateDecisionRequestInputSchema>): string {
   const publicSubject = { ...input.subject };
@@ -221,13 +370,23 @@ function hashDecisionContext(input: z.output<typeof CreateDecisionRequestInputSc
   // Stable semantic hashes deduplicate repeated scheduler requests without
   // binding a public decision to local paths, generated IDs, or wall-clock time.
   return createHash('sha256')
-    .update(JSON.stringify(canonicalContext), 'utf8')
+    .update(JSON.stringify(canonicalize(canonicalContext)), 'utf8')
     .digest('hex');
 }
 
 export interface CreateDecisionRequestOptions {
   decisionId?: string;
   now?: Date;
+}
+
+function deepFreeze<T>(value: T): DeepReadonly<T> {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const nestedValue of Object.values(value)) {
+      deepFreeze(nestedValue);
+    }
+    Object.freeze(value);
+  }
+  return value as DeepReadonly<T>;
 }
 
 export function createDecisionRequest(
@@ -244,5 +403,5 @@ export function createDecisionRequest(
     createdAt: (options.now ?? new Date()).toISOString(),
   };
 
-  return DecisionRequestSchema.parse(request);
+  return deepFreeze(DecisionRequestSchema.parse(request));
 }

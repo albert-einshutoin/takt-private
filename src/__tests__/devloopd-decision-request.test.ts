@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CreateDecisionRequestInputSchema,
   createDecisionRequest,
   DecisionRequestSchema,
 } from '../devloopd/decisionRequest.js';
@@ -7,6 +8,7 @@ import {
 const subject = {
   repoPath: '/private/worktrees/takt',
   repository: 'albert-einshutoin/takt-private',
+  runSlug: 'issue-42',
   issueNumber: 42,
   title: 'Choose the compatibility policy',
 };
@@ -238,5 +240,243 @@ describe('createDecisionRequest', () => {
     });
 
     expect(DecisionRequestSchema.parse(request).resumeGuard.strategy).toBe('pr_automation_stage');
+  });
+
+  it('rejects a request whose decision version differs from its resume guard', () => {
+    const request = createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    });
+
+    expect(() => DecisionRequestSchema.parse({
+      ...request,
+      decisionVersion: 2,
+    })).toThrow(/decisionVersion/i);
+  });
+
+  it.each([
+    ['missing', { ...subject, runSlug: undefined }],
+    ['different', { ...subject, runSlug: 'issue-99' }],
+  ])('rejects a direct-run request with a %s subject run slug', (_case, invalidSubject) => {
+    const request = createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    });
+
+    expect(() => DecisionRequestSchema.parse({
+      ...request,
+      subject: invalidSubject,
+    })).toThrow(/runSlug/i);
+  });
+
+  it.each([
+    ['missing repository', { ...subject, repository: undefined, prNumber: 108 }],
+    ['different repository', { ...subject, repository: 'example/other', prNumber: 108 }],
+    ['missing PR number', { ...subject, prNumber: undefined }],
+    ['different PR number', { ...subject, prNumber: 109 }],
+  ])('rejects a PR automation request with a %s', (_case, invalidSubject) => {
+    const request = createDecisionRequest({
+      subject: { ...subject, prNumber: 108 },
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'pr_automation_stage',
+        expectedDecisionVersion: 1,
+        repository: 'albert-einshutoin/takt-private',
+        prNumber: 108,
+        stage: 'merge_queue',
+        expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
+      },
+    });
+
+    expect(() => DecisionRequestSchema.parse({
+      ...request,
+      subject: invalidSubject,
+    })).toThrow(/repository|prNumber/i);
+  });
+
+  it('deep-freezes generated decisions while schema parsing remains a validation-only operation', () => {
+    const request = createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'yes_no',
+      question: 'May the public API change?',
+      options: [
+        {
+          id: 'yes',
+          title: 'Allow the change',
+          description: 'Proceed.',
+          consequences: ['Publish migration notes.'],
+          recommended: false,
+        },
+        {
+          id: 'no',
+          title: 'Preserve compatibility',
+          description: 'Re-scope the change.',
+          consequences: [],
+          recommended: true,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    });
+
+    expect(Object.isFrozen(request)).toBe(true);
+    expect(Object.isFrozen(request.options)).toBe(true);
+    expect(Object.isFrozen(request.options[0])).toBe(true);
+    expect(() => {
+      (request as unknown as { question: string }).question = 'Mutated';
+    }).toThrow(TypeError);
+    expect(() => {
+      (request.options[0] as unknown as { title: string }).title = 'Mutated';
+    }).toThrow(TypeError);
+
+    const parsed = DecisionRequestSchema.parse(request);
+    expect(Object.isFrozen(parsed)).toBe(false);
+  });
+
+  it('redacts POSIX and Windows absolute paths without changing URLs', () => {
+    const request = createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: 'Review /root and C:\\Users\\alice\\secret, keep https://example.com/docs.',
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    });
+
+    expect(request.question).toBe(
+      'Review [LOCAL_PATH] and [LOCAL_PATH], keep https://example.com/docs.',
+    );
+  });
+
+  it('removes ANSI, C0, C1, and Unicode format controls from public text', () => {
+    const request = createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: '\u001b[31mAllow\u001b[0m\u0000\u0085\u202E change?',
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    });
+
+    expect(request.question).toBe('Allow change?');
+    expect(request.question).not.toMatch(/[\u0000-\u001f\u007f-\u009f\p{Cf}]/u);
+  });
+
+  it('removes format controls before redacting sensitive assignments', () => {
+    const secret = 'ghp_1234567890abcdef';
+    const request = createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: `api\u200B_key=${secret}`,
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    });
+
+    expect(request.question).toBe('api_key=[REDACTED]');
+    expect(request.question).not.toContain(secret);
+  });
+
+  it('rejects public text beyond its explicit maximum length', () => {
+    expect(() => createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: 'a'.repeat(4_001),
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    })).toThrow();
+  });
+
+  it('rejects identifier control characters without echoing their value in errors', () => {
+    const injectedHeader = 'issue-42\r\nX-Injected: secret';
+    const parsed = CreateDecisionRequestInputSchema.safeParse({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: {
+        ...directRunGuard,
+        runSlug: injectedHeader,
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(JSON.stringify(parsed.error.issues)).not.toContain('X-Injected');
+      expect(JSON.stringify(parsed.error.issues)).not.toContain('secret');
+    }
+
+    expect(() => createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    }, {
+      decisionId: 'dec_ok\r\nX-Injected: secret',
+    })).toThrow();
+  });
+
+  it.each([
+    'product_policy',
+    'human_policy',
+    'security',
+    'permission',
+    'high_risk',
+  ] as const)('requires rationale for %s decisions', (riskCategory) => {
+    expect(() => createDecisionRequest({
+      subject,
+      why: { ...why, riskCategory },
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements: {
+        ...answerRequirements,
+        rationaleRequired: false,
+      },
+      resumeGuard: directRunGuard,
+    })).toThrow(/rationaleRequired/i);
+  });
+
+  it('allows rationale to remain optional for requirements ambiguity', () => {
+    const request = createDecisionRequest({
+      subject,
+      why: { ...why, riskCategory: 'requirements_ambiguity' },
+      how,
+      kind: 'text',
+      question: 'Describe the missing requirement.',
+      answerRequirements: {
+        ...answerRequirements,
+        rationaleRequired: false,
+      },
+      resumeGuard: directRunGuard,
+    });
+
+    expect(request.answerRequirements.rationaleRequired).toBe(false);
   });
 });
