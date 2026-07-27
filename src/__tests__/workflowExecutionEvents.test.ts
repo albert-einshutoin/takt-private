@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -9,6 +10,7 @@ import { resetAnalyticsWriter } from '../features/analytics/writer.js';
 import { AnalyticsEmitter } from '../features/tasks/execute/analyticsEmitter.js';
 import { bindWorkflowExecutionEvents } from '../features/tasks/execute/workflowExecutionEvents.js';
 import { resetDebugLogger, setVerboseConsole } from '../shared/utils/debug.js';
+import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
 
 class TestEngine extends EventEmitter {
   constructor(
@@ -41,6 +43,10 @@ function createBridgeHarness(options?: {
   traceDiscovery?: { queries: string[] };
   usePrefixWriter?: boolean;
   workflowSteps?: Array<{ name: string }>;
+  projectCwd?: string;
+  runSlug?: string;
+  currentTaskIssueNumber?: number;
+  decisionStoreFactory?: (repoPath: string) => DecisionStore;
 }) {
   const resumePoint = options?.resumePoint ?? {
     version: 1,
@@ -83,7 +89,10 @@ function createBridgeHarness(options?: {
       steps: options?.workflowSteps ?? [{ name: 'review' }],
     },
     task: 'task',
-    projectCwd: '/tmp/project',
+    projectCwd: options?.projectCwd ?? '/tmp/project',
+    runSlug: options?.runSlug ?? 'run-test',
+    currentTaskIssueNumber: options?.currentTaskIssueNumber,
+    decisionStoreFactory: options?.decisionStoreFactory,
     currentProvider: options?.currentProvider ?? 'mock',
     configuredModel: options?.configuredModel ?? 'gpt-test',
     out: out as never,
@@ -349,6 +358,143 @@ describe('bindWorkflowExecutionEvents', () => {
     });
 
     expect(out.info).toHaveBeenCalledWith('Base URL: [configured]');
+  });
+
+  it('structured blocked event を同じ run/step/issue の Decision として一度だけ記録する', () => {
+    const projectCwd = join(tmpdir(), `takt-workflow-events-decision-${randomUUID()}`);
+    mkdirSync(projectCwd, { recursive: true });
+    const store = new DecisionStore(projectCwd);
+    const decisionStoreFactory = vi.fn(() => store);
+    try {
+      const { bridge, engine, out } = createBridgeHarness({
+        projectCwd,
+        runSlug: 'run-issue-91',
+        currentTaskIssueNumber: 91,
+        decisionStoreFactory,
+      });
+      const step = {
+        name: 'review',
+        personaDisplayName: 'Reviewer',
+        instruction: '',
+      } as WorkflowStep;
+      const response = {
+        persona: 'reviewer',
+        status: 'blocked',
+        content: 'Owner permission is required.',
+        timestamp: new Date(),
+        structuredOutput: {
+          humanDecision: {
+            schemaVersion: 1,
+            category: 'permission',
+            question: 'May this exact blocked run publish the artifact?',
+            why: {
+              summary: 'Publishing changes externally visible state.',
+              reasons: ['The workflow does not own release authorization.'],
+              evidence: [{
+                kind: 'run',
+                reference: 'release-step',
+                summary: 'The release step stopped before publishing.',
+              }],
+            },
+            answer: { kind: 'yes_no', rationaleRequired: true },
+          },
+        },
+      };
+
+      expect(() => engine.emit('step:blocked', step, response)).not.toThrow();
+      expect(() => engine.emit('step:blocked', step, response)).not.toThrow();
+
+      expect(decisionStoreFactory).toHaveBeenCalledTimes(1);
+      expect(store.list()).toHaveLength(1);
+      const request = store.list()[0]?.request;
+      expect(request?.subject).toMatchObject({
+        repoPath: store.repoPath,
+        runSlug: 'run-issue-91',
+        workflow: 'parent',
+        step: 'review',
+        issueNumber: 91,
+      });
+      expect(bridge.state.lastDecisionId).toBe(request?.decisionId);
+      expect(out.info).toHaveBeenCalledWith(`Decision required: ${request?.decisionId}`);
+      expect(out.info.mock.calls.filter(
+        ([line]) => line === `Decision required: ${request?.decisionId}`,
+      )).toHaveLength(2);
+      expect(bridge.state.decisionGenerationError).toBeUndefined();
+    } finally {
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('plain blocked event は Decision store を作成せず既存abort処理へ委ねる', () => {
+    const decisionStoreFactory = vi.fn();
+    const { bridge, engine, out } = createBridgeHarness({ decisionStoreFactory });
+    const step = {
+      name: 'review',
+      personaDisplayName: 'Reviewer',
+      instruction: '',
+    } as WorkflowStep;
+
+    expect(() => engine.emit('step:blocked', step, {
+      persona: 'reviewer',
+      status: 'blocked',
+      content: '質問: 判断してください。理由: 不明です。',
+      timestamp: new Date(),
+    })).not.toThrow();
+
+    expect(decisionStoreFactory).not.toHaveBeenCalled();
+    expect(bridge.state.lastDecisionId).toBeUndefined();
+    expect(out.info).not.toHaveBeenCalledWith(expect.stringContaining('Decision required:'));
+  });
+
+  it('Decision store failure をsanitized state/outputへ残し blocked eventをthrowしない', () => {
+    const projectCwd = join(tmpdir(), `takt-workflow-events-failure-${randomUUID()}`);
+    mkdirSync(projectCwd, { recursive: true });
+    const store = new DecisionStore(projectCwd);
+    store.requestAndGet = () => {
+      throw new DecisionStoreError('ledger_unavailable');
+    };
+    try {
+      const { bridge, engine, out } = createBridgeHarness({
+        projectCwd,
+        runSlug: 'run-store-failure',
+        decisionStoreFactory: () => store,
+      });
+      const step = {
+        name: 'review',
+        personaDisplayName: 'Reviewer',
+        instruction: '',
+      } as WorkflowStep;
+      const response = {
+        persona: 'reviewer',
+        status: 'blocked',
+        content: 'Permission required.',
+        timestamp: new Date(),
+        structuredOutput: {
+          humanDecision: {
+            schemaVersion: 1,
+            category: 'permission',
+            question: 'May this exact blocked run continue?',
+            why: {
+              summary: 'The action requires explicit authorization.',
+              reasons: ['No permission is recorded for this run.'],
+              evidence: [],
+            },
+            answer: { kind: 'yes_no', rationaleRequired: true },
+          },
+        },
+      };
+
+      expect(() => engine.emit('step:blocked', step, response)).not.toThrow();
+      expect(bridge.state.decisionGenerationError).toBe('decision_store_ledger_unavailable');
+      expect(bridge.state.lastDecisionId).toBeUndefined();
+      expect(out.error).toHaveBeenCalledWith(
+        'Decision generation failed: decision_store_ledger_unavailable',
+      );
+      expect(JSON.stringify(out.error.mock.calls)).not.toContain(projectCwd);
+      expect(store.list()).toHaveLength(0);
+    } finally {
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
   });
 
   it('verbose 時に Claude SDK base URL を伏せて解決ソースを表示する', () => {

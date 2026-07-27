@@ -4,11 +4,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  classifyWorkflowDecisionBlock,
   classifyIssueScoutDecision,
   ensureDecisionForAutomationAction,
   ensureDecisionForAutomationActions,
   ensureDecisionForIssueScoutCandidate,
+  ensureDecisionForWorkflowBlock,
   isAutomationActionDecisionEligible,
+  parseWorkflowHumanDecision,
 } from '../devloopd/decisionGeneration.js';
 import { createDecisionRequest } from '../devloopd/decisionRequest.js';
 import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
@@ -19,6 +22,7 @@ import {
 import { appendDevloopLedgerEvent } from '../devloopd/ledger.js';
 import type { IssueScoutCandidate } from '../devloopd/issueScout.js';
 import type { DevloopAutomationAction } from '../devloopd/prAutomation.js';
+import type { AgentResponse } from '../core/models/index.js';
 
 function candidate(
   policyCategory: IssueScoutCandidate['policyCategory'] = 'product_policy',
@@ -825,5 +829,262 @@ describe('ensureDecisionForAutomationAction', () => {
     )).toThrowError(expect.objectContaining({
       code: 'request_conflict',
     }));
+  });
+});
+
+function blockedResponse(humanDecision?: unknown): AgentResponse {
+  return {
+    persona: 'planner',
+    status: 'blocked',
+    content: '質問: 実装範囲を確認してください。理由: 要求が曖昧です。',
+    timestamp: new Date('2026-07-28T00:00:00.000Z'),
+    ...(humanDecision === undefined
+      ? {}
+      : { structuredOutput: { humanDecision } }),
+  };
+}
+
+const workflowWhy = {
+  summary: 'Two mutually exclusive compatibility behaviors are possible.',
+  reasons: ['The task does not identify which behavior is required.'],
+  evidence: [{
+    kind: 'run' as const,
+    reference: 'planner-output',
+    summary: 'The planner recorded both behaviors as valid.',
+  }],
+};
+
+describe('ensureDecisionForWorkflowBlock', () => {
+  let repoPath: string;
+  let store: DecisionStore;
+
+  beforeEach(() => {
+    repoPath = join(tmpdir(), `takt-workflow-decision-${randomUUID()}`);
+    mkdirSync(repoPath, { recursive: true });
+    store = new DecisionStore(repoPath);
+  });
+
+  afterEach(() => {
+    rmSync(repoPath, { recursive: true, force: true });
+  });
+
+  it('creates a run-, step-, issue-correlated text Decision for requirements ambiguity', () => {
+    const response = blockedResponse({
+      schemaVersion: 1,
+      category: 'requirements_ambiguity',
+      question: 'Should compatibility preserve the legacy behavior or use the new behavior?',
+      why: workflowWhy,
+      answer: {
+        kind: 'text',
+        minimumTextLength: 3,
+        maximumTextLength: 500,
+        rationaleRequired: true,
+      },
+    });
+
+    const projection = ensureDecisionForWorkflowBlock(store, {
+      response,
+      stepName: 'plan',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-42',
+      issueNumber: 42,
+    }, new Date('2026-07-28T00:00:00.000Z'));
+
+    expect(projection?.request).toMatchObject({
+      kind: 'text',
+      subject: {
+        repoPath: store.repoPath,
+        runSlug: 'run-42',
+        workflow: 'takt-default',
+        step: 'plan',
+        issueNumber: 42,
+      },
+      why: { riskCategory: 'requirements_ambiguity' },
+      answerRequirements: {
+        rationaleRequired: true,
+        minimumTextLength: 3,
+        maximumTextLength: 500,
+      },
+      resumeGuard: {
+        strategy: 'direct_run',
+        runSlug: 'run-42',
+        expectedRunStatus: 'blocked',
+      },
+    });
+    expect(projection?.request.how.summary).toContain('blocked run context');
+    expect(projection?.request.how.verification.join('\n')).toMatch(/revalidate/iu);
+  });
+
+  it.each([
+    ['permission', 'May the workflow publish the prepared release artifact?'],
+    ['external_dependency', 'Is the external sandbox account now available?'],
+  ] as const)('creates explicit yes/no buttons for %s', (category, question) => {
+    const projection = ensureDecisionForWorkflowBlock(store, {
+      response: blockedResponse({
+        schemaVersion: 1,
+        category,
+        question,
+        why: workflowWhy,
+        answer: { kind: 'yes_no', rationaleRequired: category === 'permission' },
+      }),
+      stepName: 'release',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: `run-${category}`,
+    });
+
+    expect(projection?.request.kind).toBe('yes_no');
+    if (projection?.request.kind !== 'yes_no') throw new Error('expected yes/no Decision');
+    expect(projection.request.options.map((option) => option.id)).toEqual(['yes', 'no']);
+    expect(projection.request.answerRequirements.rationaleRequired)
+      .toBe(category === 'permission');
+  });
+
+  it('allows an explicitly bounded text answer for an external dependency', () => {
+    const parsed = parseWorkflowHumanDecision(blockedResponse({
+      schemaVersion: 1,
+      category: 'external_dependency',
+      question: 'Provide the approved external ticket reference.',
+      why: workflowWhy,
+      answer: {
+        kind: 'text',
+        minimumTextLength: 3,
+        maximumTextLength: 100,
+        rationaleRequired: false,
+      },
+    }));
+
+    expect(parsed?.answer.kind).toBe('text');
+  });
+
+  it('does not infer a Decision from plain blocked prose', () => {
+    const response = blockedResponse();
+
+    expect(classifyWorkflowDecisionBlock(response)).toEqual({
+      eligible: false,
+      issue: 'missing_structured_output',
+    });
+    expect(ensureDecisionForWorkflowBlock(store, {
+      response,
+      stepName: 'plan',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-plain',
+    })).toBeUndefined();
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it.each([
+    { error: 'provider failed' },
+    { errorKind: 'rate_limit' as const },
+    { failureCategory: 'provider_error' as const },
+    { failureCategory: 'stream_idle_timeout' as const },
+  ])('rejects provider/runtime failures even when a payload is present: %o', (failure) => {
+    const response = {
+      ...blockedResponse({
+        schemaVersion: 1,
+        category: 'permission',
+        question: 'May the workflow continue?',
+        why: workflowWhy,
+        answer: { kind: 'yes_no', rationaleRequired: true },
+      }),
+      ...failure,
+    };
+
+    expect(classifyWorkflowDecisionBlock(response).eligible).toBe(false);
+    expect(ensureDecisionForWorkflowBlock(store, {
+      response,
+      stepName: 'plan',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-provider',
+    })).toBeUndefined();
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it.each([
+    ['unknown schema', { schemaVersion: 2 }],
+    ['extra command', { command: 'npm publish' }],
+    ['invalid answer kind', { answer: { kind: 'choice' } }],
+  ])('classifies invalid structured output safely: %s', (_name, override) => {
+    const response = blockedResponse({
+      schemaVersion: 1,
+      category: 'permission',
+      question: 'May the workflow continue?',
+      why: workflowWhy,
+      answer: { kind: 'yes_no', rationaleRequired: true },
+      ...override,
+    });
+
+    expect(() => classifyWorkflowDecisionBlock(response)).not.toThrow();
+    expect(classifyWorkflowDecisionBlock(response)).toEqual({
+      eligible: false,
+      issue: 'invalid_structured_output',
+    });
+  });
+
+  it('deduplicates active blocks and opens a recurrence after the prior Decision is applied', () => {
+    const input = {
+      response: blockedResponse({
+        schemaVersion: 1,
+        category: 'permission',
+        question: 'May the workflow publish the release artifact?',
+        why: workflowWhy,
+        answer: { kind: 'yes_no', rationaleRequired: true },
+      }),
+      stepName: 'release',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-recurrence',
+    };
+    const first = ensureDecisionForWorkflowBlock(store, input)!;
+    const repeated = ensureDecisionForWorkflowBlock(store, input)!;
+    expect(repeated.request.decisionId).toBe(first.request.decisionId);
+
+    const answer = store.answer({
+      decisionId: first.request.decisionId,
+      expectedDecisionVersion: first.request.decisionVersion,
+      expectedContextHash: first.request.contextHash,
+      value: { optionId: 'yes' },
+      rationale: 'Release owner approved this exact blocked run.',
+      idempotencyKey: 'answer-workflow-first',
+    }, 'reviewer');
+    const identity = {
+      decisionId: first.request.decisionId,
+      decisionVersion: first.request.decisionVersion,
+      contextHash: first.request.contextHash,
+      answerEventId: answer.eventId,
+      sanitizedSummary: 'Applied blocked workflow answer.',
+    };
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent(identity));
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionAppliedEvent(identity));
+
+    const recurrence = ensureDecisionForWorkflowBlock(store, input)!;
+    expect(recurrence.status).toBe('open');
+    expect(recurrence.request.decisionId).toBe(`${first.request.decisionId}_r1`);
+  });
+
+  it('rejects unsafe, secret-bearing, path-bearing, ANSI, and oversized fields without leaking', () => {
+    for (const question of [
+      'token=super-secret',
+      '/Users/private/project/secret.txt',
+      '\u001b[31mapprove\u001b[0m',
+      'x'.repeat(2_001),
+    ]) {
+      const response = blockedResponse({
+        schemaVersion: 1,
+        category: 'permission',
+        question,
+        why: workflowWhy,
+        answer: { kind: 'yes_no', rationaleRequired: true },
+      });
+      const classification = classifyWorkflowDecisionBlock(response);
+      expect(classification).toEqual({
+        eligible: false,
+        issue: 'invalid_structured_output',
+      });
+    }
+    expect(existsSync(store.ledgerPath)).toBe(false);
   });
 });

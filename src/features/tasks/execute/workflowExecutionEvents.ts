@@ -20,18 +20,29 @@ import {
   reportWorkflowCompletion,
   updateUsageForStepCompletion,
 } from './workflowExecutionReporting.js';
+import {
+  classifyWorkflowDecisionBlock,
+  DecisionGenerationError,
+  ensureDecisionForWorkflowBlock,
+} from '../../../devloopd/decisionGeneration.js';
+import {
+  DecisionStore,
+  DecisionStoreError,
+} from '../../../devloopd/decisionStore.js';
 
 export interface WorkflowExecutionEventState {
   abortReason?: string;
   exceededInfo?: ExceededInfo;
   lastStepContent?: string;
   lastStepName?: string;
+  lastDecisionId?: string;
+  decisionGenerationError?: string;
   lastResumePoint?: WorkflowExecutionOptions['resumePoint'];
   currentIteration: number;
   sessionLog: SessionLog;
 }
 
-interface WorkflowExecutionEventBridgeDeps {
+export interface WorkflowExecutionEventBridgeDeps {
   engine: WorkflowEngine;
   workflowConfig: {
     name: string;
@@ -40,6 +51,9 @@ interface WorkflowExecutionEventBridgeDeps {
   };
   task: string;
   projectCwd: string;
+  runSlug: string;
+  currentTaskIssueNumber?: number;
+  decisionStoreFactory?: (repoPath: string) => DecisionStore;
   currentProvider: string;
   configuredModel: string | undefined;
   out: ReturnType<typeof import('./outputFns.js').createOutputFns>;
@@ -169,6 +183,12 @@ export function bindWorkflowExecutionEvents(
     sessionLog: deps.sessionLog,
   };
   const stepIterations = new Map<string, number>();
+  let decisionStore: DecisionStore | undefined;
+  const getDecisionStore = (): DecisionStore => {
+    decisionStore ??= deps.decisionStoreFactory?.(deps.projectCwd)
+      ?? new DecisionStore(deps.projectCwd);
+    return decisionStore;
+  };
   const syncLatestResumePoint = (): void => {
     if (!canReadResumePoint()) {
       return;
@@ -316,6 +336,41 @@ export function bindWorkflowExecutionEvents(
     const message = response.error ?? `Step "${step.name}" hit a rate limit`;
     playWarningSound();
     notifyWarning('TAKT', message);
+  });
+
+  deps.engine.on('step:blocked', (step, response) => {
+    const classification = classifyWorkflowDecisionBlock(response);
+    // Core reports every blocked response. The feature bridge only persists an
+    // explicit typed contract so ordinary prose can never become guessed
+    // authorization or a guessed answer form.
+    if (!classification.eligible) return;
+
+    try {
+      const projection = ensureDecisionForWorkflowBlock(getDecisionStore(), {
+        response,
+        stepName: step.name,
+        workflowName: deps.workflowConfig.name,
+        repoPath: deps.projectCwd,
+        runSlug: deps.runSlug,
+        ...(deps.currentTaskIssueNumber === undefined
+          ? {}
+          : { issueNumber: deps.currentTaskIssueNumber }),
+      });
+      if (projection === undefined) return;
+      state.lastDecisionId = projection.request.decisionId;
+      state.decisionGenerationError = undefined;
+      deps.out.info(`Decision required: ${projection.request.decisionId}`);
+    } catch (error) {
+      const code = error instanceof DecisionStoreError
+        ? `decision_store_${error.code}`
+        : error instanceof DecisionGenerationError
+          ? `decision_generation_${error.code}`
+          : 'decision_generation_failed';
+      state.decisionGenerationError = code;
+      // Never include the underlying filesystem/provider exception: it may
+      // contain a local path, token, or raw provider payload.
+      deps.out.error(`Decision generation failed: ${code}`);
+    }
   });
 
   deps.engine.on('step:report', (_step, filePath, fileName) => {

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { z } from 'zod/v4';
+import type { AgentResponse } from '../core/models/index.js';
 import type { IssueScoutCandidate } from './issueScout.js';
 import {
   createDecisionRequest,
@@ -67,6 +69,142 @@ export type IssueScoutDecisionOutcome =
   | 'approved'
   | 'revision_requested'
   | 'skipped';
+
+const WORKFLOW_DECISION_TEXT_MAX = 2_000;
+const WORKFLOW_DECISION_REASON_MAX = 20;
+const WORKFLOW_DECISION_EVIDENCE_MAX = 20;
+// Reject instead of cleaning structured blocker fields. Cleaning can change the
+// meaning of a human question, while accepting provider prose would make the
+// feature bridge guess whether a blocked step is asking for authorization.
+// eslint-disable-next-line no-control-regex
+const WORKFLOW_UNSAFE_CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]|\p{Cf}/u;
+const WORKFLOW_SECRET_PATTERN = /(?:\b(?:api[_-]?key|authorization|bearer|password|secret|token)\s*[:=]|\b(?:sk-(?:proj-)?|gh[opusr]_)[A-Za-z0-9_-]{8,})/iu;
+const WORKFLOW_LOCAL_PATH_PATTERN = /(?:^|[\s("'=])(?:\/(?!\/)\S+|[A-Za-z]:[\\/]\S+)/u;
+const WORKFLOW_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|git|gh|bash|sh|curl)\s+\S+/iu;
+
+const WorkflowDecisionPublicTextSchema = z.string()
+  .min(1)
+  .max(WORKFLOW_DECISION_TEXT_MAX)
+  .refine((value) => !WORKFLOW_UNSAFE_CONTROL_PATTERN.test(value), 'unsafe control')
+  .refine((value) => !WORKFLOW_SECRET_PATTERN.test(value), 'secret-bearing text')
+  .refine((value) => !WORKFLOW_LOCAL_PATH_PATTERN.test(value), 'local path')
+  .refine((value) => !WORKFLOW_COMMAND_PATTERN.test(value), 'command text');
+
+const WorkflowDecisionEvidenceSchema = z.object({
+  kind: z.enum(['run', 'report', 'changed_path', 'check', 'issue', 'pr', 'policy']),
+  reference: WorkflowDecisionPublicTextSchema.max(500),
+  summary: WorkflowDecisionPublicTextSchema,
+}).strict();
+
+const WorkflowDecisionWhySchema = z.object({
+  summary: WorkflowDecisionPublicTextSchema,
+  reasons: z.array(WorkflowDecisionPublicTextSchema)
+    .min(1)
+    .max(WORKFLOW_DECISION_REASON_MAX),
+  evidence: z.array(WorkflowDecisionEvidenceSchema)
+    .max(WORKFLOW_DECISION_EVIDENCE_MAX),
+}).strict();
+
+const WorkflowTextAnswerSchema = z.object({
+  kind: z.literal('text'),
+  minimumTextLength: z.number().int().min(1).max(WORKFLOW_DECISION_TEXT_MAX),
+  maximumTextLength: z.number().int().min(1).max(WORKFLOW_DECISION_TEXT_MAX),
+  rationaleRequired: z.boolean(),
+}).strict().refine(
+  (value) => value.minimumTextLength <= value.maximumTextLength,
+  'minimumTextLength must not exceed maximumTextLength',
+);
+
+const WorkflowYesNoAnswerSchema = z.object({
+  kind: z.literal('yes_no'),
+  rationaleRequired: z.boolean(),
+}).strict();
+
+const WorkflowHumanDecisionSchema = z.object({
+  schemaVersion: z.literal(1),
+  category: z.enum([
+    'requirements_ambiguity',
+    'permission',
+    'external_dependency',
+  ]),
+  question: WorkflowDecisionPublicTextSchema,
+  why: WorkflowDecisionWhySchema,
+  answer: z.discriminatedUnion('kind', [
+    WorkflowTextAnswerSchema,
+    WorkflowYesNoAnswerSchema,
+  ]),
+}).strict().superRefine((value, context) => {
+  if (
+    value.category === 'requirements_ambiguity'
+    && value.answer.kind !== 'text'
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['answer', 'kind'],
+      message: 'requirements ambiguity requires an explicit bounded text answer',
+    });
+  }
+});
+
+export type WorkflowHumanDecision = z.output<typeof WorkflowHumanDecisionSchema>;
+export type WorkflowDecisionClassification =
+  | {
+    readonly eligible: true;
+    readonly decision: WorkflowHumanDecision;
+  }
+  | {
+    readonly eligible: false;
+    readonly issue:
+      | 'not_blocked'
+      | 'provider_runtime_failure'
+      | 'missing_structured_output'
+      | 'invalid_structured_output';
+  };
+
+export interface WorkflowBlockDecisionInput {
+  readonly response: AgentResponse;
+  readonly stepName: string;
+  readonly workflowName: string;
+  readonly repoPath: string;
+  readonly runSlug: string;
+  readonly issueNumber?: number;
+}
+
+export function classifyWorkflowDecisionBlock(
+  response: AgentResponse,
+): WorkflowDecisionClassification {
+  if (response.status !== 'blocked') {
+    return { eligible: false, issue: 'not_blocked' };
+  }
+  if (
+    response.error !== undefined
+    || response.errorKind !== undefined
+    || response.failureCategory !== undefined
+  ) {
+    return { eligible: false, issue: 'provider_runtime_failure' };
+  }
+  if (
+    response.structuredOutput === undefined
+    || !Object.hasOwn(response.structuredOutput, 'humanDecision')
+  ) {
+    return { eligible: false, issue: 'missing_structured_output' };
+  }
+
+  const parsed = WorkflowHumanDecisionSchema.safeParse(
+    response.structuredOutput.humanDecision,
+  );
+  if (!parsed.success) {
+    return { eligible: false, issue: 'invalid_structured_output' };
+  }
+  return { eligible: true, decision: parsed.data };
+}
+
+export function parseWorkflowHumanDecision(
+  response: AgentResponse,
+): WorkflowHumanDecision | undefined {
+  const classification = classifyWorkflowDecisionBlock(response);
+  return classification.eligible ? classification.decision : undefined;
+}
 
 const MAX_CANDIDATE_TEXT_LENGTH = 4_000;
 const MAX_CANDIDATE_ARRAY_LENGTH = 50;
@@ -447,6 +585,148 @@ function ensureDeterministicDecision(
   return projection;
 }
 
+function ensureRecurringDecision(
+  store: DecisionStore,
+  input: CreateDecisionRequestInput,
+  now: Date,
+  projections: Map<string, DecisionProjection> = new Map(
+    store.list().map((projection) => [projection.request.decisionId, projection]),
+  ),
+): DecisionProjection {
+  const provisional = createDecisionRequest(input, { now });
+  const sameContext = [...projections.values()].filter((projection) =>
+    projection.request.contextHash === provisional.contextHash
+    && sameRequestIgnoringIdentity(projection.request, provisional));
+  const active = sameContext.filter((projection) => projection.status !== 'applied');
+  if (active.length > 1) throw new DecisionStoreError('request_conflict');
+  if (active[0] !== undefined) return active[0];
+
+  const appliedCount = sameContext.filter(
+    (projection) => projection.status === 'applied',
+  ).length;
+  const baseDecisionId = `dec_${provisional.contextHash}`;
+  const decisionId = appliedCount === 0
+    ? baseDecisionId
+    : `${baseDecisionId}_r${appliedCount}`;
+  if (projections.has(decisionId)) {
+    throw new DecisionStoreError('request_conflict');
+  }
+
+  const request = createDecisionRequest(input, { decisionId, now });
+  const projection = store.requestAndGet(request, { now });
+  if (projection.status === 'applied') {
+    throw new DecisionStoreError('request_conflict');
+  }
+  projections.set(decisionId, projection);
+  return projection;
+}
+
+function workflowDecisionInput(
+  decision: WorkflowHumanDecision,
+  input: WorkflowBlockDecisionInput,
+  repoPath: string,
+): CreateDecisionRequestInput {
+  const rationaleRequired = decision.category === 'permission'
+    || decision.category === 'requirements_ambiguity'
+    || decision.answer.rationaleRequired;
+  const common = {
+    subject: {
+      repoPath,
+      runSlug: input.runSlug,
+      workflow: input.workflowName,
+      step: input.stepName,
+      ...(input.issueNumber === undefined ? {} : { issueNumber: input.issueNumber }),
+      title: `${input.workflowName} / ${input.stepName} requires a human decision`,
+    },
+    question: decision.question,
+    why: {
+      ...decision.why,
+      riskCategory: decision.category,
+    },
+    how: {
+      summary: 'Add the explicit answer to the blocked run context, then resume only this run after revalidation.',
+      expectedEffects: [
+        'The answer is added to the blocked run context.',
+        'The stopped step is retried only after the direct-run guard is revalidated.',
+      ],
+      verification: [
+        'Revalidate that the exact run is still blocked before applying the answer.',
+        'Revalidate the answer against the stopped step before direct-run resume.',
+      ],
+    },
+    answerRequirements: {
+      rationaleRequired,
+      minimumTextLength: decision.answer.kind === 'text'
+        ? decision.answer.minimumTextLength
+        : 0,
+      maximumTextLength: decision.answer.kind === 'text'
+        ? decision.answer.maximumTextLength
+        : WORKFLOW_DECISION_TEXT_MAX,
+    },
+    resumeGuard: {
+      strategy: 'direct_run' as const,
+      expectedDecisionVersion: 1,
+      runSlug: input.runSlug,
+      expectedRunStatus: 'blocked',
+    },
+  };
+
+  if (decision.answer.kind === 'text') {
+    return {
+      ...common,
+      kind: 'text',
+    };
+  }
+
+  return {
+    ...common,
+    kind: 'yes_no',
+    options: [
+      {
+        id: 'yes',
+        title: 'Yes — allow this blocked run to be reconsidered',
+        description: 'Record an explicit yes answer for this exact blocked context.',
+        consequences: [
+          'The run may resume only after its blocked state and answer are revalidated.',
+        ],
+        recommended: false,
+      },
+      {
+        id: 'no',
+        title: 'No — keep this run blocked',
+        description: 'Record an explicit no answer and do not authorize the requested action.',
+        consequences: [
+          'The current run remains blocked unless a new valid decision is requested.',
+        ],
+        recommended: decision.category === 'permission',
+        ...(decision.category === 'permission'
+          ? { recommendationReason: 'Permission remains denied unless a human explicitly approves it.' }
+          : {}),
+      },
+    ],
+  };
+}
+
+export function ensureDecisionForWorkflowBlock(
+  store: DecisionStore,
+  input: WorkflowBlockDecisionInput,
+  now: Date = new Date(),
+): DecisionProjection | undefined {
+  const decision = parseWorkflowHumanDecision(input.response);
+  if (decision === undefined) return undefined;
+
+  try {
+    return ensureRecurringDecision(
+      store,
+      workflowDecisionInput(decision, input, store.repoPath),
+      now,
+    );
+  } catch (error) {
+    if (error instanceof DecisionStoreError) throw error;
+    throw new DecisionGenerationError('candidate_invalid');
+  }
+}
+
 export function ensureDecisionForIssueScoutCandidate(
   store: DecisionStore,
   candidate: IssueScoutCandidate,
@@ -669,34 +949,10 @@ export function ensureDecisionForAutomationActions(
       actions.map((action) => ({ ...action, pr })),
       { ...context, repoPath: store.repoPath },
     );
-    const provisional = createDecisionRequest(input, { now });
     const projections = options.projections ?? new Map(
       store.list().map((projection) => [projection.request.decisionId, projection]),
     );
-    const sameContext = [...projections.values()].filter((projection) =>
-      projection.request.contextHash === provisional.contextHash
-      && sameRequestIgnoringIdentity(projection.request, provisional));
-    const active = sameContext.filter((projection) => projection.status !== 'applied');
-    if (active.length > 1) throw new DecisionStoreError('request_conflict');
-    if (active[0] !== undefined) return active[0];
-
-    const appliedCount = sameContext.filter(
-      (projection) => projection.status === 'applied',
-    ).length;
-    const baseDecisionId = `dec_${provisional.contextHash}`;
-    const decisionId = appliedCount === 0
-      ? baseDecisionId
-      : `${baseDecisionId}_r${appliedCount}`;
-    const occupied = projections.get(decisionId);
-    if (occupied !== undefined) throw new DecisionStoreError('request_conflict');
-
-    const request = createDecisionRequest(input, { decisionId, now });
-    const projection = store.requestAndGet(request, { now });
-    if (projection.status === 'applied') {
-      throw new DecisionStoreError('request_conflict');
-    }
-    projections.set(decisionId, projection);
-    return projection;
+    return ensureRecurringDecision(store, input, now, projections);
   } catch (error) {
     if (
       error instanceof DecisionStoreError
