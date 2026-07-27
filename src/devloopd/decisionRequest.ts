@@ -29,6 +29,10 @@ const IdentifierSchema = z.string()
   .min(1)
   .max(200)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
+const CandidateIdentifierSchema = z.string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
 const RepositorySchema = z.string()
   .min(3)
   .max(200)
@@ -76,7 +80,7 @@ export const DecisionSubjectSchema = z.object({
   step: PublicTextSchema.optional(),
   issueNumber: z.number().int().positive().optional(),
   prNumber: z.number().int().positive().optional(),
-  candidateId: IdentifierSchema.optional(),
+  candidateId: CandidateIdentifierSchema.optional(),
   title: PublicTextSchema,
 }).strict();
 export type DecisionSubject = z.infer<typeof DecisionSubjectSchema>;
@@ -154,9 +158,15 @@ const PrAutomationStageResumeGuardSchema = DecisionResumeGuardCommonSchema.exten
   expectedHeadSha: z.string().regex(/^[a-f0-9]{40}$/iu),
 }).strict();
 
+const IssueScoutCandidateResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
+  strategy: z.literal('issue_scout_candidate'),
+  candidateId: CandidateIdentifierSchema,
+}).strict();
+
 export const DecisionResumeGuardSchema = z.discriminatedUnion('strategy', [
   DirectRunResumeGuardSchema,
   PrAutomationStageResumeGuardSchema,
+  IssueScoutCandidateResumeGuardSchema,
 ]);
 export type DecisionResumeGuard = z.infer<typeof DecisionResumeGuardSchema>;
 
@@ -255,6 +265,20 @@ function validateDecisionSafetyContext(
         code: 'custom',
         path: ['subject', 'runSlug'],
         message: 'subject.runSlug must match the direct-run resume guard',
+      });
+    }
+    return;
+  }
+
+  if (value.resumeGuard.strategy === 'issue_scout_candidate') {
+    if (
+      value.subject.candidateId === undefined
+      || value.subject.candidateId !== value.resumeGuard.candidateId
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['subject', 'candidateId'],
+        message: 'subject.candidateId must match the Issue Scout resume guard',
       });
     }
     return;

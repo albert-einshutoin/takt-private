@@ -54,6 +54,32 @@ function source(candidateTitle: string): IssueScoutSource {
   };
 }
 
+function riskySource(candidateTitle: string): IssueScoutSource {
+  return {
+    id: 'local_backlog',
+    scan() {
+      return {
+        sourceId: 'local_backlog',
+        status: 'success',
+        summary: 'risky fixture source',
+        candidates: [
+          buildIssueScoutCandidate({
+            sourceId: 'local_backlog',
+            title: candidateTitle,
+            summary: 'Change an existing public product commitment',
+            lane: 'feature_improvement',
+            policyCategory: 'product_policy',
+            riskBucket: 'high',
+            acceptanceCriteria: ['Preserve the existing public commitment.'],
+          }),
+        ],
+        nextActions: [],
+        artifacts: [],
+      };
+    },
+  };
+}
+
 describe('devloopd issue-scout', () => {
   let repoPath: string;
 
@@ -130,8 +156,88 @@ describe('devloopd issue-scout', () => {
     expect(report.selected).toEqual([]);
     expect(report.skipped[0]).toMatchObject({
       stopRule: 'Unsafe or too broad',
+      decisionId: expect.stringMatching(/^dec_[a-f0-9]{64}$/u),
     });
     expect(report.skipped[0]?.candidate.policyCategory).toBe('human_policy');
+  });
+
+  it('links one durable decision to repeated risky skips and the report', async () => {
+    const first = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [riskySource('Choose preview release eligibility')],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const second = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [riskySource('Choose preview release eligibility')],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T01:00:00.000Z'),
+    });
+
+    expect(first.skipped[0]?.decisionId).toBeDefined();
+    expect(second.skipped[0]?.decisionId).toBe(first.skipped[0]?.decisionId);
+    expect(formatIssueScoutReport(first)).toContain(`Decision: ${first.skipped[0]?.decisionId}`);
+
+    const events = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as {
+        eventType: string;
+        skipped?: Array<{ decisionId?: string }>;
+      });
+    expect(events.filter((event) => event.eventType === 'devloop_decision_requested')).toHaveLength(1);
+    expect(events.filter((event) => event.eventType === 'devloop_issue_scout')).toHaveLength(2);
+    expect(events
+      .filter((event) => event.eventType === 'devloop_issue_scout')
+      .every((event) => event.skipped?.[0]?.decisionId === first.skipped[0]?.decisionId))
+      .toBe(true);
+  });
+
+  it('does not create decisions for low-risk, duplicate, or backoff candidates', async () => {
+    const ledgerPath = resolveDevloopLedgerPath(repoPath, undefined);
+    appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_issue_scout', {
+      skipped: [{
+        candidateKey: 'docs tests tooling add docs and tests in backoff',
+        retryAfter: '2026-07-28T02:00:00.000Z',
+      }],
+    }, new Date('2026-07-28T00:00:00.000Z')));
+
+    await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [source('Add docs and tests in backoff')],
+      existingWork: [],
+      now: new Date('2026-07-28T01:00:00.000Z'),
+    });
+    await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [source('Duplicate docs candidate')],
+      existingWork: [{ title: 'Duplicate docs candidate', issueNumber: 42 }],
+      now: new Date('2026-07-28T03:00:00.000Z'),
+    });
+    const riskyDuplicate = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [riskySource('Duplicate product-policy candidate')],
+      existingWork: [{ title: 'Duplicate product-policy candidate', issueNumber: 43 }],
+      now: new Date('2026-07-28T03:30:00.000Z'),
+    });
+    await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sources: [source('Eligible low risk docs candidate')],
+      existingWork: [],
+      now: new Date('2026-07-28T04:00:00.000Z'),
+    });
+
+    expect(riskyDuplicate.skipped[0]?.stopRule).toBe('Duplicate or already covered');
+    expect(readFileSync(ledgerPath, 'utf8')).not.toContain('devloop_decision_requested');
   });
 
   it('turns safe dependency report JSON into lane evidence and verification', async () => {

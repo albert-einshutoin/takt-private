@@ -165,6 +165,87 @@ describe('createDecisionRequest', () => {
     } as never)).toThrow();
   });
 
+  it('accepts only a candidate-bound issue scout resume guard', () => {
+    const request = createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      kind: 'choice',
+      question: 'Choose how Issue Scout should proceed.',
+      options: [
+        {
+          id: 'approve_scope',
+          title: 'Approve scope',
+          description: 'Keep the proposed scope.',
+          consequences: ['Issue Scout will re-plan the candidate.'],
+          recommended: false,
+        },
+        {
+          id: 'skip',
+          title: 'Skip',
+          description: 'Do not create an issue.',
+          consequences: ['The candidate stays stopped.'],
+          recommended: true,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+    });
+
+    expect(request.resumeGuard).toEqual({
+      strategy: 'issue_scout_candidate',
+      expectedDecisionVersion: 1,
+      candidateId: 'local_backlog:compatibility-policy',
+    });
+  });
+
+  it('rejects an issue scout guard whose candidate differs from the subject', () => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      kind: 'text',
+      question: 'Explain how Issue Scout should proceed.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:different-candidate',
+      },
+    })).toThrow(/candidateId/i);
+  });
+
+  it('rejects command payloads on issue scout guards', () => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      kind: 'text',
+      question: 'Explain how Issue Scout should proceed.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:compatibility-policy',
+        command: 'rm -rf /',
+        args: ['--force'],
+      },
+    } as never)).toThrow();
+  });
+
   it('rejects yes/no option IDs other than exactly yes and no', () => {
     expect(() => createDecisionRequest({
       subject,

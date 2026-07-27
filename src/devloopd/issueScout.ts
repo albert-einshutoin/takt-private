@@ -19,6 +19,8 @@ import {
 } from './commandRunner.js';
 import { scanIssues } from './issueScanner.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import { ensureDecisionForIssueScoutCandidate } from './decisionGeneration.js';
+import { DecisionStore } from './decisionStore.js';
 
 export type IssueScoutSourceId =
   | 'github_issues'
@@ -110,6 +112,7 @@ export interface SkippedIssueScoutCandidate {
   stopRule: IssueScoutStopRule;
   reason: string;
   retryAfter?: string;
+  decisionId?: string;
 }
 
 export interface IssueScoutReport {
@@ -996,12 +999,28 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
       skipped.push({ candidate, stopRule: 'backoff active', reason: 'candidate is still in retry backoff', retryAfter });
       continue;
     }
-    if (candidate.policyCategory === 'product_policy' || candidate.policyCategory === 'human_policy' || candidate.riskBucket === 'high') {
-      skipped.push({ candidate, stopRule: 'Unsafe or too broad', reason: `${candidate.policyCategory} work requires human review` });
-      continue;
-    }
     if (isDuplicate(candidate, keys)) {
       skipped.push({ candidate, stopRule: 'Duplicate or already covered', reason: 'matching issue, PR, branch, or ledger key already exists' });
+      continue;
+    }
+    if (candidate.policyCategory === 'product_policy' || candidate.policyCategory === 'human_policy' || candidate.riskBucket === 'high') {
+      // dryRun controls GitHub mutation, but the local decision ledger is the
+      // durable human-approval boundary and must exist before this skip returns.
+      const decision = ensureDecisionForIssueScoutCandidate(
+        new DecisionStore(repoPath, ledgerPath),
+        candidate,
+        {
+          repoPath,
+          ...(options.repo === undefined ? {} : { repository: options.repo }),
+        },
+        now,
+      );
+      skipped.push({
+        candidate,
+        stopRule: 'Unsafe or too broad',
+        reason: `${candidate.policyCategory} work requires human review`,
+        decisionId: decision.request.decisionId,
+      });
       continue;
     }
     eligible.push(candidate);
@@ -1046,6 +1065,7 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
       stopRule: item.stopRule,
       reason: item.reason,
       retryAfter: item.retryAfter,
+      decisionId: item.decisionId,
     })),
     stopRule: selected.length === 0 ? 'no candidates' : undefined,
     retryAfter,
@@ -1084,7 +1104,10 @@ export function formatIssueScoutReport(report: IssueScoutReport): string {
   }
   if (report.skipped.length > 0) {
     lines.push('Skipped:');
-    lines.push(...report.skipped.map((item) => `- ${item.candidate.title}: ${item.stopRule} - ${item.reason}`));
+    lines.push(...report.skipped.map((item) => (
+      `- ${item.candidate.title}: ${item.stopRule} - ${item.reason}`
+      + (item.decisionId === undefined ? '' : ` (Decision: ${item.decisionId})`)
+    )));
   }
   return lines.join('\n');
 }
