@@ -11,17 +11,49 @@ const FORMAT_CONTROL_PATTERN = /\p{Cf}/gu;
 const LOCAL_PATH_PATTERN = /(^|[\s("'=])(?:\/(?!\/)[^\s,;)"']*|[A-Za-z]:[\\/][^\s,;)"']*)/gu;
 const FILE_URL_LOCAL_PATH_PATTERN = /\bfile:\/\/\/[^\s,;)"']+/giu;
 
-const PublicTextSchema = z.string().max(MAX_PUBLIC_TEXT_LENGTH).transform((value) => (
-  sanitizeSensitiveText(
+function mayContainSensitiveText(value: string): boolean {
+  const lower = value.toLowerCase();
+  return (
+    lower.includes('key')
+    || lower.includes('token')
+    || lower.includes('password')
+    || lower.includes('secret')
+    || lower.includes('authorization')
+    || lower.includes('cookie')
+    || lower.includes('://')
+    || lower.includes('--user')
+    || lower.includes('--proxy-user')
+    || lower.includes('-u')
+    || lower.includes('sk-')
+    || lower.includes('ghp_')
+    || lower.includes('xox')
+  );
+}
+
+function sanitizeLedgerText(value: string): string {
+  const controlsRemoved =
     stripAnsi(value)
       .replace(CONTROL_CHARACTER_PATTERN, ' ')
-      .replace(FORMAT_CONTROL_PATTERN, ''),
-  )
+      .replace(FORMAT_CONTROL_PATTERN, '');
+  const secretsRemoved = mayContainSensitiveText(controlsRemoved)
+    ? sanitizeSensitiveText(controlsRemoved)
+    : controlsRemoved;
+
+  return secretsRemoved
     .replace(FILE_URL_LOCAL_PATH_PATTERN, '[LOCAL_PATH]')
     .replace(LOCAL_PATH_PATTERN, '$1[LOCAL_PATH]')
     .replace(/\s+/gu, ' ')
-    .trim()
-)).pipe(z.string().min(1).max(MAX_PUBLIC_TEXT_LENGTH));
+    .trim();
+}
+
+const PublicTextSchema = z.string()
+  .max(MAX_PUBLIC_TEXT_LENGTH)
+  .transform(sanitizeLedgerText)
+  .pipe(z.string().min(1).max(MAX_PUBLIC_TEXT_LENGTH));
+const DecisionAnswerTextSchema = z.string()
+  .max(100_000)
+  .transform(sanitizeLedgerText)
+  .pipe(z.string().min(1).max(100_000));
 
 const IdentifierSchema = z.string()
   .min(1)
@@ -33,7 +65,7 @@ const RepositorySchema = z.string()
   .max(200)
   .regex(/^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u);
 
-type DeepReadonly<T> = T extends (...args: never[]) => unknown
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
   ? T
   : T extends readonly unknown[]
     ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
@@ -65,9 +97,10 @@ const TransitionIdentityShape = {
 
 export const DecisionAnswerValueSchema = z.union([
   z.object({ optionId: IdentifierSchema }).strict(),
-  z.object({ text: PublicTextSchema }).strict(),
+  z.object({ text: DecisionAnswerTextSchema }).strict(),
 ]);
-export type DecisionAnswerValue = z.output<typeof DecisionAnswerValueSchema>;
+export type DecisionAnswerValue =
+  DeepReadonly<z.output<typeof DecisionAnswerValueSchema>>;
 
 const AnswerShape = {
   value: DecisionAnswerValueSchema,
@@ -156,32 +189,73 @@ export const DecisionGithubTargetSchema = z.discriminatedUnion('kind', [
     number: z.number().int().positive(),
   }).strict(),
 ]);
-export type DecisionGithubTarget = z.output<typeof DecisionGithubTargetSchema>;
+export type DecisionGithubTarget =
+  DeepReadonly<z.output<typeof DecisionGithubTargetSchema>>;
 
-const GithubSyncEventRawSchema = z.object({
+const GithubSyncEventCommonShape = {
   ...EventMetadataShape,
   ...TransitionIdentityShape,
   eventType: z.literal('devloop_decision_github_sync'),
   target: DecisionGithubTargetSchema,
-  status: z.enum(['pending', 'synced', 'failed']),
-  commentId: IdentifierSchema.optional(),
-  commentUrl: z.url({ protocol: /^https$/u, hostname: /^github\.com$/u }).optional(),
-  sanitizedError: PublicTextSchema.optional(),
-}).strict().superRefine((event, context) => {
-  if (event.status === 'synced' && event.commentId === undefined && event.commentUrl === undefined) {
+};
+
+const GithubPendingSyncEventSchema = z.object({
+  ...GithubSyncEventCommonShape,
+  status: z.literal('pending'),
+}).strict();
+const GithubSyncedSyncEventSchema = z.object({
+  ...GithubSyncEventCommonShape,
+  status: z.literal('synced'),
+  commentId: IdentifierSchema,
+  commentUrl: z.url().optional(),
+}).strict();
+const GithubFailedSyncEventSchema = z.object({
+  ...GithubSyncEventCommonShape,
+  status: z.literal('failed'),
+  sanitizedError: PublicTextSchema,
+}).strict();
+
+function validateGithubCommentUrl(
+  event: z.infer<typeof GithubSyncedSyncEventSchema>,
+  context: z.RefinementCtx,
+): void {
+  if (event.commentUrl === undefined) return;
+
+  const url = new URL(event.commentUrl);
+  const [owner, repository, collection, number, ...extraSegments] =
+    url.pathname.split('/').filter(Boolean);
+  const expectedCollection = event.target.kind === 'issue' ? 'issues' : 'pull';
+  const expectedRepository = event.target.repository.split('/');
+  const matchesTarget = (
+    url.protocol === 'https:'
+    && url.hostname === 'github.com'
+    && (url.port === '' || url.port === '443')
+    && url.username === ''
+    && url.password === ''
+    && url.search === ''
+    && owner === expectedRepository[0]
+    && repository === expectedRepository[1]
+    && collection === expectedCollection
+    && number === String(event.target.number)
+    && extraSegments.length === 0
+    && /^#issuecomment-[1-9][0-9]*$/u.test(url.hash)
+  );
+
+  if (!matchesTarget) {
     context.addIssue({
       code: 'custom',
-      path: ['status'],
-      message: 'A synced event must identify the resulting GitHub comment',
+      path: ['commentUrl'],
+      message: 'GitHub comment URL must exactly match the synchronization target',
     });
   }
-  if (event.status === 'failed' && event.sanitizedError === undefined) {
-    context.addIssue({
-      code: 'custom',
-      path: ['sanitizedError'],
-      message: 'A failed event must contain a sanitized error',
-    });
-  }
+}
+
+const GithubSyncEventRawSchema = z.discriminatedUnion('status', [
+  GithubPendingSyncEventSchema,
+  GithubSyncedSyncEventSchema,
+  GithubFailedSyncEventSchema,
+]).superRefine((event, context) => {
+  if (event.status === 'synced') validateGithubCommentUrl(event, context);
 });
 
 export const DecisionRequestedEventSchema = RequestedEventRawSchema.transform(deepFreeze);
@@ -350,11 +424,26 @@ export function createDecisionRevalidationRequiredEvent(
 export function createDecisionGithubSyncEvent(
   input: TransitionIdentity & {
     target: DecisionGithubTarget;
-    status: 'pending' | 'synced' | 'failed';
-    commentId?: string;
-    commentUrl?: string;
-    sanitizedError?: string;
-  },
+  } & (
+    | {
+      status: 'pending';
+      commentId?: never;
+      commentUrl?: never;
+      sanitizedError?: never;
+    }
+    | {
+      status: 'synced';
+      commentId: string;
+      commentUrl?: string;
+      sanitizedError?: never;
+    }
+    | {
+      status: 'failed';
+      sanitizedError: string;
+      commentId?: never;
+      commentUrl?: never;
+    }
+  ),
   options: CreateDecisionEventOptions = {},
 ): DecisionGithubSyncEvent {
   return DecisionGithubSyncEventSchema.parse({
@@ -366,7 +455,7 @@ export function createDecisionGithubSyncEvent(
 
 export interface DecisionProjectionAnswer {
   readonly eventId: string;
-  readonly value: DecisionAnswerValue;
+  readonly value: DeepReadonly<DecisionAnswerValue>;
   readonly rationale: string;
   readonly answeredBy: string;
   readonly idempotencyKey: string;
@@ -395,21 +484,32 @@ export type DecisionApplyResult =
     readonly sanitizedSummary: string;
   };
 
-export interface DecisionGithubSyncProjection {
+type DecisionGithubSyncProjectionCommon = {
   readonly eventId: string;
-  readonly target: DecisionGithubTarget;
-  readonly status: 'pending' | 'synced' | 'failed';
-  readonly commentId?: string;
-  readonly commentUrl?: string;
-  readonly sanitizedError?: string;
-}
+  readonly target: DeepReadonly<DecisionGithubTarget>;
+};
+
+export type DecisionGithubSyncProjection = DecisionGithubSyncProjectionCommon & (
+  | {
+    readonly status: 'pending';
+  }
+  | {
+    readonly status: 'synced';
+    readonly commentId: string;
+    readonly commentUrl?: string;
+  }
+  | {
+    readonly status: 'failed';
+    readonly sanitizedError: string;
+  }
+);
 
 export interface DecisionProjection {
   readonly request: DecisionRequest;
   readonly status: 'open' | 'answered' | 'applying' | 'applied' | 'revalidation_required';
-  readonly answer?: DecisionProjectionAnswer;
-  readonly applyResult?: DecisionApplyResult;
-  readonly githubSync?: DecisionGithubSyncProjection;
+  readonly answer?: DeepReadonly<DecisionProjectionAnswer>;
+  readonly applyResult?: DeepReadonly<DecisionApplyResult>;
+  readonly githubSync?: DeepReadonly<DecisionGithubSyncProjection>;
 }
 
 export type DecisionFoldIssueCode =
@@ -432,6 +532,7 @@ export interface DecisionFoldIssue {
 
 export interface DecisionFoldResult extends Iterable<DecisionProjection> {
   readonly issues: readonly DecisionFoldIssue[];
+  readonly quarantinedDecisionIds: readonly string[];
   get(decisionId: string): DecisionProjection | undefined;
   values(): IterableIterator<DecisionProjection>;
 }
@@ -452,6 +553,14 @@ function rawString(
   if (value === null || typeof value !== 'object') return fallback;
   const candidate = Reflect.get(value, key);
   return typeof candidate === 'string' ? candidate : fallback;
+}
+
+function rawIdentifier(
+  value: unknown,
+  key: 'eventId' | 'decisionId',
+): string | undefined {
+  const parsed = IdentifierSchema.safeParse(rawString(value, key));
+  return parsed.success ? parsed.data : undefined;
 }
 
 function issueFor(
@@ -588,10 +697,14 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
   const projections = new Map<string, MutableProjection>();
   const issues: DecisionFoldIssue[] = [];
   const seenEventIds = new Set<string>();
+  const quarantinedDecisionIds = new Set<string>();
 
   for (const rawEvent of events) {
-    const eventId = rawString(rawEvent, 'eventId', '[unknown-event]') ?? '[unknown-event]';
-    const decisionId = rawString(rawEvent, 'decisionId');
+    const validEventId = rawIdentifier(rawEvent, 'eventId');
+    const eventId = validEventId ?? '[unknown-event]';
+    const decisionId = rawIdentifier(rawEvent, 'decisionId');
+    const duplicateEventId = validEventId !== undefined && seenEventIds.has(validEventId);
+    if (validEventId !== undefined && !duplicateEventId) seenEventIds.add(validEventId);
 
     if (
       rawEvent !== null
@@ -604,6 +717,14 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
         'unknown_schema_version',
         'Unsupported decision event schema version',
       ));
+      if (duplicateEventId) {
+        issues.push(issueFor(
+          { eventId, decisionId },
+          'duplicate_event_id',
+          'Duplicate event ID',
+        ));
+      }
+      if (decisionId !== undefined) quarantinedDecisionIds.add(decisionId);
       continue;
     }
 
@@ -617,15 +738,18 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
       continue;
     }
     const event = parsed.data;
-    if (seenEventIds.has(event.eventId)) {
+    if (duplicateEventId) {
       issues.push(issueFor(event, 'duplicate_event_id', 'Duplicate event ID'));
       continue;
     }
-    seenEventIds.add(event.eventId);
 
     if (event.eventType === 'devloop_decision_requested') {
       if (projections.has(event.decisionId)) {
         issues.push(issueFor(event, 'duplicate_request', 'Decision request already exists'));
+        // Decision IDs are immutable aggregate identities. Treating a second request as
+        // an implicit version upgrade could combine an old answer with new semantics, so
+        // callers must create a new decision ID and the conflicting aggregate is quarantined.
+        quarantinedDecisionIds.add(event.decisionId);
         continue;
       }
       projections.set(event.decisionId, {
@@ -650,16 +774,28 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
     }
 
     if (event.eventType === 'devloop_decision_github_sync') {
-      projection.githubSync = deepFreeze({
-        eventId: event.eventId,
-        target: event.target,
-        status: event.status,
-        ...(event.commentId === undefined ? {} : { commentId: event.commentId }),
-        ...(event.commentUrl === undefined ? {} : { commentUrl: event.commentUrl }),
-        ...(event.sanitizedError === undefined
-          ? {}
-          : { sanitizedError: event.sanitizedError }),
-      });
+      if (event.status === 'pending') {
+        projection.githubSync = deepFreeze({
+          eventId: event.eventId,
+          target: event.target,
+          status: event.status,
+        });
+      } else if (event.status === 'synced') {
+        projection.githubSync = deepFreeze({
+          eventId: event.eventId,
+          target: event.target,
+          status: event.status,
+          commentId: event.commentId,
+          ...(event.commentUrl === undefined ? {} : { commentUrl: event.commentUrl }),
+        });
+      } else {
+        projection.githubSync = deepFreeze({
+          eventId: event.eventId,
+          target: event.target,
+          status: event.status,
+          sanitizedError: event.sanitizedError,
+        });
+      }
       continue;
     }
 
@@ -669,11 +805,15 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
 
   const frozenProjections = new Map<string, DecisionProjection>();
   for (const [decisionId, projection] of projections) {
-    frozenProjections.set(decisionId, deepFreeze({ ...projection }));
+    if (!quarantinedDecisionIds.has(decisionId)) {
+      frozenProjections.set(decisionId, deepFreeze({ ...projection }));
+    }
   }
   const frozenIssues = deepFreeze(issues);
+  const frozenQuarantinedDecisionIds = deepFreeze([...quarantinedDecisionIds]);
   const result: DecisionFoldResult = {
     issues: frozenIssues,
+    quarantinedDecisionIds: frozenQuarantinedDecisionIds,
     get(decisionId: string): DecisionProjection | undefined {
       return frozenProjections.get(decisionId);
     },

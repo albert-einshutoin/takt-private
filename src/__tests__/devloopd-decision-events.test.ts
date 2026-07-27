@@ -10,8 +10,10 @@ import {
   createDecisionRequestedEvent,
   createDecisionRevalidationRequiredEvent,
   DecisionEventSchema,
+  DecisionGithubSyncEventSchema,
   foldDecisionEvents,
   parseDecisionEvent,
+  type DecisionProjection,
 } from '../devloopd/decisionEvents.js';
 
 const request = createDecisionRequest({
@@ -94,6 +96,102 @@ const answered = createDecisionAnsweredEvent({
   now: new Date('2026-07-27T01:02:00.000Z'),
 });
 
+function createVersionedRequest(
+  decisionVersion: number,
+  question = 'Choose a compatibility policy.',
+) {
+  return createDecisionRequest({
+    subject: {
+      repoPath: '/private/worktrees/takt',
+      repository: 'albert-einshutoin/takt-private',
+      runSlug: 'issue-42',
+      issueNumber: 42,
+      title: 'Choose the compatibility policy',
+    },
+    kind: 'choice',
+    question,
+    why: {
+      summary: 'The proposed change modifies a public API.',
+      riskCategory: 'product_policy',
+      reasons: ['Existing consumers may break.'],
+      evidence: [],
+    },
+    how: {
+      summary: 'Resume the run with the selected policy.',
+      expectedEffects: ['Rebuild the implementation plan.'],
+      verification: ['Confirm the selected policy is present in the task context.'],
+    },
+    options: [
+      {
+        id: 'preserve',
+        title: 'Preserve compatibility',
+        description: 'Keep the current API.',
+        consequences: [],
+        recommended: true,
+      },
+      {
+        id: 'break',
+        title: 'Allow a breaking change',
+        description: 'Publish a migration path.',
+        consequences: [],
+        recommended: false,
+      },
+    ],
+    answerRequirements: {
+      rationaleRequired: true,
+      minimumTextLength: 0,
+      maximumTextLength: 2_000,
+    },
+    resumeGuard: {
+      strategy: 'direct_run',
+      expectedDecisionVersion: decisionVersion,
+      runSlug: 'issue-42',
+      expectedRunStatus: 'blocked',
+    },
+  }, {
+    decisionId: request.decisionId,
+    now: new Date('2026-07-27T04:00:00.000Z'),
+  });
+}
+
+function createTextRequest(
+  maximumTextLength: number,
+  minimumTextLength = 0,
+  decisionId = `dec_text_${maximumTextLength}_${minimumTextLength}`,
+) {
+  return createDecisionRequest({
+    subject: {
+      repoPath: '/private/worktrees/takt',
+      runSlug: decisionId,
+      title: 'Provide decision text',
+    },
+    kind: 'text',
+    question: 'Describe the approved implementation boundary.',
+    why: {
+      summary: 'Automation needs an explicit human-authored boundary.',
+      riskCategory: 'requirements_ambiguity',
+      reasons: ['The implementation boundary is not derivable.'],
+      evidence: [],
+    },
+    how: {
+      summary: 'Resume with the approved boundary.',
+      expectedEffects: ['Use the answer as decision context.'],
+      verification: ['Validate the answer length before resuming.'],
+    },
+    answerRequirements: {
+      rationaleRequired: false,
+      minimumTextLength,
+      maximumTextLength,
+    },
+    resumeGuard: {
+      strategy: 'direct_run',
+      expectedDecisionVersion: 1,
+      runSlug: decisionId,
+      expectedRunStatus: 'blocked',
+    },
+  }, { decisionId });
+}
+
 describe('decision event fold', () => {
   it('folds requested to answered without mutating the immutable request or answer value', () => {
     const before = structuredClone(request);
@@ -110,8 +208,17 @@ describe('decision event fold', () => {
     expect(request).toEqual(before);
     expect(Object.isFrozen(projection)).toBe(true);
     expect(Object.isFrozen(projection?.request)).toBe(true);
+    expect(Object.isFrozen(projection?.answer?.value)).toBe(true);
     expect([...result.values()]).toHaveLength(1);
     expect(result.issues).toEqual([]);
+
+    if (false) {
+      const typedProjection = projection as DecisionProjection;
+      if (typedProjection.answer !== undefined) {
+        // @ts-expect-error Projection answer values are deeply readonly.
+        typedProjection.answer.value = { optionId: 'break' };
+      }
+    }
   });
 
   it('folds apply_started to applied for the fixed answer event', () => {
@@ -226,6 +333,42 @@ describe('decision event fold', () => {
     })]);
   });
 
+  it('quarantines a decision when an unknown event version drifts after an answer', () => {
+    const unknownApplied = {
+      ...createDecisionAppliedEvent({
+        ...identity,
+        answerEventId: answered.eventId,
+        sanitizedSummary: 'Future application result.',
+      }, { eventId: 'evt_future_applied' }),
+      schemaVersion: 2,
+    };
+    const result = foldDecisionEvents([requested, answered, unknownApplied]);
+
+    expect(result.get(request.decisionId)).toBeUndefined();
+    expect([...result.values()]).toEqual([]);
+    expect(result.quarantinedDecisionIds).toContain(request.decisionId);
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      eventId: 'evt_future_applied',
+      decisionId: request.decisionId,
+      code: 'unknown_schema_version',
+    }));
+  });
+
+  it('detects duplicate event IDs across unknown and known schema versions', () => {
+    const futureRequested = {
+      ...requested,
+      schemaVersion: 2,
+    };
+    const result = foldDecisionEvents([futureRequested, requested]);
+
+    expect(result.issues.map((issue) => issue.code)).toEqual([
+      'unknown_schema_version',
+      'duplicate_event_id',
+    ]);
+    expect(result.quarantinedDecisionIds).toContain(request.decisionId);
+    expect(result.get(request.decisionId)).toBeUndefined();
+  });
+
   it('classifies malformed payloads without schema versions as invalid events independently', () => {
     const result = foldDecisionEvents([
       {},
@@ -259,6 +402,29 @@ describe('decision event fold', () => {
       eventId: answered.eventId,
       code: 'duplicate_event_id',
     })]);
+  });
+
+  it.each([
+    ['version increment', createVersionedRequest(2)],
+    ['version jump', createVersionedRequest(4)],
+    ['same version with a different context hash', createVersionedRequest(
+      1,
+      'Choose a revised compatibility policy.',
+    )],
+  ])('quarantines duplicate requests for the same decision ID: %s', (_case, duplicate) => {
+    const duplicateEvent = createDecisionRequestedEvent(duplicate, {
+      eventId: `evt_duplicate_request_${duplicate.decisionVersion}_${duplicate.contextHash.slice(0, 8)}`,
+    });
+    const result = foldDecisionEvents([requested, duplicateEvent]);
+
+    expect(result.issues).toEqual([expect.objectContaining({
+      eventId: duplicateEvent.eventId,
+      decisionId: request.decisionId,
+      code: 'duplicate_request',
+    })]);
+    expect(result.quarantinedDecisionIds).toContain(request.decisionId);
+    expect(result.get(request.decisionId)).toBeUndefined();
+    expect([...result.values()]).toEqual([]);
   });
 
   it.each([
@@ -305,6 +471,106 @@ describe('decision event fold', () => {
     })]);
   });
 
+  it.each([4_000, 4_001, 5_000])(
+    'accepts a %i-character text answer when the request permits it',
+    (length) => {
+      const textRequest = createTextRequest(10_000, 0, `dec_text_${length}`);
+      const textRequested = createDecisionRequestedEvent(textRequest);
+      const textAnswered = createDecisionAnsweredEvent({
+        decisionId: textRequest.decisionId,
+        decisionVersion: textRequest.decisionVersion,
+        contextHash: textRequest.contextHash,
+        value: { text: 'x'.repeat(length) },
+        rationale: 'The boundary is explicit.',
+        answeredBy: 'user:owner',
+        idempotencyKey: `answer-text-${length}`,
+      });
+      const projection = foldDecisionEvents([textRequested, textAnswered])
+        .get(textRequest.decisionId);
+
+      expect(projection?.status).toBe('answered');
+      expect(
+        projection?.answer?.value !== undefined && 'text' in projection.answer.value
+          ? projection.answer.value.text
+          : undefined,
+      ).toHaveLength(length);
+    },
+  );
+
+  it('accepts the 100,000-character ledger boundary and rejects larger answer bodies', () => {
+    const textRequest = createTextRequest(100_000);
+    const baseInput = {
+      decisionId: textRequest.decisionId,
+      decisionVersion: textRequest.decisionVersion,
+      contextHash: textRequest.contextHash,
+      rationale: 'The boundary is explicit.',
+      answeredBy: 'user:owner',
+      idempotencyKey: 'answer-text-boundary',
+    };
+
+    const boundaryEvent = createDecisionAnsweredEvent({
+      ...baseInput,
+      value: { text: 'x'.repeat(100_000) },
+    });
+    expect(
+      'text' in boundaryEvent.value ? boundaryEvent.value.text.length : undefined,
+    ).toBe(100_000);
+    expect(() => createDecisionAnsweredEvent({
+      ...baseInput,
+      value: { text: 'x'.repeat(100_001) },
+    })).toThrow();
+  });
+
+  it('sanitizes secrets, control characters, and local paths in text answers', () => {
+    const textRequest = createTextRequest(10_000, 0, 'dec_text_sanitized');
+    const event = createDecisionAnsweredEvent({
+      decisionId: textRequest.decisionId,
+      decisionVersion: textRequest.decisionVersion,
+      contextHash: textRequest.contextHash,
+      value: {
+        text: 'token=private-value\u0000 from /Users/private/worktree',
+      },
+      rationale: 'Sanitize before persistence.',
+      answeredBy: 'user:owner',
+      idempotencyKey: 'answer-text-sanitized',
+    });
+
+    expect(event.value).toEqual({
+      text: 'token=[REDACTED] from [LOCAL_PATH]',
+    });
+  });
+
+  it('validates text answer minimum and maximum against the active request during fold', () => {
+    const textRequest = createTextRequest(10, 5, 'dec_text_fold_limits');
+    const textRequested = createDecisionRequestedEvent(textRequest);
+    const tooShort = createDecisionAnsweredEvent({
+      decisionId: textRequest.decisionId,
+      decisionVersion: textRequest.decisionVersion,
+      contextHash: textRequest.contextHash,
+      value: { text: 'xxxx' },
+      rationale: 'Too short.',
+      answeredBy: 'user:owner',
+      idempotencyKey: 'answer-text-too-short',
+    });
+    const tooLong = createDecisionAnsweredEvent({
+      decisionId: textRequest.decisionId,
+      decisionVersion: textRequest.decisionVersion,
+      contextHash: textRequest.contextHash,
+      value: { text: 'x'.repeat(11) },
+      rationale: 'Too long.',
+      answeredBy: 'user:owner',
+      idempotencyKey: 'answer-text-too-long',
+    });
+
+    for (const invalidAnswer of [tooShort, tooLong]) {
+      const result = foldDecisionEvents([textRequested, invalidAnswer]);
+      expect(result.get(textRequest.decisionId)?.status).toBe('open');
+      expect(result.issues).toEqual([expect.objectContaining({
+        code: 'invalid_transition',
+      })]);
+    }
+  });
+
   it('folds GitHub sync independently without changing the main status', () => {
     const pending = createDecisionGithubSyncEvent({
       ...identity,
@@ -333,6 +599,98 @@ describe('decision event fold', () => {
       target: { kind: 'issue', number: 42 },
       commentId: 'IC_kwDOexample',
     });
+    expect(Object.isFrozen(projection?.githubSync?.target)).toBe(true);
+  });
+
+  it.each([
+    ['pending with comment ID', {
+      status: 'pending',
+      commentId: 'IC_kwDOexample',
+    }],
+    ['pending with error', {
+      status: 'pending',
+      sanitizedError: 'Not pending.',
+    }],
+    ['synced without comment ID', {
+      status: 'synced',
+    }],
+    ['synced with error', {
+      status: 'synced',
+      commentId: 'IC_kwDOexample',
+      sanitizedError: 'Contradictory success.',
+    }],
+    ['failed without error', {
+      status: 'failed',
+    }],
+    ['failed with comment ID', {
+      status: 'failed',
+      commentId: 'IC_kwDOexample',
+      sanitizedError: 'Sync failed.',
+    }],
+  ])('rejects an invalid GitHub sync state: %s', (_case, fields) => {
+    expect(() => DecisionGithubSyncEventSchema.parse({
+      ...createDecisionGithubSyncEvent({
+        ...identity,
+        target: {
+          kind: 'issue',
+          repository: 'albert-einshutoin/takt-private',
+          number: 42,
+        },
+        status: 'pending',
+      }),
+      ...fields,
+    })).toThrow();
+  });
+
+  it.each([
+    [
+      'repository',
+      'https://github.com/another-owner/takt-private/issues/42#issuecomment-1',
+    ],
+    [
+      'number',
+      'https://github.com/albert-einshutoin/takt-private/issues/43#issuecomment-1',
+    ],
+    [
+      'target kind',
+      'https://github.com/albert-einshutoin/takt-private/pull/42#issuecomment-1',
+    ],
+    [
+      'non-standard port',
+      'https://github.com:444/albert-einshutoin/takt-private/issues/42#issuecomment-1',
+    ],
+    [
+      'comment anchor',
+      'https://github.com/albert-einshutoin/takt-private/issues/42#discussion_r1',
+    ],
+  ])('rejects a GitHub comment URL with mismatched %s', (_case, commentUrl) => {
+    expect(() => createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'synced',
+      commentId: 'IC_kwDOexample',
+      commentUrl,
+    })).toThrow();
+  });
+
+  it('accepts a PR comment URL that exactly matches its GitHub target', () => {
+    const event = createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'pr',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'synced',
+      commentId: 'IC_kwDOexample',
+      commentUrl: 'https://github.com/albert-einshutoin/takt-private/pull/42#issuecomment-1',
+    });
+
+    expect(event.status).toBe('synced');
   });
 
   it.each([
