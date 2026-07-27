@@ -62,6 +62,27 @@ const CODEX_RETRYABLE_ERROR_PATTERNS = [
   'at capacity',
   ...CODEX_RECONNECT_ERROR_PATTERNS,
 ];
+const CODEX_PATH_ENV_KEYS = ['HOME', 'USERPROFILE', 'CODEX_HOME'] as const;
+
+function buildCodexEnvironment(
+  childProcessEnv: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  const env = buildEnvWithNestedObservabilitySnapshot(
+    process.env,
+    childProcessEnv,
+  ) as Record<string, string>;
+
+  // Skill discovery and the Codex subprocess must resolve the same roots.
+  // Only path-related overrides are forwarded here; the telemetry helper keeps
+  // all other nested environment values fail-closed.
+  for (const key of CODEX_PATH_ENV_KEYS) {
+    const value = childProcessEnv?.[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
 
 function toNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -300,11 +321,12 @@ export class CodexClient {
     let standardRetryCount = 0;
     let timeoutRetryCount = 0;
     let skillConfig: CodexOptions['config'] | undefined;
+    const codexEnvironment = buildCodexEnvironment(options.childProcessEnv);
     try {
       skillConfig = options.skills
         ? buildCodexSkillConfig({
             cwd: options.cwd,
-            env: { ...process.env, ...options.childProcessEnv },
+            env: codexEnvironment,
             inheritance: options.skills,
           })
         : undefined;
@@ -320,10 +342,7 @@ export class CodexClient {
     while (true) {
       const attempt = standardRetryCount + timeoutRetryCount + 1;
       const codexClientOptions: CodexOptions = {
-        env: buildEnvWithNestedObservabilitySnapshot(
-          process.env,
-          options.childProcessEnv,
-        ) as Record<string, string>,
+        env: codexEnvironment,
         ...(options.openaiApiKey ? { apiKey: options.openaiApiKey } : {}),
         ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
         ...(options.codexPathOverride ? { codexPathOverride: options.codexPathOverride } : {}),

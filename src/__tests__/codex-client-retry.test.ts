@@ -174,6 +174,10 @@ describe('CodexClient retry', () => {
       expect(result.status).toBe('done');
       expect(codexConstructorCalls).toEqual([
         expect.objectContaining({
+          env: expect.objectContaining({
+            HOME: join(root, 'home'),
+            CODEX_HOME: join(root, 'codex-home'),
+          }),
           config: {
             skills: {
               config: [
