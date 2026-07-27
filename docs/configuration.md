@@ -625,6 +625,25 @@ provider_options:
 
 `network_access` can be set at step / `provider_routing` / deprecated `persona_providers` / `workflow_config` / project / global levels, with step having the highest priority. The environment variable `TAKT_PROVIDER_OPTIONS_CODEX_NETWORK_ACCESS=true` also works as an override.
 
+#### Codex Skill inheritance (`skills`)
+
+TAKT workflows do not inherit repository or user Codex Skills by default. Enable only the scopes a workflow needs:
+
+```yaml
+provider_options:
+  codex:
+    skills:
+      repo: true
+      user: false
+```
+
+- `repo` covers `.agents/skills` directories from the Codex execution directory through the repository root.
+- `user` covers `$HOME/.agents/skills` and `$CODEX_HOME/skills`.
+- `$CODEX_HOME/skills/.system` is outside this control and retains Codex default behavior.
+- A disabled scope is converted to exact `enabled: false` overrides for every discovered `SKILL.md`; TAKT does not modify user configuration.
+
+Discovery resolves symlinks, removes duplicates, skips hidden directories, and fails closed when bounded traversal limits are exceeded. The settings follow the normal provider-option priority. `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_REPO` and `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_USER` provide boolean environment overrides.
+
 #### Claude Code sandbox control (`allow_unsandboxed_commands`)
 
 With `permission_mode: edit`, the Claude SDK runs Bash commands inside a macOS Seatbelt sandbox. This can cause `~/.gradle` writes and JVM-based build tools to fail with `Operation not permitted`. To run Bash commands outside the sandbox while keeping file-edit permissions controlled, use:

@@ -6,6 +6,30 @@ import {
 import { normalizeProviderOptions } from '../infra/config/providerOptions.js';
 
 describe('denormalizeProviderOptions', () => {
+  it('round-trips Codex Skill inheritance leaves', () => {
+    const rawProviderOptions = {
+      codex: {
+        skills: {
+          repo: false,
+          user: true,
+        },
+      },
+    };
+
+    const normalizedProviderOptions = normalizeProviderOptions(rawProviderOptions);
+    const denormalizedProviderOptions = denormalizeProviderOptions(normalizedProviderOptions);
+
+    expect(normalizedProviderOptions).toEqual({
+      codex: {
+        skills: {
+          repo: false,
+          user: true,
+        },
+      },
+    });
+    expect(denormalizedProviderOptions).toEqual(rawProviderOptions);
+  });
+
   it('should convert camelCase provider options into persisted snake_case format', () => {
     const result = denormalizeProviderOptions({
       codex: { networkAccess: true },

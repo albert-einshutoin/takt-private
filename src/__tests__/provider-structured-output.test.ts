@@ -228,6 +228,35 @@ describe('CodexProvider — structured output', () => {
     expect(provider.supportsStructuredOutput).toBe(true);
   });
 
+  it('disables ambient Codex Skills by default for workflow calls', async () => {
+    mockCallCodex.mockResolvedValue(doneResponse('coder'));
+
+    const agent = new CodexProvider().setup({ name: 'coder' });
+    await agent.call('prompt', { cwd: '/tmp' });
+
+    expect(mockCallCodex.mock.calls[0]?.[2]).toMatchObject({
+      skills: { repo: false, user: false },
+    });
+  });
+
+  it('passes explicit Codex Skill inheritance scopes', async () => {
+    mockCallCodex.mockResolvedValue(doneResponse('coder'));
+
+    const agent = new CodexProvider().setup({ name: 'coder' });
+    await agent.call('prompt', {
+      cwd: '/tmp',
+      providerOptions: {
+        codex: {
+          skills: { repo: true, user: false },
+        },
+      },
+    });
+
+    expect(mockCallCodex.mock.calls[0]?.[2]).toMatchObject({
+      skills: { repo: true, user: false },
+    });
+  });
+
   it('outputSchema を callCodex に渡し structuredOutput を返す', async () => {
     mockCallCodex.mockResolvedValue(doneResponse('coder', { step: 2 }));
 

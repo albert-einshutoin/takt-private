@@ -625,6 +625,25 @@ provider_options:
 
 step / `provider_routing` / deprecated の `persona_providers` / `workflow_config` / project / global の各レイヤーで設定でき、step が最優先です。環境変数 `TAKT_PROVIDER_OPTIONS_CODEX_NETWORK_ACCESS=true` でも上書きできます。
 
+#### Codex Skill 継承 (`skills`)
+
+TAKT workflowは、デフォルトではrepositoryおよびuserのCodex Skillを継承しません。workflowに必要なscopeだけを明示的に有効化してください。
+
+```yaml
+provider_options:
+  codex:
+    skills:
+      repo: true
+      user: false
+```
+
+- `repo` はCodex実行ディレクトリからrepository rootまでの `.agents/skills` を対象にします。
+- `user` は `$HOME/.agents/skills` と `$CODEX_HOME/skills` を対象にします。
+- `$CODEX_HOME/skills/.system` はこの制御の対象外で、Codex標準の挙動を維持します。
+- 無効化されたscopeでは、検出した各 `SKILL.md` を正確な `enabled: false` overrideへ変換します。ユーザー設定自体は変更しません。
+
+探索ではsymlinkを実体パスへ解決し、重複を除外し、hidden directoryを走査しません。上限付き探索を超えた場合は部分的なdeny listを適用せずfail closedします。設定優先順位は通常のprovider optionと同じです。`TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_REPO` と `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_USER` でもboolean overrideできます。
+
 #### Claude Code の sandbox 制御 (`allow_unsandboxed_commands`)
 
 Claude SDK は `permission_mode: edit` のとき Bash コマンドを macOS Seatbelt サンドボックス内で実行するため、`~/.gradle` への書き込みや JVM ベースのビルドツールが `Operation not permitted` で失敗することがあります。Bash コマンドだけサンドボックス外で実行したい場合は次のとおりです。
