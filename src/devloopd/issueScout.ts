@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { basename, relative, resolve } from 'node:path';
 import {
   classifyRecursiveAutomationLane,
@@ -132,6 +133,19 @@ export interface IssueScoutReport {
   wouldCreate: readonly GeneratedIssueDraft[];
   createdIssues: readonly string[];
   ledgerPath: string;
+  batchFailure?: IssueScoutBatchFailure;
+}
+
+export type IssueScoutBatchFailureCode =
+  | 'candidate_count_exceeded'
+  | 'candidate_bytes_exceeded';
+
+export interface IssueScoutBatchFailure {
+  code: IssueScoutBatchFailureCode;
+  candidateCount: number;
+  candidateBytes?: number;
+  maxCandidateCount: number;
+  maxBatchBytes: number;
 }
 
 export interface GeneratedIssueDraft {
@@ -179,6 +193,12 @@ const DEFAULT_BACKLOG_FILES = [
   '.takt/backlog.md',
 ];
 
+export const ISSUE_SCOUT_MAX_CANDIDATES = 256;
+export const ISSUE_SCOUT_MAX_BATCH_BYTES = 256 * 1024;
+const ISSUE_SCOUT_MAX_SKIPPED_SUMMARY = 50;
+const ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY = 50;
+const ISSUE_SCOUT_SUMMARY_TEXT_LENGTH = 512;
+
 const REPORT_FILES: Readonly<Record<Extract<IssueScoutSourceId, 'dependency_report' | 'security_report' | 'benchmark_report' | 'lint_type_debt'>, {
   path: string;
   lane: RecursiveAutomationLane;
@@ -223,6 +243,100 @@ const RISK_SCORE: Readonly<Record<IssueScoutRiskBucket, number>> = {
 
 function sanitizeText(text: string): string {
   return sanitizeSensitiveText(text).replace(/\s+/g, ' ').trim();
+}
+
+function sanitizeBatchText(text: string): string {
+  // The generic sanitizer has deliberately broad assignment matching. Avoid
+  // feeding it large benign strings when no sensitive syntax is even present.
+  const sensitiveSanitized = /(?:api[_-]?key|access[_-]?key|token|password|secret|authorization|cookie|private[_-]?key|sk-|ghp_|xox|:\/\/|(?:^|\s)(?:-u|--user|--proxy-user))/iu.test(text)
+    ? sanitizeSensitiveText(text)
+    : text;
+  let controlSanitized = '';
+  let segmentStart = 0;
+  for (let index = 0; index < sensitiveSanitized.length; index += 1) {
+    const code = sensitiveSanitized.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      controlSanitized += `${sensitiveSanitized.slice(segmentStart, index)} `;
+      segmentStart = index + 1;
+    }
+  }
+  controlSanitized += sensitiveSanitized.slice(segmentStart);
+  return controlSanitized
+    .replace(/\bhttps?:\/\/[^\s)\]}]+/giu, '[REDACTED URL]')
+    .replace(/\b[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gu, '[REDACTED PATH]')
+    .replace(/\/(?:[^/\s]+\/)+[^,\s.;)\]}]*/gu, '[REDACTED PATH]')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function normalizedCandidateForBudget(candidate: IssueScoutCandidate): unknown {
+  const strings = (values: readonly string[]) => values.map(sanitizeBatchText);
+  return {
+    sourceId: candidate.sourceId,
+    title: sanitizeBatchText(candidate.title),
+    summary: sanitizeBatchText(candidate.summary),
+    lane: candidate.lane,
+    policyCategory: candidate.policyCategory,
+    riskBucket: candidate.riskBucket,
+    evidence: candidate.evidence.map((artifact) => ({
+      kind: artifact.kind,
+      path: artifact.path === undefined ? undefined : '[REDACTED PATH]',
+      url: artifact.url === undefined ? undefined : '[REDACTED URL]',
+      summary: sanitizeBatchText(artifact.summary),
+    })),
+    acceptanceCriteria: strings(candidate.acceptanceCriteria),
+    verificationCommands: strings(candidate.verificationCommands),
+    escalationCriteria: strings(candidate.escalationCriteria),
+    expectedChangedSurfaces: strings(candidate.expectedChangedSurfaces),
+    labels: strings(candidate.labels),
+    laneEvidence: strings(candidate.laneEvidence),
+  };
+}
+
+export function measureIssueScoutCandidateBatchBytes(
+  candidates: readonly IssueScoutCandidate[],
+): number {
+  let bytes = 2;
+  for (const [index, candidate] of candidates.entries()) {
+    if (index > 0) bytes += 1;
+    bytes += Buffer.byteLength(JSON.stringify(normalizedCandidateForBudget(candidate)), 'utf8');
+  }
+  return bytes;
+}
+
+function issueScoutSummaryDigest(input: {
+  observations: readonly IssueScoutObservation[];
+  candidateCount: number;
+  selected: readonly IssueScoutSelection[];
+  skipped: readonly SkippedIssueScoutCandidate[];
+  batchFailure?: IssueScoutBatchFailure;
+}): string {
+  // Only bounded structural fields enter this public digest. Candidate IDs,
+  // titles, paths, URLs, and other attacker-controlled secrets are excluded.
+  const observationCounts: Record<string, number> = {};
+  for (const observation of input.observations) {
+    const key = `${observation.sourceId}:${observation.status}`;
+    observationCounts[key] = (observationCounts[key] ?? 0) + 1;
+  }
+  const structuralSummary = {
+    observationCounts,
+    observationCount: input.observations.length,
+    candidateCount: input.candidateCount,
+    selected: input.selected.map((selection) => ({
+      sourceId: selection.candidate.sourceId,
+      lane: selection.candidate.lane,
+      riskBucket: selection.candidate.riskBucket,
+      score: selection.score,
+    })),
+    skipped: input.skipped.slice(0, ISSUE_SCOUT_MAX_SKIPPED_SUMMARY).map((item) => ({
+      sourceId: item.candidate.sourceId,
+      lane: item.candidate.lane,
+      stopRule: item.stopRule,
+    })),
+    skippedCount: input.skipped.length,
+    batchFailure: input.batchFailure,
+  };
+  return createHash('sha256').update(JSON.stringify(structuralSummary), 'utf8').digest('hex');
 }
 
 function normalizeKey(text: string): string {
@@ -814,7 +928,10 @@ export function scoreIssueScoutCandidate(candidate: IssueScoutCandidate): IssueS
 }
 
 function candidateKey(candidate: IssueScoutCandidate): string {
-  return normalizeKey(`${candidate.lane} ${candidate.title}`);
+  // Backoff/dedupe needs a stable routing key, not the full attacker-controlled
+  // title. Bounding it prevents a single near-budget candidate from amplifying
+  // sanitizer and comparison work in the per-candidate loop.
+  return normalizeKey(`${candidate.lane} ${candidate.title.slice(0, 4_000)}`);
 }
 
 function existingWorkKeys(existingWork: readonly ExistingIssueScoutWork[]): Set<string> {
@@ -829,10 +946,11 @@ function existingWorkKeys(existingWork: readonly ExistingIssueScoutWork[]): Set<
 
 function isDuplicate(candidate: IssueScoutCandidate, keys: Set<string>): boolean {
   const key = candidateKey(candidate);
-  if (keys.has(key) || keys.has(normalizeKey(candidate.title))) {
+  const boundedTitle = candidate.title.slice(0, 4_000);
+  if (keys.has(key) || keys.has(normalizeKey(boundedTitle))) {
     return true;
   }
-  const branchSlug = slug(candidate.title);
+  const branchSlug = slug(boundedTitle);
   return [...keys].some((existing) => existing.includes(key) || existing.includes(branchSlug));
 }
 
@@ -994,7 +1112,75 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   const observations = await Promise.all(registry
     .filter((source) => enabledSourceIds.has(source.id))
     .map((source) => Promise.resolve(source.scan(context))));
-  const candidates = observations.flatMap((observation) => observation.candidates);
+  const candidateCount = observations.reduce(
+    (count, observation) => count + observation.candidates.length,
+    0,
+  );
+  // Sources have already materialized their candidate arrays. Validate the
+  // whole run here, before any decision write or per-candidate derivative
+  // arrays can amplify an oversized or adversarial source response.
+  const candidates = candidateCount <= ISSUE_SCOUT_MAX_CANDIDATES
+    ? observations.flatMap((observation) => observation.candidates)
+    : [];
+  const candidateBytes = candidateCount <= ISSUE_SCOUT_MAX_CANDIDATES
+    ? measureIssueScoutCandidateBatchBytes(candidates)
+    : undefined;
+  const batchFailure: IssueScoutBatchFailure | undefined = (
+    candidateCount > ISSUE_SCOUT_MAX_CANDIDATES
+      ? {
+        code: 'candidate_count_exceeded',
+        candidateCount,
+        maxCandidateCount: ISSUE_SCOUT_MAX_CANDIDATES,
+        maxBatchBytes: ISSUE_SCOUT_MAX_BATCH_BYTES,
+      }
+      : candidateBytes !== undefined && candidateBytes > ISSUE_SCOUT_MAX_BATCH_BYTES
+        ? {
+          code: 'candidate_bytes_exceeded',
+          candidateCount: candidates.length,
+          candidateBytes,
+          maxCandidateCount: ISSUE_SCOUT_MAX_CANDIDATES,
+          maxBatchBytes: ISSUE_SCOUT_MAX_BATCH_BYTES,
+        }
+        : undefined
+  );
+  if (batchFailure !== undefined) {
+    const summaryDigest = issueScoutSummaryDigest({
+      observations,
+      candidateCount,
+      selected: [],
+      skipped: [],
+      batchFailure,
+    });
+    appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_issue_scout', {
+      observations: observations.slice(0, ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY).map((observation) => ({
+        sourceId: observation.sourceId,
+        status: observation.status,
+        candidateCount: observation.candidates.length,
+      })),
+      observationCount: observations.length,
+      omittedObservationCount: Math.max(0, observations.length - ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY),
+      candidateCount,
+      selected: [],
+      selectedCount: 0,
+      skipped: [],
+      skippedCount: 0,
+      omittedSkippedCount: 0,
+      stopRule: 'batch limit exceeded',
+      batchFailure,
+      summaryDigest,
+    }, now));
+    return {
+      passed: false,
+      message: `issue-scout batch failed: ${batchFailure.code}`,
+      observations,
+      selected: [],
+      skipped: [],
+      wouldCreate: [],
+      createdIssues: [],
+      ledgerPath,
+      batchFailure,
+    };
+  }
   const existing = await loadExistingWork(context, options.existingWork);
   const keys = existingWorkKeys(existing);
   const ledgerEvents = readRawDevloopLedgerEvents(ledgerPath);
@@ -1098,7 +1284,7 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   const selected = eligible
     .map(scoreIssueScoutCandidate)
     .sort((left, right) => left.score - right.score || left.candidate.title.localeCompare(right.candidate.title))
-    .slice(0, options.maxSelections ?? 3);
+    .slice(0, Math.min(Math.max(options.maxSelections ?? 3, 0), 3));
   const wouldCreate = selected.map((selection) => generateMaintenanceIssue(selection.candidate));
   const createdIssues: string[] = [];
 
@@ -1115,32 +1301,45 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   const decisionFailureCount = skipped.filter(
     (item) => item.stopRule === 'decision generation failed',
   ).length;
+  const skippedSummary = skipped
+    .slice(0, ISSUE_SCOUT_MAX_SKIPPED_SUMMARY)
+    .map((item, index) => ({
+      candidateRef: `${item.candidate.sourceId}:${item.candidate.lane}:${index + 1}`,
+      // This sanitized correlation key preserves retry backoff across runs.
+      candidateKey: candidateKey(item.candidate),
+      stopRule: item.stopRule,
+      reason: sanitizeBatchText(item.reason).slice(0, ISSUE_SCOUT_SUMMARY_TEXT_LENGTH),
+      retryAfter: item.retryAfter,
+      decisionId: item.decisionId,
+    }));
+  const summaryDigest = issueScoutSummaryDigest({
+    observations,
+    candidateCount,
+    selected,
+    skipped,
+  });
   appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_issue_scout', {
-    repoPath,
-    observations: observations.map((observation) => ({
+    observations: observations.slice(0, ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY).map((observation) => ({
       sourceId: observation.sourceId,
       status: observation.status,
-      summary: observation.summary,
-      candidates: observation.candidates.length,
+      candidateCount: observation.candidates.length,
     })),
-    candidateCount: candidates.length,
-    selected: selected.map((selection) => ({
-      candidateId: selection.candidate.id,
-      candidateKey: candidateKey(selection.candidate),
+    observationCount: observations.length,
+    omittedObservationCount: Math.max(0, observations.length - ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY),
+    candidateCount,
+    selected: selected.map((selection, index) => ({
+      candidateRef: `${selection.candidate.sourceId}:${selection.candidate.lane}:${index + 1}`,
       score: selection.score,
       lane: selection.candidate.lane,
     })),
-    skipped: skipped.map((item) => ({
-      candidateId: item.candidate.id,
-      candidateKey: candidateKey(item.candidate),
-      stopRule: item.stopRule,
-      reason: item.reason,
-      retryAfter: item.retryAfter,
-      decisionId: item.decisionId,
-    })),
+    selectedCount: selected.length,
+    skipped: skippedSummary,
+    skippedCount: skipped.length,
+    omittedSkippedCount: skipped.length - skippedSummary.length,
     stopRule: selected.length === 0 ? 'no candidates' : undefined,
     retryAfter,
     decisionFailureCount,
+    summaryDigest,
   }, now));
 
   const baseMessage = selected.length > 0

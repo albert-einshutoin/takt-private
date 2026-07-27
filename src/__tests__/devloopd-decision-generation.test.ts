@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -266,6 +266,41 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
     expect(serialized).not.toContain('token=secret');
     expect(serialized).not.toContain('user:password');
     expect(serialized).not.toContain('/Users/private');
+  });
+
+  it('does not derive opaque references from raw secret-bearing evidence', () => {
+    const requestFor = (secret: string, path: string) => {
+      const isolatedStore = new DecisionStore(join(repoPath, secret));
+      return ensureDecisionForIssueScoutCandidate(
+        isolatedStore,
+        {
+          ...candidate(),
+          evidence: [{
+            kind: 'file',
+            path,
+            url: `https://outside.example.invalid/report?token=${secret}`,
+            summary: `token=${secret}\u0000 from ${path}`,
+          }],
+        },
+        { repoPath: isolatedStore.repoPath },
+        new Date('2026-07-28T00:00:00.000Z'),
+      ).request.why.evidence[0];
+    };
+    const first = requestFor('lowentropy-one', '/Users/private/first-secret.txt');
+    const second = requestFor('lowentropy-two', '/Users/private/second-secret.txt');
+    const serialized = JSON.stringify([first, second]);
+    const forbiddenDigests = [
+      'lowentropy-one',
+      'lowentropy-two',
+      '/Users/private/first-secret.txt',
+      '/Users/private/second-secret.txt',
+    ].map((value) => createHash('sha256').update(value, 'utf8').digest('hex'));
+
+    expect(first?.reference).toBe(second?.reference);
+    expect(serialized).not.toContain('lowentropy-one');
+    expect(serialized).not.toContain('lowentropy-two');
+    expect(serialized).not.toContain('/Users/private');
+    for (const digest of forbiddenDigests) expect(serialized).not.toContain(digest);
   });
 
   it('deduplicates scheduler ticks with a deterministic decision ID', () => {

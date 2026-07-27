@@ -11,6 +11,7 @@ import {
   DecisionStoreError,
 } from './decisionStore.js';
 import type { DecisionProjection } from './decisionEvents.js';
+import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 
 export interface IssueScoutDecisionContext {
   readonly repoPath: string;
@@ -114,13 +115,35 @@ function safeEvidenceUrl(value: string): string | undefined {
 function opaqueEvidenceReference(
   candidate: IssueScoutCandidate,
   index: number,
-  rawReference: string,
 ): string {
   const artifact = candidate.evidence[index];
+  // Opaque references intentionally identify only the structural slot. Raw
+  // paths, URLs, and credentials must never become an offline dictionary oracle.
   const digest = createHash('sha256')
-    .update(`${candidate.sourceId}\0${artifact?.kind ?? 'unknown'}\0${rawReference}`, 'utf8')
+    .update(`${candidate.sourceId}\0${artifact?.kind ?? 'unknown'}\0${index}`, 'utf8')
     .digest('hex');
   return `redacted-${candidate.sourceId}-${artifact?.kind ?? 'unknown'}-${index + 1}-${digest}`;
+}
+
+function sanitizedEvidenceSummary(summary: string): string {
+  const sensitiveSanitized = sanitizeSensitiveText(summary);
+  let controlSanitized = '';
+  let segmentStart = 0;
+  for (let index = 0; index < sensitiveSanitized.length; index += 1) {
+    const code = sensitiveSanitized.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      controlSanitized += `${sensitiveSanitized.slice(segmentStart, index)} `;
+      segmentStart = index + 1;
+    }
+  }
+  controlSanitized += sensitiveSanitized.slice(segmentStart);
+  return controlSanitized
+    .replace(/\bhttps?:\/\/[^\s)\]}]+/giu, '[REDACTED URL]')
+    .replace(/\b[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gu, '[REDACTED PATH]')
+    .replace(/\/(?:[^/\s]+\/)+[^,\s.;)\]}]*/gu, '[REDACTED PATH]')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, MAX_CANDIDATE_TEXT_LENGTH);
 }
 
 function evidenceFor(
@@ -139,13 +162,13 @@ function evidenceFor(
           : safeEvidenceUrl(artifact.url)
       );
       const redacted = safeReference === undefined;
-      const rawReference = artifact.path ?? artifact.url ?? artifact.summary;
+      const summary = sanitizedEvidenceSummary(artifact.summary);
       return {
         kind: artifact.kind === 'command' ? 'check' as const : 'report' as const,
-        reference: safeReference ?? opaqueEvidenceReference(candidate, index, rawReference),
+        reference: safeReference ?? opaqueEvidenceReference(candidate, index),
         summary: redacted
-          ? `${artifact.summary} (reference redacted)`
-          : artifact.summary,
+          ? `${summary} (reference redacted)`
+          : summary,
       };
     }),
     ...candidate.acceptanceCriteria.map((criterion, index) => ({
