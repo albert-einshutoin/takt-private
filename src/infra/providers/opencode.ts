@@ -2,18 +2,25 @@
  * OpenCode provider implementation
  */
 
-import { callOpenCode, callOpenCodeCustom, type OpenCodeCallOptions } from '../opencode/index.js';
+import {
+  callOpenCode,
+  callOpenCodeCustom,
+  compactOpenCodeSession,
+  type OpenCodeCallOptions,
+  type OpenCodeCompactSessionOptions,
+} from '../opencode/index.js';
 import { mapsToOpenCodeEditPermission } from '../opencode/allowedTools.js';
 import { resolveOpenCodeAllowedPermissions } from '../opencode/types.js';
 import { resolveOpencodeApiKey } from '../config/index.js';
 import type { AgentResponse } from '../../core/models/index.js';
 import type { PermissionMode } from '../../core/models/index.js';
-import type { AgentSetup, Provider, ProviderAgent, ProviderCallOptions } from './types.js';
+import type { AgentSetup, Provider, ProviderAgent, ProviderCallOptions, ProviderCompactSessionOptions } from './types.js';
 
 const OPENCODE_TOOL_NAMING_FALLBACK = [
   'OpenCode tool names are lowercase.',
   'Use bash for shell commands, glob for file discovery, grep for search, read for file reads, edit/write for changes, and todowrite for todos.',
 ].join(' ');
+const OPENCODE_MODEL_REQUIRED_MESSAGE = "OpenCode provider requires model in 'provider/model' format (e.g. 'opencode/big-pickle').";
 
 function buildToolNamingInstruction(
   allowedTools: string[],
@@ -28,9 +35,7 @@ function buildToolNamingInstruction(
 }
 
 function toOpenCodeOptions(options: ProviderCallOptions): OpenCodeCallOptions {
-  if (!options.model) {
-    throw new Error("OpenCode provider requires model in 'provider/model' format (e.g. 'opencode/big-pickle').");
-  }
+  const model = requireOpenCodeModel(options.model);
 
   const openCodeAllowedTools = options.allowedTools;
 
@@ -38,7 +43,7 @@ function toOpenCodeOptions(options: ProviderCallOptions): OpenCodeCallOptions {
     cwd: options.cwd,
     abortSignal: options.abortSignal,
     sessionId: options.sessionId,
-    model: options.model,
+    model,
     allowedTools: openCodeAllowedTools,
     permissionMode: options.permissionMode,
     networkAccess: options.providerOptions?.opencode?.networkAccess,
@@ -48,6 +53,26 @@ function toOpenCodeOptions(options: ProviderCallOptions): OpenCodeCallOptions {
     opencodeApiKey: options.opencodeApiKey ?? resolveOpencodeApiKey(),
     childProcessEnv: options.childProcessEnv,
   };
+}
+
+function toOpenCodeCompactSessionOptions(options: ProviderCompactSessionOptions): OpenCodeCompactSessionOptions {
+  const model = requireOpenCodeModel(options.model);
+
+  return {
+    cwd: options.cwd,
+    sessionId: options.sessionId,
+    model,
+    abortSignal: options.abortSignal,
+    opencodeApiKey: resolveOpencodeApiKey(),
+    childProcessEnv: options.childProcessEnv,
+  };
+}
+
+function requireOpenCodeModel(model: string | undefined): string {
+  if (!model) {
+    throw new Error(OPENCODE_MODEL_REQUIRED_MESSAGE);
+  }
+  return model;
 }
 
 /** OpenCode provider — delegates to OpenCode SDK */
@@ -67,6 +92,10 @@ export class OpenCodeProvider implements Provider {
 
   keepsAllowedToolWithoutEdit(tool: string): boolean {
     return !mapsToOpenCodeEditPermission(tool);
+  }
+
+  async compactSession(options: ProviderCompactSessionOptions): Promise<void> {
+    await compactOpenCodeSession(toOpenCodeCompactSessionOptions(options));
   }
 
   setup(config: AgentSetup): ProviderAgent {

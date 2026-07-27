@@ -50,6 +50,7 @@ import {
   resolveGroundCheckConfig,
 } from '../ground-check.js';
 import { writeReportFile } from '../report-writer.js';
+import { compactSessionBeforePhase1 } from './session-compaction.js';
 
 const log = createLogger('parallel-runner');
 const GROUND_CHECK_MAX_RECHECKS = 1;
@@ -252,6 +253,7 @@ export class ParallelRunner {
 
         // Phase 1: main execution (Write excluded if sub-step has report)
         const baseOptions = this.deps.optionsBuilder.buildAgentOptions(executableSubStep, runtime);
+        await compactSessionBeforePhase1(executableSubStep, baseOptions);
         let didEmitPhaseStart = false;
         let resolvedPromptParts: PhasePromptParts | undefined;
         const phaseExecutionId = buildPhaseExecutionId({

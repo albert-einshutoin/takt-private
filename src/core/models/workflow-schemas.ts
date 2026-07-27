@@ -27,6 +27,11 @@ import {
   isAiConditionExpression,
 } from './workflow-condition-expression.js';
 import { FindingContractConfigRawSchema } from './finding-schemas.js';
+import {
+  SESSION_AGENT_STEP_REQUIRED_MESSAGE,
+  SESSION_NORMAL_AGENT_STEP_REQUIRED_MESSAGE,
+} from './workflow-session-constraints.js';
+import { WORKFLOW_SESSION_MODES } from './workflow-types.js';
 import { MAX_TEAM_LEADER_MAX_TOTAL_PARTS } from '../../shared/constants.js';
 
 const RESERVED_WORKFLOW_CALL_RESULTS = ['COMPLETE', 'ABORT'] as const;
@@ -207,6 +212,7 @@ export const TeamLeaderConfigRawSchema = z.object({
 /** Sub-step schema for parallel execution */
 export const ParallelSubStepRawSchema = z.object({
   name: z.string().min(1),
+  session: z.enum(WORKFLOW_SESSION_MODES).optional(),
   persona: z.string().optional(),
   persona_name: z.string().optional(),
   tags: z.array(z.string().min(1)).optional(),
@@ -306,7 +312,7 @@ function createWorkflowStepRawSchema(options?: { relaxWorkflowCallConditions?: b
     call: z.string().min(1).optional(),
     overrides: WorkflowCallOverridesRawSchema.optional(),
     args: WorkflowCallArgsRawSchema.optional(),
-    session: z.enum(['continue', 'refresh']).optional(),
+    session: z.enum(WORKFLOW_SESSION_MODES).optional(),
     persona: z.string().optional(),
     persona_name: z.string().optional(),
     tags: z.array(z.string().min(1)).optional(),
@@ -352,6 +358,25 @@ function createWorkflowStepRawSchema(options?: { relaxWorkflowCallConditions?: b
     }
 
     const stepKind = getWorkflowStepKind(data);
+
+    if (data.session !== undefined && stepKind !== 'agent') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['session'],
+        message: SESSION_AGENT_STEP_REQUIRED_MESSAGE,
+      });
+    }
+
+    if (
+      data.session !== undefined
+      && (data.parallel !== undefined || data.arpeggio !== undefined || data.team_leader !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['session'],
+        message: SESSION_NORMAL_AGENT_STEP_REQUIRED_MESSAGE,
+      });
+    }
 
     if (data.call !== undefined && stepKind !== 'workflow_call') {
       ctx.addIssue({

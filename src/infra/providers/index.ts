@@ -10,7 +10,14 @@ import { MockProvider } from './mock.js';
 import { SubscriptionCliProvider } from './subscription-cli.js';
 import type { Provider, ProviderType } from './types.js';
 
-export type { AgentSetup, ProviderCallOptions, ProviderAgent, Provider, ProviderType } from './types.js';
+export type {
+  AgentSetup,
+  ProviderCallOptions,
+  ProviderCompactSessionOptions,
+  ProviderAgent,
+  Provider,
+  ProviderType,
+} from './types.js';
 
 export class ProviderRegistry {
   private static instance: ProviderRegistry | null = null;

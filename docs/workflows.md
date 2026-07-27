@@ -385,6 +385,7 @@ Promotion is not supported on parallel sub-steps.
 |--------|---------|-------------|
 | `persona` | - | Persona key (references section map) or file path |
 | `persona_name` | - | Display name for logs and prompts. It does not affect `provider_routing.personas` |
+ | `session` | `continue` | Session handling for normal agent steps and parallel sub-steps. `continue` resumes the saved persona session, `refresh` starts without resuming it, and `compact` resumes it then asks the provider to compact it before Phase 1. `compact` runs only before Phase 1, not before report or status phases. Providers without a compaction capability continue unchanged, and compaction failures are logged as warnings before continuing with the uncompressed session |
 | `tags` | - | Ordered provider routing tags matched against `provider_routing.tags` in config |
 | `policy` | - | Policy key or array of keys |
 | `knowledge` | - | Knowledge key or array of keys |
