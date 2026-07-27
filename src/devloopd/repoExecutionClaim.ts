@@ -28,6 +28,17 @@ interface ClaimOwner {
   readonly operationId: string;
 }
 
+export interface RepoExecutionClaimOptions {
+  /**
+   * Fault-injection seam for cleanup-path tests. Production callers omit it.
+   * Throwing represents a transient helper failure before the real transition.
+   */
+  readonly beforeReleaseAttempt?: (attempt: number) => void;
+  readonly maxReleaseAttempts?: number;
+}
+
+const DEFAULT_RELEASE_ATTEMPTS = 3;
+
 const CLAIM_TRANSITION_SCRIPT = String.raw`
 const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
@@ -201,6 +212,7 @@ function secureClaimDirectory(path: string): void {
 export function tryAcquireRepoExecutionClaim(
   repoPath: string,
   operationId = `exec_${randomUUID()}`,
+  options: RepoExecutionClaimOptions = {},
 ): RepoExecutionClaim | undefined {
   const claimPath = join(repoPath, '.takt', 'devloop', 'repo-execution.claim');
   secureClaimDirectory(claimPath);
@@ -213,16 +225,33 @@ export function tryAcquireRepoExecutionClaim(
     operationId,
     release(): RepoExecutionClaimReleaseResult {
       if (released) return 'not_owner';
-      // Release is serialized by the same kernel advisory lock and checks the
-      // complete owner tuple, so an old handle cannot unlink a replacement.
-      const result = runClaimTransition(claimPath, 'release', owner);
-      if (result !== 'released' && result !== 'not_owner') {
-        // Do not poison this handle: a transient advisory-lock/helper failure
-        // must be observable and the caller must be able to retry cleanup.
-        throw new RepoExecutionClaimReleaseError();
+      const configuredAttempts = options.maxReleaseAttempts ?? DEFAULT_RELEASE_ATTEMPTS;
+      const maxAttempts = Number.isInteger(configuredAttempts)
+        ? Math.min(DEFAULT_RELEASE_ATTEMPTS, Math.max(1, configuredAttempts))
+        : DEFAULT_RELEASE_ATTEMPTS;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        let result: ReturnType<typeof runClaimTransition>;
+        try {
+          options.beforeReleaseAttempt?.(attempt);
+          // Release is serialized by the same kernel advisory lock and checks
+          // the complete owner tuple, so an old handle cannot unlink a replacement.
+          result = runClaimTransition(claimPath, 'release', owner);
+        } catch {
+          result = undefined;
+        }
+        if (result === 'released' || result === 'not_owner') {
+          released = true;
+          return result;
+        }
+        if (result === 'invalid_owner') {
+          // Malformed ownership is not transient and must never be retried as
+          // though it were an advisory-lock timeout.
+          throw new RepoExecutionClaimReleaseError();
+        }
       }
-      released = true;
-      return result;
+      // Do not poison this handle: a caller may explicitly retry after the
+      // bounded production cleanup attempt has surfaced the typed failure.
+      throw new RepoExecutionClaimReleaseError();
     },
   });
 }

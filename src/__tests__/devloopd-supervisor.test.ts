@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,7 +7,11 @@ import {
   startDevloop,
   type DevloopStartDependencies,
 } from '../devloopd/supervisor.js';
-import type { RepoExecutionClaim } from '../devloopd/repoExecutionClaim.js';
+import {
+  RepoExecutionClaimReleaseError,
+  tryAcquireRepoExecutionClaim,
+  type RepoExecutionClaim,
+} from '../devloopd/repoExecutionClaim.js';
 
 function unitExecutionClaim(): RepoExecutionClaim {
   return { operationId: 'unit-supervisor', release() {} };
@@ -59,6 +63,57 @@ function writeRunningRun(repoPath: string, slug: string): void {
 }
 
 describe('devloopd supervisor', () => {
+  it('retries transient claim cleanup from the production finally path', async () => {
+    const repoPath = makeTempRepo();
+    let releaseAttempts = 0;
+    const claim = tryAcquireRepoExecutionClaim(repoPath, 'supervisor_cleanup_test', {
+      beforeReleaseAttempt(attempt) {
+        releaseAttempts = attempt;
+        if (attempt === 1) throw new Error('transient release helper failure');
+      },
+    });
+    if (claim === undefined) throw new Error('claim unavailable');
+
+    const report = await startDevloop({
+      repoPath,
+      once: true,
+      dependencies: {
+        acquireExecutionClaim: () => claim,
+        scanIssues: async () => makeScan([]),
+      },
+    });
+
+    expect(report.passed).toBe(false);
+    expect(releaseAttempts).toBe(2);
+    expect(existsSync(join(repoPath, '.takt', 'devloop', 'repo-execution.claim'))).toBe(false);
+    rmSync(repoPath, { recursive: true, force: true });
+  });
+
+  it('propagates a persistent typed cleanup failure from the production finally path', async () => {
+    const repoPath = makeTempRepo();
+    let releaseAttempts = 0;
+    const claim = tryAcquireRepoExecutionClaim(repoPath, 'supervisor_cleanup_failure', {
+      beforeReleaseAttempt() {
+        releaseAttempts += 1;
+        if (releaseAttempts <= 3) throw new Error('persistent release helper failure');
+      },
+    });
+    if (claim === undefined) throw new Error('claim unavailable');
+
+    await expect(startDevloop({
+      repoPath,
+      once: true,
+      dependencies: {
+        acquireExecutionClaim: () => claim,
+        scanIssues: async () => makeScan([]),
+      },
+    })).rejects.toBeInstanceOf(RepoExecutionClaimReleaseError);
+    expect(releaseAttempts).toBe(3);
+    expect(existsSync(join(repoPath, '.takt', 'devloop', 'repo-execution.claim'))).toBe(true);
+    expect(claim.release()).toBe('released');
+    rmSync(repoPath, { recursive: true, force: true });
+  });
+
   it('runs one safest issue and imports the latest TAKT run', async () => {
     const calls: string[] = [];
     const dependencies: DevloopStartDependencies = {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,6 +16,7 @@ import {
   createDecisionApplyStartedEvent,
 } from '../devloopd/decisionEvents.js';
 import { appendDevloopLedgerEvent } from '../devloopd/ledger.js';
+import { tryAcquireRepoExecutionClaim } from '../devloopd/repoExecutionClaim.js';
 
 describe('guarded decision resume', () => {
   let repoPath: string;
@@ -268,6 +269,62 @@ describe('guarded decision resume', () => {
 
     expect(result).toMatchObject({ valid: false, reasonCode: 'active_run_changed' });
     expect(runnerCalls).toEqual([]);
+  });
+
+  it('retries transient claim cleanup from the direct-resume production finally path', async () => {
+    const runDir = join(repoPath, '.takt', 'runs', 'run-1');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, 'meta.json'), JSON.stringify({
+      task: 'task',
+      workflow: 'default',
+      runSlug: 'run-1',
+      runRoot: '.takt/runs/run-1',
+      reportDirectory: '.takt/runs/run-1/reports',
+      contextDirectory: '.takt/runs/run-1/context',
+      logsDirectory: '.takt/runs/run-1/logs',
+      status: 'aborted',
+      startTime: '2026-07-28T00:00:00.000Z',
+      abortKind: 'blocked',
+      blockedStep: 'approval',
+    }));
+    let releaseAttempts = 0;
+    const claim = tryAcquireRepoExecutionClaim(repoPath, 'direct_cleanup_test', {
+      beforeReleaseAttempt(attempt) {
+        releaseAttempts = attempt;
+        if (attempt === 1) throw new Error('transient release helper failure');
+      },
+    });
+    if (claim === undefined) throw new Error('claim unavailable');
+    const projection = store.get(context.decisionId);
+    if (projection === undefined) throw new Error('projection missing');
+    const defaultAdapter = createDefaultResumeAdapters({
+      resolveCommand: () => '/mock/git',
+      async exec() {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    }, {
+      inspectActiveRuns: () => ({
+        passed: true,
+        message: 'no active runs',
+        activeRuns: [],
+        staleAfterMinutes: 180,
+      }),
+      resumeDirectRunBySlug: async () => ({ status: 'resumed' }),
+      tryAcquireRepoExecutionClaim: () => claim,
+    }).find((item) => item.strategy === 'resume_direct_run');
+    if (defaultAdapter === undefined) throw new Error('adapter missing');
+
+    const result = await defaultAdapter.resume({
+      ...context,
+      projection,
+      strategy: 'resume_direct_run',
+      applyOperationId: 'op_test',
+      applyOwner: { pid: process.pid, startToken: 'test' },
+    });
+
+    expect(result.status).toBe('resumed');
+    expect(releaseAttempts).toBe(2);
+    expect(existsSync(join(repoPath, '.takt', 'devloop', 'repo-execution.claim'))).toBe(false);
   });
 
   it('allows only one of two Decision starts through the shared repository claim', async () => {

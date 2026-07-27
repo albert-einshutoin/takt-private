@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -27,17 +27,38 @@ describe('repository execution claim', () => {
     }
   });
 
-  it('keeps a failed cleanup retryable until the helper verifies release', () => {
+  it('retries a transient cleanup failure inside one production release call', () => {
     const repoPath = join(tmpdir(), `takt-repo-claim-release-retry-${randomUUID()}`);
-    const movedPath = `${repoPath}-moved`;
     mkdirSync(repoPath, { recursive: true });
-    const claim = tryAcquireRepoExecutionClaim(repoPath, 'retry_release');
+    let attempts = 0;
+    const claim = tryAcquireRepoExecutionClaim(repoPath, 'retry_release', {
+      beforeReleaseAttempt(attempt) {
+        attempts = attempt;
+        if (attempt === 1) throw new Error('transient helper failure');
+      },
+    });
     expect(claim).toBeDefined();
-    renameSync(repoPath, movedPath);
-    expect(() => claim?.release()).toThrow(RepoExecutionClaimReleaseError);
-    renameSync(movedPath, repoPath);
     expect(claim?.release()).toBe('released');
+    expect(attempts).toBe(2);
     expect(existsSync(join(repoPath, '.takt', 'devloop', 'repo-execution.claim'))).toBe(false);
+    rmSync(repoPath, { recursive: true, force: true });
+  });
+
+  it('propagates a typed error after bounded transient cleanup failures', () => {
+    const repoPath = join(tmpdir(), `takt-repo-claim-release-fail-${randomUUID()}`);
+    mkdirSync(repoPath, { recursive: true });
+    let attempts = 0;
+    const claim = tryAcquireRepoExecutionClaim(repoPath, 'failed_release', {
+      beforeReleaseAttempt(attempt) {
+        attempts += 1;
+        if (attempts <= 3) throw new Error(`failure ${attempt}`);
+      },
+    });
+    expect(claim).toBeDefined();
+    expect(() => claim?.release()).toThrow(RepoExecutionClaimReleaseError);
+    expect(attempts).toBe(3);
+    expect(existsSync(join(repoPath, '.takt', 'devloop', 'repo-execution.claim'))).toBe(true);
+    expect(claim?.release()).toBe('released');
     rmSync(repoPath, { recursive: true, force: true });
   });
 
