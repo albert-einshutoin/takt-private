@@ -75,3 +75,30 @@ export {
   decomposeTask,
 } from './agents/agent-usecases.js';
 export type { JudgeStatusResult } from './agents/agent-usecases.js';
+
+// Structured human decisions
+export {
+  CreateDecisionRequestInputSchema,
+  DecisionAnswerRequirementsSchema,
+  DecisionEvidenceSchema,
+  DecisionHowSchema,
+  DecisionKindSchema,
+  DecisionOptionSchema,
+  DecisionRequestSchema,
+  DecisionResumeGuardSchema,
+  DecisionSubjectSchema,
+  DecisionWhySchema,
+  createDecisionRequest,
+} from './devloopd/decisionRequest.js';
+export type {
+  CreateDecisionRequestInput,
+  CreateDecisionRequestOptions,
+  DecisionAnswerRequirements,
+  DecisionHow,
+  DecisionKind,
+  DecisionOption,
+  DecisionRequest,
+  DecisionResumeGuard,
+  DecisionSubject,
+  DecisionWhy,
+} from './devloopd/decisionRequest.js';
