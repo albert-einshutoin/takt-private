@@ -76,6 +76,16 @@ export interface LockedDevloopLedgerTransaction {
   append<T extends DevloopLedgerAppendEvent>(event: T): void;
 }
 
+export const MAX_DEVLOOP_LEDGER_LINE_BYTES = 1024 * 1024;
+export const MAX_DEVLOOP_LEDGER_BYTES = 64 * 1024 * 1024;
+
+export class DevloopLedgerCapacityError extends Error {
+  constructor() {
+    super('Devloop ledger capacity exceeded');
+    this.name = 'DevloopLedgerCapacityError';
+  }
+}
+
 export interface ImportTaktRunReport {
   passed: boolean;
   message: string;
@@ -309,6 +319,15 @@ function appendDevloopLedgerEventWithCapability<T extends DevloopLedgerAppendEve
   ledgerPath: string,
   event: T,
 ): void {
+  const serialized = JSON.stringify(event);
+  if (serialized === undefined) {
+    throw new Error('Devloop ledger event is not serializable');
+  }
+  const serializedEvent = Buffer.from(serialized, 'utf8');
+  if (serializedEvent.byteLength > MAX_DEVLOOP_LEDGER_LINE_BYTES) {
+    throw new DevloopLedgerCapacityError();
+  }
+  const line = Buffer.concat([serializedEvent, Buffer.from('\n')]);
   ensureLedgerDirectory(ledgerPath);
   const flags = constants.O_WRONLY
     | constants.O_APPEND
@@ -325,10 +344,12 @@ function appendDevloopLedgerEventWithCapability<T extends DevloopLedgerAppendEve
     ) {
       throw new Error('Devloop ledger must be a single-link regular file');
     }
+    if (ledgerStat.size + line.byteLength > MAX_DEVLOOP_LEDGER_BYTES) {
+      throw new DevloopLedgerCapacityError();
+    }
     // Restrict an existing permissive file before the first byte of a possibly
     // sensitive event is written; chmod-after-write leaves a disclosure window.
     fchmodSync(fd, 0o600);
-    const line = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8');
     let written = 0;
     while (written < line.byteLength) {
       const bytesWritten = writeSync(fd, line, written, line.byteLength - written);

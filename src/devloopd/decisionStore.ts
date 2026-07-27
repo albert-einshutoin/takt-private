@@ -23,13 +23,14 @@ import { DecisionRequestSchema, type DecisionRequest } from './decisionRequest.j
 import {
   canonicalizeDevloopLedgerPath,
   canonicalizeDevloopPath,
+  DevloopLedgerCapacityError,
+  MAX_DEVLOOP_LEDGER_BYTES,
+  MAX_DEVLOOP_LEDGER_LINE_BYTES,
   resolveDevloopLedgerPath,
   withLockedDevloopLedgerTransaction,
 } from './ledger.js';
 import { type DevloopFileLockOptions } from './stateStore.js';
 
-const MAX_LEDGER_BYTES = 64 * 1024 * 1024;
-const MAX_LEDGER_LINE_BYTES = 1024 * 1024;
 const DECISION_EVENT_PREFIX = 'devloop_decision_';
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const CONTEXT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -38,6 +39,7 @@ export type DecisionStoreErrorCode =
   | 'ledger_malformed'
   | 'ledger_incompatible'
   | 'ledger_unavailable'
+  | 'ledger_capacity_exceeded'
   | 'decision_not_found'
   | 'decision_quarantined'
   | 'repository_mismatch'
@@ -54,6 +56,7 @@ const ERROR_MESSAGES: Readonly<Record<DecisionStoreErrorCode, string>> = {
   ledger_malformed: 'The decision ledger is malformed',
   ledger_incompatible: 'The decision ledger contains incompatible decision events',
   ledger_unavailable: 'The decision ledger is unavailable',
+  ledger_capacity_exceeded: 'The decision ledger capacity was exceeded',
   decision_not_found: 'The decision was not found',
   decision_quarantined: 'The decision is quarantined',
   repository_mismatch: 'The decision belongs to a different repository',
@@ -84,6 +87,9 @@ function atStoreBoundary<T>(operation: () => T): T {
     return operation();
   } catch (error) {
     if (error instanceof DecisionStoreError) throw error;
+    if (error instanceof DevloopLedgerCapacityError) {
+      throw new DecisionStoreError('ledger_capacity_exceeded');
+    }
 
     const sanitized = new DecisionStoreError('ledger_unavailable');
     // Filesystem and lock errors often contain absolute paths or OS details.
@@ -158,14 +164,18 @@ function parseStrictDecisionLedger(ledgerPath: string): StrictDecisionLedger {
     return Object.freeze({ events: Object.freeze([]), fold });
   }
 
-  if (statSync(ledgerPath).size > MAX_LEDGER_BYTES) fail('ledger_malformed');
+  if (statSync(ledgerPath).size > MAX_DEVLOOP_LEDGER_BYTES) fail('ledger_malformed');
   const content = readFileSync(ledgerPath, 'utf8');
   if (content.length > 0 && !content.endsWith('\n')) fail('ledger_malformed');
   const events: unknown[] = [];
 
   for (const rawLine of content.split('\n')) {
     if (rawLine.trim().length === 0) continue;
-    if (Buffer.byteLength(rawLine, 'utf8') > MAX_LEDGER_LINE_BYTES) fail('ledger_malformed');
+    if (
+      Buffer.byteLength(rawLine, 'utf8') > MAX_DEVLOOP_LEDGER_LINE_BYTES
+    ) {
+      fail('ledger_malformed');
+    }
 
     let parsed: unknown;
     try {

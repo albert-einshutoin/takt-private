@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendDevloopLedgerEvent,
   buildDevloopLedgerEvent,
+  DevloopLedgerCapacityError,
   exportDevloopLedger,
   formatExportDevloopLedgerReport,
   formatImportTaktRunReport,
@@ -25,6 +26,8 @@ import {
   reconcileTaktRuns,
   readRawDevloopLedgerEvents,
   renderTimeline,
+  MAX_DEVLOOP_LEDGER_BYTES,
+  MAX_DEVLOOP_LEDGER_LINE_BYTES,
   withLockedDevloopLedgerTransaction,
 } from '../devloopd/ledger.js';
 
@@ -137,7 +140,7 @@ describe('devloopd ledger import and timeline', () => {
     expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
   });
 
-  it('changes an existing ledger to owner-only before appending', () => {
+  it('preflights serialization before changing an existing ledger to owner-only', () => {
     const ledgerDirectory = join(repoPath, '.devloop');
     const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
     mkdirSync(ledgerDirectory, { recursive: true, mode: 0o700 });
@@ -155,7 +158,7 @@ describe('devloopd ledger import and timeline', () => {
 
     appendDevloopLedgerEvent(ledgerPath, event);
 
-    expect(modeDuringSerialization).toBe(0o600);
+    expect(modeDuringSerialization).toBe(0o644);
     expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
     expect(readRawDevloopLedgerEvents(ledgerPath)).toHaveLength(1);
   });
@@ -201,6 +204,38 @@ describe('devloopd ledger import and timeline', () => {
       buildDevloopLedgerEvent('devloop_unsafe_parent', { sequence: 1 }),
     )).toThrow(/directory/i);
     expect(existsSync(ledgerPath)).toBe(false);
+  });
+
+  it('pins shared ledger capacity constants', () => {
+    expect(MAX_DEVLOOP_LEDGER_LINE_BYTES).toBe(1024 * 1024);
+    expect(MAX_DEVLOOP_LEDGER_BYTES).toBe(64 * 1024 * 1024);
+  });
+
+  it('accepts an exact-limit JSON line and rejects one extra byte without creating a ledger', () => {
+    const eventWithJsonBytes = (jsonBytes: number, eventId: string) => {
+      const empty = { eventId, eventType: 'devloop_capacity', padding: '' };
+      const overhead = Buffer.byteLength(JSON.stringify(empty), 'utf8');
+      return {
+        ...empty,
+        padding: 'x'.repeat(jsonBytes - overhead),
+      };
+    };
+    const exactLedgerPath = join(repoPath, '.devloop', 'exact.jsonl');
+    const oversizedLedgerPath = join(repoPath, '.devloop', 'oversized.jsonl');
+
+    appendDevloopLedgerEvent(
+      exactLedgerPath,
+      eventWithJsonBytes(MAX_DEVLOOP_LEDGER_LINE_BYTES, 'evt_exact'),
+    );
+    expect(
+      Buffer.byteLength(readFileSync(exactLedgerPath, 'utf8').trimEnd(), 'utf8'),
+    ).toBe(MAX_DEVLOOP_LEDGER_LINE_BYTES);
+
+    expect(() => appendDevloopLedgerEvent(
+      oversizedLedgerPath,
+      eventWithJsonBytes(MAX_DEVLOOP_LEDGER_LINE_BYTES + 1, 'evt_oversized'),
+    )).toThrow(DevloopLedgerCapacityError);
+    expect(existsSync(oversizedLedgerPath)).toBe(false);
   });
 
   it('imports the latest run when no run slug is specified', () => {

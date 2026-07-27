@@ -12,8 +12,15 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDecisionRequest, type DecisionRequest } from '../devloopd/decisionRequest.js';
-import { createDecisionAnsweredEvent } from '../devloopd/decisionEvents.js';
+import {
+  createDecisionAnsweredEvent,
+  createDecisionRequestedEvent,
+} from '../devloopd/decisionEvents.js';
 import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
+import {
+  MAX_DEVLOOP_LEDGER_BYTES,
+  MAX_DEVLOOP_LEDGER_LINE_BYTES,
+} from '../devloopd/ledger.js';
 
 function makeRequest(
   repoPath: string,
@@ -96,6 +103,82 @@ function answerFor(request: DecisionRequest) {
     rationale: 'Least privilege.',
     idempotencyKey: 'answer-store-v1',
   } as const;
+}
+
+function makeOversizedRequest(repoPath: string): DecisionRequest {
+  // A three-byte UTF-8 character reaches the byte cap with fewer schema
+  // elements, keeping this real-limit regression materially faster.
+  const maximumText = 'あ'.repeat(4_000);
+  const decisionId = 'dec_oversized';
+  return createDecisionRequest({
+    subject: {
+      repoPath,
+      runSlug: decisionId,
+      title: maximumText,
+    },
+    kind: 'choice',
+    question: maximumText,
+    why: {
+      summary: maximumText,
+      riskCategory: 'requirements_ambiguity',
+      reasons: [maximumText],
+      evidence: [],
+    },
+    how: {
+      summary: maximumText,
+      expectedEffects: [maximumText],
+      verification: [maximumText],
+    },
+    options: Array.from({ length: 2 }, (_, index) => ({
+      id: `option-${index}`,
+      title: maximumText,
+      description: maximumText,
+      consequences: Array.from({ length: 50 }, () => maximumText),
+      recommended: index === 0,
+    })),
+    answerRequirements: {
+      rationaleRequired: false,
+      minimumTextLength: 0,
+      maximumTextLength: 20,
+    },
+    resumeGuard: {
+      strategy: 'direct_run',
+      expectedDecisionVersion: 1,
+      runSlug: decisionId,
+      expectedRunStatus: 'blocked',
+    },
+  }, {
+    decisionId,
+    now: new Date('2026-07-28T00:00:00.000Z'),
+  });
+}
+
+function buildStrictGenericLedger(totalBytes: number): string {
+  const maxLineWithNewline = MAX_DEVLOOP_LEDGER_LINE_BYTES + 1;
+  const emptyLine = `${JSON.stringify({
+    eventType: 'generic_capacity_filler',
+    padding: '',
+  })}\n`;
+  const minimumLineBytes = Buffer.byteLength(emptyLine, 'utf8');
+  const chunks: string[] = [];
+  let remaining = totalBytes;
+
+  while (remaining > 0) {
+    let lineBytes = Math.min(maxLineWithNewline, remaining);
+    const tailBytes = remaining - lineBytes;
+    if (tailBytes > 0 && tailBytes < minimumLineBytes) {
+      lineBytes -= minimumLineBytes - tailBytes;
+    }
+    if (lineBytes < minimumLineBytes) throw new Error('Invalid ledger fixture size');
+    const paddingBytes = lineBytes - minimumLineBytes;
+    chunks.push(`${JSON.stringify({
+      eventType: 'generic_capacity_filler',
+      padding: 'x'.repeat(paddingBytes),
+    })}\n`);
+    remaining -= lineBytes;
+  }
+
+  return chunks.join('');
 }
 
 function expectCode(action: () => unknown, code: string): void {
@@ -465,6 +548,47 @@ describe('DecisionStore', () => {
       }),
       'ledger_unavailable',
     );
+  });
+
+  it('rejects a schema-valid request above the line limit without poisoning the ledger', () => {
+    const store = new DecisionStore(repoPath);
+    const oversized = makeOversizedRequest(repoPath);
+    const serialized = JSON.stringify(createDecisionRequestedEvent(oversized));
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeGreaterThan(MAX_DEVLOOP_LEDGER_LINE_BYTES);
+
+    expectCode(() => store.request(oversized), 'ledger_capacity_exceeded');
+    expect(existsSync(ledgerPath)).toBe(false);
+
+    const normal = makeRequest(repoPath, { decisionId: 'dec_after_capacity_rejection' });
+    store.request(normal);
+    expect(store.get(normal.decisionId)?.status).toBe('open');
+  }, 60_000);
+
+  it('rejects an append crossing the total byte limit without changing a strict ledger', () => {
+    const request = makeRequest(repoPath, { decisionId: 'dec_total_capacity' });
+    const options = {
+      eventId: 'evt_total_capacity',
+      now: new Date('2026-07-28T00:10:00.000Z'),
+    };
+    const appendBytes = Buffer.byteLength(
+      `${JSON.stringify(createDecisionRequestedEvent(request, options))}\n`,
+      'utf8',
+    );
+    const existingBytes = MAX_DEVLOOP_LEDGER_BYTES - appendBytes + 1;
+    const content = buildStrictGenericLedger(existingBytes);
+    expect(Buffer.byteLength(content, 'utf8')).toBe(existingBytes);
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true, mode: 0o700 });
+    writeFileSync(ledgerPath, content, { mode: 0o600 });
+    const beforeStat = statSync(ledgerPath);
+
+    expectCode(() => storeRequest(), 'ledger_capacity_exceeded');
+    const afterStat = statSync(ledgerPath);
+    expect(afterStat.size).toBe(beforeStat.size);
+    expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs);
+
+    function storeRequest(): unknown {
+      return new DecisionStore(repoPath).request(request, options);
+    }
   });
 
   it('isolates shared ledgers by repository and coexists with generic events', () => {
