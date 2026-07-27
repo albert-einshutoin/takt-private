@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ensureDecisionForIssueScoutCandidate } from '../devloopd/decisionGeneration.js';
-import { DecisionStore } from '../devloopd/decisionStore.js';
+import { createDecisionRequest } from '../devloopd/decisionRequest.js';
+import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
 import type { IssueScoutCandidate } from '../devloopd/issueScout.js';
 
 function candidate(
@@ -113,6 +114,22 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
     }
   });
 
+  it.each([
+    ['auto_recursive'],
+    ['mechanical'],
+  ] as const)('rejects a low-risk %s candidate before writing the ledger', (policyCategory) => {
+    expect(() => ensureDecisionForIssueScoutCandidate(
+      store,
+      candidate(policyCategory, 'low'),
+      { repoPath },
+      new Date('2026-07-28T00:00:00.000Z'),
+    )).toThrowError(expect.objectContaining({
+      name: 'DecisionGenerationError',
+      code: 'candidate_not_escalated',
+    }));
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
   it('deduplicates scheduler ticks with a deterministic decision ID', () => {
     const first = ensureDecisionForIssueScoutCandidate(
       store,
@@ -135,6 +152,86 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
       .map((line) => JSON.parse(line) as { eventType: string })
       .filter((event) => event.eventType === 'devloop_decision_requested');
     expect(requestedLines).toHaveLength(1);
+  });
+
+  it('converges when another caller persists the same request immediately before a conflict', () => {
+    const originalRequest = store.request.bind(store);
+    let wrappedCalls = 0;
+    store.request = (request, options) => {
+      wrappedCalls += 1;
+      originalRequest(request, options);
+      throw new DecisionStoreError('request_conflict');
+    };
+
+    const projection = ensureDecisionForIssueScoutCandidate(
+      store,
+      candidate(),
+      { repoPath },
+      new Date('2026-07-28T00:00:00.000Z'),
+    );
+
+    expect(wrappedCalls).toBe(1);
+    expect(projection.status).toBe('open');
+    expect(store.list()).toHaveLength(1);
+    expect(store.list()[0]?.request.contextHash).toBe(projection.request.contextHash);
+  });
+
+  it('fails closed when the deterministic ID is occupied by a different context', () => {
+    const targetRepoPath = join(repoPath, 'target-context');
+    mkdirSync(targetRepoPath, { recursive: true });
+    const target = ensureDecisionForIssueScoutCandidate(
+      new DecisionStore(targetRepoPath),
+      candidate(),
+      { repoPath: targetRepoPath },
+      new Date('2026-07-28T00:00:00.000Z'),
+    );
+    const existing = createDecisionRequest({
+      kind: 'text',
+      subject: {
+        repoPath,
+        runSlug: 'unrelated-run',
+        title: 'Unrelated run decision',
+      },
+      question: 'Describe how the unrelated run should proceed.',
+      why: {
+        summary: 'An unrelated run needs clarification.',
+        riskCategory: 'requirements_ambiguity',
+        reasons: ['The unrelated run has incomplete requirements.'],
+        evidence: [],
+      },
+      how: {
+        summary: 'Resume only the unrelated run.',
+        expectedEffects: ['The unrelated run plan is updated.'],
+        verification: ['Verify the unrelated run context.'],
+      },
+      answerRequirements: {
+        rationaleRequired: false,
+        minimumTextLength: 1,
+        maximumTextLength: 2_000,
+      },
+      resumeGuard: {
+        strategy: 'direct_run',
+        expectedDecisionVersion: 1,
+        runSlug: 'unrelated-run',
+        expectedRunStatus: 'blocked',
+      },
+    }, {
+      decisionId: target.request.decisionId,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    store.request(existing, { now: new Date('2026-07-28T00:00:00.000Z') });
+
+    expect(() => ensureDecisionForIssueScoutCandidate(
+      store,
+      candidate(),
+      { repoPath },
+      new Date('2026-07-28T01:00:00.000Z'),
+    )).toThrowError(expect.objectContaining({
+      code: 'request_conflict',
+    }));
+    expect(store.list()).toHaveLength(1);
+    expect(store.list()[0]?.request.contextHash).toBe(existing.contextHash);
+    expect(store.list()[0]?.request.subject.candidateId).toBeUndefined();
   });
 
   it('sanitizes paths and secrets without persisting executable guard payloads', () => {

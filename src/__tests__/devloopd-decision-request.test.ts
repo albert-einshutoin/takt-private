@@ -184,11 +184,18 @@ describe('createDecisionRequest', () => {
           recommended: false,
         },
         {
+          id: 'revise_scope',
+          title: 'Revise scope',
+          description: 'Narrow the proposed scope.',
+          consequences: ['Issue Scout will keep the candidate blocked.'],
+          recommended: true,
+        },
+        {
           id: 'skip',
           title: 'Skip',
           description: 'Do not create an issue.',
           consequences: ['The candidate stays stopped.'],
-          recommended: true,
+          recommended: false,
         },
       ],
       answerRequirements,
@@ -204,6 +211,132 @@ describe('createDecisionRequest', () => {
       expectedDecisionVersion: 1,
       candidateId: 'local_backlog:compatibility-policy',
     });
+  });
+
+  it.each([
+    ['text decision', {
+      kind: 'text',
+    }],
+    ['two choices', {
+      kind: 'choice',
+      options: [
+        {
+          id: 'approve_scope',
+          title: 'Approve scope',
+          description: 'Keep the proposed scope.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'skip',
+          title: 'Skip',
+          description: 'Do not create an issue.',
+          consequences: [],
+          recommended: true,
+        },
+      ],
+    }],
+    ['four choices', {
+      kind: 'choice',
+      options: [
+        {
+          id: 'approve_scope',
+          title: 'Approve scope',
+          description: 'Keep the proposed scope.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'revise_scope',
+          title: 'Revise scope',
+          description: 'Narrow the proposed scope.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'skip',
+          title: 'Skip',
+          description: 'Do not create an issue.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'defer',
+          title: 'Defer',
+          description: 'Wait for later.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+    }],
+  ])('rejects an issue scout guard attached to a %s', (_case, decisionShape) => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      question: 'Choose how Issue Scout should proceed.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      ...decisionShape,
+    } as never)).toThrow(/approve_scope|choice|Issue Scout/i);
+  });
+
+  it('rejects a persisted issue scout request whose decision shape is not canonical', () => {
+    const request = createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      kind: 'choice',
+      question: 'Choose how Issue Scout should proceed.',
+      options: [
+        {
+          id: 'approve_scope',
+          title: 'Approve scope',
+          description: 'Keep the proposed scope.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'revise_scope',
+          title: 'Revise scope',
+          description: 'Narrow the proposed scope.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'skip',
+          title: 'Skip',
+          description: 'Do not create an issue.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+    });
+    const persisted = { ...request } as Record<string, unknown>;
+    Reflect.deleteProperty(persisted, 'options');
+    persisted.kind = 'text';
+    const parsed = DecisionRequestSchema.safeParse(persisted);
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => /Issue Scout.*choice/i.test(issue.message))).toBe(true);
+    }
   });
 
   it('rejects an issue scout guard whose candidate differs from the subject', () => {

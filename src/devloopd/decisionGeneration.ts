@@ -15,6 +15,18 @@ export interface IssueScoutDecisionContext {
   readonly repository?: string;
 }
 
+export type DecisionGenerationErrorCode = 'candidate_not_escalated';
+
+export class DecisionGenerationError extends Error {
+  readonly code: DecisionGenerationErrorCode;
+
+  constructor(code: DecisionGenerationErrorCode) {
+    super('The Issue Scout candidate does not require a human decision');
+    this.name = 'DecisionGenerationError';
+    this.code = code;
+  }
+}
+
 const ACTIVE_DECISION_STATUSES = new Set<DecisionProjection['status']>([
   'open',
   'answered',
@@ -165,6 +177,14 @@ export function ensureDecisionForIssueScoutCandidate(
   context: IssueScoutDecisionContext,
   now: Date = new Date(),
 ): DecisionProjection {
+  if (
+    candidate.policyCategory !== 'product_policy'
+    && candidate.policyCategory !== 'human_policy'
+    && candidate.riskBucket !== 'high'
+  ) {
+    throw new DecisionGenerationError('candidate_not_escalated');
+  }
+
   const canonicalContext = {
     ...context,
     repoPath: store.repoPath,

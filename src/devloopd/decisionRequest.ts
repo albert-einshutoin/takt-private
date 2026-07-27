@@ -235,6 +235,8 @@ const RATIONALE_REQUIRED_RISK_CATEGORIES = new Set<DecisionWhy['riskCategory']>(
 ]);
 
 interface DecisionSafetyContext {
+  kind: DecisionKind;
+  options?: readonly DecisionOption[];
   subject: DecisionSubject;
   why: DecisionWhy;
   answerRequirements: DecisionAnswerRequirements;
@@ -271,6 +273,19 @@ function validateDecisionSafetyContext(
   }
 
   if (value.resumeGuard.strategy === 'issue_scout_candidate') {
+    if (
+      value.kind !== 'choice'
+      || value.options?.length !== 3
+      || value.options[0]?.id !== 'approve_scope'
+      || value.options[1]?.id !== 'revise_scope'
+      || value.options[2]?.id !== 'skip'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['options'],
+        message: 'Issue Scout decisions must be a choice with exactly approve_scope, revise_scope, and skip options',
+      });
+    }
     if (
       value.subject.candidateId === undefined
       || value.subject.candidateId !== value.resumeGuard.candidateId
