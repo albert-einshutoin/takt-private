@@ -768,6 +768,7 @@ export async function promotePullRequestAutoMerge(options: {
   repoPath?: string;
   repo?: string;
   expectedHeadSha?: string;
+  humanApproval?: PullRequestHumanApproval;
   label?: string;
   dryRun?: boolean;
   env?: NodeJS.ProcessEnv;
@@ -803,7 +804,12 @@ export async function promotePullRequestAutoMerge(options: {
     title: metadata.title,
     body: metadata.body,
   });
-  if (productPolicyImpact.requiresHumanReview) {
+  const validHumanApproval = options.humanApproval !== undefined
+    && options.expectedHeadSha !== undefined
+    && options.humanApproval.pr === options.pr
+    && options.humanApproval.expectedHeadSha === options.expectedHeadSha
+    && options.humanApproval.decisionVersion > 0;
+  if (productPolicyImpact.requiresHumanReview && !validHumanApproval) {
     if (options.dryRun !== true) {
       if (options.expectedHeadSha !== undefined) {
         const freshMetadata = await loadPrView({
@@ -968,6 +974,15 @@ export interface ContinuePullRequestAutomationStageOptions {
   readonly repo?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly runner?: DevloopCommandRunner;
+  readonly humanApproval: PullRequestHumanApproval;
+}
+
+export interface PullRequestHumanApproval {
+  readonly decisionId: string;
+  readonly decisionVersion: number;
+  readonly pr: number;
+  readonly stage: DevloopAutomationStage;
+  readonly expectedHeadSha: string;
 }
 
 export interface ContinuePullRequestAutomationStageReport {
@@ -984,6 +999,20 @@ export async function continuePullRequestAutomationStage(
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
+  if (
+    options.humanApproval.pr !== options.pr
+    || options.humanApproval.stage !== options.stage
+    || options.humanApproval.expectedHeadSha !== options.expectedHeadSha
+    || options.humanApproval.decisionVersion <= 0
+  ) {
+    return {
+      passed: false,
+      message: 'The typed human approval does not match this PR continuation.',
+      revalidationRequired: true,
+      reasonCode: 'human_approval_mismatch',
+      actions: [],
+    };
+  }
   const metadata = await loadPrView({
     pr: options.pr,
     repoPath,
@@ -1019,6 +1048,7 @@ export async function continuePullRequestAutomationStage(
     repoPath,
     repo: options.repo,
     expectedHeadSha: options.expectedHeadSha,
+    humanApproval: options.humanApproval,
     env,
     runner,
   });
@@ -1191,8 +1221,12 @@ export async function attachAutomationDecisions(options: {
   runner: DevloopCommandRunner;
 }): Promise<DevloopAutomationStageReport> {
   const snapshotsByPr = new Map(options.prs.map((pr) => [pr.number, pr]));
-  const eligibleIndexes = options.report.actions.flatMap((action, index) =>
-    automationActionRequiresDecision(action) ? [index] : []);
+  // review-fix has no target-locked human-approval mutation contract. Keep it
+  // blocked without generating a Decision that could never be safely applied.
+  const eligibleIndexes = options.report.stage === 'review-fix'
+    ? []
+    : options.report.actions.flatMap((action, index) =>
+      automationActionRequiresDecision(action) ? [index] : []);
   if (eligibleIndexes.length === 0) return options.report;
 
   const actions = [...options.report.actions];

@@ -18,6 +18,10 @@ import {
   type ImportTaktRunReport,
 } from './ledger.js';
 import { inspectActiveRuns, type ActiveRunsReport } from './activeRuns.js';
+import {
+  tryAcquireRepoExecutionClaim,
+  type RepoExecutionClaim,
+} from './repoExecutionClaim.js';
 import { selectIssueCandidates } from './issueSelector.js';
 import type { DevloopCommandRunner } from './commandRunner.js';
 import {
@@ -30,6 +34,7 @@ export interface DevloopStartDependencies {
   scanIssues(options: ScanIssuesOptions): Promise<IssueScanReport>;
   runDevloopIssue(options: RunDevloopIssueOptions): Promise<DevloopRunReport>;
   importTaktRun(options: ImportTaktRunOptions): ImportTaktRunReport;
+  acquireExecutionClaim?(repoPath: string): RepoExecutionClaim | undefined;
 }
 
 export type DevloopSupervisorSleep = (milliseconds: number, signal?: AbortSignal) => Promise<void>;
@@ -77,13 +82,19 @@ export interface DevloopStartReport extends DevloopStartCycleReport {
   stoppedReason?: 'once' | 'max_cycles' | 'abort_signal' | 'fatal_cycle' | 'stop_requested';
 }
 
-const DEFAULT_DEPENDENCIES: DevloopStartDependencies = {
+type ResolvedDevloopStartDependencies = Required<DevloopStartDependencies>;
+
+const DEFAULT_DEPENDENCIES: ResolvedDevloopStartDependencies = {
   scanIssues: defaultScanIssues,
   runDevloopIssue: defaultRunDevloopIssue,
   importTaktRun: defaultImportTaktRun,
+  acquireExecutionClaim: (repoPath) =>
+    tryAcquireRepoExecutionClaim(repoPath, `supervisor_${process.pid}`),
 };
 
-function resolveDependencies(dependencies: Partial<DevloopStartDependencies> | undefined): DevloopStartDependencies {
+function resolveDependencies(
+  dependencies: Partial<DevloopStartDependencies> | undefined,
+): ResolvedDevloopStartDependencies {
   return {
     ...DEFAULT_DEPENDENCIES,
     ...dependencies,
@@ -221,6 +232,11 @@ async function runDevloopCycle(options: StartDevloopOptions): Promise<DevloopSta
 
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const dependencies = resolveDependencies(options.dependencies);
+  const executionClaim = dependencies.acquireExecutionClaim(repoPath);
+  if (executionClaim === undefined) {
+    return makeCycleReport('repository execution start is already claimed');
+  }
+  try {
   const activeRuns = inspectActiveRuns({
     repoPath,
     staleAfterMinutes: options.staleAfterMinutes,
@@ -329,6 +345,9 @@ async function runDevloopCycle(options: StartDevloopOptions): Promise<DevloopSta
     selected,
     runs,
   };
+  } finally {
+    executionClaim.release();
+  }
 }
 
 export async function startDevloop(options: StartDevloopOptions = {}): Promise<DevloopStartReport> {

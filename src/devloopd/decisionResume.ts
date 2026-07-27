@@ -1,9 +1,13 @@
+import { randomUUID } from 'node:crypto';
+import { types as utilTypes } from 'node:util';
 import type { DecisionProjection } from './decisionEvents.js';
 import {
   createDecisionAppliedEvent,
   createDecisionApplyFailedEvent,
   createDecisionApplyStartedEvent,
   createDecisionRevalidationRequiredEvent,
+  parseDecisionEvent,
+  type DecisionApplyStartedEvent,
 } from './decisionEvents.js';
 import { inspectActiveRuns } from './activeRuns.js';
 import { createDefaultDevloopCommandRunner, type DevloopCommandRunner } from './commandRunner.js';
@@ -13,6 +17,11 @@ import { runDevloopIssue } from './run.js';
 import { resumeDirectRunBySlug } from '../features/tasks/resume/index.js';
 import { findResumableDirectRunBySlug } from '../features/tasks/resume/directRunFinder.js';
 import { continuePullRequestAutomationStage } from './prAutomation.js';
+import {
+  inspectProcessIdentity,
+  resolveProcessStartToken,
+  tryAcquireRepoExecutionClaim,
+} from './repoExecutionClaim.js';
 
 export type ResumeStrategy =
   | 'rerun_issue'
@@ -81,6 +90,13 @@ export type ApplyDecisionResult =
 
 export interface ApplyDecisionOptions {
   readonly adapters?: readonly ResumeAdapter[];
+  readonly owner?: ApplyOperationOwner;
+  readonly inspectOwner?: (owner: ApplyOperationOwner) => 'alive' | 'dead' | 'unknown';
+}
+
+export interface ApplyOperationOwner {
+  readonly pid: number;
+  readonly startToken: string;
 }
 
 type ClaimResult =
@@ -223,6 +239,7 @@ function appendRevalidation(
 function claimApplication(
   context: ResumeContext,
   adapters: ReadonlyMap<ResumeStrategy, ResumeAdapter>,
+  owner: ApplyOperationOwner,
 ): ClaimResult {
   return withLockedDevloopLedgerTransaction(context.store.ledgerPath, (transaction) => {
     const projection = context.store.get(context.decisionId);
@@ -306,6 +323,9 @@ function claimApplication(
     transaction.append(createDecisionApplyStartedEvent({
       ...transitionIdentity(projection),
       sanitizedSummary: FIXED_MESSAGES.applyStarted,
+      operationId: `op_${randomUUID()}`,
+      ownerPid: owner.pid,
+      ownerStartToken: owner.startToken,
     }));
     return {
       kind: 'claimed',
@@ -313,6 +333,65 @@ function claimApplication(
       context: Object.freeze({ ...context, projection, strategy }),
     };
   });
+}
+
+function currentOwner(): ApplyOperationOwner {
+  return {
+    pid: process.pid,
+    // If OS process identity cannot be inspected, use an unmatchable token.
+    // Recovery will remain "unknown" and never risk replaying a side effect.
+    startToken: resolveProcessStartToken(process.pid) ?? `unknown_${randomUUID()}`,
+  };
+}
+
+function inspectOperationOwner(owner: ApplyOperationOwner): 'alive' | 'dead' | 'unknown' {
+  return inspectProcessIdentity(owner.pid, owner.startToken);
+}
+
+function applyingClaim(store: DecisionStore, decisionId: string): DecisionApplyStartedEvent | undefined {
+  const strict = store.readStrict();
+  for (let index = strict.events.length - 1; index >= 0; index -= 1) {
+    const parsed = parseDecisionEvent(strict.events[index]);
+    if (
+      parsed.success
+      && parsed.data.eventType === 'devloop_decision_apply_started'
+      && parsed.data.decisionId === decisionId
+    ) {
+      return parsed.data;
+    }
+  }
+  return undefined;
+}
+
+function reconcileInterruptedApply(
+  context: ResumeContext,
+  inspectOwner: (owner: ApplyOperationOwner) => 'alive' | 'dead' | 'unknown',
+): ApplyDecisionResult | undefined {
+  const projection = context.store.get(context.decisionId);
+  if (projection?.status !== 'applying') return undefined;
+  const claim = applyingClaim(context.store, context.decisionId);
+  if (
+    claim?.operationId === undefined
+    || claim.ownerPid === undefined
+    || claim.ownerStartToken === undefined
+  ) {
+    return appendRevalidation(
+      context,
+      'apply_owner_unknown',
+      'The interrupted apply has no verifiable owner; external effects will not be replayed.',
+      'applying',
+    );
+  }
+  const ownerState = inspectOwner({ pid: claim.ownerPid, startToken: claim.ownerStartToken });
+  if (ownerState === 'dead') {
+    return appendRevalidation(
+      context,
+      'apply_owner_terminated',
+      'The apply owner terminated; external effects will not be replayed.',
+      'applying',
+    );
+  }
+  return resultFromProjection(projection);
 }
 
 function appendApplied(context: ResolvedResumeContext, summary: string): ApplyDecisionResult {
@@ -375,12 +454,36 @@ function appendFailed(
 }
 
 function adaptersByStrategy(adapters: readonly ResumeAdapter[]): ReadonlyMap<ResumeStrategy, ResumeAdapter> {
+  if (utilTypes.isProxy(adapters) || !Array.isArray(adapters)) {
+    throw new Error('Invalid resume adapter registry');
+  }
   const registry = new Map<ResumeStrategy, ResumeAdapter>();
   for (const adapter of adapters) {
-    if (registry.has(adapter.strategy)) {
-      throw new Error(`Duplicate resume adapter: ${adapter.strategy}`);
+    if (adapter === null || typeof adapter !== 'object' || utilTypes.isProxy(adapter)) {
+      throw new Error('Invalid resume adapter');
     }
-    registry.set(adapter.strategy, adapter);
+    const strategy = Object.getOwnPropertyDescriptor(adapter, 'strategy')?.value;
+    const revalidate = Object.getOwnPropertyDescriptor(adapter, 'revalidate')?.value;
+    const resume = Object.getOwnPropertyDescriptor(adapter, 'resume')?.value;
+    if (
+      ![
+        'rerun_issue',
+        'resume_direct_run',
+        'continue_pr_stage',
+        'replan',
+        'manual_only',
+      ].includes(strategy)
+      || typeof revalidate !== 'function'
+      || typeof resume !== 'function'
+      || registry.has(strategy as ResumeStrategy)
+    ) {
+      throw new Error('Invalid resume adapter');
+    }
+    registry.set(strategy as ResumeStrategy, Object.freeze({
+      strategy,
+      revalidate: revalidate.bind(adapter),
+      resume: resume.bind(adapter),
+    }) as ResumeAdapter);
   }
   return registry;
 }
@@ -389,8 +492,29 @@ export async function applyDecision(
   context: ResumeContext,
   options: ApplyDecisionOptions = {},
 ): Promise<ApplyDecisionResult> {
+  const interrupted = reconcileInterruptedApply(
+    context,
+    options.inspectOwner ?? inspectOperationOwner,
+  );
+  if (interrupted !== undefined) return interrupted;
+
   const adapters = options.adapters ?? createDefaultResumeAdapters();
-  const claim = claimApplication(context, adaptersByStrategy(adapters));
+  let registry: ReadonlyMap<ResumeStrategy, ResumeAdapter>;
+  try {
+    registry = adaptersByStrategy(adapters);
+  } catch {
+    return appendRevalidation(
+      context,
+      'resume_registry_invalid',
+      'The resume adapter registry could not be verified safely.',
+      'answered',
+    );
+  }
+  const claim = claimApplication(
+    context,
+    registry,
+    options.owner ?? currentOwner(),
+  );
   if (claim.kind === 'result') return claim.result;
 
   try {
@@ -469,7 +593,16 @@ async function inspectCleanWorktree(
 
 export function createDefaultResumeAdapters(
   runner: DevloopCommandRunner = defaultRunner(),
+  runtime: {
+    readonly inspectActiveRuns?: typeof inspectActiveRuns;
+    readonly resumeDirectRunBySlug?: typeof resumeDirectRunBySlug;
+    readonly tryAcquireRepoExecutionClaim?: typeof tryAcquireRepoExecutionClaim;
+  } = {},
 ): readonly ResumeAdapter[] {
+  const inspectRuns = runtime.inspectActiveRuns ?? inspectActiveRuns;
+  const resumeRun = runtime.resumeDirectRunBySlug ?? resumeDirectRunBySlug;
+  const acquireExecutionClaim =
+    runtime.tryAcquireRepoExecutionClaim ?? tryAcquireRepoExecutionClaim;
   return Object.freeze([
     {
       strategy: 'rerun_issue',
@@ -535,7 +668,7 @@ export function createDefaultResumeAdapters(
             summary: 'The guarded run is no longer at the expected blocked state.',
           };
         }
-        const active = inspectActiveRuns({ repoPath: context.store.repoPath });
+        const active = inspectRuns({ repoPath: context.store.repoPath });
         if (!active.passed || active.activeRuns.length > 0) {
           return {
             valid: false,
@@ -554,40 +687,57 @@ export function createDefaultResumeAdapters(
             summary: 'The decision guard does not describe a direct run.',
           };
         }
-        const active = inspectActiveRuns({ repoPath: context.store.repoPath });
-        if (!active.passed || active.activeRuns.length > 0) {
-          return {
-            status: 'revalidation_required',
-            reasonCode: 'active_run_changed',
-            summary: 'Another run is active or the active-run state is unavailable.',
-          };
-        }
-        const clean = await inspectCleanWorktree(context.store.repoPath, runner);
-        if (!clean.valid) return { status: 'revalidation_required', ...clean };
-        const resumed = await resumeDirectRunBySlug(
+        const executionClaim = acquireExecutionClaim(
           context.store.repoPath,
-          guard.runSlug,
-          {
-            expectedStatus: guard.expectedRunStatus,
-            expectedAbortKind: guard.expectedAbortKind,
-            expectedBlockedStep: guard.expectedBlockedStep,
-            decisionAnswer: context.projection.answer,
-          },
+          `decision_${context.projection.request.decisionId}`,
         );
-        if (resumed.status === 'revalidation_required') {
+        if (executionClaim === undefined) {
           return {
             status: 'revalidation_required',
-            reasonCode: 'run_status_changed',
-            summary: 'The guarded run changed immediately before resume.',
+            reasonCode: 'repo_execution_claimed',
+            summary: 'Another repository execution owns the start boundary.',
           };
         }
-        return resumed.status === 'resumed'
-          ? { status: 'resumed', summary: 'The guarded direct run completed.' }
-          : {
-            status: 'failed',
-            errorCode: 'direct_run_failed',
-            summary: 'The guarded direct run did not complete.',
-          };
+        try {
+          // These guards run while the shared repository claim is held through
+          // execution, closing the supervisor/Decision start race.
+          const active = inspectRuns({ repoPath: context.store.repoPath });
+          if (!active.passed || active.activeRuns.length > 0) {
+            return {
+              status: 'revalidation_required',
+              reasonCode: 'active_run_changed',
+              summary: 'Another run is active or the active-run state is unavailable.',
+            };
+          }
+          const clean = await inspectCleanWorktree(context.store.repoPath, runner);
+          if (!clean.valid) return { status: 'revalidation_required', ...clean };
+          const resumed = await resumeRun(
+            context.store.repoPath,
+            guard.runSlug,
+            {
+              expectedStatus: guard.expectedRunStatus,
+              expectedAbortKind: guard.expectedAbortKind,
+              expectedBlockedStep: guard.expectedBlockedStep,
+              decisionAnswer: context.projection.answer,
+            },
+          );
+          if (resumed.status === 'revalidation_required') {
+            return {
+              status: 'revalidation_required',
+              reasonCode: 'run_status_changed',
+              summary: 'The guarded run changed immediately before resume.',
+            };
+          }
+          return resumed.status === 'resumed'
+            ? { status: 'resumed', summary: 'The guarded direct run completed.' }
+            : {
+              status: 'failed',
+              errorCode: 'direct_run_failed',
+              summary: 'The guarded direct run did not complete.',
+            };
+        } finally {
+          executionClaim.release();
+        }
       },
     },
     {
@@ -617,6 +767,13 @@ export function createDefaultResumeAdapters(
           pr: guard.prNumber,
           stage: guard.stage,
           expectedHeadSha: guard.expectedHeadSha,
+          humanApproval: {
+            decisionId: context.projection.request.decisionId,
+            decisionVersion: context.projection.request.decisionVersion,
+            pr: guard.prNumber,
+            stage: guard.stage,
+            expectedHeadSha: guard.expectedHeadSha,
+          },
           runner,
         });
         if (report.revalidationRequired) {

@@ -7,6 +7,11 @@ import {
   startDevloop,
   type DevloopStartDependencies,
 } from '../devloopd/supervisor.js';
+import type { RepoExecutionClaim } from '../devloopd/repoExecutionClaim.js';
+
+function unitExecutionClaim(): RepoExecutionClaim {
+  return { operationId: 'unit-supervisor', release() {} };
+}
 import type { IssueCandidate, IssueScanReport } from '../devloopd/issueScanner.js';
 
 function candidate(input: Partial<IssueCandidate> & { number: number; mode: IssueCandidate['mode'] }): IssueCandidate {
@@ -57,6 +62,7 @@ describe('devloopd supervisor', () => {
   it('runs one safest issue and imports the latest TAKT run', async () => {
     const calls: string[] = [];
     const dependencies: DevloopStartDependencies = {
+      acquireExecutionClaim: unitExecutionClaim,
       async scanIssues(options) {
         calls.push(`scan:${options.repo}`);
         return makeScan([
@@ -100,6 +106,7 @@ describe('devloopd supervisor', () => {
   it('does not start TAKT when the issue scan fails', async () => {
     const calls: string[] = [];
     const dependencies: DevloopStartDependencies = {
+      acquireExecutionClaim: unitExecutionClaim,
       async scanIssues() {
         calls.push('scan');
         return { passed: false, message: 'gh issue list failed', candidates: [], skipped: [] };
@@ -124,6 +131,7 @@ describe('devloopd supervisor', () => {
   it('does not import when the TAKT issue run fails', async () => {
     const calls: string[] = [];
     const dependencies: DevloopStartDependencies = {
+      acquireExecutionClaim: unitExecutionClaim,
       async scanIssues() {
         calls.push('scan');
         return makeScan([candidate({ number: 123, mode: 'auto_pr_only' })]);
@@ -148,6 +156,7 @@ describe('devloopd supervisor', () => {
   it('runs daemon cycles without requiring --once', async () => {
     const calls: string[] = [];
     const dependencies: DevloopStartDependencies = {
+      acquireExecutionClaim: unitExecutionClaim,
       async scanIssues() {
         calls.push('scan');
         return makeScan([]);
@@ -179,6 +188,7 @@ describe('devloopd supervisor', () => {
     const repoPath = makeTempRepo();
     writeRunningRun(repoPath, 'run-active');
     const dependencies: DevloopStartDependencies = {
+      acquireExecutionClaim: unitExecutionClaim,
       async scanIssues() {
         throw new Error('should not scan');
       },
@@ -203,6 +213,7 @@ describe('devloopd supervisor', () => {
   it('uses scan retry-after hints before the next daemon cycle', async () => {
     const calls: string[] = [];
     const dependencies: DevloopStartDependencies = {
+      acquireExecutionClaim: unitExecutionClaim,
       async scanIssues() {
         calls.push('scan');
         return {

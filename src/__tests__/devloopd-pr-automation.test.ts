@@ -179,6 +179,90 @@ function makeProductPolicyPromotionRunner(): DevloopCommandRunner & { calls: str
 }
 
 describe('devloopd PR automation orchestration', () => {
+  it('uses an exact typed human approval without skipping checks, reviews, or head recheck', async () => {
+    const headSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const calls: string[] = [];
+    const comments = [
+      {
+        body: formatReviewGateComment({
+          reviewer: 'agy',
+          decision: 'approved',
+          headSha,
+          body: 'Mergeable: YES\nReason: approved current policy head',
+        }),
+      },
+      {
+        body: formatReviewGateComment({
+          reviewer: 'codex',
+          decision: 'approved',
+          headSha,
+          body: 'Codex-Human-Review: APPROVED\nReason: approved current policy head',
+        }),
+      },
+    ];
+    const runner: DevloopCommandRunner = {
+      resolveCommand(command) {
+        return command === 'gh' ? '/mock/bin/gh' : undefined;
+      },
+      async exec(_command, args) {
+        calls.push(args.join(' '));
+        if (args.slice(0, 2).join(' ') === 'pr view') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              number: 42,
+              title: 'change authentication policy',
+              body: 'Update policy behavior.',
+              headRefOid: headSha,
+              mergeStateStatus: 'CLEAN',
+              changedFiles: 1,
+              additions: 5,
+              deletions: 1,
+            }),
+            stderr: '',
+          };
+        }
+        if (args.slice(0, 2).join(' ') === 'pr diff') {
+          return { exitCode: 0, stdout: 'src/routes/auth.ts\n', stderr: '' };
+        }
+        if (args.slice(0, 2).join(' ') === 'pr checks') {
+          return { exitCode: 0, stdout: 'checks passed\n', stderr: '' };
+        }
+        if (args[0] === 'api') {
+          return { exitCode: 0, stdout: JSON.stringify(comments), stderr: '' };
+        }
+        if (args.slice(0, 2).join(' ') === 'pr edit') {
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+      },
+    };
+
+    const report = await continuePullRequestAutomationStage({
+      pr: 42,
+      stage: 'pr-review',
+      expectedHeadSha: headSha,
+      repoPath: '/repo',
+      repo: 'owner/repo',
+      runner,
+      humanApproval: {
+        decisionId: 'dec_policy_42',
+        decisionVersion: 1,
+        pr: 42,
+        stage: 'pr-review',
+        expectedHeadSha: headSha,
+      },
+    });
+
+    expect(report.passed).toBe(true);
+    expect(calls.filter((call) => call.startsWith('pr view 42'))).toHaveLength(3);
+    expect(calls.some((call) => call.startsWith('pr checks 42'))).toBe(true);
+    expect(calls.some((call) => call.startsWith('api repos/owner/repo/issues/42/comments'))).toBe(true);
+    expect(calls.filter((call) => call.startsWith('pr edit 42 --add-label agent:auto-merge')))
+      .toHaveLength(1);
+    expect(calls.some((call) => call.startsWith('pr list'))).toBe(false);
+  });
+
   it('continues only the exact PR and requires revalidation when its head changed', async () => {
     const calls: string[] = [];
     const runner: DevloopCommandRunner = {
@@ -205,6 +289,13 @@ describe('devloopd PR automation orchestration', () => {
       pr: 42,
       stage: 'pr-review',
       expectedHeadSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      humanApproval: {
+        decisionId: 'dec_pr_42',
+        decisionVersion: 1,
+        pr: 42,
+        stage: 'pr-review',
+        expectedHeadSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
       repoPath: '/repo',
       repo: 'owner/repo',
       runner,

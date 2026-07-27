@@ -1,16 +1,21 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyDecision,
+  createDefaultResumeAdapters,
   type ResumeAdapter,
   type ResumeContext,
 } from '../devloopd/decisionResume.js';
 import { createDecisionRequest } from '../devloopd/decisionRequest.js';
 import { DecisionStore } from '../devloopd/decisionStore.js';
 import { readRawDevloopLedgerEvents } from '../devloopd/ledger.js';
+import {
+  createDecisionApplyStartedEvent,
+} from '../devloopd/decisionEvents.js';
+import { appendDevloopLedgerEvent } from '../devloopd/ledger.js';
 
 describe('guarded decision resume', () => {
   let repoPath: string;
@@ -165,6 +170,262 @@ describe('guarded decision resume', () => {
     expect(resume).not.toHaveBeenCalled();
   });
 
+  it('default direct adapter rejects a changed real run status before any command', async () => {
+    const projection = store.get(context.decisionId);
+    if (projection === undefined) throw new Error('projection missing');
+    const runnerCalls: string[] = [];
+    const defaultAdapter = createDefaultResumeAdapters({
+      resolveCommand: () => '/mock/git',
+      async exec(_command, args) {
+        runnerCalls.push(args.join(' '));
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    }).find((item) => item.strategy === 'resume_direct_run');
+    if (defaultAdapter === undefined) throw new Error('adapter missing');
+
+    const result = await defaultAdapter.revalidate({
+      ...context,
+      projection,
+      strategy: 'resume_direct_run',
+    });
+
+    expect(result).toMatchObject({ valid: false, reasonCode: 'run_status_changed' });
+    expect(runnerCalls).toEqual([]);
+  });
+
+  it('default direct adapter rejects a dirty real worktree without a resume command', async () => {
+    const runDir = join(repoPath, '.takt', 'runs', 'run-1');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, 'meta.json'), JSON.stringify({
+      task: 'task',
+      workflow: 'default',
+      runSlug: 'run-1',
+      runRoot: '.takt/runs/run-1',
+      reportDirectory: '.takt/runs/run-1/reports',
+      contextDirectory: '.takt/runs/run-1/context',
+      logsDirectory: '.takt/runs/run-1/logs',
+      status: 'aborted',
+      startTime: '2026-07-28T00:00:00.000Z',
+      abortKind: 'blocked',
+      blockedStep: 'approval',
+    }));
+    const projection = store.get(context.decisionId);
+    if (projection === undefined) throw new Error('projection missing');
+    const runnerCalls: string[] = [];
+    const defaultAdapter = createDefaultResumeAdapters({
+      resolveCommand: () => '/mock/git',
+      async exec(_command, args) {
+        runnerCalls.push(args.join(' '));
+        return { exitCode: 0, stdout: ' M src/file.ts\n', stderr: '' };
+      },
+    }).find((item) => item.strategy === 'resume_direct_run');
+    if (defaultAdapter === undefined) throw new Error('adapter missing');
+
+    const result = await defaultAdapter.revalidate({
+      ...context,
+      projection,
+      strategy: 'resume_direct_run',
+    });
+
+    expect(result).toMatchObject({ valid: false, reasonCode: 'worktree_dirty' });
+    expect(runnerCalls).toEqual(['status --porcelain']);
+  });
+
+  it('default direct adapter rejects a real active run before any command', async () => {
+    for (const [slug, status] of [['run-1', 'aborted'], ['run-active', 'running']] as const) {
+      const runDir = join(repoPath, '.takt', 'runs', slug);
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, 'meta.json'), JSON.stringify({
+        task: 'task',
+        workflow: 'default',
+        runSlug: slug,
+        runRoot: `.takt/runs/${slug}`,
+        reportDirectory: `.takt/runs/${slug}/reports`,
+        contextDirectory: `.takt/runs/${slug}/context`,
+        logsDirectory: `.takt/runs/${slug}/logs`,
+        status,
+        startTime: '2026-07-28T00:00:00.000Z',
+        ...(status === 'aborted' ? { abortKind: 'blocked', blockedStep: 'approval' } : {}),
+      }));
+    }
+    const projection = store.get(context.decisionId);
+    if (projection === undefined) throw new Error('projection missing');
+    const runnerCalls: string[] = [];
+    const defaultAdapter = createDefaultResumeAdapters({
+      resolveCommand: () => '/mock/git',
+      async exec(_command, args) {
+        runnerCalls.push(args.join(' '));
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    }).find((item) => item.strategy === 'resume_direct_run');
+    if (defaultAdapter === undefined) throw new Error('adapter missing');
+
+    const result = await defaultAdapter.revalidate({
+      ...context,
+      projection,
+      strategy: 'resume_direct_run',
+    });
+
+    expect(result).toMatchObject({ valid: false, reasonCode: 'active_run_changed' });
+    expect(runnerCalls).toEqual([]);
+  });
+
+  it('allows only one of two Decision starts through the shared repository claim', async () => {
+    const projection = store.get(context.decisionId);
+    if (projection === undefined) throw new Error('projection missing');
+    let releaseRun: (() => void) | undefined;
+    const resumeRun = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releaseRun = resolve;
+      });
+      return { status: 'resumed' as const };
+    });
+    const defaultAdapter = createDefaultResumeAdapters({
+      resolveCommand: () => '/mock/git',
+      async exec() {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    }, {
+      inspectActiveRuns: () => ({
+        passed: true,
+        message: 'no active runs',
+        activeRuns: [],
+        staleAfterMinutes: 180,
+      }),
+      resumeDirectRunBySlug: resumeRun,
+    }).find((item) => item.strategy === 'resume_direct_run');
+    if (defaultAdapter === undefined) throw new Error('adapter missing');
+    const firstContext = {
+      ...context,
+      projection,
+      strategy: 'resume_direct_run' as const,
+    };
+    const secondContext = {
+      ...firstContext,
+      decisionId: 'dec_resume_other',
+      projection: {
+        ...projection,
+        request: {
+          ...projection.request,
+          decisionId: 'dec_resume_other',
+        },
+      },
+    };
+
+    const first = defaultAdapter.resume(firstContext);
+    await vi.waitFor(() => expect(resumeRun).toHaveBeenCalledTimes(1));
+    await expect(defaultAdapter.resume(secondContext)).resolves.toMatchObject({
+      status: 'revalidation_required',
+      reasonCode: 'repo_execution_claimed',
+    });
+    releaseRun?.();
+    await expect(first).resolves.toMatchObject({ status: 'resumed' });
+    expect(resumeRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('default PR adapter rejects a changed real head without a mutation command', async () => {
+    const expectedHeadSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const request = createDecisionRequest({
+      subject: {
+        repoPath,
+        repository: 'owner/repo',
+        prNumber: 42,
+        headSha: expectedHeadSha,
+        step: 'pr-review',
+        title: 'Approve current PR head',
+      },
+      question: 'Approve this current head?',
+      why: {
+        summary: 'The PR changes product policy.',
+        riskCategory: 'product_policy',
+        reasons: ['Authentication policy changes require approval.'],
+        evidence: [],
+      },
+      how: {
+        summary: 'Continue only this PR review stage.',
+        expectedEffects: ['The exact PR head is reviewed.'],
+        verification: ['Checks, reviews, and head are revalidated.'],
+      },
+      kind: 'choice',
+      options: [
+        {
+          id: 'approve_current_head',
+          title: 'Approve current head',
+          description: 'Continue this exact head.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'request_changes',
+          title: 'Request changes',
+          description: 'Keep this head blocked.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'stop',
+          title: 'Stop',
+          description: 'Stop automation.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+      answerRequirements: {
+        rationaleRequired: true,
+        minimumTextLength: 1,
+        maximumTextLength: 2_000,
+      },
+      resumeGuard: {
+        strategy: 'pr_automation_stage',
+        expectedDecisionVersion: 1,
+        repository: 'owner/repo',
+        prNumber: 42,
+        stage: 'pr-review',
+        expectedHeadSha,
+      },
+    }, { decisionId: 'dec_pr_head' });
+    store.request(request);
+    store.answer({
+      decisionId: request.decisionId,
+      expectedDecisionVersion: request.decisionVersion,
+      expectedContextHash: request.contextHash,
+      value: { optionId: 'approve_current_head' },
+      rationale: 'Approve only the exact reviewed head.',
+      idempotencyKey: 'answer-pr-head',
+    }, 'local:test');
+    const calls: string[] = [];
+    const adapters = createDefaultResumeAdapters({
+      resolveCommand: (command) => command === 'gh' ? '/mock/gh' : undefined,
+      async exec(_command, args) {
+        calls.push(args.join(' '));
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            number: 42,
+            headRefOid: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          }),
+          stderr: '',
+        };
+      },
+    });
+
+    const result = await applyDecision({
+      store,
+      decisionId: request.decisionId,
+      expectedDecisionVersion: request.decisionVersion,
+      expectedContextHash: request.contextHash,
+    }, { adapters });
+
+    expect(result).toMatchObject({
+      status: 'revalidation_required',
+      reasonCode: 'pr_head_changed',
+    });
+    expect(calls).toEqual([
+      'pr view 42 --json number,title,body,headRefOid,mergeStateStatus,changedFiles,additions,deletions --repo owner/repo',
+    ]);
+    expect(calls.some((call) => call.startsWith('pr edit'))).toBe(false);
+  });
+
   it('allows only one concurrent caller to perform the side effect', async () => {
     let release: (() => void) | undefined;
     resume.mockImplementationOnce(async () => {
@@ -181,6 +442,55 @@ describe('guarded decision resume', () => {
     release?.();
     await expect(first).resolves.toMatchObject({ status: 'applied' });
     expect(resume).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    'before any side effect',
+    'after a side effect but before its terminal event',
+  ])('reconciles a dead apply owner %s without replaying the adapter', async () => {
+    const projection = store.get(context.decisionId);
+    if (projection?.answer === undefined) throw new Error('answer missing');
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent({
+      decisionId: context.decisionId,
+      decisionVersion: context.expectedDecisionVersion,
+      contextHash: context.expectedContextHash,
+      answerEventId: projection.answer.eventId,
+      sanitizedSummary: 'apply claimed',
+      operationId: 'op_crashed',
+      ownerPid: 999_999,
+      ownerStartToken: 'owner_crashed',
+    }));
+
+    const result = await applyDecision(context, {
+      adapters: [adapter],
+      inspectOwner: () => 'dead',
+    });
+
+    expect(result).toMatchObject({
+      status: 'revalidation_required',
+      reasonCode: 'apply_owner_terminated',
+    });
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it('migrates a legacy apply claim without owner fields to fail-closed revalidation', async () => {
+    const projection = store.get(context.decisionId);
+    if (projection?.answer === undefined) throw new Error('answer missing');
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent({
+      decisionId: context.decisionId,
+      decisionVersion: context.expectedDecisionVersion,
+      contextHash: context.expectedContextHash,
+      answerEventId: projection.answer.eventId,
+      sanitizedSummary: 'legacy apply claimed',
+    }));
+
+    const result = await applyDecision(context, { adapters: [adapter] });
+
+    expect(result).toMatchObject({
+      status: 'revalidation_required',
+      reasonCode: 'apply_owner_unknown',
+    });
+    expect(resume).not.toHaveBeenCalled();
   });
 
   it('records a sanitized failure and does not retry the same answer', async () => {
@@ -237,5 +547,30 @@ describe('guarded decision resume', () => {
       reasonCode: 'resume_strategy_unavailable',
     });
     expect(resume).not.toHaveBeenCalled();
+  });
+
+  it('rejects a hostile adapter Proxy without invoking property traps or reflecting secrets', async () => {
+    let getTrapCount = 0;
+    let prototypeTrapCount = 0;
+    const hostile = new Proxy({}, {
+      get() {
+        getTrapCount += 1;
+        throw new Error('token=proxy-secret');
+      },
+      getPrototypeOf() {
+        prototypeTrapCount += 1;
+        throw new Error('token=prototype-secret');
+      },
+    }) as ResumeAdapter;
+
+    const result = await applyDecision(context, { adapters: [hostile] });
+
+    expect(result).toMatchObject({
+      status: 'revalidation_required',
+      reasonCode: 'resume_registry_invalid',
+    });
+    expect(getTrapCount).toBe(0);
+    expect(prototypeTrapCount).toBe(0);
+    expect(JSON.stringify(readRawDevloopLedgerEvents(store.ledgerPath))).not.toContain('secret');
   });
 });

@@ -18,6 +18,7 @@ import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js'
 import {
   createDecisionAppliedEvent,
   createDecisionApplyStartedEvent,
+  createDecisionRevalidationRequiredEvent,
 } from '../devloopd/decisionEvents.js';
 import { appendDevloopLedgerEvent } from '../devloopd/ledger.js';
 import type { IssueScoutCandidate } from '../devloopd/issueScout.js';
@@ -756,6 +757,7 @@ describe('ensureDecisionForAutomationAction', () => {
     expect(recurrence.request.decisionId).toMatch(
       new RegExp(`^${first.request.decisionId}_r1$`, 'u'),
     );
+    expect(recurrence.request.decisionVersion).toBe(first.request.decisionVersion + 1);
     expect(repeated.request.decisionId).toBe(recurrence.request.decisionId);
 
     const recurrenceAnswer = store.answer({
@@ -785,6 +787,44 @@ describe('ensureDecisionForAutomationAction', () => {
     const secondRecurrence = ensureDecisionForAutomationAction(store, action(), context());
     expect(secondRecurrence.status).toBe('open');
     expect(secondRecurrence.request.decisionId).toBe(`${first.request.decisionId}_r2`);
+    expect(secondRecurrence.request.decisionVersion).toBe(recurrence.request.decisionVersion + 1);
+  });
+
+  it('opens a new version after an interrupted apply requires revalidation', () => {
+    const first = ensureDecisionForAutomationAction(store, action(), context());
+    const answer = store.answer({
+      decisionId: first.request.decisionId,
+      expectedDecisionVersion: first.request.decisionVersion,
+      expectedContextHash: first.request.contextHash,
+      value: { optionId: 'approve_current_head' },
+      rationale: 'Approve only the current guarded head.',
+      idempotencyKey: 'answer-pr-interrupted',
+    }, 'reviewer');
+    const identity = {
+      decisionId: first.request.decisionId,
+      decisionVersion: first.request.decisionVersion,
+      contextHash: first.request.contextHash,
+      answerEventId: answer.eventId,
+    };
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionApplyStartedEvent({
+      ...identity,
+      sanitizedSummary: 'Apply claimed.',
+      operationId: 'op_interrupted',
+      ownerPid: 999_999,
+      ownerStartToken: 'owner_interrupted',
+    }));
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionRevalidationRequiredEvent({
+      ...identity,
+      reasonCode: 'apply_owner_terminated',
+      sanitizedSummary: 'Apply owner terminated.',
+    }));
+
+    const recurrence = ensureDecisionForAutomationAction(store, action(), context());
+
+    expect(recurrence.status).toBe('open');
+    expect(recurrence.request.decisionId).toBe(`${first.request.decisionId}_r1`);
+    expect(recurrence.request.decisionVersion).toBe(first.request.decisionVersion + 1);
+    expect(recurrence.answer).toBeUndefined();
   });
 
   it('fails closed when the deterministic recurrence id is occupied by another request', () => {
