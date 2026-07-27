@@ -4,14 +4,18 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readDecisionJsonFromStream } from '../app/devloopd/decisionsCommand.js';
 import { createDecisionRequest, type DecisionRequest } from '../devloopd/decisionRequest.js';
 import { DecisionStore } from '../devloopd/decisionStore.js';
 
 const CLI_PATH = resolve('dist/app/devloopd/index.js');
 
-function makeRequest(repoPath: string, decisionId = 'dec_cli'): DecisionRequest {
-  return createDecisionRequest({
-    kind: 'text',
+function makeRequest(
+  repoPath: string,
+  decisionId = 'dec_cli',
+  kind: 'text' | 'yes_no' | 'choice' = 'text',
+): DecisionRequest {
+  const common = {
     subject: {
       repoPath,
       runSlug: decisionId,
@@ -43,7 +47,51 @@ function makeRequest(repoPath: string, decisionId = 'dec_cli'): DecisionRequest 
       expectedAbortKind: 'blocked',
       expectedBlockedStep: 'approval',
     },
-  }, {
+  };
+  const input = kind === 'text'
+    ? { ...common, kind }
+    : kind === 'yes_no'
+      ? {
+        ...common,
+        kind,
+        options: [
+          {
+            id: 'yes',
+            title: 'はい',
+            description: 'この方針で進めます。',
+            consequences: [],
+            recommended: true,
+          },
+          {
+            id: 'no',
+            title: 'いいえ',
+            description: 'この方針では進めません。',
+            consequences: [],
+            recommended: false,
+          },
+        ] as const,
+      }
+      : {
+        ...common,
+        kind,
+        options: [
+          {
+            id: 'plan_a',
+            title: '方針A',
+            description: '安全性を優先します。',
+            consequences: [],
+            recommended: true,
+          },
+          {
+            id: 'plan_b',
+            title: '方針B',
+            description: '速度を優先します。',
+            consequences: [],
+            recommended: false,
+          },
+        ],
+      };
+  return createDecisionRequest(input, {
     decisionId,
     now: new Date('2026-07-28T00:00:00.000Z'),
   });
@@ -51,7 +99,7 @@ function makeRequest(repoPath: string, decisionId = 'dec_cli'): DecisionRequest 
 
 function runCli(
   args: readonly string[],
-  input?: string,
+  input?: string | Uint8Array,
 ): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, [CLI_PATH, ...args], {
     cwd: resolve('.'),
@@ -174,6 +222,17 @@ describe('devloopd decisions CLI', () => {
     });
   });
 
+  it('rejects malformed UTF-8 without reflecting raw input', () => {
+    const result = runCli(
+      ['decisions', 'answer', '--cwd', repoPath, '--stdin-json', '--json'],
+      Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d]),
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout).error.code).toBe('invalid_stdin_json');
+  });
+
   it('rejects empty and oversized stdin without writing an answer or reflecting it', () => {
     const empty = runCli(
       ['decisions', 'answer', '--cwd', repoPath, '--stdin-json', '--json'],
@@ -193,5 +252,100 @@ describe('devloopd decisions CLI', () => {
     expect(tooLarge.stderr).not.toContain(secret);
     expect(JSON.parse(tooLarge.stdout).error.code).toBe('stdin_too_large');
     expect(new DecisionStore(repoPath).get(request.decisionId)?.status).toBe('open');
+  });
+
+  it('returns stable JSON when required command options are missing', () => {
+    const show = runCli(['decisions', 'show', '--json', '--cwd', repoPath]);
+    expect(show.status).not.toBe(0);
+    expect(show.stderr).toBe('');
+    expect(JSON.parse(show.stdout).error.code).toBe('missing_decision_id');
+
+    const answer = runCli(['decisions', 'answer', '--json', '--cwd', repoPath]);
+    expect(answer.status).not.toBe(0);
+    expect(answer.stderr).toBe('');
+    expect(JSON.parse(answer.stdout).error.code).toBe('stdin_json_required');
+
+    const human = runCli(['decisions', 'show', '--cwd', repoPath]);
+    expect(human.status).not.toBe(0);
+    expect(human.stdout).toBe('');
+    expect(human.stderr).toContain('判断ID');
+    expect(human.stderr).not.toContain('required option');
+  });
+
+  it('converts stdin stream failures to a fixed non-reflecting error', async () => {
+    const secret = 'stream-secret-that-must-not-leak';
+    const throwingStream = {
+      async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> {
+        throw new Error(secret);
+      },
+    };
+
+    const result = await readDecisionJsonFromStream(throwingStream);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: 'stdin_unavailable',
+        message: expect.any(String),
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it('shows answer constraints and option labels for every decision kind', () => {
+    const yesNo = makeRequest(repoPath, 'dec_cli_yes_no', 'yes_no');
+    const choice = makeRequest(repoPath, 'dec_cli_choice', 'choice');
+    const store = new DecisionStore(repoPath);
+    store.request(yesNo, { eventId: 'evt_cli_yes_no' });
+    store.request(choice, { eventId: 'evt_cli_choice' });
+
+    const textOutput = runCli([
+      'decisions', 'show', '--cwd', repoPath, '--id', request.decisionId,
+    ]).stdout;
+    expect(textOutput).toContain('回答形式: 自由記述（3〜100文字）');
+    expect(textOutput).toContain('回答理由: 必須');
+
+    const yesNoOutput = runCli([
+      'decisions', 'show', '--cwd', repoPath, '--id', yesNo.decisionId,
+    ]).stdout;
+    expect(yesNoOutput).toContain('回答形式: YES / NO');
+    expect(yesNoOutput).toContain('yes: はい');
+    expect(yesNoOutput).toContain('no: いいえ');
+
+    const choiceOutput = runCli([
+      'decisions', 'show', '--cwd', repoPath, '--id', choice.decisionId,
+    ]).stdout;
+    expect(choiceOutput).toContain('回答形式: 方針選択');
+    expect(choiceOutput).toContain('plan_a: 方針A');
+    expect(choiceOutput).toContain('plan_b: 方針B');
+  });
+
+  it('rejects a nonexistent repository for list, show, and answer', () => {
+    const missingRepo = join(repoPath, 'does-not-exist');
+    const answerInput = JSON.stringify({
+      decisionId: request.decisionId,
+      expectedDecisionVersion: request.decisionVersion,
+      expectedContextHash: request.contextHash,
+      value: { text: 'safe answer' },
+      rationale: 'safe reason',
+      idempotencyKey: 'missing-repo-answer',
+    });
+    const cases = [
+      runCli(['decisions', 'list', '--cwd', missingRepo, '--json']),
+      runCli([
+        'decisions', 'show', '--cwd', missingRepo, '--id', request.decisionId, '--json',
+      ]),
+      runCli(
+        ['decisions', 'answer', '--cwd', missingRepo, '--stdin-json', '--json'],
+        answerInput,
+      ),
+    ];
+
+    for (const result of cases) {
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toBe('');
+      expect(JSON.parse(result.stdout).error.code).toBe('repository_unavailable');
+      expect(result.stdout).not.toContain(missingRepo);
+    }
   });
 });

@@ -1,5 +1,6 @@
-import { types as utilTypes } from 'node:util';
+import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { TextDecoder, types as utilTypes } from 'node:util';
 import { Command } from 'commander';
 import { z } from 'zod/v4';
 import {
@@ -37,6 +38,10 @@ type DecisionCliLocalErrorCode =
   | 'invalid_answer_input'
   | 'invalid_status'
   | 'invalid_stdin_json'
+  | 'missing_decision_id'
+  | 'repository_unavailable'
+  | 'stdin_json_required'
+  | 'stdin_unavailable'
   | 'stdin_too_large';
 type DecisionCliErrorCode = DecisionCliLocalErrorCode | DecisionStoreErrorCode;
 
@@ -46,6 +51,10 @@ const CLI_ERROR_MESSAGES: Readonly<Record<DecisionCliLocalErrorCode, string>> = 
   invalid_answer_input: '回答JSONの形式が正しくありません。',
   invalid_status: '指定された状態は利用できません。',
   invalid_stdin_json: '標準入力をJSONとして解析できません。',
+  missing_decision_id: '判断IDを指定してください。',
+  repository_unavailable: '対象リポジトリを利用できません。',
+  stdin_json_required: '回答は--stdin-jsonで標準入力から渡してください。',
+  stdin_unavailable: '標準入力を安全に読み取れません。',
   stdin_too_large: '回答JSONが許容サイズを超えています。',
 };
 
@@ -104,26 +113,46 @@ function storeFailure(error: unknown): DecisionCliFailure {
   return { code: 'ledger_unavailable', message: STORE_ERROR_MESSAGES.ledger_unavailable };
 }
 
-async function readJsonFromStdin(): Promise<
+type DecisionJsonReadResult =
   { readonly ok: true; readonly value: unknown }
-  | { readonly ok: false; readonly error: DecisionCliFailure }
-> {
+  | { readonly ok: false; readonly error: DecisionCliFailure };
+
+export async function readDecisionJsonFromStream(
+  stream: AsyncIterable<Uint8Array | string>,
+): Promise<DecisionJsonReadResult> {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-  for await (const chunk of process.stdin) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    totalBytes += buffer.byteLength;
-    if (totalBytes > MAX_STDIN_JSON_BYTES) {
-      return { ok: false, error: failure('stdin_too_large') };
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.byteLength;
+      if (totalBytes > MAX_STDIN_JSON_BYTES) {
+        return { ok: false, error: failure('stdin_too_large') };
+      }
+      chunks.push(buffer);
     }
-    chunks.push(buffer);
+  } catch {
+    return { ok: false, error: failure('stdin_unavailable') };
   }
   if (totalBytes === 0) return { ok: false, error: failure('empty_stdin') };
 
   try {
-    return { ok: true, value: JSON.parse(Buffer.concat(chunks, totalBytes).toString('utf8')) };
+    // Buffer.toString() replaces malformed bytes. Fatal decoding prevents an invalid
+    // byte sequence from being accepted as a different human answer.
+    const decoded = new TextDecoder('utf-8', { fatal: true })
+      .decode(Buffer.concat(chunks, totalBytes));
+    return { ok: true, value: JSON.parse(decoded) };
   } catch {
     return { ok: false, error: failure('invalid_stdin_json') };
+  }
+}
+
+function resolveExistingRepository(cwd: string): string | undefined {
+  try {
+    const repoPath = resolve(cwd);
+    return statSync(repoPath).isDirectory() ? repoPath : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -140,13 +169,41 @@ function writeError(error: DecisionCliFailure, json: boolean): void {
   process.exitCode = 1;
 }
 
-function formatDecision(projection: DecisionProjection): string {
+function formatDecisionSummary(projection: DecisionProjection): string {
   return [
     `判断ID: ${projection.request.decisionId}`,
     `状態: ${projection.status}`,
     `質問: ${projection.request.question}`,
+  ].join('\n');
+}
+
+function formatAnswerConstraints(projection: DecisionProjection): readonly string[] {
+  const { request } = projection;
+  const rationale = `回答理由: ${request.answerRequirements.rationaleRequired ? '必須' : '任意'}`;
+  if (request.kind === 'text') {
+    return [
+      `回答形式: 自由記述（${request.answerRequirements.minimumTextLength}〜${request.answerRequirements.maximumTextLength}文字）`,
+      rationale,
+    ];
+  }
+
+  const answerKind = request.kind === 'yes_no' ? 'YES / NO' : '方針選択';
+  return [
+    `回答形式: ${answerKind}`,
+    rationale,
+    '選択肢:',
+    ...request.options.map(
+      (option) => `- ${option.id}: ${option.title}${option.recommended ? '（推奨）' : ''}`,
+    ),
+  ];
+}
+
+function formatDecisionDetail(projection: DecisionProjection): string {
+  return [
+    formatDecisionSummary(projection),
     `理由: ${projection.request.why.summary}`,
     `進め方: ${projection.request.how.summary}`,
+    ...formatAnswerConstraints(projection),
   ].join('\n');
 }
 
@@ -174,8 +231,13 @@ export function registerDecisionsCommand(program: Command): void {
         writeError(failure('invalid_status'), options.json === true);
         return;
       }
+      const repoPath = resolveExistingRepository(options.cwd);
+      if (repoPath === undefined) {
+        writeError(failure('repository_unavailable'), options.json === true);
+        return;
+      }
       try {
-        const projections = new DecisionStore(resolve(options.cwd))
+        const projections = new DecisionStore(repoPath)
           .list()
           .filter((projection) => status === undefined || projection.status === status);
         if (options.json === true) {
@@ -185,7 +247,7 @@ export function registerDecisionsCommand(program: Command): void {
         console.log(
           projections.length === 0
             ? '判断待ちはありません。'
-            : projections.map(formatDecision).join('\n\n'),
+            : projections.map(formatDecisionSummary).join('\n\n'),
         );
       } catch (error) {
         writeError(storeFailure(error), options.json === true);
@@ -196,11 +258,20 @@ export function registerDecisionsCommand(program: Command): void {
     .command('show')
     .description('判断待ちの詳細を表示する')
     .option('--cwd <path>', '対象リポジトリ', process.cwd())
-    .requiredOption('--id <decision-id>', '判断ID')
+    .option('--id <decision-id>', '判断ID')
     .option('--json', '機械可読JSONを表示する')
-    .action((options: { cwd: string; id: string; json?: boolean }) => {
+    .action((options: { cwd: string; id?: string; json?: boolean }) => {
+      if (options.id === undefined) {
+        writeError(failure('missing_decision_id'), options.json === true);
+        return;
+      }
+      const repoPath = resolveExistingRepository(options.cwd);
+      if (repoPath === undefined) {
+        writeError(failure('repository_unavailable'), options.json === true);
+        return;
+      }
       try {
-        const projection = new DecisionStore(resolve(options.cwd)).get(options.id);
+        const projection = new DecisionStore(repoPath).get(options.id);
         if (projection === undefined) {
           writeError(failure('decision_not_found'), options.json === true);
           return;
@@ -208,7 +279,7 @@ export function registerDecisionsCommand(program: Command): void {
         console.log(
           options.json === true
             ? JSON.stringify({ schemaVersion: 1, decision: projection }, null, 2)
-            : formatDecision(projection),
+            : formatDecisionDetail(projection),
         );
       } catch (error) {
         writeError(storeFailure(error), options.json === true);
@@ -219,22 +290,31 @@ export function registerDecisionsCommand(program: Command): void {
     .command('answer')
     .description('標準入力のJSONから判断待ちへ回答する')
     .option('--cwd <path>', '対象リポジトリ', process.cwd())
-    .requiredOption('--stdin-json', '回答JSONを標準入力から読み取る')
+    .option('--stdin-json', '回答JSONを標準入力から読み取る')
     .option('--json', '機械可読JSONを表示する')
-    .action(async (options: { cwd: string; stdinJson: boolean; json?: boolean }) => {
-      const input = await readJsonFromStdin();
-      if (!input.ok) {
-        writeError(input.error, options.json === true);
+    .action(async (options: { cwd: string; stdinJson?: boolean; json?: boolean }) => {
+      if (options.stdinJson !== true) {
+        writeError(failure('stdin_json_required'), options.json === true);
         return;
       }
-      const parsed = DecisionAnswerInputSchema.safeParse(input.value);
-      if (!parsed.success) {
-        writeError(failure('invalid_answer_input'), options.json === true);
+      const repoPath = resolveExistingRepository(options.cwd);
+      if (repoPath === undefined) {
+        writeError(failure('repository_unavailable'), options.json === true);
         return;
       }
 
       try {
-        const event = new DecisionStore(resolve(options.cwd)).answer(parsed.data, localActor());
+        const input = await readDecisionJsonFromStream(process.stdin);
+        if (!input.ok) {
+          writeError(input.error, options.json === true);
+          return;
+        }
+        const parsed = DecisionAnswerInputSchema.safeParse(input.value);
+        if (!parsed.success) {
+          writeError(failure('invalid_answer_input'), options.json === true);
+          return;
+        }
+        const event = new DecisionStore(repoPath).answer(parsed.data, localActor());
         if (options.json === true) {
           // 回答本文と理由は成功応答へ含めず、端末履歴や上位プロセスのログへの拡散を防ぐ。
           console.log(JSON.stringify({
