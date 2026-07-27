@@ -259,7 +259,9 @@ describe('OpenCodeClient compactSession', () => {
 
     const compactRejection = expect(compactPromise).rejects.toThrow();
     await vi.advanceTimersByTimeAsync(5000);
+    expect(requestOptions.signal?.aborted).toBe(false);
 
+    await vi.advanceTimersByTimeAsync(115000);
     expect(requestOptions.signal?.aborted).toBe(true);
     await compactRejection;
   });

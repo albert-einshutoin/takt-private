@@ -65,6 +65,9 @@ const OPENCODE_STREAM_ABORTED_MESSAGE = 'OpenCode execution aborted';
 const OPENCODE_RETRY_MAX_ATTEMPTS = 3;
 const OPENCODE_RETRY_BASE_DELAY_MS = 250;
 const OPENCODE_INTERACTION_TIMEOUT_MS = 5000;
+// Summarization can legitimately take much longer than permission replies,
+// especially for large sessions, so it needs its own interaction budget.
+const OPENCODE_SESSION_COMPACTION_TIMEOUT_MS = 2 * 60 * 1000;
 const OPENCODE_SERVER_START_TIMEOUT_MS = 60000;
 const OPENCODE_RETRYABLE_ERROR_PATTERNS = [
   'stream disconnected before completion',
@@ -1158,7 +1161,7 @@ export class OpenCodeClient {
           modelID: parsedModel.modelID,
           auto: false,
         }, { signal }),
-        OPENCODE_INTERACTION_TIMEOUT_MS,
+        OPENCODE_SESSION_COMPACTION_TIMEOUT_MS,
         'OpenCode session summarize timed out',
         options.abortSignal,
       );
