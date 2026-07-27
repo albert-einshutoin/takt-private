@@ -533,6 +533,7 @@ export interface DecisionFoldIssue {
 export interface DecisionFoldResult extends Iterable<DecisionProjection> {
   readonly issues: readonly DecisionFoldIssue[];
   readonly quarantinedDecisionIds: readonly string[];
+  readonly fatal: boolean;
   get(decisionId: string): DecisionProjection | undefined;
   values(): IterableIterator<DecisionProjection>;
 }
@@ -698,6 +699,9 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
   const issues: DecisionFoldIssue[] = [];
   const seenEventIds = new Set<string>();
   const quarantinedDecisionIds = new Set<string>();
+  // Without a readable aggregate identity, schema drift cannot be isolated to one
+  // decision. Returning any projection could expose state built past an unreadable event.
+  let fatal = false;
 
   for (const rawEvent of events) {
     const validEventId = rawIdentifier(rawEvent, 'eventId');
@@ -724,7 +728,11 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
           'Duplicate event ID',
         ));
       }
-      if (decisionId !== undefined) quarantinedDecisionIds.add(decisionId);
+      if (decisionId !== undefined) {
+        quarantinedDecisionIds.add(decisionId);
+      } else {
+        fatal = true;
+      }
       continue;
     }
 
@@ -735,6 +743,11 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
         'invalid_event',
         'Decision event failed strict validation',
       ));
+      if (decisionId !== undefined) {
+        quarantinedDecisionIds.add(decisionId);
+      } else {
+        fatal = true;
+      }
       continue;
     }
     const event = parsed.data;
@@ -805,7 +818,7 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
 
   const frozenProjections = new Map<string, DecisionProjection>();
   for (const [decisionId, projection] of projections) {
-    if (!quarantinedDecisionIds.has(decisionId)) {
+    if (!fatal && !quarantinedDecisionIds.has(decisionId)) {
       frozenProjections.set(decisionId, deepFreeze({ ...projection }));
     }
   }
@@ -814,6 +827,7 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
   const result: DecisionFoldResult = {
     issues: frozenIssues,
     quarantinedDecisionIds: frozenQuarantinedDecisionIds,
+    fatal,
     get(decisionId: string): DecisionProjection | undefined {
       return frozenProjections.get(decisionId);
     },

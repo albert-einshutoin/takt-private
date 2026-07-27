@@ -354,6 +354,108 @@ describe('decision event fold', () => {
     }));
   });
 
+  it('fails the entire fold when a future event renames decisionId to aggregateId', () => {
+    const result = foldDecisionEvents([
+      requested,
+      answered,
+      {
+        schemaVersion: 2,
+        eventId: 'evt_future_aggregate',
+        aggregateId: request.decisionId,
+        eventType: 'devloop_decision_applied',
+      },
+    ]);
+
+    expect(result.fatal).toBe(true);
+    expect(result.get(request.decisionId)).toBeUndefined();
+    expect([...result.values()]).toEqual([]);
+    expect([...result]).toEqual([]);
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      eventId: 'evt_future_aggregate',
+      code: 'unknown_schema_version',
+    }));
+  });
+
+  it('fails the entire fold for an unknown version without a readable decision ID', () => {
+    const result = foldDecisionEvents([
+      requested,
+      {
+        schemaVersion: 2,
+        eventId: 'evt_future_without_decision',
+        eventType: 'devloop_decision_applied',
+      },
+    ]);
+
+    expect(result.fatal).toBe(true);
+    expect(result.get(request.decisionId)).toBeUndefined();
+    expect([...result.values()]).toEqual([]);
+  });
+
+  it('quarantines only the readable decision for a malformed current-version event', () => {
+    const otherRequest = createTextRequest(100, 0, 'dec_other');
+    const otherRequested = createDecisionRequestedEvent(otherRequest, {
+      eventId: 'evt_other_requested',
+    });
+    const malformed = {
+      schemaVersion: 1,
+      eventId: 'evt_malformed_answer',
+      occurredAt: '2026-07-27T05:00:00.000Z',
+      eventType: 'devloop_decision_answered',
+      decisionId: request.decisionId,
+    };
+    const result = foldDecisionEvents([requested, otherRequested, malformed]);
+
+    expect(result.fatal).toBe(false);
+    expect(result.quarantinedDecisionIds).toContain(request.decisionId);
+    expect(result.get(request.decisionId)).toBeUndefined();
+    expect(result.get(otherRequest.decisionId)?.status).toBe('open');
+    expect([...result.values()]).toHaveLength(1);
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      eventId: 'evt_malformed_answer',
+      decisionId: request.decisionId,
+      code: 'invalid_event',
+    }));
+  });
+
+  it('fails the entire fold for a malformed current-version event without a decision ID', () => {
+    const result = foldDecisionEvents([
+      requested,
+      {
+        schemaVersion: 1,
+        eventId: 'evt_malformed_without_decision',
+        eventType: 'devloop_decision_answered',
+      },
+    ]);
+
+    expect(result.fatal).toBe(true);
+    expect(result.get(request.decisionId)).toBeUndefined();
+    expect([...result.values()]).toEqual([]);
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      eventId: 'evt_malformed_without_decision',
+      code: 'invalid_event',
+    }));
+  });
+
+  it('retains duplicate and unknown issues while fatally quarantining an unreadable stream', () => {
+    const result = foldDecisionEvents([
+      requested,
+      {
+        schemaVersion: 2,
+        eventId: requested.eventId,
+        aggregateId: request.decisionId,
+        eventType: 'devloop_decision_requested',
+      },
+    ]);
+
+    expect(result.fatal).toBe(true);
+    expect(result.issues.map((issue) => issue.code)).toEqual([
+      'unknown_schema_version',
+      'duplicate_event_id',
+    ]);
+    expect(result.get(request.decisionId)).toBeUndefined();
+    expect([...result.values()]).toEqual([]);
+  });
+
   it('detects duplicate event IDs across unknown and known schema versions', () => {
     const futureRequested = {
       ...requested,
