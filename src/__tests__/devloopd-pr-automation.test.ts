@@ -14,6 +14,7 @@ import {
   parseAutomationPullRequests,
   prepareAutomationPullRequests,
   promotePullRequestAutoMerge,
+  continuePullRequestAutomationStage,
   runDevloopAutomationStage,
   selectAutomationPullRequests,
   formatDevloopAutomationStageReport,
@@ -178,6 +179,47 @@ function makeProductPolicyPromotionRunner(): DevloopCommandRunner & { calls: str
 }
 
 describe('devloopd PR automation orchestration', () => {
+  it('continues only the exact PR and requires revalidation when its head changed', async () => {
+    const calls: string[] = [];
+    const runner: DevloopCommandRunner = {
+      resolveCommand(command) {
+        return command === 'gh' ? '/mock/bin/gh' : undefined;
+      },
+      async exec(_command, args) {
+        calls.push(args.join(' '));
+        if (args.slice(0, 2).join(' ') === 'pr view') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              number: 42,
+              headRefOid: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            }),
+            stderr: '',
+          };
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected command' };
+      },
+    };
+
+    const report = await continuePullRequestAutomationStage({
+      pr: 42,
+      stage: 'pr-review',
+      expectedHeadSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      repoPath: '/repo',
+      repo: 'owner/repo',
+      runner,
+    });
+
+    expect(report).toMatchObject({
+      passed: false,
+      revalidationRequired: true,
+      reasonCode: 'pr_head_changed',
+    });
+    expect(calls).toEqual([
+      'pr view 42 --json number,title,body,headRefOid,mergeStateStatus,changedFiles,additions,deletions --repo owner/repo',
+    ]);
+    expect(calls.some((call) => call.startsWith('pr list'))).toBe(false);
+  });
   it.each([
     ['checks failed', { type: 'ci-fix', status: 'blocked', stopRule: 'checks failed', message: 'checks failed' }],
     ['head mismatch', { type: 'merge-if-safe', status: 'blocked', stopRule: 'head mismatch', message: 'head mismatch' }],

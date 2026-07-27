@@ -11,6 +11,7 @@ import {
   DecisionStore,
   type DecisionStoreErrorCode,
 } from '../../devloopd/decisionStore.js';
+import { applyDecision } from '../../devloopd/decisionResume.js';
 
 const MAX_STDIN_JSON_BYTES = 1024 * 1024;
 const CONTEXT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -36,6 +37,7 @@ type DecisionCliLocalErrorCode =
   | 'decision_not_found'
   | 'empty_stdin'
   | 'invalid_answer_input'
+  | 'invalid_apply_input'
   | 'invalid_status'
   | 'invalid_stdin_json'
   | 'missing_decision_id'
@@ -49,6 +51,7 @@ const CLI_ERROR_MESSAGES: Readonly<Record<DecisionCliLocalErrorCode, string>> = 
   decision_not_found: '指定された判断待ちは見つかりません。',
   empty_stdin: '標準入力に回答JSONがありません。',
   invalid_answer_input: '回答JSONの形式が正しくありません。',
+  invalid_apply_input: '適用条件の形式が正しくありません。',
   invalid_status: '指定された状態は利用できません。',
   invalid_stdin_json: '標準入力をJSONとして解析できません。',
   missing_decision_id: '判断IDを指定してください。',
@@ -327,6 +330,58 @@ export function registerDecisionsCommand(program: Command): void {
           return;
         }
         console.log(`判断 ${event.decisionId} の回答を記録しました。`);
+      } catch (error) {
+        writeError(storeFailure(error), options.json === true);
+      }
+    });
+
+  decisions
+    .command('apply')
+    .description('回答済みの判断を再検証して安全に適用する')
+    .option('--cwd <path>', '対象リポジトリ', process.cwd())
+    .requiredOption('--id <decision-id>', '判断ID')
+    .requiredOption('--expected-version <version>', '期待する判断version')
+    .requiredOption('--expected-context-hash <hash>', '期待するcontext hash')
+    .option('--json', '機械可読JSONを表示する')
+    .action(async (options: {
+      cwd: string;
+      id: string;
+      expectedVersion: string;
+      expectedContextHash: string;
+      json?: boolean;
+    }) => {
+      const expectedDecisionVersion = Number(options.expectedVersion);
+      if (
+        !IDENTIFIER_PATTERN.test(options.id)
+        || !Number.isInteger(expectedDecisionVersion)
+        || expectedDecisionVersion <= 0
+        || !CONTEXT_HASH_PATTERN.test(options.expectedContextHash)
+      ) {
+        writeError(failure('invalid_apply_input'), options.json === true);
+        return;
+      }
+      const repoPath = resolveExistingRepository(options.cwd);
+      if (repoPath === undefined) {
+        writeError(failure('repository_unavailable'), options.json === true);
+        return;
+      }
+      try {
+        const result = await applyDecision({
+          store: new DecisionStore(repoPath),
+          decisionId: options.id,
+          expectedDecisionVersion,
+          expectedContextHash: options.expectedContextHash,
+        });
+        if (options.json === true) {
+          // The answer body and rationale never appear in apply output. Only
+          // fixed adapter summaries and stable identifiers cross the CLI.
+          console.log(JSON.stringify({ schemaVersion: 1, ok: result.status === 'applied', ...result }, null, 2));
+        } else if (result.status === 'applied') {
+          console.log(`判断 ${result.decisionId} を適用しました。`);
+        } else {
+          console.error(`判断 ${result.decisionId} は適用されませんでした（${result.status}）。`);
+        }
+        if (result.status !== 'applied') process.exitCode = 1;
       } catch (error) {
         writeError(storeFailure(error), options.json === true);
       }

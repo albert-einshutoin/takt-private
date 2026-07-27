@@ -767,6 +767,7 @@ export async function promotePullRequestAutoMerge(options: {
   pr: number;
   repoPath?: string;
   repo?: string;
+  expectedHeadSha?: string;
   label?: string;
   dryRun?: boolean;
   env?: NodeJS.ProcessEnv;
@@ -785,6 +786,16 @@ export async function promotePullRequestAutoMerge(options: {
       message: 'PR metadata did not include headRefOid',
     };
   }
+  if (options.expectedHeadSha !== undefined && headSha !== options.expectedHeadSha) {
+    return {
+      type: 'promote-auto-merge',
+      status: 'blocked',
+      pr: options.pr,
+      headSha,
+      stopRule: 'head mismatch',
+      message: 'PR head changed before the guarded stage could continue',
+    };
+  }
 
   const changedPaths = await loadChangedPaths({ pr: options.pr, repoPath, repo: options.repo, env, runner });
   const productPolicyImpact = classifyProductPolicyImpact({
@@ -794,6 +805,26 @@ export async function promotePullRequestAutoMerge(options: {
   });
   if (productPolicyImpact.requiresHumanReview) {
     if (options.dryRun !== true) {
+      if (options.expectedHeadSha !== undefined) {
+        const freshMetadata = await loadPrView({
+          pr: options.pr,
+          repoPath,
+          repo: options.repo,
+          env,
+          runner,
+        });
+        if (freshMetadata.headRefOid !== options.expectedHeadSha) {
+          return {
+            type: 'promote-auto-merge',
+            status: 'blocked',
+            pr: options.pr,
+            headSha: freshMetadata.headRefOid,
+            stopRule: 'head mismatch',
+            message: 'PR head changed immediately before human-review label mutation',
+            productPolicyImpact,
+          };
+        }
+      }
       await addPrLabel({
         pr: options.pr,
         repoPath,
@@ -832,6 +863,20 @@ export async function promotePullRequestAutoMerge(options: {
   let dualLlmApproval = evaluateDualLlmApproval({ headSha, comments });
   const actions: DevloopAutomationAction[] = [];
   if (!dualLlmApproval.approved) {
+    if (options.expectedHeadSha !== undefined) {
+      // A guarded human answer authorizes continuation, not generation of new
+      // review comments. Missing current-head approval must return to review
+      // rather than introducing a second external mutation boundary.
+      return {
+        type: 'promote-auto-merge',
+        status: 'blocked',
+        pr: options.pr,
+        headSha,
+        message: `dual-LLM approval missing: ${dualLlmApproval.reasons.join('; ')}`,
+        dualLlmApproval,
+        productPolicyImpact,
+      };
+    }
     const prompt = buildReviewPrompt({
       pr: options.pr,
       headSha,
@@ -873,6 +918,28 @@ export async function promotePullRequestAutoMerge(options: {
     };
   }
 
+  if (options.expectedHeadSha !== undefined) {
+    const freshMetadata = await loadPrView({
+      pr: options.pr,
+      repoPath,
+      repo: options.repo,
+      env,
+      runner,
+    });
+    if (freshMetadata.headRefOid !== options.expectedHeadSha) {
+      return {
+        type: 'promote-auto-merge',
+        status: 'blocked',
+        pr: options.pr,
+        headSha: freshMetadata.headRefOid,
+        stopRule: 'head mismatch',
+        message: 'PR head changed immediately before label mutation',
+        dualLlmApproval,
+        productPolicyImpact,
+      };
+    }
+  }
+
   await addPrLabel({
     pr: options.pr,
     repoPath,
@@ -890,6 +957,113 @@ export async function promotePullRequestAutoMerge(options: {
     message: `added ${options.label ?? DEFAULT_AUTO_MERGE_LABEL}`,
     dualLlmApproval,
     productPolicyImpact,
+  };
+}
+
+export interface ContinuePullRequestAutomationStageOptions {
+  readonly pr: number;
+  readonly stage: DevloopAutomationStage;
+  readonly expectedHeadSha: string;
+  readonly repoPath?: string;
+  readonly repo?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly runner?: DevloopCommandRunner;
+}
+
+export interface ContinuePullRequestAutomationStageReport {
+  readonly passed: boolean;
+  readonly message: string;
+  readonly revalidationRequired: boolean;
+  readonly reasonCode?: string;
+  readonly actions: readonly DevloopAutomationAction[];
+}
+
+export async function continuePullRequestAutomationStage(
+  options: ContinuePullRequestAutomationStageOptions,
+): Promise<ContinuePullRequestAutomationStageReport> {
+  const repoPath = resolve(options.repoPath ?? process.cwd());
+  const env = options.env ?? process.env;
+  const runner = options.runner ?? createDefaultDevloopCommandRunner();
+  const metadata = await loadPrView({
+    pr: options.pr,
+    repoPath,
+    repo: options.repo,
+    env,
+    runner,
+  });
+  if (metadata.number !== options.pr || metadata.headRefOid !== options.expectedHeadSha) {
+    return {
+      passed: false,
+      message: 'The PR identity or head changed before the guarded stage.',
+      revalidationRequired: true,
+      reasonCode: 'pr_head_changed',
+      actions: [],
+    };
+  }
+
+  if (options.stage !== 'pr-review' && options.stage !== 'pr-merge') {
+    // issue-scout/issue-to-pr are not PR-targeted operations, and review-fix
+    // lacks an expected-head mutation contract. Never fall back to the all-PR
+    // stage runner because it could modify an unrelated pull request.
+    return {
+      passed: false,
+      message: 'This PR stage has no target-locked continuation adapter.',
+      revalidationRequired: true,
+      reasonCode: 'pr_stage_not_target_locked',
+      actions: [],
+    };
+  }
+
+  const promotion = await promotePullRequestAutoMerge({
+    pr: options.pr,
+    repoPath,
+    repo: options.repo,
+    expectedHeadSha: options.expectedHeadSha,
+    env,
+    runner,
+  });
+  if (promotion.stopRule === 'head mismatch') {
+    return {
+      passed: false,
+      message: promotion.message,
+      revalidationRequired: true,
+      reasonCode: 'pr_head_changed',
+      actions: [promotion],
+    };
+  }
+  if (promotion.status !== 'passed' || options.stage === 'pr-review') {
+    return {
+      passed: promotion.status === 'passed',
+      message: promotion.message,
+      revalidationRequired: false,
+      actions: [promotion],
+    };
+  }
+
+  const mergeReport = await mergeIfSafe({
+    pr: String(options.pr),
+    repoPath,
+    repo: options.repo,
+    expectedHeadSha: options.expectedHeadSha,
+    env,
+    runner,
+  });
+  const mergeAction: DevloopAutomationAction = {
+    type: 'merge-if-safe',
+    status: mergeReport.passed ? 'passed' : 'blocked',
+    pr: options.pr,
+    headSha: options.expectedHeadSha,
+    message: mergeReport.result,
+    ...(!mergeReport.passed && mergeReport.reasons.some((reason) => /head SHA mismatch/iu.test(reason))
+      ? { stopRule: 'head mismatch' as const }
+      : {}),
+  };
+  return {
+    passed: mergeReport.passed,
+    message: mergeReport.result,
+    revalidationRequired: mergeAction.stopRule === 'head mismatch',
+    ...(mergeAction.stopRule === 'head mismatch' ? { reasonCode: 'pr_head_changed' } : {}),
+    actions: [promotion, mergeAction],
   };
 }
 

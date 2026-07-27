@@ -23,8 +23,13 @@ import { executeTaskWithResult } from '../execute/taskExecution.js';
 import type { DirectResumeMetadata } from '../execute/runMeta.js';
 import type { TaskExecutionOptions } from '../execute/types.js';
 import { buildTraceTaskMetadata } from '../execute/traceTaskMetadata.js';
+import type { DecisionProjectionAnswer } from '../../../devloopd/decisionEvents.js';
 import { runDirectInstructMode } from './directInstructMode.js';
-import { findLatestResumableDirectRun, type ResumableDirectRun } from './directRunFinder.js';
+import {
+  findLatestResumableDirectRun,
+  findResumableDirectRunBySlug,
+  type ResumableDirectRun,
+} from './directRunFinder.js';
 
 type DirectRunResumeAction = 'requeue' | 'retry' | 'instruct' | 'view_reports' | 'cancel';
 
@@ -199,6 +204,70 @@ async function executeDirectResume(
     }),
   });
   return result.success;
+}
+
+export interface ResumeDirectRunBySlugOptions {
+  readonly expectedStatus: 'aborted';
+  readonly expectedAbortKind: 'blocked';
+  readonly expectedBlockedStep: string;
+  readonly decisionAnswer: DecisionProjectionAnswer | undefined;
+  readonly agentOverrides?: TaskExecutionOptions;
+}
+
+export type ResumeDirectRunBySlugResult =
+  | { readonly status: 'resumed' }
+  | { readonly status: 'revalidation_required' }
+  | { readonly status: 'failed' };
+
+function formatDecisionAnswerForResume(
+  answer: DecisionProjectionAnswer | undefined,
+): string | undefined {
+  if (answer === undefined) return undefined;
+  const value = 'optionId' in answer.value
+    ? `Selected option: ${answer.value.optionId}`
+    : `Answer: ${answer.value.text}`;
+  return [
+    'Human decision recorded for this blocked step.',
+    value,
+    `Rationale: ${answer.rationale}`,
+  ].join('\n');
+}
+
+function directRunMatchesGuard(
+  run: ResumableDirectRun,
+  options: ResumeDirectRunBySlugOptions,
+): boolean {
+  return run.meta.status === options.expectedStatus
+    && run.meta.abortKind === options.expectedAbortKind
+    && run.meta.blockedStep === options.expectedBlockedStep;
+}
+
+export async function resumeDirectRunBySlug(
+  projectDir: string,
+  runSlug: string,
+  options: ResumeDirectRunBySlugOptions,
+): Promise<ResumeDirectRunBySlugResult> {
+  const run = findResumableDirectRunBySlug(projectDir, runSlug);
+  if (run === null || !directRunMatchesGuard(run, options)) {
+    return { status: 'revalidation_required' };
+  }
+  const context = buildExecutionContext(projectDir, run);
+
+  // Run metadata is mutable outside the decision ledger. Re-read it immediately
+  // before execution so a changed status/blocked step fails closed instead of
+  // resuming from the earlier snapshot.
+  const freshRun = findResumableDirectRunBySlug(projectDir, runSlug);
+  if (freshRun === null || !directRunMatchesGuard(freshRun, options)) {
+    return { status: 'revalidation_required' };
+  }
+  const completed = await executeDirectResume(
+    projectDir,
+    { ...context, run: freshRun },
+    'requeue',
+    options.agentOverrides,
+    formatDecisionAnswerForResume(options.decisionAnswer),
+  );
+  return { status: completed ? 'resumed' : 'failed' };
 }
 
 function requireConversationNote(note: string): string {
