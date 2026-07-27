@@ -157,7 +157,7 @@ function makeProductPolicyPromotionRunner(): DevloopCommandRunner & { calls: str
             number: 77,
             title: 'change auth policy',
             body: 'Adjust authentication behavior.',
-            headRefOid: 'policy123',
+            headRefOid: '2123456789abcdef0123456789abcdef01234567',
             mergeStateStatus: 'CLEAN',
             changedFiles: 1,
             additions: 12,
@@ -196,7 +196,7 @@ describe('devloopd PR automation orchestration', () => {
     expect(automationActionRequiresDecision(action)).toBe(true);
   });
 
-  it('records a Decision once for a human-review PR and correlates action/state/format output', async () => {
+  it('fails closed when the evaluated human-review head moves before Decision attachment', async () => {
     const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-'));
     const calls: string[] = [];
     const listedHeadSha = '0123456789abcdef0123456789abcdef01234567';
@@ -258,27 +258,23 @@ describe('devloopd PR automation orchestration', () => {
     expect(first.actions[0]).toMatchObject({
       type: 'human-review-hold',
       pr: 77,
-      headSha: currentHeadSha,
-      decisionId: expect.stringMatching(/^dec_[a-f0-9]{64}$/u),
+      status: 'failed',
+      headSha: listedHeadSha,
+      message: 'decision generation failed: head_changed',
     });
-    expect(second.actions[0]?.decisionId).toBe(first.actions[0]?.decisionId);
-    expect(requested).toHaveLength(1);
+    expect(first.actions[0]?.decisionId).toBeUndefined();
+    expect(second.actions[0]?.decisionId).toBeUndefined();
+    expect(requested).toHaveLength(0);
+    expect(first.passed).toBe(false);
     expect(states).toEqual(expect.arrayContaining([
       expect.objectContaining({
         prNumber: 77,
-        decisionId: first.actions[0]?.decisionId,
+        status: 'failed',
       }),
     ]));
-    expect(formatDevloopAutomationStageReport(first)).toContain(
-      `decision: ${first.actions[0]?.decisionId}`,
-    );
+    expect(formatDevloopAutomationStageReport(first)).toContain('head_changed');
     expect(calls.filter((call) => call.startsWith('repo view '))).toHaveLength(2);
     expect(calls.filter((call) => call.startsWith('pr view 77 '))).toHaveLength(2);
-    const request = requested[0] as {
-      request?: { subject?: { headSha?: string }; resumeGuard?: { expectedHeadSha?: string } };
-    };
-    expect(request.request?.subject?.headSha).toBe(currentHeadSha);
-    expect(request.request?.resumeGuard?.expectedHeadSha).toBe(currentHeadSha);
   });
 
   it('fails the stage without creating a Decision when current PR metadata is invalid', async () => {
@@ -447,6 +443,8 @@ describe('devloopd PR automation orchestration', () => {
   it('correlates every same-guard action to one aggregate Decision', async () => {
     const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-group-'));
     const headSha = '0123456789abcdef0123456789abcdef01234567';
+    const movedHeadSha = '1123456789abcdef0123456789abcdef01234567';
+    const store = new DecisionStore(repoPath, 'ledger.jsonl');
     const runner: DevloopCommandRunner = {
       resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
       async exec(_command, args) {
@@ -461,6 +459,7 @@ describe('devloopd PR automation orchestration', () => {
         type: 'human-review-hold',
         status: 'blocked' as const,
         pr: 77,
+        headSha,
         stopRule: 'human review required' as const,
         message: 'Product owner approval is missing.',
       },
@@ -468,13 +467,14 @@ describe('devloopd PR automation orchestration', () => {
         type: 'current-head-blocked',
         status: 'blocked' as const,
         pr: 77,
+        headSha,
         stopRule: 'Mergeable: NO' as const,
         message: 'Security review remains blocked.',
       },
     ];
 
     const report = await attachAutomationDecisions({
-      store: new DecisionStore(repoPath, 'ledger.jsonl'),
+      store,
       report: {
         passed: true,
         stage: 'pr-review',
@@ -503,6 +503,54 @@ describe('devloopd PR automation orchestration', () => {
     expect(requested).toHaveLength(1);
     expect(JSON.stringify(requested[0])).toContain('Product owner approval is missing.');
     expect(JSON.stringify(requested[0])).toContain('Security review remains blocked.');
+    expect(requested[0]).toMatchObject({
+      request: {
+        subject: { headSha },
+        resumeGuard: { expectedHeadSha: headSha },
+      },
+    });
+
+    const inconsistent = await attachAutomationDecisions({
+      store,
+      report: {
+        passed: true,
+        stage: 'pr-review',
+        message: 'inconsistent evaluated heads',
+        actions: [
+          actions[0]!,
+          { ...actions[1]!, headSha: movedHeadSha },
+        ],
+      },
+      prs: [{
+        number: 77,
+        title: 'policy change',
+        body: '',
+        headRefName: 'takt/issue-77',
+        headRefOid: headSha,
+        isDraft: false,
+        authorLogin: 'dev',
+        labels: [],
+      }],
+      repoPath,
+      repository: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(inconsistent.passed).toBe(false);
+    expect(inconsistent.actions).toEqual([
+      expect.objectContaining({
+        status: 'failed',
+        message: 'decision generation failed: head_changed',
+      }),
+      expect.objectContaining({
+        status: 'failed',
+        message: 'decision generation failed: head_changed',
+      }),
+    ]);
+    expect(inconsistent.actions.every((action) => action.decisionId === undefined)).toBe(true);
+    expect(readRawDevloopLedgerEvents(join(repoPath, 'ledger.jsonl'))
+      .filter((event) => event.eventType === 'devloop_decision_requested')).toHaveLength(1);
   });
 
   it('clears a stale Decision id when current-head metadata validation fails', async () => {
@@ -532,6 +580,7 @@ describe('devloopd PR automation orchestration', () => {
           status: 'blocked',
           pr: 77,
           decisionId: 'dec_stale',
+          headSha: '0123456789abcdef0123456789abcdef01234567',
           stopRule: 'human review required',
           message: 'Product owner approval is missing.',
         }],
@@ -693,6 +742,7 @@ describe('devloopd PR automation orchestration', () => {
       type: 'current-head-blocked',
       status: 'blocked',
       pr: 21,
+      headSha: 'head789',
       stopRule: 'Mergeable: NO',
     }));
     expect(runner.calls.some((call) => call.includes('--remove-label agent:blocked'))).toBe(false);
@@ -723,6 +773,7 @@ describe('devloopd PR automation orchestration', () => {
       type: 'human-review-hold',
       status: 'blocked',
       pr: 22,
+      headSha: 'human123',
       stopRule: 'human review required',
     }));
     expect(runner.calls).toEqual([]);
@@ -743,6 +794,7 @@ describe('devloopd PR automation orchestration', () => {
       type: 'promote-auto-merge',
       status: 'blocked',
       pr: 77,
+      headSha: '2123456789abcdef0123456789abcdef01234567',
       stopRule: 'human review required',
     });
     expect(action.message).toContain('human:review');

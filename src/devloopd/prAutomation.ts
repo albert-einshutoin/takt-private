@@ -76,6 +76,7 @@ export interface DevloopAutomationAction {
   dualLlmApproval?: DualLlmApprovalReport;
   productPolicyImpact?: ProductPolicyClassification;
   readonly decisionId?: string;
+  /** Exact 40-hex PR head used to produce this action's reasons and classification. */
   readonly headSha?: string;
 }
 
@@ -450,6 +451,7 @@ export async function prepareAutomationPullRequests(options: {
         type: 'human-review-hold',
         status: 'blocked',
         pr: pr.number,
+        headSha: pr.headRefOid,
         stopRule: 'human review required',
         message: `${humanReviewLabel} is present; waiting for human product decision`,
       });
@@ -478,6 +480,7 @@ export async function prepareAutomationPullRequests(options: {
         type: 'current-head-blocked',
         status: 'blocked',
         pr: pr.number,
+        headSha: pr.headRefOid,
         stopRule: 'Mergeable: NO',
         message: `current head ${pr.headRefOid} is still blocked by ${currentHeadBlocker.reviewer} review`,
       });
@@ -804,6 +807,7 @@ export async function promotePullRequestAutoMerge(options: {
       type: 'promote-auto-merge',
       status: 'blocked',
       pr: options.pr,
+      headSha,
       stopRule: 'human review required',
       message: options.dryRun === true
         ? `dry-run: would add ${HUMAN_REVIEW_LABEL}; product-policy impact requires human review`
@@ -818,6 +822,7 @@ export async function promotePullRequestAutoMerge(options: {
       type: 'promote-auto-merge',
       status: 'skipped',
       pr: options.pr,
+      headSha,
       message: 'GitHub checks are not passing yet',
       productPolicyImpact,
     };
@@ -848,6 +853,7 @@ export async function promotePullRequestAutoMerge(options: {
       type: 'promote-auto-merge',
       status: 'blocked',
       pr: options.pr,
+      headSha,
       message: `dual-LLM approval missing: ${dualLlmApproval.reasons.join('; ')}`,
       dualLlmApproval,
       productPolicyImpact,
@@ -860,6 +866,7 @@ export async function promotePullRequestAutoMerge(options: {
       type: 'promote-auto-merge',
       status: 'passed',
       pr: options.pr,
+      headSha,
       message: `dry-run: would add ${options.label ?? DEFAULT_AUTO_MERGE_LABEL}`,
       dualLlmApproval,
       productPolicyImpact,
@@ -879,6 +886,7 @@ export async function promotePullRequestAutoMerge(options: {
     type: 'promote-auto-merge',
     status: 'passed',
     pr: options.pr,
+    headSha,
     message: `added ${options.label ?? DEFAULT_AUTO_MERGE_LABEL}`,
     dualLlmApproval,
     productPolicyImpact,
@@ -987,7 +995,8 @@ function decisionGenerationFailure(
     | 'pr_head_unavailable'
     | 'repository_unavailable'
     | 'decision_ledger_unavailable'
-    | 'decision_request_rejected',
+    | 'decision_request_rejected'
+    | 'head_changed',
 ): DevloopAutomationAction {
   const failedAction = { ...action };
   Reflect.deleteProperty(failedAction, 'decisionId');
@@ -1102,9 +1111,33 @@ export async function attachAutomationDecisions(options: {
 
   const groups = new Map<string, number[]>();
   for (const [pr, indexes] of indexesByPr) {
-    const headSha = headByPr.get(pr);
-    if (headSha === undefined) continue;
-    const key = `${repository}\0${pr}\0${headSha}\0${options.report.stage}`;
+    const currentHeadSha = headByPr.get(pr);
+    if (currentHeadSha === undefined) continue;
+    const evaluatedHeads = new Set(indexes.flatMap((index) => {
+      const evaluatedHeadSha = actions[index]?.headSha;
+      return evaluatedHeadSha !== undefined && HEAD_SHA_PATTERN.test(evaluatedHeadSha)
+        ? [evaluatedHeadSha]
+        : [];
+    }));
+    if (
+      indexes.some((index) => {
+        const evaluatedHeadSha = actions[index]?.headSha;
+        return evaluatedHeadSha === undefined || !HEAD_SHA_PATTERN.test(evaluatedHeadSha);
+      })
+    ) {
+      failIndexes(indexes, 'pr_head_unavailable');
+      continue;
+    }
+    if (evaluatedHeads.size !== 1 || !evaluatedHeads.has(currentHeadSha)) {
+      failIndexes(indexes, 'head_changed');
+      continue;
+    }
+    const evaluatedHeadSha = [...evaluatedHeads][0];
+    if (evaluatedHeadSha === undefined) {
+      failIndexes(indexes, 'pr_head_unavailable');
+      continue;
+    }
+    const key = `${repository}\0${pr}\0${evaluatedHeadSha}\0${options.report.stage}`;
     groups.set(key, indexes);
   }
   if (groups.size > MAX_DECISION_ACTIONS_PER_STAGE) {
@@ -1118,7 +1151,7 @@ export async function attachAutomationDecisions(options: {
       return action === undefined ? [] : [action];
     });
     const first = groupActions[0];
-    const headSha = first?.pr === undefined ? undefined : headByPr.get(first.pr);
+    const headSha = first?.headSha;
     if (first === undefined || headSha === undefined) continue;
     try {
       const projection = ensureDecisionForAutomationActions(options.store, groupActions, {
@@ -1412,6 +1445,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         type: 'review-fix',
         status: report.status,
         pr: pr.number,
+        headSha: pr.headRefOid,
         message: report.message,
         ...(report.stopRule !== undefined ? { stopRule: report.stopRule } : {}),
         ...(report.productPolicyImpact !== undefined ? { productPolicyImpact: report.productPolicyImpact } : {}),
@@ -1453,6 +1487,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         type: 'ci-fix',
         status: repair.status,
         pr: result.pr.number,
+        headSha: result.promotion.headSha ?? result.pr.headRefOid,
         message: repair.message,
         ...(repair.stopRule !== undefined ? { stopRule: repair.stopRule } : {}),
         ...(repair.productPolicyImpact !== undefined ? { productPolicyImpact: repair.productPolicyImpact } : {}),

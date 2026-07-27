@@ -202,8 +202,15 @@ function sameValue(left: DecisionAnswerValue, right: DecisionAnswerValue): boole
   return false;
 }
 
-function sameRequest(left: DecisionRequest, right: DecisionRequest): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+function sameSemanticRequest(left: DecisionRequest, right: DecisionRequest): boolean {
+  const leftSemantic = { ...left } as Partial<DecisionRequest>;
+  const rightSemantic = { ...right } as Partial<DecisionRequest>;
+  // Scheduler wall-clock time is persistence metadata, not part of the human
+  // choice. Ignoring only createdAt lets concurrent schedulers converge while
+  // keeping identity, schema, guard, and every decision field conflict-checked.
+  Reflect.deleteProperty(leftSemantic, 'createdAt');
+  Reflect.deleteProperty(rightSemantic, 'createdAt');
+  return JSON.stringify(leftSemantic) === JSON.stringify(rightSemantic);
 }
 
 function projectionBelongsToRepo(projection: DecisionProjection, repoPath: string): boolean {
@@ -313,7 +320,7 @@ export class DecisionStore {
         );
         if (existing !== undefined) {
           const existingNormalized = this.normalizeRequest(existing.request);
-          if (sameRequest(existingNormalized, normalized)) return existing;
+          if (sameSemanticRequest(existingNormalized, normalized)) return existing;
           fail('request_conflict');
         }
 
@@ -341,7 +348,7 @@ export class DecisionStore {
         if (existing !== undefined) {
           if (
             !projectionBelongsToRepo(existing, this.repoPath)
-            || !sameRequest(this.normalizeRequest(existing.request), normalized)
+            || !sameSemanticRequest(this.normalizeRequest(existing.request), normalized)
           ) {
             fail('request_conflict');
           }

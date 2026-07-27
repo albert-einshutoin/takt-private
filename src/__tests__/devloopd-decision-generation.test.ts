@@ -460,6 +460,7 @@ describe('ensureDecisionForAutomationAction', () => {
     type: 'promote-auto-merge',
     status: 'blocked',
     pr: 77,
+    headSha,
     stopRule: 'human review required',
     message: 'The public authentication policy needs an owner decision.',
     productPolicyImpact: {
@@ -584,9 +585,10 @@ describe('ensureDecisionForAutomationAction', () => {
   it('deduplicates the same action and creates a different decision for a new head', () => {
     const first = ensureDecisionForAutomationAction(store, action(), context());
     const repeated = ensureDecisionForAutomationAction(store, action(), context());
-    const moved = ensureDecisionForAutomationAction(store, action(), {
+    const movedHeadSha = '1123456789abcdef0123456789abcdef01234567';
+    const moved = ensureDecisionForAutomationAction(store, action({ headSha: movedHeadSha }), {
       ...context(),
-      headSha: '1123456789abcdef0123456789abcdef01234567',
+      headSha: movedHeadSha,
     });
 
     expect(repeated.request.decisionId).toBe(first.request.decisionId);
@@ -609,6 +611,15 @@ describe('ensureDecisionForAutomationAction', () => {
       store,
       action(),
       { ...context(), ...invalid } as never,
+    )).toThrowError(expect.objectContaining({ code: 'candidate_invalid' }));
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('fails closed when an eligible action does not retain its evaluated head', () => {
+    expect(() => ensureDecisionForAutomationAction(
+      store,
+      action({ headSha: undefined }),
+      context(),
     )).toThrowError(expect.objectContaining({ code: 'candidate_invalid' }));
     expect(existsSync(store.ledgerPath)).toBe(false);
   });
@@ -686,6 +697,28 @@ describe('ensureDecisionForAutomationAction', () => {
       .map((line) => JSON.parse(line) as { eventType: string })
       .filter((event) => event.eventType === 'devloop_decision_requested');
     expect(requested).toHaveLength(1);
+  });
+
+  it('converges stale scheduler indexes across different persistence timestamps', () => {
+    const first = ensureDecisionForAutomationActions(
+      store,
+      [action()],
+      context(),
+      new Date('2026-07-28T00:00:00.000Z'),
+      { projections: new Map() },
+    );
+    const second = ensureDecisionForAutomationActions(
+      store,
+      [action()],
+      context(),
+      new Date('2026-07-28T00:05:00.000Z'),
+      { projections: new Map() },
+    );
+
+    expect(second.request.decisionId).toBe(first.request.decisionId);
+    expect(second.request.createdAt).toBe(first.request.createdAt);
+    expect(readFileSync(store.ledgerPath, 'utf8').match(/devloop_decision_requested/gu))
+      .toHaveLength(1);
   });
 
   it('opens a deterministic recurrence after an applied Decision without reusing approval', () => {

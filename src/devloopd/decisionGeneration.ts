@@ -657,6 +657,7 @@ export function ensureDecisionForAutomationActions(
   if (
     pr === undefined
     || actions.some((action) => action.pr !== pr)
+    || actions.some((action) => action.headSha !== context.headSha)
     || !REPOSITORY_PATTERN.test(context.repository)
     || !HEAD_SHA_PATTERN.test(context.headSha)
   ) {

@@ -247,6 +247,30 @@ describe('DecisionStore', () => {
     expect(readFileSync(ledgerPath, 'utf8').trim().split('\n')).toHaveLength(1);
   });
 
+  it('deduplicates semantic requests whose scheduler timestamps differ', () => {
+    const store = new DecisionStore(repoPath);
+    const firstRequest = makeRequest(repoPath, { decisionId: 'dec_timestamp_request' });
+    const laterRequest = {
+      ...firstRequest,
+      createdAt: '2026-07-28T00:05:00.000Z',
+    };
+    const first = store.request(firstRequest, { eventId: 'evt_timestamp_first' });
+    const repeated = store.request(laterRequest, { eventId: 'evt_timestamp_later' });
+
+    const atomicFirst = makeRequest(repoPath, { decisionId: 'dec_timestamp_atomic' });
+    const atomicLater = {
+      ...atomicFirst,
+      createdAt: '2026-07-28T00:06:00.000Z',
+    };
+    const created = store.requestAndGet(atomicFirst, { eventId: 'evt_atomic_first' });
+    const reused = store.requestAndGet(atomicLater, { eventId: 'evt_atomic_later' });
+
+    expect(repeated.eventId).toBe(first.eventId);
+    expect(reused.request.createdAt).toBe(created.request.createdAt);
+    expect(readFileSync(ledgerPath, 'utf8').match(/devloop_decision_requested/gu))
+      .toHaveLength(2);
+  });
+
   it('atomically requests and returns a projection without calling list()', () => {
     const store = new DecisionStore(repoPath);
     const request = makeRequest(repoPath, { decisionId: 'dec_atomic' });
