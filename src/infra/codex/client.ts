@@ -21,6 +21,7 @@ import {
 } from '../../shared/types/agent-failure.js';
 import type { StreamToolUseEventData } from '../../shared/types/provider.js';
 import { mapToCodexSandboxMode, type CodexCallOptions } from './types.js';
+import { buildCodexSkillConfig } from './skill-config.js';
 import { formatImageAttachmentPathReference } from '../providers/imageAttachmentPrompt.js';
 import {
   type CodexEvent,
@@ -298,6 +299,23 @@ export class CodexClient {
       : fullPrompt;
     let standardRetryCount = 0;
     let timeoutRetryCount = 0;
+    let skillConfig: CodexOptions['config'] | undefined;
+    try {
+      skillConfig = options.skills
+        ? buildCodexSkillConfig({
+            cwd: options.cwd,
+            env: { ...process.env, ...options.childProcessEnv },
+            inheritance: options.skills,
+          })
+        : undefined;
+    } catch (error) {
+      const failure = createProviderErrorFailure(
+        `Failed to discover Codex Skills: ${getErrorMessage(error)}`,
+      );
+      const response = this.buildErrorResponse(agentType, threadId, failure);
+      emitResult(options.onStream, false, response.error ?? response.content, threadId);
+      return response;
+    }
 
     while (true) {
       const attempt = standardRetryCount + timeoutRetryCount + 1;
@@ -309,6 +327,7 @@ export class CodexClient {
         ...(options.openaiApiKey ? { apiKey: options.openaiApiKey } : {}),
         ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
         ...(options.codexPathOverride ? { codexPathOverride: options.codexPathOverride } : {}),
+        ...(skillConfig !== undefined ? { config: skillConfig } : {}),
       };
       const codex = new Codex(codexClientOptions);
       const thread = threadId

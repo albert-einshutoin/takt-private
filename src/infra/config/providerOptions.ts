@@ -29,6 +29,10 @@ type RawProviderOptions = {
     base_url?: string;
     network_access?: boolean;
     reasoning_effort?: CodexReasoningEffort;
+    skills?: {
+      repo?: boolean;
+      user?: boolean;
+    };
     ground_check?: RawGroundCheckOptions;
   };
   opencode?: {
@@ -201,6 +205,8 @@ export function normalizeProviderOptions(
     options.codex?.base_url !== undefined
     || options.codex?.network_access !== undefined
     || options.codex?.reasoning_effort !== undefined
+    || options.codex?.skills?.repo !== undefined
+    || options.codex?.skills?.user !== undefined
     || options.codex?.ground_check !== undefined
   ) {
     const codexBaseUrlPath = `${normalizationOptions.pathPrefix ?? 'provider_options'}.codex.base_url`;
@@ -219,6 +225,14 @@ export function normalizeProviderOptions(
         : {}),
       ...(options.codex.reasoning_effort !== undefined
         ? { reasoningEffort: options.codex.reasoning_effort }
+        : {}),
+      ...(options.codex.skills?.repo !== undefined || options.codex.skills?.user !== undefined
+        ? {
+            skills: {
+              ...(options.codex.skills.repo !== undefined ? { repo: options.codex.skills.repo } : {}),
+              ...(options.codex.skills.user !== undefined ? { user: options.codex.skills.user } : {}),
+            },
+          }
         : {}),
       ...(groundCheck !== undefined ? { groundCheck } : {}),
     };
@@ -408,6 +422,15 @@ export function mergeProviderOptions(
           : {}),
         ...(layer.codex.reasoningEffort !== undefined
           ? { reasoningEffort: layer.codex.reasoningEffort }
+          : {}),
+        ...(layer.codex.skills !== undefined
+          ? {
+              skills: {
+                ...result.codex?.skills,
+                ...(layer.codex.skills.repo !== undefined ? { repo: layer.codex.skills.repo } : {}),
+                ...(layer.codex.skills.user !== undefined ? { user: layer.codex.skills.user } : {}),
+              },
+            }
           : {}),
         ...(groundCheck !== undefined ? { groundCheck } : {}),
       };
@@ -752,6 +775,18 @@ export function resolveEffectiveProviderOptions(
     personaOptions?.codex?.baseUrl,
     stepOptions?.codex?.baseUrl,
   );
+  const codexRepoSkills = selectProviderValue(
+    resolvedConfigOptions.codex?.skills?.repo,
+    personaOptions?.codex?.skills?.repo,
+    stepOptions?.codex?.skills?.repo,
+    resolveProviderOptionOrigin(originResolver, 'codex.skills.repo', source),
+  );
+  const codexUserSkills = selectProviderValue(
+    resolvedConfigOptions.codex?.skills?.user,
+    personaOptions?.codex?.skills?.user,
+    stepOptions?.codex?.skills?.user,
+    resolveProviderOptionOrigin(originResolver, 'codex.skills.user', source),
+  );
   const opencodeNetworkAccess = selectProviderValue(
     resolvedConfigOptions.opencode?.networkAccess,
     personaOptions?.opencode?.networkAccess,
@@ -888,11 +923,21 @@ export function resolveEffectiveProviderOptions(
       codexBaseUrl !== undefined
       || codexNetworkAccess !== undefined
       || codexReasoningEffort !== undefined
+      || codexRepoSkills !== undefined
+      || codexUserSkills !== undefined
       || codexGroundCheck !== undefined
         ? {
             ...(codexBaseUrl !== undefined ? { baseUrl: codexBaseUrl } : {}),
             ...(codexNetworkAccess !== undefined ? { networkAccess: codexNetworkAccess } : {}),
             ...(codexReasoningEffort !== undefined ? { reasoningEffort: codexReasoningEffort } : {}),
+            ...(codexRepoSkills !== undefined || codexUserSkills !== undefined
+              ? {
+                  skills: {
+                    ...(codexRepoSkills !== undefined ? { repo: codexRepoSkills } : {}),
+                    ...(codexUserSkills !== undefined ? { user: codexUserSkills } : {}),
+                  },
+                }
+              : {}),
             ...(codexGroundCheck !== undefined ? { groundCheck: codexGroundCheck } : {}),
           }
         : undefined,
@@ -1075,6 +1120,8 @@ export const PROVIDER_OPTION_PATHS = [
   'codex.baseUrl',
   'codex.networkAccess',
   'codex.reasoningEffort',
+  'codex.skills.repo',
+  'codex.skills.user',
   'codex.groundCheck.enabled',
   'codex.groundCheck.provider',
   'codex.groundCheck.model',

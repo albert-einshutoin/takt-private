@@ -67,6 +67,10 @@ export const StepProviderOptionsObjectSchema = z.object({
     base_url: z.string().min(1).optional(),
     network_access: z.boolean().optional(),
     reasoning_effort: z.enum(CODEX_REASONING_EFFORT_VALUES).optional(),
+    skills: z.object({
+      repo: z.boolean().optional(),
+      user: z.boolean().optional(),
+    }).strict().optional(),
     ground_check: GroundCheckOptionsSchema,
   }).optional(),
   opencode: z.object({

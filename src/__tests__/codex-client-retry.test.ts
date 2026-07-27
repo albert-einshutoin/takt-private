@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 type MockEvent = Record<string, unknown>;
 type RunPlan =
@@ -8,6 +11,7 @@ type RunPlan =
 
 let runPlans: RunPlan[] = [];
 let runPlanIndex = 0;
+let codexConstructorCalls: Array<Record<string, unknown> | undefined> = [];
 let startThreadCalls: Array<Record<string, unknown> | undefined> = [];
 let resumeThreadCalls: Array<{ threadId: string; options?: Record<string, unknown> }> = [];
 let runStreamedInputs: unknown[] = [];
@@ -104,6 +108,10 @@ function createThread(id: string) {
 vi.mock('@openai/codex-sdk', () => {
   return {
     Codex: class MockCodex {
+      constructor(options?: Record<string, unknown>) {
+        codexConstructorCalls.push(options);
+      }
+
       async startThread(options?: Record<string, unknown>) {
         startThreadCalls.push(options);
         return createThread('thread-1');
@@ -125,9 +133,60 @@ describe('CodexClient retry', () => {
     vi.useRealTimers();
     runPlans = [];
     runPlanIndex = 0;
+    codexConstructorCalls = [];
     startThreadCalls = [];
     resumeThreadCalls = [];
     runStreamedInputs = [];
+  });
+
+  it('無効化対象の Skill を Codex SDK の config に渡す', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-codex-skills-'));
+    const cwd = join(root, 'repo');
+    const repoSkill = join(cwd, '.agents', 'skills', 'repo-skill');
+    const userSkill = join(root, 'home', '.agents', 'skills', 'user-skill');
+    mkdirSync(join(cwd, '.git'), { recursive: true });
+    mkdirSync(repoSkill, { recursive: true });
+    mkdirSync(userSkill, { recursive: true });
+    writeFileSync(join(repoSkill, 'SKILL.md'), '# repo');
+    writeFileSync(join(userSkill, 'SKILL.md'), '# user');
+    runPlans = [
+      {
+        type: 'events',
+        events: [
+          { type: 'thread.started', thread_id: 'thread-1' },
+          { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message', text: 'ok' } },
+          { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+        ],
+      },
+    ];
+
+    try {
+      const client = new CodexClient();
+      const result = await client.call('coder', 'prompt', {
+        cwd,
+        childProcessEnv: {
+          HOME: join(root, 'home'),
+          CODEX_HOME: join(root, 'codex-home'),
+        },
+        skills: { repo: false, user: false },
+      });
+
+      expect(result.status).toBe('done');
+      expect(codexConstructorCalls).toEqual([
+        expect.objectContaining({
+          config: {
+            skills: {
+              config: [
+                { path: realpathSync(join(repoSkill, 'SKILL.md')), enabled: false },
+                { path: realpathSync(join(userSkill, 'SKILL.md')), enabled: false },
+              ].sort((left, right) => left.path.localeCompare(right.path)),
+            },
+          },
+        }),
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   afterEach(() => {

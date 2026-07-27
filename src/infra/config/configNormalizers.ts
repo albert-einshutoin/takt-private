@@ -494,6 +494,8 @@ export function denormalizeProviderOptions(
     providerOptions.codex?.baseUrl !== undefined
     || providerOptions.codex?.networkAccess !== undefined
     || providerOptions.codex?.reasoningEffort !== undefined
+    || providerOptions.codex?.skills?.repo !== undefined
+    || providerOptions.codex?.skills?.user !== undefined
     || providerOptions.codex?.groundCheck !== undefined
   ) {
     const groundCheck = denormalizeGroundCheckOptions(providerOptions.codex.groundCheck);
@@ -506,6 +508,18 @@ export function denormalizeProviderOptions(
         : {}),
       ...(providerOptions.codex.reasoningEffort !== undefined
         ? { reasoning_effort: providerOptions.codex.reasoningEffort }
+        : {}),
+      ...(providerOptions.codex.skills?.repo !== undefined || providerOptions.codex.skills?.user !== undefined
+        ? {
+            skills: {
+              ...(providerOptions.codex.skills.repo !== undefined
+                ? { repo: providerOptions.codex.skills.repo }
+                : {}),
+              ...(providerOptions.codex.skills.user !== undefined
+                ? { user: providerOptions.codex.skills.user }
+                : {}),
+            },
+          }
         : {}),
       ...(groundCheck !== undefined ? { ground_check: groundCheck } : {}),
     };
