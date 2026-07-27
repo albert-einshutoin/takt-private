@@ -7,6 +7,7 @@ import {
   classifyIssueScoutDecision,
   ensureDecisionForAutomationAction,
   ensureDecisionForIssueScoutCandidate,
+  isAutomationActionDecisionEligible,
 } from '../devloopd/decisionGeneration.js';
 import { createDecisionRequest } from '../devloopd/decisionRequest.js';
 import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
@@ -497,6 +498,7 @@ describe('ensureDecisionForAutomationAction', () => {
         repoPath: store.repoPath,
         repository: 'albert-einshutoin/takt-private',
         prNumber: 77,
+        headSha,
         step: 'pr-review',
       },
       why: {
@@ -537,6 +539,45 @@ describe('ensureDecisionForAutomationAction', () => {
 
     expect(projection.request.why.riskCategory).toBe('human_policy');
     expect(projection.request.why.reasons.join('\n')).toContain('Mergeable: NO');
+  });
+
+  it.each([
+    action(),
+    action({ productPolicyImpact: undefined, stopRule: 'Unsafe or too broad' }),
+    action({ productPolicyImpact: undefined, stopRule: 'human review required' }),
+    action({
+      type: 'current-head-blocked',
+      productPolicyImpact: undefined,
+      stopRule: 'Mergeable: NO',
+    }),
+  ])('recognizes explicit human stops as Decision-eligible', (eligibleAction) => {
+    expect(isAutomationActionDecisionEligible(eligibleAction)).toBe(true);
+  });
+
+  it.each([
+    action({ status: 'passed' }),
+    action({ status: 'skipped' }),
+    action({ productPolicyImpact: undefined, stopRule: 'checks failed' }),
+    action({ productPolicyImpact: undefined, stopRule: 'head mismatch' }),
+    action({ productPolicyImpact: undefined, stopRule: 'attempt budget exhausted' }),
+    action({ productPolicyImpact: undefined, stopRule: 'overlap serialization' }),
+    action({
+      type: 'codex-review',
+      status: 'failed',
+      productPolicyImpact: undefined,
+      stopRule: undefined,
+      message: 'provider command failed',
+    }),
+  ])('rejects non-human automation actions before writing the ledger', (ineligibleAction) => {
+    expect(isAutomationActionDecisionEligible(ineligibleAction)).toBe(false);
+    expect(() => ensureDecisionForAutomationAction(
+      store,
+      ineligibleAction,
+      context(),
+    )).toThrowError(expect.objectContaining({
+      code: 'automation_action_not_escalated',
+    }));
+    expect(existsSync(store.ledgerPath)).toBe(false);
   });
 
   it('deduplicates the same action and creates a different decision for a new head', () => {

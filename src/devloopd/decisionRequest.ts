@@ -45,6 +45,7 @@ const DEVLOOP_AUTOMATION_STAGE_VALUES = [
   'pr-merge',
 ] as const satisfies readonly DevloopAutomationStage[];
 const StageSchema = z.enum(DEVLOOP_AUTOMATION_STAGE_VALUES);
+const HeadShaSchema = z.string().regex(/^[a-f0-9]{40}$/iu);
 
 function containsUnsafeControl(value: string): boolean {
   for (const character of value) {
@@ -80,6 +81,7 @@ export const DecisionSubjectSchema = z.object({
   step: PublicTextSchema.optional(),
   issueNumber: z.number().int().positive().optional(),
   prNumber: z.number().int().positive().optional(),
+  headSha: HeadShaSchema.optional(),
   candidateId: CandidateIdentifierSchema.optional(),
   title: PublicTextSchema,
 }).strict();
@@ -155,7 +157,7 @@ const PrAutomationStageResumeGuardSchema = DecisionResumeGuardCommonSchema.exten
   repository: RepositorySchema,
   prNumber: z.number().int().positive(),
   stage: StageSchema,
-  expectedHeadSha: z.string().regex(/^[a-f0-9]{40}$/iu),
+  expectedHeadSha: HeadShaSchema,
 }).strict();
 
 const IssueScoutCandidateResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
@@ -330,6 +332,27 @@ function validateDecisionSafetyContext(
       code: 'custom',
       path: ['subject', 'prNumber'],
       message: 'subject.prNumber must match the PR automation resume guard',
+    });
+  }
+  if (
+    value.subject.headSha === undefined
+    || value.subject.headSha !== value.resumeGuard.expectedHeadSha
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['subject', 'headSha'],
+      message: 'subject.headSha must match the PR automation resume guard',
+    });
+  }
+  if (
+    value.subject.step === undefined
+    || !StageSchema.safeParse(value.subject.step).success
+    || value.subject.step !== value.resumeGuard.stage
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['subject', 'step'],
+      message: 'subject.step must match the PR automation resume guard stage',
     });
   }
 }

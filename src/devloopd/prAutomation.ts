@@ -33,7 +33,10 @@ import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import { DecisionStore } from './decisionStore.js';
-import { ensureDecisionForAutomationAction } from './decisionGeneration.js';
+import {
+  ensureDecisionForAutomationAction,
+  isAutomationActionDecisionEligible,
+} from './decisionGeneration.js';
 
 export type DevloopAutomationStage = 'issue-scout' | 'issue-to-pr' | 'pr-review' | 'review-fix' | 'pr-merge';
 
@@ -142,32 +145,13 @@ function sanitizeDetail(text: string): string {
   return sanitizeSensitiveText(text).trim();
 }
 
-const MECHANICAL_DECISION_STOP_RULES = new Set<NonNullable<DevloopAutomationAction['stopRule']>>([
-  'active run limit',
-  'Duplicate or already covered',
-  'checks failed',
-  'attempt budget exhausted',
-  'head mismatch',
-  'overlap serialization',
-]);
-
 export function automationActionRequiresDecision(
   action: Pick<
   DevloopAutomationAction,
   'type' | 'status' | 'stopRule' | 'productPolicyImpact'
   >,
 ): boolean {
-  if (action.status !== 'blocked') return false;
-  if (
-    action.stopRule !== undefined
-    && MECHANICAL_DECISION_STOP_RULES.has(action.stopRule)
-  ) {
-    return false;
-  }
-  return action.productPolicyImpact?.requiresHumanReview === true
-    || action.stopRule === 'Unsafe or too broad'
-    || action.stopRule === 'human review required'
-    || action.type === 'current-head-blocked';
+  return isAutomationActionDecisionEligible(action);
 }
 
 function parseJsonArray(raw: string, context: string): unknown[] {

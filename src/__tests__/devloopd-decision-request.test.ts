@@ -426,8 +426,9 @@ describe('createDecisionRequest', () => {
     'review-fix',
     'pr-merge',
   ] as const)('accepts the registered %s PR automation stage', (stage) => {
+    const headSha = '0123456789abcdef0123456789abcdef01234567';
     const request = createDecisionRequest({
-      subject: { ...subject, prNumber: 108 },
+      subject: { ...subject, prNumber: 108, headSha, step: stage },
       why,
       how,
       kind: 'choice',
@@ -462,7 +463,7 @@ describe('createDecisionRequest', () => {
         repository: 'albert-einshutoin/takt-private',
         prNumber: 108,
         stage,
-        expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
+        expectedHeadSha: headSha,
       },
     });
 
@@ -471,7 +472,12 @@ describe('createDecisionRequest', () => {
 
   it('rejects PR automation choices that do not use the exact current-head policy options', () => {
     expect(() => createDecisionRequest({
-      subject: { ...subject, prNumber: 108 },
+      subject: {
+        ...subject,
+        prNumber: 108,
+        headSha: '0123456789abcdef0123456789abcdef01234567',
+        step: 'pr-review',
+      },
       why,
       how,
       kind: 'choice',
@@ -561,13 +567,58 @@ describe('createDecisionRequest', () => {
   });
 
   it.each([
-    ['missing repository', { ...subject, repository: undefined, prNumber: 108 }],
-    ['different repository', { ...subject, repository: 'example/other', prNumber: 108 }],
-    ['missing PR number', { ...subject, prNumber: undefined }],
-    ['different PR number', { ...subject, prNumber: 109 }],
+    ['missing repository', {
+      ...subject,
+      repository: undefined,
+      prNumber: 108,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['different repository', {
+      ...subject,
+      repository: 'example/other',
+      prNumber: 108,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['missing PR number', {
+      ...subject,
+      prNumber: undefined,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['different PR number', {
+      ...subject,
+      prNumber: 109,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['missing head SHA', { ...subject, prNumber: 108, step: 'pr-merge' }],
+    ['different head SHA', {
+      ...subject,
+      prNumber: 108,
+      headSha: '1123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['missing step', {
+      ...subject,
+      prNumber: 108,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+    }],
+    ['different step', {
+      ...subject,
+      prNumber: 108,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-review',
+    }],
   ])('rejects a PR automation request with a %s', (_case, invalidSubject) => {
     const request = createDecisionRequest({
-      subject: { ...subject, prNumber: 108 },
+      subject: {
+        ...subject,
+        prNumber: 108,
+        headSha: '0123456789abcdef0123456789abcdef01234567',
+        step: 'pr-merge',
+      },
       why,
       how,
       kind: 'choice',
@@ -609,7 +660,54 @@ describe('createDecisionRequest', () => {
     expect(() => DecisionRequestSchema.parse({
       ...request,
       subject: invalidSubject,
-    })).toThrow(/repository|prNumber/i);
+    })).toThrow(/repository|prNumber|headSha|step/i);
+  });
+
+  it('rejects an invalid subject head SHA before creating a PR automation decision', () => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        prNumber: 108,
+        headSha: 'abc123',
+        step: 'pr-merge',
+      },
+      why,
+      how,
+      kind: 'choice',
+      question: 'Choose the next PR automation action.',
+      options: [
+        {
+          id: 'approve_current_head',
+          title: 'Approve current head',
+          description: 'Continue this stage after revalidation.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'request_changes',
+          title: 'Request changes',
+          description: 'Keep this head blocked until it changes.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'stop',
+          title: 'Stop',
+          description: 'Keep automation stopped.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'pr_automation_stage',
+        expectedDecisionVersion: 1,
+        repository: 'albert-einshutoin/takt-private',
+        prNumber: 108,
+        stage: 'pr-merge',
+        expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
+      },
+    })).toThrow(/headSha|invalid/i);
   });
 
   it('deep-freezes generated decisions and public schema parse results', () => {

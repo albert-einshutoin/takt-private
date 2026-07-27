@@ -29,20 +29,34 @@ export interface AutomationActionDecisionContext {
   readonly stage: DevloopAutomationStage;
 }
 
+export interface AutomationActionDecisionEligibilityInput {
+  readonly type: string;
+  readonly status: 'passed' | 'skipped' | 'blocked' | 'failed';
+  readonly stopRule?: string;
+  readonly productPolicyImpact?: {
+    readonly requiresHumanReview: boolean;
+  };
+}
+
 export type DecisionGenerationErrorCode =
   | 'candidate_not_escalated'
   | 'candidate_invalid'
-  | 'decision_invalid';
+  | 'decision_invalid'
+  | 'automation_action_not_escalated';
 
 export class DecisionGenerationError extends Error {
   readonly code: DecisionGenerationErrorCode;
 
   constructor(code: DecisionGenerationErrorCode) {
-    super(code === 'candidate_not_escalated'
-      ? 'The Issue Scout candidate does not require a human decision'
-      : code === 'candidate_invalid'
-        ? 'The Issue Scout candidate is invalid'
-        : 'The Issue Scout decision is invalid');
+    super(
+      code === 'candidate_not_escalated'
+        ? 'The Issue Scout candidate does not require a human decision'
+        : code === 'candidate_invalid'
+          ? 'The Issue Scout candidate is invalid'
+          : code === 'automation_action_not_escalated'
+            ? 'The automation action does not require a human decision'
+            : 'The Issue Scout decision is invalid',
+    );
     this.name = 'DecisionGenerationError';
     this.code = code;
   }
@@ -66,6 +80,30 @@ const ALLOWED_EVIDENCE_HOSTS = new Set([
   'nvd.nist.gov',
   'www.cve.org',
 ]);
+const MECHANICAL_AUTOMATION_STOP_RULES = new Set([
+  'active run limit',
+  'Duplicate or already covered',
+  'checks failed',
+  'attempt budget exhausted',
+  'head mismatch',
+  'overlap serialization',
+]);
+
+export function isAutomationActionDecisionEligible(
+  action: AutomationActionDecisionEligibilityInput,
+): boolean {
+  if (action.status !== 'blocked') return false;
+  if (
+    action.stopRule !== undefined
+    && MECHANICAL_AUTOMATION_STOP_RULES.has(action.stopRule)
+  ) {
+    return false;
+  }
+  return action.productPolicyImpact?.requiresHumanReview === true
+    || action.stopRule === 'Unsafe or too broad'
+    || action.stopRule === 'human review required'
+    || action.type === 'current-head-blocked';
+}
 
 function riskCategoryFor(
   candidate: IssueScoutCandidate,
@@ -495,6 +533,7 @@ function automationDecisionInput(
       repoPath: context.repoPath,
       repository: context.repository,
       prNumber: action.pr,
+      headSha: context.headSha,
       title: `PR #${action.pr} requires a ${context.stage} policy decision`,
       step: context.stage,
     },
@@ -574,6 +613,9 @@ export function ensureDecisionForAutomationAction(
   context: AutomationActionDecisionContext,
   now: Date = new Date(),
 ): DecisionProjection {
+  if (!isAutomationActionDecisionEligible(action)) {
+    throw new DecisionGenerationError('automation_action_not_escalated');
+  }
   if (
     action.pr === undefined
     || !REPOSITORY_PATTERN.test(context.repository)
