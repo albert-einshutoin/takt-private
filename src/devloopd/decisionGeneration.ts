@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { types as nodeTypes } from 'node:util';
 import { z } from 'zod/v4';
 import type { AgentResponse } from '../core/models/index.js';
 import type { IssueScoutCandidate } from './issueScout.js';
@@ -12,7 +13,10 @@ import {
   DecisionStore,
   DecisionStoreError,
 } from './decisionStore.js';
-import type { DecisionProjection } from './decisionEvents.js';
+import type {
+  DecisionProjection,
+  DeepReadonly,
+} from './decisionEvents.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import type {
   DevloopAutomationAction,
@@ -70,9 +74,9 @@ export type IssueScoutDecisionOutcome =
   | 'revision_requested'
   | 'skipped';
 
-const WORKFLOW_DECISION_TEXT_MAX = 2_000;
-const WORKFLOW_DECISION_REASON_MAX = 20;
-const WORKFLOW_DECISION_EVIDENCE_MAX = 20;
+const WORKFLOW_DECISION_TEXT_MAX = 4_000;
+const WORKFLOW_DECISION_REASON_MAX = 50;
+const WORKFLOW_DECISION_EVIDENCE_MAX = 50;
 const WORKFLOW_DECISION_AGGREGATE_BYTES_MAX = 64 * 1_024;
 const WORKFLOW_DECISION_NODE_MAX = 512;
 const WORKFLOW_DECISION_DEPTH_MAX = 8;
@@ -85,15 +89,35 @@ const WORKFLOW_DECISION_OBJECT_KEYS_MAX = 50;
 const WORKFLOW_UNSAFE_CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]|\p{Cf}/u;
 const WORKFLOW_SECRET_PATTERN = /(?:\b(?:api[_-]?key|authorization|bearer|cookie|password|private[_-]?key|secret|session(?:[_-]?id)?|token)\s*[:=]|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:sk-(?:proj-)?|gh[opusr]_|xox[baprs]-)[A-Za-z0-9_-]{8,}|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)/iu;
 const WORKFLOW_LOCAL_PATH_PATTERN = /(?:\bfile:\/\/\/|\b(?:path|cwd)\s*:\s*(?:\/|[A-Za-z]:[\\/]|\\\\)|(?:^|[\s("'=])(?:\/(?!\/)\S+|[A-Za-z]:[\\/]\S+|\\\\[^\\\s]+\\\S+))/iu;
-const WORKFLOW_URL_QUERY_PATTERN = /\bhttps:\/\/[^\s?#]+[?#][^\s]*/iu;
+const WORKFLOW_URL_LIKE_PATTERN = /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s]+/gu;
 const WORKFLOW_COMMAND_PATTERN = /(?:^|\s)(?:npm|pnpm|yarn|git|gh|bash|sh|curl)\s+\S+/iu;
+
+function hasUnsafeWorkflowDecisionUrl(value: string): boolean {
+  for (const match of value.matchAll(WORKFLOW_URL_LIKE_PATTERN)) {
+    try {
+      const url = new URL(match[0]);
+      if (
+        url.protocol !== 'https:'
+        || url.username !== ''
+        || url.password !== ''
+        || url.search !== ''
+        || url.hash !== ''
+      ) {
+        return true;
+      }
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
 
 function isWorkflowDecisionTextSafe(value: string): boolean {
   return (
     !WORKFLOW_UNSAFE_CONTROL_PATTERN.test(value)
     && !WORKFLOW_SECRET_PATTERN.test(value)
     && !WORKFLOW_LOCAL_PATH_PATTERN.test(value)
-    && !WORKFLOW_URL_QUERY_PATTERN.test(value)
+    && !hasUnsafeWorkflowDecisionUrl(value)
     && !WORKFLOW_COMMAND_PATTERN.test(value)
     && sanitizeSensitiveText(value) === value
   );
@@ -160,19 +184,37 @@ const WorkflowHumanDecisionSchema = z.object({
   }
 });
 
-export type WorkflowHumanDecision = z.output<typeof WorkflowHumanDecisionSchema>;
+export type WorkflowHumanDecision =
+  DeepReadonly<z.output<typeof WorkflowHumanDecisionSchema>>;
+
+function deepFreezeWorkflowDecision<T>(value: T): DeepReadonly<T> {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const nestedValue of Object.values(value)) {
+      deepFreezeWorkflowDecision(nestedValue);
+    }
+    Object.freeze(value);
+  }
+  return value as DeepReadonly<T>;
+}
+
 export type WorkflowDecisionClassification =
   | {
+    readonly classification: 'eligible';
     readonly eligible: true;
     readonly decision: WorkflowHumanDecision;
   }
   | {
+    readonly classification: 'ordinary_ineligible';
     readonly eligible: false;
     readonly issue:
       | 'not_blocked'
       | 'provider_runtime_failure'
-      | 'missing_structured_output'
-      | 'invalid_structured_output';
+      | 'missing_structured_output';
+  }
+  | {
+    readonly classification: 'invalid_contract';
+    readonly eligible: false;
+    readonly issue: 'invalid_structured_output';
   };
 
 export interface WorkflowBlockDecisionInput {
@@ -185,7 +227,14 @@ export interface WorkflowBlockDecisionInput {
 }
 
 function isPlainDataRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (
+    value === null
+    || typeof value !== 'object'
+    || nodeTypes.isProxy(value)
+    || Array.isArray(value)
+  ) {
+    return false;
+  }
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
@@ -238,6 +287,13 @@ function isBoundedSafeWorkflowDecisionPayload(root: unknown): boolean {
     }
 
     const value = entry.value;
+    if (
+      value !== null
+      && (typeof value === 'object' || typeof value === 'function')
+      && nodeTypes.isProxy(value)
+    ) {
+      return false;
+    }
     if (typeof value === 'string') {
       bytes += Buffer.byteLength(JSON.stringify(value), 'utf8');
       if (
@@ -319,8 +375,19 @@ export function classifyWorkflowDecisionBlock(
   response: AgentResponse,
 ): WorkflowDecisionClassification {
   try {
+    if (nodeTypes.isProxy(response)) {
+      return {
+        classification: 'invalid_contract',
+        eligible: false,
+        issue: 'invalid_structured_output',
+      };
+    }
     if (response.status !== 'blocked') {
-      return { eligible: false, issue: 'not_blocked' };
+      return {
+        classification: 'ordinary_ineligible',
+        eligible: false,
+        issue: 'not_blocked',
+      };
     }
     if (
       response.error !== undefined
@@ -328,28 +395,52 @@ export function classifyWorkflowDecisionBlock(
       || response.failureCategory !== undefined
       || response.rateLimitInfo !== undefined
     ) {
-      return { eligible: false, issue: 'provider_runtime_failure' };
+      return {
+        classification: 'ordinary_ineligible',
+        eligible: false,
+        issue: 'provider_runtime_failure',
+      };
     }
 
     const payload = readHumanDecisionPayload(response.structuredOutput);
     if (payload.status === 'missing') {
-      return { eligible: false, issue: 'missing_structured_output' };
+      return {
+        classification: 'ordinary_ineligible',
+        eligible: false,
+        issue: 'missing_structured_output',
+      };
     }
     if (
       payload.status === 'invalid'
       || !isBoundedSafeWorkflowDecisionPayload(payload.value)
     ) {
-      return { eligible: false, issue: 'invalid_structured_output' };
+      return {
+        classification: 'invalid_contract',
+        eligible: false,
+        issue: 'invalid_structured_output',
+      };
     }
     const parsed = WorkflowHumanDecisionSchema.safeParse(payload.value);
     if (!parsed.success) {
-      return { eligible: false, issue: 'invalid_structured_output' };
+      return {
+        classification: 'invalid_contract',
+        eligible: false,
+        issue: 'invalid_structured_output',
+      };
     }
-    return { eligible: true, decision: parsed.data };
+    return {
+      classification: 'eligible',
+      eligible: true,
+      decision: deepFreezeWorkflowDecision(parsed.data),
+    };
   } catch {
     // Provider-owned objects can contain proxies or hostile accessors. Parsing
     // failure must remain a local classification issue, never a workflow crash.
-    return { eligible: false, issue: 'invalid_structured_output' };
+    return {
+      classification: 'invalid_contract',
+      eligible: false,
+      issue: 'invalid_structured_output',
+    };
   }
 }
 
@@ -795,6 +886,8 @@ function workflowDecisionInput(
     question: decision.question,
     why: {
       ...decision.why,
+      reasons: [...decision.why.reasons],
+      evidence: decision.why.evidence.map((item) => ({ ...item })),
       riskCategory: decision.category,
     },
     how: {
@@ -821,7 +914,9 @@ function workflowDecisionInput(
       strategy: 'direct_run' as const,
       expectedDecisionVersion: 1,
       runSlug: input.runSlug,
-      expectedRunStatus: 'blocked',
+      expectedRunStatus: 'aborted' as const,
+      expectedAbortKind: 'blocked' as const,
+      expectedBlockedStep: input.stepName,
     },
   };
 

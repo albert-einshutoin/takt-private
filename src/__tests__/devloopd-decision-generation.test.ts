@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
 import {
   classifyWorkflowDecisionBlock,
   classifyIssueScoutDecision,
@@ -389,6 +389,7 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
       subject: {
         repoPath,
         runSlug: 'unrelated-run',
+        step: 'unrelated-step',
         title: 'Unrelated run decision',
       },
       question: 'Describe how the unrelated run should proceed.',
@@ -412,7 +413,9 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
         strategy: 'direct_run',
         expectedDecisionVersion: 1,
         runSlug: 'unrelated-run',
-        expectedRunStatus: 'blocked',
+        expectedRunStatus: 'aborted',
+        expectedAbortKind: 'blocked',
+        expectedBlockedStep: 'unrelated-step',
       },
     }, {
       decisionId: target.request.decisionId,
@@ -920,7 +923,9 @@ describe('ensureDecisionForWorkflowBlock', () => {
       resumeGuard: {
         strategy: 'direct_run',
         runSlug: 'run-42',
-        expectedRunStatus: 'blocked',
+        expectedRunStatus: 'aborted',
+        expectedAbortKind: 'blocked',
+        expectedBlockedStep: 'plan',
       },
     });
     expect(projection?.request.how.summary).toContain('blocked run context');
@@ -973,6 +978,7 @@ describe('ensureDecisionForWorkflowBlock', () => {
     const response = blockedResponse();
 
     expect(classifyWorkflowDecisionBlock(response)).toEqual({
+      classification: 'ordinary_ineligible',
       eligible: false,
       issue: 'missing_structured_output',
     });
@@ -999,6 +1005,7 @@ describe('ensureDecisionForWorkflowBlock', () => {
 
     expect(() => classifyWorkflowDecisionBlock(response)).not.toThrow();
     expect(classifyWorkflowDecisionBlock(response)).toEqual({
+      classification: 'invalid_contract',
       eligible: false,
       issue: 'invalid_structured_output',
     });
@@ -1021,6 +1028,60 @@ describe('ensureDecisionForWorkflowBlock', () => {
     };
 
     expect(classifyWorkflowDecisionBlock(response).eligible).toBe(true);
+  });
+
+  it.each([
+    ['response', 'response'],
+    ['structured output', 'structuredOutput'],
+    ['human decision', 'humanDecision'],
+    ['nested node', 'nested'],
+  ] as const)('rejects a %s Proxy without invoking any trap', (_name, target) => {
+    let trapCount = 0;
+    const proxyHandler: ProxyHandler<object> = {
+      get(object, key, receiver) {
+        trapCount += 1;
+        return Reflect.get(object, key, receiver);
+      },
+      getPrototypeOf(object) {
+        trapCount += 1;
+        return Reflect.getPrototypeOf(object);
+      },
+      ownKeys(object) {
+        trapCount += 1;
+        return Reflect.ownKeys(object);
+      },
+      getOwnPropertyDescriptor(object, key) {
+        trapCount += 1;
+        return Reflect.getOwnPropertyDescriptor(object, key);
+      },
+    };
+    const decision = workflowHumanDecision();
+    let response: AgentResponse;
+    if (target === 'response') {
+      response = new Proxy(blockedResponse(decision), proxyHandler);
+    } else if (target === 'structuredOutput') {
+      response = {
+        ...blockedResponse(),
+        structuredOutput: new Proxy({ humanDecision: decision }, proxyHandler),
+      };
+    } else if (target === 'humanDecision') {
+      response = blockedResponse(new Proxy(decision, proxyHandler));
+    } else {
+      response = blockedResponse({
+        ...decision,
+        why: {
+          ...workflowWhy,
+          reasons: [new Proxy({ unsafe: true }, proxyHandler)],
+        },
+      });
+    }
+
+    expect(classifyWorkflowDecisionBlock(response)).toMatchObject({
+      classification: 'invalid_contract',
+      issue: 'invalid_structured_output',
+    });
+    expect(trapCount).toBe(0);
+    expect(existsSync(store.ledgerPath)).toBe(false);
   });
 
   it.each([
@@ -1062,6 +1123,7 @@ describe('ensureDecisionForWorkflowBlock', () => {
     };
 
     expect(classifyWorkflowDecisionBlock(response)).toEqual({
+      classification: 'ordinary_ineligible',
       eligible: false,
       issue: 'provider_runtime_failure',
     });
@@ -1071,6 +1133,26 @@ describe('ensureDecisionForWorkflowBlock', () => {
       workflowName: 'takt-default',
       repoPath,
       runSlug: 'run-rate-info',
+    })).toBeUndefined();
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('rejects an HTTP OAuth callback URL without persisting its code', () => {
+    const oauthCode = 'oauth-code-must-not-leak';
+    const response = blockedResponse(workflowHumanDecision({
+      question: `Review http://localhost/callback?code=${oauthCode}`,
+    }));
+
+    expect(classifyWorkflowDecisionBlock(response)).toMatchObject({
+      classification: 'invalid_contract',
+      issue: 'invalid_structured_output',
+    });
+    expect(ensureDecisionForWorkflowBlock(store, {
+      response,
+      stepName: 'review',
+      workflowName: 'takt-default',
+      repoPath,
+      runSlug: 'run-oauth-url',
     })).toBeUndefined();
     expect(existsSync(store.ledgerPath)).toBe(false);
   });
@@ -1091,6 +1173,7 @@ describe('ensureDecisionForWorkflowBlock', () => {
 
     expect(() => classifyWorkflowDecisionBlock(response)).not.toThrow();
     expect(classifyWorkflowDecisionBlock(response)).toEqual({
+      classification: 'invalid_contract',
       eligible: false,
       issue: 'invalid_structured_output',
     });
@@ -1142,7 +1225,7 @@ describe('ensureDecisionForWorkflowBlock', () => {
       'token=super-secret',
       '/Users/private/project/secret.txt',
       '\u001b[31mapprove\u001b[0m',
-      'x'.repeat(2_001),
+      'x'.repeat(4_001),
     ]) {
       const response = blockedResponse({
         schemaVersion: 1,
@@ -1153,11 +1236,24 @@ describe('ensureDecisionForWorkflowBlock', () => {
       });
       const classification = classifyWorkflowDecisionBlock(response);
       expect(classification).toEqual({
+        classification: 'invalid_contract',
         eligible: false,
         issue: 'invalid_structured_output',
       });
     }
     expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('accepts bounded adversarial-looking text without secret assignment syntax', () => {
+    const tokenLikeText = 'tokenish-context '.repeat(300).slice(0, 3_999);
+    const response = blockedResponse(workflowHumanDecision({
+      question: tokenLikeText,
+    }));
+
+    expect(() => classifyWorkflowDecisionBlock(response)).not.toThrow();
+    expect(classifyWorkflowDecisionBlock(response)).toMatchObject({
+      classification: 'eligible',
+    });
   });
 
   it.each([
@@ -1203,6 +1299,7 @@ describe('ensureDecisionForWorkflowBlock', () => {
     for (const value of unsafeValues) {
       const response = blockedResponse(buildDecision(value));
       expect(classifyWorkflowDecisionBlock(response)).toEqual({
+        classification: 'invalid_contract',
         eligible: false,
         issue: 'invalid_structured_output',
       });
@@ -1239,6 +1336,7 @@ describe('ensureDecisionForWorkflowBlock', () => {
       const response = blockedResponse(humanDecision);
       expect(() => classifyWorkflowDecisionBlock(response)).not.toThrow();
       expect(classifyWorkflowDecisionBlock(response)).toEqual({
+        classification: 'invalid_contract',
         eligible: false,
         issue: 'invalid_structured_output',
       });
@@ -1281,5 +1379,56 @@ describe('ensureDecisionForWorkflowBlock', () => {
       repoPath,
       runSlug: 'run-bounded-aggregate',
     })?.status).toBe('open');
+  });
+
+  it('returns a deeply readonly and frozen parsed workflow Decision', () => {
+    const parsed = parseWorkflowHumanDecision(blockedResponse(workflowHumanDecision()));
+    if (parsed === undefined) throw new Error('expected parsed Decision');
+
+    expectTypeOf(parsed.why.reasons).toEqualTypeOf<readonly string[]>();
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed.why)).toBe(true);
+    expect(Object.isFrozen(parsed.why.reasons)).toBe(true);
+    expect(() => {
+      (parsed.why.reasons as string[]).push('mutated');
+    }).toThrow();
+    if (false) {
+      // @ts-expect-error parsed decisions are deeply readonly
+      parsed.why.summary = 'mutated';
+    }
+  });
+
+  it('enforces the 64 KiB aggregate boundary on a valid multibyte schema shape', () => {
+    const buildAtQuestionLength = (length: number) => workflowHumanDecision({
+      question: '境'.repeat(length),
+      why: {
+        summary: '境'.repeat(1_000),
+        reasons: Array.from({ length: 19 }, () => '境'.repeat(1_000)),
+        evidence: [],
+      },
+    });
+    let low = 1;
+    let high = 2_000;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      const bytes = Buffer.byteLength(JSON.stringify(buildAtQuestionLength(middle)), 'utf8');
+      if (bytes > 64 * 1_024) high = middle;
+      else low = middle + 1;
+    }
+    const above = buildAtQuestionLength(low);
+    const below = buildAtQuestionLength(low - 1);
+    const belowBytes = Buffer.byteLength(JSON.stringify(below), 'utf8');
+    const aboveBytes = Buffer.byteLength(JSON.stringify(above), 'utf8');
+
+    expect(belowBytes).toBeLessThanOrEqual(64 * 1_024);
+    expect(aboveBytes).toBeGreaterThan(64 * 1_024);
+    expect(aboveBytes - belowBytes).toBe(3);
+    expect(classifyWorkflowDecisionBlock(blockedResponse(above))).toMatchObject({
+      classification: 'invalid_contract',
+    });
+    expect(existsSync(store.ledgerPath)).toBe(false);
+    expect(classifyWorkflowDecisionBlock(blockedResponse(below))).toMatchObject({
+      classification: 'eligible',
+    });
   });
 });

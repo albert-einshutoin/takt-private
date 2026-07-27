@@ -37,6 +37,7 @@ function makeRequest(
     subject: {
       repoPath,
       runSlug: decisionId,
+      step: 'decision-step',
       title: 'Choose the safe implementation boundary',
     },
     question: 'Which implementation boundary is approved?',
@@ -60,7 +61,9 @@ function makeRequest(
       strategy: 'direct_run' as const,
       expectedDecisionVersion: 1,
       runSlug: decisionId,
-      expectedRunStatus: 'blocked',
+      expectedRunStatus: 'aborted',
+      expectedAbortKind: 'blocked',
+      expectedBlockedStep: 'decision-step',
     },
   };
 
@@ -114,6 +117,7 @@ function makeOversizedRequest(repoPath: string): DecisionRequest {
     subject: {
       repoPath,
       runSlug: decisionId,
+      step: 'decision-step',
       title: maximumText,
     },
     kind: 'choice',
@@ -145,7 +149,9 @@ function makeOversizedRequest(repoPath: string): DecisionRequest {
       strategy: 'direct_run',
       expectedDecisionVersion: 1,
       runSlug: decisionId,
-      expectedRunStatus: 'blocked',
+      expectedRunStatus: 'aborted',
+      expectedAbortKind: 'blocked',
+      expectedBlockedStep: 'decision-step',
     },
   }, {
     decisionId,

@@ -9,6 +9,7 @@ const subject = {
   repoPath: '/private/worktrees/takt',
   repository: 'albert-einshutoin/takt-private',
   runSlug: 'issue-42',
+  step: 'compatibility',
   issueNumber: 42,
   title: 'Choose the compatibility policy',
 };
@@ -40,7 +41,9 @@ const directRunGuard = {
   strategy: 'direct_run' as const,
   expectedDecisionVersion: 1,
   runSlug: 'issue-42',
-  expectedRunStatus: 'blocked',
+  expectedRunStatus: 'aborted',
+  expectedAbortKind: 'blocked',
+  expectedBlockedStep: 'compatibility',
 };
 
 describe('createDecisionRequest', () => {
@@ -134,6 +137,52 @@ describe('createDecisionRequest', () => {
 
     expect(request.kind).toBe('text');
     expect('options' in request).toBe(false);
+  });
+
+  it('binds direct-run resume to an aborted blocked step', () => {
+    const request = createDecisionRequest({
+      subject: { ...subject, step: 'review' },
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'direct_run',
+        expectedDecisionVersion: 1,
+        runSlug: 'issue-42',
+        expectedRunStatus: 'aborted',
+        expectedAbortKind: 'blocked',
+        expectedBlockedStep: 'review',
+      },
+    });
+
+    expect(request.resumeGuard).toMatchObject({
+      strategy: 'direct_run',
+      runSlug: 'issue-42',
+      expectedRunStatus: 'aborted',
+      expectedAbortKind: 'blocked',
+      expectedBlockedStep: 'review',
+    });
+  });
+
+  it('rejects a direct-run guard whose blocked step differs from the subject', () => {
+    expect(() => createDecisionRequest({
+      subject: { ...subject, step: 'plan' },
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'direct_run',
+        expectedDecisionVersion: 1,
+        runSlug: 'issue-42',
+        expectedRunStatus: 'aborted',
+        expectedAbortKind: 'blocked',
+        expectedBlockedStep: 'review',
+      },
+    })).toThrow(/blocked step|expectedBlockedStep|subject.step/iu);
   });
 
   it('rejects text decisions that carry options', () => {

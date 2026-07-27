@@ -283,4 +283,44 @@ describe('RunMetaManager', () => {
     expect(finalizedMeta).not.toHaveProperty('sourceRunSlug');
     expect(finalizedMeta).not.toHaveProperty('resumeMode');
   });
+
+  it('persists immutable blocked terminal guards through aborted finalization', () => {
+    const manager = new RunMetaManager(createRunPaths(), 'Blocked task', 'default');
+
+    manager.recordBlocked({
+      blockedStep: 'review',
+      blockedDecisionId: 'dec_blocked_1',
+      blockedCategory: 'permission',
+    });
+    manager.finalize('aborted', 4);
+
+    const blockedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[1]![1])) as {
+      abortKind?: string;
+      blockedStep?: string;
+      blockedDecisionId?: string;
+      blockedCategory?: string;
+    };
+    const finalizedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[2]![1])) as {
+      status: string;
+      abortKind?: string;
+      blockedStep?: string;
+      blockedDecisionId?: string;
+      blockedCategory?: string;
+    };
+
+    expect(blockedMeta).toMatchObject({
+      abortKind: 'blocked',
+      blockedStep: 'review',
+      blockedDecisionId: 'dec_blocked_1',
+      blockedCategory: 'permission',
+    });
+    expect(finalizedMeta).toMatchObject({
+      status: 'aborted',
+      abortKind: 'blocked',
+      blockedStep: 'review',
+      blockedDecisionId: 'dec_blocked_1',
+      blockedCategory: 'permission',
+    });
+    expect(JSON.stringify(finalizedMeta)).not.toContain('raw provider');
+  });
 });

@@ -339,13 +339,53 @@ export function bindWorkflowExecutionEvents(
   });
 
   deps.engine.on('step:blocked', (step, response) => {
-    const classification = classifyWorkflowDecisionBlock(response);
-    // Core reports every blocked response. The feature bridge only persists an
-    // explicit typed contract so ordinary prose can never become guessed
-    // authorization or a guessed answer form.
-    if (!classification.eligible) return;
+    state.lastDecisionId = undefined;
+    state.decisionGenerationError = undefined;
+    const bestEffortDiagnostic = (write: () => void): void => {
+      try {
+        write();
+      } catch {
+        // Broken output streams (for example EPIPE) must not change blocked
+        // workflow control flow or hide the stable state code.
+      }
+    };
+    const reportError = (code: string): void => {
+      state.decisionGenerationError = code;
+      bestEffortDiagnostic(() => {
+        deps.out.error(`Decision generation failed: ${code}`);
+      });
+    };
+    let blockedDecisionId: string | undefined;
+    let blockedCategory:
+      | 'requirements_ambiguity'
+      | 'permission'
+      | 'external_dependency'
+      | undefined;
+    const recordBlocked = (): void => {
+      try {
+        deps.runMetaManager.recordBlocked({
+          blockedStep: step.name,
+          ...(blockedDecisionId === undefined ? {} : { blockedDecisionId }),
+          ...(blockedCategory === undefined ? {} : { blockedCategory }),
+        });
+      } catch {
+        reportError('run_meta_record_failed');
+      }
+    };
 
     try {
+      const classification = classifyWorkflowDecisionBlock(response);
+      // Core reports every blocked response. Ordinary provider/plain blocks are
+      // persisted as terminal run facts, but only the explicit typed contract
+      // may create a Decision.
+      if (classification.classification === 'ordinary_ineligible') {
+        return;
+      }
+      if (classification.classification === 'invalid_contract') {
+        reportError('decision_contract_invalid');
+        return;
+      }
+      blockedCategory = classification.decision.category;
       const projection = ensureDecisionForWorkflowBlock(getDecisionStore(), {
         response,
         stepName: step.name,
@@ -356,20 +396,24 @@ export function bindWorkflowExecutionEvents(
           ? {}
           : { issueNumber: deps.currentTaskIssueNumber }),
       });
-      if (projection === undefined) return;
-      state.lastDecisionId = projection.request.decisionId;
-      state.decisionGenerationError = undefined;
-      deps.out.info(`Decision required: ${projection.request.decisionId}`);
+      if (projection !== undefined) {
+        blockedDecisionId = projection.request.decisionId;
+        state.lastDecisionId = blockedDecisionId;
+        bestEffortDiagnostic(() => {
+          deps.out.info(`Decision required: ${blockedDecisionId}`);
+        });
+      }
     } catch (error) {
       const code = error instanceof DecisionStoreError
         ? `decision_store_${error.code}`
         : error instanceof DecisionGenerationError
           ? `decision_generation_${error.code}`
           : 'decision_generation_failed';
-      state.decisionGenerationError = code;
       // Never include the underlying filesystem/provider exception: it may
       // contain a local path, token, or raw provider payload.
-      deps.out.error(`Decision generation failed: ${code}`);
+      reportError(code);
+    } finally {
+      recordBlocked();
     }
   });
 

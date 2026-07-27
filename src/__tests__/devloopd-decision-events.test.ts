@@ -21,6 +21,7 @@ const request = createDecisionRequest({
     repoPath: '/private/worktrees/takt',
     repository: 'albert-einshutoin/takt-private',
     runSlug: 'issue-42',
+    step: 'compatibility',
     issueNumber: 42,
     title: 'Choose the compatibility policy',
   },
@@ -67,7 +68,9 @@ const request = createDecisionRequest({
     strategy: 'direct_run',
     expectedDecisionVersion: 1,
     runSlug: 'issue-42',
-    expectedRunStatus: 'blocked',
+    expectedRunStatus: 'aborted',
+    expectedAbortKind: 'blocked',
+    expectedBlockedStep: 'compatibility',
   },
 }, {
   decisionId: 'dec_42',
@@ -105,6 +108,7 @@ function createVersionedRequest(
       repoPath: '/private/worktrees/takt',
       repository: 'albert-einshutoin/takt-private',
       runSlug: 'issue-42',
+      step: 'compatibility',
       issueNumber: 42,
       title: 'Choose the compatibility policy',
     },
@@ -146,7 +150,9 @@ function createVersionedRequest(
       strategy: 'direct_run',
       expectedDecisionVersion: decisionVersion,
       runSlug: 'issue-42',
-      expectedRunStatus: 'blocked',
+      expectedRunStatus: 'aborted',
+      expectedAbortKind: 'blocked',
+      expectedBlockedStep: 'compatibility',
     },
   }, {
     decisionId: request.decisionId,
@@ -163,6 +169,7 @@ function createTextRequest(
     subject: {
       repoPath: '/private/worktrees/takt',
       runSlug: decisionId,
+      step: 'decision-text',
       title: 'Provide decision text',
     },
     kind: 'text',
@@ -187,7 +194,9 @@ function createTextRequest(
       strategy: 'direct_run',
       expectedDecisionVersion: 1,
       runSlug: decisionId,
-      expectedRunStatus: 'blocked',
+      expectedRunStatus: 'aborted',
+      expectedAbortKind: 'blocked',
+      expectedBlockedStep: 'decision-text',
     },
   }, { decisionId });
 }

@@ -10,6 +10,11 @@ export interface RunMetaObservability {
   traceDiscovery: WorkflowTraceDiscovery;
 }
 
+export type RunMetaBlockedCategory =
+  | 'requirements_ambiguity'
+  | 'permission'
+  | 'external_dependency';
+
 export interface RunMeta {
   task: string;
   workflow: string;
@@ -30,6 +35,10 @@ export interface RunMeta {
   resumePoint?: WorkflowResumePoint;
   sourceRunSlug?: string;
   resumeMode?: 'requeue' | 'retry' | 'instruct';
+  readonly abortKind?: 'blocked';
+  readonly blockedStep?: string;
+  readonly blockedDecisionId?: string;
+  readonly blockedCategory?: RunMetaBlockedCategory;
 }
 
 interface RawRunMeta extends RunMeta {

@@ -149,7 +149,9 @@ const DecisionResumeGuardCommonSchema = z.object({
 const DirectRunResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
   strategy: z.literal('direct_run'),
   runSlug: IdentifierSchema,
-  expectedRunStatus: IdentifierSchema,
+  expectedRunStatus: z.literal('aborted'),
+  expectedAbortKind: z.literal('blocked'),
+  expectedBlockedStep: PublicTextSchema,
 }).strict();
 
 const PrAutomationStageResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
@@ -269,6 +271,16 @@ function validateDecisionSafetyContext(
         code: 'custom',
         path: ['subject', 'runSlug'],
         message: 'subject.runSlug must match the direct-run resume guard',
+      });
+    }
+    if (
+      value.subject.step === undefined
+      || value.subject.step !== value.resumeGuard.expectedBlockedStep
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['subject', 'step'],
+        message: 'subject.step must match the direct-run blocked step guard',
       });
     }
     return;
