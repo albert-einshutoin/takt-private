@@ -24,8 +24,8 @@ describe('clone path allocation', () => {
     const second = createTaskClonePath(baseDir, '20260727T1200', 42, 'fix-review');
 
     expect(first).not.toBe(second);
-    expect(first).toMatch(/\/20260727T1200-42-fix-review-[A-Za-z0-9]{6}$/);
-    expect(second).toMatch(/\/20260727T1200-42-fix-review-[A-Za-z0-9]{6}$/);
+    expect(path.basename(first)).toMatch(/^20260727T1200-42-fix-review-[A-Za-z0-9]{6}$/);
+    expect(path.basename(second)).toMatch(/^20260727T1200-42-fix-review-[A-Za-z0-9]{6}$/);
   });
 
   it.each([
@@ -35,7 +35,7 @@ describe('clone path allocation', () => {
   ])('keeps %s slugs inside the clone base directory', (_description, taskSlug, expectedStem) => {
     const clonePath = createTaskClonePath(baseDir, '20260727T1200', undefined, taskSlug);
 
-    expect(path.relative(baseDir, clonePath)).not.toMatch(/^\.\.(?:\/|$)/);
+    expect(path.relative(baseDir, clonePath)).not.toMatch(/^\.\.(?:[\\/]|$)/);
     expect(path.basename(clonePath)).toMatch(/^[a-zA-Z0-9-]+$/);
     expect(path.basename(clonePath)).toContain(expectedStem);
   });
@@ -48,7 +48,7 @@ describe('clone path allocation', () => {
 
     expect(firstTemp).not.toBe(secondTemp);
     expect(firstPrSync).not.toBe(secondPrSync);
-    expect(firstTemp).toMatch(/\/tmp-20260727T1200-[A-Za-z0-9]{6}$/);
-    expect(firstPrSync).toMatch(/\/pr-sync-1753593600000-[a-f0-9]{16}$/);
+    expect(path.basename(firstTemp)).toMatch(/^tmp-20260727T1200-[A-Za-z0-9]{6}$/);
+    expect(path.basename(firstPrSync)).toMatch(/^pr-sync-1753593600000-[a-f0-9]{16}$/);
   });
 });
