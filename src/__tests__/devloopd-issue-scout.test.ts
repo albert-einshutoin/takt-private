@@ -338,6 +338,78 @@ describe('devloopd issue-scout', () => {
     expect(ledger).not.toContain(secretTail);
   });
 
+  it('preserves truncated updateKind provenance after normalization to unknown', async () => {
+    const secretTail = 'breaking-update-kind-tail-secret';
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(
+      join(repoPath, '.devloop', 'dependency-report.json'),
+      JSON.stringify({
+        title: 'Review dependency metadata',
+        summary: 'Small dependency metadata refresh',
+        updateKind: `${'a'.repeat(3_100)} breaking ${secretTail}`,
+      }),
+      'utf8',
+    );
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['dependency_report'],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const candidate = report.observations[0]?.candidates[0];
+    const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+    expect(candidate).toMatchObject({
+      policyCategory: 'human_policy',
+      riskBucket: 'high',
+    });
+    expect(report.selected).toHaveLength(0);
+    expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
+    expect(ledger).not.toContain(secretTail);
+    expect(ledger).not.toContain(createHash('sha256').update(secretTail).digest('hex'));
+  });
+
+  it('preserves incomplete later-alias provenance after the sample is full', async () => {
+    const secretTail = 'later-alias-tail-secret';
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(
+      join(repoPath, '.devloop', 'dependency-report.json'),
+      JSON.stringify({
+        title: 'Review dependency aliases',
+        summary: 'Small dependency alias refresh',
+        changelogUrls: Array.from(
+          { length: 50 },
+          (_, index) => `https://github.com/example/repo/releases/${index}`,
+        ),
+        changelog_urls: [`https://github.com/example/private/${secretTail}`],
+      }),
+      'utf8',
+    );
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['dependency_report'],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const candidate = report.observations[0]?.candidates[0];
+    const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+    expect(candidate).toMatchObject({
+      policyCategory: 'human_policy',
+      riskBucket: 'high',
+    });
+    expect(candidate?.laneEvidence.length).toBeLessThanOrEqual(50);
+    expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
+    expect(JSON.stringify(candidate)).not.toContain(secretTail);
+    expect(ledger).not.toContain(secretTail);
+  });
+
   it('escalates truncated ledger fields without persisting their raw tail', async () => {
     const secretTail = 'ledger-auth-migration-public-api-tail';
     const ledgerPath = resolveDevloopLedgerPath(repoPath, undefined);
@@ -365,6 +437,40 @@ describe('devloopd issue-scout', () => {
     expect(report.selected).toHaveLength(0);
     expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
     const newlyAppendedEvents = ledger.split('\n').slice(1).join('\n');
+    expect(newlyAppendedEvents).not.toContain(secretTail);
+    expect(newlyAppendedEvents).not.toContain(
+      createHash('sha256').update(secretTail).digest('hex'),
+    );
+  });
+
+  it('preserves truncated ledger lane provenance after lane normalization fails', async () => {
+    const secretTail = 'ledger-lane-tail-secret';
+    const ledgerPath = resolveDevloopLedgerPath(repoPath, undefined);
+    appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_follow_up_evidence', {
+      title: 'Small documentation follow-up',
+      summary: 'Clarify existing documentation.',
+      lane: `${'a'.repeat(3_100)} docs_tests_tooling ${secretTail}`,
+    }, new Date('2026-07-28T00:00:00.000Z')));
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['ledger_events'],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:01:00.000Z'),
+    });
+    const candidate = report.observations[0]?.candidates[0];
+    const newlyAppendedEvents = readFileSync(ledgerPath, 'utf8')
+      .split('\n')
+      .slice(1)
+      .join('\n');
+
+    expect(candidate).toMatchObject({
+      policyCategory: 'human_policy',
+      riskBucket: 'high',
+    });
+    expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
     expect(newlyAppendedEvents).not.toContain(secretTail);
     expect(newlyAppendedEvents).not.toContain(
       createHash('sha256').update(secretTail).digest('hex'),

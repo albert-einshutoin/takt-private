@@ -91,6 +91,7 @@ export interface RecursiveLaneCandidateInput {
   targetVersion?: string;
   updateKind?: DependencyUpdateKind;
   threatEvidence?: string;
+  sourceEvidenceIncomplete?: boolean;
 }
 
 export interface IssueScoutObservation {
@@ -437,53 +438,97 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function readStringField(record: Record<string, unknown> | undefined, names: readonly string[]): string | undefined {
-  if (record === undefined) return undefined;
-  for (const name of names) {
-    const value = record[name];
-    if (typeof value === 'string') {
-      const bounded = boundSourceText(value);
-      if (bounded.trim().length > 0) return sanitizeText(bounded);
-    }
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return String(value);
-    }
-  }
-  return undefined;
+interface SourceStringField {
+  value?: string;
+  incomplete: boolean;
 }
 
-function readStringArrayField(record: Record<string, unknown> | undefined, names: readonly string[]): string[] {
-  if (record === undefined) return [];
-  const values: string[] = [];
+interface SourceStringArrayField {
+  values: string[];
+  incomplete: boolean;
+}
+
+function readStringField(
+  record: Record<string, unknown> | undefined,
+  names: readonly string[],
+): SourceStringField {
+  if (record === undefined) return { incomplete: false };
+  let selected: string | undefined;
+  let incomplete = false;
   for (const name of names) {
-    if (values.length >= ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) break;
-    const value = record[name];
-    if (typeof value === 'string') {
-      const bounded = boundSourceText(value);
-      if (bounded.trim().length > 0) values.push(sanitizeText(bounded));
-      continue;
+    const raw = record[name];
+    let value: string | undefined;
+    if (typeof raw === 'string') {
+      const bounded = boundSourceTextWithStatus(raw);
+      incomplete ||= bounded.truncated;
+      const sanitized = sanitizeText(bounded.text);
+      if (sanitized.trim().length > 0) value = sanitized;
+    } else if (typeof raw === 'number' || typeof raw === 'boolean') {
+      value = String(raw);
+    } else if (raw !== undefined && raw !== null) {
+      incomplete = true;
     }
-    if (Array.isArray(value)) {
-      const remaining = ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH - values.length;
-      const sampleCount = value.length > remaining
-        ? Math.max(0, remaining - 1)
-        : remaining;
-      for (let index = 0; index < Math.min(value.length, sampleCount); index += 1) {
-        const item = value[index];
-        if (typeof item === 'string') {
-          const bounded = boundSourceText(item);
-          if (bounded.trim().length > 0) values.push(sanitizeText(bounded));
-        } else if (typeof item === 'number' || typeof item === 'boolean') {
-          values.push(String(item));
-        }
-      }
-      const omittedCount = value.length - sampleCount;
-      if (omittedCount > 0 && values.length < ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) {
-        values.push(SOURCE_ARRAY_OMISSION_MARKER(omittedCount));
-      }
+    if (value !== undefined) {
+      if (selected === undefined) selected = value;
+      else incomplete = true;
     }
   }
-  return unique(values);
+  return {
+    ...(selected === undefined ? {} : { value: selected }),
+    incomplete,
+  };
+}
+
+function readStringArrayField(
+  record: Record<string, unknown> | undefined,
+  names: readonly string[],
+): SourceStringArrayField {
+  if (record === undefined) return { values: [], incomplete: false };
+  const values: string[] = [];
+  let incomplete = false;
+  for (const name of names) {
+    const raw = record[name];
+    if (typeof raw === 'string') {
+      const bounded = boundSourceTextWithStatus(raw);
+      incomplete ||= bounded.truncated;
+      const sanitized = sanitizeText(bounded.text);
+      if (sanitized.trim().length === 0) continue;
+      if (values.length < ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) values.push(sanitized);
+      else incomplete = true;
+      continue;
+    }
+    if (Array.isArray(raw)) {
+      if (values.length >= ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) {
+        incomplete ||= raw.length > 0;
+        continue;
+      }
+      const remaining = ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH - values.length;
+      const sampleCount = raw.length > remaining
+        ? Math.max(0, remaining - 1)
+        : remaining;
+      for (let index = 0; index < Math.min(raw.length, sampleCount); index += 1) {
+        const item = raw[index];
+        if (typeof item === 'string') {
+          const bounded = boundSourceTextWithStatus(item);
+          incomplete ||= bounded.truncated;
+          const sanitized = sanitizeText(bounded.text);
+          if (sanitized.trim().length > 0) values.push(sanitized);
+        } else if (typeof item === 'number' || typeof item === 'boolean') {
+          values.push(String(item));
+        } else {
+          incomplete = true;
+        }
+      }
+      const omittedCount = raw.length - sampleCount;
+      if (omittedCount > 0 && values.length < ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) {
+        values.push(SOURCE_ARRAY_OMISSION_MARKER(omittedCount));
+        incomplete = true;
+      }
+    } else if (raw !== undefined && raw !== null) {
+      incomplete = true;
+    }
+  }
+  return { values: unique(values), incomplete };
 }
 
 function parseReportRecord(raw: string): Record<string, unknown> | undefined {
@@ -656,6 +701,7 @@ export function buildIssueScoutCandidate(input: {
   policyCategory?: AutomationPolicyCategory;
   riskBucket?: IssueScoutRiskBucket;
   laneEvidence?: readonly string[];
+  sourceEvidenceIncomplete?: boolean;
 }): IssueScoutCandidate {
   const normalizedTitle = normalizeCandidateSourceText(input.title);
   const normalizedSummary = normalizeCandidateSourceText(input.summary);
@@ -681,7 +727,8 @@ export function buildIssueScoutCandidate(input: {
     input.expectedChangedSurfaces ?? definition.expectedChangedSurfaces,
   );
   const laneEvidence = normalizeCandidateSourceArray(input.laneEvidence ?? []);
-  const sourceEvidenceIncomplete = normalizedTitle.incomplete
+  const sourceEvidenceIncomplete = input.sourceEvidenceIncomplete === true
+    || normalizedTitle.incomplete
     || normalizedSummary.incomplete
     || evidence.incomplete
     || acceptanceCriteria.incomplete
@@ -847,6 +894,7 @@ export function buildRecursiveLaneCandidate(input: RecursiveLaneCandidateInput):
     policyCategory: humanReviewedDependency ? 'human_policy' : undefined,
     riskBucket: humanReviewedDependency ? 'high' : undefined,
     laneEvidence: laneEvidence(input, updateKind),
+    sourceEvidenceIncomplete: input.sourceEvidenceIncomplete,
   });
 }
 
@@ -1025,6 +1073,17 @@ function readReportSource(sourceId: Extract<IssueScoutSourceId, 'dependency_repo
       const record = parseReportRecord(rawContent);
       const boundedRawSummary = boundSourceTextWithStatus(rawContent);
       const sanitizedRawSummary = sanitizeText(boundedRawSummary.text);
+      let sourceEvidenceIncomplete = record === undefined && boundedRawSummary.truncated;
+      const field = (names: readonly string[]): string | undefined => {
+        const result = readStringField(record, names);
+        sourceEvidenceIncomplete ||= result.incomplete;
+        return result.value;
+      };
+      const arrayField = (names: readonly string[]): string[] => {
+        const result = readStringArrayField(record, names);
+        sourceEvidenceIncomplete ||= result.incomplete;
+        return result.values;
+      };
       const rawSummary = boundedRawSummary.truncated
         ? `${sanitizedRawSummary.slice(
           0,
@@ -1035,36 +1094,37 @@ function readReportSource(sourceId: Extract<IssueScoutSourceId, 'dependency_repo
       // useful while preserving typed lane evidence in the generated issue.
       const candidate = buildRecursiveLaneCandidate({
         sourceId,
-        title: readStringField(record, ['title', 'name']) ?? config.title,
-        summary: (readStringField(record, ['summary', 'description', 'reason', 'finding']) ?? rawSummary)
+        title: field(['title', 'name']) ?? config.title,
+        summary: (field(['summary', 'description', 'reason', 'finding']) ?? rawSummary)
           || `${config.path} exists but is empty`,
         lane: config.lane,
         evidence: [{ kind: 'file', path: config.path, summary: `${sourceId} report` }],
         baselineMetric: config.lane === 'performance'
-          ? readStringField(record, ['baselineMetric', 'baseline_metric', 'baseline'])
+          ? field(['baselineMetric', 'baseline_metric', 'baseline'])
           : undefined,
         targetMetric: config.lane === 'performance'
-          ? readStringField(record, ['targetMetric', 'target_metric', 'target'])
+          ? field(['targetMetric', 'target_metric', 'target'])
           : undefined,
-        verificationCommand: readStringField(record, ['verificationCommand', 'verification_command', 'verification', 'verify']),
+        verificationCommand: field(['verificationCommand', 'verification_command', 'verification', 'verify']),
         changelogUrls: config.lane === 'dependencies'
-          ? readStringArrayField(record, ['changelogUrls', 'changelog_urls', 'changelogs', 'changelog'])
+          ? arrayField(['changelogUrls', 'changelog_urls', 'changelogs', 'changelog'])
           : undefined,
         advisoryUrls: config.lane === 'dependencies' || config.lane === 'security_hardening'
-          ? readStringArrayField(record, ['advisoryUrls', 'advisory_urls', 'advisories', 'advisory'])
+          ? arrayField(['advisoryUrls', 'advisory_urls', 'advisories', 'advisory'])
           : undefined,
         currentVersion: config.lane === 'dependencies'
-          ? readStringField(record, ['currentVersion', 'current_version', 'current'])
+          ? field(['currentVersion', 'current_version', 'current'])
           : undefined,
         targetVersion: config.lane === 'dependencies'
-          ? readStringField(record, ['targetVersion', 'target_version', 'target', 'newVersion', 'new_version'])
+          ? field(['targetVersion', 'target_version', 'target', 'newVersion', 'new_version'])
           : undefined,
         updateKind: config.lane === 'dependencies'
-          ? normalizeDependencyUpdateKind(readStringField(record, ['updateKind', 'update_kind', 'kind']))
+          ? normalizeDependencyUpdateKind(field(['updateKind', 'update_kind', 'kind']))
           : undefined,
         threatEvidence: config.lane === 'security_hardening'
-          ? readStringField(record, ['threatEvidence', 'threat_evidence', 'threat', 'risk'])
+          ? field(['threatEvidence', 'threat_evidence', 'threat', 'risk'])
           : undefined,
+        sourceEvidenceIncomplete,
       });
       return makeObservation({
         sourceId,
@@ -1093,23 +1153,36 @@ function scanLedgerEvents(context: IssueScoutSourceContext): IssueScoutObservati
     .filter((event) => event.eventType === 'devloop_follow_up_evidence' || event.eventType === 'devloop_recursive_follow_up')
     .slice(-10)
     .map((event) => {
-      const lane = readRecursiveLane(event.lane) ?? 'feature_improvement';
-      const evidence = readStringField(event, ['evidence', 'evidencePath', 'evidence_path', 'source']) ?? `ledger event ${event.eventId}`;
+      let sourceEvidenceIncomplete = false;
+      const field = (names: readonly string[]): string | undefined => {
+        const result = readStringField(event, names);
+        sourceEvidenceIncomplete ||= result.incomplete;
+        return result.value;
+      };
+      const arrayField = (names: readonly string[]): string[] => {
+        const result = readStringArrayField(event, names);
+        sourceEvidenceIncomplete ||= result.incomplete;
+        return result.values;
+      };
+      const lane = readRecursiveLane(field(['lane'])) ?? 'feature_improvement';
+      const evidence = field(['evidence', 'evidencePath', 'evidence_path', 'source'])
+        ?? `ledger event ${event.eventId}`;
       return buildRecursiveLaneCandidate({
         sourceId: 'ledger_events',
-        title: readStringField(event, ['title']) ?? `Follow up ${String(event.eventId)}`,
-        summary: readStringField(event, ['summary', 'reason', 'description']) ?? evidence,
+        title: field(['title']) ?? `Follow up ${String(event.eventId)}`,
+        summary: field(['summary', 'reason', 'description']) ?? evidence,
         lane,
         evidence: [{ kind: 'ledger', summary: evidence }],
-        baselineMetric: readStringField(event, ['baselineMetric', 'baseline_metric', 'baseline']),
-        targetMetric: readStringField(event, ['targetMetric', 'target_metric', 'target']),
-        verificationCommand: readStringField(event, ['verificationCommand', 'verification_command', 'verification', 'verify']),
-        changelogUrls: readStringArrayField(event, ['changelogUrls', 'changelog_urls', 'changelog']),
-        advisoryUrls: readStringArrayField(event, ['advisoryUrls', 'advisory_urls', 'advisory']),
-        currentVersion: readStringField(event, ['currentVersion', 'current_version', 'current']),
-        targetVersion: readStringField(event, ['targetVersion', 'target_version', 'target']),
-        updateKind: normalizeDependencyUpdateKind(readStringField(event, ['updateKind', 'update_kind', 'kind'])),
-        threatEvidence: readStringField(event, ['threatEvidence', 'threat_evidence', 'threat', 'risk']),
+        baselineMetric: field(['baselineMetric', 'baseline_metric', 'baseline']),
+        targetMetric: field(['targetMetric', 'target_metric', 'target']),
+        verificationCommand: field(['verificationCommand', 'verification_command', 'verification', 'verify']),
+        changelogUrls: arrayField(['changelogUrls', 'changelog_urls', 'changelog']),
+        advisoryUrls: arrayField(['advisoryUrls', 'advisory_urls', 'advisory']),
+        currentVersion: field(['currentVersion', 'current_version', 'current']),
+        targetVersion: field(['targetVersion', 'target_version', 'target']),
+        updateKind: normalizeDependencyUpdateKind(field(['updateKind', 'update_kind', 'kind'])),
+        threatEvidence: field(['threatEvidence', 'threat_evidence', 'threat', 'risk']),
+        sourceEvidenceIncomplete,
       });
     });
   const candidates = [...repairCandidates, ...followUpCandidates];
