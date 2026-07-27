@@ -91,6 +91,7 @@ import {
   collectReleaseProvenance,
   formatReleaseProvenance,
 } from '../../shared/utils/releaseProvenance.js';
+import { registerDecisionsCommand } from './decisionsCommand.js';
 
 const require = createRequire(import.meta.url);
 const { version: cliVersion } = require('../../../package.json') as { version: string };
@@ -149,6 +150,8 @@ program
   .name('devloopd')
   .description('devloopd sidecar utilities for TAKT subscription-only development loops')
   .version(cliVersion);
+
+registerDecisionsCommand(program);
 
 program
   .command('release-info')
