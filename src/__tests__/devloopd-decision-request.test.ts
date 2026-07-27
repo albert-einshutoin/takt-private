@@ -434,11 +434,18 @@ describe('createDecisionRequest', () => {
       question: 'Choose the next PR automation action.',
       options: [
         {
-          id: 'continue',
-          title: 'Continue',
-          description: 'Continue after revalidation.',
+          id: 'approve_current_head',
+          title: 'Approve current head',
+          description: 'Continue this stage after revalidation.',
           consequences: [],
           recommended: true,
+        },
+        {
+          id: 'request_changes',
+          title: 'Request changes',
+          description: 'Keep the PR blocked until the current head changes.',
+          consequences: [],
+          recommended: false,
         },
         {
           id: 'stop',
@@ -460,6 +467,41 @@ describe('createDecisionRequest', () => {
     });
 
     expect(DecisionRequestSchema.parse(request).resumeGuard.strategy).toBe('pr_automation_stage');
+  });
+
+  it('rejects PR automation choices that do not use the exact current-head policy options', () => {
+    expect(() => createDecisionRequest({
+      subject: { ...subject, prNumber: 108 },
+      why,
+      how,
+      kind: 'choice',
+      question: 'Choose the next PR automation action.',
+      options: [
+        {
+          id: 'continue',
+          title: 'Continue',
+          description: 'Continue after revalidation.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'stop',
+          title: 'Stop',
+          description: 'Keep the PR blocked.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'pr_automation_stage',
+        expectedDecisionVersion: 1,
+        repository: 'albert-einshutoin/takt-private',
+        prNumber: 108,
+        stage: 'pr-review',
+        expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
+      },
+    })).toThrow(/approve_current_head|options/i);
   });
 
   it('rejects automation-state labels that are not PR automation stages', () => {
@@ -528,8 +570,31 @@ describe('createDecisionRequest', () => {
       subject: { ...subject, prNumber: 108 },
       why,
       how,
-      kind: 'text',
+      kind: 'choice',
       question: 'Describe the intended compatibility policy.',
+      options: [
+        {
+          id: 'approve_current_head',
+          title: 'Approve current head',
+          description: 'Continue this stage after revalidation.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'request_changes',
+          title: 'Request changes',
+          description: 'Keep this head blocked until it changes.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'stop',
+          title: 'Stop',
+          description: 'Keep automation stopped.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
       answerRequirements,
       resumeGuard: {
         strategy: 'pr_automation_stage',

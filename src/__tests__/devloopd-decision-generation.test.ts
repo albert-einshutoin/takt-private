@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   classifyIssueScoutDecision,
+  ensureDecisionForAutomationAction,
   ensureDecisionForIssueScoutCandidate,
 } from '../devloopd/decisionGeneration.js';
 import { createDecisionRequest } from '../devloopd/decisionRequest.js';
@@ -15,6 +16,7 @@ import {
 } from '../devloopd/decisionEvents.js';
 import { appendDevloopLedgerEvent } from '../devloopd/ledger.js';
 import type { IssueScoutCandidate } from '../devloopd/issueScout.js';
+import type { DevloopAutomationAction } from '../devloopd/prAutomation.js';
 
 function candidate(
   policyCategory: IssueScoutCandidate['policyCategory'] = 'product_policy',
@@ -118,7 +120,7 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
       store,
       candidate(),
       {
-        repoPath,
+        repoPath: store.repoPath,
         repository: 'albert-einshutoin/takt-private',
       },
       new Date('2026-07-28T00:00:00.000Z'),
@@ -439,5 +441,172 @@ describe('ensureDecisionForIssueScoutCandidate', () => {
     expect(serialized).not.toContain('"command"');
     expect(serialized).not.toContain('"args"');
     expect(serialized).toContain('[LOCAL_PATH]');
+  });
+});
+
+describe('ensureDecisionForAutomationAction', () => {
+  let repoPath: string;
+  let store: DecisionStore;
+  const headSha = '0123456789abcdef0123456789abcdef01234567';
+  const context = () => ({
+    repoPath,
+    repository: 'albert-einshutoin/takt-private',
+    headSha,
+    stage: 'pr-review' as const,
+  });
+  const action = (overrides: Partial<DevloopAutomationAction> = {}): DevloopAutomationAction => ({
+    type: 'promote-auto-merge',
+    status: 'blocked',
+    pr: 77,
+    stopRule: 'human review required',
+    message: 'The public authentication policy needs an owner decision.',
+    productPolicyImpact: {
+      impact: 'product_policy',
+      policyCategory: 'product_policy',
+      requiresHumanReview: true,
+      reasons: ['Authentication eligibility would change for existing users.'],
+      evidencePaths: ['src/routes/auth.ts'],
+      evidenceHunks: [],
+    },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    repoPath = join(tmpdir(), `takt-pr-decision-generation-${randomUUID()}`);
+    mkdirSync(repoPath, { recursive: true });
+    store = new DecisionStore(repoPath);
+  });
+
+  afterEach(() => {
+    if (existsSync(repoPath)) {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a current-head, stage-scoped PR policy choice', () => {
+    const projection = ensureDecisionForAutomationAction(
+      store,
+      action(),
+      context(),
+      new Date('2026-07-28T00:00:00.000Z'),
+    );
+
+    expect(projection.request).toMatchObject({
+      kind: 'choice',
+      subject: {
+        repoPath: store.repoPath,
+        repository: 'albert-einshutoin/takt-private',
+        prNumber: 77,
+        step: 'pr-review',
+      },
+      why: {
+        riskCategory: 'product_policy',
+      },
+      answerRequirements: {
+        rationaleRequired: true,
+      },
+      resumeGuard: {
+        strategy: 'pr_automation_stage',
+        repository: 'albert-einshutoin/takt-private',
+        prNumber: 77,
+        stage: 'pr-review',
+        expectedHeadSha: headSha,
+      },
+    });
+    expect(projection.request.kind === 'choice'
+      ? projection.request.options.map((option) => option.id)
+      : []).toEqual(['approve_current_head', 'request_changes', 'stop']);
+    expect(projection.request.why.reasons.join('\n')).toContain(
+      'Authentication eligibility would change for existing users.',
+    );
+    expect(projection.request.how.summary).toContain('current head');
+    expect(projection.request.how.verification.join('\n')).toMatch(/head SHA|checks|review/iu);
+  });
+
+  it('creates a decision for an explicit current-head review block', () => {
+    const projection = ensureDecisionForAutomationAction(
+      store,
+      action({
+        type: 'current-head-blocked',
+        stopRule: 'Mergeable: NO',
+        productPolicyImpact: undefined,
+        message: 'The current head remains blocked by the recorded human review.',
+      }),
+      context(),
+    );
+
+    expect(projection.request.why.riskCategory).toBe('human_policy');
+    expect(projection.request.why.reasons.join('\n')).toContain('Mergeable: NO');
+  });
+
+  it('deduplicates the same action and creates a different decision for a new head', () => {
+    const first = ensureDecisionForAutomationAction(store, action(), context());
+    const repeated = ensureDecisionForAutomationAction(store, action(), context());
+    const moved = ensureDecisionForAutomationAction(store, action(), {
+      ...context(),
+      headSha: '1123456789abcdef0123456789abcdef01234567',
+    });
+
+    expect(repeated.request.decisionId).toBe(first.request.decisionId);
+    expect(moved.request.decisionId).not.toBe(first.request.decisionId);
+    const requested = readFileSync(store.ledgerPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { eventType: string })
+      .filter((event) => event.eventType === 'devloop_decision_requested');
+    expect(requested).toHaveLength(2);
+  });
+
+  it.each([
+    ['missing repository', { repository: undefined }],
+    ['invalid repository', { repository: 'not-a-repository' }],
+    ['missing head', { headSha: undefined }],
+    ['short head', { headSha: 'abc123' }],
+  ])('fails closed for %s without writing a bogus request', (_case, invalid) => {
+    expect(() => ensureDecisionForAutomationAction(
+      store,
+      action(),
+      { ...context(), ...invalid } as never,
+    )).toThrowError(expect.objectContaining({ code: 'candidate_invalid' }));
+    expect(existsSync(store.ledgerPath)).toBe(false);
+  });
+
+  it('does not retain raw secrets, local paths, diffs, or commands', () => {
+    const projection = ensureDecisionForAutomationAction(
+      store,
+      action({
+        message: [
+          'token=super-secret',
+          'cwd: /Users/private/worktree',
+          'diff --git a/secret.ts b/secret.ts',
+          'npm test -- --token super-secret',
+        ].join('\n'),
+        dualLlmApproval: {
+          approved: false,
+          headSha,
+          reasons: ['Run gh pr diff 77 --patch from /Users/private/worktree'],
+          approvals: [],
+        },
+      }),
+      context(),
+    );
+    const serialized = JSON.stringify(projection.request);
+
+    expect(serialized).not.toContain('super-secret');
+    expect(serialized).not.toContain('/Users/private');
+    expect(serialized).not.toContain('diff --git');
+    expect(serialized).not.toContain('npm test');
+    expect(serialized).not.toContain('gh pr diff');
+  });
+
+  it('keeps truncated public context as a high-risk decision with an origin check', () => {
+    const projection = ensureDecisionForAutomationAction(
+      store,
+      action({ message: `Owner context: ${'x'.repeat(5_000)}` }),
+      context(),
+    );
+
+    expect(projection.request.why.riskCategory).toBe('high_risk');
+    expect(projection.request.why.reasons.join('\n')).toContain('authoritative PR');
   });
 });

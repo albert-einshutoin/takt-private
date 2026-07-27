@@ -12,10 +12,21 @@ import {
 } from './decisionStore.js';
 import type { DecisionProjection } from './decisionEvents.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import type {
+  DevloopAutomationAction,
+  DevloopAutomationStage,
+} from './prAutomation.js';
 
 export interface IssueScoutDecisionContext {
   readonly repoPath: string;
   readonly repository?: string;
+}
+
+export interface AutomationActionDecisionContext {
+  readonly repoPath: string;
+  readonly repository: string;
+  readonly headSha: string;
+  readonly stage: DevloopAutomationStage;
 }
 
 export type DecisionGenerationErrorCode =
@@ -46,6 +57,8 @@ export type IssueScoutDecisionOutcome =
 const MAX_CANDIDATE_TEXT_LENGTH = 4_000;
 const MAX_CANDIDATE_ARRAY_LENGTH = 50;
 const MAX_CANDIDATE_BYTES = 256 * 1024;
+const REPOSITORY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u;
+const HEAD_SHA_PATTERN = /^[a-f0-9]{40}$/iu;
 const ALLOWED_EVIDENCE_HOSTS = new Set([
   'api.github.com',
   'cve.org',
@@ -344,6 +357,45 @@ function sameRequestIgnoringTime(
   return JSON.stringify(leftWithoutTime) === JSON.stringify(rightWithoutTime);
 }
 
+function ensureDeterministicDecision(
+  store: DecisionStore,
+  input: CreateDecisionRequestInput,
+  now: Date,
+): DecisionProjection {
+  const provisional = createDecisionRequest(input, { now });
+  const decisionId = `dec_${provisional.contextHash}`;
+  const request = createDecisionRequest(input, { decisionId, now });
+  // The semantic hash fully determines the ID. Direct lookup keeps repeated
+  // scheduler ticks O(1) while collisions still fail closed.
+  const sameIdentity = store.get(decisionId);
+  if (sameIdentity !== undefined) {
+    if (sameRequestIgnoringTime(sameIdentity.request, request)) return sameIdentity;
+    throw new DecisionStoreError('request_conflict');
+  }
+
+  try {
+    store.request(request, { now });
+  } catch (error) {
+    if (!(error instanceof DecisionStoreError) || error.code !== 'request_conflict') {
+      throw error;
+    }
+    const concurrent = store.get(decisionId);
+    if (
+      concurrent === undefined
+      || !sameRequestIgnoringTime(concurrent.request, request)
+    ) {
+      throw error;
+    }
+    return concurrent;
+  }
+
+  const projection = store.get(decisionId);
+  if (projection === undefined) {
+    throw new DecisionStoreError('decision_not_found');
+  }
+  return projection;
+}
+
 export function ensureDecisionForIssueScoutCandidate(
   store: DecisionStore,
   candidate: IssueScoutCandidate,
@@ -363,44 +415,181 @@ export function ensureDecisionForIssueScoutCandidate(
     ...context,
     repoPath: store.repoPath,
   };
-  let provisional: DecisionRequest;
   try {
-    provisional = createDecisionRequest(buildInput(candidate, canonicalContext), { now });
+    createDecisionRequest(buildInput(candidate, canonicalContext), { now });
   } catch {
     throw new DecisionGenerationError('candidate_invalid');
   }
-  const decisionId = `dec_${provisional.contextHash}`;
-  const request = createDecisionRequest(buildInput(candidate, canonicalContext), { decisionId, now });
-  // The semantic hash fully determines the ID. A direct lookup avoids repeatedly
-  // folding and scanning every projection for each candidate in a scheduler tick.
-  const sameIdentity = store.get(decisionId);
-  if (sameIdentity !== undefined) {
-    if (sameRequestIgnoringTime(sameIdentity.request, request)) return sameIdentity;
-    throw new DecisionStoreError('request_conflict');
-  }
+  return ensureDeterministicDecision(
+    store,
+    buildInput(candidate, canonicalContext),
+    now,
+  );
+}
 
+const RAW_COMMAND_PATTERN = /\b(?:npm|pnpm|yarn|git|gh|codex|agy|node|bash|sh|curl)\s+[^\n.;]*/giu;
+const RAW_COMMAND_FIELD_PATTERN = /\b(?:command|args)\s*[:=]\s*[^\n.;]*/giu;
+const RAW_DIFF_PATTERN = /(?:^|\s)(?:diff --git|@@\s|---\s+[ab]\/|\+\+\+\s+[ab]\/)[^\n]*/giu;
+const LOCAL_PATH_PATTERN = /(?:\/(?:[^/\s]+\/)+[^,\s.;)\]}]*|[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*)/gu;
+
+function sanitizeAutomationDecisionText(
+  value: string,
+  maxLength = MAX_CANDIDATE_TEXT_LENGTH,
+): {
+  text: string;
+  incomplete: boolean;
+} {
+  let controlsRemoved = '';
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    controlsRemoved += (
+      (codePoint >= 0x00 && codePoint <= 0x1f)
+      || (codePoint >= 0x7f && codePoint <= 0x9f)
+    ) ? ' ' : character;
+  }
+  const sensitiveSanitized = sanitizeSensitiveText(controlsRemoved)
+    .replace(RAW_DIFF_PATTERN, ' [REDACTED DIFF]')
+    .replace(RAW_COMMAND_PATTERN, '[REDACTED COMMAND]')
+    .replace(RAW_COMMAND_FIELD_PATTERN, '[REDACTED COMMAND]')
+    .replace(LOCAL_PATH_PATTERN, '[REDACTED PATH]')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const incomplete = sensitiveSanitized.length > maxLength;
+  return {
+    text: sensitiveSanitized.slice(0, maxLength)
+      || 'The automation action requires a human policy decision.',
+    incomplete,
+  };
+}
+
+function automationDecisionInput(
+  action: DevloopAutomationAction & { readonly pr: number },
+  context: AutomationActionDecisionContext,
+): CreateDecisionRequestInput {
+  const sourceReasons = [
+    ...(action.stopRule === undefined ? [] : [`Stop rule: ${action.stopRule}.`]),
+    ...(action.productPolicyImpact?.reasons ?? []),
+    ...(action.dualLlmApproval?.reasons ?? []),
+  ];
+  const sanitizedMessage = sanitizeAutomationDecisionText(
+    action.message,
+    MAX_CANDIDATE_TEXT_LENGTH - 400,
+  );
+  const sanitizedReasons = sourceReasons.slice(0, MAX_CANDIDATE_ARRAY_LENGTH - 1)
+    .map((reason) => sanitizeAutomationDecisionText(reason));
+  const incomplete = sanitizedMessage.incomplete
+    || sourceReasons.length > MAX_CANDIDATE_ARRAY_LENGTH - 1
+    || sanitizedReasons.some((reason) => reason.incomplete);
+  const reasons = sanitizedReasons.map((reason) => reason.text);
+  if (reasons.length === 0) {
+    reasons.push(`Automation action ${action.type} cannot continue without a human policy choice.`);
+  }
+  if (incomplete) {
+    reasons.push('Public context was bounded or truncated; inspect the authoritative PR and review records before answering.');
+  }
+  const productPolicy = action.productPolicyImpact?.requiresHumanReview === true;
+
+  return {
+    kind: 'choice',
+    subject: {
+      repoPath: context.repoPath,
+      repository: context.repository,
+      prNumber: action.pr,
+      title: `PR #${action.pr} requires a ${context.stage} policy decision`,
+      step: context.stage,
+    },
+    question: `How should PR #${action.pr} proceed at ${context.stage} for the current head?`,
+    why: {
+      summary: `${sanitizedMessage.text} Automation remains stopped until a human selects an explicit current-head policy.`,
+      riskCategory: incomplete
+        ? 'high_risk'
+        : productPolicy
+          ? 'product_policy'
+          : 'human_policy',
+      reasons,
+      evidence: [{
+        kind: 'pr',
+        reference: `PR #${action.pr}`,
+        summary: `Current-head policy stop recorded at ${context.stage}.`,
+      }],
+    },
+    how: {
+      summary: `Revalidate the current head and apply the selected policy only to ${context.stage}; do not resume another stage from this decision.`,
+      expectedEffects: [
+        'approve_current_head permits only this stage to resume after all current-head guards pass again.',
+        'request_changes keeps this head blocked until the PR changes and is reviewed again.',
+        'stop keeps automation stopped for this PR and stage.',
+      ],
+      verification: [
+        `Confirm PR #${action.pr} still points to the expected head SHA before applying the answer.`,
+        'Confirm required checks pass for the expected head SHA.',
+        'Confirm current-head review and product-policy gates match the selected policy.',
+      ],
+    },
+    options: [
+      {
+        id: 'approve_current_head',
+        title: 'Approve the current head',
+        description: `Allow ${context.stage} to resume only after current-head revalidation.`,
+        consequences: ['No later stage is implicitly approved.', 'A changed head requires a new decision.'],
+        recommended: false,
+      },
+      {
+        id: 'request_changes',
+        title: 'Request changes',
+        description: 'Keep this head blocked and require a revised PR head.',
+        consequences: ['Automation stays stopped for this head.', 'The revised head must pass checks and review again.'],
+        recommended: productPolicy || incomplete,
+        ...(productPolicy || incomplete
+          ? { recommendationReason: 'Policy-impacting or incomplete context should be revised or verified before automation resumes.' }
+          : {}),
+      },
+      {
+        id: 'stop',
+        title: 'Stop automation',
+        description: 'Keep this PR and stage stopped without requesting a code change.',
+        consequences: ['No automation stage resumes from this answer.'],
+        recommended: false,
+      },
+    ],
+    answerRequirements: {
+      rationaleRequired: true,
+      minimumTextLength: 1,
+      maximumTextLength: 2_000,
+    },
+    resumeGuard: {
+      strategy: 'pr_automation_stage',
+      expectedDecisionVersion: 1,
+      repository: context.repository,
+      prNumber: action.pr,
+      stage: context.stage,
+      expectedHeadSha: context.headSha,
+    },
+  };
+}
+
+export function ensureDecisionForAutomationAction(
+  store: DecisionStore,
+  action: DevloopAutomationAction,
+  context: AutomationActionDecisionContext,
+  now: Date = new Date(),
+): DecisionProjection {
+  if (
+    action.pr === undefined
+    || !REPOSITORY_PATTERN.test(context.repository)
+    || !HEAD_SHA_PATTERN.test(context.headSha)
+  ) {
+    throw new DecisionGenerationError('candidate_invalid');
+  }
+  let input: CreateDecisionRequestInput;
   try {
-    store.request(request, { now });
+    input = automationDecisionInput({ ...action, pr: action.pr }, {
+      ...context,
+      repoPath: store.repoPath,
+    });
+    return ensureDeterministicDecision(store, input, now);
   } catch (error) {
-    if (!(error instanceof DecisionStoreError) || error.code !== 'request_conflict') {
-      throw error;
-    }
-    // Another scheduler tick can win between list() and request(). Re-read the
-    // locked ledger and accept only the exact semantic request; an ID collision
-    // with different content remains fail-closed.
-    const concurrent = store.get(decisionId);
-    if (
-      concurrent === undefined
-      || !sameRequestIgnoringTime(concurrent.request, request)
-    ) {
-      throw error;
-    }
-    return concurrent;
+    if (error instanceof DecisionStoreError) throw error;
+    throw new DecisionGenerationError('candidate_invalid');
   }
-
-  const projection = store.get(decisionId);
-  if (projection === undefined) {
-    throw new DecisionStoreError('decision_not_found');
-  }
-  return projection;
 }

@@ -300,6 +300,19 @@ function validateDecisionSafetyContext(
   }
 
   if (
+    value.kind !== 'choice'
+    || value.options?.length !== 3
+    || value.options[0]?.id !== 'approve_current_head'
+    || value.options[1]?.id !== 'request_changes'
+    || value.options[2]?.id !== 'stop'
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['options'],
+      message: 'PR automation decisions must be a choice with exactly approve_current_head, request_changes, and stop options',
+    });
+  }
+  if (
     value.subject.repository === undefined
     || value.subject.repository !== value.resumeGuard.repository
   ) {

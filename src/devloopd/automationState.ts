@@ -23,6 +23,7 @@ export interface AutomationStateEvent {
   summary: string;
   prNumber?: number;
   issueNumber?: number;
+  decisionId?: string;
   stopRule?: string;
   nextActions: readonly string[];
   artifacts: readonly string[];
@@ -61,6 +62,7 @@ export function buildAutomationStateEvent(input: {
   summary: string;
   prNumber?: number;
   issueNumber?: number;
+  decisionId?: string;
   stopRule?: string;
   nextActions?: readonly string[];
   artifacts?: readonly string[];
@@ -75,6 +77,7 @@ export function buildAutomationStateEvent(input: {
     summary: compact(input.summary, 500),
     ...(input.prNumber !== undefined ? { prNumber: input.prNumber } : {}),
     ...(input.issueNumber !== undefined ? { issueNumber: input.issueNumber } : {}),
+    ...(input.decisionId !== undefined ? { decisionId: compact(input.decisionId, 200) } : {}),
     ...(input.stopRule !== undefined ? { stopRule: input.stopRule } : {}),
     nextActions: input.nextActions?.map((action) => compact(action, 200)) ?? [],
     artifacts: input.artifacts?.map((artifact) => compact(artifact, 200)) ?? [],
@@ -135,7 +138,8 @@ export function formatAutomationStateReport(report: AutomationStateReport): stri
     lines.push('Recent events:');
     lines.push(...report.recentEvents.map((event) => {
       const ref = event.prNumber !== undefined ? ` #${event.prNumber}` : event.issueNumber !== undefined ? ` issue #${event.issueNumber}` : '';
-      return `- ${event.timestamp} ${event.stage}${ref}: ${event.status} - ${event.summary}`;
+      const decision = event.decisionId === undefined ? '' : ` (decision: ${event.decisionId})`;
+      return `- ${event.timestamp} ${event.stage}${ref}: ${event.status}${decision} - ${event.summary}`;
     }));
   }
   if (report.nextActions.length > 0) {

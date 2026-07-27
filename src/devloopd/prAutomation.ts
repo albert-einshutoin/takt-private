@@ -32,6 +32,8 @@ import { buildExecutableDagWorkUnitPlan, type BacklogWorkItem } from './workUnit
 import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import { DecisionStore } from './decisionStore.js';
+import { ensureDecisionForAutomationAction } from './decisionGeneration.js';
 
 export type DevloopAutomationStage = 'issue-scout' | 'issue-to-pr' | 'pr-review' | 'review-fix' | 'pr-merge';
 
@@ -70,6 +72,8 @@ export interface DevloopAutomationAction {
     | 'human review required';
   dualLlmApproval?: DualLlmApprovalReport;
   productPolicyImpact?: ProductPolicyClassification;
+  readonly decisionId?: string;
+  readonly headSha?: string;
 }
 
 export interface DevloopAutomationStageReport {
@@ -130,9 +134,40 @@ const DEFAULT_AUTO_MERGE_LABEL = 'agent:auto-merge';
 const BLOCKED_LABEL = 'agent:blocked';
 const HUMAN_REVIEW_LABEL = 'human:review';
 const MAX_MERGE_QUEUE_DIFF_CONTEXT_CHARS = 8_000;
+const MAX_DECISION_ACTIONS_PER_STAGE = 100;
+const REPOSITORY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u;
+const HEAD_SHA_PATTERN = /^[a-f0-9]{40}$/iu;
 
 function sanitizeDetail(text: string): string {
   return sanitizeSensitiveText(text).trim();
+}
+
+const MECHANICAL_DECISION_STOP_RULES = new Set<NonNullable<DevloopAutomationAction['stopRule']>>([
+  'active run limit',
+  'Duplicate or already covered',
+  'checks failed',
+  'attempt budget exhausted',
+  'head mismatch',
+  'overlap serialization',
+]);
+
+export function automationActionRequiresDecision(
+  action: Pick<
+  DevloopAutomationAction,
+  'type' | 'status' | 'stopRule' | 'productPolicyImpact'
+  >,
+): boolean {
+  if (action.status !== 'blocked') return false;
+  if (
+    action.stopRule !== undefined
+    && MECHANICAL_DECISION_STOP_RULES.has(action.stopRule)
+  ) {
+    return false;
+  }
+  return action.productPolicyImpact?.requiresHumanReview === true
+    || action.stopRule === 'Unsafe or too broad'
+    || action.stopRule === 'human review required'
+    || action.type === 'current-head-blocked';
 }
 
 function parseJsonArray(raw: string, context: string): unknown[] {
@@ -940,6 +975,7 @@ function appendStageAutomationStateEvents(options: {
       status: action.status,
       summary: action.message,
       ...(action.pr !== undefined ? { prNumber: action.pr } : {}),
+      ...(action.decisionId !== undefined ? { decisionId: action.decisionId } : {}),
       ...(action.stopRule !== undefined ? { stopRule: action.stopRule } : {}),
       nextActions: nextActionsForAction(action),
       artifacts: [
@@ -957,6 +993,97 @@ function recordStageReport(
 ): DevloopAutomationStageReport {
   appendStageAutomationStateEvents({ repoPath, ledgerPath, report });
   return report;
+}
+
+function decisionGenerationFailure(
+  action: DevloopAutomationAction,
+  reason: 'action batch limit exceeded' | 'PR snapshot unavailable' | 'PR snapshot head invalid' | 'repository unavailable' | 'request rejected',
+): DevloopAutomationAction {
+  return {
+    ...action,
+    message: `${action.message}; decision generation failed: ${reason}`,
+  };
+}
+
+async function attachAutomationDecisions(options: {
+  store: DecisionStore;
+  report: DevloopAutomationStageReport;
+  prs: readonly AutomationPrSnapshot[];
+  repoPath: string;
+  repository?: string;
+  env: NodeJS.ProcessEnv;
+  runner: DevloopCommandRunner;
+}): Promise<DevloopAutomationStageReport> {
+  const snapshotsByPr = new Map(options.prs.map((pr) => [pr.number, pr]));
+  let repositoryResolved = false;
+  let repository = options.repository;
+  const resolveRepositoryOnce = async (): Promise<string | undefined> => {
+    if (repositoryResolved) return repository;
+    repositoryResolved = true;
+    if (repository !== undefined) {
+      return REPOSITORY_PATTERN.test(repository) ? repository : undefined;
+    }
+    const ghCommand = options.runner.resolveCommand('gh', options.env);
+    if (ghCommand === undefined) return undefined;
+    const resolvedRepository = await resolveLocalRepoName({
+      repoPath: options.repoPath,
+      env: options.env,
+      runner: options.runner,
+      ghCommand,
+    });
+    repository = resolvedRepository !== undefined && REPOSITORY_PATTERN.test(resolvedRepository)
+      ? resolvedRepository
+      : undefined;
+    return repository;
+  };
+
+  let decisionCandidateCount = 0;
+  const actions: DevloopAutomationAction[] = [];
+  for (const action of options.report.actions) {
+    if (!automationActionRequiresDecision(action)) {
+      actions.push(action);
+      continue;
+    }
+    decisionCandidateCount += 1;
+    if (decisionCandidateCount > MAX_DECISION_ACTIONS_PER_STAGE) {
+      actions.push(decisionGenerationFailure(action, 'action batch limit exceeded'));
+      continue;
+    }
+    const snapshot = action.pr === undefined ? undefined : snapshotsByPr.get(action.pr);
+    if (snapshot === undefined) {
+      actions.push(decisionGenerationFailure(action, 'PR snapshot unavailable'));
+      continue;
+    }
+    if (!HEAD_SHA_PATTERN.test(snapshot.headRefOid)) {
+      actions.push(decisionGenerationFailure(action, 'PR snapshot head invalid'));
+      continue;
+    }
+    const resolvedRepository = await resolveRepositoryOnce();
+    if (resolvedRepository === undefined) {
+      actions.push(decisionGenerationFailure(action, 'repository unavailable'));
+      continue;
+    }
+    try {
+      const projection = ensureDecisionForAutomationAction(options.store, action, {
+        repoPath: options.repoPath,
+        repository: resolvedRepository,
+        headSha: snapshot.headRefOid,
+        stage: options.report.stage,
+      });
+      actions.push({
+        ...action,
+        decisionId: projection.request.decisionId,
+        headSha: snapshot.headRefOid,
+      });
+    } catch {
+      actions.push(decisionGenerationFailure(action, 'request rejected'));
+    }
+  }
+
+  return {
+    ...options.report,
+    actions,
+  };
 }
 
 function queueDecisionStatus(decision: MergeQueueDecision): AutomationStateStatus {
@@ -1114,6 +1241,22 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
+  const decisionStore = new DecisionStore(repoPath, options.ledgerPath);
+  const finalizeStage = async (
+    report: DevloopAutomationStageReport,
+    prs: readonly AutomationPrSnapshot[] = [],
+  ): Promise<DevloopAutomationStageReport> => {
+    const correlated = await attachAutomationDecisions({
+      store: decisionStore,
+      report,
+      prs,
+      repoPath,
+      repository: options.repo,
+      env,
+      runner,
+    });
+    return recordStageReport(repoPath, options.ledgerPath, correlated);
+  };
 
   if (options.stage === 'issue-scout') {
     const scout = await runIssueScout({
@@ -1124,7 +1267,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
       env,
       runner,
     });
-    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [{
+    return finalizeStage(makeStageReport(options.stage, [{
       type: 'issue-scout',
       status: scout.passed ? 'passed' : 'failed',
       message: scout.message,
@@ -1153,7 +1296,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
       message: startReport.message,
       ...(startReport.message.includes('active run limit') ? { stopRule: 'active run limit' as const } : {}),
     };
-    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [action], { passed: startReport.passed, startReport }));
+    return finalizeStage(makeStageReport(options.stage, [action], { passed: startReport.passed, startReport }));
   }
 
   const discoveredPrs = await listAutomationPullRequests({ repoPath, repo: options.repo, env, runner });
@@ -1191,7 +1334,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         runner,
       }))),
     ];
-    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, actions, { duplicateIssueCoverage }));
+    return finalizeStage(makeStageReport(options.stage, actions, { duplicateIssueCoverage }), discoveredPrs);
   }
 
   if (options.stage === 'review-fix') {
@@ -1214,11 +1357,11 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         ...(report.productPolicyImpact !== undefined ? { productPolicyImpact: report.productPolicyImpact } : {}),
       };
     }));
-    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [
+    return finalizeStage(makeStageReport(options.stage, [
       ...preparedPullRequests.actions,
       ...duplicateActions,
       ...reviewFixActions,
-    ], { duplicateIssueCoverage }));
+    ], { duplicateIssueCoverage }), discoveredPrs);
   }
 
   const promotionResults = await Promise.all(nonDuplicatePrs.map(async (pr) => ({
@@ -1316,7 +1459,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
     ...queueActions,
     ...mergeActions,
   ];
-  return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, actions, { duplicateIssueCoverage }));
+  return finalizeStage(makeStageReport(options.stage, actions, { duplicateIssueCoverage }), discoveredPrs);
 }
 
 export function formatDevloopAutomationStageReport(report: DevloopAutomationStageReport): string {
@@ -1331,6 +1474,9 @@ export function formatDevloopAutomationStageReport(report: DevloopAutomationStag
     lines.push(`- ${action.type}${action.pr !== undefined ? ` #${action.pr}` : ''}: ${action.status} - ${action.message}`);
     if (action.stopRule !== undefined) {
       lines.push(`  stop rule: ${action.stopRule}`);
+    }
+    if (action.decisionId !== undefined) {
+      lines.push(`  decision: ${action.decisionId}`);
     }
   }
   return lines.join('\n');

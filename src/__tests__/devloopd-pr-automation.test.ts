@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { DevloopCommandRunner } from '../devloopd/commandRunner.js';
 import { readRawDevloopLedgerEvents } from '../devloopd/ledger.js';
 import {
+  automationActionRequiresDecision,
   attachDagPlanToMergeQueuePullRequests,
   findCurrentHeadBlockingReview,
   findDuplicateIssueCoverage,
@@ -13,6 +14,7 @@ import {
   promotePullRequestAutoMerge,
   runDevloopAutomationStage,
   selectAutomationPullRequests,
+  formatDevloopAutomationStageReport,
 } from '../devloopd/prAutomation.js';
 import { formatReviewGateComment } from '../devloopd/prReviewGate.js';
 
@@ -174,6 +176,186 @@ function makeProductPolicyPromotionRunner(): DevloopCommandRunner & { calls: str
 }
 
 describe('devloopd PR automation orchestration', () => {
+  it.each([
+    ['checks failed', { type: 'ci-fix', status: 'blocked', stopRule: 'checks failed', message: 'checks failed' }],
+    ['head mismatch', { type: 'merge-if-safe', status: 'blocked', stopRule: 'head mismatch', message: 'head mismatch' }],
+    ['overlap serialization', { type: 'merge-queue', status: 'skipped', stopRule: 'overlap serialization', message: 'serialized' }],
+    ['provider failure', { type: 'codex-review', status: 'failed', message: 'provider command failed' }],
+    ['attempt budget', { type: 'ci-fix', status: 'blocked', stopRule: 'attempt budget exhausted', message: 'budget exhausted' }],
+  ] as const)('does not turn the mechanical %s stop into a Decision', (_case, action) => {
+    expect(automationActionRequiresDecision(action)).toBe(false);
+  });
+
+  it.each([
+    { type: 'current-head-blocked', status: 'blocked', stopRule: 'Mergeable: NO', message: 'current review block' },
+    { type: 'review-fix', status: 'blocked', stopRule: 'Unsafe or too broad', message: 'scope policy required' },
+    { type: 'human-review-hold', status: 'blocked', stopRule: 'human review required', message: 'owner approval required' },
+  ] as const)('turns explicit human policy stop $type into a Decision', (action) => {
+    expect(automationActionRequiresDecision(action)).toBe(true);
+  });
+
+  it('records a Decision once for a human-review PR and correlates action/state/format output', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-'));
+    const calls: string[] = [];
+    const headSha = '0123456789abcdef0123456789abcdef01234567';
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        calls.push(args.join(' '));
+        if (args.slice(0, 2).join(' ') === 'pr list') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([{
+              number: 77,
+              title: 'change public authentication policy',
+              body: '',
+              headRefName: 'takt/issue-77',
+              headRefOid: headSha,
+              isDraft: false,
+              author: { login: 'dev' },
+              labels: [{ name: 'human:review' }],
+            }]),
+            stderr: '',
+          };
+        }
+        if (args.slice(0, 2).join(' ') === 'repo view') {
+          return { exitCode: 0, stdout: 'owner/repo\n', stderr: '' };
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+      },
+    };
+
+    const first = await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      ledgerPath: 'ledger.jsonl',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+    const second = await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      ledgerPath: 'ledger.jsonl',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+    const events = readRawDevloopLedgerEvents(join(repoPath, 'ledger.jsonl'));
+    const requested = events.filter((event) => event.eventType === 'devloop_decision_requested');
+    const states = events.filter((event) => event.eventType === 'devloop_automation_state');
+
+    expect(first.actions[0]).toMatchObject({
+      type: 'human-review-hold',
+      pr: 77,
+      headSha,
+      decisionId: expect.stringMatching(/^dec_[a-f0-9]{64}$/u),
+    });
+    expect(second.actions[0]?.decisionId).toBe(first.actions[0]?.decisionId);
+    expect(requested).toHaveLength(1);
+    expect(states).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        prNumber: 77,
+        decisionId: first.actions[0]?.decisionId,
+      }),
+    ]));
+    expect(formatDevloopAutomationStageReport(first)).toContain(
+      `decision: ${first.actions[0]?.decisionId}`,
+    );
+    expect(calls.filter((call) => call.startsWith('repo view '))).toHaveLength(2);
+  });
+
+  it('fails closed without creating a Decision when the PR snapshot head is invalid', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-invalid-'));
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        if (args.slice(0, 2).join(' ') === 'pr list') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([{
+              number: 77,
+              title: 'change public authentication policy',
+              body: '',
+              headRefName: 'takt/issue-77',
+              headRefOid: 'short-head',
+              isDraft: false,
+              author: { login: 'dev' },
+              labels: [{ name: 'human:review' }],
+            }]),
+            stderr: '',
+          };
+        }
+        return { exitCode: 0, stdout: 'owner/repo\n', stderr: '' };
+      },
+    };
+
+    const report = await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      ledgerPath: 'ledger.jsonl',
+      repo: 'owner/repo',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+    const events = readRawDevloopLedgerEvents(join(repoPath, 'ledger.jsonl'));
+
+    expect(report.actions[0]).toMatchObject({
+      type: 'human-review-hold',
+      status: 'blocked',
+    });
+    expect(report.actions[0]?.decisionId).toBeUndefined();
+    expect(report.actions[0]?.message).toContain('decision generation failed');
+    expect(events.some((event) => event.eventType === 'devloop_decision_requested')).toBe(false);
+  });
+
+  it('resolves repository metadata once for multiple PR decisions in one stage', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-batch-'));
+    const calls: string[] = [];
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        calls.push(args.join(' '));
+        if (args.slice(0, 2).join(' ') === 'pr list') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([77, 78].map((number) => ({
+              number,
+              title: `policy change ${number}`,
+              body: '',
+              headRefName: `takt/issue-${number}`,
+              headRefOid: `${number === 77 ? '0' : '1'}123456789abcdef0123456789abcdef01234567`,
+              isDraft: false,
+              author: { login: 'dev' },
+              labels: [{ name: 'human:review' }],
+            }))),
+            stderr: '',
+          };
+        }
+        if (args.slice(0, 2).join(' ') === 'repo view') {
+          return { exitCode: 0, stdout: 'owner/repo\n', stderr: '' };
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+      },
+    };
+
+    const report = await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      ledgerPath: 'ledger.jsonl',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+
+    expect(report.actions.map((action) => action.decisionId)).toEqual([
+      expect.stringMatching(/^dec_[a-f0-9]{64}$/u),
+      expect.stringMatching(/^dec_[a-f0-9]{64}$/u),
+    ]);
+    expect(calls.filter((call) => call.startsWith('repo view '))).toHaveLength(1);
+  });
+
   it('discovers non-draft automation PRs from mocked GitHub output', () => {
     const prs = parseAutomationPullRequests(JSON.stringify([
       {
