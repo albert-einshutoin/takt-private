@@ -37,6 +37,7 @@ const CONTEXT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 export type DecisionStoreErrorCode =
   | 'ledger_malformed'
   | 'ledger_incompatible'
+  | 'ledger_unavailable'
   | 'decision_not_found'
   | 'decision_quarantined'
   | 'repository_mismatch'
@@ -52,6 +53,7 @@ export type DecisionStoreErrorCode =
 const ERROR_MESSAGES: Readonly<Record<DecisionStoreErrorCode, string>> = {
   ledger_malformed: 'The decision ledger is malformed',
   ledger_incompatible: 'The decision ledger contains incompatible decision events',
+  ledger_unavailable: 'The decision ledger is unavailable',
   decision_not_found: 'The decision was not found',
   decision_quarantined: 'The decision is quarantined',
   repository_mismatch: 'The decision belongs to a different repository',
@@ -72,6 +74,23 @@ export class DecisionStoreError extends Error {
     super(ERROR_MESSAGES[code]);
     this.name = 'DecisionStoreError';
     this.code = code;
+  }
+}
+
+const INTERNAL_FAILURE_CAUSES = new WeakMap<DecisionStoreError, unknown>();
+
+function atStoreBoundary<T>(operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    if (error instanceof DecisionStoreError) throw error;
+
+    const sanitized = new DecisionStoreError('ledger_unavailable');
+    // Filesystem and lock errors often contain absolute paths or OS details.
+    // Keep the original available to an attached debugger without exposing it
+    // through the public error object, enumeration, logging, or serialization.
+    INTERNAL_FAILURE_CAUSES.set(sanitized, error);
+    throw sanitized;
   }
 }
 
@@ -237,51 +256,59 @@ export class DecisionStore {
   }
 
   readStrict(): StrictDecisionLedger {
-    const strict = parseStrictDecisionLedger(this.ledgerPath);
-    if (strict.fold.fatal) fail('ledger_incompatible');
-    return strict;
+    return atStoreBoundary(() => {
+      const strict = parseStrictDecisionLedger(this.ledgerPath);
+      if (strict.fold.fatal) fail('ledger_incompatible');
+      return strict;
+    });
   }
 
   list(): readonly DecisionProjection[] {
-    const strict = this.readStrict();
-    return Object.freeze(
-      [...strict.fold].filter((projection) => projectionBelongsToRepo(projection, this.repoPath)),
-    );
+    return atStoreBoundary(() => {
+      const strict = this.readStrict();
+      return Object.freeze(
+        [...strict.fold].filter((projection) => projectionBelongsToRepo(projection, this.repoPath)),
+      );
+    });
   }
 
   get(decisionId: string): DecisionProjection | undefined {
-    assertIdentifier(decisionId);
-    return this.list().find((projection) => projection.request.decisionId === decisionId);
+    return atStoreBoundary(() => {
+      assertIdentifier(decisionId);
+      return this.list().find((projection) => projection.request.decisionId === decisionId);
+    });
   }
 
   request(
     request: DecisionRequest,
     options: DecisionStoreWriteOptions = {},
   ): DecisionRequestedEvent {
-    return withDevloopFileLock(this.ledgerPath, () => {
-      const normalized = this.normalizeRequest(request);
-      const strict = parseStrictDecisionLedger(this.ledgerPath);
-      if (strict.fold.fatal) fail('ledger_incompatible');
-      if (strict.fold.quarantinedDecisionIds.includes(normalized.decisionId)) {
-        fail('decision_quarantined');
-      }
+    return atStoreBoundary(() =>
+      withDevloopFileLock(this.ledgerPath, () => {
+        const normalized = this.normalizeRequest(request);
+        const strict = parseStrictDecisionLedger(this.ledgerPath);
+        if (strict.fold.fatal) fail('ledger_incompatible');
+        if (strict.fold.quarantinedDecisionIds.includes(normalized.decisionId)) {
+          fail('decision_quarantined');
+        }
 
-      const decisionEvents = parsedDecisionEvents(strict.events);
-      const existing = decisionEvents.find(
-        (event): event is DecisionRequestedEvent =>
-          event.eventType === 'devloop_decision_requested'
-          && event.decisionId === normalized.decisionId,
-      );
-      if (existing !== undefined) {
-        const existingNormalized = this.normalizeRequest(existing.request);
-        if (sameRequest(existingNormalized, normalized)) return existing;
-        fail('request_conflict');
-      }
+        const decisionEvents = parsedDecisionEvents(strict.events);
+        const existing = decisionEvents.find(
+          (event): event is DecisionRequestedEvent =>
+            event.eventType === 'devloop_decision_requested'
+            && event.decisionId === normalized.decisionId,
+        );
+        if (existing !== undefined) {
+          const existingNormalized = this.normalizeRequest(existing.request);
+          if (sameRequest(existingNormalized, normalized)) return existing;
+          fail('request_conflict');
+        }
 
-      const event = createDecisionRequestedEvent(normalized, options);
-      appendDevloopLedgerEventUnlocked(this.ledgerPath, event);
-      return event;
-    }, options.lock);
+        const event = createDecisionRequestedEvent(normalized, options);
+        appendDevloopLedgerEventUnlocked(this.ledgerPath, event);
+        return event;
+      }, options.lock),
+    );
   }
 
   answer(
@@ -298,7 +325,7 @@ export class DecisionStore {
     }
     if (!CONTEXT_HASH_PATTERN.test(input.expectedContextHash)) fail('stale_context');
 
-    return withDevloopFileLock(this.ledgerPath, () => {
+    return atStoreBoundary(() => withDevloopFileLock(this.ledgerPath, () => {
       const strict = parseStrictDecisionLedger(this.ledgerPath);
       if (strict.fold.fatal) fail('ledger_incompatible');
       if (strict.fold.quarantinedDecisionIds.includes(input.decisionId)) {
@@ -388,7 +415,7 @@ export class DecisionStore {
 
       appendDevloopLedgerEventUnlocked(this.ledgerPath, candidate);
       return candidate;
-    }, options.lock);
+    }, options.lock));
   }
 
   private normalizeRequest(request: DecisionRequest): DecisionRequest {

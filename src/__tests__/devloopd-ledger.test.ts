@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendDevloopLedgerEvent,
+  appendDevloopLedgerEventUnlocked,
   buildDevloopLedgerEvent,
   exportDevloopLedger,
   formatExportDevloopLedgerReport,
@@ -16,6 +17,7 @@ import {
   readRawDevloopLedgerEvents,
   renderTimeline,
 } from '../devloopd/ledger.js';
+import { withDevloopFileLock } from '../devloopd/stateStore.js';
 
 function writeRunFixture(
   repoPath: string,
@@ -104,6 +106,21 @@ describe('devloopd ledger import and timeline', () => {
 
     expect(readRawDevloopLedgerEvents(ledgerPath)).toHaveLength(1);
     expect(renderTimeline({ repoPath }).events).toEqual([]);
+    expect(statSync(join(repoPath, '.devloop')).mode & 0o777).toBe(0o700);
+    expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('appends through the unlocked helper while the caller holds the ledger lock', () => {
+    const ledgerPath = join(repoPath, '.devloop', 'ledger.jsonl');
+    const event = buildDevloopLedgerEvent('devloop_lock_boundary', { sequence: 1 });
+
+    withDevloopFileLock(ledgerPath, () => {
+      appendDevloopLedgerEventUnlocked(ledgerPath, event);
+    }, { timeoutMs: 25 });
+
+    expect(readRawDevloopLedgerEvents(ledgerPath)).toEqual([event]);
+    expect(statSync(join(repoPath, '.devloop')).mode & 0o777).toBe(0o700);
+    expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
   });
 
   it('imports the latest run when no run slug is specified', () => {

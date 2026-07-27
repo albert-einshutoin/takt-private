@@ -275,11 +275,7 @@ describe('DecisionStore', () => {
     const request = makeRequest(repoPath);
     const store = new DecisionStore(repoPath);
     store.request(request);
-    writeFileSync(ledgerPath, '{"partial":', { flag: 'a' });
-
-    expectCode(() => store.answer(answerFor(request), 'user:owner'), 'ledger_malformed');
-
-    writeFileSync(ledgerPath, `${readFileSync(ledgerPath, 'utf8').replace('{"partial":', '')}${JSON.stringify({
+    writeFileSync(ledgerPath, `${readFileSync(ledgerPath, 'utf8')}${JSON.stringify({
       schemaVersion: 2,
       eventId: 'evt_future',
       eventType: 'devloop_decision_answered',
@@ -295,6 +291,27 @@ describe('DecisionStore', () => {
       eventType: 'devloop_decision_unknown',
     })}\n`);
     expectCode(() => store.request(makeRequest(repoPath, { decisionId: 'dec_new' })), 'ledger_incompatible');
+  });
+
+  it('fails closed on a partial JSON tail without appending', () => {
+    const request = makeRequest(repoPath);
+    const store = new DecisionStore(repoPath);
+    store.request(request);
+    writeFileSync(ledgerPath, '{"partial":', { flag: 'a' });
+    const before = readFileSync(ledgerPath, 'utf8');
+
+    expectCode(() => store.answer(answerFor(request), 'user:owner'), 'ledger_malformed');
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
+  });
+
+  it('fails closed on a primitive JSON ledger line without appending', () => {
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(ledgerPath, '42\n');
+    const store = new DecisionStore(repoPath);
+    const before = readFileSync(ledgerPath, 'utf8');
+
+    expectCode(() => store.request(makeRequest(repoPath)), 'ledger_malformed');
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
   });
 
   it('does not expose ledger paths or answer text in typed errors', () => {
@@ -325,6 +342,50 @@ describe('DecisionStore', () => {
 
     expectCode(() => store.request(makeRequest(repoPath)), 'ledger_malformed');
     expect(readFileSync(victimPath, 'utf8')).toBe('preserve-me');
+  });
+
+  it('sanitizes request lock timeout failures and does not append', () => {
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(`${ledgerPath}.lock`, JSON.stringify({ secret: 'do-not-leak' }));
+    const store = new DecisionStore(repoPath);
+
+    try {
+      store.request(makeRequest(repoPath), {
+        lock: { timeoutMs: 1, staleMs: 60_000 },
+      });
+      throw new Error('Expected DecisionStoreError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(DecisionStoreError);
+      expect((error as DecisionStoreError).code).toBe('ledger_unavailable');
+      expect((error as Error).message).not.toContain(repoPath);
+      expect((error as Error).message).not.toContain(ledgerPath);
+      expect((error as Error).message).not.toContain('do-not-leak');
+      expect(JSON.stringify(error)).not.toContain(repoPath);
+      expect(JSON.stringify(error)).not.toContain('do-not-leak');
+    }
+    expect(existsSync(ledgerPath)).toBe(false);
+  });
+
+  it('sanitizes answer lock timeout failures and does not append', () => {
+    const request = makeRequest(repoPath);
+    const store = new DecisionStore(repoPath);
+    store.request(request);
+    const before = readFileSync(ledgerPath, 'utf8');
+    writeFileSync(`${ledgerPath}.lock`, JSON.stringify({ secret: 'do-not-leak' }));
+
+    try {
+      store.answer(answerFor(request), 'user:owner', {
+        lock: { timeoutMs: 1, staleMs: 60_000 },
+      });
+      throw new Error('Expected DecisionStoreError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(DecisionStoreError);
+      expect((error as DecisionStoreError).code).toBe('ledger_unavailable');
+      expect((error as Error).message).not.toContain(repoPath);
+      expect((error as Error).message).not.toContain(ledgerPath);
+      expect((error as Error).message).not.toContain('do-not-leak');
+    }
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
   });
 
   it('isolates shared ledgers by repository and coexists with generic events', () => {
