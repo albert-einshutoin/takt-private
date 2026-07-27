@@ -1,12 +1,18 @@
 import {
+  closeSync,
+  constants,
   existsSync,
   chmodSync,
+  fchmodSync,
+  fstatSync,
   mkdirSync,
   lstatSync,
+  openSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   statSync,
-  writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -14,7 +20,11 @@ import { readRunMetaBySlug, type RunMeta } from '../core/workflow/run/run-meta.j
 import { listRecentRuns } from '../features/interactive/runSessionReader.js';
 import { isPathInside } from '../shared/utils/pathBoundary.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
-import { withDevloopFileLock, writeFileAtomic } from './stateStore.js';
+import {
+  withDevloopFileLock,
+  writeFileAtomic,
+  type DevloopFileLockOptions,
+} from './stateStore.js';
 
 export interface ImportTaktRunOptions {
   repoPath?: string;
@@ -60,6 +70,10 @@ export type DevloopLedgerEvent = DevloopLedgerEventBase & Record<string, unknown
 export interface DevloopLedgerAppendEvent {
   eventId: string;
   eventType: string;
+}
+
+export interface LockedDevloopLedgerTransaction {
+  append<T extends DevloopLedgerAppendEvent>(event: T): void;
 }
 
 export interface ImportTaktRunReport {
@@ -279,34 +293,111 @@ function ensureLedgerDirectory(ledgerPath: string): void {
   if (!ledgerDirExists) {
     chmodSync(ledgerDir, 0o700);
   }
+  const directoryStat = lstatSync(ledgerDir);
+  const currentUid = process.getuid?.();
+  if (
+    directoryStat.isSymbolicLink()
+    || !directoryStat.isDirectory()
+    || (currentUid !== undefined && directoryStat.uid !== currentUid)
+    || (directoryStat.mode & 0o022) !== 0
+  ) {
+    throw new Error('Devloop ledger directory is not secure');
+  }
 }
 
-export function appendDevloopLedgerEventUnlocked<T extends DevloopLedgerAppendEvent>(
+function appendDevloopLedgerEventWithCapability<T extends DevloopLedgerAppendEvent>(
   ledgerPath: string,
   event: T,
 ): void {
   ensureLedgerDirectory(ledgerPath);
-  if (existsSync(ledgerPath)) {
-    const ledgerStat = lstatSync(ledgerPath);
-    if (ledgerStat.isSymbolicLink() || !ledgerStat.isFile()) {
-      throw new Error('Devloop ledger must be a regular file');
+  const flags = constants.O_WRONLY
+    | constants.O_APPEND
+    | constants.O_CREAT
+    | constants.O_NOFOLLOW;
+  const fd = openSync(ledgerPath, flags, 0o600);
+  try {
+    const ledgerStat = fstatSync(fd);
+    const currentUid = process.getuid?.();
+    if (
+      !ledgerStat.isFile()
+      || ledgerStat.nlink !== 1
+      || (currentUid !== undefined && ledgerStat.uid !== currentUid)
+    ) {
+      throw new Error('Devloop ledger must be a single-link regular file');
     }
+    // Restrict an existing permissive file before the first byte of a possibly
+    // sensitive event is written; chmod-after-write leaves a disclosure window.
+    fchmodSync(fd, 0o600);
+    const line = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8');
+    let written = 0;
+    while (written < line.byteLength) {
+      const bytesWritten = writeSync(fd, line, written, line.byteLength - written);
+      if (bytesWritten <= 0) {
+        throw new Error('Devloop ledger write did not make progress');
+      }
+      written += bytesWritten;
+    }
+  } finally {
+    closeSync(fd);
   }
-  const line = `${JSON.stringify(event)}\n`;
-  writeFileSync(ledgerPath, line, { encoding: 'utf-8', flag: 'a', mode: 0o600 });
-  chmodSync(ledgerPath, 0o600);
+}
+
+export function canonicalizeDevloopPath(inputPath: string): string {
+  const absolutePath = resolve(inputPath);
+  const suffix: string[] = [];
+  let existingPath = absolutePath;
+  while (!existsSync(existingPath)) {
+    const parent = dirname(existingPath);
+    if (parent === existingPath) break;
+    suffix.unshift(basename(existingPath));
+    existingPath = parent;
+  }
+  return resolve(realpathSync.native(existingPath), ...suffix);
+}
+
+export function canonicalizeDevloopLedgerPath(ledgerPath: string): string {
+  const absoluteLedgerPath = resolve(ledgerPath);
+  // Canonicalize the deepest existing parent, not the file leaf. Following a
+  // ledger symlink here would defeat O_NOFOLLOW during the later secure open.
+  return join(
+    canonicalizeDevloopPath(dirname(absoluteLedgerPath)),
+    basename(absoluteLedgerPath),
+  );
+}
+
+export function withLockedDevloopLedgerTransaction<T>(
+  ledgerPath: string,
+  callback: (transaction: LockedDevloopLedgerTransaction) => T,
+  lockOptions?: DevloopFileLockOptions,
+): T {
+  const canonicalLedgerPath = canonicalizeDevloopLedgerPath(ledgerPath);
+  ensureLedgerDirectory(canonicalLedgerPath);
+  return withDevloopFileLock(canonicalLedgerPath, () => {
+    let active = true;
+    const transaction: LockedDevloopLedgerTransaction = Object.freeze({
+      append<E extends DevloopLedgerAppendEvent>(event: E): void {
+        if (!active) {
+          throw new Error('Devloop ledger transaction is no longer active');
+        }
+        // Only this capability can reach the unlocked fd append. Keeping it
+        // callback-scoped makes read/validate/append atomic by construction.
+        appendDevloopLedgerEventWithCapability(canonicalLedgerPath, event);
+      },
+    });
+    try {
+      return callback(transaction);
+    } finally {
+      active = false;
+    }
+  }, lockOptions);
 }
 
 export function appendDevloopLedgerEvent<T extends DevloopLedgerAppendEvent>(
   ledgerPath: string,
   event: T,
 ): void {
-  ensureLedgerDirectory(ledgerPath);
-  withDevloopFileLock(ledgerPath, () => {
-    // DecisionStore must validate and append under one lock. This unlocked helper
-    // prevents a nested self-deadlock, but is unsafe unless the caller already
-    // owns the ledger lock for the entire read/validate/append transaction.
-    appendDevloopLedgerEventUnlocked(ledgerPath, event);
+  withLockedDevloopLedgerTransaction(ledgerPath, (transaction) => {
+    transaction.append(event);
   });
 }
 

@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDecisionRequest, type DecisionRequest } from '../devloopd/decisionRequest.js';
+import { createDecisionAnsweredEvent } from '../devloopd/decisionEvents.js';
 import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
 
 function makeRequest(
@@ -304,6 +305,26 @@ describe('DecisionStore', () => {
     expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
   });
 
+  it('requires a terminal newline for every non-empty ledger', () => {
+    const request = makeRequest(repoPath);
+    const store = new DecisionStore(repoPath);
+    store.request(request);
+    writeFileSync(ledgerPath, readFileSync(ledgerPath, 'utf8').trimEnd());
+    const before = readFileSync(ledgerPath, 'utf8');
+
+    expectCode(() => store.answer(answerFor(request), 'user:owner'), 'ledger_malformed');
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
+  });
+
+  it('accepts CRLF-terminated ledger lines', () => {
+    const request = makeRequest(repoPath);
+    const store = new DecisionStore(repoPath);
+    store.request(request);
+    writeFileSync(ledgerPath, readFileSync(ledgerPath, 'utf8').replace(/\n/gu, '\r\n'));
+
+    expect(store.get(request.decisionId)?.status).toBe('open');
+  });
+
   it('fails closed on a primitive JSON ledger line without appending', () => {
     mkdirSync(join(repoPath, '.devloop'), { recursive: true });
     writeFileSync(ledgerPath, '42\n');
@@ -333,12 +354,12 @@ describe('DecisionStore', () => {
     }
   });
 
-  it('refuses to append through a symlinked ledger', () => {
+  it('refuses a ledger replaced with a symlink after store construction', () => {
     const victimPath = join(repoPath, 'victim.jsonl');
+    const store = new DecisionStore(repoPath);
     mkdirSync(join(repoPath, '.devloop'), { recursive: true });
     writeFileSync(victimPath, 'preserve-me');
     symlinkSync(victimPath, ledgerPath);
-    const store = new DecisionStore(repoPath);
 
     expectCode(() => store.request(makeRequest(repoPath)), 'ledger_malformed');
     expect(readFileSync(victimPath, 'utf8')).toBe('preserve-me');
@@ -386,6 +407,64 @@ describe('DecisionStore', () => {
       expect((error as Error).message).not.toContain('do-not-leak');
     }
     expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
+  });
+
+  it('classifies an invalid server-side timestamp as ledger unavailable', () => {
+    const request = makeRequest(repoPath);
+    const store = new DecisionStore(repoPath);
+    store.request(request);
+    const before = readFileSync(ledgerPath, 'utf8');
+
+    expectCode(
+      () => store.answer(answerFor(request), 'user:owner', { now: new Date('invalid') }),
+      'ledger_unavailable',
+    );
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
+  });
+
+  it('rejects duplicate ledger-wide idempotency keys even when retrying the first answer', () => {
+    const request = makeRequest(repoPath);
+    const store = new DecisionStore(repoPath);
+    store.request(request);
+    const first = store.answer(answerFor(request), 'user:owner', {
+      eventId: 'evt_first_duplicate_key',
+    });
+    const conflicting = createDecisionAnsweredEvent({
+      decisionId: request.decisionId,
+      decisionVersion: request.decisionVersion,
+      contextHash: request.contextHash,
+      value: { optionId: 'broad' },
+      rationale: 'Broader behavior.',
+      answeredBy: 'user:owner',
+      idempotencyKey: first.idempotencyKey,
+    }, { eventId: 'evt_second_duplicate_key' });
+    writeFileSync(ledgerPath, `${JSON.stringify(conflicting)}\n`, { flag: 'a' });
+    const before = readFileSync(ledgerPath, 'utf8');
+
+    expectCode(() => store.answer(answerFor(request), 'user:owner'), 'idempotency_conflict');
+    expect(readFileSync(ledgerPath, 'utf8')).toBe(before);
+  });
+
+  it('canonicalizes repository and ledger aliases to one lock identity', () => {
+    const repoAlias = join(otherRepoPath, 'repo-alias');
+    symlinkSync(repoPath, repoAlias, 'dir');
+    mkdirSync(join(repoPath, 'shared-ledger'), { recursive: true });
+    const ledgerDirectoryAlias = join(otherRepoPath, 'ledger-alias');
+    symlinkSync(join(repoPath, 'shared-ledger'), ledgerDirectoryAlias, 'dir');
+    const canonical = new DecisionStore(repoPath, join(repoPath, 'shared-ledger', 'events.jsonl'));
+    const aliased = new DecisionStore(repoAlias, join(ledgerDirectoryAlias, 'events.jsonl'));
+
+    expect(aliased.repoPath).toBe(canonical.repoPath);
+    expect(aliased.ledgerPath).toBe(canonical.ledgerPath);
+    const request = makeRequest(repoPath, { decisionId: 'dec_alias' });
+    canonical.request(request);
+    writeFileSync(`${canonical.ledgerPath}.lock`, '{}');
+    expectCode(
+      () => aliased.request(makeRequest(repoPath, { decisionId: 'dec_alias_2' }), {
+        lock: { timeoutMs: 1, staleMs: 60_000 },
+      }),
+      'ledger_unavailable',
+    );
   });
 
   it('isolates shared ledgers by repository and coexists with generic events', () => {

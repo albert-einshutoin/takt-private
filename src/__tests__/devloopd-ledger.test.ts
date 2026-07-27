@@ -1,11 +1,20 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendDevloopLedgerEvent,
-  appendDevloopLedgerEventUnlocked,
   buildDevloopLedgerEvent,
   exportDevloopLedger,
   formatExportDevloopLedgerReport,
@@ -16,8 +25,8 @@ import {
   reconcileTaktRuns,
   readRawDevloopLedgerEvents,
   renderTimeline,
+  withLockedDevloopLedgerTransaction,
 } from '../devloopd/ledger.js';
-import { withDevloopFileLock } from '../devloopd/stateStore.js';
 
 function writeRunFixture(
   repoPath: string,
@@ -110,17 +119,88 @@ describe('devloopd ledger import and timeline', () => {
     expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
   });
 
-  it('appends through the unlocked helper while the caller holds the ledger lock', () => {
+  it('scopes append capability to the locked ledger transaction', () => {
     const ledgerPath = join(repoPath, '.devloop', 'ledger.jsonl');
     const event = buildDevloopLedgerEvent('devloop_lock_boundary', { sequence: 1 });
+    let appendAfterTransaction: (() => void) | undefined;
 
-    withDevloopFileLock(ledgerPath, () => {
-      appendDevloopLedgerEventUnlocked(ledgerPath, event);
+    withLockedDevloopLedgerTransaction(ledgerPath, (transaction) => {
+      transaction.append(event);
+      appendAfterTransaction = () => transaction.append(
+        buildDevloopLedgerEvent('devloop_lock_boundary', { sequence: 2 }),
+      );
     }, { timeoutMs: 25 });
 
     expect(readRawDevloopLedgerEvents(ledgerPath)).toEqual([event]);
+    expect(() => appendAfterTransaction?.()).toThrow(/transaction/i);
     expect(statSync(join(repoPath, '.devloop')).mode & 0o777).toBe(0o700);
     expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('changes an existing ledger to owner-only before appending', () => {
+    const ledgerDirectory = join(repoPath, '.devloop');
+    const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
+    mkdirSync(ledgerDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(ledgerPath, '');
+    chmodSync(ledgerPath, 0o644);
+    let modeDuringSerialization: number | undefined;
+    const event = {
+      eventId: 'evt_secure_mode',
+      eventType: 'devloop_secure_mode',
+      get sequence(): number {
+        modeDuringSerialization = statSync(ledgerPath).mode & 0o777;
+        return 1;
+      },
+    };
+
+    appendDevloopLedgerEvent(ledgerPath, event);
+
+    expect(modeDuringSerialization).toBe(0o600);
+    expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
+    expect(readRawDevloopLedgerEvents(ledgerPath)).toHaveLength(1);
+  });
+
+  it('rejects hard-linked ledgers without mutating the victim', () => {
+    const ledgerDirectory = join(repoPath, '.devloop');
+    const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
+    const victimPath = join(repoPath, 'victim.jsonl');
+    mkdirSync(ledgerDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(victimPath, 'preserve-me\n');
+    linkSync(victimPath, ledgerPath);
+
+    expect(() => appendDevloopLedgerEvent(
+      ledgerPath,
+      buildDevloopLedgerEvent('devloop_hardlink', { sequence: 1 }),
+    )).toThrow(/regular|link/i);
+    expect(readFileSync(victimPath, 'utf8')).toBe('preserve-me\n');
+  });
+
+  it('rejects a symlinked ledger at secure open without mutating the victim', () => {
+    const ledgerDirectory = join(repoPath, '.devloop');
+    const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
+    const victimPath = join(repoPath, 'victim.jsonl');
+    mkdirSync(ledgerDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(victimPath, 'preserve-me\n');
+    symlinkSync(victimPath, ledgerPath);
+
+    expect(() => appendDevloopLedgerEvent(
+      ledgerPath,
+      buildDevloopLedgerEvent('devloop_symlink', { sequence: 1 }),
+    )).toThrow();
+    expect(readFileSync(victimPath, 'utf8')).toBe('preserve-me\n');
+  });
+
+  it('rejects a group-writable ledger parent directory', () => {
+    const ledgerDirectory = join(repoPath, '.devloop');
+    const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
+    mkdirSync(ledgerDirectory, { recursive: true });
+    chmodSync(ledgerDirectory, 0o770);
+
+    expect(() => appendDevloopLedgerEvent(
+      ledgerPath,
+      buildDevloopLedgerEvent('devloop_unsafe_parent', { sequence: 1 }),
+    )).toThrow(/directory/i);
+    expect(existsSync(ledgerPath)).toBe(false);
   });
 
   it('imports the latest run when no run slug is specified', () => {

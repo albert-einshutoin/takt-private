@@ -5,6 +5,7 @@ import {
   statSync,
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { ZodError } from 'zod/v4';
 import {
   createDecisionAnsweredEvent,
   createDecisionRequestedEvent,
@@ -20,13 +21,12 @@ import {
 } from './decisionEvents.js';
 import { DecisionRequestSchema, type DecisionRequest } from './decisionRequest.js';
 import {
-  appendDevloopLedgerEventUnlocked,
+  canonicalizeDevloopLedgerPath,
+  canonicalizeDevloopPath,
   resolveDevloopLedgerPath,
+  withLockedDevloopLedgerTransaction,
 } from './ledger.js';
-import {
-  withDevloopFileLock,
-  type DevloopFileLockOptions,
-} from './stateStore.js';
+import { type DevloopFileLockOptions } from './stateStore.js';
 
 const MAX_LEDGER_BYTES = 64 * 1024 * 1024;
 const MAX_LEDGER_LINE_BYTES = 1024 * 1024;
@@ -160,6 +160,7 @@ function parseStrictDecisionLedger(ledgerPath: string): StrictDecisionLedger {
 
   if (statSync(ledgerPath).size > MAX_LEDGER_BYTES) fail('ledger_malformed');
   const content = readFileSync(ledgerPath, 'utf8');
+  if (content.length > 0 && !content.endsWith('\n')) fail('ledger_malformed');
   const events: unknown[] = [];
 
   for (const rawLine of content.split('\n')) {
@@ -196,7 +197,7 @@ function sameRequest(left: DecisionRequest, right: DecisionRequest): boolean {
 }
 
 function projectionBelongsToRepo(projection: DecisionProjection, repoPath: string): boolean {
-  return resolve(projection.request.subject.repoPath) === repoPath;
+  return canonicalizeDevloopPath(projection.request.subject.repoPath) === repoPath;
 }
 
 function validateAnswerValue(request: DecisionRequest, value: DecisionAnswerValue): void {
@@ -251,8 +252,10 @@ export class DecisionStore {
   readonly ledgerPath: string;
 
   constructor(repoPath: string, ledgerPath?: string) {
-    this.repoPath = resolve(repoPath);
-    this.ledgerPath = resolveDevloopLedgerPath(this.repoPath, ledgerPath);
+    this.repoPath = canonicalizeDevloopPath(resolve(repoPath));
+    this.ledgerPath = canonicalizeDevloopLedgerPath(
+      resolveDevloopLedgerPath(this.repoPath, ledgerPath),
+    );
   }
 
   readStrict(): StrictDecisionLedger {
@@ -284,7 +287,7 @@ export class DecisionStore {
     options: DecisionStoreWriteOptions = {},
   ): DecisionRequestedEvent {
     return atStoreBoundary(() =>
-      withDevloopFileLock(this.ledgerPath, () => {
+      withLockedDevloopLedgerTransaction(this.ledgerPath, (transaction) => {
         const normalized = this.normalizeRequest(request);
         const strict = parseStrictDecisionLedger(this.ledgerPath);
         if (strict.fold.fatal) fail('ledger_incompatible');
@@ -305,7 +308,7 @@ export class DecisionStore {
         }
 
         const event = createDecisionRequestedEvent(normalized, options);
-        appendDevloopLedgerEventUnlocked(this.ledgerPath, event);
+        transaction.append(event);
         return event;
       }, options.lock),
     );
@@ -325,7 +328,9 @@ export class DecisionStore {
     }
     if (!CONTEXT_HASH_PATTERN.test(input.expectedContextHash)) fail('stale_context');
 
-    return atStoreBoundary(() => withDevloopFileLock(this.ledgerPath, () => {
+    return atStoreBoundary(() => withLockedDevloopLedgerTransaction(
+      this.ledgerPath,
+      (transaction) => {
       const strict = parseStrictDecisionLedger(this.ledgerPath);
       if (strict.fold.fatal) fail('ledger_incompatible');
       if (strict.fold.quarantinedDecisionIds.includes(input.decisionId)) {
@@ -353,8 +358,15 @@ export class DecisionStore {
           answeredBy: actor,
           idempotencyKey: input.idempotencyKey,
         }, options);
-      } catch {
-        if (projection.request.answerRequirements.rationaleRequired) {
+      } catch (error) {
+        if (!(error instanceof ZodError)) throw error;
+        const rationaleIsInvalid = error.issues.some(
+          (issue) => issue.path[0] === 'rationale',
+        );
+        if (
+          rationaleIsInvalid
+          && projection.request.answerRequirements.rationaleRequired
+        ) {
           fail('rationale_required');
         }
         // The current event schema requires persisted rationale even when the
@@ -368,22 +380,25 @@ export class DecisionStore {
       validateAnswerValue(projection.request, candidate.value);
 
       const parsedEvents = parsedDecisionEvents(strict.events);
-      const persistedWithKey = parsedEvents.find(
+      const persistedWithKey = parsedEvents.filter(
         (event): event is DecisionAnsweredEvent =>
           event.eventType === 'devloop_decision_answered'
           && event.idempotencyKey === candidate.idempotencyKey,
       );
-      if (persistedWithKey !== undefined) {
+      if (persistedWithKey.length > 0) {
+        const persisted = persistedWithKey[0];
         if (
-          projection.answer?.eventId === persistedWithKey.eventId
-          && persistedWithKey.decisionId === candidate.decisionId
-          && persistedWithKey.decisionVersion === candidate.decisionVersion
-          && persistedWithKey.contextHash === candidate.contextHash
-          && sameValue(persistedWithKey.value, candidate.value)
-          && persistedWithKey.rationale === candidate.rationale
-          && persistedWithKey.answeredBy === candidate.answeredBy
+          persistedWithKey.length === 1
+          && persisted !== undefined
+          && projection.answer?.eventId === persisted.eventId
+          && persisted.decisionId === candidate.decisionId
+          && persisted.decisionVersion === candidate.decisionVersion
+          && persisted.contextHash === candidate.contextHash
+          && sameValue(persisted.value, candidate.value)
+          && persisted.rationale === candidate.rationale
+          && persisted.answeredBy === candidate.answeredBy
         ) {
-          return persistedWithKey;
+          return persisted;
         }
         fail('idempotency_conflict');
       }
@@ -413,9 +428,11 @@ export class DecisionStore {
       }
       if (projection.status !== 'open') fail('decision_not_open');
 
-      appendDevloopLedgerEventUnlocked(this.ledgerPath, candidate);
+      transaction.append(candidate);
       return candidate;
-    }, options.lock));
+      },
+      options.lock,
+    ));
   }
 
   private normalizeRequest(request: DecisionRequest): DecisionRequest {
@@ -425,7 +442,7 @@ export class DecisionStore {
         ...request,
         subject: {
           ...request.subject,
-          repoPath: resolve(request.subject.repoPath),
+          repoPath: canonicalizeDevloopPath(request.subject.repoPath),
         },
       });
     } catch {
