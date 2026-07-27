@@ -592,15 +592,11 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
   for (const rawEvent of events) {
     const eventId = rawString(rawEvent, 'eventId', '[unknown-event]') ?? '[unknown-event]';
     const decisionId = rawString(rawEvent, 'decisionId');
-    if (seenEventIds.has(eventId)) {
-      issues.push(issueFor({ eventId, decisionId }, 'duplicate_event_id', 'Duplicate event ID'));
-      continue;
-    }
-    seenEventIds.add(eventId);
 
     if (
       rawEvent !== null
       && typeof rawEvent === 'object'
+      && Object.hasOwn(rawEvent, 'schemaVersion')
       && Reflect.get(rawEvent, 'schemaVersion') !== 1
     ) {
       issues.push(issueFor(
@@ -621,6 +617,11 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
       continue;
     }
     const event = parsed.data;
+    if (seenEventIds.has(event.eventId)) {
+      issues.push(issueFor(event, 'duplicate_event_id', 'Duplicate event ID'));
+      continue;
+    }
+    seenEventIds.add(event.eventId);
 
     if (event.eventType === 'devloop_decision_requested') {
       if (projections.has(event.decisionId)) {

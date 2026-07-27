@@ -226,6 +226,31 @@ describe('decision event fold', () => {
     })]);
   });
 
+  it('classifies malformed payloads without schema versions as invalid events independently', () => {
+    const result = foldDecisionEvents([
+      {},
+      null,
+      'bad',
+      {
+        schemaVersion: 1,
+        eventId: 'evt_missing_metadata',
+        eventType: 'devloop_decision_answered',
+      },
+    ]);
+
+    expect(result.issues).toHaveLength(4);
+    expect(result.issues.map((issue) => issue.code)).toEqual([
+      'invalid_event',
+      'invalid_event',
+      'invalid_event',
+      'invalid_event',
+    ]);
+    expect(result.issues[3]).toMatchObject({
+      eventId: 'evt_missing_metadata',
+      code: 'invalid_event',
+    });
+  });
+
   it('reports duplicate event IDs and applies an event only once', () => {
     const result = foldDecisionEvents([requested, answered, answered]);
 
@@ -310,20 +335,109 @@ describe('decision event fold', () => {
     });
   });
 
-  it('supports deterministic event ID and timestamp injection in every builder path', () => {
-    const event = createDecisionAnsweredEvent({
-      ...identity,
-      value: { optionId: 'preserve' },
-      rationale: 'Keep compatibility.',
-      answeredBy: 'user:owner',
-      idempotencyKey: 'answer-deterministic',
-    }, {
-      eventId: 'evt_deterministic',
-      now: new Date('2026-07-27T03:00:00.000Z'),
-    });
+  it.each([
+    [
+      'requested',
+      () => createDecisionRequestedEvent(request, {
+        eventId: 'evt_deterministic',
+        now: new Date('2026-07-27T03:00:00.000Z'),
+      }),
+    ],
+    [
+      'answered',
+      () => createDecisionAnsweredEvent({
+        ...identity,
+        value: { optionId: 'preserve' },
+        rationale: 'Keep compatibility.',
+        answeredBy: 'user:owner',
+        idempotencyKey: 'answer-deterministic',
+      }, {
+        eventId: 'evt_deterministic',
+        now: new Date('2026-07-27T03:00:00.000Z'),
+      }),
+    ],
+    [
+      'answer_superseded',
+      () => createDecisionAnswerSupersededEvent({
+        ...identity,
+        supersededAnswerEventId: answered.eventId,
+        value: { optionId: 'break' },
+        rationale: 'Use the migration path.',
+        answeredBy: 'user:owner',
+        idempotencyKey: 'answer-deterministic-v2',
+      }, {
+        eventId: 'evt_deterministic',
+        now: new Date('2026-07-27T03:00:00.000Z'),
+      }),
+    ],
+    [
+      'apply_started',
+      () => createDecisionApplyStartedEvent({
+        ...identity,
+        answerEventId: answered.eventId,
+        sanitizedSummary: 'Applying.',
+      }, {
+        eventId: 'evt_deterministic',
+        now: new Date('2026-07-27T03:00:00.000Z'),
+      }),
+    ],
+    [
+      'applied',
+      () => createDecisionAppliedEvent({
+        ...identity,
+        answerEventId: answered.eventId,
+        sanitizedSummary: 'Applied.',
+      }, {
+        eventId: 'evt_deterministic',
+        now: new Date('2026-07-27T03:00:00.000Z'),
+      }),
+    ],
+    [
+      'apply_failed',
+      () => createDecisionApplyFailedEvent({
+        ...identity,
+        answerEventId: answered.eventId,
+        errorCode: 'APPLY_FAILED',
+        sanitizedError: 'Application failed.',
+      }, {
+        eventId: 'evt_deterministic',
+        now: new Date('2026-07-27T03:00:00.000Z'),
+      }),
+    ],
+    [
+      'revalidation_required',
+      () => createDecisionRevalidationRequiredEvent({
+        ...identity,
+        answerEventId: answered.eventId,
+        reasonCode: 'CONTEXT_CHANGED',
+        sanitizedSummary: 'Context changed.',
+      }, {
+        eventId: 'evt_deterministic',
+        now: new Date('2026-07-27T03:00:00.000Z'),
+      }),
+    ],
+    [
+      'github_sync',
+      () => createDecisionGithubSyncEvent({
+        ...identity,
+        target: {
+          kind: 'issue',
+          repository: 'albert-einshutoin/takt-private',
+          number: 42,
+        },
+        status: 'pending',
+      }, {
+        eventId: 'evt_deterministic',
+        now: new Date('2026-07-27T03:00:00.000Z'),
+      }),
+    ],
+  ] as const)('supports deterministic injection for the %s builder', (_name, buildEvent) => {
+    const event = buildEvent();
 
-    expect(event.eventId).toBe('evt_deterministic');
-    expect(event.occurredAt).toBe('2026-07-27T03:00:00.000Z');
+    expect(event).toMatchObject({
+      eventId: 'evt_deterministic',
+      occurredAt: '2026-07-27T03:00:00.000Z',
+    });
     expect(parseDecisionEvent(event).success).toBe(true);
     expect(DecisionEventSchema.parse(event)).toEqual(event);
   });
