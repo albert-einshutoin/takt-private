@@ -2,8 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod/v4';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import { stripAnsi } from '../shared/utils/text.js';
+import type { DevloopAutomationStage } from './prAutomation.js';
 
 const MAX_PUBLIC_TEXT_LENGTH = 4_000;
+const FILE_URL_LOCAL_PATH_PATTERN = /\bfile:\/\/\/[^\s,;)"']+/giu;
+const CWD_LOCAL_PATH_PATTERN = /\bcwd:\s*(?:\/[^\s,;)"']*|[A-Za-z]:[\\/][^\s,;)"']*)/giu;
 const LOCAL_PATH_PATTERN = /(^|[\s("'=])(?:\/(?!\/)[^\s,;)"']*|[A-Za-z]:[\\/][^\s,;)"']*)/gu;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/gu;
@@ -15,6 +18,8 @@ const PublicTextSchema = z.string().max(MAX_PUBLIC_TEXT_LENGTH).transform((value
     .replace(FORMAT_CONTROL_PATTERN, '');
 
   return sanitizeSensitiveText(controlsRemoved)
+    .replace(FILE_URL_LOCAL_PATH_PATTERN, '[LOCAL_PATH]')
+    .replace(CWD_LOCAL_PATH_PATTERN, 'cwd:[LOCAL_PATH]')
     .replace(LOCAL_PATH_PATTERN, '$1[LOCAL_PATH]')
     .replace(/\s+/gu, ' ')
     .trim();
@@ -28,10 +33,14 @@ const RepositorySchema = z.string()
   .min(3)
   .max(200)
   .regex(/^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u);
-const StageSchema = z.string()
-  .min(1)
-  .max(64)
-  .regex(/^[a-z][a-z0-9_]*$/u);
+const DEVLOOP_AUTOMATION_STAGE_VALUES = [
+  'issue-scout',
+  'issue-to-pr',
+  'pr-review',
+  'review-fix',
+  'pr-merge',
+] as const satisfies readonly DevloopAutomationStage[];
+const StageSchema = z.enum(DEVLOOP_AUTOMATION_STAGE_VALUES);
 
 function containsUnsafeControl(value: string): boolean {
   for (const character of value) {
@@ -280,13 +289,20 @@ const DecisionRequestUnionSchema = z.discriminatedUnion('kind', [
   ChoiceDecisionRequestSchema,
   TextDecisionRequestSchema,
 ]);
-export const DecisionRequestSchema = DecisionRequestUnionSchema.superRefine((value, context) => {
+const DecisionRequestValidationSchema = DecisionRequestUnionSchema.superRefine((value, context) => {
   validateDecisionSafetyContext(value, context);
   if (value.decisionVersion !== value.resumeGuard.expectedDecisionVersion) {
     context.addIssue({
       code: 'custom',
       path: ['decisionVersion'],
       message: 'decisionVersion must match resumeGuard.expectedDecisionVersion',
+    });
+  }
+  if (value.contextHash !== hashDecisionContext(value)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['contextHash'],
+      message: 'contextHash must match the normalized semantic decision context',
     });
   }
 });
@@ -299,9 +315,11 @@ type DeepReadonly<T> = T extends (...args: never[]) => unknown
       ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
       : T;
 
-// The factory returns an immutable domain value even though direct schema parsing
-// intentionally remains a validation-only operation.
-export type DecisionRequest = DeepReadonly<z.infer<typeof DecisionRequestSchema>>;
+// Persisted requests and newly created requests share one immutable public parse path,
+// so callers cannot mutate a validated context without invalidating its hash contract.
+export const DecisionRequestSchema = DecisionRequestValidationSchema
+  .transform((value) => deepFreeze(value));
+export type DecisionRequest = z.output<typeof DecisionRequestSchema>;
 
 const CreateDecisionRequestCommonShape = {
   subject: DecisionSubjectSchema,
@@ -359,12 +377,30 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
-function hashDecisionContext(input: z.output<typeof CreateDecisionRequestInputSchema>): string {
+type SemanticDecisionContext = {
+  subject: DecisionSubject;
+  question: string;
+  why: DecisionWhy;
+  how: DecisionHow;
+  answerRequirements: DecisionAnswerRequirements;
+  resumeGuard: DecisionResumeGuard;
+} & (
+  | { kind: 'text' }
+  | { kind: 'yes_no' | 'choice'; options: readonly DecisionOption[] }
+);
+
+function hashDecisionContext(input: SemanticDecisionContext): string {
   const publicSubject = { ...input.subject };
   Reflect.deleteProperty(publicSubject, 'repoPath');
   const canonicalContext = {
-    ...input,
     subject: publicSubject,
+    question: input.question,
+    why: input.why,
+    how: input.how,
+    kind: input.kind,
+    ...(input.kind === 'text' ? {} : { options: input.options }),
+    answerRequirements: input.answerRequirements,
+    resumeGuard: input.resumeGuard,
   };
 
   // Stable semantic hashes deduplicate repeated scheduler requests without
@@ -403,5 +439,5 @@ export function createDecisionRequest(
     createdAt: (options.now ?? new Date()).toISOString(),
   };
 
-  return deepFreeze(DecisionRequestSchema.parse(request));
+  return DecisionRequestSchema.parse(request);
 }

@@ -205,7 +205,13 @@ describe('createDecisionRequest', () => {
     })).toThrow();
   });
 
-  it('accepts the registered PR automation stage guard with typed identifiers', () => {
+  it.each([
+    'issue-scout',
+    'issue-to-pr',
+    'pr-review',
+    'review-fix',
+    'pr-merge',
+  ] as const)('accepts the registered %s PR automation stage', (stage) => {
     const request = createDecisionRequest({
       subject: { ...subject, prNumber: 108 },
       why,
@@ -234,12 +240,31 @@ describe('createDecisionRequest', () => {
         expectedDecisionVersion: 1,
         repository: 'albert-einshutoin/takt-private',
         prNumber: 108,
-        stage: 'merge_queue',
+        stage,
         expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
       },
     });
 
     expect(DecisionRequestSchema.parse(request).resumeGuard.strategy).toBe('pr_automation_stage');
+  });
+
+  it('rejects automation-state labels that are not PR automation stages', () => {
+    expect(() => createDecisionRequest({
+      subject: { ...subject, prNumber: 108 },
+      why,
+      how,
+      kind: 'text',
+      question: 'Choose the next PR automation action.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'pr_automation_stage',
+        expectedDecisionVersion: 1,
+        repository: 'albert-einshutoin/takt-private',
+        prNumber: 108,
+        stage: 'merge_queue',
+        expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
+      },
+    } as never)).toThrow();
   });
 
   it('rejects a request whose decision version differs from its resume guard', () => {
@@ -297,7 +322,7 @@ describe('createDecisionRequest', () => {
         expectedDecisionVersion: 1,
         repository: 'albert-einshutoin/takt-private',
         prNumber: 108,
-        stage: 'merge_queue',
+        stage: 'pr-merge',
         expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
       },
     });
@@ -308,7 +333,7 @@ describe('createDecisionRequest', () => {
     })).toThrow(/repository|prNumber/i);
   });
 
-  it('deep-freezes generated decisions while schema parsing remains a validation-only operation', () => {
+  it('deep-freezes generated decisions and public schema parse results', () => {
     const request = createDecisionRequest({
       subject,
       why,
@@ -345,8 +370,41 @@ describe('createDecisionRequest', () => {
       (request.options[0] as unknown as { title: string }).title = 'Mutated';
     }).toThrow(TypeError);
 
-    const parsed = DecisionRequestSchema.parse(request);
-    expect(Object.isFrozen(parsed)).toBe(false);
+    const parsed = DecisionRequestSchema.parse(JSON.parse(JSON.stringify(request)));
+    const originalContextHash = parsed.contextHash;
+
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed.subject)).toBe(true);
+    expect(Object.isFrozen(parsed.options)).toBe(true);
+    expect(Object.isFrozen(parsed.options[0])).toBe(true);
+    expect(() => {
+      (parsed as unknown as { contextHash: string }).contextHash = '0'.repeat(64);
+    }).toThrow(TypeError);
+    expect(() => {
+      (parsed.options[0] as unknown as { title: string }).title = 'Mutated';
+    }).toThrow(TypeError);
+    expect(parsed.contextHash).toBe(originalContextHash);
+    expect(() => DecisionRequestSchema.parse({
+      ...JSON.parse(JSON.stringify(request)),
+      contextHash: '0'.repeat(64),
+    })).toThrow(/contextHash/i);
+  });
+
+  it('rejects persisted requests whose semantic context no longer matches the hash', () => {
+    const request = createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    });
+
+    expect(() => DecisionRequestSchema.parse({
+      ...JSON.parse(JSON.stringify(request)),
+      question: 'A different semantic question.',
+    })).toThrow(/contextHash/i);
   });
 
   it('redacts POSIX and Windows absolute paths without changing URLs', () => {
@@ -362,6 +420,26 @@ describe('createDecisionRequest', () => {
 
     expect(request.question).toBe(
       'Review [LOCAL_PATH] and [LOCAL_PATH], keep https://example.com/docs.',
+    );
+  });
+
+  it('redacts file URLs and cwd-prefixed local paths while preserving public URLs', () => {
+    const request = createDecisionRequest({
+      subject,
+      why,
+      how,
+      kind: 'text',
+      question: [
+        'Read file:///root/.ssh/id_rsa',
+        'from cwd:/root/.ssh/id_rsa',
+        'and keep https://example.com/docs.',
+      ].join(' '),
+      answerRequirements,
+      resumeGuard: directRunGuard,
+    });
+
+    expect(request.question).toBe(
+      'Read [LOCAL_PATH] from cwd:[LOCAL_PATH] and keep https://example.com/docs.',
     );
   });
 
