@@ -87,19 +87,16 @@ function buildCodexEnvironment(
 
 // OpenAI の安全フィルタ拒否は「正常終了したターンの本文全体が拒否文」という形で届き、
 // AgentResponse.error に乗らないままルール評価に流れて不一致 abort を起こす。
-// 拒否文を引用しただけの長い応答を誤検出しないよう、本文が短い場合のみ照合する。
-const CODEX_SAFETY_REFUSAL_PATTERNS = [
-  'flagged for possible cybersecurity risk',
-  'trusted access for cyber',
-];
+// 分析中の引用を誤検出しないよう、短い本文が既知の拒否文で始まる場合だけ照合する。
 const CODEX_SAFETY_REFUSAL_MAX_CONTENT_LENGTH = 600;
+const CODEX_SAFETY_REFUSAL_PREFIX =
+  /^(?:(?:this|the|your)\s+)?request was flagged for possible cybersecurity risk\b/i;
 
 function isCodexSafetyRefusal(content: string): boolean {
   if (content.length === 0 || content.length > CODEX_SAFETY_REFUSAL_MAX_CONTENT_LENGTH) {
     return false;
   }
-  const lower = content.toLowerCase();
-  return CODEX_SAFETY_REFUSAL_PATTERNS.some((pattern) => lower.includes(pattern));
+  return CODEX_SAFETY_REFUSAL_PREFIX.test(content.trimStart());
 }
 
 function toNumber(value: unknown): number | undefined {
@@ -143,6 +140,39 @@ function extractProviderUsageFromTurnCompleted(event: CodexEvent): ProviderUsage
   }
 
   return providerUsage;
+}
+
+function mergeProviderUsage(
+  accumulated: ProviderUsageSnapshot | undefined,
+  current: ProviderUsageSnapshot,
+): ProviderUsageSnapshot {
+  if (!accumulated) {
+    return { ...current };
+  }
+
+  const merged: ProviderUsageSnapshot = {
+    usageMissing: accumulated.usageMissing || current.usageMissing,
+  };
+  const tokenFields = [
+    'inputTokens',
+    'outputTokens',
+    'totalTokens',
+    'cachedInputTokens',
+    'cacheCreationInputTokens',
+    'cacheReadInputTokens',
+  ] as const;
+  for (const field of tokenFields) {
+    const left = accumulated[field];
+    const right = current[field];
+    if (left !== undefined || right !== undefined) {
+      merged[field] = (left ?? 0) + (right ?? 0);
+    }
+  }
+  const reason = accumulated.reason ?? current.reason;
+  if (reason !== undefined) {
+    merged.reason = reason;
+  }
+  return merged;
 }
 
 /**
@@ -339,6 +369,7 @@ export class CodexClient {
     let standardRetryCount = 0;
     let timeoutRetryCount = 0;
     let refusalRetryCount = 0;
+    let accumulatedProviderUsage: ProviderUsageSnapshot | undefined;
     let skillConfig: CodexOptions['config'] | undefined;
     const codexEnvironment = buildCodexEnvironment(options.childProcessEnv);
     try {
@@ -446,6 +477,7 @@ export class CodexClient {
           if (event.type === 'turn.completed') {
             sawTurnCompleted = true;
             providerUsage = extractProviderUsageFromTurnCompleted(event);
+            accumulatedProviderUsage = mergeProviderUsage(accumulatedProviderUsage, providerUsage);
             continue;
           }
 
@@ -616,7 +648,7 @@ export class CodexClient {
           timestamp: new Date(),
           sessionId: currentThreadId,
           structuredOutput,
-          providerUsage: providerUsage ?? {
+          providerUsage: accumulatedProviderUsage ?? providerUsage ?? {
             usageMissing: true,
             reason: USAGE_MISSING_REASONS.NOT_AVAILABLE,
           },

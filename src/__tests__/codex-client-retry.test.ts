@@ -509,7 +509,7 @@ describe('CodexClient retry', () => {
         events: [
           { type: 'thread.started', thread_id: 'thread-1' },
           { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message', text: 'This request was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber' } },
-          { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 2 } },
+          { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 2, cached_input_tokens: 1 } },
         ],
       },
       {
@@ -517,7 +517,7 @@ describe('CodexClient retry', () => {
         events: [
           { type: 'thread.started', thread_id: 'thread-2' },
           { type: 'item.completed', item: { id: 'msg-2', type: 'agent_message', text: 'review completed' } },
-          { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 2 } },
+          { type: 'turn.completed', usage: { input_tokens: 3, output_tokens: 4, cached_input_tokens: 2 } },
         ],
       },
     ];
@@ -533,6 +533,13 @@ describe('CodexClient retry', () => {
     expect(resumeThreadCalls).toHaveLength(0);
     expect(result.status).toBe('done');
     expect(result.content).toBe('review completed');
+    expect(result.providerUsage).toEqual({
+      inputTokens: 4,
+      outputTokens: 6,
+      totalTokens: 10,
+      cachedInputTokens: 3,
+      usageMissing: false,
+    });
   });
 
   it('渡された既存セッションは安全フィルタ拒否の retry でも破棄しない', async () => {
@@ -659,6 +666,27 @@ describe('CodexClient retry', () => {
 
   it('拒否文を引用しただけの長い正常応答は拒否として扱わない', async () => {
     const quoted = `レビュー結果: 前回の実行は "flagged for possible cybersecurity risk" という拒否で失敗していました。${'この点を踏まえた分析と該当箇所の検証結果を以下に記載します。'.repeat(25)}`;
+    runPlans = [
+      {
+        type: 'events',
+        events: [
+          { type: 'thread.started', thread_id: 'thread-1' },
+          { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message', text: quoted } },
+          { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 2 } },
+        ],
+      },
+    ];
+
+    const client = new CodexClient();
+    const result = await client.call('coder', 'prompt', { cwd: '/tmp' });
+
+    expect(startThreadCalls).toHaveLength(1);
+    expect(result.status).toBe('done');
+    expect(result.content).toBe(quoted);
+  });
+
+  it('拒否フレーズを分析として引用した短い通常文は拒否として扱わない', async () => {
+    const quoted = 'レビュー結果: "flagged for possible cybersecurity risk" は前回応答の引用です。実装上の問題はありません。';
     runPlans = [
       {
         type: 'events',
