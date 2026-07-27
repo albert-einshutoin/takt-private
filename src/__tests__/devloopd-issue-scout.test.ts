@@ -410,6 +410,83 @@ describe('devloopd issue-scout', () => {
     expect(ledger).not.toContain(secretTail);
   });
 
+  it('flags omitted later report records even when the first record looks safe', async () => {
+    const secretTail = 'second-record-auth-public-api-secret';
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(
+      join(repoPath, '.devloop', 'dependency-report.json'),
+      JSON.stringify([
+        {
+          title: 'Apply safe patch metadata',
+          summary: 'Small patch dependency refresh',
+          currentVersion: '1.2.3',
+          targetVersion: '1.2.4',
+          updateKind: 'patch',
+        },
+        {
+          title: 'Breaking auth migration',
+          summary: `Change public API auth policy ${secretTail}`,
+          updateKind: 'breaking',
+        },
+      ]),
+      'utf8',
+    );
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['dependency_report'],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const candidate = report.observations[0]?.candidates[0];
+    const ledger = readFileSync(resolveDevloopLedgerPath(repoPath, undefined), 'utf8');
+
+    expect(candidate).toMatchObject({
+      policyCategory: 'human_policy',
+      riskBucket: 'high',
+    });
+    expect(candidate?.laneEvidence).toContain('sourceEvidence=truncated_or_omitted');
+    expect(report.selected).toHaveLength(0);
+    expect(report.skipped[0]?.stopRule).toBe('Unsafe or too broad');
+    expect(ledger).not.toContain(secretTail);
+    expect(ledger).not.toContain(createHash('sha256').update(secretTail).digest('hex'));
+  });
+
+  it('keeps a single-record report array on the normal patch path', async () => {
+    mkdirSync(join(repoPath, '.devloop'), { recursive: true });
+    writeFileSync(
+      join(repoPath, '.devloop', 'dependency-report.json'),
+      JSON.stringify([{
+        title: 'Apply one safe patch',
+        summary: 'Small patch dependency refresh',
+        currentVersion: '1.2.3',
+        targetVersion: '1.2.4',
+        updateKind: 'patch',
+      }]),
+      'utf8',
+    );
+
+    const report = await runIssueScout({
+      repoPath,
+      runner: runner(),
+      sourceIds: ['dependency_report'],
+      existingWork: [],
+      dryRun: true,
+      now: new Date('2026-07-28T00:00:00.000Z'),
+    });
+    const candidate = report.observations[0]?.candidates[0];
+
+    expect(candidate).toMatchObject({
+      policyCategory: 'auto_recursive',
+      riskBucket: 'medium',
+    });
+    expect(candidate?.laneEvidence).not.toContain('sourceEvidence=truncated_or_omitted');
+    expect(report.selected).toHaveLength(1);
+    expect(report.skipped).toHaveLength(0);
+  });
+
   it('escalates truncated ledger fields without persisting their raw tail', async () => {
     const secretTail = 'ledger-auth-migration-public-api-tail';
     const ledgerPath = resolveDevloopLedgerPath(repoPath, undefined);

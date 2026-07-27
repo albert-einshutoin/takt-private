@@ -531,17 +531,43 @@ function readStringArrayField(
   return { values: unique(values), incomplete };
 }
 
-function parseReportRecord(raw: string): Record<string, unknown> | undefined {
+interface ParsedReportRecord {
+  record?: Record<string, unknown>;
+  incomplete: boolean;
+}
+
+const MAX_REPORT_ROOT_ARRAY_SCAN = 50;
+
+function parseReportRecord(raw: string): ParsedReportRecord {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (isRecord(parsed)) return parsed;
+    if (isRecord(parsed)) return { record: parsed, incomplete: false };
     if (Array.isArray(parsed)) {
-      return parsed.find(isRecord);
+      const scanCount = Math.min(parsed.length, MAX_REPORT_ROOT_ARRAY_SCAN);
+      let firstRecord: Record<string, unknown> | undefined;
+      let recordCount = 0;
+      let nonRecordSeen = false;
+      for (let index = 0; index < scanCount; index += 1) {
+        const item = parsed[index];
+        if (isRecord(item)) {
+          firstRecord ??= item;
+          recordCount += 1;
+        } else {
+          nonRecordSeen = true;
+        }
+      }
+      const incomplete = parsed.length > scanCount
+        || nonRecordSeen
+        || recordCount > 1;
+      return {
+        ...(firstRecord === undefined ? {} : { record: firstRecord }),
+        incomplete,
+      };
     }
   } catch {
-    return undefined;
+    return { incomplete: true };
   }
-  return undefined;
+  return { incomplete: true };
 }
 
 function normalizeDependencyUpdateKind(value: string | undefined): DependencyUpdateKind | undefined {
@@ -1070,10 +1096,12 @@ function readReportSource(sourceId: Extract<IssueScoutSourceId, 'dependency_repo
         });
       }
       const rawContent = readFileSync(filePath, 'utf-8');
-      const record = parseReportRecord(rawContent);
+      const parsedReport = parseReportRecord(rawContent);
+      const record = parsedReport.record;
       const boundedRawSummary = boundSourceTextWithStatus(rawContent);
       const sanitizedRawSummary = sanitizeText(boundedRawSummary.text);
-      let sourceEvidenceIncomplete = record === undefined && boundedRawSummary.truncated;
+      let sourceEvidenceIncomplete = parsedReport.incomplete
+        || (record === undefined && boundedRawSummary.truncated);
       const field = (names: readonly string[]): string | undefined => {
         const result = readStringField(record, names);
         sourceEvidenceIncomplete ||= result.incomplete;
