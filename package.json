@@ -74,6 +74,19 @@
   "engines": {
     "node": ">=20.6.0"
   },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^20.19.0 || ^22.13.0 || >=24",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "10.9.2",
+      "onFail": "error"
+    }
+  },
+  "packageManager": "npm@10.9.2",
   "files": [
     "dist/",
     "bin/",

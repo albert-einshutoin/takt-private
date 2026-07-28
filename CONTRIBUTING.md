@@ -6,6 +6,11 @@ Thank you for your interest in contributing to TAKT! This project uses TAKT's re
 
 ## Development Setup
 
+Source development is standardized on **Node.js 22.13.1** and **npm 10.9.2**.
+The published package continues to support Node.js **20.6.0 and newer**; the
+newer development baseline is required by linting and other contributor tools,
+not by TAKT's product runtime.
+
 ```bash
 git clone https://github.com/your-username/takt.git
 cd takt
