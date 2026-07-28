@@ -1,6 +1,7 @@
 import { accessSync, constants } from 'node:fs';
 import { delimiter, extname, join } from 'node:path';
-import { crossSpawn, getErrorMessage } from '../shared/utils/index.js';
+import { StringDecoder } from 'node:string_decoder';
+import { crossSpawn } from '../shared/utils/index.js';
 
 export interface DevloopCommandResult {
   exitCode: number;
@@ -13,7 +14,13 @@ export interface DevloopCommandRunner {
   exec(
     command: string,
     args: readonly string[],
-    options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdin?: string; timeoutMs?: number },
+    options?: {
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+      stdin?: string;
+      timeoutMs?: number;
+      maxOutputBytes?: number;
+    },
   ): Promise<DevloopCommandResult>;
 }
 
@@ -30,11 +37,21 @@ export function githubMetadataExecOptions(options: {
   env: NodeJS.ProcessEnv;
   stdin?: string;
   timeoutMs?: number;
-}): { cwd: string; env: NodeJS.ProcessEnv; stdin?: string; timeoutMs: number } {
+  maxOutputBytes?: number;
+}): {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  stdin?: string;
+  timeoutMs: number;
+  maxOutputBytes?: number;
+} {
   return {
     cwd: options.cwd,
     env: options.env,
     ...(options.stdin !== undefined ? { stdin: options.stdin } : {}),
+    ...(options.maxOutputBytes === undefined
+      ? {}
+      : { maxOutputBytes: options.maxOutputBytes }),
     timeoutMs: options.timeoutMs ?? resolveGithubMetadataTimeoutMs(options.env),
   };
 }
@@ -96,47 +113,129 @@ export function createDefaultDevloopCommandRunner(): DevloopCommandRunner {
         let stdout = '';
         let stderr = '';
         let settled = false;
+        let closed = false;
+        let terminationReason: 'timeout' | 'output_limit' | undefined;
+        let spawnFailed = false;
         let timeout: ReturnType<typeof setTimeout> | undefined;
         let forceKillTimeout: ReturnType<typeof setTimeout> | undefined;
+        const configuredOutputLimit = options?.maxOutputBytes;
+        const maxOutputBytes = (
+          configuredOutputLimit !== undefined
+          && Number.isFinite(configuredOutputLimit)
+          && configuredOutputLimit > 0
+        )
+          ? Math.floor(configuredOutputLimit)
+          : undefined;
+        let stdoutBytes = 0;
+        let stderrBytes = 0;
+        const stdoutDecoder = new StringDecoder('utf8');
+        const stderrDecoder = new StringDecoder('utf8');
 
-        const resolveOnce = (result: DevloopCommandResult, keepForceKillTimer = false): void => {
+        const resolveOnce = (result: DevloopCommandResult): void => {
           if (settled) return;
           settled = true;
           if (timeout !== undefined) {
             clearTimeout(timeout);
           }
-          if (!keepForceKillTimer && forceKillTimeout !== undefined) {
+          if (forceKillTimeout !== undefined) {
             clearTimeout(forceKillTimeout);
           }
           resolveResult(result);
         };
 
+        const requestTermination = (reason: 'timeout' | 'output_limit'): void => {
+          if (terminationReason !== undefined || closed) return;
+          terminationReason = reason;
+          // Once output becomes untrusted, discard both streams rather than
+          // reflecting a secret-bearing prefix in the public failure result.
+          stdout = '';
+          stderr = '';
+          stdoutBytes = 0;
+          stderrBytes = 0;
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            // The close event remains the only completion boundary.
+          }
+          forceKillTimeout = setTimeout(() => {
+            if (closed) return;
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              // The close event remains the only completion boundary.
+            }
+          }, 1_000);
+          forceKillTimeout.unref?.();
+        };
+
         if (options?.timeoutMs !== undefined) {
           timeout = setTimeout(() => {
-            child.kill('SIGTERM');
-            // Some provider CLIs ignore SIGTERM while waiting on network streams; the
-            // follow-up SIGKILL keeps readiness checks from leaving orphaned processes.
-            forceKillTimeout = setTimeout(() => child.kill('SIGKILL'), 1_000);
-            forceKillTimeout.unref?.();
-            resolveOnce({
-              exitCode: 1,
-              stdout,
-              stderr: [stderr, `command timed out after ${options.timeoutMs}ms`].filter(Boolean).join('\n'),
-            }, true);
+            requestTermination('timeout');
           }, options.timeoutMs);
           timeout.unref?.();
         }
 
+        const capture = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+          if (terminationReason !== undefined) return;
+          const bytes = chunk.byteLength;
+          const nextBytes = (stream === 'stdout' ? stdoutBytes : stderrBytes) + bytes;
+          if (maxOutputBytes !== undefined && nextBytes > maxOutputBytes) {
+            requestTermination('output_limit');
+            return;
+          }
+          if (stream === 'stdout') {
+            stdoutBytes = nextBytes;
+            stdout += stdoutDecoder.write(chunk);
+          } else {
+            stderrBytes = nextBytes;
+            stderr += stderrDecoder.write(chunk);
+          }
+        };
+
         child.stdout?.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString('utf-8');
+          capture('stdout', chunk);
         });
         child.stderr?.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString('utf-8');
+          capture('stderr', chunk);
         });
-        child.on('error', (error) => {
-          resolveOnce({ exitCode: 1, stdout, stderr: getErrorMessage(error) });
+        child.on('error', () => {
+          // spawn errors are followed by close. Do not resolve early because a
+          // caller may release an idempotency lock immediately after resolution.
+          spawnFailed = true;
+          stdout = '';
+          stderr = '';
         });
         child.on('close', (exitCode, signal) => {
+          closed = true;
+          if (terminationReason === 'timeout') {
+            resolveOnce({
+              exitCode: 1,
+              stdout: '',
+              stderr: `command timed out after ${options?.timeoutMs}ms`,
+            });
+            return;
+          }
+          if (terminationReason === 'output_limit') {
+            resolveOnce({
+              exitCode: 1,
+              stdout: '',
+              stderr: 'command output exceeded limit',
+            });
+            return;
+          }
+          if (spawnFailed) {
+            resolveOnce({
+              exitCode: 1,
+              stdout: '',
+              stderr: 'command could not be started',
+            });
+            return;
+          }
+          // StringDecoder preserves multibyte code points split across data
+          // chunks and deterministically replaces an incomplete trailing
+          // sequence instead of silently dropping or double-decoding bytes.
+          stdout += stdoutDecoder.end();
+          stderr += stderrDecoder.end();
           const signalDetail = signal ? `terminated by signal ${signal}` : '';
           resolveOnce({
             exitCode: exitCode ?? 1,

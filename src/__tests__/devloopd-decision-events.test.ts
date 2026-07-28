@@ -696,7 +696,7 @@ describe('decision event fold', () => {
       ...identity,
       target: pending.target,
       status: 'synced',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       commentUrl: 'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-1',
     }, { eventId: 'evt_github_synced' });
 
@@ -704,19 +704,392 @@ describe('decision event fold', () => {
       .get(request.decisionId);
 
     expect(projection?.status).toBe('answered');
+    expect(synced.identityVersion).toBe(2);
     expect(projection?.githubSync).toMatchObject({
       eventId: 'evt_github_synced',
       status: 'synced',
       target: { kind: 'issue', number: 42 },
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
     });
     expect(Object.isFrozen(projection?.githubSync?.target)).toBe(true);
+  });
+
+  it('folds structured GitHub posting intent and uncertain failure metadata', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const pending = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'pending',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+    }, { eventId: 'evt_github_posting' });
+    const failed = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'failed',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+      outcome: 'may_have_posted',
+      sanitizedError: 'GitHub synchronization failed.',
+    }, { eventId: 'evt_github_failed' });
+
+    expect(foldDecisionEvents([requested, answered, pending]).get(request.decisionId)?.githubSync)
+      .toMatchObject({ status: 'pending', phase: 'posting', attemptId: 'attempt-1' });
+    expect(foldDecisionEvents([requested, answered, pending, failed])
+      .get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'failed',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+      outcome: 'may_have_posted',
+    });
+  });
+
+  it('keeps posting uncertainty sticky across inspecting and missing evidence', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const commentUrl =
+      'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123';
+    const synced = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '123',
+      commentUrl,
+    }, { eventId: 'evt_synced_before_regression' });
+    const posting = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'pending',
+      phase: 'posting',
+      attemptId: 'attempt-a',
+    }, { eventId: 'evt_posting_before_regression' });
+    const inspecting = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'pending',
+      phase: 'inspecting',
+      attemptId: 'attempt-b',
+    }, { eventId: 'evt_inspecting_after_posting' });
+    const missing = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'missing',
+      missingCommentId: '123',
+      missingCommentUrl: commentUrl,
+      attemptId: 'attempt-c',
+    }, { eventId: 'evt_missing_known_ref' });
+
+    const afterInspecting = foldDecisionEvents([
+      requested,
+      answered,
+      synced,
+      posting,
+      inspecting,
+    ]).get(request.decisionId)?.githubSync;
+    const afterMissing = foldDecisionEvents([
+      requested,
+      answered,
+      synced,
+      posting,
+      inspecting,
+      missing,
+    ]).get(request.decisionId)?.githubSync;
+
+    expect(afterInspecting).toMatchObject({
+      status: 'pending',
+      knownCommentId: '123',
+      postUncertain: true,
+    });
+    expect(afterMissing).toMatchObject({
+      status: 'missing',
+      missingCommentId: '123',
+      postUncertain: true,
+    });
+  });
+
+  it('ignores missing evidence that does not match the known comment reference', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const synced = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '123',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    }, { eventId: 'evt_synced_known_ref' });
+    const mismatchedMissing = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'missing',
+      missingCommentId: '999',
+      missingCommentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-999',
+      attemptId: 'attempt-mismatched',
+    }, { eventId: 'evt_mismatched_missing' });
+
+    const result = foldDecisionEvents([requested, answered, synced, mismatchedMissing]);
+
+    expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'synced',
+      knownCommentId: '123',
+      postUncertain: false,
+    });
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      eventId: 'evt_mismatched_missing',
+      code: 'invalid_transition',
+    }));
+  });
+
+  it.each([
+    ['synced', () => createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'synced',
+      commentId: '456',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    })],
+    ['verified', () => createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'verified',
+      commentId: '456',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    })],
+    ['missing', () => createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'missing',
+      missingCommentId: '456',
+      missingCommentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+      attemptId: 'attempt-mismatched-anchor',
+    })],
+  ])('rejects %s evidence when comment ID and URL anchor differ', (_status, createEvent) => {
+    expect(createEvent).toThrow();
+  });
+
+  it('decodes a legacy synced GraphQL node ID and derives strong identity from its URL', () => {
+    const current = createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'synced',
+      commentId: '123',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    }, { eventId: 'evt_legacy_graphql_synced' });
+    const legacyRaw: Record<string, unknown> = {
+      ...current,
+      commentId: 'IC_kwDOlegacy',
+    };
+    Reflect.deleteProperty(legacyRaw, 'identityVersion');
+
+    const legacy = DecisionGithubSyncEventSchema.parse(legacyRaw);
+    const result = foldDecisionEvents([requested, answered, legacy]);
+
+    expect(legacy).toMatchObject({
+      status: 'synced',
+      commentId: 'IC_kwDOlegacy',
+    });
+    expect(result.issues).toEqual([]);
+    expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'synced',
+      commentId: 'IC_kwDOlegacy',
+      knownCommentId: '123',
+      knownCommentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+      postUncertain: false,
+    });
+  });
+
+  it.each(['verified', 'synced'] as const)(
+    'does not replace known comment evidence with a different %s ref',
+    (status) => {
+      const target = {
+        kind: 'issue' as const,
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      };
+      const synced123 = createDecisionGithubSyncEvent({
+        ...identity,
+        target,
+        status: 'synced',
+        commentId: '123',
+        commentUrl:
+          'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+      }, { eventId: `evt_known_123_before_${status}` });
+      const replacement = createDecisionGithubSyncEvent({
+        ...identity,
+        target,
+        status,
+        commentId: '456',
+        commentUrl:
+          'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-456',
+      }, { eventId: `evt_replacement_${status}_456` });
+
+      const result = foldDecisionEvents([requested, answered, synced123, replacement]);
+
+      expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+        knownCommentId: '123',
+        knownCommentUrl:
+          'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+      });
+      expect(result.issues).toContainEqual(expect.objectContaining({
+        eventId: `evt_replacement_${status}_456`,
+        code: 'invalid_transition',
+      }));
+    },
+  );
+
+  it('accepts a new verified ref only after matching missing evidence clears the old ref', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const url123 =
+      'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123';
+    const synced123 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '123',
+      commentUrl: url123,
+    }, { eventId: 'evt_known_123_before_missing' });
+    const missing123 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'missing',
+      missingCommentId: '123',
+      missingCommentUrl: url123,
+      attemptId: 'attempt-clear-123',
+    }, { eventId: 'evt_missing_123_before_456' });
+    const verified456 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'verified',
+      commentId: '456',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-456',
+    }, { eventId: 'evt_verified_456_after_missing' });
+
+    const result = foldDecisionEvents([
+      requested,
+      answered,
+      synced123,
+      missing123,
+      verified456,
+    ]);
+
+    expect(result.issues).toEqual([]);
+    expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'verified',
+      knownCommentId: '456',
+    });
+  });
+
+  it('does not let a legacy URL-less synced event overwrite strong evidence', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const synced123 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '123',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    }, { eventId: 'evt_strong_synced_123' });
+    const legacyRaw: Record<string, unknown> = {
+      ...synced123,
+      eventId: 'evt_legacy_synced_456',
+      commentId: '456',
+    };
+    Reflect.deleteProperty(legacyRaw, 'identityVersion');
+    Reflect.deleteProperty(legacyRaw, 'commentUrl');
+    const legacySynced456 = DecisionGithubSyncEventSchema.parse(legacyRaw);
+
+    const result = foldDecisionEvents([requested, answered, synced123, legacySynced456]);
+
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      eventId: 'evt_legacy_synced_456',
+      code: 'invalid_transition',
+    }));
+    expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'synced',
+      commentId: '123',
+      knownCommentId: '123',
+      knownCommentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    });
+  });
+
+  it('rejects partially structured GitHub sync events', () => {
+    const base = {
+      ...identity,
+      target: {
+        kind: 'issue' as const,
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+    };
+
+    expect(() => createDecisionGithubSyncEvent({
+      ...base,
+      status: 'pending',
+      phase: 'posting',
+    })).toThrow();
+    expect(() => createDecisionGithubSyncEvent({
+      ...base,
+      status: 'failed',
+      sanitizedError: 'GitHub synchronization failed.',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+    })).toThrow();
+    expect(() => createDecisionGithubSyncEvent({
+      ...base,
+      status: 'failed',
+      sanitizedError: 'GitHub synchronization failed.',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+      outcome: 'definitely_not_posted',
+    })).toThrow();
   });
 
   it.each([
     ['pending with comment ID', {
       status: 'pending',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
     }],
     ['pending with error', {
       status: 'pending',
@@ -727,7 +1100,7 @@ describe('decision event fold', () => {
     }],
     ['synced with error', {
       status: 'synced',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       sanitizedError: 'Contradictory success.',
     }],
     ['failed without error', {
@@ -735,7 +1108,7 @@ describe('decision event fold', () => {
     }],
     ['failed with comment ID', {
       status: 'failed',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       sanitizedError: 'Sync failed.',
     }],
   ])('rejects an invalid GitHub sync state: %s', (_case, fields) => {
@@ -783,7 +1156,7 @@ describe('decision event fold', () => {
         number: 42,
       },
       status: 'synced',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       commentUrl,
     })).toThrow();
   });
@@ -797,7 +1170,7 @@ describe('decision event fold', () => {
         number: 42,
       },
       status: 'synced',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       commentUrl: 'https://github.com/albert-einshutoin/takt-private/pull/42#issuecomment-1',
     });
 

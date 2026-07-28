@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_GITHUB_METADATA_TIMEOUT_MS,
@@ -35,6 +39,88 @@ describe('devloopd command runner', () => {
     expect(Date.now() - startedAt).toBeLessThan(2_000);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain('command timed out after 10ms');
+  });
+
+  it('waits for a SIGTERM-ignoring child to close before resolving timeout', async () => {
+    const runner = createDefaultDevloopCommandRunner();
+    const directory = join(tmpdir(), `takt-command-timeout-${randomUUID()}`);
+    const sideEffectPath = join(directory, 'posted');
+    mkdirSync(directory, { recursive: true });
+    try {
+      const startedAt = Date.now();
+      const result = await runner.exec(process.execPath, [
+        '-e',
+        [
+          'const fs = require("node:fs");',
+          'process.on("SIGTERM", () => {});',
+          `setTimeout(() => fs.writeFileSync(${JSON.stringify(sideEffectPath)}, "posted"), 100);`,
+          'setTimeout(() => {}, 5000);',
+        ].join(''),
+      ], { timeoutMs: 50 });
+
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
+      expect(existsSync(sideEffectPath)).toBe(true);
+      expect(result).toEqual({
+        exitCode: 1,
+        stdout: '',
+        stderr: 'command timed out after 50ms',
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['stdout', 'stderr'] as const)(
+    'bounds %s while returning a fixed non-reflective overflow error',
+    async (stream) => {
+      const runner = createDefaultDevloopCommandRunner();
+      const secret = 'token=stream-secret';
+      const script = stream === 'stdout'
+        ? `process.stdout.write(${JSON.stringify(secret.repeat(10_000))});`
+        : `process.stderr.write(${JSON.stringify(secret.repeat(10_000))});`;
+
+      const result = await runner.exec(process.execPath, ['-e', script], {
+        maxOutputBytes: 128,
+        timeoutMs: 5_000,
+      });
+
+      expect(result).toEqual({
+        exitCode: 1,
+        stdout: '',
+        stderr: 'command output exceeded limit',
+      });
+      expect(result.stdout).not.toContain(secret);
+      expect(result.stderr).not.toContain(secret);
+      expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(128);
+      expect(Buffer.byteLength(result.stderr, 'utf8')).toBeLessThanOrEqual(128);
+    },
+  );
+
+  it.each(['stdout', 'stderr'] as const)(
+    'decodes split UTF-8 code points from %s without replacement corruption',
+    async (stream) => {
+      const runner = createDefaultDevloopCommandRunner();
+      const target = stream === 'stdout' ? 'process.stdout' : 'process.stderr';
+      const result = await runner.exec(process.execPath, [
+        '-e',
+        `${target}.write(Buffer.from([0xe3]));setTimeout(()=>${target}.write(Buffer.from([0x81,0x82])),20);`,
+      ], { maxOutputBytes: 16 });
+
+      expect(result.exitCode).toBe(0);
+      expect(stream === 'stdout' ? result.stdout : result.stderr).toBe('あ');
+      expect(`${result.stdout}${result.stderr}`).not.toContain('�');
+    },
+  );
+
+  it('replaces an incomplete trailing UTF-8 sequence deterministically', async () => {
+    const runner = createDefaultDevloopCommandRunner();
+
+    const result = await runner.exec(process.execPath, [
+      '-e',
+      'process.stdout.write(Buffer.from([0xe3,0x81]));',
+    ], { maxOutputBytes: 16 });
+
+    expect(result).toEqual({ exitCode: 0, stdout: '�', stderr: '' });
   });
 
   it('resolves GitHub metadata timeout from environment with a safe default', () => {
