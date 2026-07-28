@@ -114,14 +114,14 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^20.14.0",
     "@types/wanakana": "^4.0.6",
-    "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@typescript-eslint/parser": "^8.0.0",
-    "eslint": "^9.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.65.0",
+    "@typescript-eslint/parser": "^8.65.0",
+    "eslint": "^10.8.0",
     "typescript": "^5.5.0",
-    "typescript-eslint": "^8.53.1",
+    "typescript-eslint": "^8.65.0",
     "vitest": "^3.2.6"
   },
   "overrides": {

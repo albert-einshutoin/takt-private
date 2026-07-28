@@ -968,6 +968,7 @@ describe('branchExists remote tracking branch fallback', () => {
     expect(thrown).toBeInstanceOf(Error);
     expect(thrown?.message).toBe('Git remote branch fetch failed');
     expect(thrown?.message).not.toContain(hiddenProjectDir);
+    expect(thrown?.cause).toBeInstanceOf(Error);
     expect(serializedCloneLogs()).not.toContain(hiddenProjectDir);
   });
 
@@ -1023,6 +1024,7 @@ describe('branchExists remote tracking branch fallback', () => {
     expect(thrown).toBeInstanceOf(Error);
     expect(thrown?.message).toBe('Git remote branch fetch failed');
     expect(thrown?.message).not.toContain(hiddenProjectDir);
+    expect(thrown?.cause).toBeInstanceOf(Error);
     expect(serializedCloneLogs()).not.toContain(hiddenProjectDir);
   });
 

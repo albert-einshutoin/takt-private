@@ -35,6 +35,21 @@ describe('parseParts', () => {
     );
   });
 
+  it('JSON parse causeを内部保持し、列挙可能な出力へ入力本文を漏らさない', () => {
+    const secret = 'private-token-value';
+    let thrown: Error | undefined;
+
+    try {
+      parseParts(`\`\`\`json\n{"secret":"${secret}"\n\`\`\``, 3);
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toContain('Failed to parse part JSON');
+    expect(thrown?.cause).toBeInstanceOf(SyntaxError);
+    expect(thrown?.message).not.toContain(secret);
+  });
+
   it('max_partsを超えたらエラー', () => {
     const content = '```json\n[{"id":"a","title":"A","instruction":"Do A"},{"id":"b","title":"B","instruction":"Do B"}]\n```';
 

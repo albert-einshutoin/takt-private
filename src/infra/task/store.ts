@@ -56,10 +56,10 @@ export class TaskStore {
       const parsed = parseYaml(raw) as unknown;
       return TasksFileSchema.parse(parsed);
     } catch (err) {
-      log.error('tasks.yaml is broken. Keeping file untouched.', { file: this.tasksFile, error: String(err) });
-      const reason = err instanceof Error ? err.message : String(err);
+      log.error('tasks.yaml is broken. Keeping file untouched.', { file: this.tasksFile });
       throw new Error(
-        `Invalid tasks.yaml: ${this.tasksFile}. Please fix the file and retry. Cause: ${reason}`,
+        `Invalid tasks.yaml: ${this.tasksFile}. Please fix the file and retry.`,
+        { cause: err },
       );
     }
   }

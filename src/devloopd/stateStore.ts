@@ -65,7 +65,7 @@ export function withDevloopFileLock<T>(
       }
       removeIfStale(lockPath, now(), staleMs);
       if (now() - startedAt >= timeoutMs) {
-        throw new Error(`timed out waiting for devloop state lock: ${lockPath}`);
+        throw new Error(`timed out waiting for devloop state lock: ${lockPath}`, { cause: error });
       }
       // The lock is process-local and intentionally synchronous because the
       // ledger/state APIs are synchronous; a bounded wait avoids partial writes

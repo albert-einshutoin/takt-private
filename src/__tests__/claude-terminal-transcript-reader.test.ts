@@ -258,12 +258,22 @@ describe('Claude terminal transcript reader', () => {
   });
 
   it('Given malformed JSONL, When parsing, Then transcript corruption is reported instead of skipped', () => {
+    const secret = 'private-transcript-secret';
     const transcript = [
       JSON.stringify({ type: 'user', session_id: 'claude-session-1' }),
-      '{not-json',
+      `{"secret":"${secret}"`,
     ].join('\n');
 
-    expect(() => parseClaudeTerminalTranscript(transcript)).toThrow(/malformed claude terminal transcript json/i);
+    let thrown: Error | undefined;
+    try {
+      parseClaudeTerminalTranscript(transcript);
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toMatch(/malformed claude terminal transcript json/i);
+    expect(thrown?.cause).toBeInstanceOf(SyntaxError);
+    expect(thrown?.message).not.toContain(secret);
   });
 
   it('Given incomplete final JSONL, When polling parse is enabled, Then the final line is ignored temporarily', () => {

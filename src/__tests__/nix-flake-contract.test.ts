@@ -85,15 +85,21 @@ describe('Nix flake contract', () => {
   it('Given the npm lock changes, When Nix builds dependencies, Then the fixed-output hash matches CI', () => {
     const flake = readRequiredFile('flake.nix');
     const packageLock = JSON.parse(readRequiredFile('package-lock.json')) as {
-      packages?: Record<string, { bin?: Record<string, string> }>;
+      packages?: Record<string, {
+        bin?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+        version?: string;
+      }>;
     };
 
     expect(packageLock.packages?.['']?.bin).toMatchObject({
       takt: 'bin/takt.js',
       'takt-dev': 'bin/takt.js',
     });
+    expect(packageLock.packages?.['']?.devDependencies?.eslint).toBe('^10.8.0');
+    expect(packageLock.packages?.['node_modules/eslint']?.version).toBe('10.8.0');
     expect(flake).toContain(
-      'npmDepsHash = "sha256-d3a8mdI/SUbqS2zyHybouH3uaMwPX/TSrdmUKOsgIKY=";',
+      'npmDepsHash = "sha256-44uy+5lEyZd/M84y0/PF5VPYjxG9Jn/+jI9HV5oM2v0=";',
     );
   });
 

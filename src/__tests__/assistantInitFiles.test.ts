@@ -94,7 +94,16 @@ describe('loadAssistantInitContext', () => {
   it('should reject a missing configured file', () => {
     writeProjectConfig(['docs/missing.md']);
 
-    expect(() => loadAssistantInitContext(projectDir)).toThrow(/docs\/missing\.md/);
+    let thrown: Error | undefined;
+    try {
+      loadAssistantInitContext(projectDir);
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toMatch(/docs\/missing\.md/);
+    expect(thrown?.cause).toBeInstanceOf(Error);
+    expect(thrown?.message).not.toContain(projectDir);
   });
 
   it('should reject a configured directory', () => {

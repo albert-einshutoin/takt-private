@@ -116,7 +116,16 @@ describe('analyze usage command', () => {
     const file = join(root, 'session-usage-events.phase.jsonl');
     writeFileSync(file, '{bad json}\n', 'utf-8');
 
-    expect(() => analyzeUsage([file])).toThrow(`Invalid JSON in ${file}:1`);
+    let thrown: Error | undefined;
+    try {
+      analyzeUsage([file]);
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toContain(`Invalid JSON in ${file}:1`);
+    expect(thrown?.cause).toBeInstanceOf(SyntaxError);
+    expect(thrown?.message).not.toContain('{bad json}');
     expect(readFileSync(file, 'utf-8')).toBe('{bad json}\n');
   });
 

@@ -271,8 +271,9 @@ describe('StepExecutor', () => {
     const executor = new StepExecutor(deps);
     const state = makeState();
 
-    await expect(
-      executor.runNormalStep(
+    let thrown: Error | undefined;
+    try {
+      await executor.runNormalStep(
         step,
         state,
         'test task',
@@ -280,8 +281,16 @@ describe('StepExecutor', () => {
         vi.fn(),
         'Plan the next follow-up action.',
         undefined,
-      ),
-    ).rejects.toThrow('Step "implement" requires structured_output for provider "cursor": $.result is required');
+      );
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toBe(
+      'Step "implement" requires structured_output for provider "cursor": $.result is required',
+    );
+    expect(thrown?.cause).toBeInstanceOf(Error);
+    expect(thrown?.message).not.toContain('test task');
   });
 
   it('非対応 provider の structured_output fallback で additionalProperties false を強制する', async () => {

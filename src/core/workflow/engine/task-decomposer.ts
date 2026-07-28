@@ -21,7 +21,7 @@ function parseJsonBlock(content: string): unknown {
     return JSON.parse(lastJsonBlock) as unknown;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to parse part JSON: ${message}`);
+    throw new Error(`Failed to parse part JSON: ${message}`, { cause: error });
   }
 }
 

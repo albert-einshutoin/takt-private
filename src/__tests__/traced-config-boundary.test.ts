@@ -76,6 +76,54 @@ describe('traced config boundaries', () => {
     expect(traceEntries.get('provider_options.claude.allowed_tools')?.origin).toBe('local');
   });
 
+  it('project config parse causeを内部保持し、列挙可能な出力へ設定本文を漏らさない', () => {
+    const tempDir = join(tmpdir(), `takt-traced-invalid-${randomUUID()}`);
+    const configPath = join(tempDir, 'config.yaml');
+    const secret = 'private-config-secret';
+    const privatePath = '/Users/private/.ssh/id_rsa';
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(configPath, `provider: [${secret}, ${privatePath}`, 'utf-8');
+
+    try {
+      let thrown: Error | undefined;
+      try {
+        loadProjectConfigTrace(configPath, []);
+      } catch (error) {
+        thrown = error as Error;
+      }
+
+      expect(thrown?.message).toContain(`Configuration error: failed to parse ${configPath}`);
+      expect(thrown?.cause).toBeInstanceOf(Error);
+      expect(thrown?.message).not.toContain(secret);
+      expect(thrown?.message).not.toContain(privatePath);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('duplicate YAML keyの安全な診断を公開messageへ保持する', () => {
+    const tempDir = join(tmpdir(), `takt-traced-duplicate-${randomUUID()}`);
+    const configPath = join(tempDir, 'config.yaml');
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(configPath, 'provider: codex\nprovider: claude\n', 'utf-8');
+
+    try {
+      let thrown: Error | undefined;
+      try {
+        loadProjectConfigTrace(configPath, []);
+      } catch (error) {
+        thrown = error as Error;
+      }
+
+      expect(thrown?.message).toContain('Map keys must be unique');
+      expect(thrown?.message).not.toContain('provider: codex');
+      expect(thrown?.message).not.toContain('provider: claude');
+      expect(thrown?.cause).toBeInstanceOf(Error);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('project config loader は root JSON env override の opaque ancestor 規則を rawConfig と origin 解決で共有する', () => {
     const tempDir = join(tmpdir(), `takt-traced-loader-${randomUUID()}`);
     const configDir = join(tempDir, '.takt');

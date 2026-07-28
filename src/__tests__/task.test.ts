@@ -5,6 +5,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { TaskRunner } from '../infra/task/runner.js';
 import { TaskRecordSchema, type TaskRecord } from '../infra/task/schema.js';
 import { buildTerminalTaskRecord } from '../infra/task/taskRecordMutations.js';
+import { initDebugLogger, resetDebugLogger } from '../shared/utils/debug.js';
 
 function loadTasksFile(testDir: string): { tasks: Array<Record<string, unknown>> } {
   const raw = readFileSync(join(testDir, '.takt', 'tasks.yaml'), 'utf-8');
@@ -346,10 +347,27 @@ describe('TaskRunner (tasks.yaml)', () => {
 
   it('should preserve corrupted tasks.yaml and throw', () => {
     mkdirSync(join(testDir, '.takt'), { recursive: true });
-    writeFileSync(join(testDir, '.takt', 'tasks.yaml'), 'tasks:\n  - name: [broken', 'utf-8');
+    const secret = 'private-task-secret';
+    const debugLogFile = join(testDir, 'task-debug.log');
+    writeFileSync(join(testDir, '.takt', 'tasks.yaml'), `tasks:\n  - name: [${secret}`, 'utf-8');
+    resetDebugLogger();
+    initDebugLogger({ enabled: true, logFile: debugLogFile }, testDir);
 
     const tasksFilePath = join(testDir, '.takt', 'tasks.yaml');
-    expect(() => runner.listTasks()).toThrow(/Invalid tasks\.yaml/);
+    let thrown: Error | undefined;
+    try {
+      runner.listTasks();
+    } catch (error) {
+      thrown = error as Error;
+    } finally {
+      resetDebugLogger();
+    }
+
+    expect(thrown?.message).toMatch(/Invalid tasks\.yaml/);
+    expect(thrown?.message).not.toContain(secret);
+    expect(thrown?.cause).toBeInstanceOf(Error);
+    expect(readFileSync(debugLogFile, 'utf-8')).toContain('tasks.yaml is broken');
+    expect(readFileSync(debugLogFile, 'utf-8')).not.toContain(secret);
     expect(existsSync(tasksFilePath)).toBe(true);
   });
 

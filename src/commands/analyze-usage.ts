@@ -167,7 +167,7 @@ function readPhaseUsageRecords(file: string): PhaseUsageEventLogRecord[] {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid JSON in ${file}:${index + 1}: ${message}`);
+      throw new Error(`Invalid JSON in ${file}:${index + 1}: ${message}`, { cause: error });
     }
   }
   return records;

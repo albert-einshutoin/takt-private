@@ -108,8 +108,8 @@ export function fetchRemoteBranchIntoIsolatedClone(projectDir: string, clonePath
       projectDir,
       `refs/remotes/origin/${branch}:refs/heads/${branch}`,
     ]);
-  } catch {
-    throw new Error(REMOTE_BRANCH_FETCH_FAILED_MESSAGE);
+  } catch (err) {
+    throw new Error(REMOTE_BRANCH_FETCH_FAILED_MESSAGE, { cause: err });
   }
 }
 
@@ -130,7 +130,7 @@ export async function fetchRemoteBranchIntoIsolatedCloneAbortable(
     if (isTaskAbortError(err)) {
       throw err;
     }
-    throw new Error(REMOTE_BRANCH_FETCH_FAILED_MESSAGE);
+    throw new Error(REMOTE_BRANCH_FETCH_FAILED_MESSAGE, { cause: err });
   }
 }
 
@@ -142,8 +142,8 @@ export function fetchBaseBranchIntoIsolatedClone(projectDir: string, clonePath: 
       projectDir,
       `refs/remotes/origin/${branch}:refs/takt/base/${branch}`,
     ]);
-  } catch {
-    throw new Error(REMOTE_BRANCH_FETCH_FAILED_MESSAGE);
+  } catch (err) {
+    throw new Error(REMOTE_BRANCH_FETCH_FAILED_MESSAGE, { cause: err });
   }
 }
 
@@ -164,7 +164,7 @@ export async function fetchBaseBranchIntoIsolatedCloneAbortable(
     if (isTaskAbortError(err)) {
       throw err;
     }
-    throw new Error(REMOTE_BRANCH_FETCH_FAILED_MESSAGE);
+    throw new Error(REMOTE_BRANCH_FETCH_FAILED_MESSAGE, { cause: err });
   }
 }
 

@@ -67,7 +67,7 @@ function getValidator(schema: Record<string, unknown>): ValidateFunction {
     return validate;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Structured output schema is invalid: ${detail}`);
+    throw new Error(`Structured output schema is invalid: ${detail}`, { cause: error });
   }
 }
 
