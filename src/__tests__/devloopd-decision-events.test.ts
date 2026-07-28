@@ -747,6 +747,109 @@ describe('decision event fold', () => {
     });
   });
 
+  it('keeps posting uncertainty sticky across inspecting and missing evidence', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const commentUrl =
+      'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123';
+    const synced = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '123',
+      commentUrl,
+    }, { eventId: 'evt_synced_before_regression' });
+    const posting = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'pending',
+      phase: 'posting',
+      attemptId: 'attempt-a',
+    }, { eventId: 'evt_posting_before_regression' });
+    const inspecting = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'pending',
+      phase: 'inspecting',
+      attemptId: 'attempt-b',
+    }, { eventId: 'evt_inspecting_after_posting' });
+    const missing = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'missing',
+      missingCommentId: '123',
+      missingCommentUrl: commentUrl,
+      attemptId: 'attempt-c',
+    }, { eventId: 'evt_missing_known_ref' });
+
+    const afterInspecting = foldDecisionEvents([
+      requested,
+      answered,
+      synced,
+      posting,
+      inspecting,
+    ]).get(request.decisionId)?.githubSync;
+    const afterMissing = foldDecisionEvents([
+      requested,
+      answered,
+      synced,
+      posting,
+      inspecting,
+      missing,
+    ]).get(request.decisionId)?.githubSync;
+
+    expect(afterInspecting).toMatchObject({
+      status: 'pending',
+      knownCommentId: '123',
+      postUncertain: true,
+    });
+    expect(afterMissing).toMatchObject({
+      status: 'missing',
+      missingCommentId: '123',
+      postUncertain: true,
+    });
+  });
+
+  it('ignores missing evidence that does not match the known comment reference', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const synced = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '123',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    }, { eventId: 'evt_synced_known_ref' });
+    const mismatchedMissing = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'missing',
+      missingCommentId: '999',
+      missingCommentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-999',
+      attemptId: 'attempt-mismatched',
+    }, { eventId: 'evt_mismatched_missing' });
+
+    const result = foldDecisionEvents([requested, answered, synced, mismatchedMissing]);
+
+    expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'synced',
+      knownCommentId: '123',
+      postUncertain: false,
+    });
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      eventId: 'evt_mismatched_missing',
+      code: 'invalid_transition',
+    }));
+  });
+
   it('rejects partially structured GitHub sync events', () => {
     const base = {
       ...identity,

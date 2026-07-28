@@ -483,6 +483,224 @@ describe('decision GitHub synchronization', () => {
     });
   });
 
+  it('preserves a verified comment reference across PATCH failure and stale list visibility', async () => {
+    const answeredPreview = buildDecisionGithubPreview(store.get(request.decisionId)!);
+    const firstRunner = new FakeRunner();
+    firstRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: 'https://github.com/octo/project/issues/42#issuecomment-123\n',
+        stderr: '',
+      },
+    );
+    await syncDecisionToGithub({ store, decisionId: request.decisionId, runner: firstRunner });
+    markApplied(store, request);
+    const appliedPreview = buildDecisionGithubPreview(store.get(request.decisionId)!);
+
+    const failedPatchRunner = new FakeRunner();
+    failedPatchRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [{
+            id: 'IC_123',
+            url: 'https://github.com/octo/project/issues/42#issuecomment-123',
+            viewerDidAuthor: true,
+            body: answeredPreview.body,
+          }],
+        }),
+        stderr: '',
+      },
+      { exitCode: 124, stdout: '', stderr: '' },
+    );
+    const failedPatch = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner: failedPatchRunner,
+    });
+    expect(failedPatch).toMatchObject({ status: 'failed', errorCode: 'github_unavailable' });
+
+    const recoveryRunner = new FakeRunner();
+    recoveryRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: 123,
+          html_url: 'https://github.com/octo/project/issues/42#issuecomment-123',
+          body: answeredPreview.body,
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: 123,
+          html_url: 'https://github.com/octo/project/issues/42#issuecomment-123',
+          body: appliedPreview.body,
+        }),
+        stderr: '',
+      },
+    );
+    const recovered = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner: recoveryRunner,
+    });
+
+    expect(recovered).toMatchObject({ status: 'synced', existing: true, commentId: '123' });
+    expect([...failedPatchRunner.calls, ...recoveryRunner.calls]
+      .filter((call) => call.args[1] === 'comment')).toHaveLength(0);
+    expect(recoveryRunner.calls.map((call) => call.args[0])).toEqual(['issue', 'api', 'api']);
+  });
+
+  it('does not downgrade uncertain posting after a later inspecting event', async () => {
+    const identity = {
+      decisionId: request.decisionId,
+      decisionVersion: request.decisionVersion,
+      contextHash: request.contextHash,
+      target: { kind: 'issue' as const, repository: 'octo/project', number: 42 },
+    };
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionGithubSyncEvent({
+      ...identity,
+      status: 'pending',
+      phase: 'posting',
+      attemptId: 'attempt-a',
+    }, { eventId: 'evt_posting_a' }));
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionGithubSyncEvent({
+      ...identity,
+      status: 'pending',
+      phase: 'inspecting',
+      attemptId: 'attempt-b',
+    }, { eventId: 'evt_inspecting_b' }));
+    expect(store.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'pending',
+      phase: 'inspecting',
+      postUncertain: true,
+    });
+
+    const runner = new FakeRunner();
+    for (let index = 0; index < 4; index += 1) {
+      runner.results.push({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      });
+    }
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      errorCode: 'sync_visibility_unconfirmed',
+    });
+    expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
+  });
+
+  it('allows one replacement POST only after explicit missing evidence is durable', async () => {
+    const firstRunner = new FakeRunner();
+    firstRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: 'https://github.com/octo/project/issues/42#issuecomment-123\n',
+        stderr: '',
+      },
+    );
+    await syncDecisionToGithub({ store, decisionId: request.decisionId, runner: firstRunner });
+
+    const deletionRunner = new FakeRunner();
+    deletionRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'gh: Not Found (HTTP 404)\n',
+      },
+    );
+    const interrupted = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner: deletionRunner,
+      afterMissingPersisted() {
+        throw new Error('simulated interruption after durable 404');
+      },
+    });
+    expect(interrupted).toMatchObject({ status: 'failed', errorCode: 'ledger_unavailable' });
+    expect(store.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'missing',
+      missingCommentId: '123',
+    });
+
+    const replacementRunner = new FakeRunner();
+    replacementRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: 'https://github.com/octo/project/issues/42#issuecomment-456\n',
+        stderr: '',
+      },
+    );
+    const replaced = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner: replacementRunner,
+    });
+
+    expect(replaced).toMatchObject({ status: 'synced', existing: false, commentId: '456' });
+    expect(replacementRunner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(1);
+  });
+
   it('does not edit a matching marker comment not owned by the authenticated viewer', async () => {
     const preview = buildDecisionGithubPreview(store.get(request.decisionId)!);
     const runner = new FakeRunner();
@@ -817,6 +1035,41 @@ describe('decision GitHub synchronization', () => {
       errorCode: 'sync_visibility_unconfirmed',
     });
     expect(runner.calls).toHaveLength(4);
+    expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
+  });
+
+  it('treats a legacy synced event without a verified URL as ambiguous', async () => {
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionGithubSyncEvent({
+      decisionId: request.decisionId,
+      decisionVersion: request.decisionVersion,
+      contextHash: request.contextHash,
+      target: { kind: 'issue', repository: 'octo/project', number: 42 },
+      status: 'synced',
+      commentId: '123',
+    }, { eventId: 'evt_legacy_synced_without_url' }));
+    const runner = new FakeRunner();
+    for (let index = 0; index < 4; index += 1) {
+      runner.results.push({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      });
+    }
+
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      errorCode: 'sync_visibility_unconfirmed',
+    });
     expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
   });
 

@@ -222,6 +222,19 @@ const GithubSyncedSyncEventSchema = z.object({
   commentId: IdentifierSchema,
   commentUrl: z.url().optional(),
 }).strict();
+const GithubVerifiedSyncEventSchema = z.object({
+  ...GithubSyncEventCommonShape,
+  status: z.literal('verified'),
+  commentId: IdentifierSchema,
+  commentUrl: z.url(),
+}).strict();
+const GithubMissingSyncEventSchema = z.object({
+  ...GithubSyncEventCommonShape,
+  status: z.literal('missing'),
+  missingCommentId: IdentifierSchema,
+  missingCommentUrl: z.url(),
+  attemptId: IdentifierSchema,
+}).strict();
 const GithubFailedSyncEventSchema = z.object({
   ...GithubSyncEventCommonShape,
   status: z.literal('failed'),
@@ -249,11 +262,12 @@ const GithubFailedSyncEventSchema = z.object({
 });
 
 function validateGithubCommentUrl(
-  event: z.infer<typeof GithubSyncedSyncEventSchema>,
+  event: {
+    readonly target: z.output<typeof DecisionGithubTargetSchema>;
+    readonly commentUrl: string;
+  },
   context: z.RefinementCtx,
 ): void {
-  if (event.commentUrl === undefined) return;
-
   const url = new URL(event.commentUrl);
   const [owner, repository, collection, number, ...extraSegments] =
     url.pathname.split('/').filter(Boolean);
@@ -286,9 +300,20 @@ function validateGithubCommentUrl(
 const GithubSyncEventRawSchema = z.discriminatedUnion('status', [
   GithubPendingSyncEventSchema,
   GithubSyncedSyncEventSchema,
+  GithubVerifiedSyncEventSchema,
+  GithubMissingSyncEventSchema,
   GithubFailedSyncEventSchema,
 ]).superRefine((event, context) => {
-  if (event.status === 'synced') validateGithubCommentUrl(event, context);
+  if (event.status === 'synced' && event.commentUrl !== undefined) {
+    validateGithubCommentUrl({ target: event.target, commentUrl: event.commentUrl }, context);
+  } else if (event.status === 'verified') {
+    validateGithubCommentUrl(event, context);
+  } else if (event.status === 'missing') {
+    validateGithubCommentUrl({
+      target: event.target,
+      commentUrl: event.missingCommentUrl,
+    }, context);
+  }
 });
 
 export const DecisionRequestedEventSchema = RequestedEventRawSchema.transform(deepFreeze);
@@ -476,6 +501,21 @@ export function createDecisionGithubSyncEvent(
       sanitizedError?: never;
     }
     | {
+      status: 'verified';
+      commentId: string;
+      commentUrl: string;
+      sanitizedError?: never;
+    }
+    | {
+      status: 'missing';
+      missingCommentId: string;
+      missingCommentUrl: string;
+      attemptId: string;
+      commentId?: never;
+      commentUrl?: never;
+      sanitizedError?: never;
+    }
+    | {
       status: 'failed';
       sanitizedError: string;
       phase?: 'inspecting' | 'posting';
@@ -528,6 +568,9 @@ export type DecisionApplyResult =
 type DecisionGithubSyncProjectionCommon = {
   readonly eventId: string;
   readonly target: DeepReadonly<DecisionGithubTarget>;
+  readonly knownCommentId?: string;
+  readonly knownCommentUrl?: string;
+  readonly postUncertain: boolean;
 };
 
 export type DecisionGithubSyncProjection = DecisionGithubSyncProjectionCommon & (
@@ -540,6 +583,17 @@ export type DecisionGithubSyncProjection = DecisionGithubSyncProjectionCommon & 
     readonly status: 'synced';
     readonly commentId: string;
     readonly commentUrl?: string;
+  }
+  | {
+    readonly status: 'verified';
+    readonly commentId: string;
+    readonly commentUrl: string;
+  }
+  | {
+    readonly status: 'missing';
+    readonly missingCommentId: string;
+    readonly missingCommentUrl: string;
+    readonly attemptId: string;
   }
   | {
     readonly status: 'failed';
@@ -833,23 +887,81 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
     }
 
     if (event.eventType === 'devloop_decision_github_sync') {
+      // Evidence is carried forward during the existing single-pass fold. This
+      // keeps recovery O(n) in ledger size while preventing a later advisory
+      // status event from erasing stronger duplicate-prevention evidence.
+      const previousSync = projection.githubSync;
+      const inheritedEvidence = (
+        previousSync?.knownCommentId === undefined
+        || previousSync.knownCommentUrl === undefined
+      ) ? {} : {
+          knownCommentId: previousSync.knownCommentId,
+          knownCommentUrl: previousSync.knownCommentUrl,
+        };
+      const inheritedUncertainty = previousSync?.postUncertain ?? false;
       if (event.status === 'pending') {
         projection.githubSync = deepFreeze({
           eventId: event.eventId,
           target: event.target,
           status: event.status,
+          ...inheritedEvidence,
+          postUncertain: inheritedUncertainty || event.phase !== 'inspecting',
           ...(event.phase === undefined ? {} : {
             phase: event.phase,
             attemptId: event.attemptId,
           }),
         });
       } else if (event.status === 'synced') {
+        const hasVerifiedRef = event.commentUrl !== undefined;
         projection.githubSync = deepFreeze({
           eventId: event.eventId,
           target: event.target,
           status: event.status,
           commentId: event.commentId,
+          ...(hasVerifiedRef ? {
+            knownCommentId: event.commentId,
+            knownCommentUrl: event.commentUrl,
+          } : inheritedEvidence),
+          // Legacy synced events may omit the verified URL. Without a complete
+          // immutable ref, preserve prior evidence and never authorize POST.
+          postUncertain: hasVerifiedRef
+            ? false
+            : inheritedUncertainty || previousSync?.knownCommentId === undefined,
           ...(event.commentUrl === undefined ? {} : { commentUrl: event.commentUrl }),
+        });
+      } else if (event.status === 'verified') {
+        projection.githubSync = deepFreeze({
+          eventId: event.eventId,
+          target: event.target,
+          status: event.status,
+          commentId: event.commentId,
+          commentUrl: event.commentUrl,
+          knownCommentId: event.commentId,
+          knownCommentUrl: event.commentUrl,
+          postUncertain: false,
+        });
+      } else if (event.status === 'missing') {
+        if (
+          previousSync?.knownCommentId !== event.missingCommentId
+          || previousSync.knownCommentUrl !== event.missingCommentUrl
+        ) {
+          issues.push(issueFor(
+            event,
+            'invalid_transition',
+            'GitHub missing evidence must match the known comment reference',
+          ));
+          continue;
+        }
+        projection.githubSync = deepFreeze({
+          eventId: event.eventId,
+          target: event.target,
+          status: event.status,
+          missingCommentId: event.missingCommentId,
+          missingCommentUrl: event.missingCommentUrl,
+          attemptId: event.attemptId,
+          // A 404 only proves this known ID is absent. It cannot prove that an
+          // earlier uncertain POST did not create a different comment ID.
+          postUncertain: inheritedUncertainty,
         });
       } else {
         projection.githubSync = deepFreeze({
@@ -857,6 +969,8 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
           target: event.target,
           status: event.status,
           sanitizedError: event.sanitizedError,
+          ...inheritedEvidence,
+          postUncertain: inheritedUncertainty || event.outcome !== 'definitely_not_posted',
           ...(event.phase === undefined ? {} : {
             phase: event.phase,
             attemptId: event.attemptId,

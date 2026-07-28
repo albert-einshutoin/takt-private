@@ -62,6 +62,8 @@ export interface SyncDecisionToGithubOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Test-only boundary used to prove crash safety after posting intent is durable. */
   readonly afterPostingPersisted?: () => void;
+  /** Test-only boundary used to prove an explicit 404 is durable before replacement. */
+  readonly afterMissingPersisted?: () => void;
   /** Test-only boundary used to prove recovery after the external side effect. */
   readonly afterCommentCreated?: () => void;
 }
@@ -189,6 +191,13 @@ function appendSyncEvent(
       attemptId?: string;
     }
     | { status: 'synced'; commentId: string; commentUrl: string }
+    | { status: 'verified'; commentId: string; commentUrl: string }
+    | {
+      status: 'missing';
+      missingCommentId: string;
+      missingCommentUrl: string;
+      attemptId: string;
+    }
     | {
       status: 'failed';
       sanitizedError: string;
@@ -210,6 +219,59 @@ function appendSyncEvent(
       ...state,
     }));
     return projection;
+  });
+}
+
+function appendVerifiedComment(
+  store: DecisionStore,
+  decisionId: string,
+  target: DecisionGithubTarget,
+  comment: { readonly commentId: string; readonly commentUrl: string },
+): void {
+  withLockedDevloopLedgerTransaction(store.ledgerPath, (transaction) => {
+    const projection = store.get(decisionId);
+    if (projection === undefined) throw new Error('decision not found');
+    const currentTarget = targetFromProjection(projection);
+    if (currentTarget === undefined || !sameTarget(currentTarget, target)) {
+      throw new Error('decision target changed');
+    }
+    transaction.append(createDecisionGithubSyncEvent({
+      ...transitionIdentity(projection),
+      target,
+      status: 'verified',
+      commentId: comment.commentId,
+      commentUrl: comment.commentUrl,
+    }));
+  });
+}
+
+function appendMissingComment(
+  store: DecisionStore,
+  decisionId: string,
+  target: DecisionGithubTarget,
+  comment: { readonly commentId: string; readonly commentUrl: string },
+  attemptId: string,
+): void {
+  withLockedDevloopLedgerTransaction(store.ledgerPath, (transaction) => {
+    const projection = store.get(decisionId);
+    if (projection === undefined) throw new Error('decision not found');
+    const currentTarget = targetFromProjection(projection);
+    if (
+      currentTarget === undefined
+      || !sameTarget(currentTarget, target)
+      || projection.githubSync?.knownCommentId !== comment.commentId
+      || projection.githubSync.knownCommentUrl !== comment.commentUrl
+    ) {
+      throw new Error('known GitHub comment changed');
+    }
+    transaction.append(createDecisionGithubSyncEvent({
+      ...transitionIdentity(projection),
+      target,
+      status: 'missing',
+      missingCommentId: comment.commentId,
+      missingCommentUrl: comment.commentUrl,
+      attemptId,
+    }));
   });
 }
 
@@ -623,21 +685,12 @@ async function performSync(
   if (previousSync !== undefined) {
     if (!sameTarget(previousSync.target, initialSnapshot.preview.target)) {
       recoveryRequired = true;
-    } else if (previousSync.status === 'synced') {
-      const parsed = parseCommentUrl(previousSync.commentUrl, previousSync.target);
-      if (parsed !== undefined && parsed.commentId === previousSync.commentId) {
-        knownRef = parsed;
-      } else {
-        recoveryRequired = true;
-      }
-    } else if (previousSync.status === 'pending') {
-      // A legacy pending event has no durable proof that POST did not start.
-      // Only the explicit inspecting phase is safe to retry with a new POST.
-      recoveryRequired = previousSync.phase !== 'inspecting';
     } else {
-      // Legacy failures and any uncertain posting outcome are ambiguous. Once
-      // a POST may have happened, retries may inspect/reconcile but never POST.
-      recoveryRequired = previousSync.outcome !== 'definitely_not_posted';
+      recoveryRequired = previousSync.postUncertain;
+      const parsed = parseCommentUrl(previousSync.knownCommentUrl, previousSync.target);
+      if (parsed !== undefined && parsed.commentId === previousSync.knownCommentId) {
+        knownRef = parsed;
+      }
     }
   }
 
@@ -767,6 +820,12 @@ async function performSync(
       if (isExplicitGithubNotFound(knownResult)) {
         // Only a narrowly parsed, explicit 404 proves the previously verified
         // comment was deleted. Network and malformed failures remain ambiguous.
+        try {
+          appendMissingComment(store, decisionId, preview.target, knownRef, attemptId);
+        } catch {
+          return failed(decisionId, 'ledger_unavailable');
+        }
+        options.afterMissingPersisted?.();
         knownRef = undefined;
       } else if (knownResult.exitCode !== 0) {
         return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
@@ -789,10 +848,22 @@ async function performSync(
             outcome: 'may_have_posted',
           });
         }
+        try {
+          appendVerifiedComment(
+            store,
+            decisionId,
+            preview.target,
+            directlyVerifiedComment,
+          );
+        } catch {
+          return failed(decisionId, 'ledger_unavailable');
+        }
+        knownRef = directlyVerifiedComment;
+        recoveryRequired = false;
       }
     }
 
-    const authoritativeRef = createdRef ?? knownRef;
+    let authoritativeRef = createdRef ?? knownRef;
     if (
       managed !== undefined
       && authoritativeRef !== undefined
@@ -803,6 +874,16 @@ async function performSync(
         attemptId,
         outcome: 'may_have_posted',
       });
+    }
+    if (managed !== undefined) {
+      try {
+        appendVerifiedComment(store, decisionId, preview.target, managed.comment);
+      } catch {
+        return failed(decisionId, 'ledger_unavailable');
+      }
+      knownRef = managed.comment;
+      authoritativeRef = createdRef ?? knownRef;
+      recoveryRequired = false;
     }
 
     const currentComment = managed !== undefined && managed.current
@@ -980,6 +1061,12 @@ async function performSync(
       });
     }
     options.afterCommentCreated?.();
+    try {
+      appendVerifiedComment(store, decisionId, preview.target, createdRef);
+    } catch {
+      return failed(decisionId, 'ledger_unavailable');
+    }
+    recoveryRequired = false;
     try {
       if (!appendSyncedIfCurrent(
         store,
