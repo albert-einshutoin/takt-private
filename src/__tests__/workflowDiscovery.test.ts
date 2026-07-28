@@ -69,6 +69,27 @@ describe('workflowDiscovery', () => {
     expect(rawFixWorkflowNames('ja')).toEqual(rawFixWorkflowNames('en'));
   });
 
+  it.each(['en', 'ja'] as const)('does not attach the shared fix report to non-fix steps in %s', (language) => {
+    const workflowsDir = join(process.cwd(), 'builtins', language, 'workflows');
+    const nonFixReportSteps = Array.from(iterateWorkflowDir(workflowsDir, 'builtin')).flatMap((entry) => {
+      const rawWorkflow = parseYaml(readFileSync(entry.path, 'utf-8')) as {
+        steps?: Array<{
+          name?: unknown;
+          instruction?: unknown;
+          output_contracts?: { report?: Array<{ name?: unknown }> };
+        }>;
+      };
+      return (rawWorkflow.steps ?? [])
+        .filter((step) => (
+          step.instruction !== 'fix'
+          && step.output_contracts?.report?.some((report) => report.name === 'fix-report.md')
+        ))
+        .map((step) => `${entry.name}:${String(step.name)}`);
+    });
+
+    expect(nonFixReportSteps).toEqual([]);
+  });
+
   it.each([
     {
       language: 'en',
@@ -80,6 +101,12 @@ describe('workflowDiscovery', () => {
         '## Decision and Resume Continuity',
       ],
       privacyRule: 'Never include secrets, credentials, tokens, full prompts, raw decision text, verbatim private source text, or unbounded logs.',
+      safeCommandRule: 'Use only a redacted command name and safe arguments.',
+      sanitizedDecisionRule: 'Use only decision_id and a sanitized, bounded summary of non-confidential Why / What / How.',
+      contradictoryPhrases: [
+        '{Command, path, or concise result}',
+        '{Decision required, or a redacted answer summary}',
+      ],
     },
     {
       language: 'ja',
@@ -91,8 +118,21 @@ describe('workflowDiscovery', () => {
         '## 判断と再開の連続性',
       ],
       privacyRule: '秘密情報、認証情報、トークン、プロンプト全文、判断回答の原文、privateなソース原文、無制限のログを含めないこと。',
+      safeCommandRule: '秘匿化したコマンド名と安全な引数だけを使用する。',
+      sanitizedDecisionRule: 'decision_idと、非機密なWhy / What / Howをサニタイズした上限のある要約だけを使用する。',
+      contradictoryPhrases: [
+        '{コマンド、パス、または簡潔な結果}',
+        '{判断事項、または秘匿化した回答要約}',
+      ],
     },
-  ])('keeps the $language fix report complete and privacy-bounded', ({ language, headings, privacyRule }) => {
+  ])('keeps the $language fix report complete and privacy-bounded', ({
+    language,
+    headings,
+    privacyRule,
+    safeCommandRule,
+    sanitizedDecisionRule,
+    contradictoryPhrases,
+  }) => {
     const contract = readFileSync(
       join(process.cwd(), 'builtins', language, 'facets', 'output-contracts', 'fix-report.md'),
       'utf-8',
@@ -103,6 +143,11 @@ describe('workflowDiscovery', () => {
     }
     expect(contract).toContain(privacyRule);
     expect(contract).toContain('decision_id');
+    expect(contract).toContain(safeCommandRule);
+    expect(contract).toContain(sanitizedDecisionRule);
+    for (const phrase of contradictoryPhrases) {
+      expect(contract).not.toContain(phrase);
+    }
   });
 
   it('repo 直下でも builtin の privileged workflow を discovery で skip しない', () => {
