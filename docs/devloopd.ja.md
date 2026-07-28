@@ -207,12 +207,21 @@ v1を推測生成せず、`decisions answer` では回答できません。構�
 devloopd decisions sync-github \
   --cwd /path/to/repo \
   --id dec_example \
+  --expected-version 1 \
+  --expected-context-hash <64桁のSHA-256> \
+  --expected-preview-sha256 <64桁のSHA-256> \
   --json
 ```
 
 コメントへ出すのは安定marker、ID、version、kind、状態だけです。回答本文、理由、
 証跡、ローカルpath、privateなtask本文はローカルに残します。同期は固定された
-Issue／PRを再取得し、既存markerを照合してから作成または更新します。
+Issue／PRを再取得し、既存markerを照合してから作成または更新します。確認画面と
+同期処理は同じcanonical preview producerを使います。preview SHA-256は
+`target`、`marker`、`body` envelopeをkey辞書順・slash非escapeのUTF-8 JSONとして
+決定論的に計算します。
+外部書込みの直前にversion、context hash、preview SHA-256とPOST不確実性を再検証し、
+一致しなければ `preview_binding_mismatch` でfail-closedします。digestの入力と
+preview出力に回答、理由、証跡、ローカルpathは含めません。
 `sync_visibility_unconfirmed` や `sync_state_changed` は不確実性を台帳へ残します。
 再試行時は可視性を再照合し、不確実なPOSTを重複POSTへ変換しません。
 

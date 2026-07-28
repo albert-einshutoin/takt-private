@@ -214,13 +214,24 @@ After an answer, optionally mirror its status to the fixed GitHub target:
 devloopd decisions sync-github \
   --cwd /path/to/repo \
   --id dec_example \
+  --expected-version 1 \
+  --expected-context-hash <64-character-sha256> \
+  --expected-preview-sha256 <64-character-sha256> \
   --json
 ```
 
 The comment contains a stable marker, ID, version, kind, and status only. Answer
 text, rationale, evidence, local paths, and private task prose stay local.
 Synchronization re-reads the fixed Issue/PR target and reconciles an existing
-marker before creating or updating a comment. Failures such as
+marker before creating or updating a comment. The confirmation surface and sync
+operation use the same canonical preview producer. The preview SHA-256 is
+deterministically computed from a `target`, `marker`, and `body` envelope encoded
+as UTF-8 JSON with lexicographically sorted keys and unescaped slashes.
+Immediately before an external write, sync
+revalidates the version, context hash, preview SHA-256, and POST uncertainty; a
+mismatch fails closed with `preview_binding_mismatch`. Answer text, rationale,
+evidence, and local paths are absent from both the digest input and preview
+output. Failures such as
 `sync_visibility_unconfirmed` and `sync_state_changed` preserve uncertainty in
 the ledger; retrying reconciles visibility and never converts an uncertain POST
 into a blind duplicate POST.
