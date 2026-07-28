@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { types as utilTypes } from 'node:util';
 import {
   createDefaultDevloopCommandRunner,
@@ -64,6 +65,7 @@ interface GithubComment {
   readonly body: string;
   readonly commentId: string;
   readonly commentUrl: string;
+  readonly viewerDidAuthor: boolean;
 }
 
 interface GithubView {
@@ -88,14 +90,34 @@ function targetFromProjection(projection: DecisionProjection): DecisionGithubTar
     : { kind: 'issue' as const, repository, number: issueNumber });
 }
 
-function publicStatus(projection: DecisionProjection): string {
-  switch (projection.status) {
+function publicStatus(status: DecisionProjection['status']): string {
+  switch (status) {
     case 'open': return '判断待ち';
     case 'answered': return '回答済み';
     case 'applying': return '適用中';
     case 'applied': return '適用済み';
     case 'revalidation_required': return '再確認が必要';
   }
+}
+
+function renderPreviewBody(
+  projection: DecisionProjection,
+  marker: string,
+  status: DecisionProjection['status'],
+): string {
+  const { decisionId, decisionVersion } = projection.request;
+  return [
+    marker,
+    '### Takt 判断ステータス',
+    '',
+    `- 判断ID: \`${decisionId}\``,
+    `- バージョン: ${decisionVersion}`,
+    `- 状態: ${publicStatus(status)}`,
+    `- 種別: ${projection.request.kind}`,
+    '',
+    '回答内容・理由・証跡はローカル判断台帳にのみ保存されています。',
+    '',
+  ].join('\n');
 }
 
 export function buildDecisionGithubPreview(
@@ -110,18 +132,7 @@ export function buildDecisionGithubPreview(
   // GitHub is an optional notification surface, not the source of truth. Keep
   // this body intentionally fixed: user answers, rationale, evidence, local
   // paths, and private task prose must remain only in the local ledger.
-  const body = [
-    marker,
-    '### Takt 判断ステータス',
-    '',
-    `- 判断ID: \`${decisionId}\``,
-    `- バージョン: ${decisionVersion}`,
-    `- 状態: ${publicStatus(projection)}`,
-    `- 種別: ${projection.request.kind}`,
-    '',
-    '回答内容・理由・証跡はローカル判断台帳にのみ保存されています。',
-    '',
-  ].join('\n');
+  const body = renderPreviewBody(projection, marker, projection.status);
   return Object.freeze({ target, marker, body });
 }
 
@@ -251,38 +262,95 @@ function parseGithubView(stdout: string, target: DecisionGithubTarget): GithubVi
   for (const rawComment of rawComments) {
     if (!isPlainRecord(rawComment)) return undefined;
     const body = Reflect.get(rawComment, 'body');
+    const viewerDidAuthor = Reflect.get(rawComment, 'viewerDidAuthor');
     const parsedUrl = parseCommentUrl(Reflect.get(rawComment, 'url'), target);
     if (
       typeof body !== 'string'
+      || typeof viewerDidAuthor !== 'boolean'
       || Buffer.byteLength(body, 'utf8') > MAX_GITHUB_COMMENT_BODY_BYTES
       || parsedUrl === undefined
     ) {
       return undefined;
     }
-    comments.push(Object.freeze({ body, ...parsedUrl }));
+    comments.push(Object.freeze({ body, viewerDidAuthor, ...parsedUrl }));
   }
   return Object.freeze({ comments: Object.freeze(comments) });
 }
 
-function findExistingComment(
+function findManagedComment(
   view: GithubView,
   preview: DecisionGithubPreview,
-  decisionId: string,
-): GithubComment | 'collision' | undefined {
-  let existing: GithubComment | undefined;
+  projection: DecisionProjection,
+): { readonly comment: GithubComment; readonly current: boolean } | 'collision' | undefined {
+  let managed: GithubComment | undefined;
+  const allowedBodies = new Set<DecisionProjection['status']>([
+    'open',
+    'answered',
+    'applying',
+    'applied',
+    'revalidation_required',
+  ]);
+  const validGeneratedBodies = new Set(
+    [...allowedBodies].map((status) => renderPreviewBody(projection, preview.marker, status)),
+  );
   for (const comment of view.comments) {
-    const referencesCurrentDecision = comment.body.includes(`id=${decisionId} `);
+    const referencesCurrentDecision =
+      comment.body.includes(`id=${projection.request.decisionId} `);
     const containsCurrentMarker = comment.body.includes(preview.marker);
-    if (containsCurrentMarker) {
-      if (comment.body !== preview.body || existing !== undefined) return 'collision';
-      existing = comment;
-    } else if (referencesCurrentDecision && comment.body.includes('takt-decision:')) {
-      // A marker for the same immutable aggregate but a different version or
-      // malformed HTML cannot be trusted as an idempotency proof.
-      return 'collision';
+    if (containsCurrentMarker || (
+      referencesCurrentDecision
+      && comment.body.includes('takt-decision:')
+    )) {
+      if (
+        managed !== undefined
+        || !comment.viewerDidAuthor
+        || !comment.body.startsWith(`${preview.marker}\n`)
+        || !validGeneratedBodies.has(comment.body)
+      ) {
+        return 'collision';
+      }
+      managed = comment;
     }
   }
-  return existing;
+  return managed === undefined
+    ? undefined
+    : Object.freeze({ comment: managed, current: managed.body === preview.body });
+}
+
+function parseUpdatedComment(
+  stdout: string,
+  target: DecisionGithubTarget,
+  expected: GithubComment,
+  expectedBody: string,
+): GithubComment | undefined {
+  if (Buffer.byteLength(stdout, 'utf8') > MAX_GITHUB_RESPONSE_BYTES) return undefined;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!isPlainRecord(raw)) return undefined;
+  const parsedUrl = parseCommentUrl(Reflect.get(raw, 'html_url'), target);
+  const rawId = Reflect.get(raw, 'id');
+  const id = typeof rawId === 'number' && Number.isSafeInteger(rawId)
+    ? String(rawId)
+    : typeof rawId === 'string' ? rawId : undefined;
+  if (
+    parsedUrl === undefined
+    || parsedUrl.commentId !== expected.commentId
+    || parsedUrl.commentUrl !== expected.commentUrl
+    || id !== expected.commentId
+    || Reflect.get(raw, 'body') !== expectedBody
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    body: expectedBody,
+    commentId: parsedUrl.commentId,
+    commentUrl: parsedUrl.commentUrl,
+    viewerDidAuthor: true,
+  });
 }
 
 function safeCommandResult(value: unknown): SafeCommandResult | undefined {
@@ -355,28 +423,6 @@ async function performSync(
   })();
   if (preview === undefined) return failed(decisionId, 'github_target_unavailable');
 
-  if (
-    projection.githubSync?.status === 'synced'
-    && sameTarget(projection.githubSync.target, preview.target)
-  ) {
-    const localComment = parseCommentUrl(
-      projection.githubSync.commentUrl
-        ?? `${expectedTargetUrl(preview.target)}#issuecomment-${projection.githubSync.commentId}`,
-      preview.target,
-    );
-    if (
-      localComment !== undefined
-      && localComment.commentId === projection.githubSync.commentId
-    ) {
-      return {
-        status: 'synced',
-        decisionId,
-        existing: true,
-        ...localComment,
-      };
-    }
-  }
-
   try {
     appendSyncEvent(store, decisionId, preview.target, { status: 'pending' });
   } catch {
@@ -386,6 +432,11 @@ async function performSync(
   const gh = commandPath(runner, env);
   if (gh === undefined) return appendFailure(store, decisionId, preview.target, 'github_unavailable');
   const entity = preview.target.kind === 'issue' ? 'issue' : 'pr';
+  const execOptions = githubMetadataExecOptions({
+    cwd: store.repoPath,
+    env,
+    maxOutputBytes: MAX_GITHUB_RESPONSE_BYTES,
+  });
   let rawViewResult: unknown;
   try {
     rawViewResult = await runner.exec(gh, [
@@ -396,7 +447,7 @@ async function performSync(
       preview.target.repository,
       '--json',
       'number,url,comments',
-    ], githubMetadataExecOptions({ cwd: store.repoPath, env }));
+    ], execOptions);
   } catch {
     return appendFailure(store, decisionId, preview.target, 'github_unavailable');
   }
@@ -411,23 +462,71 @@ async function performSync(
   if (view === undefined) {
     return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
   }
-  const existing = findExistingComment(view, preview, decisionId);
-  if (existing === 'collision') {
+  const managed = findManagedComment(view, preview, projection);
+  if (managed === 'collision') {
     return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
   }
-  if (existing !== undefined) {
+  if (managed !== undefined && managed.current) {
     try {
       appendSyncEvent(store, decisionId, preview.target, {
         status: 'synced',
-        commentId: existing.commentId,
-        commentUrl: existing.commentUrl,
+        commentId: managed.comment.commentId,
+        commentUrl: managed.comment.commentUrl,
       });
       return {
         status: 'synced',
         decisionId,
         existing: true,
-        commentId: existing.commentId,
-        commentUrl: existing.commentUrl,
+        commentId: managed.comment.commentId,
+        commentUrl: managed.comment.commentUrl,
+      };
+    } catch {
+      return failed(decisionId, 'ledger_unavailable');
+    }
+  }
+
+  if (managed !== undefined) {
+    let rawUpdateResult: unknown;
+    try {
+      rawUpdateResult = await runner.exec(gh, [
+        'api',
+        '--method',
+        'PATCH',
+        `repos/${preview.target.repository}/issues/comments/${managed.comment.commentId}`,
+        '-f',
+        `body=${preview.body}`,
+      ], execOptions);
+    } catch {
+      return appendFailure(store, decisionId, preview.target, 'github_unavailable');
+    }
+    const updateResult = safeCommandResult(rawUpdateResult);
+    if (updateResult === undefined) {
+      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+    }
+    if (updateResult.exitCode !== 0) {
+      return appendFailure(store, decisionId, preview.target, 'github_unavailable');
+    }
+    const updated = parseUpdatedComment(
+      updateResult.stdout,
+      preview.target,
+      managed.comment,
+      preview.body,
+    );
+    if (updated === undefined) {
+      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+    }
+    try {
+      appendSyncEvent(store, decisionId, preview.target, {
+        status: 'synced',
+        commentId: updated.commentId,
+        commentUrl: updated.commentUrl,
+      });
+      return {
+        status: 'synced',
+        decisionId,
+        existing: true,
+        commentId: updated.commentId,
+        commentUrl: updated.commentUrl,
       };
     } catch {
       return failed(decisionId, 'ledger_unavailable');
@@ -444,7 +543,7 @@ async function performSync(
       preview.target.repository,
       '--body',
       preview.body,
-    ], githubMetadataExecOptions({ cwd: store.repoPath, env }));
+    ], execOptions);
   } catch {
     return appendFailure(store, decisionId, preview.target, 'github_unavailable');
   }
@@ -484,9 +583,12 @@ export async function syncDecisionToGithub(
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
   const env = options.env ?? process.env;
   try {
+    const lockDigest = createHash('sha256')
+      .update(options.decisionId, 'utf8')
+      .digest('hex');
     return await withRepoKernelAdvisoryLock(
       options.store.repoPath,
-      `decision-github-${options.decisionId}`,
+      `decision-github-${lockDigest}`,
       () => performSync(options, runner, env),
       SYNC_LOCK_TIMEOUT_MS,
     );
