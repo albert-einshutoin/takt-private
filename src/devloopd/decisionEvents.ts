@@ -219,18 +219,21 @@ const GithubPendingSyncEventSchema = z.object({
 const GithubSyncedSyncEventSchema = z.object({
   ...GithubSyncEventCommonShape,
   status: z.literal('synced'),
+  identityVersion: z.literal(2).optional(),
   commentId: IdentifierSchema,
   commentUrl: z.url().optional(),
 }).strict();
 const GithubVerifiedSyncEventSchema = z.object({
   ...GithubSyncEventCommonShape,
   status: z.literal('verified'),
+  identityVersion: z.literal(2),
   commentId: IdentifierSchema,
   commentUrl: z.url(),
 }).strict();
 const GithubMissingSyncEventSchema = z.object({
   ...GithubSyncEventCommonShape,
   status: z.literal('missing'),
+  identityVersion: z.literal(2),
   missingCommentId: IdentifierSchema,
   missingCommentUrl: z.url(),
   attemptId: IdentifierSchema,
@@ -261,6 +264,11 @@ const GithubFailedSyncEventSchema = z.object({
   }
 });
 
+function githubCommentAnchorId(commentUrl: string): string | undefined {
+  const match = /^#issuecomment-([1-9][0-9]*)$/u.exec(new URL(commentUrl).hash);
+  return match?.[1];
+}
+
 function validateGithubCommentUrl(
   event: {
     readonly target: z.output<typeof DecisionGithubTargetSchema>;
@@ -268,14 +276,16 @@ function validateGithubCommentUrl(
     readonly commentUrl: string;
   },
   context: z.RefinementCtx,
+  requireIdentityMatch: boolean,
 ): void {
   const url = new URL(event.commentUrl);
+  const anchorId = githubCommentAnchorId(event.commentUrl);
   const [owner, repository, collection, number, ...extraSegments] =
     url.pathname.split('/').filter(Boolean);
   const expectedCollection = event.target.kind === 'issue' ? 'issues' : 'pull';
   const expectedRepository = event.target.repository.split('/');
   const expectedUrl = `https://github.com/${event.target.repository}/${expectedCollection}`
-    + `/${event.target.number}#issuecomment-${event.commentId}`;
+    + `/${event.target.number}#issuecomment-${anchorId ?? ''}`;
   const matchesTarget = (
     event.commentUrl === expectedUrl
     && url.protocol === 'https:'
@@ -289,7 +299,7 @@ function validateGithubCommentUrl(
     && collection === expectedCollection
     && number === String(event.target.number)
     && extraSegments.length === 0
-    && /^#issuecomment-[1-9][0-9]*$/u.test(url.hash)
+    && anchorId !== undefined
   );
 
   if (!matchesTarget) {
@@ -297,6 +307,12 @@ function validateGithubCommentUrl(
       code: 'custom',
       path: ['commentUrl'],
       message: 'GitHub comment URL must exactly match the synchronization target',
+    });
+  } else if (requireIdentityMatch && event.commentId !== anchorId) {
+    context.addIssue({
+      code: 'custom',
+      path: ['commentId'],
+      message: 'GitHub comment ID must match the canonical URL anchor',
     });
   }
 }
@@ -308,20 +324,26 @@ const GithubSyncEventRawSchema = z.discriminatedUnion('status', [
   GithubMissingSyncEventSchema,
   GithubFailedSyncEventSchema,
 ]).superRefine((event, context) => {
-  if (event.status === 'synced' && event.commentUrl !== undefined) {
+  if (event.status === 'synced' && event.identityVersion === 2 && event.commentUrl === undefined) {
+    context.addIssue({
+      code: 'custom',
+      path: ['commentUrl'],
+      message: 'GitHub identity version 2 requires a canonical comment URL',
+    });
+  } else if (event.status === 'synced' && event.commentUrl !== undefined) {
     validateGithubCommentUrl({
       target: event.target,
       commentId: event.commentId,
       commentUrl: event.commentUrl,
-    }, context);
+    }, context, event.identityVersion === 2);
   } else if (event.status === 'verified') {
-    validateGithubCommentUrl(event, context);
+    validateGithubCommentUrl(event, context, true);
   } else if (event.status === 'missing') {
     validateGithubCommentUrl({
       target: event.target,
       commentId: event.missingCommentId,
       commentUrl: event.missingCommentUrl,
-    }, context);
+    }, context, true);
   }
 });
 
@@ -536,10 +558,18 @@ export function createDecisionGithubSyncEvent(
   ),
   options: CreateDecisionEventOptions = {},
 ): DecisionGithubSyncEvent {
+  // Identity v2 makes newly written durable evidence self-verifying while the
+  // optional marker on historical synced events preserves schemaVersion 1 ledgers.
+  const identityVersion = (
+    input.status === 'synced'
+    || input.status === 'verified'
+    || input.status === 'missing'
+  ) ? { identityVersion: 2 as const } : {};
   return DecisionGithubSyncEventSchema.parse({
     ...metadata(options),
     eventType: 'devloop_decision_github_sync',
     ...input,
+    ...identityVersion,
   });
 }
 
@@ -908,13 +938,26 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
           knownCommentUrl: previousSync.knownCommentUrl,
         };
       const inheritedUncertainty = previousSync?.postUncertain ?? false;
-      const incomingVerifiedRef = (
-        event.status === 'verified'
-        || (event.status === 'synced' && event.commentUrl !== undefined)
+      // Legacy producers persisted GraphQL node IDs in commentId. The canonical
+      // URL anchor is the trusted REST ID needed for direct recovery and dedupe.
+      const syncedKnownRef = (
+        event.status === 'synced'
+        && event.commentUrl !== undefined
       ) ? {
-          commentId: event.commentId,
+          commentId: githubCommentAnchorId(event.commentUrl),
           commentUrl: event.commentUrl,
         } : undefined;
+      const incomingVerifiedRef = event.status === 'verified'
+        ? {
+            commentId: event.commentId,
+            commentUrl: event.commentUrl,
+          }
+        : syncedKnownRef?.commentId === undefined
+          ? undefined
+          : {
+              commentId: syncedKnownRef.commentId,
+              commentUrl: syncedKnownRef.commentUrl,
+            };
       const legacySyncedConflictsWithKnown = (
         event.status === 'synced'
         && event.commentUrl === undefined
@@ -953,15 +996,15 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
           }),
         });
       } else if (event.status === 'synced') {
-        const hasVerifiedRef = event.commentUrl !== undefined;
+        const hasVerifiedRef = syncedKnownRef?.commentId !== undefined;
         projection.githubSync = deepFreeze({
           eventId: event.eventId,
           target: event.target,
           status: event.status,
           commentId: event.commentId,
           ...(hasVerifiedRef ? {
-            knownCommentId: event.commentId,
-            knownCommentUrl: event.commentUrl,
+            knownCommentId: syncedKnownRef.commentId,
+            knownCommentUrl: syncedKnownRef.commentUrl,
           } : inheritedEvidence),
           // Legacy synced events may omit the verified URL. Without a complete
           // immutable ref, preserve prior evidence and never authorize POST.

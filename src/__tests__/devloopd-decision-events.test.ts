@@ -704,6 +704,7 @@ describe('decision event fold', () => {
       .get(request.decisionId);
 
     expect(projection?.status).toBe('answered');
+    expect(synced.identityVersion).toBe(2);
     expect(projection?.githubSync).toMatchObject({
       eventId: 'evt_github_synced',
       status: 'synced',
@@ -892,6 +893,43 @@ describe('decision event fold', () => {
     expect(createEvent).toThrow();
   });
 
+  it('decodes a legacy synced GraphQL node ID and derives strong identity from its URL', () => {
+    const current = createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'synced',
+      commentId: '123',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    }, { eventId: 'evt_legacy_graphql_synced' });
+    const legacyRaw: Record<string, unknown> = {
+      ...current,
+      commentId: 'IC_kwDOlegacy',
+    };
+    Reflect.deleteProperty(legacyRaw, 'identityVersion');
+
+    const legacy = DecisionGithubSyncEventSchema.parse(legacyRaw);
+    const result = foldDecisionEvents([requested, answered, legacy]);
+
+    expect(legacy).toMatchObject({
+      status: 'synced',
+      commentId: 'IC_kwDOlegacy',
+    });
+    expect(result.issues).toEqual([]);
+    expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'synced',
+      commentId: 'IC_kwDOlegacy',
+      knownCommentId: '123',
+      knownCommentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+      postUncertain: false,
+    });
+  });
+
   it.each(['verified', 'synced'] as const)(
     'does not replace known comment evidence with a different %s ref',
     (status) => {
@@ -992,12 +1030,14 @@ describe('decision event fold', () => {
       commentUrl:
         'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
     }, { eventId: 'evt_strong_synced_123' });
-    const legacySynced456 = createDecisionGithubSyncEvent({
-      ...identity,
-      target,
-      status: 'synced',
+    const legacyRaw: Record<string, unknown> = {
+      ...synced123,
+      eventId: 'evt_legacy_synced_456',
       commentId: '456',
-    }, { eventId: 'evt_legacy_synced_456' });
+    };
+    Reflect.deleteProperty(legacyRaw, 'identityVersion');
+    Reflect.deleteProperty(legacyRaw, 'commentUrl');
+    const legacySynced456 = DecisionGithubSyncEventSchema.parse(legacyRaw);
 
     const result = foldDecisionEvents([requested, answered, synced123, legacySynced456]);
 

@@ -22,6 +22,7 @@ import {
   createDecisionAppliedEvent,
   createDecisionApplyStartedEvent,
   createDecisionGithubSyncEvent,
+  DecisionGithubSyncEventSchema,
   type DecisionProjection,
 } from '../devloopd/decisionEvents.js';
 import { createDecisionRequest, type DecisionRequest } from '../devloopd/decisionRequest.js';
@@ -681,6 +682,67 @@ describe('decision GitHub synchronization', () => {
     expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(0);
   });
 
+  it('recovers a legacy GraphQL comment ID through its numeric URL anchor without POST', async () => {
+    const identity = {
+      decisionId: request.decisionId,
+      decisionVersion: request.decisionVersion,
+      contextHash: request.contextHash,
+      target: { kind: 'issue' as const, repository: 'octo/project', number: 42 },
+    };
+    const current = createDecisionGithubSyncEvent({
+      ...identity,
+      status: 'synced',
+      commentId: '123',
+      commentUrl: 'https://github.com/octo/project/issues/42#issuecomment-123',
+    }, { eventId: 'evt_legacy_graphql_ref' });
+    const legacyRaw: Record<string, unknown> = {
+      ...current,
+      commentId: 'IC_kwDOlegacy',
+    };
+    Reflect.deleteProperty(legacyRaw, 'identityVersion');
+    appendDevloopLedgerEvent(
+      store.ledgerPath,
+      DecisionGithubSyncEventSchema.parse(legacyRaw),
+    );
+    expect(store.get(request.decisionId)?.githubSync).toMatchObject({
+      commentId: 'IC_kwDOlegacy',
+      knownCommentId: '123',
+    });
+
+    const preview = buildDecisionGithubPreview(store.get(request.decisionId)!);
+    const runner = new FakeRunner();
+    runner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: 123,
+          html_url: 'https://github.com/octo/project/issues/42#issuecomment-123',
+          body: preview.body,
+        }),
+        stderr: '',
+      },
+    );
+
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner,
+    });
+
+    expect(result).toMatchObject({ status: 'synced', existing: true, commentId: '123' });
+    expect(runner.calls[1]?.args.at(-1)).toBe('repos/octo/project/issues/comments/123');
+    expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(0);
+  });
+
   it('allows one replacement POST only after explicit missing evidence is durable', async () => {
     const firstRunner = new FakeRunner();
     firstRunner.results.push(
@@ -1097,14 +1159,22 @@ describe('decision GitHub synchronization', () => {
   });
 
   it('treats a legacy synced event without a verified URL as ambiguous', async () => {
-    appendDevloopLedgerEvent(store.ledgerPath, createDecisionGithubSyncEvent({
+    const current = createDecisionGithubSyncEvent({
       decisionId: request.decisionId,
       decisionVersion: request.decisionVersion,
       contextHash: request.contextHash,
       target: { kind: 'issue', repository: 'octo/project', number: 42 },
       status: 'synced',
       commentId: '123',
-    }, { eventId: 'evt_legacy_synced_without_url' }));
+      commentUrl: 'https://github.com/octo/project/issues/42#issuecomment-123',
+    }, { eventId: 'evt_legacy_synced_without_url' });
+    const legacyRaw: Record<string, unknown> = { ...current };
+    Reflect.deleteProperty(legacyRaw, 'identityVersion');
+    Reflect.deleteProperty(legacyRaw, 'commentUrl');
+    appendDevloopLedgerEvent(
+      store.ledgerPath,
+      DecisionGithubSyncEventSchema.parse(legacyRaw),
+    );
     const runner = new FakeRunner();
     for (let index = 0; index < 4; index += 1) {
       runner.results.push({
