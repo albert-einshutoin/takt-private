@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -56,7 +57,7 @@ describe('Node toolchain contract', () => {
     });
     expect(packageJson.devEngines?.packageManager).toEqual({
       name: 'npm',
-      version: '10.9.2',
+      version: '^10.9.2',
       onFail: 'error',
     });
     expect(packageJson.packageManager).toBe('npm@10.9.2');
@@ -99,12 +100,34 @@ describe('Node toolchain contract', () => {
       image?: string;
     };
     const flake = readRequiredFile('flake.nix');
+    const nixWorkflow = readRequiredFile('.github/workflows/nix.yml');
     const nvmVersion = readRequiredFile('.nvmrc').trim();
 
     expect(dockerfile).toContain('FROM node:22.13.1-alpine');
     expect(devcontainer.image).toBe('node:22.13.1-bookworm');
     expect(flake).toContain('nodejs = pkgs.nodejs_22');
+    expect(nixWorkflow).toContain('nix develop --command node tools/check-development-toolchain.mjs');
     expect(nvmVersion).toBe(developmentNodeVersion);
+  });
+
+  it('accepts compatible Nix npm versions and rejects the next npm major', () => {
+    const checker = join(repositoryRoot, 'tools/check-development-toolchain.mjs');
+
+    expect(execFileSync(process.execPath, [
+      checker,
+      '--node-version', '22.22.3',
+      '--npm-version', '10.9.8',
+    ], { encoding: 'utf-8' })).toContain('compatible');
+    expect(execFileSync(process.execPath, [
+      checker,
+      '--node-version', '24.2.0',
+      '--npm-version', '10.9.2',
+    ], { encoding: 'utf-8' })).toContain('compatible');
+    expect(() => execFileSync(process.execPath, [
+      checker,
+      '--node-version', '22.22.3',
+      '--npm-version', '11.0.0',
+    ], { stdio: 'pipe' })).toThrow();
   });
 
   it('documents development and runtime Node requirements in both languages', () => {

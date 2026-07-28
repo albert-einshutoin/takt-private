@@ -7,6 +7,11 @@ Thank you for your interest in contributing to TAKT! This project uses TAKT's re
 ## Development Setup
 
 Source development is standardized on **Node.js 22.13.1** and **npm 10.9.2**.
+The `packageManager` field pins that recommended reproducible pair for Corepack.
+The supported development ranges are Node.js **20.19 or newer within Node 20,
+22.13 or newer within Node 22, or Node 24+**, and npm **10.9.2 or newer within
+npm 10**. This lets the pinned Nix development shell use its lock-file-selected
+Node/npm patch releases without admitting npm 11.
 The published package continues to support Node.js **20.6.0 and newer**; the
 newer development baseline is required by linting and other contributor tools,
 not by TAKT's product runtime.
