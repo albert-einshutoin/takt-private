@@ -1,10 +1,13 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { DevloopCommandRunner } from '../devloopd/commandRunner.js';
+import { DecisionStore } from '../devloopd/decisionStore.js';
 import { readRawDevloopLedgerEvents } from '../devloopd/ledger.js';
 import {
+  automationActionRequiresDecision,
+  attachAutomationDecisions,
   attachDagPlanToMergeQueuePullRequests,
   findCurrentHeadBlockingReview,
   findDuplicateIssueCoverage,
@@ -13,6 +16,7 @@ import {
   promotePullRequestAutoMerge,
   runDevloopAutomationStage,
   selectAutomationPullRequests,
+  formatDevloopAutomationStageReport,
 } from '../devloopd/prAutomation.js';
 import { formatReviewGateComment } from '../devloopd/prReviewGate.js';
 
@@ -153,7 +157,7 @@ function makeProductPolicyPromotionRunner(): DevloopCommandRunner & { calls: str
             number: 77,
             title: 'change auth policy',
             body: 'Adjust authentication behavior.',
-            headRefOid: 'policy123',
+            headRefOid: '2123456789abcdef0123456789abcdef01234567',
             mergeStateStatus: 'CLEAN',
             changedFiles: 1,
             additions: 12,
@@ -174,6 +178,437 @@ function makeProductPolicyPromotionRunner(): DevloopCommandRunner & { calls: str
 }
 
 describe('devloopd PR automation orchestration', () => {
+  it.each([
+    ['checks failed', { type: 'ci-fix', status: 'blocked', stopRule: 'checks failed', message: 'checks failed' }],
+    ['head mismatch', { type: 'merge-if-safe', status: 'blocked', stopRule: 'head mismatch', message: 'head mismatch' }],
+    ['overlap serialization', { type: 'merge-queue', status: 'skipped', stopRule: 'overlap serialization', message: 'serialized' }],
+    ['provider failure', { type: 'codex-review', status: 'failed', message: 'provider command failed' }],
+    ['attempt budget', { type: 'ci-fix', status: 'blocked', stopRule: 'attempt budget exhausted', message: 'budget exhausted' }],
+  ] as const)('does not turn the mechanical %s stop into a Decision', (_case, action) => {
+    expect(automationActionRequiresDecision(action)).toBe(false);
+  });
+
+  it.each([
+    { type: 'current-head-blocked', status: 'blocked', stopRule: 'Mergeable: NO', message: 'current review block' },
+    { type: 'review-fix', status: 'blocked', stopRule: 'Unsafe or too broad', message: 'scope policy required' },
+    { type: 'human-review-hold', status: 'blocked', stopRule: 'human review required', message: 'owner approval required' },
+  ] as const)('turns explicit human policy stop $type into a Decision', (action) => {
+    expect(automationActionRequiresDecision(action)).toBe(true);
+  });
+
+  it('fails closed when the evaluated human-review head moves before Decision attachment', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-'));
+    const calls: string[] = [];
+    const listedHeadSha = '0123456789abcdef0123456789abcdef01234567';
+    const currentHeadSha = '1123456789abcdef0123456789abcdef01234567';
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        calls.push(args.join(' '));
+        if (args.slice(0, 2).join(' ') === 'pr list') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([{
+              number: 77,
+              title: 'change public authentication policy',
+              body: '',
+              headRefName: 'takt/issue-77',
+              headRefOid: listedHeadSha,
+              isDraft: false,
+              author: { login: 'dev' },
+              labels: [{ name: 'human:review' }],
+            }]),
+            stderr: '',
+          };
+        }
+        if (args.slice(0, 2).join(' ') === 'repo view') {
+          return { exitCode: 0, stdout: 'owner/repo\n', stderr: '' };
+        }
+        if (args.slice(0, 2).join(' ') === 'pr view') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ number: 77, headRefOid: currentHeadSha }),
+            stderr: '',
+          };
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+      },
+    };
+
+    const first = await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      ledgerPath: 'ledger.jsonl',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+    const second = await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      ledgerPath: 'ledger.jsonl',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+    const events = readRawDevloopLedgerEvents(join(repoPath, 'ledger.jsonl'));
+    const requested = events.filter((event) => event.eventType === 'devloop_decision_requested');
+    const states = events.filter((event) => event.eventType === 'devloop_automation_state');
+
+    expect(first.actions[0]).toMatchObject({
+      type: 'human-review-hold',
+      pr: 77,
+      status: 'failed',
+      headSha: listedHeadSha,
+      message: 'decision generation failed: head_changed',
+    });
+    expect(first.actions[0]?.decisionId).toBeUndefined();
+    expect(second.actions[0]?.decisionId).toBeUndefined();
+    expect(requested).toHaveLength(0);
+    expect(first.passed).toBe(false);
+    expect(states).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        prNumber: 77,
+        status: 'failed',
+      }),
+    ]));
+    expect(formatDevloopAutomationStageReport(first)).toContain('head_changed');
+    expect(calls.filter((call) => call.startsWith('repo view '))).toHaveLength(2);
+    expect(calls.filter((call) => call.startsWith('pr view 77 '))).toHaveLength(2);
+  });
+
+  it('fails the stage without creating a Decision when current PR metadata is invalid', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-invalid-'));
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        if (args.slice(0, 2).join(' ') === 'pr list') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([{
+              number: 77,
+              title: 'change public authentication policy',
+              body: '',
+              headRefName: 'takt/issue-77',
+              headRefOid: '0123456789abcdef0123456789abcdef01234567',
+              isDraft: false,
+              author: { login: 'dev' },
+              labels: [{ name: 'human:review' }],
+            }]),
+            stderr: '',
+          };
+        }
+        if (args.slice(0, 2).join(' ') === 'pr view') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ number: 77, headRefOid: 'short-head' }),
+            stderr: '',
+          };
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected metadata command' };
+      },
+    };
+
+    const report = await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      ledgerPath: 'ledger.jsonl',
+      repo: 'owner/repo',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+    const events = readRawDevloopLedgerEvents(join(repoPath, 'ledger.jsonl'));
+
+    expect(report.actions[0]).toMatchObject({
+      type: 'human-review-hold',
+      status: 'failed',
+    });
+    expect(report.passed).toBe(false);
+    expect(report.actions[0]?.decisionId).toBeUndefined();
+    expect(report.actions[0]?.message).toContain('decision generation failed');
+    expect(events.some((event) => event.eventType === 'devloop_decision_requested')).toBe(false);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        eventType: 'devloop_automation_state',
+        status: 'failed',
+        prNumber: 77,
+      }),
+    ]));
+    expect(formatDevloopAutomationStageReport(report)).toContain('failed');
+  });
+
+  it('resolves repository metadata once for multiple PR decisions in one stage', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-batch-'));
+    const calls: string[] = [];
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        calls.push(args.join(' '));
+        if (args.slice(0, 2).join(' ') === 'pr list') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([77, 78].map((number) => ({
+              number,
+              title: `policy change ${number}`,
+              body: '',
+              headRefName: `takt/issue-${number}`,
+              headRefOid: `${number === 77 ? '0' : '1'}123456789abcdef0123456789abcdef01234567`,
+              isDraft: false,
+              author: { login: 'dev' },
+              labels: [{ name: 'human:review' }],
+            }))),
+            stderr: '',
+          };
+        }
+        if (args.slice(0, 2).join(' ') === 'repo view') {
+          return { exitCode: 0, stdout: 'owner/repo\n', stderr: '' };
+        }
+        if (args.slice(0, 2).join(' ') === 'pr view') {
+          const number = Number(args[2]);
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              number,
+              headRefOid: `${number === 77 ? '0' : '1'}123456789abcdef0123456789abcdef01234567`,
+            }),
+            stderr: '',
+          };
+        }
+        return { exitCode: 1, stdout: '', stderr: `unexpected: ${args.join(' ')}` };
+      },
+    };
+
+    const report = await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      ledgerPath: 'ledger.jsonl',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+
+    expect(report.actions.map((action) => action.decisionId)).toEqual([
+      expect.stringMatching(/^dec_[a-f0-9]{64}$/u),
+      expect.stringMatching(/^dec_[a-f0-9]{64}$/u),
+    ]);
+    expect(calls.filter((call) => call.startsWith('repo view '))).toHaveLength(1);
+    expect(calls.filter((call) => call.startsWith('pr view '))).toHaveLength(2);
+  });
+
+  it('loads the Decision projection index once per stage', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-index-'));
+    const listSpy = vi.spyOn(DecisionStore.prototype, 'list');
+    const headSha = '0123456789abcdef0123456789abcdef01234567';
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        if (args.slice(0, 2).join(' ') === 'pr list') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([{
+              number: 77,
+              title: 'policy change',
+              body: '',
+              headRefName: 'takt/issue-77',
+              headRefOid: headSha,
+              isDraft: false,
+              author: { login: 'dev' },
+              labels: [{ name: 'human:review' }],
+            }]),
+            stderr: '',
+          };
+        }
+        if (args.slice(0, 2).join(' ') === 'pr view') {
+          return { exitCode: 0, stdout: JSON.stringify({ number: 77, headRefOid: headSha }), stderr: '' };
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected command' };
+      },
+    };
+
+    await runDevloopAutomationStage({
+      stage: 'pr-review',
+      repoPath,
+      repo: 'owner/repo',
+      ledgerPath: 'ledger.jsonl',
+      runner,
+      env: { PATH: '/mock/bin' },
+      dryRun: true,
+    });
+
+    expect(listSpy).toHaveBeenCalledTimes(1);
+    listSpy.mockRestore();
+  });
+
+  it('correlates every same-guard action to one aggregate Decision', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-group-'));
+    const headSha = '0123456789abcdef0123456789abcdef01234567';
+    const movedHeadSha = '1123456789abcdef0123456789abcdef01234567';
+    const store = new DecisionStore(repoPath, 'ledger.jsonl');
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        if (args.slice(0, 2).join(' ') === 'pr view') {
+          return { exitCode: 0, stdout: JSON.stringify({ number: 77, headRefOid: headSha }), stderr: '' };
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected command' };
+      },
+    };
+    const actions = [
+      {
+        type: 'human-review-hold',
+        status: 'blocked' as const,
+        pr: 77,
+        headSha,
+        stopRule: 'human review required' as const,
+        message: 'Product owner approval is missing.',
+      },
+      {
+        type: 'current-head-blocked',
+        status: 'blocked' as const,
+        pr: 77,
+        headSha,
+        stopRule: 'Mergeable: NO' as const,
+        message: 'Security review remains blocked.',
+      },
+    ];
+
+    const report = await attachAutomationDecisions({
+      store,
+      report: {
+        passed: true,
+        stage: 'pr-review',
+        message: 'two blockers',
+        actions,
+      },
+      prs: [{
+        number: 77,
+        title: 'policy change',
+        body: '',
+        headRefName: 'takt/issue-77',
+        headRefOid: headSha,
+        isDraft: false,
+        authorLogin: 'dev',
+        labels: [],
+      }],
+      repoPath,
+      repository: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+    const events = readRawDevloopLedgerEvents(join(repoPath, 'ledger.jsonl'));
+    const requested = events.filter((event) => event.eventType === 'devloop_decision_requested');
+
+    expect(report.actions[0]?.decisionId).toBe(report.actions[1]?.decisionId);
+    expect(requested).toHaveLength(1);
+    expect(JSON.stringify(requested[0])).toContain('Product owner approval is missing.');
+    expect(JSON.stringify(requested[0])).toContain('Security review remains blocked.');
+    expect(requested[0]).toMatchObject({
+      request: {
+        subject: { headSha },
+        resumeGuard: { expectedHeadSha: headSha },
+      },
+    });
+
+    const inconsistent = await attachAutomationDecisions({
+      store,
+      report: {
+        passed: true,
+        stage: 'pr-review',
+        message: 'inconsistent evaluated heads',
+        actions: [
+          actions[0]!,
+          { ...actions[1]!, headSha: movedHeadSha },
+        ],
+      },
+      prs: [{
+        number: 77,
+        title: 'policy change',
+        body: '',
+        headRefName: 'takt/issue-77',
+        headRefOid: headSha,
+        isDraft: false,
+        authorLogin: 'dev',
+        labels: [],
+      }],
+      repoPath,
+      repository: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(inconsistent.passed).toBe(false);
+    expect(inconsistent.actions).toEqual([
+      expect.objectContaining({
+        status: 'failed',
+        message: 'decision generation failed: head_changed',
+      }),
+      expect.objectContaining({
+        status: 'failed',
+        message: 'decision generation failed: head_changed',
+      }),
+    ]);
+    expect(inconsistent.actions.every((action) => action.decisionId === undefined)).toBe(true);
+    expect(readRawDevloopLedgerEvents(join(repoPath, 'ledger.jsonl'))
+      .filter((event) => event.eventType === 'devloop_decision_requested')).toHaveLength(1);
+  });
+
+  it('clears a stale Decision id when current-head metadata validation fails', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'takt-pr-decision-stale-id-'));
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (command) => command === 'gh' ? '/mock/bin/gh' : undefined,
+      async exec(_command, args) {
+        if (args.slice(0, 2).join(' ') === 'pr view') {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({ number: 77, headRefOid: 'short-head' }),
+            stderr: '',
+          };
+        }
+        return { exitCode: 1, stdout: '', stderr: 'unexpected command' };
+      },
+    };
+
+    const report = await attachAutomationDecisions({
+      store: new DecisionStore(repoPath, 'ledger.jsonl'),
+      report: {
+        passed: true,
+        stage: 'pr-review',
+        message: 'blocked',
+        actions: [{
+          type: 'human-review-hold',
+          status: 'blocked',
+          pr: 77,
+          decisionId: 'dec_stale',
+          headSha: '0123456789abcdef0123456789abcdef01234567',
+          stopRule: 'human review required',
+          message: 'Product owner approval is missing.',
+        }],
+      },
+      prs: [{
+        number: 77,
+        title: 'policy change',
+        body: '',
+        headRefName: 'takt/issue-77',
+        headRefOid: '0123456789abcdef0123456789abcdef01234567',
+        isDraft: false,
+        authorLogin: 'dev',
+        labels: [],
+      }],
+      repoPath,
+      repository: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(report.actions[0]).toMatchObject({
+      status: 'failed',
+      message: 'decision generation failed: pr_head_unavailable',
+      stopRule: 'human review required',
+    });
+    expect(report.actions[0]?.decisionId).toBeUndefined();
+  });
+
   it('discovers non-draft automation PRs from mocked GitHub output', () => {
     const prs = parseAutomationPullRequests(JSON.stringify([
       {
@@ -307,6 +742,7 @@ describe('devloopd PR automation orchestration', () => {
       type: 'current-head-blocked',
       status: 'blocked',
       pr: 21,
+      headSha: 'head789',
       stopRule: 'Mergeable: NO',
     }));
     expect(runner.calls.some((call) => call.includes('--remove-label agent:blocked'))).toBe(false);
@@ -337,6 +773,7 @@ describe('devloopd PR automation orchestration', () => {
       type: 'human-review-hold',
       status: 'blocked',
       pr: 22,
+      headSha: 'human123',
       stopRule: 'human review required',
     }));
     expect(runner.calls).toEqual([]);
@@ -357,6 +794,7 @@ describe('devloopd PR automation orchestration', () => {
       type: 'promote-auto-merge',
       status: 'blocked',
       pr: 77,
+      headSha: '2123456789abcdef0123456789abcdef01234567',
       stopRule: 'human review required',
     });
     expect(action.message).toContain('human:review');

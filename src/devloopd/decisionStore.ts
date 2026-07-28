@@ -202,8 +202,15 @@ function sameValue(left: DecisionAnswerValue, right: DecisionAnswerValue): boole
   return false;
 }
 
-function sameRequest(left: DecisionRequest, right: DecisionRequest): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+function sameSemanticRequest(left: DecisionRequest, right: DecisionRequest): boolean {
+  const leftSemantic = { ...left } as Partial<DecisionRequest>;
+  const rightSemantic = { ...right } as Partial<DecisionRequest>;
+  // Scheduler wall-clock time is persistence metadata, not part of the human
+  // choice. Ignoring only createdAt lets concurrent schedulers converge while
+  // keeping identity, schema, guard, and every decision field conflict-checked.
+  Reflect.deleteProperty(leftSemantic, 'createdAt');
+  Reflect.deleteProperty(rightSemantic, 'createdAt');
+  return JSON.stringify(leftSemantic) === JSON.stringify(rightSemantic);
 }
 
 function projectionBelongsToRepo(projection: DecisionProjection, repoPath: string): boolean {
@@ -313,13 +320,46 @@ export class DecisionStore {
         );
         if (existing !== undefined) {
           const existingNormalized = this.normalizeRequest(existing.request);
-          if (sameRequest(existingNormalized, normalized)) return existing;
+          if (sameSemanticRequest(existingNormalized, normalized)) return existing;
           fail('request_conflict');
         }
 
         const event = createDecisionRequestedEvent(normalized, options);
         transaction.append(event);
         return event;
+      }, options.lock),
+    );
+  }
+
+  requestAndGet(
+    request: DecisionRequest,
+    options: DecisionStoreWriteOptions = {},
+  ): DecisionProjection {
+    return atStoreBoundary(() =>
+      withLockedDevloopLedgerTransaction(this.ledgerPath, (transaction) => {
+        const normalized = this.normalizeRequest(request);
+        const strict = parseStrictDecisionLedger(this.ledgerPath);
+        if (strict.fold.fatal) fail('ledger_incompatible');
+        if (strict.fold.quarantinedDecisionIds.includes(normalized.decisionId)) {
+          fail('decision_quarantined');
+        }
+
+        const existing = strict.fold.get(normalized.decisionId);
+        if (existing !== undefined) {
+          if (
+            !projectionBelongsToRepo(existing, this.repoPath)
+            || !sameSemanticRequest(this.normalizeRequest(existing.request), normalized)
+          ) {
+            fail('request_conflict');
+          }
+          return existing;
+        }
+
+        transaction.append(createDecisionRequestedEvent(normalized, options));
+        return Object.freeze({
+          request: normalized,
+          status: 'open' as const,
+        });
       }, options.lock),
     );
   }

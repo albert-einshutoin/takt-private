@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { basename, relative, resolve } from 'node:path';
 import {
   classifyRecursiveAutomationLane,
@@ -19,6 +20,13 @@ import {
 } from './commandRunner.js';
 import { scanIssues } from './issueScanner.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import {
+  classifyIssueScoutDecision,
+  DecisionGenerationError,
+  ensureDecisionForIssueScoutCandidate,
+  validateIssueScoutDecisionCandidate,
+} from './decisionGeneration.js';
+import { DecisionStore, DecisionStoreError } from './decisionStore.js';
 
 export type IssueScoutSourceId =
   | 'github_issues'
@@ -36,6 +44,9 @@ export type IssueScoutStopRule =
   | 'Duplicate or already covered'
   | 'active run limit'
   | 'Unsafe or too broad'
+  | 'human revision requested'
+  | 'human decision skipped'
+  | 'decision generation failed'
   | 'backoff active'
   | 'no candidates';
 
@@ -80,6 +91,7 @@ export interface RecursiveLaneCandidateInput {
   targetVersion?: string;
   updateKind?: DependencyUpdateKind;
   threatEvidence?: string;
+  sourceEvidenceIncomplete?: boolean;
 }
 
 export interface IssueScoutObservation {
@@ -110,6 +122,7 @@ export interface SkippedIssueScoutCandidate {
   stopRule: IssueScoutStopRule;
   reason: string;
   retryAfter?: string;
+  decisionId?: string;
 }
 
 export interface IssueScoutReport {
@@ -121,6 +134,20 @@ export interface IssueScoutReport {
   wouldCreate: readonly GeneratedIssueDraft[];
   createdIssues: readonly string[];
   ledgerPath: string;
+  batchFailure?: IssueScoutBatchFailure;
+}
+
+export type IssueScoutBatchFailureCode =
+  | 'candidate_count_exceeded'
+  | 'candidate_invalid'
+  | 'candidate_bytes_exceeded';
+
+export interface IssueScoutBatchFailure {
+  code: IssueScoutBatchFailureCode;
+  candidateCount: number;
+  candidateBytes?: number;
+  maxCandidateCount: number;
+  maxBatchBytes: number;
 }
 
 export interface GeneratedIssueDraft {
@@ -168,6 +195,20 @@ const DEFAULT_BACKLOG_FILES = [
   '.takt/backlog.md',
 ];
 
+export const ISSUE_SCOUT_MAX_CANDIDATES = 256;
+export const ISSUE_SCOUT_MAX_BATCH_BYTES = 256 * 1024;
+export const ISSUE_SCOUT_MAX_CANDIDATE_TEXT_LENGTH = 4_000;
+const ISSUE_SCOUT_MAX_CANDIDATE_TEXT_BYTES = 16 * 1024;
+const ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH = 50;
+const ISSUE_SCOUT_MAX_SKIPPED_SUMMARY = 50;
+const ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY = 50;
+const ISSUE_SCOUT_SUMMARY_TEXT_LENGTH = 512;
+const SOURCE_TEXT_TRUNCATION_MARKER = ' [TRUNCATED]';
+const SOURCE_ARRAY_OMISSION_MARKER = (count: number) => `[OMITTED ${count} ITEMS]`;
+const SOURCE_EVIDENCE_INCOMPLETE_REASON =
+  'Source evidence was truncated or omitted; inspect the original source.';
+const ISSUE_SCOUT_MAX_SOURCE_TEXT_LENGTH = 3_000;
+
 const REPORT_FILES: Readonly<Record<Extract<IssueScoutSourceId, 'dependency_report' | 'security_report' | 'benchmark_report' | 'lint_type_debt'>, {
   path: string;
   lane: RecursiveAutomationLane;
@@ -210,16 +251,183 @@ const RISK_SCORE: Readonly<Record<IssueScoutRiskBucket, number>> = {
   high: 100,
 };
 
+function sourceTextIsIncomplete(text: string): boolean {
+  return text.includes(SOURCE_TEXT_TRUNCATION_MARKER.trim())
+    || /\[OMITTED \d+ ITEMS\]/u.test(text);
+}
+
+function boundSourceTextWithStatus(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  if (text.length <= ISSUE_SCOUT_MAX_SOURCE_TEXT_LENGTH) {
+    return { text, truncated: sourceTextIsIncomplete(text) };
+  }
+  const prefixLength = ISSUE_SCOUT_MAX_SOURCE_TEXT_LENGTH
+    - SOURCE_TEXT_TRUNCATION_MARKER.length;
+  return {
+    text: `${text.slice(0, prefixLength)}${SOURCE_TEXT_TRUNCATION_MARKER}`,
+    truncated: true,
+  };
+}
+
+function boundSourceText(text: string): string {
+  return boundSourceTextWithStatus(text).text;
+}
+
 function sanitizeText(text: string): string {
-  return sanitizeSensitiveText(text).replace(/\s+/g, ' ').trim();
+  // Bound raw source text before any broad secret or normalization regex runs.
+  // The deterministic marker contains no attacker-controlled suffix.
+  return sanitizeSensitiveText(boundSourceText(text)).replace(/\s+/g, ' ').trim();
+}
+
+function sanitizeBatchText(text: string): string {
+  // The generic sanitizer has deliberately broad assignment matching. Avoid
+  // feeding it large benign strings when no sensitive syntax is even present.
+  const sensitiveSanitized = /(?:api[_-]?key|access[_-]?key|token|password|secret|authorization|cookie|private[_-]?key|sk-|ghp_|xox|:\/\/|(?:^|\s)(?:-u|--user|--proxy-user))/iu.test(text)
+    ? sanitizeSensitiveText(text)
+    : text;
+  let controlSanitized = '';
+  let segmentStart = 0;
+  for (let index = 0; index < sensitiveSanitized.length; index += 1) {
+    const code = sensitiveSanitized.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      controlSanitized += `${sensitiveSanitized.slice(segmentStart, index)} `;
+      segmentStart = index + 1;
+    }
+  }
+  controlSanitized += sensitiveSanitized.slice(segmentStart);
+  return controlSanitized
+    .replace(/\bhttps?:\/\/[^\s)\]}]+/giu, '[REDACTED URL]')
+    .replace(/\b[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/gu, '[REDACTED PATH]')
+    .replace(/\/(?:[^/\s]+\/)+[^,\s.;)\]}]*/gu, '[REDACTED PATH]')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+class IssueScoutCandidatePreflightError extends Error {
+  readonly code: IssueScoutBatchFailureCode;
+  readonly candidateBytes?: number;
+
+  constructor(code: IssueScoutBatchFailureCode, candidateBytes?: number) {
+    super(`Issue Scout candidate preflight failed: ${code}`);
+    this.name = 'IssueScoutCandidatePreflightError';
+    this.code = code;
+    this.candidateBytes = candidateBytes;
+  }
+}
+
+export function measureIssueScoutCandidateBatchBytes(
+  candidates: readonly IssueScoutCandidate[],
+): number {
+  if (candidates.length > ISSUE_SCOUT_MAX_CANDIDATES) {
+    throw new IssueScoutCandidatePreflightError('candidate_count_exceeded');
+  }
+  let bytes = 0;
+  const addString = (value: unknown): void => {
+    // Length and array shape checks intentionally precede sanitization. This
+    // prevents broad secret-matching regexes from receiving attacker-sized text.
+    if (typeof value !== 'string' || value.length > ISSUE_SCOUT_MAX_CANDIDATE_TEXT_LENGTH) {
+      throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+    }
+    const valueBytes = Buffer.byteLength(value, 'utf8');
+    if (valueBytes > ISSUE_SCOUT_MAX_CANDIDATE_TEXT_BYTES) {
+      throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+    }
+    bytes += valueBytes;
+    if (bytes > ISSUE_SCOUT_MAX_BATCH_BYTES) {
+      throw new IssueScoutCandidatePreflightError('candidate_bytes_exceeded', bytes);
+    }
+  };
+  const addStringArray = (values: unknown): void => {
+    if (!Array.isArray(values) || values.length > ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) {
+      throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+    }
+    for (const value of values) addString(value);
+  };
+
+  for (const candidate of candidates) {
+    addString(candidate.id);
+    addString(candidate.sourceId);
+    addString(candidate.title);
+    addString(candidate.summary);
+    addString(candidate.lane);
+    addString(candidate.policyCategory);
+    addString(candidate.riskBucket);
+    if (
+      !Array.isArray(candidate.evidence)
+      || candidate.evidence.length > ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH
+    ) {
+      throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+    }
+    for (const artifact of candidate.evidence) {
+      if (artifact === null || typeof artifact !== 'object') {
+        throw new IssueScoutCandidatePreflightError('candidate_invalid', bytes);
+      }
+      addString(artifact.kind);
+      if (artifact.path !== undefined) addString(artifact.path);
+      if (artifact.url !== undefined) addString(artifact.url);
+      addString(artifact.summary);
+    }
+    addStringArray(candidate.acceptanceCriteria);
+    addStringArray(candidate.verificationCommands);
+    addStringArray(candidate.escalationCriteria);
+    addStringArray(candidate.expectedChangedSurfaces);
+    addStringArray(candidate.labels);
+    addStringArray(candidate.laneEvidence);
+  }
+  return bytes;
+}
+
+function issueScoutSummaryDigest(input: {
+  observations: readonly IssueScoutObservation[];
+  candidateCount: number;
+  selected: readonly IssueScoutSelection[];
+  skipped: readonly SkippedIssueScoutCandidate[];
+  batchFailure?: IssueScoutBatchFailure;
+}): string {
+  // Only bounded structural fields enter this public digest. Candidate IDs,
+  // titles, paths, URLs, and other attacker-controlled secrets are excluded.
+  const observationCounts: Record<string, number> = {};
+  for (const observation of input.observations) {
+    const key = `${observation.sourceId}:${observation.status}`;
+    observationCounts[key] = (observationCounts[key] ?? 0) + 1;
+  }
+  const structuralSummary = {
+    observationCounts,
+    observationCount: input.observations.length,
+    candidateCount: input.candidateCount,
+    selected: input.selected.map((selection) => ({
+      sourceId: selection.candidate.sourceId,
+      lane: selection.candidate.lane,
+      riskBucket: selection.candidate.riskBucket,
+      score: selection.score,
+    })),
+    skipped: input.skipped.slice(0, ISSUE_SCOUT_MAX_SKIPPED_SUMMARY).map((item) => ({
+      sourceId: item.candidate.sourceId,
+      lane: item.candidate.lane,
+      stopRule: item.stopRule,
+    })),
+    skippedCount: input.skipped.length,
+    batchFailure: input.batchFailure,
+  };
+  return createHash('sha256').update(JSON.stringify(structuralSummary), 'utf8').digest('hex');
 }
 
 function normalizeKey(text: string): string {
   return sanitizeText(text).toLowerCase().replace(/[^a-z0-9]+/gu, ' ').trim();
 }
 
+function normalizeSanitizedKey(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/gu, ' ').trim();
+}
+
 function slug(text: string): string {
   return normalizeKey(text).replaceAll(' ', '-').slice(0, 64);
+}
+
+function slugFromSanitizedText(text: string): string {
+  return normalizeSanitizedKey(text).replaceAll(' ', '-').slice(0, 64);
 }
 
 function unique(values: readonly string[]): string[] {
@@ -230,55 +438,136 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function readStringField(record: Record<string, unknown> | undefined, names: readonly string[]): string | undefined {
-  if (record === undefined) return undefined;
-  for (const name of names) {
-    const value = record[name];
-    if (typeof value === 'string' && value.trim().length > 0) {
-      return sanitizeText(value);
-    }
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return String(value);
-    }
-  }
-  return undefined;
+interface SourceStringField {
+  value?: string;
+  incomplete: boolean;
 }
 
-function readStringArrayField(record: Record<string, unknown> | undefined, names: readonly string[]): string[] {
-  if (record === undefined) return [];
-  const values: string[] = [];
+interface SourceStringArrayField {
+  values: string[];
+  incomplete: boolean;
+}
+
+function readStringField(
+  record: Record<string, unknown> | undefined,
+  names: readonly string[],
+): SourceStringField {
+  if (record === undefined) return { incomplete: false };
+  let selected: string | undefined;
+  let incomplete = false;
   for (const name of names) {
-    const value = record[name];
-    if (typeof value === 'string' && value.trim().length > 0) {
-      values.push(sanitizeText(value));
+    const raw = record[name];
+    let value: string | undefined;
+    if (typeof raw === 'string') {
+      const bounded = boundSourceTextWithStatus(raw);
+      incomplete ||= bounded.truncated;
+      const sanitized = sanitizeText(bounded.text);
+      if (sanitized.trim().length > 0) value = sanitized;
+    } else if (typeof raw === 'number' || typeof raw === 'boolean') {
+      value = String(raw);
+    } else if (raw !== undefined && raw !== null) {
+      incomplete = true;
+    }
+    if (value !== undefined) {
+      if (selected === undefined) selected = value;
+      else incomplete = true;
+    }
+  }
+  return {
+    ...(selected === undefined ? {} : { value: selected }),
+    incomplete,
+  };
+}
+
+function readStringArrayField(
+  record: Record<string, unknown> | undefined,
+  names: readonly string[],
+): SourceStringArrayField {
+  if (record === undefined) return { values: [], incomplete: false };
+  const values: string[] = [];
+  let incomplete = false;
+  for (const name of names) {
+    const raw = record[name];
+    if (typeof raw === 'string') {
+      const bounded = boundSourceTextWithStatus(raw);
+      incomplete ||= bounded.truncated;
+      const sanitized = sanitizeText(bounded.text);
+      if (sanitized.trim().length === 0) continue;
+      if (values.length < ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) values.push(sanitized);
+      else incomplete = true;
       continue;
     }
-    if (Array.isArray(value)) {
-      values.push(...value.flatMap((item) => {
-        if (typeof item === 'string' && item.trim().length > 0) {
-          return [sanitizeText(item)];
+    if (Array.isArray(raw)) {
+      if (values.length >= ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) {
+        incomplete ||= raw.length > 0;
+        continue;
+      }
+      const remaining = ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH - values.length;
+      const sampleCount = raw.length > remaining
+        ? Math.max(0, remaining - 1)
+        : remaining;
+      for (let index = 0; index < Math.min(raw.length, sampleCount); index += 1) {
+        const item = raw[index];
+        if (typeof item === 'string') {
+          const bounded = boundSourceTextWithStatus(item);
+          incomplete ||= bounded.truncated;
+          const sanitized = sanitizeText(bounded.text);
+          if (sanitized.trim().length > 0) values.push(sanitized);
+        } else if (typeof item === 'number' || typeof item === 'boolean') {
+          values.push(String(item));
+        } else {
+          incomplete = true;
         }
-        if (typeof item === 'number' || typeof item === 'boolean') {
-          return [String(item)];
-        }
-        return [];
-      }));
+      }
+      const omittedCount = raw.length - sampleCount;
+      if (omittedCount > 0 && values.length < ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH) {
+        values.push(SOURCE_ARRAY_OMISSION_MARKER(omittedCount));
+        incomplete = true;
+      }
+    } else if (raw !== undefined && raw !== null) {
+      incomplete = true;
     }
   }
-  return unique(values);
+  return { values: unique(values), incomplete };
 }
 
-function parseReportRecord(raw: string): Record<string, unknown> | undefined {
+interface ParsedReportRecord {
+  record?: Record<string, unknown>;
+  incomplete: boolean;
+}
+
+const MAX_REPORT_ROOT_ARRAY_SCAN = 50;
+
+function parseReportRecord(raw: string): ParsedReportRecord {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (isRecord(parsed)) return parsed;
+    if (isRecord(parsed)) return { record: parsed, incomplete: false };
     if (Array.isArray(parsed)) {
-      return parsed.find(isRecord);
+      const scanCount = Math.min(parsed.length, MAX_REPORT_ROOT_ARRAY_SCAN);
+      let firstRecord: Record<string, unknown> | undefined;
+      let recordCount = 0;
+      let nonRecordSeen = false;
+      for (let index = 0; index < scanCount; index += 1) {
+        const item = parsed[index];
+        if (isRecord(item)) {
+          firstRecord ??= item;
+          recordCount += 1;
+        } else {
+          nonRecordSeen = true;
+        }
+      }
+      const incomplete = parsed.length > scanCount
+        || nonRecordSeen
+        || recordCount > 1;
+      return {
+        ...(firstRecord === undefined ? {} : { record: firstRecord }),
+        incomplete,
+      };
     }
   } catch {
-    return undefined;
+    return { incomplete: true };
   }
-  return undefined;
+  return { incomplete: true };
 }
 
 function normalizeDependencyUpdateKind(value: string | undefined): DependencyUpdateKind | undefined {
@@ -322,7 +611,9 @@ export function classifyDependencyUpdateKind(input: {
   if (input.updateKind !== undefined && input.updateKind !== 'unknown') {
     return input.updateKind;
   }
-  if (/\b(breaking|major migration|incompatible)\b/iu.test(input.summary ?? '')) {
+  if (/\b(breaking|major migration|incompatible)\b/iu.test(
+    boundSourceText(input.summary ?? ''),
+  )) {
     return 'breaking';
   }
   const current = parseVersionMajorMinorPatch(input.currentVersion);
@@ -365,6 +656,65 @@ function riskForCandidate(input: {
   return 'low';
 }
 
+function normalizeCandidateSourceText(value: string): {
+  text: string;
+  incomplete: boolean;
+} {
+  const bounded = boundSourceTextWithStatus(value);
+  return {
+    text: sanitizeText(bounded.text),
+    incomplete: bounded.truncated,
+  };
+}
+
+function normalizeCandidateSourceArray(values: readonly string[]): {
+  values: string[];
+  incomplete: boolean;
+} {
+  const oversized = values.length > ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH;
+  const sampleCount = oversized
+    ? ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH - 1
+    : values.length;
+  let incomplete = oversized;
+  const normalized = values.slice(0, sampleCount).map((value) => {
+    const item = normalizeCandidateSourceText(value);
+    incomplete ||= item.incomplete;
+    return item.text;
+  });
+  if (oversized) {
+    normalized.push(SOURCE_ARRAY_OMISSION_MARKER(values.length - sampleCount));
+  }
+  return { values: normalized, incomplete };
+}
+
+function normalizeCandidateEvidence(values: readonly IssueScoutArtifact[]): {
+  values: IssueScoutArtifact[];
+  incomplete: boolean;
+} {
+  const oversized = values.length > ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH;
+  const sampleCount = oversized
+    ? ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH - 1
+    : values.length;
+  let incomplete = oversized;
+  const normalized = values.slice(0, sampleCount).map((artifact) => {
+    const summary = normalizeCandidateSourceText(artifact.summary);
+    const path = artifact.path === undefined
+      ? undefined
+      : normalizeCandidateSourceText(artifact.path);
+    const url = artifact.url === undefined
+      ? undefined
+      : normalizeCandidateSourceText(artifact.url);
+    incomplete ||= summary.incomplete || path?.incomplete === true || url?.incomplete === true;
+    return {
+      kind: artifact.kind,
+      summary: summary.text,
+      ...(path === undefined ? {} : { path: path.text }),
+      ...(url === undefined ? {} : { url: url.text }),
+    };
+  });
+  return { values: normalized, incomplete };
+}
+
 export function buildIssueScoutCandidate(input: {
   sourceId: IssueScoutSourceId;
   title: string;
@@ -377,41 +727,106 @@ export function buildIssueScoutCandidate(input: {
   policyCategory?: AutomationPolicyCategory;
   riskBucket?: IssueScoutRiskBucket;
   laneEvidence?: readonly string[];
+  sourceEvidenceIncomplete?: boolean;
 }): IssueScoutCandidate {
+  const normalizedTitle = normalizeCandidateSourceText(input.title);
+  const normalizedSummary = normalizeCandidateSourceText(input.summary);
+  const title = normalizedTitle.text;
+  const summary = normalizedSummary.text;
   const laneClassification = classifyRecursiveAutomationLane({
-    title: input.title,
-    body: input.summary,
+    title,
+    body: summary,
     labels: input.lane === undefined ? [] : [`lane:${input.lane}`],
   });
   const lane = input.lane ?? laneClassification.lane;
   const definition = getRecursiveAutomationLaneDefinition(lane);
-  const policyCategory = input.policyCategory ?? (laneClassification.requiresHumanReview ? 'human_policy' : definition.policyCategory);
-  const riskBucket = input.riskBucket ?? riskForCandidate({
-    lane,
-    policyCategory,
-    title: input.title,
-    summary: input.summary,
-  });
+  const evidence = normalizeCandidateEvidence(input.evidence ?? []);
+  const acceptanceCriteria = normalizeCandidateSourceArray(input.acceptanceCriteria ?? [
+    'Keep the change scoped to the evidence in this issue.',
+    'Add or update tests/docs for the changed behavior.',
+    'Do not change product direction, public contracts, pricing, auth, retention, or security posture without human approval.',
+  ]);
+  const verificationCommands = normalizeCandidateSourceArray(
+    input.verificationCommands ?? definition.defaultVerification,
+  );
+  const expectedChangedSurfaces = normalizeCandidateSourceArray(
+    input.expectedChangedSurfaces ?? definition.expectedChangedSurfaces,
+  );
+  const laneEvidence = normalizeCandidateSourceArray(input.laneEvidence ?? []);
+  const sourceEvidenceIncomplete = input.sourceEvidenceIncomplete === true
+    || normalizedTitle.incomplete
+    || normalizedSummary.incomplete
+    || evidence.incomplete
+    || acceptanceCriteria.incomplete
+    || verificationCommands.incomplete
+    || expectedChangedSurfaces.incomplete
+    || laneEvidence.incomplete;
+  const policyCategory = sourceEvidenceIncomplete
+    ? 'human_policy'
+    : input.policyCategory
+      ?? (laneClassification.requiresHumanReview ? 'human_policy' : definition.policyCategory);
+  const riskBucket = sourceEvidenceIncomplete
+    ? 'high'
+    : input.riskBucket ?? riskForCandidate({
+      lane,
+      policyCategory,
+      title,
+      summary,
+    });
+  const decisionAcceptanceCriteria = sourceEvidenceIncomplete
+    ? acceptanceCriteria.values.slice(0, 20)
+    : acceptanceCriteria.values;
+  const decisionExpectedChangedSurfaces = sourceEvidenceIncomplete
+    ? expectedChangedSurfaces.values.slice(0, 10)
+    : expectedChangedSurfaces.values;
+  const evidenceCapacity = ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH
+    - decisionAcceptanceCriteria.length
+    - decisionExpectedChangedSurfaces.length;
+  const decisionEvidence = sourceEvidenceIncomplete
+    ? [
+      ...evidence.values.slice(0, Math.max(0, evidenceCapacity - 1)),
+      { kind: 'ledger' as const, summary: SOURCE_EVIDENCE_INCOMPLETE_REASON },
+    ]
+    : evidence.values;
+  const escalationCriteria = sourceEvidenceIncomplete
+    ? [...definition.humanReviewEscalation, SOURCE_EVIDENCE_INCOMPLETE_REASON]
+    : definition.humanReviewEscalation;
+  const laneEvidenceCapacity = ISSUE_SCOUT_MAX_CANDIDATE_ARRAY_LENGTH
+    - 2
+    - escalationCriteria.length
+    - (decisionExpectedChangedSurfaces.length > 0 ? 1 : 0);
+  const explicitIncompleteLaneEvidence = laneEvidence.values.find(sourceTextIsIncomplete);
+  const decisionLaneEvidence = sourceEvidenceIncomplete
+    ? [
+      ...laneEvidence.values
+        .filter((value) => !sourceTextIsIncomplete(value))
+        .slice(0, Math.max(
+          0,
+          laneEvidenceCapacity - (explicitIncompleteLaneEvidence === undefined ? 1 : 2),
+        )),
+      ...(explicitIncompleteLaneEvidence === undefined ? [] : [explicitIncompleteLaneEvidence]),
+      'sourceEvidence=truncated_or_omitted',
+    ]
+    : laneEvidence.values;
 
   return {
-    id: `${input.sourceId}:${slug(input.title)}`,
+    // A bounded prefix can collide with another truncated source. Such
+    // candidates are always human/high-risk, so the ID can route review but
+    // can never authorize automatic issue creation.
+    id: `${input.sourceId}:${slugFromSanitizedText(title)}`,
     sourceId: input.sourceId,
-    title: sanitizeText(input.title),
-    summary: sanitizeText(input.summary),
+    title,
+    summary,
     lane,
     policyCategory,
     riskBucket,
-    evidence: input.evidence ?? [],
-    acceptanceCriteria: input.acceptanceCriteria ?? [
-      'Keep the change scoped to the evidence in this issue.',
-      'Add or update tests/docs for the changed behavior.',
-      'Do not change product direction, public contracts, pricing, auth, retention, or security posture without human approval.',
-    ],
-    verificationCommands: input.verificationCommands ?? definition.defaultVerification,
-    escalationCriteria: definition.humanReviewEscalation,
-    expectedChangedSurfaces: input.expectedChangedSurfaces ?? definition.expectedChangedSurfaces,
+    evidence: decisionEvidence,
+    acceptanceCriteria: decisionAcceptanceCriteria,
+    verificationCommands: verificationCommands.values,
+    escalationCriteria,
+    expectedChangedSurfaces: decisionExpectedChangedSurfaces,
     labels: labelsForLane(lane, policyCategory),
-    laneEvidence: input.laneEvidence ?? [],
+    laneEvidence: decisionLaneEvidence,
   };
 }
 
@@ -505,6 +920,7 @@ export function buildRecursiveLaneCandidate(input: RecursiveLaneCandidateInput):
     policyCategory: humanReviewedDependency ? 'human_policy' : undefined,
     riskBucket: humanReviewedDependency ? 'high' : undefined,
     laneEvidence: laneEvidence(input, updateKind),
+    sourceEvidenceIncomplete: input.sourceEvidenceIncomplete,
   });
 }
 
@@ -585,7 +1001,8 @@ function scanLocalBacklog(context: IssueScoutSourceContext): IssueScoutObservati
     const content = readFileSync(filePath, 'utf-8');
     artifacts.push({ kind: 'file', path: relativePath, summary: `local backlog file ${relativePath}` });
     content.split('\n').forEach((line, index) => {
-      const title = parseBacklogLine(line);
+      const boundedLine = boundSourceText(line);
+      const title = parseBacklogLine(boundedLine);
       if (title === undefined) {
         return;
       }
@@ -593,7 +1010,7 @@ function scanLocalBacklog(context: IssueScoutSourceContext): IssueScoutObservati
         sourceId: 'local_backlog',
         title,
         summary: `${relativePath}:${index + 1} backlog item`,
-        evidence: [{ kind: 'file', path: `${relativePath}:${index + 1}`, summary: sanitizeText(line) }],
+        evidence: [{ kind: 'file', path: `${relativePath}:${index + 1}`, summary: sanitizeText(boundedLine) }],
       }));
     });
   }
@@ -641,7 +1058,7 @@ async function scanTodoComments(context: IssueScoutSourceContext): Promise<Issue
   }
 
   const candidates = result.stdout.split('\n')
-    .map((line) => line.trim())
+    .map((line) => boundSourceText(line).trim())
     .filter(Boolean)
     .slice(0, 25)
     .map((line) => {
@@ -679,42 +1096,63 @@ function readReportSource(sourceId: Extract<IssueScoutSourceId, 'dependency_repo
         });
       }
       const rawContent = readFileSync(filePath, 'utf-8');
-      const record = parseReportRecord(rawContent);
-      const rawSummary = sanitizeText(rawContent).slice(0, 2_000);
+      const parsedReport = parseReportRecord(rawContent);
+      const record = parsedReport.record;
+      const boundedRawSummary = boundSourceTextWithStatus(rawContent);
+      const sanitizedRawSummary = sanitizeText(boundedRawSummary.text);
+      let sourceEvidenceIncomplete = parsedReport.incomplete
+        || (record === undefined && boundedRawSummary.truncated);
+      const field = (names: readonly string[]): string | undefined => {
+        const result = readStringField(record, names);
+        sourceEvidenceIncomplete ||= result.incomplete;
+        return result.value;
+      };
+      const arrayField = (names: readonly string[]): string[] => {
+        const result = readStringArrayField(record, names);
+        sourceEvidenceIncomplete ||= result.incomplete;
+        return result.values;
+      };
+      const rawSummary = boundedRawSummary.truncated
+        ? `${sanitizedRawSummary.slice(
+          0,
+          2_000 - SOURCE_TEXT_TRUNCATION_MARKER.length,
+        )}${SOURCE_TEXT_TRUNCATION_MARKER}`
+        : sanitizedRawSummary.slice(0, 2_000);
       // Report producers are intentionally schema-light; accepting common field aliases keeps the loop
       // useful while preserving typed lane evidence in the generated issue.
       const candidate = buildRecursiveLaneCandidate({
         sourceId,
-        title: readStringField(record, ['title', 'name']) ?? config.title,
-        summary: (readStringField(record, ['summary', 'description', 'reason', 'finding']) ?? rawSummary)
+        title: field(['title', 'name']) ?? config.title,
+        summary: (field(['summary', 'description', 'reason', 'finding']) ?? rawSummary)
           || `${config.path} exists but is empty`,
         lane: config.lane,
         evidence: [{ kind: 'file', path: config.path, summary: `${sourceId} report` }],
         baselineMetric: config.lane === 'performance'
-          ? readStringField(record, ['baselineMetric', 'baseline_metric', 'baseline'])
+          ? field(['baselineMetric', 'baseline_metric', 'baseline'])
           : undefined,
         targetMetric: config.lane === 'performance'
-          ? readStringField(record, ['targetMetric', 'target_metric', 'target'])
+          ? field(['targetMetric', 'target_metric', 'target'])
           : undefined,
-        verificationCommand: readStringField(record, ['verificationCommand', 'verification_command', 'verification', 'verify']),
+        verificationCommand: field(['verificationCommand', 'verification_command', 'verification', 'verify']),
         changelogUrls: config.lane === 'dependencies'
-          ? readStringArrayField(record, ['changelogUrls', 'changelog_urls', 'changelogs', 'changelog'])
+          ? arrayField(['changelogUrls', 'changelog_urls', 'changelogs', 'changelog'])
           : undefined,
         advisoryUrls: config.lane === 'dependencies' || config.lane === 'security_hardening'
-          ? readStringArrayField(record, ['advisoryUrls', 'advisory_urls', 'advisories', 'advisory'])
+          ? arrayField(['advisoryUrls', 'advisory_urls', 'advisories', 'advisory'])
           : undefined,
         currentVersion: config.lane === 'dependencies'
-          ? readStringField(record, ['currentVersion', 'current_version', 'current'])
+          ? field(['currentVersion', 'current_version', 'current'])
           : undefined,
         targetVersion: config.lane === 'dependencies'
-          ? readStringField(record, ['targetVersion', 'target_version', 'target', 'newVersion', 'new_version'])
+          ? field(['targetVersion', 'target_version', 'target', 'newVersion', 'new_version'])
           : undefined,
         updateKind: config.lane === 'dependencies'
-          ? normalizeDependencyUpdateKind(readStringField(record, ['updateKind', 'update_kind', 'kind']))
+          ? normalizeDependencyUpdateKind(field(['updateKind', 'update_kind', 'kind']))
           : undefined,
         threatEvidence: config.lane === 'security_hardening'
-          ? readStringField(record, ['threatEvidence', 'threat_evidence', 'threat', 'risk'])
+          ? field(['threatEvidence', 'threat_evidence', 'threat', 'risk'])
           : undefined,
+        sourceEvidenceIncomplete,
       });
       return makeObservation({
         sourceId,
@@ -743,23 +1181,36 @@ function scanLedgerEvents(context: IssueScoutSourceContext): IssueScoutObservati
     .filter((event) => event.eventType === 'devloop_follow_up_evidence' || event.eventType === 'devloop_recursive_follow_up')
     .slice(-10)
     .map((event) => {
-      const lane = readRecursiveLane(event.lane) ?? 'feature_improvement';
-      const evidence = readStringField(event, ['evidence', 'evidencePath', 'evidence_path', 'source']) ?? `ledger event ${event.eventId}`;
+      let sourceEvidenceIncomplete = false;
+      const field = (names: readonly string[]): string | undefined => {
+        const result = readStringField(event, names);
+        sourceEvidenceIncomplete ||= result.incomplete;
+        return result.value;
+      };
+      const arrayField = (names: readonly string[]): string[] => {
+        const result = readStringArrayField(event, names);
+        sourceEvidenceIncomplete ||= result.incomplete;
+        return result.values;
+      };
+      const lane = readRecursiveLane(field(['lane'])) ?? 'feature_improvement';
+      const evidence = field(['evidence', 'evidencePath', 'evidence_path', 'source'])
+        ?? `ledger event ${event.eventId}`;
       return buildRecursiveLaneCandidate({
         sourceId: 'ledger_events',
-        title: readStringField(event, ['title']) ?? `Follow up ${String(event.eventId)}`,
-        summary: readStringField(event, ['summary', 'reason', 'description']) ?? evidence,
+        title: field(['title']) ?? `Follow up ${String(event.eventId)}`,
+        summary: field(['summary', 'reason', 'description']) ?? evidence,
         lane,
         evidence: [{ kind: 'ledger', summary: evidence }],
-        baselineMetric: readStringField(event, ['baselineMetric', 'baseline_metric', 'baseline']),
-        targetMetric: readStringField(event, ['targetMetric', 'target_metric', 'target']),
-        verificationCommand: readStringField(event, ['verificationCommand', 'verification_command', 'verification', 'verify']),
-        changelogUrls: readStringArrayField(event, ['changelogUrls', 'changelog_urls', 'changelog']),
-        advisoryUrls: readStringArrayField(event, ['advisoryUrls', 'advisory_urls', 'advisory']),
-        currentVersion: readStringField(event, ['currentVersion', 'current_version', 'current']),
-        targetVersion: readStringField(event, ['targetVersion', 'target_version', 'target']),
-        updateKind: normalizeDependencyUpdateKind(readStringField(event, ['updateKind', 'update_kind', 'kind'])),
-        threatEvidence: readStringField(event, ['threatEvidence', 'threat_evidence', 'threat', 'risk']),
+        baselineMetric: field(['baselineMetric', 'baseline_metric', 'baseline']),
+        targetMetric: field(['targetMetric', 'target_metric', 'target']),
+        verificationCommand: field(['verificationCommand', 'verification_command', 'verification', 'verify']),
+        changelogUrls: arrayField(['changelogUrls', 'changelog_urls', 'changelog']),
+        advisoryUrls: arrayField(['advisoryUrls', 'advisory_urls', 'advisory']),
+        currentVersion: field(['currentVersion', 'current_version', 'current']),
+        targetVersion: field(['targetVersion', 'target_version', 'target']),
+        updateKind: normalizeDependencyUpdateKind(field(['updateKind', 'update_kind', 'kind'])),
+        threatEvidence: field(['threatEvidence', 'threat_evidence', 'threat', 'risk']),
+        sourceEvidenceIncomplete,
       });
     });
   const candidates = [...repairCandidates, ...followUpCandidates];
@@ -803,7 +1254,10 @@ export function scoreIssueScoutCandidate(candidate: IssueScoutCandidate): IssueS
 }
 
 function candidateKey(candidate: IssueScoutCandidate): string {
-  return normalizeKey(`${candidate.lane} ${candidate.title}`);
+  // Backoff/dedupe needs a stable routing key, not the full attacker-controlled
+  // title. Bounding it prevents a single near-budget candidate from amplifying
+  // sanitizer and comparison work in the per-candidate loop.
+  return normalizeKey(`${candidate.lane} ${candidate.title.slice(0, 4_000)}`);
 }
 
 function existingWorkKeys(existingWork: readonly ExistingIssueScoutWork[]): Set<string> {
@@ -818,10 +1272,11 @@ function existingWorkKeys(existingWork: readonly ExistingIssueScoutWork[]): Set<
 
 function isDuplicate(candidate: IssueScoutCandidate, keys: Set<string>): boolean {
   const key = candidateKey(candidate);
-  if (keys.has(key) || keys.has(normalizeKey(candidate.title))) {
+  const boundedTitle = candidate.title.slice(0, 4_000);
+  if (keys.has(key) || keys.has(normalizeKey(boundedTitle))) {
     return true;
   }
-  const branchSlug = slug(candidate.title);
+  const branchSlug = slug(boundedTitle);
   return [...keys].some((existing) => existing.includes(key) || existing.includes(branchSlug));
 }
 
@@ -983,12 +1438,105 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   const observations = await Promise.all(registry
     .filter((source) => enabledSourceIds.has(source.id))
     .map((source) => Promise.resolve(source.scan(context))));
-  const candidates = observations.flatMap((observation) => observation.candidates);
+  const candidateCount = observations.reduce(
+    (count, observation) => count + observation.candidates.length,
+    0,
+  );
+  // Sources have already materialized their candidate arrays. Validate the
+  // whole run here, before any decision write or per-candidate derivative
+  // arrays can amplify an oversized or adversarial source response.
+  const candidates = candidateCount <= ISSUE_SCOUT_MAX_CANDIDATES
+    ? observations.flatMap((observation) => observation.candidates)
+    : [];
+  let preflightFailure: IssueScoutCandidatePreflightError | undefined;
+  if (candidateCount <= ISSUE_SCOUT_MAX_CANDIDATES) {
+    try {
+      measureIssueScoutCandidateBatchBytes(candidates);
+    } catch (error) {
+      preflightFailure = error instanceof IssueScoutCandidatePreflightError
+        ? error
+        : new IssueScoutCandidatePreflightError('candidate_invalid');
+    }
+  }
+  const batchFailure: IssueScoutBatchFailure | undefined = (
+    candidateCount > ISSUE_SCOUT_MAX_CANDIDATES
+      ? {
+        code: 'candidate_count_exceeded',
+        candidateCount,
+        maxCandidateCount: ISSUE_SCOUT_MAX_CANDIDATES,
+        maxBatchBytes: ISSUE_SCOUT_MAX_BATCH_BYTES,
+      }
+      : preflightFailure !== undefined
+        ? {
+          code: preflightFailure.code,
+          candidateCount,
+          ...(preflightFailure.candidateBytes === undefined
+            ? {}
+            : { candidateBytes: preflightFailure.candidateBytes }),
+          maxCandidateCount: ISSUE_SCOUT_MAX_CANDIDATES,
+          maxBatchBytes: ISSUE_SCOUT_MAX_BATCH_BYTES,
+        }
+        : undefined
+  );
+  if (batchFailure !== undefined) {
+    const summaryDigest = issueScoutSummaryDigest({
+      observations,
+      candidateCount,
+      selected: [],
+      skipped: [],
+      batchFailure,
+    });
+    appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_issue_scout', {
+      observations: observations.slice(0, ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY).map((observation) => ({
+        sourceId: observation.sourceId,
+        status: observation.status,
+        candidateCount: observation.candidates.length,
+      })),
+      observationCount: observations.length,
+      omittedObservationCount: Math.max(0, observations.length - ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY),
+      candidateCount,
+      selected: [],
+      selectedCount: 0,
+      skipped: [],
+      skippedCount: 0,
+      omittedSkippedCount: 0,
+      stopRule: 'batch limit exceeded',
+      batchFailure,
+      summaryDigest,
+    }, now));
+    return {
+      passed: false,
+      message: `issue-scout batch failed: ${batchFailure.code}`,
+      observations,
+      selected: [],
+      skipped: [],
+      wouldCreate: [],
+      createdIssues: [],
+      ledgerPath,
+      batchFailure,
+    };
+  }
   const existing = await loadExistingWork(context, options.existingWork);
   const keys = existingWorkKeys(existing);
   const ledgerEvents = readRawDevloopLedgerEvents(ledgerPath);
   const skipped: SkippedIssueScoutCandidate[] = [];
   const eligible: IssueScoutCandidate[] = [];
+  const decisionStore = new DecisionStore(repoPath, ledgerPath);
+  const invalidDecisionCandidates = new Set<IssueScoutCandidate>();
+  for (const candidate of candidates) {
+    if (
+      candidate.policyCategory !== 'product_policy'
+      && candidate.policyCategory !== 'human_policy'
+      && candidate.riskBucket !== 'high'
+    ) {
+      continue;
+    }
+    try {
+      validateIssueScoutDecisionCandidate(candidate);
+    } catch {
+      invalidDecisionCandidates.add(candidate);
+    }
+  }
 
   for (const candidate of candidates) {
     const retryAfter = latestBackoff(candidate, ledgerEvents, now);
@@ -996,12 +1544,72 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
       skipped.push({ candidate, stopRule: 'backoff active', reason: 'candidate is still in retry backoff', retryAfter });
       continue;
     }
-    if (candidate.policyCategory === 'product_policy' || candidate.policyCategory === 'human_policy' || candidate.riskBucket === 'high') {
-      skipped.push({ candidate, stopRule: 'Unsafe or too broad', reason: `${candidate.policyCategory} work requires human review` });
-      continue;
-    }
     if (isDuplicate(candidate, keys)) {
       skipped.push({ candidate, stopRule: 'Duplicate or already covered', reason: 'matching issue, PR, branch, or ledger key already exists' });
+      continue;
+    }
+    if (candidate.policyCategory === 'product_policy' || candidate.policyCategory === 'human_policy' || candidate.riskBucket === 'high') {
+      if (invalidDecisionCandidates.has(candidate)) {
+        skipped.push({
+          candidate,
+          stopRule: 'decision generation failed',
+          reason: 'decision generation failed: candidate_invalid',
+        });
+        continue;
+      }
+      try {
+        // dryRun controls GitHub mutation, but the local decision ledger is the
+        // durable human-approval boundary and must exist before this skip returns.
+        const decision = ensureDecisionForIssueScoutCandidate(
+          decisionStore,
+          candidate,
+          {
+            repoPath,
+            ...(options.repo === undefined ? {} : { repository: options.repo }),
+          },
+          now,
+        );
+        const outcome = classifyIssueScoutDecision(decision);
+        if (outcome === 'approved') {
+          eligible.push(candidate);
+          keys.add(candidateKey(candidate));
+          continue;
+        }
+        if (outcome === 'revision_requested') {
+          skipped.push({
+            candidate,
+            stopRule: 'human revision requested',
+            reason: 'the applied decision requires a revised candidate scope',
+            decisionId: decision.request.decisionId,
+          });
+          continue;
+        }
+        if (outcome === 'skipped') {
+          skipped.push({
+            candidate,
+            stopRule: 'human decision skipped',
+            reason: 'the applied decision skips this candidate',
+            decisionId: decision.request.decisionId,
+          });
+          continue;
+        }
+        skipped.push({
+          candidate,
+          stopRule: 'Unsafe or too broad',
+          reason: `${candidate.policyCategory} work requires human review`,
+          decisionId: decision.request.decisionId,
+        });
+      } catch (error) {
+        const errorCode = (
+          error instanceof DecisionGenerationError
+          || error instanceof DecisionStoreError
+        ) ? error.code : 'unknown';
+        skipped.push({
+          candidate,
+          stopRule: 'decision generation failed',
+          reason: `decision generation failed: ${errorCode}`,
+        });
+      }
       continue;
     }
     eligible.push(candidate);
@@ -1011,7 +1619,7 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   const selected = eligible
     .map(scoreIssueScoutCandidate)
     .sort((left, right) => left.score - right.score || left.candidate.title.localeCompare(right.candidate.title))
-    .slice(0, options.maxSelections ?? 3);
+    .slice(0, Math.min(Math.max(options.maxSelections ?? 3, 0), 3));
   const wouldCreate = selected.map((selection) => generateMaintenanceIssue(selection.candidate));
   const createdIssues: string[] = [];
 
@@ -1025,37 +1633,59 @@ export async function runIssueScout(options: RunIssueScoutOptions = {}): Promise
   }
 
   const retryAfter = selected.length === 0 ? new Date(now.getTime() + 60 * 60 * 1000).toISOString() : undefined;
+  const decisionFailureCount = skipped.filter(
+    (item) => item.stopRule === 'decision generation failed',
+  ).length;
+  const skippedSummary = skipped
+    .slice(0, ISSUE_SCOUT_MAX_SKIPPED_SUMMARY)
+    .map((item, index) => ({
+      candidateRef: `${item.candidate.sourceId}:${item.candidate.lane}:${index + 1}`,
+      // This sanitized correlation key preserves retry backoff across runs.
+      candidateKey: candidateKey(item.candidate),
+      stopRule: item.stopRule,
+      reason: sanitizeBatchText(item.reason).slice(0, ISSUE_SCOUT_SUMMARY_TEXT_LENGTH),
+      retryAfter: item.retryAfter,
+      decisionId: item.decisionId,
+    }));
+  const summaryDigest = issueScoutSummaryDigest({
+    observations,
+    candidateCount,
+    selected,
+    skipped,
+  });
   appendDevloopLedgerEvent(ledgerPath, buildDevloopLedgerEvent('devloop_issue_scout', {
-    repoPath,
-    observations: observations.map((observation) => ({
+    observations: observations.slice(0, ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY).map((observation) => ({
       sourceId: observation.sourceId,
       status: observation.status,
-      summary: observation.summary,
-      candidates: observation.candidates.length,
+      candidateCount: observation.candidates.length,
     })),
-    candidateCount: candidates.length,
-    selected: selected.map((selection) => ({
-      candidateId: selection.candidate.id,
-      candidateKey: candidateKey(selection.candidate),
+    observationCount: observations.length,
+    omittedObservationCount: Math.max(0, observations.length - ISSUE_SCOUT_MAX_OBSERVATION_SUMMARY),
+    candidateCount,
+    selected: selected.map((selection, index) => ({
+      candidateRef: `${selection.candidate.sourceId}:${selection.candidate.lane}:${index + 1}`,
       score: selection.score,
       lane: selection.candidate.lane,
     })),
-    skipped: skipped.map((item) => ({
-      candidateId: item.candidate.id,
-      candidateKey: candidateKey(item.candidate),
-      stopRule: item.stopRule,
-      reason: item.reason,
-      retryAfter: item.retryAfter,
-    })),
+    selectedCount: selected.length,
+    skipped: skippedSummary,
+    skippedCount: skipped.length,
+    omittedSkippedCount: skipped.length - skippedSummary.length,
     stopRule: selected.length === 0 ? 'no candidates' : undefined,
     retryAfter,
+    decisionFailureCount,
+    summaryDigest,
   }, now));
 
+  const baseMessage = selected.length > 0
+    ? `issue-scout selected ${selected.length} candidate(s)`
+    : 'issue-scout found no eligible candidates';
   return {
-    passed: observations.every((observation) => observation.status !== 'error'),
-    message: selected.length > 0
-      ? `issue-scout selected ${selected.length} candidate(s)`
-      : 'issue-scout found no eligible candidates',
+    passed: observations.every((observation) => observation.status !== 'error')
+      && decisionFailureCount === 0,
+    message: decisionFailureCount === 0
+      ? baseMessage
+      : `${baseMessage}; isolated ${decisionFailureCount} decision generation failure(s)`,
     observations,
     selected,
     skipped,
@@ -1084,7 +1714,14 @@ export function formatIssueScoutReport(report: IssueScoutReport): string {
   }
   if (report.skipped.length > 0) {
     lines.push('Skipped:');
-    lines.push(...report.skipped.map((item) => `- ${item.candidate.title}: ${item.stopRule} - ${item.reason}`));
+    lines.push(...report.skipped.map((item) => (
+      `- ${item.candidate.title}: ${item.stopRule} - ${item.reason}`
+      + (item.decisionId === undefined
+        ? ''
+        : item.stopRule === 'Unsafe or too broad'
+          ? ` (Decision: ${item.decisionId}; status: pending)`
+          : ` (Decision: ${item.decisionId}; outcome: ${item.stopRule})`)
+    )));
   }
   return lines.join('\n');
 }

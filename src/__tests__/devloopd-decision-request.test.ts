@@ -9,6 +9,7 @@ const subject = {
   repoPath: '/private/worktrees/takt',
   repository: 'albert-einshutoin/takt-private',
   runSlug: 'issue-42',
+  step: 'compatibility',
   issueNumber: 42,
   title: 'Choose the compatibility policy',
 };
@@ -40,7 +41,9 @@ const directRunGuard = {
   strategy: 'direct_run' as const,
   expectedDecisionVersion: 1,
   runSlug: 'issue-42',
-  expectedRunStatus: 'blocked',
+  expectedRunStatus: 'aborted',
+  expectedAbortKind: 'blocked',
+  expectedBlockedStep: 'compatibility',
 };
 
 describe('createDecisionRequest', () => {
@@ -136,6 +139,52 @@ describe('createDecisionRequest', () => {
     expect('options' in request).toBe(false);
   });
 
+  it('binds direct-run resume to an aborted blocked step', () => {
+    const request = createDecisionRequest({
+      subject: { ...subject, step: 'review' },
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'direct_run',
+        expectedDecisionVersion: 1,
+        runSlug: 'issue-42',
+        expectedRunStatus: 'aborted',
+        expectedAbortKind: 'blocked',
+        expectedBlockedStep: 'review',
+      },
+    });
+
+    expect(request.resumeGuard).toMatchObject({
+      strategy: 'direct_run',
+      runSlug: 'issue-42',
+      expectedRunStatus: 'aborted',
+      expectedAbortKind: 'blocked',
+      expectedBlockedStep: 'review',
+    });
+  });
+
+  it('rejects a direct-run guard whose blocked step differs from the subject', () => {
+    expect(() => createDecisionRequest({
+      subject: { ...subject, step: 'plan' },
+      why,
+      how,
+      kind: 'text',
+      question: 'Describe the intended compatibility policy.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'direct_run',
+        expectedDecisionVersion: 1,
+        runSlug: 'issue-42',
+        expectedRunStatus: 'aborted',
+        expectedAbortKind: 'blocked',
+        expectedBlockedStep: 'review',
+      },
+    })).toThrow(/blocked step|expectedBlockedStep|subject.step/iu);
+  });
+
   it('rejects text decisions that carry options', () => {
     expect(() => createDecisionRequest({
       subject,
@@ -161,6 +210,220 @@ describe('createDecisionRequest', () => {
         strategy: 'shell_command',
         expectedDecisionVersion: 1,
         command: 'npm test',
+      },
+    } as never)).toThrow();
+  });
+
+  it('accepts only a candidate-bound issue scout resume guard', () => {
+    const request = createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      kind: 'choice',
+      question: 'Choose how Issue Scout should proceed.',
+      options: [
+        {
+          id: 'approve_scope',
+          title: 'Approve scope',
+          description: 'Keep the proposed scope.',
+          consequences: ['Issue Scout will re-plan the candidate.'],
+          recommended: false,
+        },
+        {
+          id: 'revise_scope',
+          title: 'Revise scope',
+          description: 'Narrow the proposed scope.',
+          consequences: ['Issue Scout will keep the candidate blocked.'],
+          recommended: true,
+        },
+        {
+          id: 'skip',
+          title: 'Skip',
+          description: 'Do not create an issue.',
+          consequences: ['The candidate stays stopped.'],
+          recommended: false,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+    });
+
+    expect(request.resumeGuard).toEqual({
+      strategy: 'issue_scout_candidate',
+      expectedDecisionVersion: 1,
+      candidateId: 'local_backlog:compatibility-policy',
+    });
+  });
+
+  it.each([
+    ['text decision', {
+      kind: 'text',
+    }],
+    ['two choices', {
+      kind: 'choice',
+      options: [
+        {
+          id: 'approve_scope',
+          title: 'Approve scope',
+          description: 'Keep the proposed scope.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'skip',
+          title: 'Skip',
+          description: 'Do not create an issue.',
+          consequences: [],
+          recommended: true,
+        },
+      ],
+    }],
+    ['four choices', {
+      kind: 'choice',
+      options: [
+        {
+          id: 'approve_scope',
+          title: 'Approve scope',
+          description: 'Keep the proposed scope.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'revise_scope',
+          title: 'Revise scope',
+          description: 'Narrow the proposed scope.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'skip',
+          title: 'Skip',
+          description: 'Do not create an issue.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'defer',
+          title: 'Defer',
+          description: 'Wait for later.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+    }],
+  ])('rejects an issue scout guard attached to a %s', (_case, decisionShape) => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      question: 'Choose how Issue Scout should proceed.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      ...decisionShape,
+    } as never)).toThrow(/approve_scope|choice|Issue Scout/i);
+  });
+
+  it('rejects a persisted issue scout request whose decision shape is not canonical', () => {
+    const request = createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      kind: 'choice',
+      question: 'Choose how Issue Scout should proceed.',
+      options: [
+        {
+          id: 'approve_scope',
+          title: 'Approve scope',
+          description: 'Keep the proposed scope.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'revise_scope',
+          title: 'Revise scope',
+          description: 'Narrow the proposed scope.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'skip',
+          title: 'Skip',
+          description: 'Do not create an issue.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+    });
+    const persisted = { ...request } as Record<string, unknown>;
+    Reflect.deleteProperty(persisted, 'options');
+    persisted.kind = 'text';
+    const parsed = DecisionRequestSchema.safeParse(persisted);
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => /Issue Scout.*choice/i.test(issue.message))).toBe(true);
+    }
+  });
+
+  it('rejects an issue scout guard whose candidate differs from the subject', () => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      kind: 'text',
+      question: 'Explain how Issue Scout should proceed.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:different-candidate',
+      },
+    })).toThrow(/candidateId/i);
+  });
+
+  it('rejects command payloads on issue scout guards', () => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        candidateId: 'local_backlog:compatibility-policy',
+      },
+      why,
+      how,
+      kind: 'text',
+      question: 'Explain how Issue Scout should proceed.',
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'issue_scout_candidate',
+        expectedDecisionVersion: 1,
+        candidateId: 'local_backlog:compatibility-policy',
+        command: 'rm -rf /',
+        args: ['--force'],
       },
     } as never)).toThrow();
   });
@@ -212,8 +475,58 @@ describe('createDecisionRequest', () => {
     'review-fix',
     'pr-merge',
   ] as const)('accepts the registered %s PR automation stage', (stage) => {
+    const headSha = '0123456789abcdef0123456789abcdef01234567';
     const request = createDecisionRequest({
-      subject: { ...subject, prNumber: 108 },
+      subject: { ...subject, prNumber: 108, headSha, step: stage },
+      why,
+      how,
+      kind: 'choice',
+      question: 'Choose the next PR automation action.',
+      options: [
+        {
+          id: 'approve_current_head',
+          title: 'Approve current head',
+          description: 'Continue this stage after revalidation.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'request_changes',
+          title: 'Request changes',
+          description: 'Keep the PR blocked until the current head changes.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'stop',
+          title: 'Stop',
+          description: 'Keep the PR blocked.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'pr_automation_stage',
+        expectedDecisionVersion: 1,
+        repository: 'albert-einshutoin/takt-private',
+        prNumber: 108,
+        stage,
+        expectedHeadSha: headSha,
+      },
+    });
+
+    expect(DecisionRequestSchema.parse(request).resumeGuard.strategy).toBe('pr_automation_stage');
+  });
+
+  it('rejects PR automation choices that do not use the exact current-head policy options', () => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        prNumber: 108,
+        headSha: '0123456789abcdef0123456789abcdef01234567',
+        step: 'pr-review',
+      },
       why,
       how,
       kind: 'choice',
@@ -240,12 +553,10 @@ describe('createDecisionRequest', () => {
         expectedDecisionVersion: 1,
         repository: 'albert-einshutoin/takt-private',
         prNumber: 108,
-        stage,
+        stage: 'pr-review',
         expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
       },
-    });
-
-    expect(DecisionRequestSchema.parse(request).resumeGuard.strategy).toBe('pr_automation_stage');
+    })).toThrow(/approve_current_head|options/i);
   });
 
   it('rejects automation-state labels that are not PR automation stages', () => {
@@ -305,17 +616,85 @@ describe('createDecisionRequest', () => {
   });
 
   it.each([
-    ['missing repository', { ...subject, repository: undefined, prNumber: 108 }],
-    ['different repository', { ...subject, repository: 'example/other', prNumber: 108 }],
-    ['missing PR number', { ...subject, prNumber: undefined }],
-    ['different PR number', { ...subject, prNumber: 109 }],
+    ['missing repository', {
+      ...subject,
+      repository: undefined,
+      prNumber: 108,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['different repository', {
+      ...subject,
+      repository: 'example/other',
+      prNumber: 108,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['missing PR number', {
+      ...subject,
+      prNumber: undefined,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['different PR number', {
+      ...subject,
+      prNumber: 109,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['missing head SHA', { ...subject, prNumber: 108, step: 'pr-merge' }],
+    ['different head SHA', {
+      ...subject,
+      prNumber: 108,
+      headSha: '1123456789abcdef0123456789abcdef01234567',
+      step: 'pr-merge',
+    }],
+    ['missing step', {
+      ...subject,
+      prNumber: 108,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+    }],
+    ['different step', {
+      ...subject,
+      prNumber: 108,
+      headSha: '0123456789abcdef0123456789abcdef01234567',
+      step: 'pr-review',
+    }],
   ])('rejects a PR automation request with a %s', (_case, invalidSubject) => {
     const request = createDecisionRequest({
-      subject: { ...subject, prNumber: 108 },
+      subject: {
+        ...subject,
+        prNumber: 108,
+        headSha: '0123456789abcdef0123456789abcdef01234567',
+        step: 'pr-merge',
+      },
       why,
       how,
-      kind: 'text',
+      kind: 'choice',
       question: 'Describe the intended compatibility policy.',
+      options: [
+        {
+          id: 'approve_current_head',
+          title: 'Approve current head',
+          description: 'Continue this stage after revalidation.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'request_changes',
+          title: 'Request changes',
+          description: 'Keep this head blocked until it changes.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'stop',
+          title: 'Stop',
+          description: 'Keep automation stopped.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
       answerRequirements,
       resumeGuard: {
         strategy: 'pr_automation_stage',
@@ -330,7 +709,54 @@ describe('createDecisionRequest', () => {
     expect(() => DecisionRequestSchema.parse({
       ...request,
       subject: invalidSubject,
-    })).toThrow(/repository|prNumber/i);
+    })).toThrow(/repository|prNumber|headSha|step/i);
+  });
+
+  it('rejects an invalid subject head SHA before creating a PR automation decision', () => {
+    expect(() => createDecisionRequest({
+      subject: {
+        ...subject,
+        prNumber: 108,
+        headSha: 'abc123',
+        step: 'pr-merge',
+      },
+      why,
+      how,
+      kind: 'choice',
+      question: 'Choose the next PR automation action.',
+      options: [
+        {
+          id: 'approve_current_head',
+          title: 'Approve current head',
+          description: 'Continue this stage after revalidation.',
+          consequences: [],
+          recommended: false,
+        },
+        {
+          id: 'request_changes',
+          title: 'Request changes',
+          description: 'Keep this head blocked until it changes.',
+          consequences: [],
+          recommended: true,
+        },
+        {
+          id: 'stop',
+          title: 'Stop',
+          description: 'Keep automation stopped.',
+          consequences: [],
+          recommended: false,
+        },
+      ],
+      answerRequirements,
+      resumeGuard: {
+        strategy: 'pr_automation_stage',
+        expectedDecisionVersion: 1,
+        repository: 'albert-einshutoin/takt-private',
+        prNumber: 108,
+        stage: 'pr-merge',
+        expectedHeadSha: '0123456789abcdef0123456789abcdef01234567',
+      },
+    })).toThrow(/headSha|invalid/i);
   });
 
   it('deep-freezes generated decisions and public schema parse results', () => {

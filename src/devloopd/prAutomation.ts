@@ -32,6 +32,11 @@ import { buildExecutableDagWorkUnitPlan, type BacklogWorkItem } from './workUnit
 import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
+import { DecisionStore } from './decisionStore.js';
+import {
+  ensureDecisionForAutomationActions,
+  isAutomationActionDecisionEligible,
+} from './decisionGeneration.js';
 
 export type DevloopAutomationStage = 'issue-scout' | 'issue-to-pr' | 'pr-review' | 'review-fix' | 'pr-merge';
 
@@ -70,6 +75,9 @@ export interface DevloopAutomationAction {
     | 'human review required';
   dualLlmApproval?: DualLlmApprovalReport;
   productPolicyImpact?: ProductPolicyClassification;
+  readonly decisionId?: string;
+  /** Exact 40-hex PR head used to produce this action's reasons and classification. */
+  readonly headSha?: string;
 }
 
 export interface DevloopAutomationStageReport {
@@ -130,9 +138,21 @@ const DEFAULT_AUTO_MERGE_LABEL = 'agent:auto-merge';
 const BLOCKED_LABEL = 'agent:blocked';
 const HUMAN_REVIEW_LABEL = 'human:review';
 const MAX_MERGE_QUEUE_DIFF_CONTEXT_CHARS = 8_000;
+const MAX_DECISION_ACTIONS_PER_STAGE = 100;
+const REPOSITORY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u;
+const HEAD_SHA_PATTERN = /^[a-f0-9]{40}$/iu;
 
 function sanitizeDetail(text: string): string {
   return sanitizeSensitiveText(text).trim();
+}
+
+export function automationActionRequiresDecision(
+  action: Pick<
+  DevloopAutomationAction,
+  'type' | 'status' | 'stopRule' | 'productPolicyImpact'
+  >,
+): boolean {
+  return isAutomationActionDecisionEligible(action);
 }
 
 function parseJsonArray(raw: string, context: string): unknown[] {
@@ -431,6 +451,7 @@ export async function prepareAutomationPullRequests(options: {
         type: 'human-review-hold',
         status: 'blocked',
         pr: pr.number,
+        headSha: pr.headRefOid,
         stopRule: 'human review required',
         message: `${humanReviewLabel} is present; waiting for human product decision`,
       });
@@ -459,6 +480,7 @@ export async function prepareAutomationPullRequests(options: {
         type: 'current-head-blocked',
         status: 'blocked',
         pr: pr.number,
+        headSha: pr.headRefOid,
         stopRule: 'Mergeable: NO',
         message: `current head ${pr.headRefOid} is still blocked by ${currentHeadBlocker.reviewer} review`,
       });
@@ -785,6 +807,7 @@ export async function promotePullRequestAutoMerge(options: {
       type: 'promote-auto-merge',
       status: 'blocked',
       pr: options.pr,
+      headSha,
       stopRule: 'human review required',
       message: options.dryRun === true
         ? `dry-run: would add ${HUMAN_REVIEW_LABEL}; product-policy impact requires human review`
@@ -799,6 +822,7 @@ export async function promotePullRequestAutoMerge(options: {
       type: 'promote-auto-merge',
       status: 'skipped',
       pr: options.pr,
+      headSha,
       message: 'GitHub checks are not passing yet',
       productPolicyImpact,
     };
@@ -829,6 +853,7 @@ export async function promotePullRequestAutoMerge(options: {
       type: 'promote-auto-merge',
       status: 'blocked',
       pr: options.pr,
+      headSha,
       message: `dual-LLM approval missing: ${dualLlmApproval.reasons.join('; ')}`,
       dualLlmApproval,
       productPolicyImpact,
@@ -841,6 +866,7 @@ export async function promotePullRequestAutoMerge(options: {
       type: 'promote-auto-merge',
       status: 'passed',
       pr: options.pr,
+      headSha,
       message: `dry-run: would add ${options.label ?? DEFAULT_AUTO_MERGE_LABEL}`,
       dualLlmApproval,
       productPolicyImpact,
@@ -860,6 +886,7 @@ export async function promotePullRequestAutoMerge(options: {
     type: 'promote-auto-merge',
     status: 'passed',
     pr: options.pr,
+    headSha,
     message: `added ${options.label ?? DEFAULT_AUTO_MERGE_LABEL}`,
     dualLlmApproval,
     productPolicyImpact,
@@ -940,6 +967,7 @@ function appendStageAutomationStateEvents(options: {
       status: action.status,
       summary: action.message,
       ...(action.pr !== undefined ? { prNumber: action.pr } : {}),
+      ...(action.decisionId !== undefined ? { decisionId: action.decisionId } : {}),
       ...(action.stopRule !== undefined ? { stopRule: action.stopRule } : {}),
       nextActions: nextActionsForAction(action),
       artifacts: [
@@ -957,6 +985,198 @@ function recordStageReport(
 ): DevloopAutomationStageReport {
   appendStageAutomationStateEvents({ repoPath, ledgerPath, report });
   return report;
+}
+
+function decisionGenerationFailure(
+  action: DevloopAutomationAction,
+  reason:
+    | 'action_batch_limit'
+    | 'pr_snapshot_unavailable'
+    | 'pr_head_unavailable'
+    | 'repository_unavailable'
+    | 'decision_ledger_unavailable'
+    | 'decision_request_rejected'
+    | 'head_changed',
+): DevloopAutomationAction {
+  const failedAction = { ...action };
+  Reflect.deleteProperty(failedAction, 'decisionId');
+  return {
+    ...failedAction,
+    status: 'failed',
+    message: `decision generation failed: ${reason}`,
+  };
+}
+
+export async function attachAutomationDecisions(options: {
+  store: DecisionStore;
+  report: DevloopAutomationStageReport;
+  prs: readonly AutomationPrSnapshot[];
+  repoPath: string;
+  repository?: string;
+  env: NodeJS.ProcessEnv;
+  runner: DevloopCommandRunner;
+}): Promise<DevloopAutomationStageReport> {
+  const snapshotsByPr = new Map(options.prs.map((pr) => [pr.number, pr]));
+  const eligibleIndexes = options.report.actions.flatMap((action, index) =>
+    automationActionRequiresDecision(action) ? [index] : []);
+  if (eligibleIndexes.length === 0) return options.report;
+
+  const actions = [...options.report.actions];
+  const failIndexes = (
+    indexes: readonly number[],
+    reason: Parameters<typeof decisionGenerationFailure>[1],
+  ): void => {
+    for (const index of indexes) {
+      const action = actions[index];
+      if (action !== undefined) actions[index] = decisionGenerationFailure(action, reason);
+    }
+  };
+  const finish = (): DevloopAutomationStageReport => ({
+    ...options.report,
+    passed: options.report.passed && !actions.some((action) => action.status === 'failed'),
+    actions,
+  });
+
+  // Reject the whole eligible batch before metadata or ledger writes so a
+  // scheduler cannot partially create policy decisions beyond the safety bound.
+  if (eligibleIndexes.length > MAX_DECISION_ACTIONS_PER_STAGE) {
+    failIndexes(eligibleIndexes, 'action_batch_limit');
+    return finish();
+  }
+
+  let repository = options.repository;
+  if (repository === undefined) {
+    const ghCommand = options.runner.resolveCommand('gh', options.env);
+    if (ghCommand === undefined) {
+      failIndexes(eligibleIndexes, 'repository_unavailable');
+      return finish();
+    }
+    const resolvedRepository = await resolveLocalRepoName({
+      repoPath: options.repoPath,
+      env: options.env,
+      runner: options.runner,
+      ghCommand,
+    });
+    repository = resolvedRepository !== undefined && REPOSITORY_PATTERN.test(resolvedRepository)
+      ? resolvedRepository
+      : undefined;
+  }
+  if (repository === undefined || !REPOSITORY_PATTERN.test(repository)) {
+    failIndexes(eligibleIndexes, 'repository_unavailable');
+    return finish();
+  }
+
+  let projections: Map<string, ReturnType<DecisionStore['list']>[number]>;
+  try {
+    projections = new Map(
+      options.store.list().map((projection) => [projection.request.decisionId, projection]),
+    );
+  } catch {
+    failIndexes(eligibleIndexes, 'decision_ledger_unavailable');
+    return finish();
+  }
+
+  const indexesByPr = new Map<number, number[]>();
+  for (const index of eligibleIndexes) {
+    const action = actions[index];
+    if (
+      action?.pr === undefined
+      || snapshotsByPr.get(action.pr) === undefined
+    ) {
+      failIndexes([index], 'pr_snapshot_unavailable');
+      continue;
+    }
+    indexesByPr.set(action.pr, [...(indexesByPr.get(action.pr) ?? []), index]);
+  }
+
+  const headByPr = new Map<number, string>();
+  for (const [pr, indexes] of indexesByPr) {
+    try {
+      const metadata = await loadPrView({
+        pr,
+        repoPath: options.repoPath,
+        repo: repository,
+        env: options.env,
+        runner: options.runner,
+      });
+      if (metadata.headRefOid === undefined || !HEAD_SHA_PATTERN.test(metadata.headRefOid)) {
+        failIndexes(indexes, 'pr_head_unavailable');
+        continue;
+      }
+      headByPr.set(pr, metadata.headRefOid);
+    } catch {
+      failIndexes(indexes, 'pr_head_unavailable');
+    }
+  }
+
+  const groups = new Map<string, number[]>();
+  for (const [pr, indexes] of indexesByPr) {
+    const currentHeadSha = headByPr.get(pr);
+    if (currentHeadSha === undefined) continue;
+    const evaluatedHeads = new Set(indexes.flatMap((index) => {
+      const evaluatedHeadSha = actions[index]?.headSha;
+      return evaluatedHeadSha !== undefined && HEAD_SHA_PATTERN.test(evaluatedHeadSha)
+        ? [evaluatedHeadSha]
+        : [];
+    }));
+    if (
+      indexes.some((index) => {
+        const evaluatedHeadSha = actions[index]?.headSha;
+        return evaluatedHeadSha === undefined || !HEAD_SHA_PATTERN.test(evaluatedHeadSha);
+      })
+    ) {
+      failIndexes(indexes, 'pr_head_unavailable');
+      continue;
+    }
+    if (evaluatedHeads.size !== 1 || !evaluatedHeads.has(currentHeadSha)) {
+      failIndexes(indexes, 'head_changed');
+      continue;
+    }
+    const evaluatedHeadSha = [...evaluatedHeads][0];
+    if (evaluatedHeadSha === undefined) {
+      failIndexes(indexes, 'pr_head_unavailable');
+      continue;
+    }
+    const key = `${repository}\0${pr}\0${evaluatedHeadSha}\0${options.report.stage}`;
+    groups.set(key, indexes);
+  }
+  if (groups.size > MAX_DECISION_ACTIONS_PER_STAGE) {
+    failIndexes(eligibleIndexes, 'action_batch_limit');
+    return finish();
+  }
+
+  for (const indexes of groups.values()) {
+    const groupActions = indexes.flatMap((index) => {
+      const action = actions[index];
+      return action === undefined ? [] : [action];
+    });
+    const first = groupActions[0];
+    const headSha = first?.headSha;
+    if (first === undefined || headSha === undefined) continue;
+    try {
+      const projection = ensureDecisionForAutomationActions(options.store, groupActions, {
+        repoPath: options.repoPath,
+        repository,
+        headSha,
+        stage: options.report.stage,
+      }, new Date(), {
+        projections,
+      });
+      for (const index of indexes) {
+        const action = actions[index];
+        if (action === undefined) continue;
+        actions[index] = {
+          ...action,
+          decisionId: projection.request.decisionId,
+          headSha,
+        };
+      }
+    } catch {
+      failIndexes(indexes, 'decision_request_rejected');
+    }
+  }
+
+  return finish();
 }
 
 function queueDecisionStatus(decision: MergeQueueDecision): AutomationStateStatus {
@@ -1114,6 +1334,22 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
+  const decisionStore = new DecisionStore(repoPath, options.ledgerPath);
+  const finalizeStage = async (
+    report: DevloopAutomationStageReport,
+    prs: readonly AutomationPrSnapshot[] = [],
+  ): Promise<DevloopAutomationStageReport> => {
+    const correlated = await attachAutomationDecisions({
+      store: decisionStore,
+      report,
+      prs,
+      repoPath,
+      repository: options.repo,
+      env,
+      runner,
+    });
+    return recordStageReport(repoPath, options.ledgerPath, correlated);
+  };
 
   if (options.stage === 'issue-scout') {
     const scout = await runIssueScout({
@@ -1124,7 +1360,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
       env,
       runner,
     });
-    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [{
+    return finalizeStage(makeStageReport(options.stage, [{
       type: 'issue-scout',
       status: scout.passed ? 'passed' : 'failed',
       message: scout.message,
@@ -1153,7 +1389,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
       message: startReport.message,
       ...(startReport.message.includes('active run limit') ? { stopRule: 'active run limit' as const } : {}),
     };
-    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [action], { passed: startReport.passed, startReport }));
+    return finalizeStage(makeStageReport(options.stage, [action], { passed: startReport.passed, startReport }));
   }
 
   const discoveredPrs = await listAutomationPullRequests({ repoPath, repo: options.repo, env, runner });
@@ -1191,7 +1427,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         runner,
       }))),
     ];
-    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, actions, { duplicateIssueCoverage }));
+    return finalizeStage(makeStageReport(options.stage, actions, { duplicateIssueCoverage }), discoveredPrs);
   }
 
   if (options.stage === 'review-fix') {
@@ -1209,16 +1445,17 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         type: 'review-fix',
         status: report.status,
         pr: pr.number,
+        headSha: pr.headRefOid,
         message: report.message,
         ...(report.stopRule !== undefined ? { stopRule: report.stopRule } : {}),
         ...(report.productPolicyImpact !== undefined ? { productPolicyImpact: report.productPolicyImpact } : {}),
       };
     }));
-    return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, [
+    return finalizeStage(makeStageReport(options.stage, [
       ...preparedPullRequests.actions,
       ...duplicateActions,
       ...reviewFixActions,
-    ], { duplicateIssueCoverage }));
+    ], { duplicateIssueCoverage }), discoveredPrs);
   }
 
   const promotionResults = await Promise.all(nonDuplicatePrs.map(async (pr) => ({
@@ -1250,6 +1487,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
         type: 'ci-fix',
         status: repair.status,
         pr: result.pr.number,
+        headSha: result.promotion.headSha ?? result.pr.headRefOid,
         message: repair.message,
         ...(repair.stopRule !== undefined ? { stopRule: repair.stopRule } : {}),
         ...(repair.productPolicyImpact !== undefined ? { productPolicyImpact: repair.productPolicyImpact } : {}),
@@ -1316,7 +1554,7 @@ export async function runDevloopAutomationStage(options: RunDevloopAutomationSta
     ...queueActions,
     ...mergeActions,
   ];
-  return recordStageReport(repoPath, options.ledgerPath, makeStageReport(options.stage, actions, { duplicateIssueCoverage }));
+  return finalizeStage(makeStageReport(options.stage, actions, { duplicateIssueCoverage }), discoveredPrs);
 }
 
 export function formatDevloopAutomationStageReport(report: DevloopAutomationStageReport): string {
@@ -1331,6 +1569,9 @@ export function formatDevloopAutomationStageReport(report: DevloopAutomationStag
     lines.push(`- ${action.type}${action.pr !== undefined ? ` #${action.pr}` : ''}: ${action.status} - ${action.message}`);
     if (action.stopRule !== undefined) {
       lines.push(`  stop rule: ${action.stopRule}`);
+    }
+    if (action.decisionId !== undefined) {
+      lines.push(`  decision: ${action.decisionId}`);
     }
   }
   return lines.join('\n');

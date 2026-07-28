@@ -1,14 +1,19 @@
 import { EventEmitter } from 'node:events';
-import { writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { FindingLedger, WorkflowResumePoint, WorkflowStep } from '../core/models/index.js';
+import { readRunMeta } from '../core/workflow/run/run-meta.js';
+import { buildRunPaths } from '../core/workflow/run/run-paths.js';
 import { initAnalyticsWriter } from '../features/analytics/index.js';
 import { resetAnalyticsWriter } from '../features/analytics/writer.js';
 import { AnalyticsEmitter } from '../features/tasks/execute/analyticsEmitter.js';
+import { RunMetaManager } from '../features/tasks/execute/runMeta.js';
 import { bindWorkflowExecutionEvents } from '../features/tasks/execute/workflowExecutionEvents.js';
 import { resetDebugLogger, setVerboseConsole } from '../shared/utils/debug.js';
+import { DecisionStore, DecisionStoreError } from '../devloopd/decisionStore.js';
 
 class TestEngine extends EventEmitter {
   constructor(
@@ -41,6 +46,11 @@ function createBridgeHarness(options?: {
   traceDiscovery?: { queries: string[] };
   usePrefixWriter?: boolean;
   workflowSteps?: Array<{ name: string }>;
+  projectCwd?: string;
+  runSlug?: string;
+  currentTaskIssueNumber?: number;
+  decisionStoreFactory?: (repoPath: string) => DecisionStore;
+  runMetaManagerOverride?: RunMetaManager;
 }) {
   const resumePoint = options?.resumePoint ?? {
     version: 1,
@@ -65,6 +75,7 @@ function createBridgeHarness(options?: {
     updateStep: vi.fn(),
     updatePhase: vi.fn(),
     updateResumePoint: vi.fn(),
+    recordBlocked: vi.fn(),
     finalize: vi.fn(),
   };
   const analyticsEmitter = {
@@ -83,7 +94,10 @@ function createBridgeHarness(options?: {
       steps: options?.workflowSteps ?? [{ name: 'review' }],
     },
     task: 'task',
-    projectCwd: '/tmp/project',
+    projectCwd: options?.projectCwd ?? '/tmp/project',
+    runSlug: options?.runSlug ?? 'run-test',
+    currentTaskIssueNumber: options?.currentTaskIssueNumber,
+    decisionStoreFactory: options?.decisionStoreFactory,
     currentProvider: options?.currentProvider ?? 'mock',
     configuredModel: options?.configuredModel ?? 'gpt-test',
     out: out as never,
@@ -110,7 +124,7 @@ function createBridgeHarness(options?: {
       onWorkflowComplete: vi.fn(),
       onWorkflowAbort: vi.fn(),
     } as never,
-    runMetaManager: runMetaManager as never,
+    runMetaManager: (options?.runMetaManagerOverride ?? runMetaManager) as never,
     ndjsonLogPath: '/tmp/project/run/logs/session.jsonl',
     shouldNotifyWorkflowComplete: false,
     shouldNotifyWorkflowAbort: false,
@@ -131,6 +145,8 @@ function createBridgeHarness(options?: {
 
   return { bridge, engine, out, runMetaManager, resumePoint, analyticsEmitter, displayRef };
 }
+
+const BLOCKED_ABORT_REASON = 'Workflow blocked and no user input provided';
 
 describe('bindWorkflowExecutionEvents', () => {
   it('event bridge が run meta と実行結果を同期する', () => {
@@ -212,6 +228,23 @@ describe('bindWorkflowExecutionEvents', () => {
     expect(out.info).toHaveBeenCalledWith(
       '  { resource.service.name = "takt" && span."takt.task.issue_number" = 792 }',
     );
+  });
+
+  it('run meta abort finalization failureをcaller fallbackへ伝播する', () => {
+    const { bridge, engine, runMetaManager } = createBridgeHarness();
+    runMetaManager.finalize.mockImplementation(() => {
+      throw new Error('run meta finalize failed');
+    });
+
+    expect(() => engine.emit(
+      'workflow:abort',
+      { iteration: 2 },
+      'Step "review" failed',
+    )).toThrowError('run meta finalize failed');
+
+    expect(runMetaManager.finalize).toHaveBeenCalledWith('aborted', 2);
+    expect(bridge.state.abortReason).toBe('Step "review" failed');
+    expect(bridge.state.sessionLog.status).toBe('aborted');
   });
 
   it('finding ledger analytics の書き込み失敗後も workflow complete を処理する', () => {
@@ -349,6 +382,528 @@ describe('bindWorkflowExecutionEvents', () => {
     });
 
     expect(out.info).toHaveBeenCalledWith('Base URL: [configured]');
+  });
+
+  it('terminal blocked abort で保留中のDecisionを同じrun/step/issueへ一度だけ記録する', () => {
+    const projectCwd = join(tmpdir(), `takt-workflow-events-decision-${randomUUID()}`);
+    mkdirSync(projectCwd, { recursive: true });
+    const store = new DecisionStore(projectCwd);
+    const decisionStoreFactory = vi.fn(() => store);
+    try {
+      const { bridge, engine, out, runMetaManager } = createBridgeHarness({
+        projectCwd,
+        runSlug: 'run-issue-91',
+        currentTaskIssueNumber: 91,
+        decisionStoreFactory,
+      });
+      const step = {
+        name: 'review',
+        personaDisplayName: 'Reviewer',
+        instruction: '',
+      } as WorkflowStep;
+      const response = {
+        persona: 'reviewer',
+        status: 'blocked',
+        content: 'Owner permission is required.',
+        timestamp: new Date(),
+        structuredOutput: {
+          humanDecision: {
+            schemaVersion: 1,
+            category: 'permission',
+            question: 'May this exact blocked run publish the artifact?',
+            why: {
+              summary: 'Publishing changes externally visible state.',
+              reasons: ['The workflow does not own release authorization.'],
+              evidence: [{
+                kind: 'run',
+                reference: 'release-step',
+                summary: 'The release step stopped before publishing.',
+              }],
+            },
+            answer: { kind: 'yes_no', rationaleRequired: true },
+          },
+        },
+      };
+
+      expect(() => engine.emit('step:blocked', step, response)).not.toThrow();
+      expect(() => engine.emit('step:blocked', step, response)).not.toThrow();
+
+      expect(decisionStoreFactory).not.toHaveBeenCalled();
+      expect(store.list()).toHaveLength(0);
+      expect(runMetaManager.recordBlocked).not.toHaveBeenCalled();
+      expect(out.info).not.toHaveBeenCalledWith(expect.stringContaining('Decision required:'));
+
+      expect(() => engine.emit('workflow:abort', { iteration: 2 }, BLOCKED_ABORT_REASON)).not.toThrow();
+      expect(() => engine.emit('workflow:abort', { iteration: 2 }, BLOCKED_ABORT_REASON)).not.toThrow();
+
+      expect(decisionStoreFactory).toHaveBeenCalledTimes(1);
+      expect(store.list()).toHaveLength(1);
+      const request = store.list()[0]?.request;
+      expect(request?.subject).toMatchObject({
+        repoPath: store.repoPath,
+        runSlug: 'run-issue-91',
+        workflow: 'parent',
+        step: 'review',
+        issueNumber: 91,
+      });
+      expect(bridge.state.lastDecisionId).toBe(request?.decisionId);
+      expect(runMetaManager.recordBlocked).toHaveBeenLastCalledWith({
+        blockedStep: 'review',
+        blockedDecisionId: request?.decisionId,
+        blockedCategory: 'permission',
+      });
+      expect(out.info).toHaveBeenCalledWith(`Decision required: ${request?.decisionId}`);
+      expect(out.info.mock.calls.filter(
+        ([line]) => line === `Decision required: ${request?.decisionId}`,
+      )).toHaveLength(1);
+      expect(bridge.state.decisionGenerationError).toBeUndefined();
+    } finally {
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('terminal blocked abortだけが実RunMetaへDecision guardをfinalizeする', () => {
+    const projectCwd = join(tmpdir(), `takt-workflow-events-terminal-meta-${randomUUID()}`);
+    const runSlug = 'run-terminal-meta';
+    const runPaths = buildRunPaths(projectCwd, runSlug);
+    const runMetaManager = new RunMetaManager(runPaths, 'task', 'parent');
+    const store = new DecisionStore(projectCwd);
+    try {
+      const { engine } = createBridgeHarness({
+        projectCwd,
+        runSlug,
+        decisionStoreFactory: () => store,
+        runMetaManagerOverride: runMetaManager,
+      });
+      const step = {
+        name: 'review',
+        personaDisplayName: 'Reviewer',
+        instruction: '',
+      } as WorkflowStep;
+
+      engine.emit('step:blocked', step, {
+        persona: 'reviewer',
+        status: 'blocked',
+        content: 'Permission required.',
+        timestamp: new Date(),
+        structuredOutput: {
+          humanDecision: {
+            schemaVersion: 1,
+            category: 'permission',
+            question: 'May this exact blocked run continue?',
+            why: {
+              summary: 'The action requires explicit authorization.',
+              reasons: ['No permission is recorded for this run.'],
+              evidence: [],
+            },
+            answer: { kind: 'yes_no', rationaleRequired: true },
+          },
+        },
+      });
+
+      expect(readRunMeta(runPaths.metaAbs)).toMatchObject({ status: 'running' });
+      expect(readRunMeta(runPaths.metaAbs)?.abortKind).toBeUndefined();
+      expect(store.list()).toHaveLength(0);
+
+      engine.emit('workflow:abort', { iteration: 2 }, BLOCKED_ABORT_REASON);
+
+      const decision = store.list()[0]?.request;
+      expect(store.list()).toHaveLength(1);
+      expect(readRunMeta(runPaths.metaAbs)).toMatchObject({
+        status: 'aborted',
+        abortKind: 'blocked',
+        blockedStep: 'review',
+        blockedDecisionId: decision?.decisionId,
+        blockedCategory: 'permission',
+      });
+    } finally {
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('plain blocked event は Decision store を作成せず既存abort処理へ委ねる', () => {
+    const decisionStoreFactory = vi.fn();
+    const { bridge, engine, out, runMetaManager } = createBridgeHarness({ decisionStoreFactory });
+    const step = {
+      name: 'review',
+      personaDisplayName: 'Reviewer',
+      instruction: '',
+    } as WorkflowStep;
+
+    expect(() => engine.emit('step:blocked', step, {
+      persona: 'reviewer',
+      status: 'blocked',
+      content: '質問: 判断してください。理由: 不明です。',
+      timestamp: new Date(),
+    })).not.toThrow();
+
+    expect(decisionStoreFactory).not.toHaveBeenCalled();
+    expect(runMetaManager.recordBlocked).not.toHaveBeenCalled();
+    expect(bridge.state.lastDecisionId).toBeUndefined();
+    expect(out.info).not.toHaveBeenCalledWith(expect.stringContaining('Decision required:'));
+  });
+
+  it('interactive user input後のcompleteでは保留Decisionとblocked metaを残さない', () => {
+    const decisionStoreFactory = vi.fn();
+    const { engine, runMetaManager } = createBridgeHarness({ decisionStoreFactory });
+    const step = {
+      name: 'review',
+      personaDisplayName: 'Reviewer',
+      instruction: '',
+    } as WorkflowStep;
+    const response = {
+      persona: 'reviewer',
+      status: 'blocked',
+      content: 'Permission required.',
+      timestamp: new Date(),
+      structuredOutput: {
+        humanDecision: {
+          schemaVersion: 1,
+          category: 'permission',
+          question: 'May this exact blocked run continue?',
+          why: {
+            summary: 'The action requires explicit authorization.',
+            reasons: ['No permission is recorded for this run.'],
+            evidence: [],
+          },
+          answer: { kind: 'yes_no', rationaleRequired: true },
+        },
+      },
+    };
+
+    engine.emit('step:blocked', step, response);
+    engine.emit('step:user_input', step, 'Continue interactively');
+    engine.emit('workflow:complete', { iteration: 3 });
+
+    expect(decisionStoreFactory).not.toHaveBeenCalled();
+    expect(runMetaManager.recordBlocked).not.toHaveBeenCalled();
+    expect(runMetaManager.finalize).toHaveBeenCalledWith('completed', 3);
+  });
+
+  it('interactive continue後の実RunMetaはcompletedでblocked fieldsを持たない', () => {
+    const projectCwd = join(tmpdir(), `takt-workflow-events-interactive-meta-${randomUUID()}`);
+    const runSlug = 'run-interactive-meta';
+    const runPaths = buildRunPaths(projectCwd, runSlug);
+    const runMetaManager = new RunMetaManager(runPaths, 'task', 'parent');
+    const store = new DecisionStore(projectCwd);
+    try {
+      const { engine } = createBridgeHarness({
+        projectCwd,
+        runSlug,
+        decisionStoreFactory: () => store,
+        runMetaManagerOverride: runMetaManager,
+      });
+      const step = {
+        name: 'review',
+        personaDisplayName: 'Reviewer',
+        instruction: '',
+      } as WorkflowStep;
+
+      engine.emit('step:blocked', step, {
+        persona: 'reviewer',
+        status: 'blocked',
+        content: 'Permission required.',
+        timestamp: new Date(),
+        structuredOutput: {
+          humanDecision: {
+            schemaVersion: 1,
+            category: 'permission',
+            question: 'May this exact blocked run continue?',
+            why: {
+              summary: 'The action requires explicit authorization.',
+              reasons: ['No permission is recorded for this run.'],
+              evidence: [],
+            },
+            answer: { kind: 'yes_no', rationaleRequired: true },
+          },
+        },
+      });
+      engine.emit('step:user_input', step, 'Continue interactively');
+      engine.emit('workflow:complete', { iteration: 3 });
+
+      const meta = readRunMeta(runPaths.metaAbs);
+      expect(store.list()).toHaveLength(0);
+      expect(meta).toMatchObject({ status: 'completed' });
+      expect(meta?.abortKind).toBeUndefined();
+      expect(meta?.blockedStep).toBeUndefined();
+      expect(meta?.blockedDecisionId).toBeUndefined();
+      expect(meta?.blockedCategory).toBeUndefined();
+    } finally {
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('blocked以外のabortでは保留Decisionを破棄する', () => {
+    const decisionStoreFactory = vi.fn();
+    const { engine, runMetaManager } = createBridgeHarness({ decisionStoreFactory });
+    const step = {
+      name: 'review',
+      personaDisplayName: 'Reviewer',
+      instruction: '',
+    } as WorkflowStep;
+
+    engine.emit('step:blocked', step, {
+      persona: 'reviewer',
+      status: 'blocked',
+      content: 'Permission required.',
+      timestamp: new Date(),
+      structuredOutput: {
+        humanDecision: {
+          schemaVersion: 1,
+          category: 'permission',
+          question: 'May this exact blocked run continue?',
+          why: {
+            summary: 'The action requires explicit authorization.',
+            reasons: ['No permission is recorded for this run.'],
+            evidence: [],
+          },
+          answer: { kind: 'yes_no', rationaleRequired: true },
+        },
+      },
+    });
+    engine.emit('workflow:abort', { iteration: 2 }, 'Step "review" failed');
+
+    expect(decisionStoreFactory).not.toHaveBeenCalled();
+    expect(runMetaManager.recordBlocked).not.toHaveBeenCalled();
+    expect(runMetaManager.finalize).toHaveBeenCalledWith('aborted', 2);
+  });
+
+  it('Proxy throwをtrap実行せずsanitized errorへ分類してabort listenerをthrowしない', () => {
+    let trapCount = 0;
+    const thrownProxy = new Proxy({}, {
+      get() {
+        trapCount += 1;
+        throw new Error('get trap should not run');
+      },
+      getOwnPropertyDescriptor() {
+        trapCount += 1;
+        throw new Error('descriptor trap should not run');
+      },
+      getPrototypeOf() {
+        trapCount += 1;
+        throw new Error('prototype trap should not run');
+      },
+    });
+    const harness = createBridgeHarness({
+      decisionStoreFactory: () => {
+        throw thrownProxy;
+      },
+    });
+    const step = {
+      name: 'review',
+      personaDisplayName: 'Reviewer',
+      instruction: '',
+    } as WorkflowStep;
+
+    harness.engine.emit('step:blocked', step, {
+      persona: 'reviewer',
+      status: 'blocked',
+      content: 'Permission required.',
+      timestamp: new Date(),
+      structuredOutput: {
+        humanDecision: {
+          schemaVersion: 1,
+          category: 'permission',
+          question: 'May this exact blocked run continue?',
+          why: {
+            summary: 'The action requires explicit authorization.',
+            reasons: ['No permission is recorded for this run.'],
+            evidence: [],
+          },
+          answer: { kind: 'yes_no', rationaleRequired: true },
+        },
+      },
+    });
+
+    expect(() => harness.engine.emit(
+      'workflow:abort',
+      { iteration: 2 },
+      BLOCKED_ABORT_REASON,
+    )).not.toThrow();
+    expect(trapCount).toBe(0);
+    expect(harness.bridge.state.decisionGenerationError).toBe('decision_generation_failed');
+    expect(harness.out.error).toHaveBeenCalledWith(
+      'Decision generation failed: decision_generation_failed',
+    );
+  });
+
+  it('Decision store failure をsanitized state/outputへ残し blocked eventをthrowしない', () => {
+    const projectCwd = join(tmpdir(), `takt-workflow-events-failure-${randomUUID()}`);
+    mkdirSync(projectCwd, { recursive: true });
+    const store = new DecisionStore(projectCwd);
+    store.requestAndGet = () => {
+      throw new DecisionStoreError('ledger_unavailable');
+    };
+    try {
+      const { bridge, engine, out } = createBridgeHarness({
+        projectCwd,
+        runSlug: 'run-store-failure',
+        decisionStoreFactory: () => store,
+      });
+      const step = {
+        name: 'review',
+        personaDisplayName: 'Reviewer',
+        instruction: '',
+      } as WorkflowStep;
+      const response = {
+        persona: 'reviewer',
+        status: 'blocked',
+        content: 'Permission required.',
+        timestamp: new Date(),
+        structuredOutput: {
+          humanDecision: {
+            schemaVersion: 1,
+            category: 'permission',
+            question: 'May this exact blocked run continue?',
+            why: {
+              summary: 'The action requires explicit authorization.',
+              reasons: ['No permission is recorded for this run.'],
+              evidence: [],
+            },
+            answer: { kind: 'yes_no', rationaleRequired: true },
+          },
+        },
+      };
+
+      expect(() => engine.emit('step:blocked', step, response)).not.toThrow();
+      expect(bridge.state.decisionGenerationError).toBeUndefined();
+      expect(() => engine.emit(
+        'workflow:abort',
+        { iteration: 2 },
+        BLOCKED_ABORT_REASON,
+      )).not.toThrow();
+      expect(bridge.state.decisionGenerationError).toBe('decision_store_ledger_unavailable');
+      expect(bridge.state.lastDecisionId).toBeUndefined();
+      expect(out.error).toHaveBeenCalledWith(
+        'Decision generation failed: decision_store_ledger_unavailable',
+      );
+      expect(JSON.stringify(out.error.mock.calls)).not.toContain(projectCwd);
+      expect(store.list()).toHaveLength(0);
+    } finally {
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('resets Decision state across success, ordinary, failure, and invalid blocked events', () => {
+    const projectCwd = join(tmpdir(), `takt-workflow-events-state-${randomUUID()}`);
+    mkdirSync(projectCwd, { recursive: true });
+    const store = new DecisionStore(projectCwd);
+    try {
+      const { bridge, engine, out } = createBridgeHarness({
+        projectCwd,
+        runSlug: 'run-state-reset',
+        decisionStoreFactory: () => store,
+      });
+      const step = {
+        name: 'review',
+        personaDisplayName: 'Reviewer',
+        instruction: '',
+      } as WorkflowStep;
+      const eligible = {
+        persona: 'reviewer',
+        status: 'blocked',
+        content: 'Permission required.',
+        timestamp: new Date(),
+        structuredOutput: {
+          humanDecision: {
+            schemaVersion: 1,
+            category: 'permission',
+            question: 'May this exact blocked run continue?',
+            why: {
+              summary: 'The action requires explicit authorization.',
+              reasons: ['No permission is recorded for this run.'],
+              evidence: [],
+            },
+            answer: { kind: 'yes_no', rationaleRequired: true },
+          },
+        },
+      };
+      engine.emit('step:blocked', step, eligible);
+      expect(bridge.state.lastDecisionId).toBeUndefined();
+      expect(bridge.state.decisionGenerationError).toBeUndefined();
+
+      engine.emit('step:blocked', step, {
+        ...eligible,
+        structuredOutput: undefined,
+      });
+      expect(bridge.state.lastDecisionId).toBeUndefined();
+      expect(bridge.state.decisionGenerationError).toBeUndefined();
+
+      engine.emit('step:blocked', step, {
+        ...eligible,
+        structuredOutput: { humanDecision: { schemaVersion: 99 } },
+      });
+      expect(bridge.state.lastDecisionId).toBeUndefined();
+      expect(bridge.state.decisionGenerationError).toBe('decision_contract_invalid');
+      expect(out.error).toHaveBeenCalledWith(
+        'Decision generation failed: decision_contract_invalid',
+      );
+
+      engine.emit('step:blocked', step, {
+        ...eligible,
+        error: 'provider failed',
+      });
+      expect(bridge.state.lastDecisionId).toBeUndefined();
+      expect(bridge.state.decisionGenerationError).toBeUndefined();
+      engine.emit('workflow:abort', { iteration: 2 }, BLOCKED_ABORT_REASON);
+      expect(store.list()).toHaveLength(0);
+    } finally {
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps Decision materialization no-throw when run meta and its diagnostic fail', () => {
+    const projectCwd = join(tmpdir(), `takt-workflow-events-no-throw-${randomUUID()}`);
+    mkdirSync(projectCwd, { recursive: true });
+    const store = new DecisionStore(projectCwd);
+    try {
+      const harness = createBridgeHarness({
+        projectCwd,
+        runSlug: 'run-no-throw',
+        decisionStoreFactory: () => store,
+      });
+      harness.runMetaManager.recordBlocked.mockImplementation(() => {
+        throw new Error('raw /private/path from metadata writer');
+      });
+      harness.out.error.mockImplementationOnce(() => {
+        throw new Error('EPIPE');
+      });
+      const step = {
+        name: 'review',
+        personaDisplayName: 'Reviewer',
+        instruction: '',
+      } as WorkflowStep;
+      const response = {
+        persona: 'reviewer',
+        status: 'blocked',
+        content: 'Permission required.',
+        timestamp: new Date(),
+        structuredOutput: {
+          humanDecision: {
+            schemaVersion: 1,
+            category: 'permission',
+            question: 'May this exact blocked run continue?',
+            why: {
+              summary: 'The action requires explicit authorization.',
+              reasons: ['No permission is recorded for this run.'],
+              evidence: [],
+            },
+            answer: { kind: 'yes_no', rationaleRequired: true },
+          },
+        },
+      };
+
+      expect(() => harness.engine.emit('step:blocked', step, response)).not.toThrow();
+      expect(() => harness.engine.emit(
+        'workflow:abort',
+        { iteration: 2 },
+        BLOCKED_ABORT_REASON,
+      )).not.toThrow();
+      expect(harness.bridge.state.decisionGenerationError).toBe('run_meta_record_failed');
+      expect(harness.bridge.state.lastDecisionId).toBeUndefined();
+    } finally {
+      rmSync(projectCwd, { recursive: true, force: true });
+    }
   });
 
   it('verbose 時に Claude SDK base URL を伏せて解決ソースを表示する', () => {

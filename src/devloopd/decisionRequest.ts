@@ -29,6 +29,10 @@ const IdentifierSchema = z.string()
   .min(1)
   .max(200)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
+const CandidateIdentifierSchema = z.string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
 const RepositorySchema = z.string()
   .min(3)
   .max(200)
@@ -41,6 +45,7 @@ const DEVLOOP_AUTOMATION_STAGE_VALUES = [
   'pr-merge',
 ] as const satisfies readonly DevloopAutomationStage[];
 const StageSchema = z.enum(DEVLOOP_AUTOMATION_STAGE_VALUES);
+const HeadShaSchema = z.string().regex(/^[a-f0-9]{40}$/iu);
 
 function containsUnsafeControl(value: string): boolean {
   for (const character of value) {
@@ -76,7 +81,8 @@ export const DecisionSubjectSchema = z.object({
   step: PublicTextSchema.optional(),
   issueNumber: z.number().int().positive().optional(),
   prNumber: z.number().int().positive().optional(),
-  candidateId: IdentifierSchema.optional(),
+  headSha: HeadShaSchema.optional(),
+  candidateId: CandidateIdentifierSchema.optional(),
   title: PublicTextSchema,
 }).strict();
 export type DecisionSubject = z.infer<typeof DecisionSubjectSchema>;
@@ -143,7 +149,9 @@ const DecisionResumeGuardCommonSchema = z.object({
 const DirectRunResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
   strategy: z.literal('direct_run'),
   runSlug: IdentifierSchema,
-  expectedRunStatus: IdentifierSchema,
+  expectedRunStatus: z.literal('aborted'),
+  expectedAbortKind: z.literal('blocked'),
+  expectedBlockedStep: PublicTextSchema,
 }).strict();
 
 const PrAutomationStageResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
@@ -151,12 +159,18 @@ const PrAutomationStageResumeGuardSchema = DecisionResumeGuardCommonSchema.exten
   repository: RepositorySchema,
   prNumber: z.number().int().positive(),
   stage: StageSchema,
-  expectedHeadSha: z.string().regex(/^[a-f0-9]{40}$/iu),
+  expectedHeadSha: HeadShaSchema,
+}).strict();
+
+const IssueScoutCandidateResumeGuardSchema = DecisionResumeGuardCommonSchema.extend({
+  strategy: z.literal('issue_scout_candidate'),
+  candidateId: CandidateIdentifierSchema,
 }).strict();
 
 export const DecisionResumeGuardSchema = z.discriminatedUnion('strategy', [
   DirectRunResumeGuardSchema,
   PrAutomationStageResumeGuardSchema,
+  IssueScoutCandidateResumeGuardSchema,
 ]);
 export type DecisionResumeGuard = z.infer<typeof DecisionResumeGuardSchema>;
 
@@ -225,6 +239,8 @@ const RATIONALE_REQUIRED_RISK_CATEGORIES = new Set<DecisionWhy['riskCategory']>(
 ]);
 
 interface DecisionSafetyContext {
+  kind: DecisionKind;
+  options?: readonly DecisionOption[];
   subject: DecisionSubject;
   why: DecisionWhy;
   answerRequirements: DecisionAnswerRequirements;
@@ -257,9 +273,59 @@ function validateDecisionSafetyContext(
         message: 'subject.runSlug must match the direct-run resume guard',
       });
     }
+    if (
+      value.subject.step === undefined
+      || value.subject.step !== value.resumeGuard.expectedBlockedStep
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['subject', 'step'],
+        message: 'subject.step must match the direct-run blocked step guard',
+      });
+    }
     return;
   }
 
+  if (value.resumeGuard.strategy === 'issue_scout_candidate') {
+    if (
+      value.kind !== 'choice'
+      || value.options?.length !== 3
+      || value.options[0]?.id !== 'approve_scope'
+      || value.options[1]?.id !== 'revise_scope'
+      || value.options[2]?.id !== 'skip'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['options'],
+        message: 'Issue Scout decisions must be a choice with exactly approve_scope, revise_scope, and skip options',
+      });
+    }
+    if (
+      value.subject.candidateId === undefined
+      || value.subject.candidateId !== value.resumeGuard.candidateId
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['subject', 'candidateId'],
+        message: 'subject.candidateId must match the Issue Scout resume guard',
+      });
+    }
+    return;
+  }
+
+  if (
+    value.kind !== 'choice'
+    || value.options?.length !== 3
+    || value.options[0]?.id !== 'approve_current_head'
+    || value.options[1]?.id !== 'request_changes'
+    || value.options[2]?.id !== 'stop'
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['options'],
+      message: 'PR automation decisions must be a choice with exactly approve_current_head, request_changes, and stop options',
+    });
+  }
   if (
     value.subject.repository === undefined
     || value.subject.repository !== value.resumeGuard.repository
@@ -278,6 +344,27 @@ function validateDecisionSafetyContext(
       code: 'custom',
       path: ['subject', 'prNumber'],
       message: 'subject.prNumber must match the PR automation resume guard',
+    });
+  }
+  if (
+    value.subject.headSha === undefined
+    || value.subject.headSha !== value.resumeGuard.expectedHeadSha
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['subject', 'headSha'],
+      message: 'subject.headSha must match the PR automation resume guard',
+    });
+  }
+  if (
+    value.subject.step === undefined
+    || !StageSchema.safeParse(value.subject.step).success
+    || value.subject.step !== value.resumeGuard.stage
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['subject', 'step'],
+      message: 'subject.step must match the PR automation resume guard stage',
     });
   }
 }

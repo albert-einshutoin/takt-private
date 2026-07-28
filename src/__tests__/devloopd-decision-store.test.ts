@@ -37,6 +37,7 @@ function makeRequest(
     subject: {
       repoPath,
       runSlug: decisionId,
+      step: 'decision-step',
       title: 'Choose the safe implementation boundary',
     },
     question: 'Which implementation boundary is approved?',
@@ -60,7 +61,9 @@ function makeRequest(
       strategy: 'direct_run' as const,
       expectedDecisionVersion: 1,
       runSlug: decisionId,
-      expectedRunStatus: 'blocked',
+      expectedRunStatus: 'aborted',
+      expectedAbortKind: 'blocked',
+      expectedBlockedStep: 'decision-step',
     },
   };
 
@@ -114,6 +117,7 @@ function makeOversizedRequest(repoPath: string): DecisionRequest {
     subject: {
       repoPath,
       runSlug: decisionId,
+      step: 'decision-step',
       title: maximumText,
     },
     kind: 'choice',
@@ -145,7 +149,9 @@ function makeOversizedRequest(repoPath: string): DecisionRequest {
       strategy: 'direct_run',
       expectedDecisionVersion: 1,
       runSlug: decisionId,
-      expectedRunStatus: 'blocked',
+      expectedRunStatus: 'aborted',
+      expectedAbortKind: 'blocked',
+      expectedBlockedStep: 'decision-step',
     },
   }, {
     decisionId,
@@ -245,6 +251,52 @@ describe('DecisionStore', () => {
     const conflicting = makeRequest(repoPath, { decisionId: request.decisionId, kind: 'text' });
     expectCode(() => store.request(conflicting), 'request_conflict');
     expect(readFileSync(ledgerPath, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
+  it('deduplicates semantic requests whose scheduler timestamps differ', () => {
+    const store = new DecisionStore(repoPath);
+    const firstRequest = makeRequest(repoPath, { decisionId: 'dec_timestamp_request' });
+    const laterRequest = {
+      ...firstRequest,
+      createdAt: '2026-07-28T00:05:00.000Z',
+    };
+    const first = store.request(firstRequest, { eventId: 'evt_timestamp_first' });
+    const repeated = store.request(laterRequest, { eventId: 'evt_timestamp_later' });
+
+    const atomicFirst = makeRequest(repoPath, { decisionId: 'dec_timestamp_atomic' });
+    const atomicLater = {
+      ...atomicFirst,
+      createdAt: '2026-07-28T00:06:00.000Z',
+    };
+    const created = store.requestAndGet(atomicFirst, { eventId: 'evt_atomic_first' });
+    const reused = store.requestAndGet(atomicLater, { eventId: 'evt_atomic_later' });
+
+    expect(repeated.eventId).toBe(first.eventId);
+    expect(reused.request.createdAt).toBe(created.request.createdAt);
+    expect(readFileSync(ledgerPath, 'utf8').match(/devloop_decision_requested/gu))
+      .toHaveLength(2);
+  });
+
+  it('atomically requests and returns a projection without calling list()', () => {
+    const store = new DecisionStore(repoPath);
+    const request = makeRequest(repoPath, { decisionId: 'dec_atomic' });
+    let listCalls = 0;
+    store.list = () => {
+      listCalls += 1;
+      return [];
+    };
+
+    const created = store.requestAndGet(request, { eventId: 'evt_atomic' });
+    const repeated = store.requestAndGet(request, { eventId: 'evt_atomic_retry' });
+
+    expect(created).toMatchObject({
+      status: 'open',
+      request: { decisionId: 'dec_atomic' },
+    });
+    expect(repeated.request.decisionId).toBe(created.request.decisionId);
+    expect(listCalls).toBe(0);
+    expect(readFileSync(store.ledgerPath, 'utf8').match(/devloop_decision_requested/gu))
+      .toHaveLength(1);
   });
 
   it('returns the original answer for an identical idempotent retry without appending', () => {

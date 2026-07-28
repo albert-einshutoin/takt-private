@@ -1,3 +1,4 @@
+import { types as nodeTypes } from 'node:util';
 import { interruptAllQueries } from '../../../infra/claude/query-manager.js';
 import type { WorkflowResumePointEntry } from '../../../core/models/index.js';
 import type { WorkflowEngine } from '../../../core/workflow/index.js';
@@ -20,18 +21,26 @@ import {
   reportWorkflowCompletion,
   updateUsageForStepCompletion,
 } from './workflowExecutionReporting.js';
+import {
+  classifyWorkflowDecisionBlock,
+  ensureDecisionForWorkflowBlock,
+  type WorkflowHumanDecision,
+} from '../../../devloopd/decisionGeneration.js';
+import { DecisionStore } from '../../../devloopd/decisionStore.js';
 
 export interface WorkflowExecutionEventState {
   abortReason?: string;
   exceededInfo?: ExceededInfo;
   lastStepContent?: string;
   lastStepName?: string;
+  lastDecisionId?: string;
+  decisionGenerationError?: string;
   lastResumePoint?: WorkflowExecutionOptions['resumePoint'];
   currentIteration: number;
   sessionLog: SessionLog;
 }
 
-interface WorkflowExecutionEventBridgeDeps {
+export interface WorkflowExecutionEventBridgeDeps {
   engine: WorkflowEngine;
   workflowConfig: {
     name: string;
@@ -40,6 +49,9 @@ interface WorkflowExecutionEventBridgeDeps {
   };
   task: string;
   projectCwd: string;
+  runSlug: string;
+  currentTaskIssueNumber?: number;
+  decisionStoreFactory?: (repoPath: string) => DecisionStore;
   currentProvider: string;
   configuredModel: string | undefined;
   out: ReturnType<typeof import('./outputFns.js').createOutputFns>;
@@ -152,6 +164,72 @@ function resolveDisplayProgress(
   };
 }
 
+const BLOCKED_WORKFLOW_ABORT_REASON = 'Workflow blocked and no user input provided';
+const DECISION_STORE_ERROR_CODES = new Set([
+  'ledger_malformed',
+  'ledger_incompatible',
+  'ledger_unavailable',
+  'ledger_capacity_exceeded',
+  'decision_not_found',
+  'decision_quarantined',
+  'repository_mismatch',
+  'stale_version',
+  'stale_context',
+  'decision_not_open',
+  'invalid_answer',
+  'rationale_required',
+  'idempotency_conflict',
+  'request_conflict',
+  'invalid_identifier',
+]);
+const DECISION_GENERATION_ERROR_CODES = new Set([
+  'candidate_not_escalated',
+  'candidate_invalid',
+  'decision_invalid',
+  'automation_action_not_escalated',
+]);
+
+function readOwnString(error: object, key: string): string | undefined {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, key);
+    return descriptor !== undefined
+      && Object.hasOwn(descriptor, 'value')
+      && typeof descriptor.value === 'string'
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function classifyDecisionMaterializationError(error: unknown): string {
+  if (
+    error === null
+    || (typeof error !== 'object' && typeof error !== 'function')
+    || nodeTypes.isProxy(error)
+  ) {
+    return 'decision_generation_failed';
+  }
+  const name = readOwnString(error, 'name');
+  const code = readOwnString(error, 'code');
+  if (name === 'DecisionStoreError' && code !== undefined && DECISION_STORE_ERROR_CODES.has(code)) {
+    return `decision_store_${code}`;
+  }
+  if (
+    name === 'DecisionGenerationError'
+    && code !== undefined
+    && DECISION_GENERATION_ERROR_CODES.has(code)
+  ) {
+    return `decision_generation_${code}`;
+  }
+  return 'decision_generation_failed';
+}
+
+interface PendingWorkflowDecision {
+  readonly stepName: string;
+  readonly decision: WorkflowHumanDecision;
+}
+
 export function bindWorkflowExecutionEvents(
   deps: WorkflowExecutionEventBridgeDeps,
 ): WorkflowExecutionEventBridge {
@@ -169,6 +247,13 @@ export function bindWorkflowExecutionEvents(
     sessionLog: deps.sessionLog,
   };
   const stepIterations = new Map<string, number>();
+  let decisionStore: DecisionStore | undefined;
+  let pendingWorkflowDecision: PendingWorkflowDecision | undefined;
+  const getDecisionStore = (): DecisionStore => {
+    decisionStore ??= deps.decisionStoreFactory?.(deps.projectCwd)
+      ?? new DecisionStore(deps.projectCwd);
+    return decisionStore;
+  };
   const syncLatestResumePoint = (): void => {
     if (!canReadResumePoint()) {
       return;
@@ -318,6 +403,94 @@ export function bindWorkflowExecutionEvents(
     notifyWarning('TAKT', message);
   });
 
+  const bestEffortDiagnostic = (write: () => void): void => {
+    try {
+      write();
+    } catch {
+      // Broken output streams (for example EPIPE) must not change terminal
+      // workflow control flow or hide the stable state code.
+    }
+  };
+  const reportDecisionError = (code: string): void => {
+    state.decisionGenerationError = code;
+    bestEffortDiagnostic(() => {
+      deps.out.error(`Decision generation failed: ${code}`);
+    });
+  };
+  const materializePendingDecision = (pending: PendingWorkflowDecision): void => {
+    try {
+      const response = {
+        persona: 'workflow',
+        status: 'blocked' as const,
+        content: '',
+        timestamp: new Date(0),
+        structuredOutput: {
+          humanDecision: pending.decision,
+        },
+      };
+      const projection = ensureDecisionForWorkflowBlock(getDecisionStore(), {
+        response,
+        stepName: pending.stepName,
+        workflowName: deps.workflowConfig.name,
+        repoPath: deps.projectCwd,
+        runSlug: deps.runSlug,
+        ...(deps.currentTaskIssueNumber === undefined
+          ? {}
+          : { issueNumber: deps.currentTaskIssueNumber }),
+      });
+      if (projection === undefined) {
+        reportDecisionError('decision_generation_failed');
+        return;
+      }
+      const decisionId = projection.request.decisionId;
+      try {
+        deps.runMetaManager.recordBlocked({
+          blockedStep: pending.stepName,
+          blockedDecisionId: decisionId,
+          blockedCategory: pending.decision.category,
+        });
+      } catch {
+        reportDecisionError('run_meta_record_failed');
+        return;
+      }
+      state.lastDecisionId = decisionId;
+      bestEffortDiagnostic(() => {
+        deps.out.info(`Decision required: ${decisionId}`);
+      });
+    } catch (error) {
+      // Never inspect a Proxy or include the underlying exception: it may
+      // contain a local path, token, or raw provider payload.
+      reportDecisionError(classifyDecisionMaterializationError(error));
+    }
+  };
+
+  deps.engine.on('step:blocked', (step, response) => {
+    pendingWorkflowDecision = undefined;
+    state.lastDecisionId = undefined;
+    state.decisionGenerationError = undefined;
+    try {
+      const classification = classifyWorkflowDecisionBlock(response);
+      if (classification.classification === 'invalid_contract') {
+        reportDecisionError('decision_contract_invalid');
+        return;
+      }
+      if (classification.classification === 'eligible') {
+        // Retain only the validated, deeply frozen contract. The provider-owned
+        // response is not safe to keep alive until terminal workflow outcome.
+        pendingWorkflowDecision = {
+          stepName: step.name,
+          decision: classification.decision,
+        };
+      }
+    } catch {
+      reportDecisionError('decision_generation_failed');
+    }
+  });
+
+  deps.engine.on('step:user_input', () => {
+    pendingWorkflowDecision = undefined;
+  });
+
   deps.engine.on('step:report', (_step, filePath, fileName) => {
     reportStepFile(filePath, fileName, deps.out);
     deps.analyticsEmitter.onStepReport(_step, filePath);
@@ -328,6 +501,7 @@ export function bindWorkflowExecutionEvents(
   });
 
   deps.engine.on('workflow:complete', (workflowState) => {
+    pendingWorkflowDecision = undefined;
     syncLatestResumePoint();
     state.sessionLog = finalizeWorkflowSuccess(
       state.sessionLog,
@@ -356,6 +530,12 @@ export function bindWorkflowExecutionEvents(
   });
 
   deps.engine.on('workflow:abort', (workflowState, reason) => {
+    const pending = pendingWorkflowDecision;
+    pendingWorkflowDecision = undefined;
+    if (pending !== undefined && reason === BLOCKED_WORKFLOW_ABORT_REASON) {
+      materializePendingDecision(pending);
+    }
+
     interruptAllQueries();
     syncLatestResumePoint();
     if (deps.displayRef.current) {

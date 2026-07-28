@@ -236,6 +236,8 @@ async function executeWorkflowInternal(
       workflowConfig: bootstrap.effectiveWorkflowConfig,
       task,
       projectCwd: options.projectCwd,
+      runSlug: bootstrap.runSlug,
+      currentTaskIssueNumber: options.currentTaskIssueNumber,
       currentProvider: bootstrap.currentProvider!,
       configuredModel: bootstrap.configuredModel,
       out: bootstrap.out,

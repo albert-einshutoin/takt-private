@@ -6,7 +6,10 @@
  */
 
 import { writeFileAtomic, ensureDir } from '../../../infra/config/index.js';
-import type { RunMeta } from '../../../core/workflow/run/run-meta.js';
+import type {
+  RunMeta,
+  RunMetaBlockedCategory,
+} from '../../../core/workflow/run/run-meta.js';
 import type { RunPaths } from '../../../core/workflow/run/run-paths.js';
 import type { WorkflowResumePoint } from '../../../core/models/index.js';
 import type { WorkflowTraceDiscovery } from '../../../core/workflow/observability/traceDiscovery.js';
@@ -20,6 +23,12 @@ export interface RunMetaManagerOptions {
   readonly traceDiscovery?: WorkflowTraceDiscovery;
 }
 
+export interface RunMetaBlockedInput {
+  readonly blockedStep: string;
+  readonly blockedDecisionId?: string;
+  readonly blockedCategory?: RunMetaBlockedCategory;
+}
+
 type PersistedRunMeta = Omit<RunMeta, 'resumePoint' | 'sourceRunSlug' | 'resumeMode'> & {
   resume_point?: WorkflowResumePoint;
   source_run_slug?: string;
@@ -27,7 +36,7 @@ type PersistedRunMeta = Omit<RunMeta, 'resumePoint' | 'sourceRunSlug' | 'resumeM
 };
 
 export class RunMetaManager {
-  private readonly runMeta: RunMeta;
+  private runMeta: RunMeta;
   private readonly metaAbs: string;
   private finalized = false;
 
@@ -80,6 +89,20 @@ export class RunMetaManager {
 
   updateResumePoint(resumePoint?: WorkflowResumePoint): void {
     this.runMeta.resumePoint = resumePoint;
+    this.writeRunMeta(this.runMeta);
+  }
+
+  recordBlocked(input: RunMetaBlockedInput): void {
+    // Replace the terminal guard as one immutable snapshot. Re-emitted blocked
+    // events cannot retain a stale Decision ID or category from an earlier
+    // classification.
+    this.runMeta = {
+      ...this.runMeta,
+      abortKind: 'blocked',
+      blockedStep: input.blockedStep,
+      blockedDecisionId: input.blockedDecisionId,
+      blockedCategory: input.blockedCategory,
+    };
     this.writeRunMeta(this.runMeta);
   }
 
