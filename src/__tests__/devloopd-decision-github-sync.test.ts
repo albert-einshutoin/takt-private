@@ -21,6 +21,7 @@ import { createDefaultDevloopCommandRunner } from '../devloopd/commandRunner.js'
 import {
   createDecisionAppliedEvent,
   createDecisionApplyStartedEvent,
+  createDecisionGithubSyncEvent,
   type DecisionProjection,
 } from '../devloopd/decisionEvents.js';
 import { createDecisionRequest, type DecisionRequest } from '../devloopd/decisionRequest.js';
@@ -345,6 +346,11 @@ describe('decision GitHub synchronization', () => {
         stderr: '',
       },
       {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'gh: Not Found (HTTP 404)\n',
+      },
+      {
         exitCode: 0,
         stdout: 'https://github.com/octo/project/issues/42#issuecomment-456\n',
         stderr: '',
@@ -361,7 +367,120 @@ describe('decision GitHub synchronization', () => {
       existing: false,
       commentId: '456',
     });
-    expect(retryRunner.calls.map((call) => call.args[1])).toEqual(['view', 'comment']);
+    expect(retryRunner.calls.map((call) => call.args[0])).toEqual(['issue', 'api', 'issue']);
+    expect(retryRunner.calls[1]?.args).toEqual([
+      'api',
+      '--method',
+      'GET',
+      'repos/octo/project/issues/comments/123',
+    ]);
+  });
+
+  it('uses a direct comment lookup to survive stale list visibility without reposting', async () => {
+    const preview = buildDecisionGithubPreview(store.get(request.decisionId)!);
+    const firstRunner = new FakeRunner();
+    firstRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: 'https://github.com/octo/project/issues/42#issuecomment-123\n',
+        stderr: '',
+      },
+    );
+    await syncDecisionToGithub({ store, decisionId: request.decisionId, runner: firstRunner });
+
+    const retryRunner = new FakeRunner();
+    retryRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: 123,
+          html_url: 'https://github.com/octo/project/issues/42#issuecomment-123',
+          body: preview.body,
+        }),
+        stderr: '',
+      },
+    );
+
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner: retryRunner,
+    });
+
+    expect(result).toMatchObject({ status: 'synced', existing: true, commentId: '123' });
+    expect(retryRunner.calls.map((call) => call.args[0])).toEqual(['issue', 'api']);
+    expect(retryRunner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(0);
+  });
+
+  it('fails closed when direct verification of a recorded comment is ambiguous', async () => {
+    const firstRunner = new FakeRunner();
+    firstRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: 'https://github.com/octo/project/issues/42#issuecomment-123\n',
+        stderr: '',
+      },
+    );
+    await syncDecisionToGithub({ store, decisionId: request.decisionId, runner: firstRunner });
+
+    const retryRunner = new FakeRunner();
+    retryRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'network unavailable',
+      },
+    );
+
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner: retryRunner,
+    });
+
+    expect(result).toMatchObject({ status: 'failed', errorCode: 'github_unavailable' });
+    expect(retryRunner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(0);
+    expect(store.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'failed',
+      phase: 'posting',
+      outcome: 'may_have_posted',
+    });
   });
 
   it('does not edit a matching marker comment not owned by the authenticated viewer', async () => {
@@ -569,12 +688,7 @@ describe('decision GitHub synchronization', () => {
         stdout: JSON.stringify({
           number: 42,
           url: 'https://github.com/octo/project/issues/42',
-          comments: [{
-            id: 'IC_412',
-            url: 'https://github.com/octo/project/issues/42#issuecomment-412',
-            viewerDidAuthor: true,
-            body: answeredPreview.body,
-          }],
+          comments: [],
         }),
         stderr: '',
       },
@@ -614,6 +728,96 @@ describe('decision GitHub synchronization', () => {
     expect(store.get(request.decisionId)?.status).toBe('applied');
     expect(store.get(request.decisionId)?.githubSync?.status).toBe('synced');
     expect(syncedEvents).toHaveLength(1);
+  });
+
+  it('fails closed when interrupted after posting intent is durable but before POST starts', async () => {
+    const firstRunner = new FakeRunner();
+    firstRunner.results.push({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        number: 42,
+        url: 'https://github.com/octo/project/issues/42',
+        comments: [],
+      }),
+      stderr: '',
+    });
+
+    const interrupted = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner: firstRunner,
+      afterPostingPersisted() {
+        throw new Error('simulated interruption before POST');
+      },
+    });
+
+    expect(interrupted).toMatchObject({ status: 'failed', errorCode: 'ledger_unavailable' });
+    expect(firstRunner.calls.map((call) => call.args[1])).toEqual(['view']);
+    expect(store.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'pending',
+      phase: 'posting',
+    });
+
+    const retryRunner = new FakeRunner();
+    for (let index = 0; index < 4; index += 1) {
+      retryRunner.results.push({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      });
+    }
+
+    const retry = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner: retryRunner,
+    });
+
+    expect(retry).toMatchObject({
+      status: 'failed',
+      errorCode: 'sync_visibility_unconfirmed',
+    });
+    expect(retryRunner.calls).toHaveLength(4);
+    expect(retryRunner.calls.every((call) => call.args[1] === 'view')).toBe(true);
+  });
+
+  it('treats a legacy pending event as ambiguous and never posts again', async () => {
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionGithubSyncEvent({
+      decisionId: request.decisionId,
+      decisionVersion: request.decisionVersion,
+      contextHash: request.contextHash,
+      target: { kind: 'issue', repository: 'octo/project', number: 42 },
+      status: 'pending',
+    }, { eventId: 'evt_legacy_pending' }));
+    const runner = new FakeRunner();
+    for (let index = 0; index < 4; index += 1) {
+      runner.results.push({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      });
+    }
+
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      errorCode: 'sync_visibility_unconfirmed',
+    });
+    expect(runner.calls).toHaveLength(4);
+    expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
   });
 
   it('reconciles again when projection changes while PATCH is in flight', async () => {
@@ -690,21 +894,19 @@ describe('decision GitHub synchronization', () => {
 
   it('fails with a fixed event when the publish snapshot never stabilizes', async () => {
     const realGet = store.get.bind(store);
-    let getCalls = 0;
+    let syntheticStatus: DecisionProjection['status'] = 'answered';
     const flappingStore = new DecisionStore(repoPath);
     flappingStore.get = ((decisionId: string): DecisionProjection | undefined => {
       const projection = realGet(decisionId);
       if (projection === undefined) return undefined;
-      const position = getCalls % 3;
-      const iteration = Math.floor(getCalls / 3);
-      getCalls += 1;
-      const snapshotStatus = iteration % 2 === 0 ? 'answered' : 'applied';
-      const status = position === 2
-        ? snapshotStatus === 'answered' ? 'applied' : 'answered'
-        : snapshotStatus;
-      return Object.freeze({ ...projection, status });
+      return Object.freeze({ ...projection, status: syntheticStatus });
     }) as typeof flappingStore.get;
     const runner = new FakeRunner();
+    runner.beforeResult = (_, args) => {
+      if (args[1] === 'view') {
+        syntheticStatus = syntheticStatus === 'answered' ? 'applied' : 'answered';
+      }
+    };
     for (let index = 0; index < 4; index += 1) {
       runner.results.push({
         exitCode: 0,
@@ -815,20 +1017,40 @@ describe('decision GitHub synchronization', () => {
 
     const preview = buildDecisionGithubPreview(store.get(request.decisionId)!);
     const retryRunner = new FakeRunner();
-    retryRunner.results.push({
-      exitCode: 0,
-      stdout: JSON.stringify({
-        number: 42,
-        url: 'https://github.com/octo/project/issues/42',
-        comments: [{
-          id: 'IC_654',
-          url: 'https://github.com/octo/project/issues/42#issuecomment-654',
-          viewerDidAuthor: true,
-          body: preview.body,
-        }],
-      }),
-      stderr: '',
-    });
+    retryRunner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [{
+            id: 'IC_654',
+            url: 'https://github.com/octo/project/issues/42#issuecomment-654',
+            viewerDidAuthor: true,
+            body: preview.body,
+          }],
+        }),
+        stderr: '',
+      },
+    );
 
     const recovered = await syncDecisionToGithub({
       store,
@@ -841,8 +1063,8 @@ describe('decision GitHub synchronization', () => {
       existing: true,
       commentId: '654',
     });
-    expect(retryRunner.calls).toHaveLength(1);
-    expect(retryRunner.calls[0]?.args[1]).toBe('view');
+    expect(retryRunner.calls).toHaveLength(3);
+    expect(retryRunner.calls.every((call) => call.args[1] === 'view')).toBe(true);
   });
 
   it('holds the sync lock until a timed-out POST child closes before retrying', async () => {

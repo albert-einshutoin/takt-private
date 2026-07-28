@@ -713,6 +713,72 @@ describe('decision event fold', () => {
     expect(Object.isFrozen(projection?.githubSync?.target)).toBe(true);
   });
 
+  it('folds structured GitHub posting intent and uncertain failure metadata', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const pending = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'pending',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+    }, { eventId: 'evt_github_posting' });
+    const failed = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'failed',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+      outcome: 'may_have_posted',
+      sanitizedError: 'GitHub synchronization failed.',
+    }, { eventId: 'evt_github_failed' });
+
+    expect(foldDecisionEvents([requested, answered, pending]).get(request.decisionId)?.githubSync)
+      .toMatchObject({ status: 'pending', phase: 'posting', attemptId: 'attempt-1' });
+    expect(foldDecisionEvents([requested, answered, pending, failed])
+      .get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'failed',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+      outcome: 'may_have_posted',
+    });
+  });
+
+  it('rejects partially structured GitHub sync events', () => {
+    const base = {
+      ...identity,
+      target: {
+        kind: 'issue' as const,
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+    };
+
+    expect(() => createDecisionGithubSyncEvent({
+      ...base,
+      status: 'pending',
+      phase: 'posting',
+    })).toThrow();
+    expect(() => createDecisionGithubSyncEvent({
+      ...base,
+      status: 'failed',
+      sanitizedError: 'GitHub synchronization failed.',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+    })).toThrow();
+    expect(() => createDecisionGithubSyncEvent({
+      ...base,
+      status: 'failed',
+      sanitizedError: 'GitHub synchronization failed.',
+      phase: 'posting',
+      attemptId: 'attempt-1',
+      outcome: 'definitely_not_posted',
+    })).toThrow();
+  });
+
   it.each([
     ['pending with comment ID', {
       status: 'pending',

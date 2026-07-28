@@ -205,7 +205,17 @@ const GithubSyncEventCommonShape = {
 const GithubPendingSyncEventSchema = z.object({
   ...GithubSyncEventCommonShape,
   status: z.literal('pending'),
-}).strict();
+  phase: z.enum(['inspecting', 'posting']).optional(),
+  attemptId: IdentifierSchema.optional(),
+}).strict().superRefine((event, context) => {
+  if ((event.phase === undefined) !== (event.attemptId === undefined)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['phase'],
+      message: 'GitHub sync pending phase and attempt ID must be recorded together',
+    });
+  }
+});
 const GithubSyncedSyncEventSchema = z.object({
   ...GithubSyncEventCommonShape,
   status: z.literal('synced'),
@@ -216,7 +226,27 @@ const GithubFailedSyncEventSchema = z.object({
   ...GithubSyncEventCommonShape,
   status: z.literal('failed'),
   sanitizedError: PublicTextSchema,
-}).strict();
+  phase: z.enum(['inspecting', 'posting']).optional(),
+  attemptId: IdentifierSchema.optional(),
+  outcome: z.enum(['definitely_not_posted', 'may_have_posted']).optional(),
+}).strict().superRefine((event, context) => {
+  const structuredFields = [event.phase, event.attemptId, event.outcome];
+  const presentCount = structuredFields.filter((field) => field !== undefined).length;
+  if (presentCount !== 0 && presentCount !== structuredFields.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['outcome'],
+      message: 'GitHub sync failure phase, attempt ID, and outcome must be recorded together',
+    });
+  }
+  if (event.phase === 'posting' && event.outcome === 'definitely_not_posted') {
+    context.addIssue({
+      code: 'custom',
+      path: ['outcome'],
+      message: 'GitHub sync posting failures must be treated as possibly posted',
+    });
+  }
+});
 
 function validateGithubCommentUrl(
   event: z.infer<typeof GithubSyncedSyncEventSchema>,
@@ -433,6 +463,8 @@ export function createDecisionGithubSyncEvent(
   } & (
     | {
       status: 'pending';
+      phase?: 'inspecting' | 'posting';
+      attemptId?: string;
       commentId?: never;
       commentUrl?: never;
       sanitizedError?: never;
@@ -446,6 +478,9 @@ export function createDecisionGithubSyncEvent(
     | {
       status: 'failed';
       sanitizedError: string;
+      phase?: 'inspecting' | 'posting';
+      attemptId?: string;
+      outcome?: 'definitely_not_posted' | 'may_have_posted';
       commentId?: never;
       commentUrl?: never;
     }
@@ -498,6 +533,8 @@ type DecisionGithubSyncProjectionCommon = {
 export type DecisionGithubSyncProjection = DecisionGithubSyncProjectionCommon & (
   | {
     readonly status: 'pending';
+    readonly phase?: 'inspecting' | 'posting';
+    readonly attemptId?: string;
   }
   | {
     readonly status: 'synced';
@@ -507,6 +544,9 @@ export type DecisionGithubSyncProjection = DecisionGithubSyncProjectionCommon & 
   | {
     readonly status: 'failed';
     readonly sanitizedError: string;
+    readonly phase?: 'inspecting' | 'posting';
+    readonly attemptId?: string;
+    readonly outcome?: 'definitely_not_posted' | 'may_have_posted';
   }
 );
 
@@ -798,6 +838,10 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
           eventId: event.eventId,
           target: event.target,
           status: event.status,
+          ...(event.phase === undefined ? {} : {
+            phase: event.phase,
+            attemptId: event.attemptId,
+          }),
         });
       } else if (event.status === 'synced') {
         projection.githubSync = deepFreeze({
@@ -813,6 +857,11 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
           target: event.target,
           status: event.status,
           sanitizedError: event.sanitizedError,
+          ...(event.phase === undefined ? {} : {
+            phase: event.phase,
+            attemptId: event.attemptId,
+            outcome: event.outcome,
+          }),
         });
       }
       continue;

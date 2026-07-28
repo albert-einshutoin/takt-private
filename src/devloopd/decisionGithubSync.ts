@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { types as utilTypes } from 'node:util';
 import {
   createDefaultDevloopCommandRunner,
@@ -45,6 +45,7 @@ export type DecisionGithubSyncResult =
       | 'github_unavailable'
       | 'ledger_unavailable'
       | 'sync_state_changed'
+      | 'sync_visibility_unconfirmed'
       | 'untrusted_github_response';
     readonly sanitizedError: string;
   };
@@ -59,6 +60,8 @@ export interface SyncDecisionToGithubOptions {
   readonly decisionId: string;
   readonly runner?: DevloopCommandRunner;
   readonly env?: NodeJS.ProcessEnv;
+  /** Test-only boundary used to prove crash safety after posting intent is durable. */
+  readonly afterPostingPersisted?: () => void;
   /** Test-only boundary used to prove recovery after the external side effect. */
   readonly afterCommentCreated?: () => void;
 }
@@ -77,6 +80,7 @@ interface GithubView {
 interface SafeCommandResult {
   readonly exitCode: number;
   readonly stdout: string;
+  readonly stderr: string;
 }
 
 interface DecisionSyncSnapshot {
@@ -179,9 +183,19 @@ function appendSyncEvent(
   decisionId: string,
   target: DecisionGithubTarget,
   state:
-    | { status: 'pending' }
+    | {
+      status: 'pending';
+      phase?: 'inspecting' | 'posting';
+      attemptId?: string;
+    }
     | { status: 'synced'; commentId: string; commentUrl: string }
-    | { status: 'failed'; sanitizedError: string },
+    | {
+      status: 'failed';
+      sanitizedError: string;
+      phase?: 'inspecting' | 'posting';
+      attemptId?: string;
+      outcome?: 'definitely_not_posted' | 'may_have_posted';
+    },
 ): DecisionProjection {
   return withLockedDevloopLedgerTransaction(store.ledgerPath, (transaction) => {
     const projection = store.get(decisionId);
@@ -203,17 +217,58 @@ function appendFailure(
   store: DecisionStore,
   decisionId: string,
   target: DecisionGithubTarget,
-  errorCode: 'github_unavailable' | 'sync_state_changed' | 'untrusted_github_response',
+  errorCode:
+    | 'github_unavailable'
+    | 'sync_state_changed'
+    | 'sync_visibility_unconfirmed'
+    | 'untrusted_github_response',
+  state: {
+    readonly phase: 'inspecting' | 'posting';
+    readonly attemptId: string;
+    readonly outcome: 'definitely_not_posted' | 'may_have_posted';
+  },
 ): DecisionGithubSyncResult {
   try {
     appendSyncEvent(store, decisionId, target, {
       status: 'failed',
       sanitizedError: FIXED_SYNC_ERROR,
+      ...state,
     });
     return failed(decisionId, errorCode);
   } catch {
     return failed(decisionId, 'ledger_unavailable');
   }
+}
+
+function appendPendingIfCurrent(
+  store: DecisionStore,
+  decisionId: string,
+  target: DecisionGithubTarget,
+  fingerprint: string,
+  phase: 'inspecting' | 'posting',
+  attemptId: string,
+): boolean {
+  return withLockedDevloopLedgerTransaction(store.ledgerPath, (transaction) => {
+    const projection = store.get(decisionId);
+    if (projection === undefined) return false;
+    const currentTarget = targetFromProjection(projection);
+    const snapshot = snapshotFromProjection(projection);
+    if (
+      currentTarget === undefined
+      || !sameTarget(currentTarget, target)
+      || snapshot?.fingerprint !== fingerprint
+    ) {
+      return false;
+    }
+    transaction.append(createDecisionGithubSyncEvent({
+      ...transitionIdentity(projection),
+      target,
+      status: 'pending',
+      phase,
+      attemptId,
+    }));
+    return true;
+  });
 }
 
 function snapshotFingerprint(preview: DecisionGithubPreview): string {
@@ -431,24 +486,84 @@ function parseUpdatedComment(
   });
 }
 
+function parseKnownComment(
+  stdout: string,
+  target: DecisionGithubTarget,
+  expected: { readonly commentId: string; readonly commentUrl: string },
+  preview: DecisionGithubPreview,
+  projection: DecisionProjection,
+): GithubComment | undefined {
+  if (Buffer.byteLength(stdout, 'utf8') > MAX_GITHUB_RESPONSE_BYTES) return undefined;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!isPlainRecord(raw)) return undefined;
+  const body = Reflect.get(raw, 'body');
+  const parsedUrl = parseCommentUrl(Reflect.get(raw, 'html_url'), target);
+  const rawId = Reflect.get(raw, 'id');
+  const id = typeof rawId === 'number' && Number.isSafeInteger(rawId)
+    ? String(rawId)
+    : typeof rawId === 'string' ? rawId : undefined;
+  if (
+    typeof body !== 'string'
+    || Buffer.byteLength(body, 'utf8') > MAX_GITHUB_COMMENT_BODY_BYTES
+    || parsedUrl === undefined
+    || parsedUrl.commentId !== expected.commentId
+    || parsedUrl.commentUrl !== expected.commentUrl
+    || id !== expected.commentId
+  ) {
+    return undefined;
+  }
+  const comment = Object.freeze({
+    body,
+    commentId: parsedUrl.commentId,
+    commentUrl: parsedUrl.commentUrl,
+    // The local synced event records a comment previously verified as owned.
+    // The REST endpoint establishes that the same immutable comment ID remains.
+    viewerDidAuthor: true,
+  });
+  const managed = findManagedComment(
+    Object.freeze({ comments: Object.freeze([comment]) }),
+    preview,
+    projection,
+  );
+  return managed === 'collision' || managed === undefined ? undefined : managed.comment;
+}
+
+function isExplicitGithubNotFound(result: SafeCommandResult): boolean {
+  return result.exitCode !== 0
+    && result.stdout === ''
+    && result.stderr.trim() === 'gh: Not Found (HTTP 404)';
+}
+
 function safeCommandResult(value: unknown): SafeCommandResult | undefined {
   if (!isPlainRecord(value)) return undefined;
   try {
     const exitCodeDescriptor = Object.getOwnPropertyDescriptor(value, 'exitCode');
     const stdoutDescriptor = Object.getOwnPropertyDescriptor(value, 'stdout');
+    const stderrDescriptor = Object.getOwnPropertyDescriptor(value, 'stderr');
     const exitCode = exitCodeDescriptor?.value;
     const stdout = stdoutDescriptor?.value;
+    const stderr = stderrDescriptor?.value;
     if (
       exitCodeDescriptor?.get !== undefined
       || stdoutDescriptor?.get !== undefined
+      || stderrDescriptor?.get !== undefined
       || !Number.isInteger(exitCode)
       || typeof stdout !== 'string'
+      || typeof stderr !== 'string'
+      || Buffer.byteLength(stdout, 'utf8') > MAX_GITHUB_RESPONSE_BYTES
+      || Buffer.byteLength(stderr, 'utf8') > MAX_GITHUB_RESPONSE_BYTES
     ) {
       return undefined;
     }
     return {
       exitCode: exitCode as number,
       stdout,
+      stderr,
     };
   } catch {
     return undefined;
@@ -483,7 +598,62 @@ async function performSync(
   env: NodeJS.ProcessEnv,
 ): Promise<DecisionGithubSyncResult> {
   const { store, decisionId } = options;
+  const attemptId = randomUUID();
   let lastTarget: DecisionGithubTarget | undefined;
+  let createdRef: { readonly commentId: string; readonly commentUrl: string } | undefined;
+  let knownRef: { readonly commentId: string; readonly commentUrl: string } | undefined;
+  let recoveryRequired = false;
+  let postingStarted = false;
+  let managedWasObserved = false;
+
+  let initialProjection: DecisionProjection | undefined;
+  try {
+    initialProjection = store.get(decisionId);
+  } catch {
+    return failed(decisionId, 'ledger_unavailable');
+  }
+  if (initialProjection === undefined || initialProjection.answer === undefined) {
+    return failed(decisionId, 'decision_not_answered');
+  }
+  const initialSnapshot = snapshotFromProjection(initialProjection);
+  if (initialSnapshot === undefined) return failed(decisionId, 'github_target_unavailable');
+  lastTarget = initialSnapshot.preview.target;
+
+  const previousSync = initialProjection.githubSync;
+  if (previousSync !== undefined) {
+    if (!sameTarget(previousSync.target, initialSnapshot.preview.target)) {
+      recoveryRequired = true;
+    } else if (previousSync.status === 'synced') {
+      const parsed = parseCommentUrl(previousSync.commentUrl, previousSync.target);
+      if (parsed !== undefined && parsed.commentId === previousSync.commentId) {
+        knownRef = parsed;
+      } else {
+        recoveryRequired = true;
+      }
+    } else if (previousSync.status === 'pending') {
+      // A legacy pending event has no durable proof that POST did not start.
+      // Only the explicit inspecting phase is safe to retry with a new POST.
+      recoveryRequired = previousSync.phase !== 'inspecting';
+    } else {
+      // Legacy failures and any uncertain posting outcome are ambiguous. Once
+      // a POST may have happened, retries may inspect/reconcile but never POST.
+      recoveryRequired = previousSync.outcome !== 'definitely_not_posted';
+    }
+  }
+
+  const gh = commandPath(runner, env);
+  if (gh === undefined) {
+    return appendFailure(store, decisionId, initialSnapshot.preview.target, 'github_unavailable', {
+      phase: recoveryRequired ? 'posting' : 'inspecting',
+      attemptId,
+      outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+    });
+  }
+  const execOptions = githubMetadataExecOptions({
+    cwd: store.repoPath,
+    env,
+    maxOutputBytes: MAX_GITHUB_RESPONSE_BYTES,
+  });
 
   for (let attempt = 0; attempt < MAX_RECONCILE_ATTEMPTS; attempt += 1) {
     let projection: DecisionProjection | undefined;
@@ -500,22 +670,24 @@ async function performSync(
     const { preview, fingerprint } = snapshot;
     lastTarget = preview.target;
 
-    try {
-      appendSyncEvent(store, decisionId, preview.target, { status: 'pending' });
-    } catch {
-      return failed(decisionId, 'ledger_unavailable');
+    if (!recoveryRequired && knownRef === undefined && createdRef === undefined) {
+      try {
+        if (!appendPendingIfCurrent(
+          store,
+          decisionId,
+          preview.target,
+          fingerprint,
+          'inspecting',
+          attemptId,
+        )) {
+          continue;
+        }
+      } catch {
+        return failed(decisionId, 'ledger_unavailable');
+      }
     }
 
-    const gh = commandPath(runner, env);
-    if (gh === undefined) {
-      return appendFailure(store, decisionId, preview.target, 'github_unavailable');
-    }
     const entity = preview.target.kind === 'issue' ? 'issue' : 'pr';
-    const execOptions = githubMetadataExecOptions({
-      cwd: store.repoPath,
-      env,
-      maxOutputBytes: MAX_GITHUB_RESPONSE_BYTES,
-    });
     let rawViewResult: unknown;
     try {
       rawViewResult = await runner.exec(gh, [
@@ -528,32 +700,122 @@ async function performSync(
         'number,url,comments',
       ], execOptions);
     } catch {
-      return appendFailure(store, decisionId, preview.target, 'github_unavailable');
+      return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
+        phase: recoveryRequired ? 'posting' : 'inspecting',
+        attemptId,
+        outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+      });
     }
     const viewResult = safeCommandResult(rawViewResult);
     if (viewResult === undefined) {
-      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+        phase: recoveryRequired ? 'posting' : 'inspecting',
+        attemptId,
+        outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+      });
     }
     if (viewResult.exitCode !== 0) {
-      return appendFailure(store, decisionId, preview.target, 'github_unavailable');
+      return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
+        phase: recoveryRequired ? 'posting' : 'inspecting',
+        attemptId,
+        outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+      });
     }
     const view = parseGithubView(viewResult.stdout, preview.target);
     if (view === undefined) {
-      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+        phase: recoveryRequired ? 'posting' : 'inspecting',
+        attemptId,
+        outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+      });
     }
     const managed = findManagedComment(view, preview, projection);
     if (managed === 'collision') {
-      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+        phase: recoveryRequired ? 'posting' : 'inspecting',
+        attemptId,
+        outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+      });
+    }
+    if (managed !== undefined) managedWasObserved = true;
+
+    let directlyVerifiedComment: GithubComment | undefined;
+    if (managed === undefined && createdRef === undefined && knownRef !== undefined) {
+      let rawKnownResult: unknown;
+      try {
+        rawKnownResult = await runner.exec(gh, [
+          'api',
+          '--method',
+          'GET',
+          `repos/${preview.target.repository}/issues/comments/${knownRef.commentId}`,
+        ], execOptions);
+      } catch {
+        return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
+          phase: 'posting',
+          attemptId,
+          outcome: 'may_have_posted',
+        });
+      }
+      const knownResult = safeCommandResult(rawKnownResult);
+      if (knownResult === undefined) {
+        return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+          phase: 'posting',
+          attemptId,
+          outcome: 'may_have_posted',
+        });
+      }
+      if (isExplicitGithubNotFound(knownResult)) {
+        // Only a narrowly parsed, explicit 404 proves the previously verified
+        // comment was deleted. Network and malformed failures remain ambiguous.
+        knownRef = undefined;
+      } else if (knownResult.exitCode !== 0) {
+        return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
+          phase: 'posting',
+          attemptId,
+          outcome: 'may_have_posted',
+        });
+      } else {
+        directlyVerifiedComment = parseKnownComment(
+          knownResult.stdout,
+          preview.target,
+          knownRef,
+          preview,
+          projection,
+        );
+        if (directlyVerifiedComment === undefined) {
+          return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+            phase: 'posting',
+            attemptId,
+            outcome: 'may_have_posted',
+          });
+        }
+      }
     }
 
-    if (managed !== undefined && managed.current) {
+    const authoritativeRef = createdRef ?? knownRef;
+    if (
+      managed !== undefined
+      && authoritativeRef !== undefined
+      && managed.comment.commentId !== authoritativeRef.commentId
+    ) {
+      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+        phase: 'posting',
+        attemptId,
+        outcome: 'may_have_posted',
+      });
+    }
+
+    const currentComment = managed !== undefined && managed.current
+      ? managed.comment
+      : directlyVerifiedComment?.body === preview.body ? directlyVerifiedComment : undefined;
+    if (currentComment !== undefined) {
       try {
         if (!appendSyncedIfCurrent(
           store,
           decisionId,
           preview.target,
           fingerprint,
-          managed.comment,
+          currentComment,
         )) {
           continue;
         }
@@ -561,12 +823,18 @@ async function performSync(
           status: 'synced',
           decisionId,
           existing: true,
-          commentId: managed.comment.commentId,
-          commentUrl: managed.comment.commentUrl,
+          commentId: currentComment.commentId,
+          commentUrl: currentComment.commentUrl,
         };
       } catch {
         return failed(decisionId, 'ledger_unavailable');
       }
+    }
+
+    if (managed === undefined && authoritativeRef === undefined && recoveryRequired) {
+      // GitHub comment creation may be eventually consistent. Re-inspect a
+      // bounded number of times, but never convert uncertainty into a POST.
+      continue;
     }
 
     const stateBeforeMutation = currentSnapshotState(store, decisionId, fingerprint);
@@ -575,35 +843,58 @@ async function performSync(
     }
     if (stateBeforeMutation === 'changed') continue;
 
-    if (managed !== undefined) {
+    const patchTarget = managed?.comment ?? directlyVerifiedComment ?? (authoritativeRef === undefined
+      ? undefined
+      : Object.freeze({
+        ...authoritativeRef,
+        body: '',
+        viewerDidAuthor: true,
+      }));
+    if (patchTarget !== undefined) {
       let rawUpdateResult: unknown;
       try {
         rawUpdateResult = await runner.exec(gh, [
           'api',
           '--method',
           'PATCH',
-          `repos/${preview.target.repository}/issues/comments/${managed.comment.commentId}`,
+          `repos/${preview.target.repository}/issues/comments/${patchTarget.commentId}`,
           '-f',
           `body=${preview.body}`,
         ], execOptions);
       } catch {
-        return appendFailure(store, decisionId, preview.target, 'github_unavailable');
+        return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
+          phase: recoveryRequired ? 'posting' : 'inspecting',
+          attemptId,
+          outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+        });
       }
       const updateResult = safeCommandResult(rawUpdateResult);
       if (updateResult === undefined) {
-        return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+        return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+          phase: recoveryRequired ? 'posting' : 'inspecting',
+          attemptId,
+          outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+        });
       }
       if (updateResult.exitCode !== 0) {
-        return appendFailure(store, decisionId, preview.target, 'github_unavailable');
+        return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
+          phase: recoveryRequired ? 'posting' : 'inspecting',
+          attemptId,
+          outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+        });
       }
       const updated = parseUpdatedComment(
         updateResult.stdout,
         preview.target,
-        managed.comment,
+        patchTarget,
         preview.body,
       );
       if (updated === undefined) {
-        return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+        return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+          phase: recoveryRequired ? 'posting' : 'inspecting',
+          attemptId,
+          outcome: recoveryRequired ? 'may_have_posted' : 'definitely_not_posted',
+        });
       }
       try {
         if (!appendSyncedIfCurrent(
@@ -627,6 +918,26 @@ async function performSync(
       }
     }
 
+    try {
+      if (!appendPendingIfCurrent(
+        store,
+        decisionId,
+        preview.target,
+        fingerprint,
+        'posting',
+        attemptId,
+      )) {
+        continue;
+      }
+    } catch {
+      return failed(decisionId, 'ledger_unavailable');
+    }
+    // Once posting intent is durable, this invocation is structurally barred
+    // from entering the POST branch again, even if projection CAS later fails.
+    postingStarted = true;
+    recoveryRequired = true;
+    options.afterPostingPersisted?.();
+
     let rawCommentResult: unknown;
     try {
       rawCommentResult = await runner.exec(gh, [
@@ -639,18 +950,34 @@ async function performSync(
         preview.body,
       ], execOptions);
     } catch {
-      return appendFailure(store, decisionId, preview.target, 'github_unavailable');
+      return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
+        phase: 'posting',
+        attemptId,
+        outcome: 'may_have_posted',
+      });
     }
     const commentResult = safeCommandResult(rawCommentResult);
     if (commentResult === undefined) {
-      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+        phase: 'posting',
+        attemptId,
+        outcome: 'may_have_posted',
+      });
     }
     if (commentResult.exitCode !== 0) {
-      return appendFailure(store, decisionId, preview.target, 'github_unavailable');
+      return appendFailure(store, decisionId, preview.target, 'github_unavailable', {
+        phase: 'posting',
+        attemptId,
+        outcome: 'may_have_posted',
+      });
     }
-    const created = parseCommentUrl(commentResult.stdout.trim(), preview.target);
-    if (created === undefined) {
-      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response');
+    createdRef = parseCommentUrl(commentResult.stdout.trim(), preview.target);
+    if (createdRef === undefined) {
+      return appendFailure(store, decisionId, preview.target, 'untrusted_github_response', {
+        phase: 'posting',
+        attemptId,
+        outcome: 'may_have_posted',
+      });
     }
     options.afterCommentCreated?.();
     try {
@@ -659,7 +986,7 @@ async function performSync(
         decisionId,
         preview.target,
         fingerprint,
-        created,
+        createdRef,
       )) {
         continue;
       }
@@ -667,17 +994,31 @@ async function performSync(
         status: 'synced',
         decisionId,
         existing: false,
-        commentId: created.commentId,
-        commentUrl: created.commentUrl,
+        commentId: createdRef.commentId,
+        commentUrl: createdRef.commentUrl,
       };
     } catch {
       return failed(decisionId, 'ledger_unavailable');
     }
   }
 
-  return lastTarget === undefined
-    ? failed(decisionId, 'sync_state_changed')
-    : appendFailure(store, decisionId, lastTarget, 'sync_state_changed');
+  if (lastTarget === undefined) return failed(decisionId, 'sync_state_changed');
+  if (recoveryRequired && createdRef === undefined && knownRef === undefined && !managedWasObserved) {
+    return appendFailure(
+      store,
+      decisionId,
+      lastTarget,
+      'sync_visibility_unconfirmed',
+      { phase: 'posting', attemptId, outcome: 'may_have_posted' },
+    );
+  }
+  return appendFailure(store, decisionId, lastTarget, 'sync_state_changed', {
+    phase: postingStarted || recoveryRequired ? 'posting' : 'inspecting',
+    attemptId,
+    outcome: postingStarted || recoveryRequired
+      ? 'may_have_posted'
+      : 'definitely_not_posted',
+  });
 }
 
 export async function syncDecisionToGithub(
