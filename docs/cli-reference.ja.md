@@ -64,6 +64,11 @@ npm run test:devloopd:soak
 devloopd run --issue 123 --repo owner/repo
 devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
+devloopd decisions list --cwd /path/to/repo --status open --json
+devloopd decisions show --cwd /path/to/repo --id <decision-id> --json
+devloopd decisions answer --cwd /path/to/repo --stdin-json --json
+devloopd decisions apply --cwd /path/to/repo --id <decision-id> --expected-version <version> --expected-context-hash <hash> --json
+devloopd decisions sync-github --cwd /path/to/repo --id <decision-id> --json
 devloopd export-ledger --output .devloop/backup/ledger.jsonl
 devloopd timeline --issue 123
 devloopd automation-state --cwd /path/to/repo
@@ -126,6 +131,33 @@ provider smoke matrix は全 provider について `pass`、`fail`、`skip` を�
 | `--cwd <path>` | 検査するリポジトリパス |
 | `--ledger <path>` | ledger パス。デフォルトは `.devloop/ledger.jsonl` |
 | `--stale-after-minutes <count>` | active-runs が run を stale とみなすまでの分数。デフォルトは 180 |
+
+`devloopd decisions` コマンド:
+
+| コマンド | オプション | 説明 |
+|---------|-----------|------|
+| `list` | `--cwd <path>`, `--status <status>`, `--json` | projection一覧。状態は `open`、`answered`、`applying`、`applied`、`revalidation_required` |
+| `show` | `--cwd <path>`, `--id <decision-id>`, `--json` | 質問、Why、How、回答条件、version、hash、型付きguardを表示 |
+| `answer` | `--cwd <path>`, `--stdin-json`, `--json` | サイズ制限付きUTF-8 stdinからversion/hashに紐づく回答を原子的に記録 |
+| `apply` | `--cwd <path>`, `--id <decision-id>`, `--expected-version <version>`, `--expected-context-hash <hash>`, `--json` | 再検証後、登録済みの型付きresume adapterだけを実行 |
+| `sync-github` | `--cwd <path>`, `--id <decision-id>`, `--json` | 固定されたIssue／PRへsanitize済み状態を任意同期 |
+
+回答JSONには `decisionId`、`expectedDecisionVersion`、`expectedContextHash`、
+`value`、`rationale`、`idempotencyKey` が必要です。`value` は
+`{ "optionId": "<id>" }` または `{ "text": "<回答>" }` です。このdocumentを
+stdinへpipeしてください。回答本文を渡すargv optionは意図的にありません。
+正本はローカルの `.devloop/ledger.jsonl` で、GitHub同期は任意です。回答記録だけ
+では適用されません。適用時はstaleなversion/contextと、戦略固有のrun、
+worktree、ownership、target、stage、head guardを必ず再検証します。テスト、
+レビュー、clean-worktree、head-match、merge gateを迂回しません。
+
+旧形式の非構造化stopからdecisionを推測生成しません。中断した `applying` は
+process identityから照合し、不明な副作用を再実行しません。GitHub同期は可視性の
+不確実性を記録し、再試行前に照合するためblindな重複POSTをしません。必須の
+`lockf`／`flock` kernel lockが使えない場合はfail-closedします。台帳は
+リポジトリローカルで、owner限定（directory `0700`、通常file `0600`）かつ
+symlink／hard-link差し替えを拒否します。stdin例、error code、復旧状態、
+data boundaryは [devloopd](./devloopd.ja.md#構造化された人間判断) を参照してください。
 
 `devloopd recover-stale` のオプション:
 

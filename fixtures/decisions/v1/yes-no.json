@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "decisionId": "dec_example_yes_no",
+  "decisionVersion": 1,
+  "subject": {
+    "repoPath": "/example/repo",
+    "repository": "example/repo",
+    "runSlug": "run-issue-123",
+    "workflow": "release-review",
+    "step": "release-policy",
+    "issueNumber": 123,
+    "candidateId": "candidate-123",
+    "title": "Approve the fictional release policy"
+  },
+  "question": "May the fictional release proceed under the proposed policy?",
+  "why": {
+    "summary": "A human must approve the product policy before work resumes.",
+    "riskCategory": "product_policy",
+    "reasons": [
+      "The choice changes externally visible behavior."
+    ],
+    "evidence": [
+      {
+        "kind": "issue",
+        "reference": "example/repo#123",
+        "summary": "Fictional issue requests a policy decision."
+      }
+    ]
+  },
+  "how": {
+    "summary": "Continue only after the answer is revalidated.",
+    "expectedEffects": [
+      "Resume the registered workflow adapter."
+    ],
+    "verification": [
+      "Run the required tests and review the current repository state."
+    ]
+  },
+  "answerRequirements": {
+    "rationaleRequired": true,
+    "minimumTextLength": 0,
+    "maximumTextLength": 2000
+  },
+  "resumeGuard": {
+    "expectedDecisionVersion": 1,
+    "strategy": "direct_run",
+    "runSlug": "run-issue-123",
+    "expectedRunStatus": "aborted",
+    "expectedAbortKind": "blocked",
+    "expectedBlockedStep": "release-policy"
+  },
+  "contextHash": "e47ad8c064061f69dc7e19ec76bc4951c8fb2cde5dc5a095d23f9125ac168d39",
+  "createdAt": "2026-07-27T00:00:00.000Z",
+  "kind": "yes_no",
+  "options": [
+    {
+      "id": "yes",
+      "title": "Yes, approve",
+      "description": "Proceed after all safeguards pass.",
+      "consequences": [
+        "The workflow may resume after revalidation."
+      ],
+      "recommended": true,
+      "recommendationReason": "The fictional acceptance criteria are satisfied."
+    },
+    {
+      "id": "no",
+      "title": "No, stop",
+      "description": "Keep the workflow paused.",
+      "consequences": [
+        "A revised policy will be required."
+      ],
+      "recommended": false
+    }
+  ]
+}

@@ -133,6 +133,97 @@ takt --pipeline \
 | `--no-auto-pr` | TAKT に `--auto-pr` を渡しません |
 | `--no-quiet` | TAKT に `--quiet` を渡しません |
 
+## 構造化された人間判断
+
+自動化がプロダクト方針、権限、曖昧な要件など人間だけが決めるべき判断を
+必要とすると、構造化された依頼がリポジトリローカルの台帳へ追記されます。
+正本はローカルの `.devloop/ledger.jsonl` です。GitHub Issue／PRコメントは
+任意の状態同期先であり、回答入力や作業再開の権威にはなりません。
+
+判断待ち一覧と1件の詳細を確認します。
+
+```bash
+devloopd decisions list --cwd /path/to/repo --status open
+devloopd decisions show --cwd /path/to/repo --id dec_example --json
+```
+
+`show` では質問、Why、How、回答条件、現在のversion、context hash、型付きの
+再開guardを確認できます。回答はサイズ制限されたUTF-8 JSONとして標準入力
+からのみ受け取ります。回答本文や理由をコマンドライン引数へ載せないでください。
+
+```bash
+devloopd decisions answer --cwd /path/to/repo --stdin-json --json <<'JSON'
+{
+  "decisionId": "dec_example",
+  "expectedDecisionVersion": 1,
+  "expectedContextHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "value": { "optionId": "yes" },
+  "rationale": "架空の受け入れ条件を満たしているためです。",
+  "idempotencyKey": "answer-dec-example-1"
+}
+JSON
+```
+
+YES／NOと方針選択は `{ "optionId": "<id>" }`、自由記述は
+`{ "text": "<回答>" }` を使います。成功応答に含まれるのは安定したIDと状態
+だけで、回答本文や理由は反映されません。回答者はstdinを信用せずローカル
+プロセスから決定します。version、context hash、回答形式、理由必須条件、
+冪等キーは原子的に検証され、同じキーを異なる回答で再利用すると失敗します。
+
+回答の記録だけでは作業は再開しません。回答済みprojectionを正確に指定して
+適用します。
+
+```bash
+devloopd decisions apply \
+  --cwd /path/to/repo \
+  --id dec_example \
+  --expected-version 1 \
+  --expected-context-hash 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --json
+```
+
+適用直前に登録済みの型付きguardを再検証します。戦略に応じて、中断runの状態、
+active runの所有権、clean worktree、リポジトリ／PR／stage／head SHAの完全一致、
+現在のcandidateなどを確認します。人間の回答がテスト、コードレビュー、
+clean-worktree確認、current-head一致、merge policy、後続の品質gateを迂回する
+ことはありません。状態が変わっていれば `revalidation_required` になります。
+古い回答を強制適用せず、詳細を確認して新しい判断依頼を受信してください。
+
+クラッシュ後は `applying` のまま残ることがあります。次の `apply` は記録された
+プロセスidentityを検証し、生存中のownerには触れません。ownerが終了済み、または
+検証不能なら外部副作用を再実行せず `revalidation_required` に移します。
+リポジトリ実行claimとGitHub同期はOSの `lockf` または `flock` によるkernel
+advisory lockを必須とし、取得できなければfail-closedします。
+
+旧形式の非構造化workflow stopは通常のaborted runのままです。Decision Request
+v1を推測生成せず、`decisions answer` では回答できません。構造化producerで再実行
+するか、手動で扱ってください。
+
+回答後、必要な場合だけ固定されたGitHub対象へ状態を同期します。
+
+```bash
+devloopd decisions sync-github \
+  --cwd /path/to/repo \
+  --id dec_example \
+  --json
+```
+
+コメントへ出すのは安定marker、ID、version、kind、状態だけです。回答本文、理由、
+証跡、ローカルpath、privateなtask本文はローカルに残します。同期は固定された
+Issue／PRを再取得し、既存markerを照合してから作成または更新します。
+`sync_visibility_unconfirmed` や `sync_state_changed` は不確実性を台帳へ残します。
+再試行時は可視性を再照合し、不確実なPOSTを重複POSTへ変換しません。
+
+台帳directoryはowner限定の `0700`、台帳はowner限定の通常file `0600` として開き、
+symlink／hard-linkを拒否します。`.devloop/` をcommitしたり、生の内容をticketへ
+コピーしたり、対象リポジトリ外の台帳を指定したりしないでください。公開例のpathは
+placeholderだけです。壊れた台帳、非互換台帳、利用不能、容量超過はfail-closedです。
+CLIのJSON errorは `{ "schemaVersion": 1, "ok": false, "error":
+{ "code": "...", "message": "..." } }` の固定envelopeです。主なcodeは
+`stale_version`、`stale_context`、`decision_not_open`、`invalid_answer`、
+`rationale_required`、`idempotency_conflict`、`ledger_malformed`、
+`ledger_incompatible`、`ledger_unavailable`、`ledger_capacity_exceeded` です。
+
 ## Import And Timeline
 
 TAKT は workflow engine として `.takt/runs/` に run metadata を出力します。`devloopd import-takt-run` はその metadata を `.devloop/ledger.jsonl` に取り込み、log / report file の artifact path、byte size、SHA-256 hash を保存します。
