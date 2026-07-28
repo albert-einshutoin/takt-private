@@ -139,6 +139,34 @@ describe('dependency versions', () => {
     }
   });
 
+  it('locks the OpenTelemetry security release train without changing transport', () => {
+    const packageJson = readPackageJson();
+    const packageLock = readPackageLock();
+
+    // Keep the existing OTLP/HTTP transport while moving the complete SDK train
+    // together; mixing OpenTelemetry release trains can fail only at runtime.
+    expect(packageJson.dependencies?.['@opentelemetry/api']).toBe('^1.9.1');
+    expect(packageJson.dependencies?.['@opentelemetry/exporter-metrics-otlp-http']).toBe('^0.221.0');
+    expect(packageJson.dependencies?.['@opentelemetry/exporter-trace-otlp-http']).toBe('^0.221.0');
+    expect(packageJson.dependencies?.['@opentelemetry/sdk-node']).toBe('^0.221.0');
+    expect(packageJson.dependencies?.['@opentelemetry/sdk-metrics']).toBe('^2.10.0');
+    expect(packageJson.dependencies?.['@opentelemetry/sdk-trace-base']).toBe('^2.10.0');
+    expect(packageJson.dependencies).not.toHaveProperty('@opentelemetry/exporter-metrics-otlp-proto');
+    expect(packageJson.dependencies).not.toHaveProperty('@opentelemetry/exporter-trace-otlp-proto');
+
+    expect(getLockedPackage(packageLock, 'node_modules/@opentelemetry/api').version).toBe('1.9.1');
+    expect(
+      getLockedPackage(packageLock, 'node_modules/@opentelemetry/exporter-metrics-otlp-http').version,
+    ).toBe('0.221.0');
+    expect(
+      getLockedPackage(packageLock, 'node_modules/@opentelemetry/exporter-trace-otlp-http').version,
+    ).toBe('0.221.0');
+    expect(getLockedPackage(packageLock, 'node_modules/@opentelemetry/sdk-node').version).toBe('0.221.0');
+    expect(getLockedPackage(packageLock, 'node_modules/@opentelemetry/sdk-metrics').version).toBe('2.10.0');
+    expect(getLockedPackage(packageLock, 'node_modules/@opentelemetry/sdk-trace-base').version).toBe('2.10.0');
+    expect(getLockedPackage(packageLock, 'node_modules/@opentelemetry/propagator-jaeger').version).toBe('2.10.0');
+  });
+
   it('declares Node support compatible with runtime dependency engines', () => {
     const packageJson = readPackageJson();
     const packageLock = readPackageLock();
