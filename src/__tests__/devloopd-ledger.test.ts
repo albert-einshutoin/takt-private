@@ -1,4 +1,14 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -6,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendDevloopLedgerEvent,
   buildDevloopLedgerEvent,
+  DevloopLedgerCapacityError,
   exportDevloopLedger,
   formatExportDevloopLedgerReport,
   formatImportTaktRunReport,
@@ -15,6 +26,9 @@ import {
   reconcileTaktRuns,
   readRawDevloopLedgerEvents,
   renderTimeline,
+  MAX_DEVLOOP_LEDGER_BYTES,
+  MAX_DEVLOOP_LEDGER_LINE_BYTES,
+  withLockedDevloopLedgerTransaction,
 } from '../devloopd/ledger.js';
 
 function writeRunFixture(
@@ -104,6 +118,124 @@ describe('devloopd ledger import and timeline', () => {
 
     expect(readRawDevloopLedgerEvents(ledgerPath)).toHaveLength(1);
     expect(renderTimeline({ repoPath }).events).toEqual([]);
+    expect(statSync(join(repoPath, '.devloop')).mode & 0o777).toBe(0o700);
+    expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('scopes append capability to the locked ledger transaction', () => {
+    const ledgerPath = join(repoPath, '.devloop', 'ledger.jsonl');
+    const event = buildDevloopLedgerEvent('devloop_lock_boundary', { sequence: 1 });
+    let appendAfterTransaction: (() => void) | undefined;
+
+    withLockedDevloopLedgerTransaction(ledgerPath, (transaction) => {
+      transaction.append(event);
+      appendAfterTransaction = () => transaction.append(
+        buildDevloopLedgerEvent('devloop_lock_boundary', { sequence: 2 }),
+      );
+    }, { timeoutMs: 25 });
+
+    expect(readRawDevloopLedgerEvents(ledgerPath)).toEqual([event]);
+    expect(() => appendAfterTransaction?.()).toThrow(/transaction/i);
+    expect(statSync(join(repoPath, '.devloop')).mode & 0o777).toBe(0o700);
+    expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('preflights serialization before changing an existing ledger to owner-only', () => {
+    const ledgerDirectory = join(repoPath, '.devloop');
+    const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
+    mkdirSync(ledgerDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(ledgerPath, '');
+    chmodSync(ledgerPath, 0o644);
+    let modeDuringSerialization: number | undefined;
+    const event = {
+      eventId: 'evt_secure_mode',
+      eventType: 'devloop_secure_mode',
+      get sequence(): number {
+        modeDuringSerialization = statSync(ledgerPath).mode & 0o777;
+        return 1;
+      },
+    };
+
+    appendDevloopLedgerEvent(ledgerPath, event);
+
+    expect(modeDuringSerialization).toBe(0o644);
+    expect(statSync(ledgerPath).mode & 0o777).toBe(0o600);
+    expect(readRawDevloopLedgerEvents(ledgerPath)).toHaveLength(1);
+  });
+
+  it('rejects hard-linked ledgers without mutating the victim', () => {
+    const ledgerDirectory = join(repoPath, '.devloop');
+    const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
+    const victimPath = join(repoPath, 'victim.jsonl');
+    mkdirSync(ledgerDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(victimPath, 'preserve-me\n');
+    linkSync(victimPath, ledgerPath);
+
+    expect(() => appendDevloopLedgerEvent(
+      ledgerPath,
+      buildDevloopLedgerEvent('devloop_hardlink', { sequence: 1 }),
+    )).toThrow(/regular|link/i);
+    expect(readFileSync(victimPath, 'utf8')).toBe('preserve-me\n');
+  });
+
+  it('rejects a symlinked ledger at secure open without mutating the victim', () => {
+    const ledgerDirectory = join(repoPath, '.devloop');
+    const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
+    const victimPath = join(repoPath, 'victim.jsonl');
+    mkdirSync(ledgerDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(victimPath, 'preserve-me\n');
+    symlinkSync(victimPath, ledgerPath);
+
+    expect(() => appendDevloopLedgerEvent(
+      ledgerPath,
+      buildDevloopLedgerEvent('devloop_symlink', { sequence: 1 }),
+    )).toThrow();
+    expect(readFileSync(victimPath, 'utf8')).toBe('preserve-me\n');
+  });
+
+  it('rejects a group-writable ledger parent directory', () => {
+    const ledgerDirectory = join(repoPath, '.devloop');
+    const ledgerPath = join(ledgerDirectory, 'ledger.jsonl');
+    mkdirSync(ledgerDirectory, { recursive: true });
+    chmodSync(ledgerDirectory, 0o770);
+
+    expect(() => appendDevloopLedgerEvent(
+      ledgerPath,
+      buildDevloopLedgerEvent('devloop_unsafe_parent', { sequence: 1 }),
+    )).toThrow(/directory/i);
+    expect(existsSync(ledgerPath)).toBe(false);
+  });
+
+  it('pins shared ledger capacity constants', () => {
+    expect(MAX_DEVLOOP_LEDGER_LINE_BYTES).toBe(1024 * 1024);
+    expect(MAX_DEVLOOP_LEDGER_BYTES).toBe(64 * 1024 * 1024);
+  });
+
+  it('accepts an exact-limit JSON line and rejects one extra byte without creating a ledger', () => {
+    const eventWithJsonBytes = (jsonBytes: number, eventId: string) => {
+      const empty = { eventId, eventType: 'devloop_capacity', padding: '' };
+      const overhead = Buffer.byteLength(JSON.stringify(empty), 'utf8');
+      return {
+        ...empty,
+        padding: 'x'.repeat(jsonBytes - overhead),
+      };
+    };
+    const exactLedgerPath = join(repoPath, '.devloop', 'exact.jsonl');
+    const oversizedLedgerPath = join(repoPath, '.devloop', 'oversized.jsonl');
+
+    appendDevloopLedgerEvent(
+      exactLedgerPath,
+      eventWithJsonBytes(MAX_DEVLOOP_LEDGER_LINE_BYTES, 'evt_exact'),
+    );
+    expect(
+      Buffer.byteLength(readFileSync(exactLedgerPath, 'utf8').trimEnd(), 'utf8'),
+    ).toBe(MAX_DEVLOOP_LEDGER_LINE_BYTES);
+
+    expect(() => appendDevloopLedgerEvent(
+      oversizedLedgerPath,
+      eventWithJsonBytes(MAX_DEVLOOP_LEDGER_LINE_BYTES + 1, 'evt_oversized'),
+    )).toThrow(DevloopLedgerCapacityError);
+    expect(existsSync(oversizedLedgerPath)).toBe(false);
   });
 
   it('imports the latest run when no run slug is specified', () => {
