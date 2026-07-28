@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readDecisionJsonFromStream } from '../app/devloopd/decisionsCommand.js';
+import { buildDecisionGithubPreview } from '../devloopd/decisionGithubSync.js';
 import { createDecisionRequest, type DecisionRequest } from '../devloopd/decisionRequest.js';
 import { DecisionStore } from '../devloopd/decisionStore.js';
 
@@ -14,10 +15,14 @@ function makeRequest(
   repoPath: string,
   decisionId = 'dec_cli',
   kind: 'text' | 'yes_no' | 'choice' = 'text',
+  githubTarget?:
+    | { readonly repository: string; readonly issueNumber: number }
+    | { readonly repository: string; readonly prNumber: number },
 ): DecisionRequest {
   const common = {
     subject: {
       repoPath,
+      ...githubTarget,
       runSlug: decisionId,
       step: 'approval',
       title: '実装方針を決定する',
@@ -198,6 +203,75 @@ describe('devloopd decisions CLI', () => {
         value: { text: answerText },
         rationale,
         answeredBy: expect.stringMatching(/^local:/u),
+      },
+    });
+  });
+
+  it('returns the canonical GitHub preview without mutating the ledger or exposing private fields', () => {
+    const previewRequest = makeRequest(
+      repoPath,
+      'dec_cli_preview',
+      'text',
+      { repository: 'octo/project', issueNumber: 42 },
+    );
+    const previewStore = new DecisionStore(repoPath);
+    previewStore.request(previewRequest, { eventId: 'evt_cli_preview_requested' });
+    previewStore.answer({
+      decisionId: previewRequest.decisionId,
+      expectedDecisionVersion: previewRequest.decisionVersion,
+      expectedContextHash: previewRequest.contextHash,
+      value: { text: 'private roadmap choice' },
+      rationale: 'private customer evidence',
+      idempotencyKey: 'cli-preview-answer',
+    }, 'local:test', { eventId: 'evt_cli_preview_answered' });
+    const projection = previewStore.get(previewRequest.decisionId)!;
+    const ledgerBefore = readFileSync(previewStore.ledgerPath, 'utf8');
+
+    const result = runCli([
+      'decisions',
+      'preview-github',
+      '--cwd',
+      repoPath,
+      '--id',
+      previewRequest.decisionId,
+      '--json',
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).not.toContain('private roadmap choice');
+    expect(result.stdout).not.toContain('private customer evidence');
+    expect(result.stdout).not.toContain(repoPath);
+    expect(JSON.parse(result.stdout)).toEqual({
+      schemaVersion: 1,
+      ok: true,
+      decisionId: previewRequest.decisionId,
+      decisionVersion: previewRequest.decisionVersion,
+      contextHash: previewRequest.contextHash,
+      preview: buildDecisionGithubPreview(projection),
+    });
+    expect(readFileSync(previewStore.ledgerPath, 'utf8')).toBe(ledgerBefore);
+  });
+
+  it('fails GitHub preview with fixed output when no typed subject target exists', () => {
+    const result = runCli([
+      'decisions',
+      'preview-github',
+      '--cwd',
+      repoPath,
+      '--id',
+      request.decisionId,
+      '--json',
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      error: {
+        code: 'github_preview_unavailable',
+        message: 'GitHub同期previewを作成できません。',
       },
     });
   });

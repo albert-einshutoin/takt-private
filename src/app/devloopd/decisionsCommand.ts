@@ -12,7 +12,10 @@ import {
   type DecisionStoreErrorCode,
 } from '../../devloopd/decisionStore.js';
 import { applyDecision } from '../../devloopd/decisionResume.js';
-import { syncDecisionToGithub } from '../../devloopd/decisionGithubSync.js';
+import {
+  buildDecisionGithubPreview,
+  syncDecisionToGithub,
+} from '../../devloopd/decisionGithubSync.js';
 
 const MAX_STDIN_JSON_BYTES = 1024 * 1024;
 const CONTEXT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
@@ -38,8 +41,10 @@ const DecisionAnswerInputSchema = z.object({
 type DecisionCliLocalErrorCode =
   | 'decision_not_found'
   | 'empty_stdin'
+  | 'github_preview_unavailable'
   | 'invalid_answer_input'
   | 'invalid_apply_input'
+  | 'invalid_github_preview_input'
   | 'invalid_sync_input'
   | 'invalid_status'
   | 'invalid_stdin_json'
@@ -53,8 +58,10 @@ type DecisionCliErrorCode = DecisionCliLocalErrorCode | DecisionStoreErrorCode;
 const CLI_ERROR_MESSAGES: Readonly<Record<DecisionCliLocalErrorCode, string>> = {
   decision_not_found: '指定された判断待ちは見つかりません。',
   empty_stdin: '標準入力に回答JSONがありません。',
+  github_preview_unavailable: 'GitHub同期previewを作成できません。',
   invalid_answer_input: '回答JSONの形式が正しくありません。',
   invalid_apply_input: '適用条件の形式が正しくありません。',
+  invalid_github_preview_input: 'GitHub同期previewの入力形式が正しくありません。',
   invalid_sync_input: 'GitHub同期対象の形式が正しくありません。',
   invalid_status: '指定された状態は利用できません。',
   invalid_stdin_json: '標準入力をJSONとして解析できません。',
@@ -290,6 +297,67 @@ export function registerDecisionsCommand(program: Command): void {
         );
       } catch (error) {
         writeError(storeFailure(error), options.json === true);
+      }
+    });
+
+  decisions
+    .command('preview-github')
+    .description('GitHub同期前のcanonical previewを読み取り専用で表示する')
+    .option('--cwd <path>', '対象リポジトリ', process.cwd())
+    .option('--id <decision-id>', '判断ID')
+    .option('--json', '機械可読JSONを表示する')
+    .action((options: { cwd: string; id?: string; json?: boolean }) => {
+      if (options.id === undefined) {
+        writeError(failure('missing_decision_id'), options.json === true);
+        return;
+      }
+      if (options.id.length > 200 || !IDENTIFIER_PATTERN.test(options.id)) {
+        writeError(failure('invalid_github_preview_input'), options.json === true);
+        return;
+      }
+      const repoPath = resolveExistingRepository(options.cwd);
+      if (repoPath === undefined) {
+        writeError(failure('repository_unavailable'), options.json === true);
+        return;
+      }
+
+      let projection: DecisionProjection | undefined;
+      try {
+        projection = new DecisionStore(repoPath).get(options.id);
+      } catch (error) {
+        writeError(storeFailure(error), options.json === true);
+        return;
+      }
+      if (projection === undefined) {
+        writeError(failure('decision_not_found'), options.json === true);
+        return;
+      }
+
+      try {
+        const preview = buildDecisionGithubPreview(projection);
+        if (options.json === true) {
+          // Keep this response equal to the canonical sync input. The enclosing
+          // binding fields let a caller pass the exact version, context, and
+          // digest to sync-github without exposing private ledger fields.
+          console.log(JSON.stringify({
+            schemaVersion: 1,
+            ok: true,
+            decisionId: projection.request.decisionId,
+            decisionVersion: projection.request.decisionVersion,
+            contextHash: projection.request.contextHash,
+            preview,
+          }, null, 2));
+          return;
+        }
+        console.log([
+          preview.body,
+          `同期先: ${preview.target.repository} ${preview.target.kind} #${preview.target.number}`,
+          `Preview SHA-256: ${preview.sha256}`,
+        ].join('\n'));
+      } catch {
+        // Preview construction may reject a missing or ambiguous typed target.
+        // Never reflect internal exceptions or private projection data.
+        writeError(failure('github_preview_unavailable'), options.json === true);
       }
     });
 
