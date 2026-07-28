@@ -1,6 +1,14 @@
-# TAKT
+# private-takt
+
+> [!IMPORTANT]
+> **このリポジトリは、[TAKT](https://github.com/nrslib/takt) を基に独立して開発している非公式の downstream です。**
+> TAKT は Masanobu Naruse 氏によって作られ、upstream リポジトリでコントリビューターとともに開発されています。
+> この downstream は元の MIT License と著作権表示を維持していますが、TAKT の公式リリースではなく、upstream のメンテナーによる推奨・サポートを受けたものではありません。
+
+このリポジトリで private-takt の成果物であることを明記していない限り、npm の公式 `takt` パッケージ、リリース、ドキュメント、コミュニティへのリンクは元のプロジェクトが管理するものです。
 
 <p align="center">
+  <strong>Upstream TAKT プロジェクト</strong><br>
   <a href="https://www.npmjs.com/package/takt"><img src="https://img.shields.io/npm/v/takt?label=npm" alt="npm version"></a>
   <a href="https://github.com/nrslib/takt/stargazers"><img src="https://img.shields.io/github/stars/nrslib/takt?logo=github&label=stars" alt="GitHub stars"></a>
   <a href="https://github.com/nrslib/takt/actions/workflows/ci.yml"><img src="https://github.com/nrslib/takt/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
@@ -31,6 +39,18 @@ AI と会話してやりたいことを決め、タスクとして積み、`takt
 TAKT は AI コーディングワークフローを主な用途として提供していますが、コーディング以外でも、複数の AI エージェントを協調させたいタスクや、レビュー・判定・フィードバックループによってタスクの精度を高めたい場面で活用できます。
 
 TAKT は TAKT 自身で開発しています（ドッグフーディング）。
+
+## Upstream TAKT との関係
+
+private-takt は、TAKT を基盤として個人利用向けの自動化・運用機能を開発するための downstream です。プロジェクトの由来と upstream のメンテナー・コントリビューターによる成果が明確に残るよう、Git の履歴と MIT License の帰属表示を維持しています。
+
+- **元のプロジェクト:** [nrslib/takt](https://github.com/nrslib/takt)
+- **原作者:** 維持している [MIT License](../LICENSE) に記載された Masanobu Naruse 氏
+- **Downstream の目的:** 個人向け自動化、サブスクリプション／ログイン方式の CLI 運用、長時間タスクの実行・復旧、および関連する運用ツール
+- **互換性:** upstream の変更は内容を確認したうえで選択的に取り込むため、すべての upstream リリースとの互換性は保証しません
+- **コントリビューション:** 広く有用で upstream の目的に合う変更は、焦点を絞ったコントリビューションとして提案する場合があります。downstream 固有の動作はこのリポジトリで管理します
+
+private-takt に関する Issue やサポート依頼は、このリポジトリへ提出してください。元のプロジェクトに関する質問には、upstream が案内する窓口を利用してください。
 
 ## なぜ TAKT か
 

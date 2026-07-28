@@ -1,6 +1,14 @@
-# TAKT
+# private-takt
+
+> [!IMPORTANT]
+> **This is an unofficial, independently maintained downstream of [TAKT](https://github.com/nrslib/takt).**
+> TAKT was created by Masanobu Naruse and is developed with its contributors in the upstream repository.
+> This downstream keeps the original MIT license and copyright notice, but it is not an official TAKT release and is not endorsed or supported by the upstream maintainers.
+
+The official `takt` npm package, upstream releases, documentation, and community links are maintained by the original project unless this repository explicitly labels an artifact as a private-takt build.
 
 <p align="center">
+  <strong>Upstream TAKT project</strong><br>
   <a href="https://www.npmjs.com/package/takt"><img src="https://img.shields.io/npm/v/takt?label=npm" alt="npm version"></a>
   <a href="https://github.com/nrslib/takt/stargazers"><img src="https://img.shields.io/github/stars/nrslib/takt?logo=github&label=stars" alt="GitHub stars"></a>
   <a href="https://github.com/nrslib/takt/actions/workflows/ci.yml"><img src="https://github.com/nrslib/takt/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
@@ -31,6 +39,18 @@ Talk to AI to define what you want, queue it as a task, and run it with `takt ru
 TAKT is built primarily for AI coding workflows, but the same model applies beyond coding: any task where multiple AI agents need to coordinate, or where review, judgment, and feedback loops can improve task quality.
 
 TAKT is built with TAKT itself (dogfooding).
+
+## Relationship to upstream TAKT
+
+private-takt exists to develop personal-use automation and operational capabilities on top of TAKT. It preserves the upstream Git history and MIT attribution so that the origin of the project and the work of its maintainers and contributors remain visible.
+
+- **Original project:** [nrslib/takt](https://github.com/nrslib/takt)
+- **Original author:** Masanobu Naruse, as identified in the preserved [MIT license](./LICENSE)
+- **Downstream purpose:** personal automation, subscription/login-based CLI operation, long-running task execution, recovery, and related operational tooling
+- **Compatibility:** upstream changes are evaluated and integrated deliberately; compatibility with every upstream release is not guaranteed
+- **Contributions:** broadly useful changes may be proposed to upstream as focused contributions when they align with upstream's goals; downstream-specific behavior remains here
+
+Issues and support requests for private-takt should be filed in this repository. Questions about the original project should use the upstream project's own channels.
 
 ## Why TAKT
 
