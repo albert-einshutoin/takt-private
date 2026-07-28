@@ -1,6 +1,15 @@
-# TAKT
+# private-takt
+
+> [!IMPORTANT]
+> **This is an unofficial, independently maintained downstream of [TAKT](https://github.com/nrslib/takt).**
+> TAKT is created and maintained by nrslib and contributors in the upstream repository.
+> This downstream keeps the original MIT license and copyright notice, but it is not an official TAKT release and is not endorsed or supported by the upstream maintainers.
+
+The official `takt` npm package, upstream releases, documentation, and community links are maintained by the original project unless this repository explicitly labels an artifact as a private-takt build.
+We are grateful to the upstream maintainers and contributors for making TAKT available under the MIT License; private-takt builds on that work while keeping its origin and authorship visible.
 
 <p align="center">
+  <strong>Upstream TAKT project</strong><br>
   <a href="https://www.npmjs.com/package/takt"><img src="https://img.shields.io/npm/v/takt?label=npm" alt="npm version"></a>
   <a href="https://github.com/nrslib/takt/stargazers"><img src="https://img.shields.io/github/stars/nrslib/takt?logo=github&label=stars" alt="GitHub stars"></a>
   <a href="https://github.com/nrslib/takt/actions/workflows/ci.yml"><img src="https://github.com/nrslib/takt/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
@@ -32,6 +41,18 @@ TAKT is built primarily for AI coding workflows, but the same model applies beyo
 
 TAKT is built with TAKT itself (dogfooding).
 
+## Relationship to upstream TAKT
+
+private-takt exists to develop personal-use automation and operational capabilities on top of TAKT. It preserves the upstream Git history and MIT attribution so that the origin of the project and the work of its maintainers and contributors remain visible.
+
+- **Upstream project and maintainer:** [nrslib/takt](https://github.com/nrslib/takt)
+- **Preserved copyright notice:** `Copyright (c) 2026 Masanobu Naruse`, as stated in the original [MIT license](./LICENSE)
+- **Downstream purpose:** personal automation, subscription/login-based CLI operation, long-running task execution, recovery, and related operational tooling
+- **Compatibility:** upstream changes are evaluated and integrated deliberately; compatibility with every upstream release is not guaranteed
+- **Contributions:** broadly useful changes may be proposed to upstream as focused contributions when they align with upstream's goals; downstream-specific behavior remains here
+
+Issues and support requests for private-takt should be filed in this repository. Questions about the original project should use the upstream project's own channels.
+
 ## Why TAKT
 
 AI coding agents are powerful, but they do not automatically create a stable development process. In long-running work, they forget instructions, accumulate polluted context, blur implementation and review responsibilities, and often force humans to repeat the same feedback again and again. That wears people down.
@@ -50,10 +71,19 @@ The goal is simple: make development processes reusable, reviewable, and reprodu
 
 ## Try It in 5 Minutes
 
-From a Git repository with at least one commit:
+Install private-takt from this repository:
 
 ```bash
-npm install -g takt
+git clone https://github.com/albert-einshutoin/takt-private.git
+cd takt-private
+npm ci
+npm run build
+npm link
+```
+
+`npm link` exposes the locally built `takt` and `devloopd` commands without publishing a downstream package to the public npm registry. Then, from a Git repository with at least one commit:
+
+```bash
 
 # Talk to AI, describe a task, use /go, then choose "Queue as task"
 takt
@@ -119,18 +149,35 @@ Optional:
 
 ### Install
 
+Choose the distribution that matches what you intend to run. Downstream-only personal automation and `devloopd` behavior require a private-takt build.
+
+#### private-takt downstream
+
+```bash
+git clone https://github.com/albert-einshutoin/takt-private.git
+cd takt-private
+npm ci
+npm run build
+npm link
+devloopd release-info
+```
+
+This installs commands from the current checkout through a local npm link. It does not publish private-takt to npm. Before long-running personal automation or a personal release, follow the [Personal Release Workflow](./docs/personal-release.md).
+
+#### Official upstream TAKT
+
 ```bash
 npm install -g takt
 ```
 
-With Nix flakes:
+The command above installs the official upstream package from npm. With Nix flakes, the following commands also run or install upstream TAKT:
 
 ```bash
 nix run github:nrslib/takt
 nix profile install github:nrslib/takt
 ```
 
-The Nix package installs the TAKT CLI itself. External CLI providers, `git`, and `gh`/`glab` still need to be installed and available on `PATH` or configured separately as described in [Requirements](#requirements).
+These upstream installation paths do not include private-takt-only functionality. In either distribution, external CLI providers, `git`, and `gh`/`glab` still need to be installed and available on `PATH` or configured separately as described in [Requirements](#requirements).
 
 ### Talk to AI and queue tasks
 

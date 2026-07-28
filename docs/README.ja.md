@@ -1,6 +1,15 @@
-# TAKT
+# private-takt
+
+> [!IMPORTANT]
+> **このリポジトリは、[TAKT](https://github.com/nrslib/takt) を基に独立して開発している非公式の downstream です。**
+> TAKT は upstream リポジトリで nrslib とコントリビューターによって開発・保守されています。
+> この downstream は元の MIT License と著作権表示を維持していますが、TAKT の公式リリースではなく、upstream のメンテナーによる推奨・サポートを受けたものではありません。
+
+このリポジトリで private-takt の成果物であることを明記していない限り、npm の公式 `takt` パッケージ、リリース、ドキュメント、コミュニティへのリンクは元のプロジェクトが管理するものです。
+TAKT を MIT License で公開している upstream のメンテナーとコントリビューターに敬意と感謝を示し、private-takt ではプロジェクトの由来と成果の帰属が明確に伝わる形で、その成果を基盤として開発します。
 
 <p align="center">
+  <strong>Upstream TAKT プロジェクト</strong><br>
   <a href="https://www.npmjs.com/package/takt"><img src="https://img.shields.io/npm/v/takt?label=npm" alt="npm version"></a>
   <a href="https://github.com/nrslib/takt/stargazers"><img src="https://img.shields.io/github/stars/nrslib/takt?logo=github&label=stars" alt="GitHub stars"></a>
   <a href="https://github.com/nrslib/takt/actions/workflows/ci.yml"><img src="https://github.com/nrslib/takt/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
@@ -32,6 +41,18 @@ TAKT は AI コーディングワークフローを主な用途として提供�
 
 TAKT は TAKT 自身で開発しています（ドッグフーディング）。
 
+## Upstream TAKT との関係
+
+private-takt は、TAKT を基盤として個人利用向けの自動化・運用機能を開発するための downstream です。プロジェクトの由来と upstream のメンテナー・コントリビューターによる成果が明確に残るよう、Git の履歴と MIT License の帰属表示を維持しています。
+
+- **Upstream のプロジェクトとメンテナー:** [nrslib/takt](https://github.com/nrslib/takt)
+- **維持している著作権表示:** 元の [MIT License](../LICENSE) に記載された `Copyright (c) 2026 Masanobu Naruse`
+- **Downstream の目的:** 個人向け自動化、サブスクリプション／ログイン方式の CLI 運用、長時間タスクの実行・復旧、および関連する運用ツール
+- **互換性:** upstream の変更は内容を確認したうえで選択的に取り込むため、すべての upstream リリースとの互換性は保証しません
+- **コントリビューション:** 広く有用で upstream の目的に合う変更は、焦点を絞ったコントリビューションとして提案する場合があります。downstream 固有の動作はこのリポジトリで管理します
+
+private-takt に関する Issue やサポート依頼は、このリポジトリへ提出してください。元のプロジェクトに関する質問には、upstream が案内する窓口を利用してください。
+
 ## なぜ TAKT か
 
 AI コーディングエージェントは強力ですが、そのままでは安定した開発プロセスにはなりません。長い作業では指示を忘れ、コンテキストが汚染され、実装とレビューの責務が混ざり、同じ指摘を人間が何度も繰り返すことになります。それは人を疲弊させます。
@@ -50,10 +71,19 @@ workflow で工程を定義し、persona・policy・knowledge・instruction・ou
 
 ## 5分で試す
 
-少なくとも1回 commit 済みの Git リポジトリで実行します。
+このリポジトリから private-takt をインストールします。
 
 ```bash
-npm install -g takt
+git clone https://github.com/albert-einshutoin/takt-private.git
+cd takt-private
+npm ci
+npm run build
+npm link
+```
+
+`npm link` は downstream のパッケージを公開npmレジストリへpublishせず、ローカルでbuildした `takt` と `devloopd` コマンドを利用可能にします。その後、少なくとも1回 commit 済みの Git リポジトリで実行します。
+
+```bash
 
 # AI と会話し、タスクを説明し、/go の後に「タスクにつむ」を選びます
 takt
@@ -119,18 +149,35 @@ takt list
 
 ### インストール
 
+利用したい機能に合う配布元を選んでください。downstream 固有の個人向け自動化や `devloopd` の機能を使う場合は、private-takt のbuildが必要です。
+
+#### private-takt downstream
+
+```bash
+git clone https://github.com/albert-einshutoin/takt-private.git
+cd takt-private
+npm ci
+npm run build
+npm link
+devloopd release-info
+```
+
+現在のcheckoutからローカルnpm linkを使ってコマンドをインストールします。private-taktをnpmへpublishする処理は行いません。長時間の個人向け自動化やpersonal releaseの前には、[Personal Release Workflow](./personal-release.ja.md)に従ってください。
+
+#### 公式upstream TAKT
+
 ```bash
 npm install -g takt
 ```
 
-Nix flakes を使う場合:
+上記のコマンドは、npmから公式upstreamパッケージをインストールします。Nix flakesを使う場合も、次のコマンドが実行・インストールするのはupstream TAKTです。
 
 ```bash
 nix run github:nrslib/takt
 nix profile install github:nrslib/takt
 ```
 
-Nix パッケージがインストールするのは TAKT CLI 本体のみです。外部 CLI プロバイダー、`git`、`gh`/`glab` は、[必要なもの](#必要なもの) に記載のとおり別途インストールして `PATH` に置くか、設定で指定してください。
+これらのupstream向けインストール手順には、private-takt固有の機能は含まれません。どちらの配布元でも、外部CLIプロバイダー、`git`、`gh`/`glab`は、[必要なもの](#必要なもの)に記載のとおり別途インストールして`PATH`に置くか、設定で指定してください。
 
 ### AI と相談してタスクを積む
 
