@@ -26,6 +26,7 @@ function setupNodeVersions(relativePath: string, jobName: string): string[] {
 describe('Node toolchain contract', () => {
   it('separates the development baseline from the supported product runtime', () => {
     const packageJson = JSON.parse(readRequiredFile('package.json')) as {
+      bin?: Record<string, string>;
       engines?: { node?: string };
       devEngines?: {
         runtime?: { name?: string; version?: string; onFail?: string };
@@ -46,6 +47,10 @@ describe('Node toolchain contract', () => {
       onFail: 'error',
     });
     expect(packageJson.packageManager).toBe('npm@10.9.2');
+    expect(packageJson.bin).toMatchObject({
+      takt: './bin/takt.js',
+      'takt-dev': './bin/takt.js',
+    });
   });
 
   it('runs source development checks on the exact Node baseline', () => {

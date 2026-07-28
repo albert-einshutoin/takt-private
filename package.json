@@ -5,8 +5,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "takt": "./bin/takt",
-    "takt-dev": "./bin/takt",
+    "takt": "./bin/takt.js",
+    "takt-dev": "./bin/takt.js",
     "takt-cli": "./dist/app/cli/index.js",
     "devloopd": "./bin/devloopd.mjs"
   },
