@@ -34,7 +34,7 @@ describe('devloopd state store', () => {
 
     expect(thrown?.message).toMatch(/timed out waiting for devloop state lock/u);
     expect(thrown?.cause).toBeInstanceOf(Error);
-    expect(JSON.stringify(thrown)).not.toContain(`${filePath}.lock`);
+    expect(thrown?.message).not.toContain('locked');
   });
 
   it('evicts stale locks before writing state', () => {

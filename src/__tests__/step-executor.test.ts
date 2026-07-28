@@ -290,7 +290,7 @@ describe('StepExecutor', () => {
       'Step "implement" requires structured_output for provider "cursor": $.result is required',
     );
     expect(thrown?.cause).toBeInstanceOf(Error);
-    expect(JSON.stringify(thrown)).not.toContain('test task');
+    expect(thrown?.message).not.toContain('test task');
   });
 
   it('非対応 provider の structured_output fallback で additionalProperties false を強制する', async () => {

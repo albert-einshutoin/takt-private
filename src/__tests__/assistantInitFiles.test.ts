@@ -103,7 +103,7 @@ describe('loadAssistantInitContext', () => {
 
     expect(thrown?.message).toMatch(/docs\/missing\.md/);
     expect(thrown?.cause).toBeInstanceOf(Error);
-    expect(JSON.stringify(thrown)).not.toContain(projectDir);
+    expect(thrown?.message).not.toContain(projectDir);
   });
 
   it('should reject a configured directory', () => {

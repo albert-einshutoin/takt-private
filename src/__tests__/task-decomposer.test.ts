@@ -47,7 +47,7 @@ describe('parseParts', () => {
 
     expect(thrown?.message).toContain('Failed to parse part JSON');
     expect(thrown?.cause).toBeInstanceOf(SyntaxError);
-    expect(JSON.stringify(thrown)).not.toContain(secret);
+    expect(thrown?.message).not.toContain(secret);
   });
 
   it('max_partsを超えたらエラー', () => {

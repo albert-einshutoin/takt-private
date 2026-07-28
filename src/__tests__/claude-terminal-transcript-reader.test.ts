@@ -273,7 +273,7 @@ describe('Claude terminal transcript reader', () => {
 
     expect(thrown?.message).toMatch(/malformed claude terminal transcript json/i);
     expect(thrown?.cause).toBeInstanceOf(SyntaxError);
-    expect(JSON.stringify(thrown)).not.toContain(secret);
+    expect(thrown?.message).not.toContain(secret);
   });
 
   it('Given incomplete final JSONL, When polling parse is enabled, Then the final line is ignored temporarily', () => {

@@ -2202,6 +2202,6 @@ steps:
 
     expect(thrown?.message).toContain('Structured output schema is invalid');
     expect(thrown?.cause).toBeInstanceOf(Error);
-    expect(JSON.stringify(thrown)).not.toContain(secret);
+    expect(thrown?.message).not.toContain(secret);
   });
 });

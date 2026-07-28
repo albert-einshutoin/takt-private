@@ -80,8 +80,9 @@ describe('traced config boundaries', () => {
     const tempDir = join(tmpdir(), `takt-traced-invalid-${randomUUID()}`);
     const configPath = join(tempDir, 'config.yaml');
     const secret = 'private-config-secret';
+    const privatePath = '/Users/private/.ssh/id_rsa';
     mkdirSync(tempDir, { recursive: true });
-    writeFileSync(configPath, `provider: [${secret}`, 'utf-8');
+    writeFileSync(configPath, `provider: [${secret}, ${privatePath}`, 'utf-8');
 
     try {
       let thrown: Error | undefined;
@@ -93,7 +94,31 @@ describe('traced config boundaries', () => {
 
       expect(thrown?.message).toContain(`Configuration error: failed to parse ${configPath}`);
       expect(thrown?.cause).toBeInstanceOf(Error);
-      expect(JSON.stringify(thrown)).not.toContain(secret);
+      expect(thrown?.message).not.toContain(secret);
+      expect(thrown?.message).not.toContain(privatePath);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('duplicate YAML keyの安全な診断を公開messageへ保持する', () => {
+    const tempDir = join(tmpdir(), `takt-traced-duplicate-${randomUUID()}`);
+    const configPath = join(tempDir, 'config.yaml');
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(configPath, 'provider: codex\nprovider: claude\n', 'utf-8');
+
+    try {
+      let thrown: Error | undefined;
+      try {
+        loadProjectConfigTrace(configPath, []);
+      } catch (error) {
+        thrown = error as Error;
+      }
+
+      expect(thrown?.message).toContain('Map keys must be unique');
+      expect(thrown?.message).not.toContain('provider: codex');
+      expect(thrown?.message).not.toContain('provider: claude');
+      expect(thrown?.cause).toBeInstanceOf(Error);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

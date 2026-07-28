@@ -125,7 +125,7 @@ describe('analyze usage command', () => {
 
     expect(thrown?.message).toContain(`Invalid JSON in ${file}:1`);
     expect(thrown?.cause).toBeInstanceOf(SyntaxError);
-    expect(JSON.stringify(thrown)).not.toContain('{bad json}');
+    expect(thrown?.message).not.toContain('{bad json}');
     expect(readFileSync(file, 'utf-8')).toBe('{bad json}\n');
   });
 

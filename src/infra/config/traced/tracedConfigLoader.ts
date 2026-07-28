@@ -45,16 +45,27 @@ function getNestedConfigValue(
   }, value);
 }
 
+function getSafeYamlParseDetail(error: unknown): string {
+  const code = error instanceof Error && 'code' in error
+    ? String((error as Error & { code?: unknown }).code)
+    : '';
+
+  // YAML parser messages embed source excerpts. Expose only diagnostics whose
+  // wording is independent of user values; keep the full parser error in cause.
+  return code === 'DUPLICATE_KEY' ? 'Map keys must be unique' : 'invalid YAML';
+}
+
 function createYamlParser(options: LoadConfigTraceOptions): (content: string) => unknown {
   return (content: string): unknown => {
     let parsed: unknown;
     try {
       parsed = parseYaml(content);
     } catch (error) {
+      const detail = getSafeYamlParseDetail(error);
       if (options.parseErrorPrefix) {
-        throw new Error(`${options.parseErrorPrefix}: invalid YAML`, { cause: error });
+        throw new Error(`${options.parseErrorPrefix}: ${detail}`, { cause: error });
       }
-      throw new Error('Configuration error: invalid YAML', { cause: error });
+      throw new Error(`Configuration error: ${detail}`, { cause: error });
     }
 
     const sanitized = options.sanitize ? options.sanitize(parsed) : parsed;
