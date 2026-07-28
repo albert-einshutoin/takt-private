@@ -202,6 +202,45 @@ describe('devloopd decisions CLI', () => {
     });
   });
 
+  it('applies a manual-only answer without reflecting the answer body', () => {
+    const yesNoRequest = makeRequest(repoPath, 'dec_cli_apply', 'yes_no');
+    const applyStore = new DecisionStore(repoPath);
+    applyStore.request(yesNoRequest, { eventId: 'evt_cli_apply_requested' });
+    applyStore.answer({
+      decisionId: yesNoRequest.decisionId,
+      expectedDecisionVersion: yesNoRequest.decisionVersion,
+      expectedContextHash: yesNoRequest.contextHash,
+      value: { optionId: 'no' },
+      rationale: 'private stop rationale',
+      idempotencyKey: 'cli-apply-answer',
+    }, 'local:test', { eventId: 'evt_cli_apply_answered' });
+
+    const result = runCli([
+      'decisions',
+      'apply',
+      '--cwd',
+      repoPath,
+      '--id',
+      yesNoRequest.decisionId,
+      '--expected-version',
+      String(yesNoRequest.decisionVersion),
+      '--expected-context-hash',
+      yesNoRequest.contextHash,
+      '--json',
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).not.toContain('private stop rationale');
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: 1,
+      ok: true,
+      decisionId: yesNoRequest.decisionId,
+      status: 'applied',
+    });
+    expect(applyStore.get(yesNoRequest.decisionId)?.status).toBe('applied');
+  });
+
   it('returns a machine-readable error for invalid JSON without reflecting input', () => {
     const sensitiveInvalidJson = '{"value":"do-not-reflect",';
     const result = runCli(

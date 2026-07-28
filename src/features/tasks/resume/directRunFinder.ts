@@ -54,3 +54,15 @@ export function findLatestResumableDirectRun(projectDir: string): ResumableDirec
 
   return runs[0] ?? null;
 }
+
+export function findResumableDirectRunBySlug(
+  projectDir: string,
+  runSlug: string,
+): ResumableDirectRun | null {
+  const meta = readRunMetaBySlug(projectDir, runSlug);
+  if (!meta || !RESUMABLE_STATUSES.has(meta.status)) {
+    return null;
+  }
+  const taskRunSlugs = collectTaskRunSlugs(projectDir);
+  return taskRunSlugs.has(runSlug) ? null : { slug: runSlug, meta };
+}

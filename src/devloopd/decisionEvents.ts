@@ -149,6 +149,9 @@ const ApplyStartedEventRawSchema = z.object({
   eventType: z.literal('devloop_decision_apply_started'),
   answerEventId: IdentifierSchema,
   sanitizedSummary: PublicTextSchema,
+  operationId: IdentifierSchema.optional(),
+  ownerPid: z.number().int().positive().optional(),
+  ownerStartToken: IdentifierSchema.optional(),
 }).strict();
 
 const AppliedEventRawSchema = z.object({
@@ -367,6 +370,9 @@ export function createDecisionAnswerSupersededEvent(
 type ApplyStartedInput = TransitionIdentity & {
   answerEventId: string;
   sanitizedSummary: string;
+  operationId?: string;
+  ownerPid?: number;
+  ownerStartToken?: string;
 };
 
 export function createDecisionApplyStartedEvent(

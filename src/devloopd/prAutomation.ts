@@ -33,6 +33,8 @@ import { runReviewFixForPullRequest } from './reviewFix.js';
 import { startDevloop, type DevloopStartReport, type StartDevloopOptions } from './supervisor.js';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import { DecisionStore } from './decisionStore.js';
+import { parseDecisionEvent } from './decisionEvents.js';
+import { resolveProcessStartToken } from './repoExecutionClaim.js';
 import {
   ensureDecisionForAutomationActions,
   isAutomationActionDecisionEligible,
@@ -763,15 +765,22 @@ function buildReviewPrompt(options: {
   ].join('\n');
 }
 
-export async function promotePullRequestAutoMerge(options: {
+interface PromotePullRequestAutoMergeOptions {
   pr: number;
   repoPath?: string;
   repo?: string;
+  expectedHeadSha?: string;
   label?: string;
   dryRun?: boolean;
   env?: NodeJS.ProcessEnv;
   runner?: DevloopCommandRunner;
-}): Promise<DevloopAutomationAction> {
+}
+
+const HUMAN_APPROVAL_CAPABILITY = Symbol('ledger-bound-human-approval');
+
+async function promotePullRequestAutoMergeInternal(
+  options: PromotePullRequestAutoMergeOptions & { readonly [HUMAN_APPROVAL_CAPABILITY]?: true },
+): Promise<DevloopAutomationAction> {
   const repoPath = resolve(options.repoPath ?? process.cwd());
   const env = options.env ?? process.env;
   const runner = options.runner ?? createDefaultDevloopCommandRunner();
@@ -785,6 +794,16 @@ export async function promotePullRequestAutoMerge(options: {
       message: 'PR metadata did not include headRefOid',
     };
   }
+  if (options.expectedHeadSha !== undefined && headSha !== options.expectedHeadSha) {
+    return {
+      type: 'promote-auto-merge',
+      status: 'blocked',
+      pr: options.pr,
+      headSha,
+      stopRule: 'head mismatch',
+      message: 'PR head changed before the guarded stage could continue',
+    };
+  }
 
   const changedPaths = await loadChangedPaths({ pr: options.pr, repoPath, repo: options.repo, env, runner });
   const productPolicyImpact = classifyProductPolicyImpact({
@@ -792,8 +811,30 @@ export async function promotePullRequestAutoMerge(options: {
     title: metadata.title,
     body: metadata.body,
   });
-  if (productPolicyImpact.requiresHumanReview) {
+  const validHumanApproval = options[HUMAN_APPROVAL_CAPABILITY] === true
+    && options.expectedHeadSha !== undefined;
+  if (productPolicyImpact.requiresHumanReview && !validHumanApproval) {
     if (options.dryRun !== true) {
+      if (options.expectedHeadSha !== undefined) {
+        const freshMetadata = await loadPrView({
+          pr: options.pr,
+          repoPath,
+          repo: options.repo,
+          env,
+          runner,
+        });
+        if (freshMetadata.headRefOid !== options.expectedHeadSha) {
+          return {
+            type: 'promote-auto-merge',
+            status: 'blocked',
+            pr: options.pr,
+            headSha: freshMetadata.headRefOid,
+            stopRule: 'head mismatch',
+            message: 'PR head changed immediately before human-review label mutation',
+            productPolicyImpact,
+          };
+        }
+      }
       await addPrLabel({
         pr: options.pr,
         repoPath,
@@ -832,6 +873,20 @@ export async function promotePullRequestAutoMerge(options: {
   let dualLlmApproval = evaluateDualLlmApproval({ headSha, comments });
   const actions: DevloopAutomationAction[] = [];
   if (!dualLlmApproval.approved) {
+    if (options.expectedHeadSha !== undefined) {
+      // A guarded human answer authorizes continuation, not generation of new
+      // review comments. Missing current-head approval must return to review
+      // rather than introducing a second external mutation boundary.
+      return {
+        type: 'promote-auto-merge',
+        status: 'blocked',
+        pr: options.pr,
+        headSha,
+        message: `dual-LLM approval missing: ${dualLlmApproval.reasons.join('; ')}`,
+        dualLlmApproval,
+        productPolicyImpact,
+      };
+    }
     const prompt = buildReviewPrompt({
       pr: options.pr,
       headSha,
@@ -873,6 +928,28 @@ export async function promotePullRequestAutoMerge(options: {
     };
   }
 
+  if (options.expectedHeadSha !== undefined) {
+    const freshMetadata = await loadPrView({
+      pr: options.pr,
+      repoPath,
+      repo: options.repo,
+      env,
+      runner,
+    });
+    if (freshMetadata.headRefOid !== options.expectedHeadSha) {
+      return {
+        type: 'promote-auto-merge',
+        status: 'blocked',
+        pr: options.pr,
+        headSha: freshMetadata.headRefOid,
+        stopRule: 'head mismatch',
+        message: 'PR head changed immediately before label mutation',
+        dualLlmApproval,
+        productPolicyImpact,
+      };
+    }
+  }
+
   await addPrLabel({
     pr: options.pr,
     repoPath,
@@ -890,6 +967,187 @@ export async function promotePullRequestAutoMerge(options: {
     message: `added ${options.label ?? DEFAULT_AUTO_MERGE_LABEL}`,
     dualLlmApproval,
     productPolicyImpact,
+  };
+}
+
+export async function promotePullRequestAutoMerge(
+  options: PromotePullRequestAutoMergeOptions,
+): Promise<DevloopAutomationAction> {
+  return promotePullRequestAutoMergeInternal(options);
+}
+
+export interface ContinuePullRequestAutomationStageOptions {
+  readonly pr: number;
+  readonly stage: DevloopAutomationStage;
+  readonly expectedHeadSha: string;
+  readonly repoPath?: string;
+  readonly repo?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly runner?: DevloopCommandRunner;
+  readonly decisionId: string;
+  readonly expectedDecisionVersion: number;
+  readonly expectedContextHash: string;
+  readonly ledgerPath?: string;
+  readonly applyOperationId: string;
+  readonly applyOwnerPid: number;
+  readonly applyOwnerStartToken: string;
+}
+
+export interface ContinuePullRequestAutomationStageReport {
+  readonly passed: boolean;
+  readonly message: string;
+  readonly revalidationRequired: boolean;
+  readonly reasonCode?: string;
+  readonly actions: readonly DevloopAutomationAction[];
+}
+
+export async function continuePullRequestAutomationStage(
+  options: ContinuePullRequestAutomationStageOptions,
+): Promise<ContinuePullRequestAutomationStageReport> {
+  const repoPath = resolve(options.repoPath ?? process.cwd());
+  const env = options.env ?? process.env;
+  const runner = options.runner ?? createDefaultDevloopCommandRunner();
+  const store = new DecisionStore(repoPath, options.ledgerPath);
+  const projection = store.get(options.decisionId);
+  const guard = projection?.request.resumeGuard;
+  const parsedEvents = store.readStrict().events.map((event) => parseDecisionEvent(event));
+  const answerEvent = projection?.answer === undefined
+    ? undefined
+    : parsedEvents.find((parsed) =>
+        parsed.success
+        && parsed.data.eventType === 'devloop_decision_answered'
+        && parsed.data.eventId === projection.answer?.eventId);
+  const applyEvent = [...parsedEvents].reverse().find((parsed) =>
+    parsed.success
+    && parsed.data.eventType === 'devloop_decision_apply_started'
+    && parsed.data.decisionId === options.decisionId);
+  const callerStartToken = resolveProcessStartToken(process.pid);
+  if (
+    projection === undefined
+    || projection.answer === undefined
+    || projection.status !== 'applying'
+    || projection.applyResult?.status !== 'applying'
+    || projection.request.decisionVersion !== options.expectedDecisionVersion
+    || projection.request.contextHash !== options.expectedContextHash
+    || guard?.strategy !== 'pr_automation_stage'
+    || guard.repository !== options.repo
+    || guard.prNumber !== options.pr
+    || guard.stage !== options.stage
+    || guard.expectedHeadSha !== options.expectedHeadSha
+    || projection.request.subject.repoPath !== store.repoPath
+    || projection.request.subject.repository !== options.repo
+    || projection.request.subject.prNumber !== options.pr
+    || projection.request.subject.step !== options.stage
+    || projection.request.subject.headSha !== options.expectedHeadSha
+    || !('optionId' in projection.answer.value)
+    || projection.answer.value.optionId !== 'approve_current_head'
+    || answerEvent === undefined
+    || !answerEvent.success
+    || answerEvent.data.eventType !== 'devloop_decision_answered'
+    || answerEvent.data.decisionId !== options.decisionId
+    || answerEvent.data.decisionVersion !== options.expectedDecisionVersion
+    || answerEvent.data.contextHash !== options.expectedContextHash
+    || applyEvent === undefined
+    || !applyEvent.success
+    || applyEvent.data.eventType !== 'devloop_decision_apply_started'
+    || projection.applyResult.eventId !== applyEvent.data.eventId
+    || applyEvent.data.operationId !== options.applyOperationId
+    || applyEvent.data.ownerPid !== options.applyOwnerPid
+    || applyEvent.data.ownerStartToken !== options.applyOwnerStartToken
+    || applyEvent.data.answerEventId !== projection.answer.eventId
+    || options.applyOwnerPid !== process.pid
+    || callerStartToken === undefined
+    || applyEvent.data.ownerStartToken !== callerStartToken
+  ) {
+    return {
+      passed: false,
+      message: 'The typed human approval does not match this PR continuation.',
+      revalidationRequired: true,
+      reasonCode: 'human_approval_mismatch',
+      actions: [],
+    };
+  }
+  const metadata = await loadPrView({
+    pr: options.pr,
+    repoPath,
+    repo: options.repo,
+    env,
+    runner,
+  });
+  if (metadata.number !== options.pr || metadata.headRefOid !== options.expectedHeadSha) {
+    return {
+      passed: false,
+      message: 'The PR identity or head changed before the guarded stage.',
+      revalidationRequired: true,
+      reasonCode: 'pr_head_changed',
+      actions: [],
+    };
+  }
+
+  if (options.stage !== 'pr-review' && options.stage !== 'pr-merge') {
+    // issue-scout/issue-to-pr are not PR-targeted operations, and review-fix
+    // lacks an expected-head mutation contract. Never fall back to the all-PR
+    // stage runner because it could modify an unrelated pull request.
+    return {
+      passed: false,
+      message: 'This PR stage has no target-locked continuation adapter.',
+      revalidationRequired: true,
+      reasonCode: 'pr_stage_not_target_locked',
+      actions: [],
+    };
+  }
+
+  const promotion = await promotePullRequestAutoMergeInternal({
+    pr: options.pr,
+    repoPath,
+    repo: options.repo,
+    expectedHeadSha: options.expectedHeadSha,
+    [HUMAN_APPROVAL_CAPABILITY]: true,
+    env,
+    runner,
+  });
+  if (promotion.stopRule === 'head mismatch') {
+    return {
+      passed: false,
+      message: promotion.message,
+      revalidationRequired: true,
+      reasonCode: 'pr_head_changed',
+      actions: [promotion],
+    };
+  }
+  if (promotion.status !== 'passed' || options.stage === 'pr-review') {
+    return {
+      passed: promotion.status === 'passed',
+      message: promotion.message,
+      revalidationRequired: false,
+      actions: [promotion],
+    };
+  }
+
+  const mergeReport = await mergeIfSafe({
+    pr: String(options.pr),
+    repoPath,
+    repo: options.repo,
+    expectedHeadSha: options.expectedHeadSha,
+    env,
+    runner,
+  });
+  const mergeAction: DevloopAutomationAction = {
+    type: 'merge-if-safe',
+    status: mergeReport.passed ? 'passed' : 'blocked',
+    pr: options.pr,
+    headSha: options.expectedHeadSha,
+    message: mergeReport.result,
+    ...(!mergeReport.passed && mergeReport.reasons.some((reason) => /head SHA mismatch/iu.test(reason))
+      ? { stopRule: 'head mismatch' as const }
+      : {}),
+  };
+  return {
+    passed: mergeReport.passed,
+    message: mergeReport.result,
+    revalidationRequired: mergeAction.stopRule === 'head mismatch',
+    ...(mergeAction.stopRule === 'head mismatch' ? { reasonCode: 'pr_head_changed' } : {}),
+    actions: [promotion, mergeAction],
   };
 }
 
@@ -1017,8 +1275,12 @@ export async function attachAutomationDecisions(options: {
   runner: DevloopCommandRunner;
 }): Promise<DevloopAutomationStageReport> {
   const snapshotsByPr = new Map(options.prs.map((pr) => [pr.number, pr]));
-  const eligibleIndexes = options.report.actions.flatMap((action, index) =>
-    automationActionRequiresDecision(action) ? [index] : []);
+  // review-fix has no target-locked human-approval mutation contract. Keep it
+  // blocked without generating a Decision that could never be safely applied.
+  const eligibleIndexes = options.report.stage === 'review-fix'
+    ? []
+    : options.report.actions.flatMap((action, index) =>
+      automationActionRequiresDecision(action) ? [index] : []);
   if (eligibleIndexes.length === 0) return options.report;
 
   const actions = [...options.report.actions];

@@ -763,17 +763,42 @@ function sameRequestIgnoringTime(
   return JSON.stringify(leftWithoutTime) === JSON.stringify(rightWithoutTime);
 }
 
-function sameRequestIgnoringIdentity(
+function sameLogicalDecisionContext(
   left: DecisionRequest,
   right: DecisionRequest,
 ): boolean {
-  const leftSemantic = { ...left } as Partial<DecisionRequest>;
-  const rightSemantic = { ...right } as Partial<DecisionRequest>;
-  Reflect.deleteProperty(leftSemantic, 'createdAt');
-  Reflect.deleteProperty(leftSemantic, 'decisionId');
-  Reflect.deleteProperty(rightSemantic, 'createdAt');
-  Reflect.deleteProperty(rightSemantic, 'decisionId');
-  return JSON.stringify(leftSemantic) === JSON.stringify(rightSemantic);
+  const normalize = (request: DecisionRequest): unknown => {
+    const semantic = { ...request } as Record<string, unknown>;
+    Reflect.deleteProperty(semantic, 'createdAt');
+    Reflect.deleteProperty(semantic, 'decisionId');
+    Reflect.deleteProperty(semantic, 'decisionVersion');
+    Reflect.deleteProperty(semantic, 'contextHash');
+    semantic.resumeGuard = {
+      ...request.resumeGuard,
+      expectedDecisionVersion: 0,
+    };
+    return semantic;
+  };
+  return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
+}
+
+function decisionCanReuseAnswer(projection: DecisionProjection): boolean {
+  return projection.status === 'open'
+    || projection.status === 'applying'
+    || (projection.status === 'answered' && projection.applyResult === undefined);
+}
+
+function inputWithDecisionVersion(
+  input: CreateDecisionRequestInput,
+  expectedDecisionVersion: number,
+): CreateDecisionRequestInput {
+  return {
+    ...input,
+    resumeGuard: {
+      ...input.resumeGuard,
+      expectedDecisionVersion,
+    },
+  } as CreateDecisionRequestInput;
 }
 
 function ensureDeterministicDecision(
@@ -788,7 +813,18 @@ function ensureDeterministicDecision(
   // the ledger for each direct lookup, so batch callers use the indexed path below.
   const sameIdentity = store.get(decisionId);
   if (sameIdentity !== undefined) {
-    if (sameRequestIgnoringTime(sameIdentity.request, request)) return sameIdentity;
+    if (sameRequestIgnoringTime(sameIdentity.request, request)) {
+      if (
+        sameIdentity.status === 'revalidation_required'
+        || (
+          sameIdentity.status === 'answered'
+          && sameIdentity.applyResult?.status === 'failed'
+        )
+      ) {
+        return ensureRecurringDecision(store, input, now);
+      }
+      return sameIdentity;
+    }
     throw new DecisionStoreError('request_conflict');
   }
 
@@ -825,24 +861,28 @@ function ensureRecurringDecision(
 ): DecisionProjection {
   const provisional = createDecisionRequest(input, { now });
   const sameContext = [...projections.values()].filter((projection) =>
-    projection.request.contextHash === provisional.contextHash
-    && sameRequestIgnoringIdentity(projection.request, provisional));
-  const active = sameContext.filter((projection) => projection.status !== 'applied');
+    sameLogicalDecisionContext(projection.request, provisional));
+  const active = sameContext.filter(decisionCanReuseAnswer);
   if (active.length > 1) throw new DecisionStoreError('request_conflict');
   if (active[0] !== undefined) return active[0];
 
-  const appliedCount = sameContext.filter(
-    (projection) => projection.status === 'applied',
-  ).length;
+  const terminalCount = sameContext.length;
+  const nextVersion = sameContext.reduce(
+    (maximum, projection) => Math.max(maximum, projection.request.decisionVersion),
+    0,
+  ) + 1;
   const baseDecisionId = `dec_${provisional.contextHash}`;
-  const decisionId = appliedCount === 0
+  const decisionId = terminalCount === 0
     ? baseDecisionId
-    : `${baseDecisionId}_r${appliedCount}`;
+    : `${baseDecisionId}_r${terminalCount}`;
   if (projections.has(decisionId)) {
     throw new DecisionStoreError('request_conflict');
   }
 
-  const request = createDecisionRequest(input, { decisionId, now });
+  const request = createDecisionRequest(
+    inputWithDecisionVersion(input, nextVersion),
+    { decisionId, now },
+  );
   const projection = store.requestAndGet(request, { now });
   if (projection.status === 'applied') {
     throw new DecisionStoreError('request_conflict');
