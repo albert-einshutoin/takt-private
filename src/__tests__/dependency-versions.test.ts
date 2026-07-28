@@ -7,6 +7,12 @@ type PackageJson = {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   engines?: Record<string, string>;
+  devEngines?: {
+    runtime?: {
+      name?: string;
+      version?: string;
+    };
+  };
   overrides?: Record<string, string>;
 };
 
@@ -266,17 +272,67 @@ describe('dependency versions', () => {
       .toBe(true);
   });
 
-  it('keeps unrelated toolchain security refreshes inside their existing majors', () => {
+  it('locks the ESLint 10 security chain without overrides', () => {
+    const packageJson = readPackageJson();
     const packageLock = readPackageLock();
+    const eslint = getLockedPackage(packageLock, 'node_modules/eslint');
+    const eslintConfigArray = getLockedPackage(packageLock, 'node_modules/@eslint/config-array');
+    const typescriptEslint = getLockedPackage(packageLock, 'node_modules/typescript-eslint');
+    const typescriptEslintPlugin = getLockedPackage(
+      packageLock,
+      'node_modules/@typescript-eslint/eslint-plugin',
+    );
+    const typescriptEslintParser = getLockedPackage(
+      packageLock,
+      'node_modules/@typescript-eslint/parser',
+    );
+    const typescriptEslintVisitorKeys = getLockedPackage(
+      packageLock,
+      'node_modules/@typescript-eslint/visitor-keys',
+    );
 
-    expect(getLockedPackage(packageLock, 'node_modules/brace-expansion').version).toBe('2.1.2');
-    expect(getLockedPackage(packageLock, 'node_modules/minimatch').version).toBe('9.0.9');
+    expect(packageJson.devDependencies?.eslint).toBe('^10.8.0');
+    expect(packageJson.devDependencies?.['@eslint/js']).toBe('^10.0.1');
+    expect(packageJson.devDependencies?.['typescript-eslint']).toBe('^8.65.0');
+    expect(packageJson.devDependencies?.['@typescript-eslint/eslint-plugin']).toBe('^8.65.0');
+    expect(packageJson.devDependencies?.['@typescript-eslint/parser']).toBe('^8.65.0');
+    expect(packageJson.overrides).not.toHaveProperty('eslint');
+    expect(packageJson.overrides).not.toHaveProperty('minimatch');
+    expect(packageJson.overrides).not.toHaveProperty('brace-expansion');
+
+    expect(eslint.version).toBe('10.8.0');
+    expect(getLockedPackage(packageLock, 'node_modules/@eslint/js').version).toBe('10.0.1');
+    expect(typescriptEslint.version).toBe('8.65.0');
+    expect(typescriptEslintPlugin.version).toBe('8.65.0');
+    expect(typescriptEslintParser.version).toBe('8.65.0');
+    expect(getLockedPackage(packageLock, 'node_modules/brace-expansion').version).toBe('5.0.8');
+    expect(getLockedPackage(packageLock, 'node_modules/minimatch').version).toBe('10.2.6');
+    expect(eslint.dependencies?.['eslint-visitor-keys']).toBe('^5.0.1');
+    expect(eslintConfigArray.dependencies?.minimatch).toBe('^10.2.4');
+    expect(getLockedPackage(
+      packageLock,
+      'node_modules/eslint/node_modules/eslint-visitor-keys',
+    ).version).toBe('5.0.1');
+    expect(typescriptEslintVisitorKeys.dependencies?.['eslint-visitor-keys']).toBe('^5.0.0');
     expect(
       getLockedPackage(
         packageLock,
         'node_modules/@typescript-eslint/visitor-keys/node_modules/eslint-visitor-keys',
       ).version,
-    ).toBe('4.2.1');
+    ).toBe('5.0.1');
+
+    // ESLint 10 is development-only and intentionally raises only the declared
+    // contributor toolchain floor; the packed runtime remains Node >=20.6.
+    expect(packageJson.engines?.node).toBe('>=20.6.0');
+    expect(packageJson.devEngines?.runtime).toEqual({
+      name: 'node',
+      version: '^20.19.0 || ^22.13.0 || >=24',
+      onFail: 'error',
+    });
+    expect(satisfiesNodeRange(
+      parseNodeVersion('20.19.0'),
+      eslint.engines?.node ?? '',
+    )).toBe(true);
   });
 
   it('locks test runner transitive dependencies to patched security releases', () => {
