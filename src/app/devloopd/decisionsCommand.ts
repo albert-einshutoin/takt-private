@@ -17,6 +17,7 @@ import { syncDecisionToGithub } from '../../devloopd/decisionGithubSync.js';
 const MAX_STDIN_JSON_BYTES = 1024 * 1024;
 const CONTEXT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const DECISION_STATUSES = [
   'open',
   'answered',
@@ -395,12 +396,32 @@ export function registerDecisionsCommand(program: Command): void {
     .description('判断状態の安全な要約を任意でGitHubへ同期する')
     .option('--cwd <path>', '対象リポジトリ', process.cwd())
     .option('--id <decision-id>', '判断ID')
+    .option('--expected-version <version>', '確認済み判断バージョン')
+    .option('--expected-context-hash <sha256>', '確認済みコンテキストSHA-256')
+    .option('--expected-preview-sha256 <sha256>', '確認済みGitHub preview SHA-256')
     .option('--json', '機械可読JSONを表示する')
-    .action(async (options: { cwd: string; id?: string; json?: boolean }) => {
+    .action(async (options: {
+      cwd: string;
+      id?: string;
+      expectedVersion?: string;
+      expectedContextHash?: string;
+      expectedPreviewSha256?: string;
+      json?: boolean;
+    }) => {
+      const expectedVersion = options.expectedVersion === undefined
+        ? undefined
+        : Number(options.expectedVersion);
       if (
         options.id === undefined
         || options.id.length > 200
         || !IDENTIFIER_PATTERN.test(options.id)
+        || expectedVersion === undefined
+        || !Number.isSafeInteger(expectedVersion)
+        || expectedVersion < 1
+        || options.expectedContextHash === undefined
+        || !SHA256_PATTERN.test(options.expectedContextHash)
+        || options.expectedPreviewSha256 === undefined
+        || !SHA256_PATTERN.test(options.expectedPreviewSha256)
       ) {
         writeError(failure('invalid_sync_input'), options.json === true);
         return;
@@ -416,6 +437,9 @@ export function registerDecisionsCommand(program: Command): void {
         result = await syncDecisionToGithub({
           store: new DecisionStore(repoPath),
           decisionId: options.id,
+          expectedDecisionVersion: expectedVersion,
+          expectedContextHash: options.expectedContextHash,
+          expectedPreviewSha256: options.expectedPreviewSha256,
         });
       } catch (error) {
         writeError(storeFailure(error), options.json === true);

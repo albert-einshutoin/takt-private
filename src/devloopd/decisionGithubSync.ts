@@ -26,6 +26,7 @@ export interface DecisionGithubPreview {
   readonly target: DecisionGithubTarget;
   readonly marker: string;
   readonly body: string;
+  readonly sha256: string;
 }
 
 export type DecisionGithubSyncResult =
@@ -44,6 +45,7 @@ export type DecisionGithubSyncResult =
       | 'github_target_unavailable'
       | 'github_unavailable'
       | 'ledger_unavailable'
+      | 'preview_binding_mismatch'
       | 'sync_state_changed'
       | 'sync_visibility_unconfirmed'
       | 'untrusted_github_response';
@@ -58,6 +60,9 @@ type DecisionGithubSyncErrorCode = Extract<
 export interface SyncDecisionToGithubOptions {
   readonly store: DecisionStore;
   readonly decisionId: string;
+  readonly expectedDecisionVersion: number;
+  readonly expectedContextHash: string;
+  readonly expectedPreviewSha256: string;
   readonly runner?: DevloopCommandRunner;
   readonly env?: NodeJS.ProcessEnv;
   /** Test-only boundary used to prove crash safety after posting intent is durable. */
@@ -147,7 +152,21 @@ export function buildDecisionGithubPreview(
   // this body intentionally fixed: user answers, rationale, evidence, local
   // paths, and private task prose must remain only in the local ledger.
   const body = renderPreviewBody(projection, marker, projection.status);
-  return Object.freeze({ target, marker, body });
+  // The canonical envelope is the sole digest input so preview generation and
+  // write authorization cannot silently drift into separate representations.
+  // Keep keys in lexicographic order to match Swift JSONEncoder.sortedKeys;
+  // JSON.stringify leaves slashes unescaped, matching withoutEscapingSlashes.
+  const envelope = JSON.stringify({
+    body,
+    marker,
+    target: {
+      kind: target.kind,
+      number: target.number,
+      repository: target.repository,
+    },
+  });
+  const sha256 = createHash('sha256').update(envelope, 'utf8').digest('hex');
+  return Object.freeze({ target, marker, body, sha256 });
 }
 
 function sameTarget(left: DecisionGithubTarget, right: DecisionGithubTarget): boolean {
@@ -333,15 +352,6 @@ function appendPendingIfCurrent(
   });
 }
 
-function snapshotFingerprint(preview: DecisionGithubPreview): string {
-  return createHash('sha256').update(JSON.stringify([
-    preview.target.kind,
-    preview.target.repository,
-    preview.target.number,
-    preview.body,
-  ]), 'utf8').digest('hex');
-}
-
 function snapshotFromProjection(
   projection: DecisionProjection,
 ): DecisionSyncSnapshot | undefined {
@@ -351,7 +361,7 @@ function snapshotFromProjection(
     return Object.freeze({
       projection,
       preview,
-      fingerprint: snapshotFingerprint(preview),
+      fingerprint: preview.sha256,
     });
   } catch {
     return undefined;
@@ -359,15 +369,25 @@ function snapshotFromProjection(
 }
 
 function currentSnapshotState(
-  store: DecisionStore,
-  decisionId: string,
+  options: SyncDecisionToGithubOptions,
   expectedFingerprint: string,
+  requireWriteSafe: boolean,
 ): 'current' | 'changed' | 'unavailable' {
   try {
-    const projection = store.get(decisionId);
+    const projection = options.store.get(options.decisionId);
     if (projection === undefined) return 'changed';
     const snapshot = snapshotFromProjection(projection);
-    return snapshot?.fingerprint === expectedFingerprint ? 'current' : 'changed';
+    if (
+      snapshot === undefined
+      || snapshot.projection.request.decisionVersion !== options.expectedDecisionVersion
+      || snapshot.projection.request.contextHash !== options.expectedContextHash
+      || snapshot.preview.sha256 !== options.expectedPreviewSha256
+      || snapshot.fingerprint !== expectedFingerprint
+      || (requireWriteSafe && snapshot.projection.githubSync?.postUncertain === true)
+    ) {
+      return 'changed';
+    }
+    return 'current';
   } catch {
     return 'unavailable';
   }
@@ -680,6 +700,9 @@ async function performSync(
   const initialSnapshot = snapshotFromProjection(initialProjection);
   if (initialSnapshot === undefined) return failed(decisionId, 'github_target_unavailable');
   lastTarget = initialSnapshot.preview.target;
+  const initialBindingState = currentSnapshotState(options, initialSnapshot.fingerprint, false);
+  if (initialBindingState === 'unavailable') return failed(decisionId, 'ledger_unavailable');
+  if (initialBindingState === 'changed') return failed(decisionId, 'preview_binding_mismatch');
 
   const previousSync = initialProjection.githubSync;
   if (previousSync !== undefined) {
@@ -918,11 +941,13 @@ async function performSync(
       continue;
     }
 
-    const stateBeforeMutation = currentSnapshotState(store, decisionId, fingerprint);
+    const stateBeforeMutation = currentSnapshotState(options, fingerprint, true);
     if (stateBeforeMutation === 'unavailable') {
       return failed(decisionId, 'ledger_unavailable');
     }
-    if (stateBeforeMutation === 'changed') continue;
+    if (stateBeforeMutation === 'changed') {
+      return failed(decisionId, 'preview_binding_mismatch');
+    }
 
     const patchTarget = managed?.comment ?? directlyVerifiedComment ?? (authoritativeRef === undefined
       ? undefined
@@ -1008,7 +1033,7 @@ async function performSync(
         'posting',
         attemptId,
       )) {
-        continue;
+        return failed(decisionId, 'preview_binding_mismatch');
       }
     } catch {
       return failed(decisionId, 'ledger_unavailable');

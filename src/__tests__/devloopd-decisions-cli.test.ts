@@ -220,6 +220,12 @@ describe('devloopd decisions CLI', () => {
       repoPath,
       '--id',
       request.decisionId,
+      '--expected-version',
+      String(request.decisionVersion),
+      '--expected-context-hash',
+      request.contextHash,
+      '--expected-preview-sha256',
+      '0'.repeat(64),
       '--json',
     ]);
 
@@ -234,6 +240,29 @@ describe('devloopd decisions CLI', () => {
       status: 'failed',
       errorCode: 'github_target_unavailable',
       sanitizedError: 'GitHub同期に失敗しました。',
+    });
+  });
+
+  it('requires every immutable GitHub preview binding input', () => {
+    const result = runCli([
+      'decisions',
+      'sync-github',
+      '--cwd',
+      repoPath,
+      '--id',
+      request.decisionId,
+      '--json',
+    ]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual({
+      schemaVersion: 1,
+      ok: false,
+      error: {
+        code: 'invalid_sync_input',
+        message: 'GitHub同期対象の形式が正しくありません。',
+      },
     });
   });
 
