@@ -71,10 +71,19 @@ The goal is simple: make development processes reusable, reviewable, and reprodu
 
 ## Try It in 5 Minutes
 
-From a Git repository with at least one commit:
+Install private-takt from this repository:
 
 ```bash
-npm install -g takt
+git clone https://github.com/albert-einshutoin/takt-private.git
+cd takt-private
+npm ci
+npm run build
+npm link
+```
+
+`npm link` exposes the locally built `takt` and `devloopd` commands without publishing a downstream package to the public npm registry. Then, from a Git repository with at least one commit:
+
+```bash
 
 # Talk to AI, describe a task, use /go, then choose "Queue as task"
 takt
@@ -140,18 +149,35 @@ Optional:
 
 ### Install
 
+Choose the distribution that matches what you intend to run. Downstream-only personal automation and `devloopd` behavior require a private-takt build.
+
+#### private-takt downstream
+
+```bash
+git clone https://github.com/albert-einshutoin/takt-private.git
+cd takt-private
+npm ci
+npm run build
+npm link
+devloopd release-info
+```
+
+This installs commands from the current checkout through a local npm link. It does not publish private-takt to npm. Before long-running personal automation or a personal release, follow the [Personal Release Workflow](./docs/personal-release.md).
+
+#### Official upstream TAKT
+
 ```bash
 npm install -g takt
 ```
 
-With Nix flakes:
+The command above installs the official upstream package from npm. With Nix flakes, the following commands also run or install upstream TAKT:
 
 ```bash
 nix run github:nrslib/takt
 nix profile install github:nrslib/takt
 ```
 
-The Nix package installs the TAKT CLI itself. External CLI providers, `git`, and `gh`/`glab` still need to be installed and available on `PATH` or configured separately as described in [Requirements](#requirements).
+These upstream installation paths do not include private-takt-only functionality. In either distribution, external CLI providers, `git`, and `gh`/`glab` still need to be installed and available on `PATH` or configured separately as described in [Requirements](#requirements).
 
 ### Talk to AI and queue tasks
 

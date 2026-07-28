@@ -71,10 +71,19 @@ workflow で工程を定義し、persona・policy・knowledge・instruction・ou
 
 ## 5分で試す
 
-少なくとも1回 commit 済みの Git リポジトリで実行します。
+このリポジトリから private-takt をインストールします。
 
 ```bash
-npm install -g takt
+git clone https://github.com/albert-einshutoin/takt-private.git
+cd takt-private
+npm ci
+npm run build
+npm link
+```
+
+`npm link` は downstream のパッケージを公開npmレジストリへpublishせず、ローカルでbuildした `takt` と `devloopd` コマンドを利用可能にします。その後、少なくとも1回 commit 済みの Git リポジトリで実行します。
+
+```bash
 
 # AI と会話し、タスクを説明し、/go の後に「タスクにつむ」を選びます
 takt
@@ -140,18 +149,35 @@ takt list
 
 ### インストール
 
+利用したい機能に合う配布元を選んでください。downstream 固有の個人向け自動化や `devloopd` の機能を使う場合は、private-takt のbuildが必要です。
+
+#### private-takt downstream
+
+```bash
+git clone https://github.com/albert-einshutoin/takt-private.git
+cd takt-private
+npm ci
+npm run build
+npm link
+devloopd release-info
+```
+
+現在のcheckoutからローカルnpm linkを使ってコマンドをインストールします。private-taktをnpmへpublishする処理は行いません。長時間の個人向け自動化やpersonal releaseの前には、[Personal Release Workflow](./personal-release.ja.md)に従ってください。
+
+#### 公式upstream TAKT
+
 ```bash
 npm install -g takt
 ```
 
-Nix flakes を使う場合:
+上記のコマンドは、npmから公式upstreamパッケージをインストールします。Nix flakesを使う場合も、次のコマンドが実行・インストールするのはupstream TAKTです。
 
 ```bash
 nix run github:nrslib/takt
 nix profile install github:nrslib/takt
 ```
 
-Nix パッケージがインストールするのは TAKT CLI 本体のみです。外部 CLI プロバイダー、`git`、`gh`/`glab` は、[必要なもの](#必要なもの) に記載のとおり別途インストールして `PATH` に置くか、設定で指定してください。
+これらのupstream向けインストール手順には、private-takt固有の機能は含まれません。どちらの配布元でも、外部CLIプロバイダー、`git`、`gh`/`glab`は、[必要なもの](#必要なもの)に記載のとおり別途インストールして`PATH`に置くか、設定で指定してください。
 
 ### AI と相談してタスクを積む
 
