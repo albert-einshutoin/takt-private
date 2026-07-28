@@ -193,7 +193,9 @@ clean-worktree確認、current-head一致、merge policy、後続の品質gate�
 プロセスidentityを検証し、生存中のownerには触れません。ownerが終了済み、または
 検証不能なら外部副作用を再実行せず `revalidation_required` に移します。
 リポジトリ実行claimとGitHub同期はOSの `lockf` または `flock` によるkernel
-advisory lockを必須とし、取得できなければfail-closedします。
+advisory lockを必須とし、取得できなければfail-closedします。GitHub同期は
+inspectionとnetwork副作用を含む全体で外側のkernel lockを保持し、内側のledger
+transactionが個々のlocal read／validate／append遷移を原子的にします。
 
 旧形式の非構造化workflow stopは通常のaborted runのままです。Decision Request
 v1を推測生成せず、`decisions answer` では回答できません。構造化producerで再実行
@@ -214,10 +216,17 @@ Issue／PRを再取得し、既存markerを照合してから作成または更�
 `sync_visibility_unconfirmed` や `sync_state_changed` は不確実性を台帳へ残します。
 再試行時は可視性を再照合し、不確実なPOSTを重複POSTへ変換しません。
 
-台帳directoryはowner限定の `0700`、台帳はowner限定の通常file `0600` として開き、
-symlink／hard-linkを拒否します。`.devloop/` をcommitしたり、生の内容をticketへ
-コピーしたり、対象リポジトリ外の台帳を指定したりしないでください。公開例のpathは
-placeholderだけです。壊れた台帳、非互換台帳、利用不能、容量超過はfail-closedです。
+新規の台帳directoryはmode `0700` で作成します。既存のrepository state directoryは
+`0755` など読み取り権限が広い場合もありますが、write時にはcurrent user所有の
+実directoryで、group／other write bitがないことを必須にします。write pathはsymlinkを
+followせず台帳を開き、owner一致・link数1の通常fileであることを検証してからmodeを
+`0600` に変更して追記します。read pathは存在するcanonicalな台帳とdirectoryが
+通常のnon-symlink filesystem objectであることを検証しますが、権限変更や
+ownership取得は遡って行いません。restoreしたrepositoryの権限が広い場合は
+`chmod 0700 .devloop` と `chmod 0600 .devloop/ledger.jsonl` を実行してください。
+`.devloop/` をcommitしたり、生の内容をticketへコピーしたり、対象リポジトリ外の
+台帳を指定したりしないでください。公開例のpathはplaceholderだけです。壊れた台帳、
+非互換台帳、利用不能、容量超過はfail-closedです。
 CLIのJSON errorは `{ "schemaVersion": 1, "ok": false, "error":
 { "code": "...", "message": "..." } }` の固定envelopeです。主なcodeは
 `stale_version`、`stale_context`、`decision_not_open`、`invalid_answer`、

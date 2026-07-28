@@ -3,7 +3,7 @@
   "$id": "https://takt.dev/schemas/decision-request-v1.json",
   "title": "TAKT Decision Request v1",
   "description": "Portable structural contract for a sanitized structured human decision request. The TAKT runtime additionally verifies semantic guard bindings and contextHash.",
-  "$comment": "This schema is an interoperability shape, not a resume authorization boundary. Use the canonical TAKT runtime parser to verify normalized public text, cross-field guard equality, recommendation and rationale invariants, text-length bounds, decision-version equality, and the semantic context hash.",
+  "$comment": "This schema is an interoperability shape, not a resume authorization boundary. Draft-07 cannot express uniqueness projected by option.id or compare sibling numeric fields. Use the canonical TAKT runtime parser to reject duplicate choice option IDs, multiple recommended options, minimumTextLength greater than maximumTextLength, unsafe normalized public text, cross-field guard mismatches, missing rationale requirements, decision-version mismatches, and semantic context-hash mismatches.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -55,7 +55,8 @@
     },
     "createdAt": {
       "type": "string",
-      "format": "date-time"
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
     },
     "kind": {
       "enum": [
@@ -151,7 +152,8 @@
     "publicText": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 4000
+      "maxLength": 4000,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
     },
     "identifier": {
       "type": "string",
@@ -187,7 +189,14 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "pattern": "^(?:/|[A-Za-z]:[\\\\/])"
+          "allOf": [
+            {
+              "pattern": "^(?:/|[A-Za-z]:[\\\\/])"
+            },
+            {
+              "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+            }
+          ]
         },
         "repository": {
           "$ref": "#/definitions/repository"

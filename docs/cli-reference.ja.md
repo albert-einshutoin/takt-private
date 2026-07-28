@@ -154,10 +154,13 @@ worktree、ownership、target、stage、head guardを必ず再検証します。
 旧形式の非構造化stopからdecisionを推測生成しません。中断した `applying` は
 process identityから照合し、不明な副作用を再実行しません。GitHub同期は可視性の
 不確実性を記録し、再試行前に照合するためblindな重複POSTをしません。必須の
-`lockf`／`flock` kernel lockが使えない場合はfail-closedします。台帳は
-リポジトリローカルで、owner限定（directory `0700`、通常file `0600`）かつ
-symlink／hard-link差し替えを拒否します。stdin例、error code、復旧状態、
-data boundaryは [devloopd](./devloopd.ja.md#構造化された人間判断) を参照してください。
+`lockf`／`flock` kernel lockが使えない場合はfail-closedします。外側のkernel
+lockはGitHub操作全体、内側のledger transactionはlocal遷移を保護します。新規台帳
+directoryは`0700`で作成します。既存directoryはcurrent user所有かつgroup／other
+write不可でなければなりません。追記前にowner一致・link数1の通常fileであることを
+検証して`0600`へ変更しますが、read-only inspectionは権限を遡って強化しません。
+推奨`chmod` command、stdin例、error code、復旧状態、data boundaryは
+[devloopd](./devloopd.ja.md#構造化された人間判断) を参照してください。
 
 `devloopd recover-stale` のオプション:
 

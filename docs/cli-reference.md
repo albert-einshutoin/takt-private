@@ -158,10 +158,14 @@ Old unstructured stops are not synthesized into decisions. Interrupted
 `applying` operations are reconciled from process identity without replaying an
 unknown side effect. GitHub sync records uncertain visibility and reconciles
 before retrying instead of blindly posting twice. Required `lockf`/`flock`
-kernel locks fail closed when unavailable. Ledger storage is repository-local,
-owner-only (`0700` directory and `0600` regular file), and protected against
-symlink/hard-link substitution. See [devloopd](./devloopd.md#structured-human-decisions)
-for the stdin example, error codes, recovery states, and data boundary.
+kernel locks fail closed when unavailable; the outer kernel lock covers the
+GitHub operation while inner ledger transactions protect local transitions. New
+ledger directories are created as `0700`. Existing directories must be
+current-user-owned and not group/other writable. Before each append the file
+must be an owner-matched, single-link regular file and is changed to `0600`;
+read-only inspection does not retroactively tighten permissions. See
+[devloopd](./devloopd.md#structured-human-decisions) for recommended `chmod`
+commands, the stdin example, error codes, recovery states, and data boundary.
 
 `devloopd recover-stale` options:
 

@@ -63,6 +63,7 @@ describe('public decision request v1 contract', () => {
     const fixturePaths = [
       'fixtures/decisions/v1/yes-no.json',
       'fixtures/decisions/v1/single-choice.json',
+      'fixtures/decisions/v1/issue-scout-choice.json',
       'fixtures/decisions/v1/text.json',
     ];
 
@@ -98,10 +99,59 @@ describe('public decision request v1 contract', () => {
       { ...yesNo, kind: 'text' },
       { ...text, options: [] },
       { ...yesNo, contextHash: 'not-a-sha256' },
+      { ...yesNo, createdAt: '2026-07-27T09:00:00+09:00' },
+      {
+        ...yesNo,
+        subject: {
+          ...(yesNo.subject as Record<string, unknown>),
+          repoPath: '/example/repo\u0000hidden',
+        },
+      },
+      {
+        ...yesNo,
+        question: 'May the fictional release proceed?\u007f',
+      },
     ];
 
     for (const sample of invalidSamples) {
       expect(validate(sample)).toBe(false);
+      expect(DecisionRequestSchema.safeParse(sample).success).toBe(false);
+    }
+  });
+
+  it('documents semantic checks that JSON Schema intentionally delegates to the runtime', () => {
+    const contract = readPublicContract('builtins/schemas/decision-request-v1.json');
+    const validate = new Ajv({ allErrors: true, jsonPointers: true }).compile(contract as object);
+    const choice = readPublicContract(
+      'fixtures/decisions/v1/single-choice.json',
+    ) as Record<string, unknown>;
+    const text = readPublicContract('fixtures/decisions/v1/text.json') as Record<string, unknown>;
+    const choiceOptions = choice.options as Record<string, unknown>[];
+    const semanticInvalidSamples = [
+      {
+        ...choice,
+        options: choiceOptions.map((option, index) => index === 1
+          ? { ...option, id: choiceOptions[0]?.id }
+          : option),
+      },
+      {
+        ...choice,
+        options: choiceOptions.map((option, index) => index === 0
+          ? { ...option, recommended: true }
+          : option),
+      },
+      {
+        ...text,
+        answerRequirements: {
+          rationaleRequired: false,
+          minimumTextLength: 2_001,
+          maximumTextLength: 2_000,
+        },
+      },
+    ];
+
+    for (const sample of semanticInvalidSamples) {
+      expect(validate(sample)).toBe(true);
       expect(DecisionRequestSchema.safeParse(sample).success).toBe(false);
     }
   });

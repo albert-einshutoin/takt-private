@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "decisionId": "dec_example_issue_scout",
+  "decisionVersion": 1,
+  "subject": {
+    "repoPath": "/example/repo",
+    "repository": "example/repo",
+    "workflow": "issue-scout",
+    "step": "candidate-review",
+    "candidateId": "candidate-issue-125",
+    "title": "Choose the scope for fictional issue candidate 125"
+  },
+  "question": "How should the fictional issue candidate scope be handled?",
+  "why": {
+    "summary": "The candidate requires an explicit human scope decision.",
+    "riskCategory": "human_policy",
+    "reasons": [
+      "Automation must not choose product scope on behalf of a maintainer."
+    ],
+    "evidence": [
+      {
+        "kind": "issue",
+        "reference": "fictional-candidate-125",
+        "summary": "The sanitized candidate proposes a new public workflow."
+      }
+    ]
+  },
+  "how": {
+    "summary": "Return the typed answer to the guarded planning pass.",
+    "expectedEffects": [
+      "Approve, revise, or skip only the recorded candidate."
+    ],
+    "verification": [
+      "Revalidate the candidate identifier and clean worktree before planning."
+    ]
+  },
+  "answerRequirements": {
+    "rationaleRequired": true,
+    "minimumTextLength": 0,
+    "maximumTextLength": 2000
+  },
+  "resumeGuard": {
+    "expectedDecisionVersion": 1,
+    "strategy": "issue_scout_candidate",
+    "candidateId": "candidate-issue-125"
+  },
+  "contextHash": "9372becf1fe3d7889dc536792ccde556c53be381b8a2bad62a826b99d9a09d7b",
+  "createdAt": "2026-07-27T00:03:00.000Z",
+  "kind": "choice",
+  "options": [
+    {
+      "id": "approve_scope",
+      "title": "Approve scope",
+      "description": "Continue planning the recorded fictional scope.",
+      "consequences": [
+        "The next guarded planning pass may consume the candidate."
+      ],
+      "recommended": false
+    },
+    {
+      "id": "revise_scope",
+      "title": "Revise scope",
+      "description": "Keep automation stopped until a revised candidate exists.",
+      "consequences": [
+        "A new candidate and decision context will be required."
+      ],
+      "recommended": true,
+      "recommendationReason": "The fictional scope needs clearer acceptance criteria."
+    },
+    {
+      "id": "skip",
+      "title": "Skip candidate",
+      "description": "Do not continue this fictional candidate.",
+      "consequences": [
+        "No issue is created from this candidate."
+      ],
+      "recommended": false
+    }
+  ]
+}

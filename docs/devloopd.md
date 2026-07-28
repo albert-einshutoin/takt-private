@@ -200,7 +200,9 @@ recorded process identity. A live owner is left alone; a dead or unverifiable
 owner is moved to `revalidation_required`, and external effects are not
 replayed. Repository execution claims and GitHub synchronization require the
 platform `lockf` or `flock` kernel advisory lock. If neither lock can be
-acquired, the operation fails closed.
+acquired, the operation fails closed. GitHub synchronization holds that outer
+kernel lock across inspection and the network side effect; its inner ledger
+transactions separately make each local read/validate/append transition atomic.
 
 Legacy unstructured workflow stops remain ordinary aborted runs. They are not
 guessed into Decision Request v1 and cannot be answered with `decisions answer`;
@@ -223,11 +225,20 @@ marker before creating or updating a comment. Failures such as
 the ledger; retrying reconciles visibility and never converts an uncertain POST
 into a blind duplicate POST.
 
-The ledger directory is owner-only (`0700`) and the ledger is opened as an
-owner-only regular file (`0600`) with symlink and hard-link defenses. Do not
-commit `.devloop/`, copy its raw content into tickets, or configure a ledger
-outside the target repository. Public examples use placeholder paths only.
-Malformed, incompatible, unavailable, or capacity-exceeded ledgers fail closed.
+TAKT creates a new ledger directory with mode `0700`. An existing repository
+state directory may be more readable (for example `0755`), but writes require it
+to be owned by the current user, be a real directory, and have no group/other
+write bits. The write path opens the ledger without following symlinks, then
+verifies an owner-matched, single-link regular file before changing its mode to
+`0600` and appending. The read path verifies any present canonical ledger and
+directory are regular, non-symlink filesystem objects, but does not
+retroactively change permissions or claim ownership. Operators should run
+`chmod 0700 .devloop` and
+`chmod 0600 .devloop/ledger.jsonl` when a restored repository is more
+permissive. Do not commit `.devloop/`, copy its raw content into tickets, or
+configure a ledger outside the target repository. Public examples use
+placeholder paths only. Malformed, incompatible, unavailable, or
+capacity-exceeded ledgers fail closed.
 CLI JSON failures use a stable `{ "schemaVersion": 1, "ok": false, "error":
 { "code": "...", "message": "..." } }` envelope. Common codes include
 `stale_version`, `stale_context`, `decision_not_open`, `invalid_answer`,
