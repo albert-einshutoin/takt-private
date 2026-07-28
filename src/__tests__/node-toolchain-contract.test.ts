@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 const repositoryRoot = process.cwd();
 const developmentNodeVersion = '22.13.1';
+const runtimeMinimumNodeVersion = '20.6.0';
 
 function readRequiredFile(relativePath: string): string {
   return readFileSync(join(repositoryRoot, relativePath), 'utf-8');
@@ -21,6 +22,18 @@ function setupNodeVersions(relativePath: string, jobName: string): string[] {
 
   return [...jobMatch[1].matchAll(/^\s+node-version:\s*['"]?([^'"\s]+)['"]?\s*$/gm)]
     .map((match) => match[1] ?? '');
+}
+
+function workflowJob(relativePath: string, jobName: string): string {
+  const workflow = `${readRequiredFile(relativePath)}\n  __end__:\n`;
+  const escapedJobName = jobName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const jobMatch = workflow.match(
+    new RegExp(`^  ${escapedJobName}:\\n([\\s\\S]*?)(?=^  [A-Za-z0-9_-]+:\\n)`, 'm'),
+  );
+  if (!jobMatch?.[1]) {
+    throw new Error(`Missing workflow job: ${jobName}`);
+  }
+  return jobMatch[1];
 }
 
 describe('Node toolchain contract', () => {
@@ -67,6 +80,17 @@ describe('Node toolchain contract', () => {
     // These jobs consume the already-published CLI rather than developing the source.
     expect(setupNodeVersions('.github/workflows/pr-comment-commands.yml', 'review')).toEqual(['20']);
     expect(setupNodeVersions('.github/workflows/pr-comment-commands.yml', 'resolve')).toEqual(['20']);
+  });
+
+  it('smoke tests the packed production CLI at the advertised runtime minimum', () => {
+    const runtimeSmoke = workflowJob('.github/workflows/ci.yml', 'runtime-smoke');
+
+    expect(setupNodeVersions('.github/workflows/ci.yml', 'runtime-smoke'))
+      .toEqual([developmentNodeVersion, runtimeMinimumNodeVersion]);
+    expect(runtimeSmoke).toContain('npm pack');
+    expect(runtimeSmoke).toContain('npm install --omit=dev');
+    expect(runtimeSmoke).toContain('NO_UPDATE_NOTIFIER=1');
+    expect(runtimeSmoke).toContain('--version');
   });
 
   it('pins container development environments while keeping Nix on Node 22', () => {
