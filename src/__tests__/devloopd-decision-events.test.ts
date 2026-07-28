@@ -696,7 +696,7 @@ describe('decision event fold', () => {
       ...identity,
       target: pending.target,
       status: 'synced',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       commentUrl: 'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-1',
     }, { eventId: 'evt_github_synced' });
 
@@ -708,7 +708,7 @@ describe('decision event fold', () => {
       eventId: 'evt_github_synced',
       status: 'synced',
       target: { kind: 'issue', number: 42 },
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
     });
     expect(Object.isFrozen(projection?.githubSync?.target)).toBe(true);
   });
@@ -850,6 +850,170 @@ describe('decision event fold', () => {
     }));
   });
 
+  it.each([
+    ['synced', () => createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'synced',
+      commentId: '456',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    })],
+    ['verified', () => createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'verified',
+      commentId: '456',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    })],
+    ['missing', () => createDecisionGithubSyncEvent({
+      ...identity,
+      target: {
+        kind: 'issue',
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      },
+      status: 'missing',
+      missingCommentId: '456',
+      missingCommentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+      attemptId: 'attempt-mismatched-anchor',
+    })],
+  ])('rejects %s evidence when comment ID and URL anchor differ', (_status, createEvent) => {
+    expect(createEvent).toThrow();
+  });
+
+  it.each(['verified', 'synced'] as const)(
+    'does not replace known comment evidence with a different %s ref',
+    (status) => {
+      const target = {
+        kind: 'issue' as const,
+        repository: 'albert-einshutoin/takt-private',
+        number: 42,
+      };
+      const synced123 = createDecisionGithubSyncEvent({
+        ...identity,
+        target,
+        status: 'synced',
+        commentId: '123',
+        commentUrl:
+          'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+      }, { eventId: `evt_known_123_before_${status}` });
+      const replacement = createDecisionGithubSyncEvent({
+        ...identity,
+        target,
+        status,
+        commentId: '456',
+        commentUrl:
+          'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-456',
+      }, { eventId: `evt_replacement_${status}_456` });
+
+      const result = foldDecisionEvents([requested, answered, synced123, replacement]);
+
+      expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+        knownCommentId: '123',
+        knownCommentUrl:
+          'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+      });
+      expect(result.issues).toContainEqual(expect.objectContaining({
+        eventId: `evt_replacement_${status}_456`,
+        code: 'invalid_transition',
+      }));
+    },
+  );
+
+  it('accepts a new verified ref only after matching missing evidence clears the old ref', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const url123 =
+      'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123';
+    const synced123 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '123',
+      commentUrl: url123,
+    }, { eventId: 'evt_known_123_before_missing' });
+    const missing123 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'missing',
+      missingCommentId: '123',
+      missingCommentUrl: url123,
+      attemptId: 'attempt-clear-123',
+    }, { eventId: 'evt_missing_123_before_456' });
+    const verified456 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'verified',
+      commentId: '456',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-456',
+    }, { eventId: 'evt_verified_456_after_missing' });
+
+    const result = foldDecisionEvents([
+      requested,
+      answered,
+      synced123,
+      missing123,
+      verified456,
+    ]);
+
+    expect(result.issues).toEqual([]);
+    expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'verified',
+      knownCommentId: '456',
+    });
+  });
+
+  it('does not let a legacy URL-less synced event overwrite strong evidence', () => {
+    const target = {
+      kind: 'issue' as const,
+      repository: 'albert-einshutoin/takt-private',
+      number: 42,
+    };
+    const synced123 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '123',
+      commentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    }, { eventId: 'evt_strong_synced_123' });
+    const legacySynced456 = createDecisionGithubSyncEvent({
+      ...identity,
+      target,
+      status: 'synced',
+      commentId: '456',
+    }, { eventId: 'evt_legacy_synced_456' });
+
+    const result = foldDecisionEvents([requested, answered, synced123, legacySynced456]);
+
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      eventId: 'evt_legacy_synced_456',
+      code: 'invalid_transition',
+    }));
+    expect(result.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'synced',
+      commentId: '123',
+      knownCommentId: '123',
+      knownCommentUrl:
+        'https://github.com/albert-einshutoin/takt-private/issues/42#issuecomment-123',
+    });
+  });
+
   it('rejects partially structured GitHub sync events', () => {
     const base = {
       ...identity,
@@ -885,7 +1049,7 @@ describe('decision event fold', () => {
   it.each([
     ['pending with comment ID', {
       status: 'pending',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
     }],
     ['pending with error', {
       status: 'pending',
@@ -896,7 +1060,7 @@ describe('decision event fold', () => {
     }],
     ['synced with error', {
       status: 'synced',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       sanitizedError: 'Contradictory success.',
     }],
     ['failed without error', {
@@ -904,7 +1068,7 @@ describe('decision event fold', () => {
     }],
     ['failed with comment ID', {
       status: 'failed',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       sanitizedError: 'Sync failed.',
     }],
   ])('rejects an invalid GitHub sync state: %s', (_case, fields) => {
@@ -952,7 +1116,7 @@ describe('decision event fold', () => {
         number: 42,
       },
       status: 'synced',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       commentUrl,
     })).toThrow();
   });
@@ -966,7 +1130,7 @@ describe('decision event fold', () => {
         number: 42,
       },
       status: 'synced',
-      commentId: 'IC_kwDOexample',
+      commentId: '1',
       commentUrl: 'https://github.com/albert-einshutoin/takt-private/pull/42#issuecomment-1',
     });
 

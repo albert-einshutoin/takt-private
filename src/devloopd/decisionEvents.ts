@@ -264,6 +264,7 @@ const GithubFailedSyncEventSchema = z.object({
 function validateGithubCommentUrl(
   event: {
     readonly target: z.output<typeof DecisionGithubTargetSchema>;
+    readonly commentId: string;
     readonly commentUrl: string;
   },
   context: z.RefinementCtx,
@@ -273,8 +274,11 @@ function validateGithubCommentUrl(
     url.pathname.split('/').filter(Boolean);
   const expectedCollection = event.target.kind === 'issue' ? 'issues' : 'pull';
   const expectedRepository = event.target.repository.split('/');
+  const expectedUrl = `https://github.com/${event.target.repository}/${expectedCollection}`
+    + `/${event.target.number}#issuecomment-${event.commentId}`;
   const matchesTarget = (
-    url.protocol === 'https:'
+    event.commentUrl === expectedUrl
+    && url.protocol === 'https:'
     && url.hostname === 'github.com'
     && (url.port === '' || url.port === '443')
     && url.username === ''
@@ -305,12 +309,17 @@ const GithubSyncEventRawSchema = z.discriminatedUnion('status', [
   GithubFailedSyncEventSchema,
 ]).superRefine((event, context) => {
   if (event.status === 'synced' && event.commentUrl !== undefined) {
-    validateGithubCommentUrl({ target: event.target, commentUrl: event.commentUrl }, context);
+    validateGithubCommentUrl({
+      target: event.target,
+      commentId: event.commentId,
+      commentUrl: event.commentUrl,
+    }, context);
   } else if (event.status === 'verified') {
     validateGithubCommentUrl(event, context);
   } else if (event.status === 'missing') {
     validateGithubCommentUrl({
       target: event.target,
+      commentId: event.missingCommentId,
       commentUrl: event.missingCommentUrl,
     }, context);
   }
@@ -899,6 +908,38 @@ export function foldDecisionEvents(events: readonly unknown[]): DecisionFoldResu
           knownCommentUrl: previousSync.knownCommentUrl,
         };
       const inheritedUncertainty = previousSync?.postUncertain ?? false;
+      const incomingVerifiedRef = (
+        event.status === 'verified'
+        || (event.status === 'synced' && event.commentUrl !== undefined)
+      ) ? {
+          commentId: event.commentId,
+          commentUrl: event.commentUrl,
+        } : undefined;
+      const legacySyncedConflictsWithKnown = (
+        event.status === 'synced'
+        && event.commentUrl === undefined
+        && previousSync?.knownCommentId !== undefined
+        && event.commentId !== previousSync.knownCommentId
+      );
+      if (
+        legacySyncedConflictsWithKnown
+        || (
+          previousSync?.knownCommentId !== undefined
+          && previousSync.knownCommentUrl !== undefined
+          && incomingVerifiedRef !== undefined
+          && (
+            incomingVerifiedRef.commentId !== previousSync.knownCommentId
+            || incomingVerifiedRef.commentUrl !== previousSync.knownCommentUrl
+          )
+        )
+      ) {
+        issues.push(issueFor(
+          event,
+          'invalid_transition',
+          'GitHub verified comment reference cannot change without matching missing evidence',
+        ));
+        continue;
+      }
       if (event.status === 'pending') {
         projection.githubSync = deepFreeze({
           eventId: event.eventId,

@@ -623,6 +623,64 @@ describe('decision GitHub synchronization', () => {
     expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
   });
 
+  it('keeps the original known ref after a malicious verified replacement and never posts', async () => {
+    const identity = {
+      decisionId: request.decisionId,
+      decisionVersion: request.decisionVersion,
+      contextHash: request.contextHash,
+      target: { kind: 'issue' as const, repository: 'octo/project', number: 42 },
+    };
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionGithubSyncEvent({
+      ...identity,
+      status: 'synced',
+      commentId: '123',
+      commentUrl: 'https://github.com/octo/project/issues/42#issuecomment-123',
+    }, { eventId: 'evt_known_ref_123' }));
+    appendDevloopLedgerEvent(store.ledgerPath, createDecisionGithubSyncEvent({
+      ...identity,
+      status: 'verified',
+      commentId: '456',
+      commentUrl: 'https://github.com/octo/project/issues/42#issuecomment-456',
+    }, { eventId: 'evt_malicious_verified_456' }));
+    expect(store.get(request.decisionId)?.githubSync).toMatchObject({
+      knownCommentId: '123',
+      knownCommentUrl: 'https://github.com/octo/project/issues/42#issuecomment-123',
+    });
+
+    const preview = buildDecisionGithubPreview(store.get(request.decisionId)!);
+    const runner = new FakeRunner();
+    runner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: 123,
+          html_url: 'https://github.com/octo/project/issues/42#issuecomment-123',
+          body: preview.body,
+        }),
+        stderr: '',
+      },
+    );
+
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner,
+    });
+
+    expect(result).toMatchObject({ status: 'synced', existing: true, commentId: '123' });
+    expect(runner.calls[1]?.args.at(-1)).toBe('repos/octo/project/issues/comments/123');
+    expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(0);
+  });
+
   it('allows one replacement POST only after explicit missing evidence is durable', async () => {
     const firstRunner = new FakeRunner();
     firstRunner.results.push(
