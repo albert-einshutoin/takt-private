@@ -1,6 +1,6 @@
 {
   "name": "TAKT Development",
-  "image": "mcr.microsoft.com/devcontainers/typescript-node:20",
+  "image": "node:22.13.1-bookworm",
   "postCreateCommand": "npm ci && npm run build",
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}

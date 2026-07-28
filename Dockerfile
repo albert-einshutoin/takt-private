@@ -1,7 +1,9 @@
 # TAKT - Docker環境
 # 他の環境でビルド・テストが動作するかを確認するため
 
-FROM node:20-alpine
+# This image builds and tests the source, so it follows devEngines rather than
+# the wider Node range supported by the published package.
+FROM node:22.13.1-alpine
 
 WORKDIR /app
 

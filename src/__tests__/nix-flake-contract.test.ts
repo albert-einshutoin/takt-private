@@ -82,6 +82,21 @@ describe('Nix flake contract', () => {
     expect(flake).not.toContain(`homepage = "${packageJson.homepage}"`);
   });
 
+  it('Given the npm lock changes, When Nix builds dependencies, Then the fixed-output hash matches CI', () => {
+    const flake = readRequiredFile('flake.nix');
+    const packageLock = JSON.parse(readRequiredFile('package-lock.json')) as {
+      packages?: Record<string, { bin?: Record<string, string> }>;
+    };
+
+    expect(packageLock.packages?.['']?.bin).toMatchObject({
+      takt: 'bin/takt.js',
+      'takt-dev': 'bin/takt.js',
+    });
+    expect(flake).toContain(
+      'npmDepsHash = "sha256-d3a8mdI/SUbqS2zyHybouH3uaMwPX/TSrdmUKOsgIKY=";',
+    );
+  });
+
   it('Given runtime requirements, When package and dev shell are defined, Then Node is shared and Bun is development-only', () => {
     const flake = readRequiredFile('flake.nix');
 

@@ -12,6 +12,9 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -19,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.13.1
           cache: npm
       - run: npm ci
       - run: npm run build
@@ -31,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.13.1
           cache: npm
       - run: npm ci
       - run: npm run build
@@ -43,8 +46,37 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22.13.1
           cache: npm
       - run: npm ci
       - run: npm run build
       - run: npm run test:e2e:mock
+
+  runtime-smoke:
+    name: Node 20.6 packaged CLI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use development Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.1
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Pack the production artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/takt-package"
+          npm pack --pack-destination "$RUNNER_TEMP/takt-package"
+      - name: Use minimum supported runtime Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.6.0
+      - name: Install production dependencies and start the CLI
+        run: |
+          runtime_dir="$RUNNER_TEMP/takt-runtime-smoke"
+          mkdir -p "$runtime_dir"
+          cd "$runtime_dir"
+          npm init --yes
+          npm install --omit=dev "$RUNNER_TEMP/takt-package/"*.tgz
+          NO_UPDATE_NOTIFIER=1 ./node_modules/.bin/takt --version
