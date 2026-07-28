@@ -185,12 +185,26 @@ describe('dependency versions', () => {
 
     // Exact versions keep future lock refreshes from silently restoring known-vulnerable releases.
     expect(getLockedPackage(packageLock, 'node_modules/ajv').version).toBe('6.15.0');
-    expect(getLockedPackage(packageLock, 'node_modules/express-rate-limit').version).toBe('8.5.2');
+    expect(getLockedPackage(packageLock, 'node_modules/body-parser').version).toBe('2.3.0');
     expect(getLockedPackage(packageLock, 'node_modules/fast-uri').version).toBe('3.1.4');
     expect(getLockedPackage(packageLock, 'node_modules/hono').version).toBe('4.12.32');
-    expect(getLockedPackage(packageLock, 'node_modules/ip-address').version).toBe('10.2.0');
+    expect(getLockedPackage(packageLock, 'node_modules/postcss').version).toBe('8.5.23');
     expect(getLockedPackage(packageLock, 'node_modules/protobufjs').version).toBe('7.6.5');
-    expect(getLockedPackage(packageLock, 'node_modules/qs').version).toBe('6.15.2');
+  });
+
+  it('keeps security refreshes inside the existing runtime and toolchain majors', () => {
+    const packageLock = readPackageLock();
+
+    // These exact boundaries intentionally defer ecosystem major upgrades to isolated PRs.
+    expect(getLockedPackage(packageLock, 'node_modules/@hono/node-server').version).toBe('1.19.14');
+    expect(getLockedPackage(packageLock, 'node_modules/brace-expansion').version).toBe('2.1.2');
+    expect(getLockedPackage(packageLock, 'node_modules/minimatch').version).toBe('9.0.9');
+    expect(
+      getLockedPackage(
+        packageLock,
+        'node_modules/@typescript-eslint/visitor-keys/node_modules/eslint-visitor-keys',
+      ).version,
+    ).toBe('4.2.1');
   });
 
   it('locks test runner transitive dependencies to patched security releases', () => {
