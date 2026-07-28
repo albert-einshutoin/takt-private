@@ -96,6 +96,33 @@ describe('devloopd command runner', () => {
     },
   );
 
+  it.each(['stdout', 'stderr'] as const)(
+    'decodes split UTF-8 code points from %s without replacement corruption',
+    async (stream) => {
+      const runner = createDefaultDevloopCommandRunner();
+      const target = stream === 'stdout' ? 'process.stdout' : 'process.stderr';
+      const result = await runner.exec(process.execPath, [
+        '-e',
+        `${target}.write(Buffer.from([0xe3]));setTimeout(()=>${target}.write(Buffer.from([0x81,0x82])),20);`,
+      ], { maxOutputBytes: 16 });
+
+      expect(result.exitCode).toBe(0);
+      expect(stream === 'stdout' ? result.stdout : result.stderr).toBe('あ');
+      expect(`${result.stdout}${result.stderr}`).not.toContain('�');
+    },
+  );
+
+  it('replaces an incomplete trailing UTF-8 sequence deterministically', async () => {
+    const runner = createDefaultDevloopCommandRunner();
+
+    const result = await runner.exec(process.execPath, [
+      '-e',
+      'process.stdout.write(Buffer.from([0xe3,0x81]));',
+    ], { maxOutputBytes: 16 });
+
+    expect(result).toEqual({ exitCode: 0, stdout: '�', stderr: '' });
+  });
+
   it('resolves GitHub metadata timeout from environment with a safe default', () => {
     expect(resolveGithubMetadataTimeoutMs({})).toBe(DEFAULT_GITHUB_METADATA_TIMEOUT_MS);
     expect(resolveGithubMetadataTimeoutMs({ TAKT_LOOP_GH_TIMEOUT_MS: '1234' })).toBe(1234);

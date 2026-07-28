@@ -1,5 +1,6 @@
 import { accessSync, constants } from 'node:fs';
 import { delimiter, extname, join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { crossSpawn } from '../shared/utils/index.js';
 
 export interface DevloopCommandResult {
@@ -127,6 +128,8 @@ export function createDefaultDevloopCommandRunner(): DevloopCommandRunner {
           : undefined;
         let stdoutBytes = 0;
         let stderrBytes = 0;
+        const stdoutDecoder = new StringDecoder('utf8');
+        const stderrDecoder = new StringDecoder('utf8');
 
         const resolveOnce = (result: DevloopCommandResult): void => {
           if (settled) return;
@@ -182,10 +185,10 @@ export function createDefaultDevloopCommandRunner(): DevloopCommandRunner {
           }
           if (stream === 'stdout') {
             stdoutBytes = nextBytes;
-            stdout += chunk.toString('utf-8');
+            stdout += stdoutDecoder.write(chunk);
           } else {
             stderrBytes = nextBytes;
-            stderr += chunk.toString('utf-8');
+            stderr += stderrDecoder.write(chunk);
           }
         };
 
@@ -228,6 +231,11 @@ export function createDefaultDevloopCommandRunner(): DevloopCommandRunner {
             });
             return;
           }
+          // StringDecoder preserves multibyte code points split across data
+          // chunks and deterministically replaces an incomplete trailing
+          // sequence instead of silently dropping or double-decoding bytes.
+          stdout += stdoutDecoder.end();
+          stderr += stderrDecoder.end();
           const signalDetail = signal ? `terminated by signal ${signal}` : '';
           resolveOnce({
             exitCode: exitCode ?? 1,

@@ -21,6 +21,7 @@ import { createDefaultDevloopCommandRunner } from '../devloopd/commandRunner.js'
 import {
   createDecisionAppliedEvent,
   createDecisionApplyStartedEvent,
+  type DecisionProjection,
 } from '../devloopd/decisionEvents.js';
 import { createDecisionRequest, type DecisionRequest } from '../devloopd/decisionRequest.js';
 import { DecisionStore } from '../devloopd/decisionStore.js';
@@ -34,6 +35,7 @@ class FakeRunner implements DevloopCommandRunner {
   }> = [];
   readonly results: DevloopCommandResult[] = [];
   thrown: unknown;
+  beforeResult?: (callIndex: number, args: readonly string[]) => void;
 
   resolveCommand(command: string): string | undefined {
     return command === 'gh' ? '/usr/bin/gh' : undefined;
@@ -46,6 +48,7 @@ class FakeRunner implements DevloopCommandRunner {
   ): Promise<DevloopCommandResult> {
     this.calls.push({ command, args, options });
     if (this.thrown !== undefined) throw this.thrown;
+    this.beforeResult?.(this.calls.length, args);
     return this.results.shift() ?? { exitCode: 1, stdout: '', stderr: 'unexpected command' };
   }
 }
@@ -499,6 +502,234 @@ describe('decision GitHub synchronization', () => {
     expect(after?.status).toBe('applied');
     expect(after?.answer).toEqual(before?.answer);
     expect(after?.applyResult).toEqual(before?.applyResult);
+  });
+
+  it('restarts after GET when the local projection advances before POST', async () => {
+    const runner = new FakeRunner();
+    runner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: 'https://github.com/octo/project/issues/42#issuecomment-411\n',
+        stderr: '',
+      },
+    );
+    runner.beforeResult = (callIndex) => {
+      if (callIndex === 1) markApplied(store, request);
+    };
+
+    const result = await syncDecisionToGithub({ store, decisionId: request.decisionId, runner });
+    const post = runner.calls.find((call) => call.args[1] === 'comment');
+    const body = post?.args[post.args.indexOf('--body') + 1];
+
+    expect(result).toMatchObject({ status: 'synced', commentId: '411' });
+    expect(runner.calls.map((call) => call.args[1])).toEqual(['view', 'view', 'comment']);
+    expect(body).toContain('状態: 適用済み');
+    expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(1);
+  });
+
+  it('patches the latest projection when state advances after POST before local CAS', async () => {
+    const answeredPreview = buildDecisionGithubPreview(store.get(request.decisionId)!);
+    const appliedBody = answeredPreview.body.replace('状態: 回答済み', '状態: 適用済み');
+    const runner = new FakeRunner();
+    runner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: 'https://github.com/octo/project/issues/42#issuecomment-412\n',
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [{
+            id: 'IC_412',
+            url: 'https://github.com/octo/project/issues/42#issuecomment-412',
+            viewerDidAuthor: true,
+            body: answeredPreview.body,
+          }],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: 412,
+          html_url: 'https://github.com/octo/project/issues/42#issuecomment-412',
+          body: appliedBody,
+        }),
+        stderr: '',
+      },
+    );
+    let advanced = false;
+
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner,
+      afterCommentCreated() {
+        if (!advanced) {
+          advanced = true;
+          markApplied(store, request);
+        }
+      },
+    });
+    const syncedEvents = store.readStrict().events.filter((event) =>
+      event !== null
+      && typeof event === 'object'
+      && Reflect.get(event, 'eventType') === 'devloop_decision_github_sync'
+      && Reflect.get(event, 'status') === 'synced');
+
+    expect(result).toMatchObject({ status: 'synced', existing: true, commentId: '412' });
+    expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(1);
+    expect(runner.calls.filter((call) => call.args[0] === 'api')).toHaveLength(1);
+    expect(runner.calls.at(-1)?.args.at(-1)).toBe(`body=${appliedBody}`);
+    expect(store.get(request.decisionId)?.status).toBe('applied');
+    expect(store.get(request.decisionId)?.githubSync?.status).toBe('synced');
+    expect(syncedEvents).toHaveLength(1);
+  });
+
+  it('reconciles again when projection changes while PATCH is in flight', async () => {
+    const answeredPreview = buildDecisionGithubPreview(store.get(request.decisionId)!);
+    const openBody = answeredPreview.body.replace('状態: 回答済み', '状態: 判断待ち');
+    const appliedBody = answeredPreview.body.replace('状態: 回答済み', '状態: 適用済み');
+    const runner = new FakeRunner();
+    runner.results.push(
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [{
+            id: 'IC_413',
+            url: 'https://github.com/octo/project/issues/42#issuecomment-413',
+            viewerDidAuthor: true,
+            body: openBody,
+          }],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: 413,
+          html_url: 'https://github.com/octo/project/issues/42#issuecomment-413',
+          body: answeredPreview.body,
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [{
+            id: 'IC_413',
+            url: 'https://github.com/octo/project/issues/42#issuecomment-413',
+            viewerDidAuthor: true,
+            body: answeredPreview.body,
+          }],
+        }),
+        stderr: '',
+      },
+      {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: 413,
+          html_url: 'https://github.com/octo/project/issues/42#issuecomment-413',
+          body: appliedBody,
+        }),
+        stderr: '',
+      },
+    );
+    runner.beforeResult = (callIndex) => {
+      if (callIndex === 2) markApplied(store, request);
+    };
+
+    const result = await syncDecisionToGithub({ store, decisionId: request.decisionId, runner });
+    const patchBodies = runner.calls
+      .filter((call) => call.args[0] === 'api')
+      .map((call) => call.args.at(-1));
+
+    expect(result).toMatchObject({ status: 'synced', commentId: '413' });
+    expect(patchBodies).toEqual([
+      `body=${answeredPreview.body}`,
+      `body=${appliedBody}`,
+    ]);
+    expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(0);
+    expect(store.get(request.decisionId)?.status).toBe('applied');
+    expect(store.get(request.decisionId)?.githubSync?.status).toBe('synced');
+  });
+
+  it('fails with a fixed event when the publish snapshot never stabilizes', async () => {
+    const realGet = store.get.bind(store);
+    let getCalls = 0;
+    const flappingStore = new DecisionStore(repoPath);
+    flappingStore.get = ((decisionId: string): DecisionProjection | undefined => {
+      const projection = realGet(decisionId);
+      if (projection === undefined) return undefined;
+      const position = getCalls % 3;
+      const iteration = Math.floor(getCalls / 3);
+      getCalls += 1;
+      const snapshotStatus = iteration % 2 === 0 ? 'answered' : 'applied';
+      const status = position === 2
+        ? snapshotStatus === 'answered' ? 'applied' : 'answered'
+        : snapshotStatus;
+      return Object.freeze({ ...projection, status });
+    }) as typeof flappingStore.get;
+    const runner = new FakeRunner();
+    for (let index = 0; index < 4; index += 1) {
+      runner.results.push({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 42,
+          url: 'https://github.com/octo/project/issues/42',
+          comments: [],
+        }),
+        stderr: '',
+      });
+    }
+
+    const result = await syncDecisionToGithub({
+      store: flappingStore,
+      decisionId: request.decisionId,
+      runner,
+    });
+
+    expect(result).toMatchObject({ status: 'failed', errorCode: 'sync_state_changed' });
+    expect(runner.calls).toHaveLength(4);
+    expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
+    expect(store.get(request.decisionId)?.githubSync).toMatchObject({
+      status: 'failed',
+      sanitizedError: 'GitHub同期に失敗しました。',
+    });
   });
 
   it('serializes concurrent synchronization so only one comment is posted', async () => {
