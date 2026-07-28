@@ -51,11 +51,10 @@ function createYamlParser(options: LoadConfigTraceOptions): (content: string) =>
     try {
       parsed = parseYaml(content);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       if (options.parseErrorPrefix) {
-        throw new Error(`${options.parseErrorPrefix}: ${message}`);
+        throw new Error(`${options.parseErrorPrefix}: invalid YAML`, { cause: error });
       }
-      throw new Error(message);
+      throw new Error('Configuration error: invalid YAML', { cause: error });
     }
 
     const sanitized = options.sanitize ? options.sanitize(parsed) : parsed;

@@ -25,8 +25,16 @@ describe('devloopd state store', () => {
     const filePath = makePath('ledger.jsonl');
     writeFileSync(`${filePath}.lock`, 'locked', 'utf-8');
 
-    expect(() => withDevloopFileLock(filePath, () => 'unreachable', { timeoutMs: 1, staleMs: 60_000 }))
-      .toThrow(/timed out waiting for devloop state lock/u);
+    let thrown: Error | undefined;
+    try {
+      withDevloopFileLock(filePath, () => 'unreachable', { timeoutMs: 1, staleMs: 60_000 });
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toMatch(/timed out waiting for devloop state lock/u);
+    expect(thrown?.cause).toBeInstanceOf(Error);
+    expect(JSON.stringify(thrown)).not.toContain(`${filePath}.lock`);
   });
 
   it('evicts stale locks before writing state', () => {

@@ -2187,4 +2187,21 @@ steps:
       rmSync(projectDir, { recursive: true, force: true });
     }
   });
+
+  it('invalid schema causeを内部保持し、列挙可能な出力へschema値を漏らさない', () => {
+    const secret = 'private-schema-keyword';
+    let thrown: Error | undefined;
+
+    try {
+      validateStructuredOutputAgainstSchema({}, {
+        type: secret,
+      });
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toContain('Structured output schema is invalid');
+    expect(thrown?.cause).toBeInstanceOf(Error);
+    expect(JSON.stringify(thrown)).not.toContain(secret);
+  });
 });

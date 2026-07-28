@@ -1254,12 +1254,22 @@ describe('fetchPrReviewComments', () => {
       reviews: [],
       files: [],
     };
+    const secret = 'private-gh-path';
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(ghResponse))
       .mockImplementationOnce(() => {
-        throw new Error('gh api graphql failed');
+        throw new Error(`gh api graphql failed: ${secret}`);
       });
-    expect(() => fetchPrReviewComments(52, '/project')).toThrow('GraphQL reviewThreads failed');
+    let thrown: Error | undefined;
+    try {
+      fetchPrReviewComments(52, '/project');
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toContain('GraphQL reviewThreads failed');
+    expect(thrown?.cause).toBeInstanceOf(Error);
+    expect(JSON.stringify(thrown)).not.toContain(secret);
   });
 
   it('should throw when gh CLI fails', () => {

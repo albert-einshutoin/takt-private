@@ -394,7 +394,7 @@ function fetchPrReviewThreads(owner: string, repo: string, prNumber: number, cwd
       `Pagination limit exceeded while fetching pull request #${prNumber} review threads (>${GRAPHQL_PAGINATION_HARD_CAP} pages)`,
     );
   } catch (err) {
-    throw new Error(`GraphQL reviewThreads failed: ${getErrorMessage(err)}`);
+    throw new Error('GraphQL reviewThreads failed', { cause: err });
   }
 }
 

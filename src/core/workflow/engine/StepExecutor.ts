@@ -303,6 +303,7 @@ export class StepExecutor {
       );
       throw new Error(
         `Step "${step.name}" requires structured_output for provider "${provider}": ${detail}`,
+        { cause: error },
       );
     }
   }

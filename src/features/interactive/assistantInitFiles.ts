@@ -30,10 +30,6 @@ function formatAssistantInitContextSection(files: LoadedAssistantInitFile[]): st
   ].join('\n\n');
 }
 
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function isInsideProjectRoot(projectRoot: string, targetPath: string): boolean {
   const relativePath = relative(projectRoot, targetPath);
   return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
@@ -86,7 +82,10 @@ function loadAssistantInitFile(
   try {
     realPath = realpathSync(resolvedPath);
   } catch (error) {
-    throw new Error(`Assistant init file '${configuredPath}' does not exist or cannot be accessed: ${getErrorMessage(error)}`);
+    throw new Error(
+      `Assistant init file '${configuredPath}' does not exist or cannot be accessed.`,
+      { cause: error },
+    );
   }
 
   if (!isInsideProjectRoot(projectRoot, realPath)) {
@@ -123,7 +122,9 @@ function loadAssistantInitFile(
       content: readFileSync(realPath, 'utf-8'),
     };
   } catch (error) {
-    throw new Error(`Failed to read assistant init file '${configuredPath}': ${getErrorMessage(error)}`);
+    throw new Error(`Failed to read assistant init file '${configuredPath}'.`, {
+      cause: error,
+    });
   }
 }
 

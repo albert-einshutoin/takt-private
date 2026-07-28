@@ -163,7 +163,10 @@ function parseTranscriptLineForPolling(
       return undefined;
     }
     if (error instanceof SyntaxError) {
-      throw new Error(`Malformed Claude terminal transcript JSON at line ${lineNumber}: ${error.message}`);
+      throw new Error(
+        `Malformed Claude terminal transcript JSON at line ${lineNumber}: ${error.message}`,
+        { cause: error },
+      );
     }
     throw error;
   }

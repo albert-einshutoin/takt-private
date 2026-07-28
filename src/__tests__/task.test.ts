@@ -346,10 +346,21 @@ describe('TaskRunner (tasks.yaml)', () => {
 
   it('should preserve corrupted tasks.yaml and throw', () => {
     mkdirSync(join(testDir, '.takt'), { recursive: true });
-    writeFileSync(join(testDir, '.takt', 'tasks.yaml'), 'tasks:\n  - name: [broken', 'utf-8');
+    const secret = 'private-task-secret';
+    writeFileSync(join(testDir, '.takt', 'tasks.yaml'), `tasks:\n  - name: [${secret}`, 'utf-8');
 
     const tasksFilePath = join(testDir, '.takt', 'tasks.yaml');
-    expect(() => runner.listTasks()).toThrow(/Invalid tasks\.yaml/);
+    let thrown: Error | undefined;
+    try {
+      runner.listTasks();
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown?.message).toMatch(/Invalid tasks\.yaml/);
+    expect(thrown?.message).not.toContain(secret);
+    expect(thrown?.cause).toBeInstanceOf(Error);
+    expect(JSON.stringify(thrown)).not.toContain(secret);
     expect(existsSync(tasksFilePath)).toBe(true);
   });
 

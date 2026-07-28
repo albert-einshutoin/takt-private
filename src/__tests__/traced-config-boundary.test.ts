@@ -76,6 +76,29 @@ describe('traced config boundaries', () => {
     expect(traceEntries.get('provider_options.claude.allowed_tools')?.origin).toBe('local');
   });
 
+  it('project config parse causeを内部保持し、列挙可能な出力へ設定本文を漏らさない', () => {
+    const tempDir = join(tmpdir(), `takt-traced-invalid-${randomUUID()}`);
+    const configPath = join(tempDir, 'config.yaml');
+    const secret = 'private-config-secret';
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(configPath, `provider: [${secret}`, 'utf-8');
+
+    try {
+      let thrown: Error | undefined;
+      try {
+        loadProjectConfigTrace(configPath, []);
+      } catch (error) {
+        thrown = error as Error;
+      }
+
+      expect(thrown?.message).toContain(`Configuration error: failed to parse ${configPath}`);
+      expect(thrown?.cause).toBeInstanceOf(Error);
+      expect(JSON.stringify(thrown)).not.toContain(secret);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('project config loader は root JSON env override の opaque ancestor 規則を rawConfig と origin 解決で共有する', () => {
     const tempDir = join(tmpdir(), `takt-traced-loader-${randomUUID()}`);
     const configDir = join(tempDir, '.takt');
