@@ -211,6 +211,11 @@ rerun them with a structured producer or handle them manually.
 After an answer, optionally mirror its status to the fixed GitHub target:
 
 ```bash
+devloopd decisions preview-github \
+  --cwd /path/to/repo \
+  --id dec_example \
+  --json
+
 devloopd decisions sync-github \
   --cwd /path/to/repo \
   --id dec_example \
@@ -219,6 +224,12 @@ devloopd decisions sync-github \
   --expected-preview-sha256 <64-character-sha256> \
   --json
 ```
+
+`preview-github` is read-only. Its JSON returns `decisionVersion`,
+`contextHash`, and the canonical `preview.target`, `preview.marker`,
+`preview.body`, and `preview.sha256`. Pass those binding values unchanged to
+the corresponding `sync-github` options; in particular,
+`preview.sha256` is the value for `--expected-preview-sha256`.
 
 The comment contains a stable marker, ID, version, kind, and status only. Answer
 text, rationale, evidence, local paths, and private task prose stay local.

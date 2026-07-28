@@ -66,6 +66,7 @@ devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
 devloopd decisions list --cwd /path/to/repo --status open --json
 devloopd decisions show --cwd /path/to/repo --id <decision-id> --json
+devloopd decisions preview-github --cwd /path/to/repo --id <decision-id> --json
 devloopd decisions answer --cwd /path/to/repo --stdin-json --json
 devloopd decisions apply --cwd /path/to/repo --id <decision-id> --expected-version <version> --expected-context-hash <hash> --json
 devloopd decisions sync-github --cwd /path/to/repo --id <decision-id> --expected-version <version> --expected-context-hash <hash> --expected-preview-sha256 <hash> --json
@@ -141,6 +142,7 @@ The provider smoke matrix always prints `pass`, `fail`, or `skip` for every prov
 |---------|---------|-------------|
 | `list` | `--cwd <path>`, `--status <status>`, `--json` | List projections. Status is `open`, `answered`, `applying`, `applied`, or `revalidation_required` |
 | `show` | `--cwd <path>`, `--id <decision-id>`, `--json` | Show the question, Why, How, constraints, version, hash, and typed guard |
+| `preview-github` | `--cwd <path>`, `--id <decision-id>`, `--json` | Read the canonical sanitized target, body, and SHA-256 without writing the ledger or GitHub |
 | `answer` | `--cwd <path>`, `--stdin-json`, `--json` | Atomically record a version/hash-bound answer from bounded UTF-8 stdin |
 | `apply` | `--cwd <path>`, `--id <decision-id>`, `--expected-version <version>`, `--expected-context-hash <hash>`, `--json` | Revalidate and invoke only the registered typed resume adapter |
 | `sync-github` | `--cwd <path>`, `--id <decision-id>`, `--expected-version <version>`, `--expected-context-hash <hash>`, `--expected-preview-sha256 <hash>`, `--json` | Optionally mirror a sanitized status to the fixed Issue or PR target, bound to the confirmed canonical preview |

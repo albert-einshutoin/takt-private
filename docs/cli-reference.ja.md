@@ -66,6 +66,7 @@ devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
 devloopd decisions list --cwd /path/to/repo --status open --json
 devloopd decisions show --cwd /path/to/repo --id <decision-id> --json
+devloopd decisions preview-github --cwd /path/to/repo --id <decision-id> --json
 devloopd decisions answer --cwd /path/to/repo --stdin-json --json
 devloopd decisions apply --cwd /path/to/repo --id <decision-id> --expected-version <version> --expected-context-hash <hash> --json
 devloopd decisions sync-github --cwd /path/to/repo --id <decision-id> --expected-version <version> --expected-context-hash <hash> --expected-preview-sha256 <hash> --json
@@ -138,6 +139,7 @@ provider smoke matrix は全 provider について `pass`、`fail`、`skip` を�
 |---------|-----------|------|
 | `list` | `--cwd <path>`, `--status <status>`, `--json` | projection一覧。状態は `open`、`answered`、`applying`、`applied`、`revalidation_required` |
 | `show` | `--cwd <path>`, `--id <decision-id>`, `--json` | 質問、Why、How、回答条件、version、hash、型付きguardを表示 |
+| `preview-github` | `--cwd <path>`, `--id <decision-id>`, `--json` | 台帳やGitHubへ書き込まず、sanitize済みcanonical target、body、SHA-256を取得 |
 | `answer` | `--cwd <path>`, `--stdin-json`, `--json` | サイズ制限付きUTF-8 stdinからversion/hashに紐づく回答を原子的に記録 |
 | `apply` | `--cwd <path>`, `--id <decision-id>`, `--expected-version <version>`, `--expected-context-hash <hash>`, `--json` | 再検証後、登録済みの型付きresume adapterだけを実行 |
 | `sync-github` | `--cwd <path>`, `--id <decision-id>`, `--expected-version <version>`, `--expected-context-hash <hash>`, `--expected-preview-sha256 <hash>`, `--json` | 確認済みcanonical previewに拘束して固定Issue／PRへsanitize済み状態を任意同期 |

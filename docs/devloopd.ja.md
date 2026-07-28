@@ -204,6 +204,11 @@ v1を推測生成せず、`decisions answer` では回答できません。構�
 回答後、必要な場合だけ固定されたGitHub対象へ状態を同期します。
 
 ```bash
+devloopd decisions preview-github \
+  --cwd /path/to/repo \
+  --id dec_example \
+  --json
+
 devloopd decisions sync-github \
   --cwd /path/to/repo \
   --id dec_example \
@@ -212,6 +217,12 @@ devloopd decisions sync-github \
   --expected-preview-sha256 <64桁のSHA-256> \
   --json
 ```
+
+`preview-github` はread-onlyです。JSONには `decisionVersion`、
+`contextHash` とcanonicalな `preview.target`、`preview.marker`、
+`preview.body`、`preview.sha256` が含まれます。これらの拘束値を変更せず
+対応する `sync-github` optionへ渡してください。特に `preview.sha256` が
+`--expected-preview-sha256` の値です。
 
 コメントへ出すのは安定marker、ID、version、kind、状態だけです。回答本文、理由、
 証跡、ローカルpath、privateなtask本文はローカルに残します。同期は固定された
