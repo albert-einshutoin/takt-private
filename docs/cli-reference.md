@@ -66,9 +66,10 @@ devloopd import-takt-run --latest --issue 123
 devloopd reconcile-runs
 devloopd decisions list --cwd /path/to/repo --status open --json
 devloopd decisions show --cwd /path/to/repo --id <decision-id> --json
+devloopd decisions preview-github --cwd /path/to/repo --id <decision-id> --json
 devloopd decisions answer --cwd /path/to/repo --stdin-json --json
 devloopd decisions apply --cwd /path/to/repo --id <decision-id> --expected-version <version> --expected-context-hash <hash> --json
-devloopd decisions sync-github --cwd /path/to/repo --id <decision-id> --json
+devloopd decisions sync-github --cwd /path/to/repo --id <decision-id> --expected-version <version> --expected-context-hash <hash> --expected-preview-sha256 <hash> --json
 devloopd export-ledger --output .devloop/backup/ledger.jsonl
 devloopd timeline --issue 123
 devloopd automation-state --cwd /path/to/repo
@@ -141,9 +142,10 @@ The provider smoke matrix always prints `pass`, `fail`, or `skip` for every prov
 |---------|---------|-------------|
 | `list` | `--cwd <path>`, `--status <status>`, `--json` | List projections. Status is `open`, `answered`, `applying`, `applied`, or `revalidation_required` |
 | `show` | `--cwd <path>`, `--id <decision-id>`, `--json` | Show the question, Why, How, constraints, version, hash, and typed guard |
+| `preview-github` | `--cwd <path>`, `--id <decision-id>`, `--json` | Read the canonical sanitized target, body, and SHA-256 without writing the ledger or GitHub |
 | `answer` | `--cwd <path>`, `--stdin-json`, `--json` | Atomically record a version/hash-bound answer from bounded UTF-8 stdin |
 | `apply` | `--cwd <path>`, `--id <decision-id>`, `--expected-version <version>`, `--expected-context-hash <hash>`, `--json` | Revalidate and invoke only the registered typed resume adapter |
-| `sync-github` | `--cwd <path>`, `--id <decision-id>`, `--json` | Optionally mirror a sanitized status to the fixed Issue or PR target |
+| `sync-github` | `--cwd <path>`, `--id <decision-id>`, `--expected-version <version>`, `--expected-context-hash <hash>`, `--expected-preview-sha256 <hash>`, `--json` | Optionally mirror a sanitized status to the fixed Issue or PR target, bound to the confirmed canonical preview |
 
 The answer JSON requires `decisionId`, `expectedDecisionVersion`,
 `expectedContextHash`, `value`, `rationale`, and `idempotencyKey`. `value` is
@@ -157,7 +159,13 @@ never bypasses tests, review, clean-worktree, head-match, or merge gates.
 Old unstructured stops are not synthesized into decisions. Interrupted
 `applying` operations are reconciled from process identity without replaying an
 unknown side effect. GitHub sync records uncertain visibility and reconciles
-before retrying instead of blindly posting twice. Required `lockf`/`flock`
+before retrying instead of blindly posting twice. The required version, context
+hash, and preview SHA-256 inputs must match the current
+projection before another external write; POST uncertainty also fails closed
+with `preview_binding_mismatch`. The preview digest uses only the canonical
+target/marker/body envelope encoded as UTF-8 JSON with lexicographically sorted
+keys and unescaped slashes, and excludes answers, rationale, evidence, and local
+paths. Required `lockf`/`flock`
 kernel locks fail closed when unavailable; the outer kernel lock covers the
 GitHub operation while inner ledger transactions protect local transitions. New
 ledger directories are created as `0700`. Existing directories must be

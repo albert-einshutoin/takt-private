@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
   mkdirSync,
@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildDecisionGithubPreview,
-  syncDecisionToGithub,
+  syncDecisionToGithub as syncDecisionToGithubBound,
 } from '../devloopd/decisionGithubSync.js';
 import type {
   DevloopCommandResult,
@@ -28,6 +28,34 @@ import {
 import { createDecisionRequest, type DecisionRequest } from '../devloopd/decisionRequest.js';
 import { DecisionStore } from '../devloopd/decisionStore.js';
 import { appendDevloopLedgerEvent } from '../devloopd/ledger.js';
+
+type BoundSyncOptions = Parameters<typeof syncDecisionToGithubBound>[0];
+type TestSyncOptions = Omit<
+  BoundSyncOptions,
+  'expectedDecisionVersion' | 'expectedContextHash' | 'expectedPreviewSha256'
+> & Partial<Pick<
+  BoundSyncOptions,
+  'expectedDecisionVersion' | 'expectedContextHash' | 'expectedPreviewSha256'
+>>;
+
+function syncDecisionToGithub(options: TestSyncOptions) {
+  const projection = options.store.get(options.decisionId);
+  if (projection === undefined) {
+    return syncDecisionToGithubBound({
+      ...options,
+      expectedDecisionVersion: options.expectedDecisionVersion ?? 1,
+      expectedContextHash: options.expectedContextHash ?? '0'.repeat(64),
+      expectedPreviewSha256: options.expectedPreviewSha256 ?? '0'.repeat(64),
+    });
+  }
+  const preview = buildDecisionGithubPreview(projection);
+  return syncDecisionToGithubBound({
+    expectedDecisionVersion: projection.request.decisionVersion,
+    expectedContextHash: projection.request.contextHash,
+    expectedPreviewSha256: preview.sha256,
+    ...options,
+  });
+}
 
 class FakeRunner implements DevloopCommandRunner {
   readonly calls: Array<{
@@ -161,6 +189,21 @@ describe('decision GitHub synchronization', () => {
     expect(preview.marker).toBe('<!-- takt-decision:v1 id=dec_github version=1 -->');
     expect(preview.body).toContain(preview.marker);
     expect(preview.body).toContain('回答済み');
+    const canonicalEnvelope = JSON.stringify({
+      body: preview.body,
+      marker: preview.marker,
+      target: {
+        kind: preview.target.kind,
+        number: preview.target.number,
+        repository: preview.target.repository,
+      },
+    });
+    expect(preview.sha256).toBe(
+      createHash('sha256').update(canonicalEnvelope, 'utf8').digest('hex'),
+    );
+    expect(preview.sha256).toBe(
+      'a0ea9aa87883ac779f61df2a5cabee8d7d1b0b16b40b918338396ef2fbb4ce8c',
+    );
     for (const secret of [
       repoPath,
       '/Users/alice',
@@ -177,8 +220,81 @@ describe('decision GitHub synchronization', () => {
       'rationale-secret',
       'ghp_1234567890',
     ]) {
-      expect(preview.body).not.toContain(secret);
+      expect(JSON.stringify(preview)).not.toContain(secret);
     }
+  });
+
+  it('rejects version, context, and canonical preview digest mismatches before GitHub access', async () => {
+    const projection = store.get(request.decisionId)!;
+    const preview = buildDecisionGithubPreview(projection);
+    const cases = [
+      {
+        expectedDecisionVersion: request.decisionVersion + 1,
+        expectedContextHash: request.contextHash,
+        expectedPreviewSha256: preview.sha256,
+      },
+      {
+        expectedDecisionVersion: request.decisionVersion,
+        expectedContextHash: 'f'.repeat(64),
+        expectedPreviewSha256: preview.sha256,
+      },
+      {
+        expectedDecisionVersion: request.decisionVersion,
+        expectedContextHash: request.contextHash,
+        expectedPreviewSha256: '0'.repeat(64),
+      },
+    ];
+
+    for (const expected of cases) {
+      const runner = new FakeRunner();
+      const result = await syncDecisionToGithub({
+        store,
+        decisionId: request.decisionId,
+        runner,
+        ...expected,
+      });
+      expect(result).toMatchObject({
+        status: 'failed',
+        errorCode: 'preview_binding_mismatch',
+        sanitizedError: 'GitHub同期に失敗しました。',
+      });
+      expect(runner.calls).toHaveLength(0);
+    }
+  });
+
+  it('revalidates the canonical preview binding immediately before an external write', async () => {
+    const preview = buildDecisionGithubPreview(store.get(request.decisionId)!);
+    const runner = new FakeRunner();
+    runner.results.push({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        number: 42,
+        url: 'https://github.com/octo/project/issues/42',
+        comments: [],
+      }),
+      stderr: '',
+    });
+    runner.beforeResult = (callIndex) => {
+      if (callIndex === 1) markApplied(store, request);
+    };
+
+    const result = await syncDecisionToGithub({
+      store,
+      decisionId: request.decisionId,
+      runner,
+      expectedDecisionVersion: request.decisionVersion,
+      expectedContextHash: request.contextHash,
+      expectedPreviewSha256: preview.sha256,
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      errorCode: 'preview_binding_mismatch',
+    });
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls.some((call) => (
+      call.args.includes('comment') || call.args.includes('PATCH')
+    ))).toBe(false);
   });
 
   it('uses only the typed subject target and posts sanitized argv once', async () => {
@@ -961,7 +1077,7 @@ describe('decision GitHub synchronization', () => {
     expect(after?.applyResult).toEqual(before?.applyResult);
   });
 
-  it('restarts after GET when the local projection advances before POST', async () => {
+  it('fails closed after GET when the bound projection advances before POST', async () => {
     const runner = new FakeRunner();
     runner.results.push(
       {
@@ -993,16 +1109,15 @@ describe('decision GitHub synchronization', () => {
     };
 
     const result = await syncDecisionToGithub({ store, decisionId: request.decisionId, runner });
-    const post = runner.calls.find((call) => call.args[1] === 'comment');
-    const body = post?.args[post.args.indexOf('--body') + 1];
-
-    expect(result).toMatchObject({ status: 'synced', commentId: '411' });
-    expect(runner.calls.map((call) => call.args[1])).toEqual(['view', 'view', 'comment']);
-    expect(body).toContain('状態: 適用済み');
-    expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(1);
+    expect(result).toMatchObject({
+      status: 'failed',
+      errorCode: 'preview_binding_mismatch',
+    });
+    expect(runner.calls.map((call) => call.args[1])).toEqual(['view']);
+    expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(0);
   });
 
-  it('patches the latest projection when state advances after POST before local CAS', async () => {
+  it('does not patch after the bound projection advances following POST', async () => {
     const answeredPreview = buildDecisionGithubPreview(store.get(request.decisionId)!);
     const appliedBody = answeredPreview.body.replace('状態: 回答済み', '状態: 適用済み');
     const runner = new FakeRunner();
@@ -1059,13 +1174,14 @@ describe('decision GitHub synchronization', () => {
       && Reflect.get(event, 'eventType') === 'devloop_decision_github_sync'
       && Reflect.get(event, 'status') === 'synced');
 
-    expect(result).toMatchObject({ status: 'synced', existing: true, commentId: '412' });
+    expect(result).toMatchObject({
+      status: 'failed',
+      errorCode: 'preview_binding_mismatch',
+    });
     expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(1);
-    expect(runner.calls.filter((call) => call.args[0] === 'api')).toHaveLength(1);
-    expect(runner.calls.at(-1)?.args.at(-1)).toBe(`body=${appliedBody}`);
+    expect(runner.calls.filter((call) => call.args[0] === 'api')).toHaveLength(0);
     expect(store.get(request.decisionId)?.status).toBe('applied');
-    expect(store.get(request.decisionId)?.githubSync?.status).toBe('synced');
-    expect(syncedEvents).toHaveLength(1);
+    expect(syncedEvents).toHaveLength(0);
   });
 
   it('fails closed when interrupted after posting intent is durable but before POST starts', async () => {
@@ -1201,7 +1317,7 @@ describe('decision GitHub synchronization', () => {
     expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
   });
 
-  it('reconciles again when projection changes while PATCH is in flight', async () => {
+  it('does not issue another PATCH when the bound projection changes in flight', async () => {
     const answeredPreview = buildDecisionGithubPreview(store.get(request.decisionId)!);
     const openBody = answeredPreview.body.replace('状態: 回答済み', '状態: 判断待ち');
     const appliedBody = answeredPreview.body.replace('状態: 回答済み', '状態: 適用済み');
@@ -1263,17 +1379,19 @@ describe('decision GitHub synchronization', () => {
       .filter((call) => call.args[0] === 'api')
       .map((call) => call.args.at(-1));
 
-    expect(result).toMatchObject({ status: 'synced', commentId: '413' });
+    expect(result).toMatchObject({
+      status: 'failed',
+      errorCode: 'preview_binding_mismatch',
+    });
     expect(patchBodies).toEqual([
       `body=${answeredPreview.body}`,
-      `body=${appliedBody}`,
     ]);
     expect(runner.calls.filter((call) => call.args[1] === 'comment')).toHaveLength(0);
     expect(store.get(request.decisionId)?.status).toBe('applied');
-    expect(store.get(request.decisionId)?.githubSync?.status).toBe('synced');
+    expect(store.get(request.decisionId)?.githubSync?.status).not.toBe('synced');
   });
 
-  it('fails with a fixed event when the publish snapshot never stabilizes', async () => {
+  it('fails closed on the first bound preview change', async () => {
     const realGet = store.get.bind(store);
     let syntheticStatus: DecisionProjection['status'] = 'answered';
     const flappingStore = new DecisionStore(repoPath);
@@ -1306,13 +1424,12 @@ describe('decision GitHub synchronization', () => {
       runner,
     });
 
-    expect(result).toMatchObject({ status: 'failed', errorCode: 'sync_state_changed' });
-    expect(runner.calls).toHaveLength(4);
-    expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
-    expect(store.get(request.decisionId)?.githubSync).toMatchObject({
+    expect(result).toMatchObject({
       status: 'failed',
-      sanitizedError: 'GitHub同期に失敗しました。',
+      errorCode: 'preview_binding_mismatch',
     });
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls.every((call) => call.args[1] === 'view')).toBe(true);
   });
 
   it('serializes concurrent synchronization so only one comment is posted', async () => {
