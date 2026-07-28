@@ -2,10 +2,11 @@
 
 > [!IMPORTANT]
 > **このリポジトリは、[TAKT](https://github.com/nrslib/takt) を基に独立して開発している非公式の downstream です。**
-> TAKT は Masanobu Naruse 氏によって作られ、upstream リポジトリでコントリビューターとともに開発されています。
+> TAKT は upstream リポジトリで nrslib とコントリビューターによって開発・保守されています。
 > この downstream は元の MIT License と著作権表示を維持していますが、TAKT の公式リリースではなく、upstream のメンテナーによる推奨・サポートを受けたものではありません。
 
 このリポジトリで private-takt の成果物であることを明記していない限り、npm の公式 `takt` パッケージ、リリース、ドキュメント、コミュニティへのリンクは元のプロジェクトが管理するものです。
+TAKT を MIT License で公開している upstream のメンテナーとコントリビューターに敬意と感謝を示し、private-takt ではプロジェクトの由来と成果の帰属が明確に伝わる形で、その成果を基盤として開発します。
 
 <p align="center">
   <strong>Upstream TAKT プロジェクト</strong><br>
@@ -44,8 +45,8 @@ TAKT は TAKT 自身で開発しています（ドッグフーディング）。
 
 private-takt は、TAKT を基盤として個人利用向けの自動化・運用機能を開発するための downstream です。プロジェクトの由来と upstream のメンテナー・コントリビューターによる成果が明確に残るよう、Git の履歴と MIT License の帰属表示を維持しています。
 
-- **元のプロジェクト:** [nrslib/takt](https://github.com/nrslib/takt)
-- **原作者:** 維持している [MIT License](../LICENSE) に記載された Masanobu Naruse 氏
+- **Upstream のプロジェクトとメンテナー:** [nrslib/takt](https://github.com/nrslib/takt)
+- **維持している著作権表示:** 元の [MIT License](../LICENSE) に記載された `Copyright (c) 2026 Masanobu Naruse`
 - **Downstream の目的:** 個人向け自動化、サブスクリプション／ログイン方式の CLI 運用、長時間タスクの実行・復旧、および関連する運用ツール
 - **互換性:** upstream の変更は内容を確認したうえで選択的に取り込むため、すべての upstream リリースとの互換性は保証しません
 - **コントリビューション:** 広く有用で upstream の目的に合う変更は、焦点を絞ったコントリビューションとして提案する場合があります。downstream 固有の動作はこのリポジトリで管理します

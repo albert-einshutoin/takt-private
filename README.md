@@ -2,10 +2,11 @@
 
 > [!IMPORTANT]
 > **This is an unofficial, independently maintained downstream of [TAKT](https://github.com/nrslib/takt).**
-> TAKT was created by Masanobu Naruse and is developed with its contributors in the upstream repository.
+> TAKT is created and maintained by nrslib and contributors in the upstream repository.
 > This downstream keeps the original MIT license and copyright notice, but it is not an official TAKT release and is not endorsed or supported by the upstream maintainers.
 
 The official `takt` npm package, upstream releases, documentation, and community links are maintained by the original project unless this repository explicitly labels an artifact as a private-takt build.
+We are grateful to the upstream maintainers and contributors for making TAKT available under the MIT License; private-takt builds on that work while keeping its origin and authorship visible.
 
 <p align="center">
   <strong>Upstream TAKT project</strong><br>
@@ -44,8 +45,8 @@ TAKT is built with TAKT itself (dogfooding).
 
 private-takt exists to develop personal-use automation and operational capabilities on top of TAKT. It preserves the upstream Git history and MIT attribution so that the origin of the project and the work of its maintainers and contributors remain visible.
 
-- **Original project:** [nrslib/takt](https://github.com/nrslib/takt)
-- **Original author:** Masanobu Naruse, as identified in the preserved [MIT license](./LICENSE)
+- **Upstream project and maintainer:** [nrslib/takt](https://github.com/nrslib/takt)
+- **Preserved copyright notice:** `Copyright (c) 2026 Masanobu Naruse`, as stated in the original [MIT license](./LICENSE)
 - **Downstream purpose:** personal automation, subscription/login-based CLI operation, long-running task execution, recovery, and related operational tooling
 - **Compatibility:** upstream changes are evaluated and integrated deliberately; compatibility with every upstream release is not guaranteed
 - **Contributions:** broadly useful changes may be proposed to upstream as focused contributions when they align with upstream's goals; downstream-specific behavior remains here
