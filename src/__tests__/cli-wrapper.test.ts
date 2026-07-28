@@ -27,8 +27,14 @@ describe('cli wrapper import URL', () => {
     expect(url).toBe('file:///usr/local/lib/takt/dist/app/cli/index.js');
   });
 
-  it('uses pathToFileURL in the npm wrapper', async () => {
-    const wrapperPath = resolve('bin', 'takt');
+  it('uses pathToFileURL in the extension-bearing npm wrapper', async () => {
+    const packageJson = JSON.parse(await readFile(resolve('package.json'), 'utf8')) as {
+      bin?: Record<string, string>;
+    };
+    const publishedBin = packageJson.bin?.takt;
+    expect(publishedBin).toBe('./bin/takt.js');
+
+    const wrapperPath = resolve(publishedBin ?? '');
     const wrapperContents = await readFile(wrapperPath, 'utf8');
 
     expect(wrapperContents).toContain('pathToFileURL');
