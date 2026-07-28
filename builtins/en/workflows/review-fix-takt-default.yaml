@@ -282,6 +282,11 @@ steps:
     required_permission_mode: edit
     pass_previous_response: false
     instruction: fix
+    output_contracts:
+      report:
+        - name: fix-report.md
+          format: fix-report
+          use_judge: false
     rules:
       - condition: Fix complete
         next: ai-antipattern-review-1st
