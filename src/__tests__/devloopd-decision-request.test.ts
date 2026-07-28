@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import Ajv from 'ajv';
 import { describe, expect, it } from 'vitest';
 import {
   CreateDecisionRequestInputSchema,
@@ -45,6 +49,113 @@ const directRunGuard = {
   expectedAbortKind: 'blocked',
   expectedBlockedStep: 'compatibility',
 };
+
+const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+function readPublicContract(path: string): unknown {
+  return JSON.parse(readFileSync(join(repositoryRoot, path), 'utf8')) as unknown;
+}
+
+describe('public decision request v1 contract', () => {
+  it('keeps sanitized fixtures valid in both JSON Schema and the canonical runtime parser', () => {
+    const contract = readPublicContract('builtins/schemas/decision-request-v1.json');
+    const validate = new Ajv({ allErrors: true, jsonPointers: true }).compile(contract as object);
+    const fixturePaths = [
+      'fixtures/decisions/v1/yes-no.json',
+      'fixtures/decisions/v1/single-choice.json',
+      'fixtures/decisions/v1/issue-scout-choice.json',
+      'fixtures/decisions/v1/text.json',
+    ];
+
+    for (const fixturePath of fixturePaths) {
+      const fixture = readPublicContract(fixturePath);
+      const serialized = JSON.stringify(fixture);
+      expect(
+        validate(fixture),
+        `${fixturePath}: ${JSON.stringify(validate.errors)}`,
+      ).toBe(true);
+      expect(DecisionRequestSchema.safeParse(fixture).success, fixturePath).toBe(true);
+      expect(fixture).toMatchObject({
+        subject: {
+          repoPath: '/example/repo',
+          repository: 'example/repo',
+        },
+      });
+      expect(serialized).not.toMatch(/\/(?:Users|Volumes|home)\//u);
+      expect(serialized).not.toMatch(/[A-Za-z]:\\\\/u);
+      expect(serialized).not.toMatch(
+        /(?:api[_-]?key|authorization|bearer|cookie|password|secret|token)\s*[:=]/iu,
+      );
+    }
+  });
+
+  it('keeps structural rejection semantics aligned with the runtime parser', () => {
+    const contract = readPublicContract('builtins/schemas/decision-request-v1.json');
+    const validate = new Ajv({ allErrors: true, jsonPointers: true }).compile(contract as object);
+    const yesNo = readPublicContract('fixtures/decisions/v1/yes-no.json') as Record<string, unknown>;
+    const text = readPublicContract('fixtures/decisions/v1/text.json') as Record<string, unknown>;
+    const invalidSamples = [
+      { ...yesNo, unexpected: true },
+      { ...yesNo, kind: 'text' },
+      { ...text, options: [] },
+      { ...yesNo, contextHash: 'not-a-sha256' },
+      { ...yesNo, createdAt: '2026-07-27T09:00:00+09:00' },
+      {
+        ...yesNo,
+        subject: {
+          ...(yesNo.subject as Record<string, unknown>),
+          repoPath: '/example/repo\u0000hidden',
+        },
+      },
+      {
+        ...yesNo,
+        question: 'May the fictional release proceed?\u007f',
+      },
+    ];
+
+    for (const sample of invalidSamples) {
+      expect(validate(sample)).toBe(false);
+      expect(DecisionRequestSchema.safeParse(sample).success).toBe(false);
+    }
+  });
+
+  it('documents semantic checks that JSON Schema intentionally delegates to the runtime', () => {
+    const contract = readPublicContract('builtins/schemas/decision-request-v1.json');
+    const validate = new Ajv({ allErrors: true, jsonPointers: true }).compile(contract as object);
+    const choice = readPublicContract(
+      'fixtures/decisions/v1/single-choice.json',
+    ) as Record<string, unknown>;
+    const text = readPublicContract('fixtures/decisions/v1/text.json') as Record<string, unknown>;
+    const choiceOptions = choice.options as Record<string, unknown>[];
+    const semanticInvalidSamples = [
+      {
+        ...choice,
+        options: choiceOptions.map((option, index) => index === 1
+          ? { ...option, id: choiceOptions[0]?.id }
+          : option),
+      },
+      {
+        ...choice,
+        options: choiceOptions.map((option, index) => index === 0
+          ? { ...option, recommended: true }
+          : option),
+      },
+      {
+        ...text,
+        answerRequirements: {
+          rationaleRequired: false,
+          minimumTextLength: 2_001,
+          maximumTextLength: 2_000,
+        },
+      },
+    ];
+
+    for (const sample of semanticInvalidSamples) {
+      expect(validate(sample)).toBe(true);
+      expect(DecisionRequestSchema.safeParse(sample).success).toBe(false);
+    }
+  });
+});
 
 describe('createDecisionRequest', () => {
   it('computes the same context hash when identity, time, and local repository path differ', () => {

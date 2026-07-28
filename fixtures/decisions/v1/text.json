@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "decisionId": "dec_example_text",
+  "decisionVersion": 1,
+  "subject": {
+    "repoPath": "/example/repo",
+    "repository": "example/repo",
+    "runSlug": "run-issue-124",
+    "workflow": "requirements-review",
+    "step": "requirements",
+    "issueNumber": 124,
+    "title": "Clarify the fictional requirement"
+  },
+  "question": "What acceptance criterion should the fictional task use?",
+  "why": {
+    "summary": "The workflow cannot infer the missing requirement.",
+    "riskCategory": "requirements_ambiguity",
+    "reasons": [
+      "Two valid interpretations produce different behavior."
+    ],
+    "evidence": [
+      {
+        "kind": "report",
+        "reference": "requirements-report",
+        "summary": "The fictional report lists the unresolved ambiguity."
+      },
+      {
+        "kind": "changed_path",
+        "reference": "src/example.ts",
+        "summary": "The affected fictional module has two valid contracts."
+      },
+      {
+        "kind": "run",
+        "reference": "run-issue-124",
+        "summary": "The run stopped before implementation."
+      },
+      {
+        "kind": "policy",
+        "reference": "human-decision-boundary",
+        "summary": "Ambiguous requirements require a human answer."
+      }
+    ]
+  },
+  "how": {
+    "summary": "Continue only after the answer is revalidated.",
+    "expectedEffects": [
+      "Resume the registered workflow adapter."
+    ],
+    "verification": [
+      "Run the required tests and review the current repository state."
+    ]
+  },
+  "answerRequirements": {
+    "rationaleRequired": false,
+    "minimumTextLength": 10,
+    "maximumTextLength": 2000
+  },
+  "resumeGuard": {
+    "expectedDecisionVersion": 1,
+    "strategy": "direct_run",
+    "runSlug": "run-issue-124",
+    "expectedRunStatus": "aborted",
+    "expectedAbortKind": "blocked",
+    "expectedBlockedStep": "requirements"
+  },
+  "contextHash": "a25f7491bbaca3725755741cc28fc2949bd92e095324c6f9022a2610487faf8c",
+  "createdAt": "2026-07-27T00:02:00.000Z",
+  "kind": "text"
+}

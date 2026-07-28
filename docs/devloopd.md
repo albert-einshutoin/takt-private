@@ -135,6 +135,126 @@ takt --pipeline \
 | `--no-auto-pr` | Do not pass `--auto-pr` to TAKT |
 | `--no-quiet` | Do not pass `--quiet` to TAKT |
 
+## Structured Human Decisions
+
+When automation needs product policy, permission, ambiguous requirements, or
+another human-only judgment, a structured request is appended to the
+repository-local ledger. The local `.devloop/ledger.jsonl` is the source of
+truth. GitHub Issue or pull-request comments are an optional status mirror, not
+an input channel and not an authority for resuming work.
+
+Inspect the open inbox and one request:
+
+```bash
+devloopd decisions list --cwd /path/to/repo --status open
+devloopd decisions show --cwd /path/to/repo --id dec_example --json
+```
+
+`show` exposes the question, Why, How, answer constraints, current version,
+context hash, and typed resume guard. Answer data is accepted only as a bounded
+UTF-8 JSON document on standard input. Never put answer text or a rationale in
+command-line arguments:
+
+```bash
+devloopd decisions answer --cwd /path/to/repo --stdin-json --json <<'JSON'
+{
+  "decisionId": "dec_example",
+  "expectedDecisionVersion": 1,
+  "expectedContextHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "value": { "optionId": "yes" },
+  "rationale": "The fictional acceptance criteria are satisfied.",
+  "idempotencyKey": "answer-dec-example-1"
+}
+JSON
+```
+
+Use `{ "optionId": "<id>" }` for YES/NO and choice requests, or
+`{ "text": "<answer>" }` for text requests. The success response contains only
+stable identifiers and status; it never reflects the answer or rationale. The
+ledger derives the actor from the local process instead of trusting stdin.
+Version, context hash, answer shape, rationale requirement, and idempotency key
+are checked atomically. Reusing a key with different content fails.
+
+Recording an answer does not resume work. Apply the exact answered projection:
+
+```bash
+devloopd decisions apply \
+  --cwd /path/to/repo \
+  --id dec_example \
+  --expected-version 1 \
+  --expected-context-hash 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --json
+```
+
+Apply revalidates the registered typed guard immediately before the side effect.
+Depending on the strategy, this includes the blocked run state, active-run
+ownership, a clean worktree, the exact repository/PR/stage/head SHA, and the
+current candidate. A human answer never bypasses tests, code review,
+clean-worktree checks, current-head matching, merge policy, or any downstream
+quality gate. If state changed, the projection becomes
+`revalidation_required`; inspect it and receive a fresh request instead of
+forcing the old answer.
+
+An interrupted projection may remain `applying`. A later `apply` verifies the
+recorded process identity. A live owner is left alone; a dead or unverifiable
+owner is moved to `revalidation_required`, and external effects are not
+replayed. Repository execution claims and GitHub synchronization require the
+platform `lockf` or `flock` kernel advisory lock. If neither lock can be
+acquired, the operation fails closed. GitHub synchronization holds that outer
+kernel lock across inspection and the network side effect; its inner ledger
+transactions separately make each local read/validate/append transition atomic.
+
+Legacy unstructured workflow stops remain ordinary aborted runs. They are not
+guessed into Decision Request v1 and cannot be answered with `decisions answer`;
+rerun them with a structured producer or handle them manually.
+
+After an answer, optionally mirror its status to the fixed GitHub target:
+
+```bash
+devloopd decisions sync-github \
+  --cwd /path/to/repo \
+  --id dec_example \
+  --json
+```
+
+The comment contains a stable marker, ID, version, kind, and status only. Answer
+text, rationale, evidence, local paths, and private task prose stay local.
+Synchronization re-reads the fixed Issue/PR target and reconciles an existing
+marker before creating or updating a comment. Failures such as
+`sync_visibility_unconfirmed` and `sync_state_changed` preserve uncertainty in
+the ledger; retrying reconciles visibility and never converts an uncertain POST
+into a blind duplicate POST.
+
+TAKT creates a new ledger directory with mode `0700`. An existing repository
+state directory may be more readable (for example `0755`), but writes require it
+to be owned by the current user, be a real directory, and have no group/other
+write bits. The write path opens the ledger without following symlinks, then
+verifies an owner-matched, single-link regular file before changing its mode to
+`0600` and appending. The read path verifies any present canonical ledger and
+directory are regular, non-symlink filesystem objects, but does not
+retroactively change permissions or claim ownership. Operators should run
+`chmod 0700 .devloop` and
+`chmod 0600 .devloop/ledger.jsonl` when a restored repository is more
+permissive. Do not commit `.devloop/`, copy its raw content into tickets, or
+configure a ledger outside the target repository. Public examples use
+placeholder paths only. Malformed, incompatible, unavailable, or
+capacity-exceeded ledgers fail closed.
+Input, repository, and ledger failures use the stable
+`{ "schemaVersion": 1, "ok": false, "error": { "code": "...", "message":
+"..." } }` JSON envelope. Common codes include
+`stale_version`, `stale_context`, `decision_not_open`, `invalid_answer`,
+`rationale_required`, `idempotency_conflict`, `ledger_malformed`,
+`ledger_incompatible`, `ledger_unavailable`, and `ledger_capacity_exceeded`.
+
+Command outcomes keep their typed domain result at the top level. A non-applied
+`decisions apply --json` response is `{ "schemaVersion": 1, "ok": false,
+"decisionId": "...", "status": "revalidation_required", "reasonCode": "...",
+"sanitizedSummary": "..." }` or uses `status: "failed"` with `errorCode` and
+`sanitizedError`. A failed `decisions sync-github --json` response uses the same
+top-level `schemaVersion`, `ok`, `decisionId`, and `status: "failed"` fields with
+`errorCode` and `sanitizedError`. These fixed summaries never include answer
+text, rationale, evidence, or raw external-tool output.
+
 ## Import And Timeline
 
 TAKT remains the workflow engine and writes run metadata under `.takt/runs/`. `devloopd import-takt-run` imports that metadata into `.devloop/ledger.jsonl`, including artifact paths, byte sizes, and SHA-256 hashes for log and report files.

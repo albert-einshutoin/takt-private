@@ -1,0 +1,489 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://takt.dev/schemas/decision-request-v1.json",
+  "title": "TAKT Decision Request v1",
+  "description": "Portable structural contract for a sanitized structured human decision request. The TAKT runtime additionally verifies semantic guard bindings and contextHash.",
+  "$comment": "This schema is an interoperability shape, not a resume authorization boundary. Draft-07 cannot express uniqueness projected by option.id or compare sibling numeric fields. Use the canonical TAKT runtime parser to reject duplicate choice option IDs, multiple recommended options, minimumTextLength greater than maximumTextLength, unsafe normalized public text, cross-field guard mismatches, missing rationale requirements, decision-version mismatches, and semantic context-hash mismatches.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "decisionId",
+    "decisionVersion",
+    "subject",
+    "question",
+    "why",
+    "how",
+    "answerRequirements",
+    "resumeGuard",
+    "contextHash",
+    "createdAt",
+    "kind"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "decisionId": {
+      "$ref": "#/definitions/identifier"
+    },
+    "decisionVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "subject": {
+      "$ref": "#/definitions/subject"
+    },
+    "question": {
+      "$ref": "#/definitions/publicText"
+    },
+    "why": {
+      "$ref": "#/definitions/why"
+    },
+    "how": {
+      "$ref": "#/definitions/how"
+    },
+    "answerRequirements": {
+      "$ref": "#/definitions/answerRequirements"
+    },
+    "resumeGuard": {
+      "$ref": "#/definitions/resumeGuard"
+    },
+    "contextHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+    },
+    "kind": {
+      "enum": [
+        "yes_no",
+        "choice",
+        "text"
+      ]
+    },
+    "options": {
+      "type": "array"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "yes_no"
+        },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "additionalItems": false,
+          "items": [
+            {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/option"
+                },
+                {
+                  "properties": {
+                    "id": {
+                      "const": "yes"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/option"
+                },
+                {
+                  "properties": {
+                    "id": {
+                      "const": "no"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "options"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "choice"
+        },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/option"
+          }
+        }
+      },
+      "required": [
+        "options"
+      ]
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "text"
+        }
+      },
+      "not": {
+        "required": [
+          "options"
+        ]
+      }
+    }
+  ],
+  "definitions": {
+    "publicText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "candidateIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,38})/[A-Za-z0-9_.-]{1,100}$"
+    },
+    "headSha": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{40}$"
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repoPath",
+        "title"
+      ],
+      "properties": {
+        "repoPath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "allOf": [
+            {
+              "pattern": "^(?:/|[A-Za-z]:[\\\\/])"
+            },
+            {
+              "pattern": "^[^\\u0000-\\u001F\\u007F]*$"
+            }
+          ]
+        },
+        "repository": {
+          "$ref": "#/definitions/repository"
+        },
+        "runSlug": {
+          "$ref": "#/definitions/identifier"
+        },
+        "workflow": {
+          "$ref": "#/definitions/publicText"
+        },
+        "step": {
+          "$ref": "#/definitions/publicText"
+        },
+        "issueNumber": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "prNumber": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "headSha": {
+          "$ref": "#/definitions/headSha"
+        },
+        "candidateId": {
+          "$ref": "#/definitions/candidateIdentifier"
+        },
+        "title": {
+          "$ref": "#/definitions/publicText"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reference",
+        "summary"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "run",
+            "report",
+            "changed_path",
+            "check",
+            "issue",
+            "pr",
+            "policy"
+          ]
+        },
+        "reference": {
+          "$ref": "#/definitions/publicText"
+        },
+        "summary": {
+          "$ref": "#/definitions/publicText"
+        }
+      }
+    },
+    "why": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "riskCategory",
+        "reasons",
+        "evidence"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/definitions/publicText"
+        },
+        "riskCategory": {
+          "enum": [
+            "product_policy",
+            "human_policy",
+            "requirements_ambiguity",
+            "security",
+            "permission",
+            "external_dependency",
+            "high_risk",
+            "unknown"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/definitions/publicText"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/definitions/evidence"
+          }
+        }
+      }
+    },
+    "how": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "expectedEffects",
+        "verification"
+      ],
+      "properties": {
+        "summary": {
+          "$ref": "#/definitions/publicText"
+        },
+        "expectedEffects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/definitions/publicText"
+          }
+        },
+        "verification": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/definitions/publicText"
+          }
+        }
+      }
+    },
+    "answerRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rationaleRequired",
+        "minimumTextLength",
+        "maximumTextLength"
+      ],
+      "properties": {
+        "rationaleRequired": {
+          "type": "boolean"
+        },
+        "minimumTextLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximumTextLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        }
+      }
+    },
+    "resumeGuard": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strategy",
+            "expectedDecisionVersion",
+            "runSlug",
+            "expectedRunStatus",
+            "expectedAbortKind",
+            "expectedBlockedStep"
+          ],
+          "properties": {
+            "strategy": {
+              "const": "direct_run"
+            },
+            "expectedDecisionVersion": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "runSlug": {
+              "$ref": "#/definitions/identifier"
+            },
+            "expectedRunStatus": {
+              "const": "aborted"
+            },
+            "expectedAbortKind": {
+              "const": "blocked"
+            },
+            "expectedBlockedStep": {
+              "$ref": "#/definitions/publicText"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strategy",
+            "expectedDecisionVersion",
+            "repository",
+            "prNumber",
+            "stage",
+            "expectedHeadSha"
+          ],
+          "properties": {
+            "strategy": {
+              "const": "pr_automation_stage"
+            },
+            "expectedDecisionVersion": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "repository": {
+              "$ref": "#/definitions/repository"
+            },
+            "prNumber": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "stage": {
+              "enum": [
+                "issue-scout",
+                "issue-to-pr",
+                "pr-review",
+                "review-fix",
+                "pr-merge"
+              ]
+            },
+            "expectedHeadSha": {
+              "$ref": "#/definitions/headSha"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strategy",
+            "expectedDecisionVersion",
+            "candidateId"
+          ],
+          "properties": {
+            "strategy": {
+              "const": "issue_scout_candidate"
+            },
+            "expectedDecisionVersion": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "candidateId": {
+              "$ref": "#/definitions/candidateIdentifier"
+            }
+          }
+        }
+      ]
+    },
+    "option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "description",
+        "consequences",
+        "recommended"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/identifier"
+        },
+        "title": {
+          "$ref": "#/definitions/publicText"
+        },
+        "description": {
+          "$ref": "#/definitions/publicText"
+        },
+        "consequences": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/definitions/publicText"
+          }
+        },
+        "recommended": {
+          "type": "boolean"
+        },
+        "recommendationReason": {
+          "$ref": "#/definitions/publicText"
+        }
+      }
+    }
+  }
+}

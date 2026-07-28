@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "decisionId": "dec_example_choice",
+  "decisionVersion": 1,
+  "subject": {
+    "repoPath": "/example/repo",
+    "repository": "example/repo",
+    "workflow": "pull-request-review",
+    "step": "pr-review",
+    "issueNumber": 123,
+    "prNumber": 456,
+    "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "title": "Choose how to handle fictional pull request 456"
+  },
+  "question": "How should the current fictional pull request head be handled?",
+  "why": {
+    "summary": "The current head needs an explicit human direction.",
+    "riskCategory": "high_risk",
+    "reasons": [
+      "The review found a policy-sensitive change."
+    ],
+    "evidence": [
+      {
+        "kind": "pr",
+        "reference": "example/repo#456",
+        "summary": "Fictional pull request at the recorded head."
+      },
+      {
+        "kind": "check",
+        "reference": "review-gate",
+        "summary": "Current-head review requires a decision."
+      }
+    ]
+  },
+  "how": {
+    "summary": "Continue only after the answer is revalidated.",
+    "expectedEffects": [
+      "Resume the registered workflow adapter."
+    ],
+    "verification": [
+      "Run the required tests and review the current repository state."
+    ]
+  },
+  "answerRequirements": {
+    "rationaleRequired": true,
+    "minimumTextLength": 0,
+    "maximumTextLength": 2000
+  },
+  "resumeGuard": {
+    "expectedDecisionVersion": 1,
+    "strategy": "pr_automation_stage",
+    "repository": "example/repo",
+    "prNumber": 456,
+    "stage": "pr-review",
+    "expectedHeadSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "contextHash": "eb8f80941706c7525bae82810ffed8bd3f4b270b2c9f1b88db140c4d5a08a173",
+  "createdAt": "2026-07-27T00:01:00.000Z",
+  "kind": "choice",
+  "options": [
+    {
+      "id": "approve_current_head",
+      "title": "Approve current head",
+      "description": "Allow the recorded head to continue.",
+      "consequences": [
+        "The stage resumes only if the head still matches."
+      ],
+      "recommended": false
+    },
+    {
+      "id": "request_changes",
+      "title": "Request changes",
+      "description": "Return the pull request for revision.",
+      "consequences": [
+        "A new head must be reviewed again."
+      ],
+      "recommended": true,
+      "recommendationReason": "The fictional review evidence requires revision."
+    },
+    {
+      "id": "stop",
+      "title": "Stop automation",
+      "description": "Leave the pull request for manual handling.",
+      "consequences": [
+        "No automated continuation is attempted."
+      ],
+      "recommended": false
+    }
+  ]
+}
