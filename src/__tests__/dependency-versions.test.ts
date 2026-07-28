@@ -11,7 +11,12 @@ type PackageJson = {
 };
 
 type PackageLock = {
-  packages?: Record<string, { version?: string; engines?: Record<string, string> }>;
+  packages?: Record<string, {
+    version?: string;
+    dependencies?: Record<string, string>;
+    engines?: Record<string, string>;
+    peerDependencies?: Record<string, string>;
+  }>;
 };
 
 function readPackageJson(): PackageJson {
@@ -26,7 +31,9 @@ function readPackageLock(): PackageLock {
 
 function getLockedPackage(packageLock: PackageLock, path: string): {
   version?: string;
+  dependencies?: Record<string, string>;
   engines?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
 } {
   const lockedPackage = packageLock.packages?.[path];
   if (!lockedPackage) {
@@ -220,11 +227,48 @@ describe('dependency versions', () => {
     expect(getLockedPackage(packageLock, 'node_modules/protobufjs').version).toBe('7.6.5');
   });
 
-  it('keeps security refreshes inside the existing runtime and toolchain majors', () => {
+  it('locks the MCP Hono server chain to the compatible path traversal fix', () => {
+    const packageLock = readPackageLock();
+    const claudeAgentSdk = getLockedPackage(
+      packageLock,
+      'node_modules/@anthropic-ai/claude-agent-sdk',
+    );
+    const mcpSdk = getLockedPackage(packageLock, 'node_modules/@modelcontextprotocol/sdk');
+    const honoNodeServer = getLockedPackage(packageLock, 'node_modules/@hono/node-server');
+
+    // @hono/node-server 2.0.5 is the first release patched for GHSA-frvp-7c67-39w9.
+    // Exact versions make a future lock refresh visibly re-evaluate this production boundary.
+    expect(mcpSdk.version).toBe('1.30.0');
+    expect(mcpSdk.dependencies?.['@hono/node-server']).toBe('^1.19.9 || ^2.0.5');
+    expect(honoNodeServer.version).toBe('2.0.12');
+    expect(
+      compareNodeVersions(
+        parseNodeVersion(honoNodeServer.version ?? ''),
+        parseNodeVersion('2.0.5'),
+      ),
+    ).toBeGreaterThanOrEqual(0);
+    expect(honoNodeServer.engines?.node).toBe('>=20');
+    expect(honoNodeServer.peerDependencies?.hono).toBe('^4');
+    expect(getLockedPackage(packageLock, 'node_modules/hono').version).toBe('4.12.32');
+    expect(claudeAgentSdk.peerDependencies?.['@modelcontextprotocol/sdk']).toBe('^1.29.0');
+    expect(
+      satisfiesNodeRange(
+        parseNodeVersion(mcpSdk.version ?? ''),
+        claudeAgentSdk.peerDependencies?.['@modelcontextprotocol/sdk'] ?? '',
+      ),
+    ).toBe(true);
+
+    const rootNodeRange = readPackageJson().engines?.node;
+    if (!rootNodeRange) {
+      throw new Error('package.json engines.node is required');
+    }
+    expect(satisfiesNodeRange(getMinimumNodeVersion(rootNodeRange), honoNodeServer.engines?.node ?? ''))
+      .toBe(true);
+  });
+
+  it('keeps unrelated toolchain security refreshes inside their existing majors', () => {
     const packageLock = readPackageLock();
 
-    // These exact boundaries intentionally defer ecosystem major upgrades to isolated PRs.
-    expect(getLockedPackage(packageLock, 'node_modules/@hono/node-server').version).toBe('1.19.14');
     expect(getLockedPackage(packageLock, 'node_modules/brace-expansion').version).toBe('2.1.2');
     expect(getLockedPackage(packageLock, 'node_modules/minimatch').version).toBe('9.0.9');
     expect(
