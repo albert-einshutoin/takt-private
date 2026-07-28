@@ -239,11 +239,21 @@ permissive. Do not commit `.devloop/`, copy its raw content into tickets, or
 configure a ledger outside the target repository. Public examples use
 placeholder paths only. Malformed, incompatible, unavailable, or
 capacity-exceeded ledgers fail closed.
-CLI JSON failures use a stable `{ "schemaVersion": 1, "ok": false, "error":
-{ "code": "...", "message": "..." } }` envelope. Common codes include
+Input, repository, and ledger failures use the stable
+`{ "schemaVersion": 1, "ok": false, "error": { "code": "...", "message":
+"..." } }` JSON envelope. Common codes include
 `stale_version`, `stale_context`, `decision_not_open`, `invalid_answer`,
 `rationale_required`, `idempotency_conflict`, `ledger_malformed`,
 `ledger_incompatible`, `ledger_unavailable`, and `ledger_capacity_exceeded`.
+
+Command outcomes keep their typed domain result at the top level. A non-applied
+`decisions apply --json` response is `{ "schemaVersion": 1, "ok": false,
+"decisionId": "...", "status": "revalidation_required", "reasonCode": "...",
+"sanitizedSummary": "..." }` or uses `status: "failed"` with `errorCode` and
+`sanitizedError`. A failed `decisions sync-github --json` response uses the same
+top-level `schemaVersion`, `ok`, `decisionId`, and `status: "failed"` fields with
+`errorCode` and `sanitizedError`. These fixed summaries never include answer
+text, rationale, evidence, or raw external-tool output.
 
 ## Import And Timeline
 

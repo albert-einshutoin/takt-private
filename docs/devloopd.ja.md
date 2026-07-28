@@ -227,11 +227,20 @@ ownership取得は遡って行いません。restoreしたrepositoryの権限が
 `.devloop/` をcommitしたり、生の内容をticketへコピーしたり、対象リポジトリ外の
 台帳を指定したりしないでください。公開例のpathはplaceholderだけです。壊れた台帳、
 非互換台帳、利用不能、容量超過はfail-closedです。
-CLIのJSON errorは `{ "schemaVersion": 1, "ok": false, "error":
-{ "code": "...", "message": "..." } }` の固定envelopeです。主なcodeは
+入力、repository、ledgerのfailureは `{ "schemaVersion": 1, "ok": false,
+"error": { "code": "...", "message": "..." } }` の固定JSON envelopeです。主なcodeは
 `stale_version`、`stale_context`、`decision_not_open`、`invalid_answer`、
 `rationale_required`、`idempotency_conflict`、`ledger_malformed`、
 `ledger_incompatible`、`ledger_unavailable`、`ledger_capacity_exceeded` です。
+
+commandの処理結果はtyped domain resultをtop levelに保ちます。
+`decisions apply --json` が適用しなかった場合は `{ "schemaVersion": 1,
+"ok": false, "decisionId": "...", "status": "revalidation_required",
+"reasonCode": "...", "sanitizedSummary": "..." }`、または `status:
+"failed"` と `errorCode`、`sanitizedError` を返します。`decisions
+sync-github --json` のfailureもtop levelの `schemaVersion`、`ok`、
+`decisionId`、`status: "failed"`、`errorCode`、`sanitizedError` を返します。
+これらの固定summaryに回答本文、理由、evidence、外部toolのraw outputは含まれません。
 
 ## Import And Timeline
 
