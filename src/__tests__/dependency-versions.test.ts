@@ -183,12 +183,13 @@ describe('dependency versions', () => {
   it('locks runtime transitive dependencies to patched security releases', () => {
     const packageLock = readPackageLock();
 
+    // Exact versions keep future lock refreshes from silently restoring known-vulnerable releases.
     expect(getLockedPackage(packageLock, 'node_modules/ajv').version).toBe('6.15.0');
     expect(getLockedPackage(packageLock, 'node_modules/express-rate-limit').version).toBe('8.5.2');
-    expect(getLockedPackage(packageLock, 'node_modules/fast-uri').version).toBe('3.1.2');
-    expect(getLockedPackage(packageLock, 'node_modules/hono').version).toBe('4.12.25');
+    expect(getLockedPackage(packageLock, 'node_modules/fast-uri').version).toBe('3.1.4');
+    expect(getLockedPackage(packageLock, 'node_modules/hono').version).toBe('4.12.32');
     expect(getLockedPackage(packageLock, 'node_modules/ip-address').version).toBe('10.2.0');
-    expect(getLockedPackage(packageLock, 'node_modules/protobufjs').version).toBe('7.6.4');
+    expect(getLockedPackage(packageLock, 'node_modules/protobufjs').version).toBe('7.6.5');
     expect(getLockedPackage(packageLock, 'node_modules/qs').version).toBe('6.15.2');
   });
 
