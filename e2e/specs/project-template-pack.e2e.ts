@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -63,14 +63,19 @@ describe('project template pack E2E', () => {
   it('round-trips a valid 2,600-entry pack whose control documents exceed 1 MiB', async () => {
     const root = mkdtempSync(join(tmpdir(), 'taktpack-large-e2e-'));
     roots.push(root);
-    const longSegments = ['a'.repeat(110), 'b'.repeat(110), 'c'.repeat(110)];
+    const longSegments = [
+      'a'.repeat(110),
+      'b'.repeat(110),
+      'c'.repeat(110),
+      'd'.repeat(110),
+    ];
     for (let index = 0; index < 2_600; index += 1) {
       const path = join(
         root,
         '.takt',
         'workflows',
         ...longSegments,
-        `review-${index.toString().padStart(4, '0')}.yaml`,
+        `review-${index.toString().padStart(4, '0')}-${'e'.repeat(40)}.yaml`,
       );
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, `name: review-${index}\n`);
@@ -79,8 +84,17 @@ describe('project template pack E2E', () => {
     const output = join(root, 'large.taktpack');
 
     await writeTaktpack(output, plan);
+    const archive = readFileSync(output);
+    const packBytes = Number.parseInt(archive.subarray(124, 136).toString('ascii'), 8);
+    const manifestHeader = 512 + Math.ceil(packBytes / 512) * 512;
+    const manifestBytes = Number.parseInt(
+      archive.subarray(manifestHeader + 124, manifestHeader + 136).toString('ascii'),
+      8,
+    );
     const inspected = await inspectTaktpack(output);
 
+    expect(packBytes).toBeGreaterThan(1.6 * 1024 * 1024);
+    expect(manifestBytes).toBeGreaterThan(1.55 * 1024 * 1024);
     expect(inspected.manifest.entries).toHaveLength(2_600);
   }, 120_000);
 });

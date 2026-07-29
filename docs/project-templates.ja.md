@@ -167,13 +167,20 @@ canonical JSONを使用するため、同一inputはbyte-for-byteで同じartifa
 capabilityがある場合、project-owned entryのpolicyが未指定の場合にfail-closedです。
 runtimeやsensitive pathを開いてhash化せず、除外reasonの件数だけをredacted reportへ
 記録します。source fileの絶対pathとinode snapshotはplanのJSONには含まれない
-process-local stateとして保持されます。
+process-local stateとして保持されます。返却planは再帰的readonly/deep freezeで、
+process-localなcanonical sealに束縛されます。writerはsealed snapshotからcontrol
+documentを再構築し、copy・mutationされたplanをtemp作成前に拒否します。v1の
+`warnings`はclosedな空fieldです。`excludedReasons`はclassifier reason codeだけを
+許可し、bounded countの合計が`counts.excluded`と一致しなければなりません。
 
 `writeTaktpack` はsourceを`O_NOFOLLOW`でreopenし、root containment、type、inode、
-link count、size、mode、timestamp、SHA-256を再検証します。同一directoryの`wx` tempへ
-streamし、fsync後にpublishします。`force: false`はhard-link publishで競合時にも
+link count、size、mode、timestamp、SHA-256を再検証します。同一digestを複数pathが
+共有する場合も全sourceを検証し、全件成功後に代表blobだけを同一directoryの`wx`
+tempへstreamし、fsync後にpublishします。`force: false`はhard-link publishで競合時にも
 no-clobberを維持し、`force: true`もregular single-link file以外を拒否して、完成した
 新packをrenameするまで既存fileを保持します。
+Windowsでは完成fileのfsync後、directory fsyncをunsupportedとして扱い、正常に
+publish済みのartifactを失敗とは報告しません。
 
 `inspectTaktpack` はextractも外部`tar`も使いません。USTAR blockを順次読み、
 directory、PAX/GNU extension、sparse、symlink、hardlink、device、FIFO、unknown name、
@@ -181,7 +188,15 @@ directory、PAX/GNU extension、sparse、symlink、hardlink、device、FIFO、un
 拒否します。pack indexがmanifest、export report、blobのhashとsizeを束縛し、
 manifest/lock seed照合とclassifierによるsecret・absolute path・binary・capabilityの
 再検査も行います。`currentTaktVersion`を省略した互換性は安全を仮定せず
-`status: "unknown"`です。
+`status: "unknown"`です。inspect結果は正式な`TemplateLockV1`ではなく、構造的に
+異なる`{ kind: "project-template-lock-seed", ... }`を返します。承認と正式lock作成は
+後続のapply段階の責務です。
+
+entry種別ごとのceilingは独立し、callerは縮小だけできます。`pack.json`と
+`manifest.json`は各4 MiB、`export-report.json`と各blobは各1 MiBで、entry count、
+total payload、archive全体にも別上限があります。USTARのoctal、checksum、
+uname/gname、device、prefix、reserved bytesはv1 canonical encodingとの完全一致が
+必要です。
 
 writerは`tar-stream` 3.1.7をdirect dependencyとして固定しています。readerは
 security境界を明確にするため自前のbounded USTAR parserを使います。3.2.0で追加された
