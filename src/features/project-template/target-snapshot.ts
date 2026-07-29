@@ -135,12 +135,18 @@ function splitNul(output: Buffer): string[] {
   return records;
 }
 
-function fromGitPath(path: string): string | undefined {
-  if (!path.startsWith('.takt/')) return undefined;
-  return path.slice('.takt/'.length);
+function fromGitPath(path: string, repositoryPrefix: string): string | undefined {
+  const prefixes = repositoryPrefix === ''
+    ? ['.takt/']
+    : [`.takt/`, `${repositoryPrefix}.takt/`];
+  const prefix = prefixes.find((candidate) => path.startsWith(candidate));
+  return prefix === undefined ? undefined : path.slice(prefix.length);
 }
 
-function parseGitStatus(output: Buffer): Map<string, ProjectTemplateGitTrackingStatus> {
+function parseGitStatus(
+  output: Buffer,
+  repositoryPrefix: string,
+): Map<string, ProjectTemplateGitTrackingStatus> {
   const records = splitNul(output);
   const statuses = new Map<string, ProjectTemplateGitTrackingStatus>();
   for (let index = 0; index < records.length; index += 1) {
@@ -149,7 +155,7 @@ function parseGitStatus(output: Buffer): Map<string, ProjectTemplateGitTrackingS
       throw new Error('unsupported git status record');
     }
     const code = record.slice(0, 2);
-    const path = fromGitPath(record.slice(3));
+    const path = fromGitPath(record.slice(3), repositoryPrefix);
     if (path !== undefined) {
       const status: ProjectTemplateGitTrackingStatus =
         code === '??' ? 'untracked'
@@ -162,6 +168,8 @@ function parseGitStatus(output: Buffer): Map<string, ProjectTemplateGitTrackingS
     if (code.includes('R') || code.includes('C')) {
       index += 1;
       if (index >= records.length) throw new Error('truncated git rename record');
+      const secondPath = fromGitPath(records[index]!, repositoryPrefix);
+      if (secondPath !== undefined) statuses.set(secondPath, 'staged');
     }
   }
   return statuses;
@@ -197,7 +205,8 @@ async function gitTrackingForPaths(
   }
 
   try {
-    const [trackedOutput, statusOutput] = await Promise.all([
+    const [prefixOutput, trackedOutput, statusOutput] = await Promise.all([
+      runGit(projectRoot, ['rev-parse', '--show-prefix'], 64 * 1024),
       runGit(projectRoot, ['ls-files', '--cached', '-z', '--', '.takt']),
       runGit(projectRoot, [
         'status',
@@ -209,12 +218,19 @@ async function gitTrackingForPaths(
         '.takt',
       ]),
     ]);
+    const repositoryPrefix = prefixOutput.toString('utf8').trim();
+    if (
+      repositoryPrefix !== ''
+      && (!repositoryPrefix.endsWith('/') || repositoryPrefix.includes('\0'))
+    ) {
+      throw new Error('invalid repository prefix');
+    }
     const tracked = new Set(
       splitNul(trackedOutput)
-        .map(fromGitPath)
+        .map((path) => fromGitPath(path, repositoryPrefix))
         .filter((path): path is string => path !== undefined),
     );
-    const changed = parseGitStatus(statusOutput);
+    const changed = parseGitStatus(statusOutput, repositoryPrefix);
     return new Map(existingPaths.map((path) => [
       path,
       changed.get(path) ?? (tracked.has(path) ? 'tracked-clean' : 'untracked'),
@@ -440,6 +456,20 @@ export async function captureProjectTemplateTargetSnapshot(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw unsafeTarget();
     const tracking = await gitTrackingForPaths(projectRoot, candidatePaths);
+    try {
+      await lstat(taktRoot);
+      throw unsafeTarget();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const refreshedProjectNames = await readBoundedDirectory(
+      projectRealPath,
+      new Map(),
+      { entries: 0 },
+    );
+    if ((refreshedProjectNames.get('.takt') ?? []).length > 0) {
+      throw unsafeTarget();
+    }
     return {
       rootState: 'missing',
       candidatePaths,

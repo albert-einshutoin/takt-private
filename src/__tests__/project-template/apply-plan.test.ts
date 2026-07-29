@@ -265,6 +265,10 @@ describe('project template three-way apply plan', () => {
       expect.objectContaining({ path: oldPath, action: 'conflict' }),
       expect.objectContaining({ path: newPath, action: 'conflict' }),
     ]));
+    for (const entry of plan.entries) {
+      expect(entry).not.toHaveProperty('afterSha256');
+      expect(entry).not.toHaveProperty('afterMode');
+    }
   });
 
   it('produces stable JSON/human summaries and a bounded text diff', () => {

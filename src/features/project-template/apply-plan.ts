@@ -623,8 +623,11 @@ function overrideConflict(
   reasonCode: ProjectTemplateApplyReasonCode,
 ): ProjectTemplateApplyPlanEntry {
   if (entry.policy === 'excluded') return entry;
+  const unresolved = { ...entry } as Record<string, unknown>;
+  delete unresolved['afterSha256'];
+  delete unresolved['afterMode'];
   return {
-    ...entry,
+    ...unresolved,
     action: 'conflict',
     reasonCode,
     rollbackImpact: 'manual-conflict',

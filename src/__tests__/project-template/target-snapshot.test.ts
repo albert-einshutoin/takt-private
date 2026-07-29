@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   lstatSync,
   linkSync,
   mkdirSync,
@@ -274,6 +275,75 @@ describe('project template target snapshot', () => {
     expect(staged.missingPathTracking).toEqual({
       'config.yaml': 'staged',
     });
+  });
+
+  it('normalizes Git status paths when the project is nested in a worktree', async () => {
+    const repositoryRoot = makeRoot();
+    const projectRoot = join(repositoryRoot, 'subproject');
+    mkdirSync(join(projectRoot, '.takt'), { recursive: true });
+    writeTakt(projectRoot, 'config.yaml', 'base\n');
+    commitAll(repositoryRoot);
+    writeTakt(projectRoot, 'config.yaml', 'changed\n');
+    execFileSync('git', ['add', 'subproject/.takt/config.yaml'], {
+      cwd: repositoryRoot,
+    });
+
+    const snapshot = await captureProjectTemplateTargetSnapshot(
+      projectRoot,
+      ['config.yaml'],
+    );
+
+    expect(snapshot.entries[0]?.gitTrackingStatus).toBe('staged');
+  });
+
+  it('records staged status for both endpoints of a Git rename', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'old.yaml', 'base\n');
+    commitAll(root);
+    execFileSync('git', ['mv', '.takt/old.yaml', '.takt/new.yaml'], { cwd: root });
+
+    const snapshot = await captureProjectTemplateTargetSnapshot(root, [
+      'new.yaml',
+      'old.yaml',
+    ]);
+
+    expect(snapshot.entries[0]).toMatchObject({
+      path: 'new.yaml',
+      gitTrackingStatus: 'staged',
+    });
+    expect(snapshot.missingPathTracking['old.yaml']).toBe('staged');
+  });
+
+  it('revalidates a missing root after Git inspection', async () => {
+    const root = makeRoot(false);
+    rmSync(join(root, '.takt'), { recursive: true });
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    const gitBinary = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+    const wrapper = join(bin, 'git');
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\n/bin/mkdir -p "$TAKT_RACE_ROOT/.takt"\nexec "${gitBinary}" "$@"\n`,
+    );
+    chmodSync(wrapper, 0o755);
+    const originalPath = process.env['PATH'];
+    const originalRaceRoot = process.env['TAKT_RACE_ROOT'];
+    process.env['PATH'] = `${bin}:${originalPath ?? ''}`;
+    process.env['TAKT_RACE_ROOT'] = root;
+    try {
+      await expect(captureProjectTemplateTargetSnapshot(
+        root,
+        ['config.yaml'],
+      )).rejects.toMatchObject({
+        code: 'UNSAFE_ARCHIVE_ENTRY',
+        field: 'target',
+      });
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      if (originalRaceRoot === undefined) delete process.env['TAKT_RACE_ROOT'];
+      else process.env['TAKT_RACE_ROOT'] = originalRaceRoot;
+    }
   });
 });
 
