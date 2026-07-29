@@ -108,7 +108,7 @@ provider smoke matrix は全 provider について `pass`、`fail`、`skip` を�
 | `--apply` | file と label の変更を適用します。指定しない場合は dry-run report だけを表示します |
 | `--force` | Git repository 検出失敗時の続行と template file 上書きを許可します |
 
-`devloopd onboard-repo` は `--force` がない限り既存 `.takt` file を保持します。`--apply` mode のときだけ personal subscription-only config、devloop policy、default workflow wrapper、ignore rule、必須 `agent:*` label を作成します。
+`devloopd onboard-repo` は `--force` がない限り既存 `.takt` file を保持します。`--apply` mode のときだけ personal subscription-only config、devloop policy、default workflow wrapper、ignore rule、必須 automation label（`agent:ready`, `agent:auto-merge`, `agent:blocked`, `human:review`）を作成します。
 
 `devloopd ready` のオプション:
 
@@ -147,7 +147,7 @@ provider smoke matrix は全 provider について `pass`、`fail`、`skip` を�
 | `--cwd <path>` | 検査するリポジトリパス |
 | `--reason <text>` | 停止要求に保存する operator 向け理由 |
 
-`devloopd stop` は stop-request file を書き、foreground の `devloopd start` loop が次 cycle 前に読み取ります。`devloopd reset` は personal daemon metadata と stop-request state だけを消し、TAKT run artifact や devloop ledger は削除しません。
+`devloopd stop` は stop-request file を書き、foreground の `devloopd start` と `devloopd staged loop` が次 cycle 前に読み取ります。`devloopd reset` は personal daemon metadata と stop-request state だけを消し、TAKT run artifact や devloop ledger は削除しません。
 
 `devloopd reset` のオプション:
 

@@ -110,6 +110,11 @@ const LABEL_TEMPLATES: readonly LabelTemplate[] = [
     color: 'd93f0b',
     description: 'Automation is blocked and needs operator attention',
   },
+  {
+    name: 'human:review',
+    color: 'fbca04',
+    description: 'Human product or policy decision is required before automation resumes',
+  },
 ];
 
 function makeAction(

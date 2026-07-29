@@ -9,6 +9,8 @@ import {
   findCurrentHeadBlockingReview,
   findDuplicateIssueCoverage,
   parseAutomationPullRequests,
+  prepareAutomationPullRequests,
+  promotePullRequestAutoMerge,
   runDevloopAutomationStage,
   selectAutomationPullRequests,
 } from '../devloopd/prAutomation.js';
@@ -108,6 +110,69 @@ function makePrMergeRunner(): DevloopCommandRunner & { calls: string[]; timeouts
   };
 }
 
+function makePreparationRunner(
+  commentsByPr: Record<number, Array<{ body: string }>>,
+): DevloopCommandRunner & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    resolveCommand(command) {
+      return command === 'gh' ? '/mock/bin/gh' : undefined;
+    },
+    async exec(_command, args) {
+      calls.push(args.join(' '));
+      if (args[0] === 'api') {
+        const prNumber = Number(/\/issues\/(\d+)\/comments$/u.exec(args[1] ?? '')?.[1]);
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify(commentsByPr[prNumber] ?? []),
+          stderr: '',
+        };
+      }
+      if (args.slice(0, 2).join(' ') === 'pr edit') {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      }
+      return { exitCode: 1, stdout: '', stderr: `unexpected gh args: ${args.join(' ')}` };
+    },
+  };
+}
+
+function makeProductPolicyPromotionRunner(): DevloopCommandRunner & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    resolveCommand(command) {
+      return command === 'gh' ? '/mock/bin/gh' : undefined;
+    },
+    async exec(_command, args) {
+      calls.push(args.join(' '));
+      if (args.slice(0, 2).join(' ') === 'pr view') {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            number: 77,
+            title: 'change auth policy',
+            body: 'Adjust authentication behavior.',
+            headRefOid: 'policy123',
+            mergeStateStatus: 'CLEAN',
+            changedFiles: 1,
+            additions: 12,
+            deletions: 2,
+          }),
+          stderr: '',
+        };
+      }
+      if (args.slice(0, 2).join(' ') === 'pr diff' && args.includes('--name-only')) {
+        return { exitCode: 0, stdout: 'src/routes/auth.ts\n', stderr: '' };
+      }
+      if (args.slice(0, 2).join(' ') === 'pr edit') {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      }
+      return { exitCode: 1, stdout: '', stderr: `unexpected gh args: ${args.join(' ')}` };
+    },
+  };
+}
+
 describe('devloopd PR automation orchestration', () => {
   it('discovers non-draft automation PRs from mocked GitHub output', () => {
     const prs = parseAutomationPullRequests(JSON.stringify([
@@ -141,9 +206,161 @@ describe('devloopd PR automation orchestration', () => {
         author: { login: 'dependabot[bot]' },
         labels: [],
       },
+      {
+        number: 13,
+        title: 'blocked',
+        body: '',
+        headRefName: 'takt/issue-43',
+        headRefOid: 'bcd234',
+        isDraft: false,
+        author: { login: 'dev' },
+        labels: [{ name: 'agent:blocked' }],
+      },
+      {
+        number: 14,
+        title: 'human review',
+        body: '',
+        headRefName: 'takt/issue-44',
+        headRefOid: 'cde345',
+        isDraft: false,
+        author: { login: 'dev' },
+        labels: [{ name: 'human:review' }],
+      },
     ]));
 
     expect(selectAutomationPullRequests(prs).map((pr) => pr.number)).toEqual([10]);
+    expect(selectAutomationPullRequests(prs, {
+      includeBlocked: true,
+      includeHumanReview: true,
+    }).map((pr) => pr.number)).toEqual([10, 13, 14]);
+  });
+
+  it('re-enters stale blocked PRs after the head has moved', async () => {
+    const runner = makePreparationRunner({
+      20: [{
+        body: formatReviewGateComment({
+          reviewer: 'agy',
+          decision: 'blocked',
+          headSha: 'old123',
+          body: 'Mergeable: NO\nReason: stale blocker',
+        }),
+      }],
+    });
+
+    const prepared = await prepareAutomationPullRequests({
+      prs: [{
+        number: 20,
+        title: 'fix stale review block',
+        body: '',
+        headRefName: 'takt/issue-20',
+        headRefOid: 'new456',
+        isDraft: false,
+        authorLogin: 'dev',
+        labels: ['agent:blocked'],
+      }],
+      repoPath: '/repo',
+      repo: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(prepared.prs.map((pr) => pr.number)).toEqual([20]);
+    expect(prepared.actions).toContainEqual(expect.objectContaining({
+      type: 'stale-block-unlock',
+      status: 'passed',
+      pr: 20,
+    }));
+    expect(runner.calls).toContain('pr edit 20 --remove-label agent:blocked --repo owner/repo');
+  });
+
+  it('keeps current-head blocked PRs out of review retry', async () => {
+    const runner = makePreparationRunner({
+      21: [{
+        body: formatReviewGateComment({
+          reviewer: 'codex',
+          decision: 'blocked',
+          headSha: 'head789',
+          body: 'Codex-Human-Review: BLOCKED\nReason: still unsafe',
+        }),
+      }],
+    });
+
+    const prepared = await prepareAutomationPullRequests({
+      prs: [{
+        number: 21,
+        title: 'still blocked',
+        body: '',
+        headRefName: 'takt/issue-21',
+        headRefOid: 'head789',
+        isDraft: false,
+        authorLogin: 'dev',
+        labels: ['agent:blocked'],
+      }],
+      repoPath: '/repo',
+      repo: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(prepared.prs).toEqual([]);
+    expect(prepared.actions).toContainEqual(expect.objectContaining({
+      type: 'current-head-blocked',
+      status: 'blocked',
+      pr: 21,
+      stopRule: 'Mergeable: NO',
+    }));
+    expect(runner.calls.some((call) => call.includes('--remove-label agent:blocked'))).toBe(false);
+  });
+
+  it('holds human review PRs outside automation stages', async () => {
+    const runner = makePreparationRunner({});
+
+    const prepared = await prepareAutomationPullRequests({
+      prs: [{
+        number: 22,
+        title: 'product direction change',
+        body: '',
+        headRefName: 'takt/issue-22',
+        headRefOid: 'human123',
+        isDraft: false,
+        authorLogin: 'dev',
+        labels: ['human:review'],
+      }],
+      repoPath: '/repo',
+      repo: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(prepared.prs).toEqual([]);
+    expect(prepared.actions).toContainEqual(expect.objectContaining({
+      type: 'human-review-hold',
+      status: 'blocked',
+      pr: 22,
+      stopRule: 'human review required',
+    }));
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('marks product-policy PRs with human:review before leaving automation', async () => {
+    const runner = makeProductPolicyPromotionRunner();
+
+    const action = await promotePullRequestAutoMerge({
+      pr: 77,
+      repoPath: '/repo',
+      repo: 'owner/repo',
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(action).toMatchObject({
+      type: 'promote-auto-merge',
+      status: 'blocked',
+      pr: 77,
+      stopRule: 'human review required',
+    });
+    expect(action.message).toContain('human:review');
+    expect(runner.calls).toContain('pr edit 77 --add-label human:review --repo owner/repo');
   });
 
   it('keeps duplicate issue coverage as a distinct stop rule', () => {

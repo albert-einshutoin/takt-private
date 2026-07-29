@@ -112,6 +112,8 @@ describe('devloopd run', () => {
         command: '/mock/bin/takt',
         args: [
           '--pipeline',
+          '--isolation',
+          'worktree',
           '--issue',
           '123',
           '--workflow',
@@ -177,6 +179,8 @@ describe('devloopd run', () => {
 
     expect(runner.calls[0]?.args).toEqual([
       '--pipeline',
+      '--isolation',
+      'worktree',
       '--issue',
       '123',
       '--workflow',
