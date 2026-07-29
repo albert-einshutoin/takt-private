@@ -66,6 +66,7 @@ export type ProjectTemplateApplyNotStartedCode =
 export type ProjectTemplateRollbackNotStartedCode =
   | 'APPLY_GUARD_BLOCKED'
   | 'APPLY_LEASE_UNAVAILABLE'
+  | 'BACKUP_UNAVAILABLE'
   | 'ROLLBACK_DRIFT';
 
 export type ProjectTemplateApplyResult =
@@ -1052,6 +1053,7 @@ export async function rollbackProjectTemplateApply(options: {
   } catch {
     return rollbackNotStarted('APPLY_LEASE_UNAVAILABLE', 'exclusive apply lease is unavailable');
   }
+  let rollbackMutationStarted = false;
   try {
     const ownedGuard = inspectProjectTemplateApplyGuard({
       repoPath: options.projectRoot,
@@ -1083,6 +1085,10 @@ export async function rollbackProjectTemplateApply(options: {
     }
     const transactionId = `rollback-${randomUUID()}`;
     const restoredOperations: string[] = [];
+    // Everything above is read-only validation. Once this phase begins, even
+    // a failed first journal write has uncertain durability and must retain
+    // the recovery-required classification.
+    rollbackMutationStarted = true;
     try {
       for (const entry of [...manifest.entries].reverse()) {
         const key = operationKey(storage, entry.target);
@@ -1154,6 +1160,12 @@ export async function rollbackProjectTemplateApply(options: {
       };
     }
   } catch {
+    if (!rollbackMutationStarted) {
+      return rollbackNotStarted(
+        'BACKUP_UNAVAILABLE',
+        'backup generation or rollback preconditions are unavailable',
+      );
+    }
     return {
       status: 'recovery_required',
       code: 'RECOVERY_REQUIRED',

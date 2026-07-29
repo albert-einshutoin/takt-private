@@ -1098,6 +1098,60 @@ describe('project template atomic apply executor', () => {
     expect(statSync(join(root, '.takt', 'config.yaml')).mode & 0o777).toBe(0o600);
   });
 
+  it.each(['unknown', 'pruned', 'invalid'] as const)(
+    'returns not_started without changing rollback journal or targets for an %s backup manifest',
+    async (manifestState) => {
+      const root = makeRoot();
+      const contents = { 'config.yaml': 'language: ja\n' };
+      const incomingManifest = manifest(contents);
+      const blobs = incomingContents(contents);
+      const plan = await createPlan(root, incomingManifest, blobs);
+      const applied = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: blobs,
+      });
+      expect(applied.status).toBe('committed');
+      if (applied.status !== 'committed') return;
+
+      const journalPath = join(root, '.takt-template-state', 'journal.json');
+      const journalBefore = readFileSync(journalPath, 'utf8');
+      const backupRoot = join(
+        root,
+        '.takt-template-state',
+        'backups',
+        applied.backupId,
+      );
+      let backupId = applied.backupId;
+      if (manifestState === 'unknown') {
+        backupId = 'backup-does-not-exist';
+      } else if (manifestState === 'pruned') {
+        rmSync(backupRoot, { recursive: true });
+      } else {
+        writeFileSync(join(backupRoot, 'manifest.json'), '{invalid');
+      }
+
+      const result = await rollbackProjectTemplateApply({
+        projectRoot: root,
+        backupId,
+      });
+
+      expect(result).toMatchObject({
+        status: 'not_started',
+        code: 'BACKUP_UNAVAILABLE',
+      });
+      expect(readFileSync(journalPath, 'utf8')).toBe(journalBefore);
+      expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'))
+        .toBe('language: ja\n');
+      expect(existsSync(join(
+        root,
+        '.takt-template-state',
+        'recovery-required.json',
+      ))).toBe(false);
+    },
+  );
+
   it.each(['write', 'chmod', 'file-fsync', 'rename'] as const)(
     'leaves the target byte-identical when %s fails before publish',
     async (faultOperation) => {
@@ -1326,6 +1380,13 @@ describe('project template atomic apply executor', () => {
     });
     expect(injected).toBe(true);
     expect(failedRollback.status).toBe('recovery_required');
+    expect(JSON.parse(readFileSync(
+      join(root, '.takt-template-state', 'journal.json'),
+      'utf8',
+    ))).toMatchObject({
+      state: 'restore-failed',
+      backupId: applied.status === 'committed' ? applied.backupId : '',
+    });
 
     const recovered = await recoverProjectTemplateApply({ projectRoot: root });
 
