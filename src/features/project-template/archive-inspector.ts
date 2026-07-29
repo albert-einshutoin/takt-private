@@ -33,7 +33,10 @@ import type {
 import { compareSemVer, requireSemVer } from './validation.js';
 import { parseSha256 } from './validation.js';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
-import { PROJECT_TEMPLATE_CLASSIFICATION_REASONS } from './classifier-types.js';
+import {
+  MAX_PROJECT_TEMPLATE_EXPORT_EXCLUSIONS,
+  PROJECT_TEMPLATE_CLASSIFICATION_REASONS,
+} from './classifier-types.js';
 import {
   maxBytesForTaktpackEntry,
   resolveTaktpackLimits,
@@ -218,7 +221,24 @@ function parsePackMetadata(content: Buffer): PackMetadata {
     || (record['lockSeed'] as Record<string, unknown>)['kind'] !== 'project-template-lock-seed') {
     throw new TaktpackError('INVALID_PACK', 'pack lock seed is invalid', 'pack.json.lockSeed');
   }
-  const seedFields = { ...record['lockSeed'] as Record<string, unknown> };
+  const seedRecord = record['lockSeed'] as Record<string, unknown>;
+  const seedKeys = Object.keys(seedRecord).sort();
+  const expectedSeedKeys = [
+    'capabilities',
+    'entries',
+    'kind',
+    'packVersion',
+    'schemaVersion',
+    'source',
+  ];
+  if (JSON.stringify(seedKeys) !== JSON.stringify(expectedSeedKeys)) {
+    throw new TaktpackError(
+      'INVALID_PACK',
+      'pack lock seed has unknown or missing fields',
+      'pack.json.lockSeed',
+    );
+  }
+  const seedFields = { ...seedRecord };
   delete seedFields['kind'];
   const parsedSeed = parseTemplateLock({
     ...seedFields,
@@ -296,13 +316,16 @@ function parseReport(content: Buffer): TaktpackExportReportV1 {
       !allowedReasons.has(reason)
       || !Number.isSafeInteger(count)
       || (count as number) < 0
-      || (count as number) > 4_096
+      || (count as number) > MAX_PROJECT_TEMPLATE_EXPORT_EXCLUSIONS
     ))
   ) {
     throw new TaktpackError('INVALID_PACK', 'invalid excluded reason count', 'excludedReasons');
   }
   const excludedTotal = reasonEntries.reduce((sum, [, count]) => sum + (count as number), 0);
-  if (excludedTotal !== counts.excluded || excludedTotal > 4_096) {
+  if (
+    excludedTotal !== counts.excluded
+    || excludedTotal > MAX_PROJECT_TEMPLATE_EXPORT_EXCLUSIONS
+  ) {
     throw new TaktpackError('INVALID_PACK', 'excluded reason counts do not match excluded total', 'excludedReasons');
   }
   return {

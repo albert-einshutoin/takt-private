@@ -43,6 +43,15 @@ export const PROJECT_TEMPLATE_CLASSIFICATION_REASONS = [
 export type ProjectTemplateClassificationReason =
   typeof PROJECT_TEMPLATE_CLASSIFICATION_REASONS[number];
 
+export const DEFAULT_PROJECT_TEMPLATE_MAX_NODES = 8_192;
+
+/**
+ * A complete scan can report one exclusion per `.takt` node plus the fixed,
+ * redacted `.devloop` sibling sentinel recorded outside that node budget.
+ */
+export const MAX_PROJECT_TEMPLATE_EXPORT_EXCLUSIONS =
+  DEFAULT_PROJECT_TEMPLATE_MAX_NODES + 1;
+
 export interface ProjectTemplateClassifierInput {
   relativePath: string;
   content?: Uint8Array;

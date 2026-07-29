@@ -22,6 +22,7 @@ import type {
   TemplateEntryPolicy,
   TemplateLockV1,
 } from './types.js';
+import { requireRecord } from './validation.js';
 
 const DESCRIPTOR: TaktpackDescriptorV1 = {
   format: 'taktpack',
@@ -84,6 +85,43 @@ function incrementReason(
   reasons[reason] = (reasons[reason] ?? 0) + 1;
 }
 
+function parseExportPolicies(
+  value: ProjectTemplateExportOptions['policies'],
+): ReadonlyMap<string, Exclude<TemplateEntryPolicy, 'excluded'>> {
+  let record: Record<string, unknown>;
+  try {
+    record = requireRecord(value ?? {}, 'policies');
+  } catch {
+    throw new TaktpackError(
+      'INVALID_EXPORT_PLAN',
+      'policies must be a plain own-property object without accessors',
+      'policies',
+    );
+  }
+  if (Object.getOwnPropertySymbols(record).length > 0) {
+    throw new TaktpackError(
+      'INVALID_EXPORT_PLAN',
+      'policies must contain string keys only',
+      'policies',
+    );
+  }
+  const policies = new Map<string, Exclude<TemplateEntryPolicy, 'excluded'>>();
+  // Approval lookup and unknown-key validation must consume the same immutable
+  // own-property snapshot; reading the prototype could silently grant approval.
+  for (const [path, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(record))) {
+    const policy = descriptor.value;
+    if (policy !== 'managed' && policy !== 'merge' && policy !== 'scaffold') {
+      throw new TaktpackError(
+        'INVALID_EXPORT_PLAN',
+        'policy value is not supported',
+        'policies',
+      );
+    }
+    policies.set(path, policy);
+  }
+  return policies;
+}
+
 /**
  * Converts the redacted scanner result into immutable archive metadata.
  * Excluded paths stay in the report only: runtime and secret paths are never
@@ -93,6 +131,7 @@ export async function createProjectTemplateExportPlan(
   projectRoot: string,
   options: ProjectTemplateExportOptions,
 ): Promise<ProjectTemplateExportPlan> {
+  const policies = parseExportPolicies(options.policies);
   const scan = await scanProjectTemplateDirectory(projectRoot);
   if (scan.scanStatus !== 'complete') {
     throw new TaktpackError(
@@ -103,7 +142,6 @@ export async function createProjectTemplateExportPlan(
   }
 
   const approvedCapabilities = new Set(options.approvedCapabilities ?? []);
-  const policies = options.policies ?? {};
   const includedPaths = new Set<string>();
   const entries: TemplateEntry[] = [];
   const files: ProjectTemplateExportFile[] = [];
@@ -130,7 +168,7 @@ export async function createProjectTemplateExportPlan(
       throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'capability inspection is incomplete', entryField);
     }
 
-    const explicitPolicy = policies[result.relativePath];
+    const explicitPolicy = policies.get(result.relativePath);
     if (result.classification === 'project-owned' && explicitPolicy === undefined) {
       throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'project-owned entry requires an explicit policy', entryField);
     }
@@ -186,7 +224,7 @@ export async function createProjectTemplateExportPlan(
     });
   }
 
-  const unknownPolicies = Object.keys(policies).filter((path) => !includedPaths.has(path));
+  const unknownPolicies = [...policies.keys()].filter((path) => !includedPaths.has(path));
   if (unknownPolicies.length > 0) {
     throw new TaktpackError('INVALID_EXPORT_PLAN', 'policy references a non-exportable path', 'policies');
   }

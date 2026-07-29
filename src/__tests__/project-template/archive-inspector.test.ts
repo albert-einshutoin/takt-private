@@ -108,6 +108,27 @@ function rewriteTarChecksum(header: Buffer): void {
   header.write(encoded, 148, 8, 'ascii');
 }
 
+function rewriteTarEntryContent(
+  archive: Buffer,
+  entryName: string,
+  content: Buffer,
+): Buffer {
+  const headerOffset = findTarEntryOffset(archive, entryName);
+  const header = Buffer.from(archive.subarray(headerOffset, headerOffset + 512));
+  const oldSize = Number.parseInt(header.subarray(124, 136).toString('ascii'), 8);
+  const oldEnd = headerOffset + 512 + Math.ceil(oldSize / 512) * 512;
+  const paddedSize = Math.ceil(content.byteLength / 512) * 512;
+  header.write(`${content.byteLength.toString(8).padStart(11, '0')}\0`, 124, 12, 'ascii');
+  rewriteTarChecksum(header);
+  return Buffer.concat([
+    archive.subarray(0, headerOffset),
+    header,
+    content,
+    Buffer.alloc(paddedSize - content.byteLength),
+    archive.subarray(oldEnd),
+  ]);
+}
+
 function findTarEntryOffset(bytes: Buffer, prefix: string): number {
   let offset = 0;
   while (offset + 512 <= bytes.length) {
@@ -144,6 +165,60 @@ describe('taktpack streaming inspector', () => {
     });
     expect(existsSync(join(root, 'pack.json'))).toBe(false);
     expect(existsSync(join(root, 'blobs'))).toBe(false);
+  });
+
+  it('round-trips a scanner-valid report with more than 4,096 exclusions', async () => {
+    const root = makeRoot();
+    const sourceDirectory = join(root, '.takt', 'unknown');
+    mkdirSync(sourceDirectory, { recursive: true });
+    for (let index = 0; index < 4_097; index += 1) {
+      writeFileSync(join(sourceDirectory, `file-${index.toString().padStart(4, '0')}.txt`), '');
+    }
+    const plan = await createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0',
+      takt: { minVersion: '0.48.0' },
+      source: {
+        kind: 'local',
+        uri: '.',
+        ref: 'workspace',
+        commit: 'a'.repeat(40),
+      },
+    });
+    const pack = join(root, 'many-exclusions.taktpack');
+    await writeTaktpack(pack, plan);
+
+    await expect(inspectTaktpack(pack)).resolves.toMatchObject({
+      report: {
+        counts: { excluded: 4_097 },
+        excludedReasons: { UNKNOWN_DEFAULT_DENY: 4_097 },
+      },
+    });
+  }, 30_000);
+
+  it('rejects an unapproved manifestSha256 field inside lockSeed', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+    const archive = readFileSync(pack);
+    const packOffset = findTarEntryOffset(archive, 'pack.json');
+    const packSize = Number.parseInt(
+      archive.subarray(packOffset + 124, packOffset + 136).toString('ascii'),
+      8,
+    );
+    const metadata = JSON.parse(
+      archive.subarray(packOffset + 512, packOffset + 512 + packSize).toString('utf8'),
+    ) as Record<string, unknown> & { lockSeed: Record<string, unknown> };
+    metadata.lockSeed.manifestSha256 = 'f'.repeat(64);
+    const canonical = Buffer.from(`${JSON.stringify(metadata, (_key, value) => (
+      value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
+        : value
+    ))}\n`);
+    writeFileSync(pack, rewriteTarEntryContent(archive, 'pack.json', canonical));
+
+    await expect(inspectTaktpack(pack)).rejects.toMatchObject({
+      code: 'INVALID_PACK',
+      field: 'pack.json.lockSeed',
+    });
   });
 
   it('reports compatibility as unknown when the caller provides no current version', async () => {

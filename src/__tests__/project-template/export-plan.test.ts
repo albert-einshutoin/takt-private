@@ -115,6 +115,75 @@ describe('project template export plan', () => {
     expect(approved.manifest.entries[0]?.policy).toBe('managed');
   });
 
+  it('does not treat an inherited policy as explicit approval', async () => {
+    const root = makeProject({ 'config.yaml': 'language: ja\n' });
+    const inheritedPolicies = Object.create({
+      'config.yaml': 'managed',
+    }) as Record<string, 'managed'>;
+
+    await expect(createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0',
+      takt: { minVersion: '0.48.0' },
+      source,
+      policies: inheritedPolicies,
+    })).rejects.toMatchObject({
+      code: 'INVALID_EXPORT_PLAN',
+      field: 'policies',
+    });
+  });
+
+  it('rejects policy accessors without invoking them', async () => {
+    const root = makeProject({ 'config.yaml': 'language: ja\n' });
+    let getterCalls = 0;
+    const policies = Object.defineProperty({}, 'config.yaml', {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return 'managed';
+      },
+    }) as Record<string, 'managed'>;
+
+    await expect(createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0',
+      takt: { minVersion: '0.48.0' },
+      source,
+      policies,
+    })).rejects.toMatchObject({
+      code: 'INVALID_EXPORT_PLAN',
+      field: 'policies',
+    });
+    expect(getterCalls).toBe(0);
+  });
+
+  it('accepts an own policy in a null-prototype dictionary', async () => {
+    const root = makeProject({ 'config.yaml': 'language: ja\n' });
+    const policies = Object.create(null) as Record<string, 'managed'>;
+    policies['config.yaml'] = 'managed';
+
+    const plan = await createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0',
+      takt: { minVersion: '0.48.0' },
+      source,
+      policies,
+    });
+
+    expect(plan.manifest.entries[0]?.policy).toBe('managed');
+  });
+
+  it('rejects an invalid runtime policy before building counts', async () => {
+    const root = makeProject({ 'config.yaml': 'language: ja\n' });
+
+    await expect(createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0',
+      takt: { minVersion: '0.48.0' },
+      source,
+      policies: { 'config.yaml': 'excluded' } as unknown as Record<string, 'managed'>,
+    })).rejects.toMatchObject({
+      code: 'INVALID_EXPORT_PLAN',
+      field: 'policies',
+    });
+  });
+
   it('redacts unknown policy keys and hostile path markers from errors', async () => {
     const root = makeProject({ 'workflows/review.yaml': 'name: review\n' });
     const marker = 'TOKEN_MARKER_ABC';
