@@ -25,6 +25,11 @@ export type TemplateCapability = 'executable' | 'github-write' | 'external-comma
 export interface DetectedTemplateCapabilities {
   path: string;
   capabilities: TemplateCapability[];
+  /**
+   * Empty capabilities are authoritative only when inspection completed.
+   * Optional for v1 callers created before classifier evidence carried status.
+   */
+  inspectionStatus?: 'complete' | 'incomplete' | 'blocked';
 }
 
 export interface GithubTemplateSource {

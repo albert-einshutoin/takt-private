@@ -26,6 +26,7 @@ export type ProjectTemplateClassificationReason =
   | 'PATH_ESCAPE'
   | 'PATH_COLLISION'
   | 'UNSAFE_ENTRY_PATH'
+  | 'INVALID_CLASSIFIER_INPUT'
   | 'NODE_LIMIT_EXCEEDED'
   | 'FILE_LIMIT_EXCEEDED'
   | 'SINGLE_FILE_LIMIT_EXCEEDED'
@@ -33,6 +34,7 @@ export type ProjectTemplateClassificationReason =
   | 'SCAN_LIMIT_EXCEEDED'
   | 'DEPTH_LIMIT_EXCEEDED'
   | 'FILE_CHANGED_DURING_SCAN'
+  | 'DIRECTORY_CHANGED_DURING_SCAN'
   | 'FILE_READ_OVERFLOW'
   | 'READ_FAILED'
   | 'ROOT_UNSAFE';
@@ -57,6 +59,8 @@ export interface ProjectTemplateClassificationResult {
   sha256?: string;
   suggestedPolicy?: TemplateEntryPolicy;
   detectedCapabilities: DetectedTemplateCapabilities;
+  /** True when capabilities or project-owned policy need explicit approval. */
+  reviewRequired: boolean;
   warnings: string[];
 }
 

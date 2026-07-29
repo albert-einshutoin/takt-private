@@ -14,7 +14,7 @@ import {
 function parseDetection(value: unknown, index: number): DetectedTemplateCapabilities {
   const field = `detections[${index}]`;
   const detection = requireRecord(value, field);
-  assertAllowedKeys(detection, ['path', 'capabilities'], field);
+  assertAllowedKeys(detection, ['path', 'capabilities', 'inspectionStatus'], field);
   const capabilities = parseCapabilities(
     detection['capabilities'],
     `${field}.capabilities`,
@@ -27,9 +27,23 @@ function parseDetection(value: unknown, index: number): DetectedTemplateCapabili
       `${field}.capabilities`,
     );
   }
+  const inspectionStatus = detection['inspectionStatus'];
+  if (
+    inspectionStatus !== undefined
+    && inspectionStatus !== 'complete'
+    && inspectionStatus !== 'incomplete'
+    && inspectionStatus !== 'blocked'
+  ) {
+    throw new ProjectTemplateValidationError(
+      'DETECTED_CAPABILITY_MISMATCH',
+      `${field}.inspectionStatus is invalid`,
+      `${field}.inspectionStatus`,
+    );
+  }
   return {
     path: parsePortablePath(detection['path'], `${field}.path`),
     capabilities,
+    ...(inspectionStatus === undefined ? {} : { inspectionStatus }),
   };
 }
 
