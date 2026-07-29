@@ -19,7 +19,8 @@ export type ProjectTemplateValidationErrorCode =
   | 'NON_PLAIN_OBJECT'
   | 'LIMIT_EXCEEDED'
   | 'INVALID_VERSION_RANGE'
-  | 'LOCK_MISMATCH';
+  | 'LOCK_MISMATCH'
+  | 'DETECTED_CAPABILITY_MISMATCH';
 
 export class ProjectTemplateValidationError extends Error {
   constructor(

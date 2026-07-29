@@ -17,6 +17,16 @@ export type TemplateEntryPolicy =
 
 export type TemplateCapability = 'executable' | 'github-write' | 'external-command';
 
+/**
+ * Capability evidence produced by a classifier or archive inspector.
+ * An empty detection is evidence of no detected capability for that entry; an
+ * omitted entry means inspection has not supplied evidence for that path.
+ */
+export interface DetectedTemplateCapabilities {
+  path: string;
+  capabilities: TemplateCapability[];
+}
+
 export interface GithubTemplateSource {
   kind: 'github';
   /** Canonical HTTPS repository URL without `.git`, query, or fragment. */

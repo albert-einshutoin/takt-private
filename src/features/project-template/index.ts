@@ -7,6 +7,7 @@ export {
   calculateProjectTemplateManifestSha256,
   validateManifestLockPair,
 } from './binding.js';
+export { validateDetectedTemplateCapabilities } from './capability-detection.js';
 export {
   projectTemplateManifestV1JsonSchema,
   projectTemplateLockV1JsonSchema,
@@ -23,5 +24,6 @@ export type {
   GithubTemplateSource,
   GitTemplateSource,
   LocalTemplateSource,
+  DetectedTemplateCapabilities,
 } from './types.js';
 export type { ProjectTemplateValidationErrorCode } from './errors.js';

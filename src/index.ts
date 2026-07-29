@@ -85,6 +85,7 @@ export {
   serializeTemplateLock,
   calculateProjectTemplateManifestSha256,
   validateManifestLockPair,
+  validateDetectedTemplateCapabilities,
   projectTemplateManifestV1JsonSchema,
   projectTemplateLockV1JsonSchema,
   ProjectTemplateValidationError,
@@ -100,5 +101,6 @@ export type {
   GithubTemplateSource,
   GitTemplateSource,
   LocalTemplateSource,
+  DetectedTemplateCapabilities,
   ProjectTemplateValidationErrorCode,
 } from './features/project-template/index.js';

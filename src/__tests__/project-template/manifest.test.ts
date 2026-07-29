@@ -208,6 +208,8 @@ describe('project template manifest public contract', () => {
     '.takt\\hooks\\prepare.sh',
     '.takt/hooks/prepare.sh',
     'workflows/CON.yaml',
+    'workflows/CONIN$.yaml',
+    'workflows/CONOUT$.yaml',
     'workflows/task.yaml:secret',
     'workflows/task.yaml.',
     'workflows/task.yaml ',
@@ -237,15 +239,21 @@ describe('project template manifest public contract', () => {
     expectValidationCode(manifest, 'UNDECLARED_CAPABILITY');
   });
 
-  it('should reject NFC and NFD path collisions', () => {
+  it('should reject NFKC compatibility path collisions', () => {
     const manifest = validManifest();
     const entry = (manifest['entries'] as Array<Record<string, unknown>>)[0]!;
-    entry['path'] = 'workflows/caf\u00e9.yaml';
+    entry['path'] = 'workflows/Ａ.yaml';
     (manifest['entries'] as Array<Record<string, unknown>>).push({
       ...entry,
-      path: 'workflows/cafe\u0301.yaml',
+      path: 'workflows/A.yaml',
     });
     expectValidationCode(manifest, 'PATH_NORMALIZATION_COLLISION');
+  });
+
+  it('should require every entry path to already be NFC normalized', () => {
+    const manifest = validManifest();
+    (manifest['entries'] as Array<Record<string, unknown>>)[0]!['path'] = 'workflows/cafe\u0301.yaml';
+    expectValidationCode(manifest, 'INVALID_PATH');
   });
 
   it('should reject non-plain objects before reading inherited values', () => {
@@ -289,11 +297,23 @@ describe('project template manifest public contract', () => {
     expectValidationCode(manifest, 'INVALID_VERSION_RANGE');
   });
 
+  it('should compare the complete SemVer prerelease after the first hyphen', () => {
+    const manifest = validManifest();
+    manifest['takt'] = { minVersion: '1.0.0-alpha-y', maxVersion: '1.0.0-alpha-x' };
+    expectValidationCode(manifest, 'INVALID_VERSION_RANGE');
+  });
+
   it.each([
     ['github', 'github:example/project-template', 'v1.2.3'],
     ['github', 'https://github.com/example/project-template.git', 'v1.2.3'],
+    ['github', 'https://github.com/example/.', 'v1.2.3'],
+    ['github', 'https://github.com/example/..', 'v1.2.3'],
     ['git', 'ssh://git@example.com/project/template.git', 'main'],
     ['git', 'https://example.com/project.git?token=secret', 'main'],
+    ['git', 'https://GIT.example.com/project/template.git', 'main'],
+    ['git', 'https://git.example.com/project/a/../template.git', 'main'],
+    ['git', 'https://git.example.com/project%2Ftemplate.git', 'main'],
+    ['git', 'https://git.example.com/project%5Ctemplate.git', 'main'],
     ['local', '/Users/example/template', 'workspace'],
     ['local', '../template', 'workspace'],
     ['local', 'templates/default', 'main'],
@@ -412,6 +432,29 @@ describe('project template manifest public contract', () => {
     expect(() => validatePair(manifest, lock)).toThrow(expect.objectContaining({ code: 'LOCK_MISMATCH' }));
   });
 
+  it('should fail closed when detected capabilities exceed declarations or reference an unknown entry', () => {
+    const api = projectTemplate as unknown as Record<string, unknown>;
+    expect(typeof api['validateDetectedTemplateCapabilities']).toBe('function');
+    const validateDetections = api['validateDetectedTemplateCapabilities'] as (
+      manifest: unknown,
+      detections: unknown,
+    ) => void;
+    const manifest = validManifest();
+
+    expect(() => validateDetections(manifest, [{
+      path: 'hooks/prepare.sh',
+      capabilities: ['executable'],
+    }])).not.toThrow();
+    expect(() => validateDetections(manifest, [{
+      path: 'hooks/prepare.sh',
+      capabilities: ['external-command'],
+    }])).toThrow(expect.objectContaining({ code: 'DETECTED_CAPABILITY_MISMATCH' }));
+    expect(() => validateDetections(manifest, [{
+      path: 'hooks/not-in-pack.sh',
+      capabilities: [],
+    }])).toThrow(expect.objectContaining({ code: 'DETECTED_CAPABILITY_MISMATCH' }));
+  });
+
   it('should keep draft-07 manifest and lock schemas in parity with the fixture corpus', () => {
     const api = projectTemplate as unknown as Record<string, unknown>;
     const lockSchema = api['projectTemplateLockV1JsonSchema'];
@@ -442,6 +485,25 @@ describe('project template manifest public contract', () => {
       },
       (value: Record<string, unknown>) => {
         delete (value['entries'] as Array<Record<string, unknown>>)[0]!['sha256'];
+      },
+      (value: Record<string, unknown>) => {
+        (value['entries'] as Array<Record<string, unknown>>)[0]!['path'] = 'workflows/CONOUT$.yaml';
+      },
+      (value: Record<string, unknown>) => {
+        value['source'] = {
+          kind: 'git',
+          uri: 'https://GIT.example.com/project/template.git',
+          ref: 'main',
+          commit: '0123456789abcdef0123456789abcdef01234567',
+        };
+      },
+      (value: Record<string, unknown>) => {
+        value['source'] = {
+          kind: 'git',
+          uri: 'https://git.example.com/project%2Ftemplate.git',
+          ref: 'main',
+          commit: '0123456789abcdef0123456789abcdef01234567',
+        };
       },
     ];
     for (const mutate of singleFieldBadCorpus) {

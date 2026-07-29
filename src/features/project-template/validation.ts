@@ -31,10 +31,10 @@ export const SEMVER_PATTERN_SOURCE = '^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\
 export const SHA256_PATTERN_SOURCE = '^[a-f0-9]{64}$';
 export const COMMIT_PATTERN_SOURCE = '^[a-f0-9]{40}(?:[a-f0-9]{24})?$';
 export const CONTROL_FREE_PATTERN_SOURCE = '^[^\\u0000-\\u001F\\u007F]*$';
-export const GITHUB_URI_PATTERN_SOURCE = '^(?!.*\\.git$)https://github\\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$';
-export const GIT_URI_PATTERN_SOURCE = '^https://(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}(?::[1-9][0-9]{0,4})?/[A-Za-z0-9._~!$&\'()*+,;=:@%/-]+$';
+export const GITHUB_URI_PATTERN_SOURCE = '^(?!.*\\.git$)https://github\\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/(?!(?:\\.|\\.\\.)$)[A-Za-z0-9._-]{1,100}$';
+export const GIT_URI_PATTERN_SOURCE = '^(?!.*%(?:2[fF]|5[cC]))(?!.*\\/\\.{1,2}(?:\\/|$))https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}(?::[1-9][0-9]{0,4})?/[A-Za-z0-9._~!$&\'()*+,;=:@%/-]+$';
 export const SOURCE_REF_PATTERN_SOURCE = '^(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\.lock(?:/|$))[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,254}[A-Za-z0-9_-])?$';
-const PORTABLE_RELATIVE_PATH_BODY_SOURCE = '(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(?!.*[\\u0000-\\u001F\\u007F])(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)[^/]*[ .](?:/|$))(?!.*//)[^/]+(?:/[^/]+)*';
+const PORTABLE_RELATIVE_PATH_BODY_SOURCE = '(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(?!.*[\\u0000-\\u001F\\u007F])(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Nn](?:[Ii][Nn]|[Oo][Uu][Tt])\\$|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)[^/]*[ .](?:/|$))(?!.*//)[^/]+(?:/[^/]+)*';
 export const LOCAL_SOURCE_URI_PATTERN_SOURCE = `^(?:\\.|${PORTABLE_RELATIVE_PATH_BODY_SOURCE})$`;
 export const PROJECT_TEMPLATE_PATH_PATTERN_SOURCE = `^(?!\\.takt(?:/|$))${PORTABLE_RELATIVE_PATH_BODY_SOURCE}$`;
 
@@ -170,7 +170,9 @@ function compareIdentifiers(left: string, right: string): number {
 export function compareSemVer(left: string, right: string): number {
   const parse = (version: string): { core: string[]; prerelease: string[] } => {
     const withoutBuild = version.split('+', 1)[0]!;
-    const [coreText, prereleaseText] = withoutBuild.split('-', 2);
+    const separatorIndex = withoutBuild.indexOf('-');
+    const coreText = separatorIndex === -1 ? withoutBuild : withoutBuild.slice(0, separatorIndex);
+    const prereleaseText = separatorIndex === -1 ? undefined : withoutBuild.slice(separatorIndex + 1);
     return {
       core: coreText!.split('.'),
       prerelease: prereleaseText?.split('.') ?? [],
@@ -224,6 +226,21 @@ function parseRef(value: unknown): string {
   return ref;
 }
 
+function isCanonicalHttpsUrl(uri: string): boolean {
+  if (/%(?:2f|5c)/i.test(uri)) return false;
+  try {
+    const parsed = new URL(uri);
+    return parsed.protocol === 'https:'
+      && parsed.username === ''
+      && parsed.password === ''
+      && parsed.search === ''
+      && parsed.hash === ''
+      && parsed.href === uri;
+  } catch {
+    return false;
+  }
+}
+
 export function parseSource(value: unknown): TemplateSource {
   const source = requireRecord(value, 'source');
   assertAllowedKeys(source, ['kind', 'uri', 'ref', 'commit'], 'source');
@@ -232,13 +249,13 @@ export function parseSource(value: unknown): TemplateSource {
   const commit = parseCommit(source['commit']);
 
   if (kind === 'github') {
-    if (!GITHUB_URI_PATTERN.test(uri)) {
+    if (!GITHUB_URI_PATTERN.test(uri) || !isCanonicalHttpsUrl(uri)) {
       throw new ProjectTemplateValidationError('INVALID_SOURCE', 'source.uri must be a canonical GitHub HTTPS repository URL without .git, query, or fragment', 'source.uri');
     }
     return { kind, uri: uri as `https://github.com/${string}/${string}`, ref: parseRef(source['ref']), commit };
   }
   if (kind === 'git') {
-    if (!GIT_URI_PATTERN.test(uri)) {
+    if (!GIT_URI_PATTERN.test(uri) || !isCanonicalHttpsUrl(uri)) {
       throw new ProjectTemplateValidationError('INVALID_SOURCE', 'source.uri must be a credential-free HTTPS Git URL without query or fragment', 'source.uri');
     }
     return { kind, uri: uri as `https://${string}`, ref: parseRef(source['ref']), commit };
@@ -261,13 +278,16 @@ export function parseCapabilities(
   const rawCapabilities = requireArray(value, field, TEMPLATE_CAPABILITIES.length, errorCode);
   const seen = new Set<TemplateCapability>();
   const capabilities: TemplateCapability[] = [];
+  const capabilityErrorCode = errorCode === 'DETECTED_CAPABILITY_MISMATCH'
+    ? errorCode
+    : 'UNDECLARED_CAPABILITY';
   for (const capability of rawCapabilities) {
     if (!TEMPLATE_CAPABILITIES.includes(capability as TemplateCapability)) {
-      throw new ProjectTemplateValidationError('UNDECLARED_CAPABILITY', `${field} contains an unsupported capability`, field);
+      throw new ProjectTemplateValidationError(capabilityErrorCode, `${field} contains an unsupported capability`, field);
     }
     const typedCapability = capability as TemplateCapability;
     if (seen.has(typedCapability)) {
-      throw new ProjectTemplateValidationError('UNDECLARED_CAPABILITY', `${field} must not contain duplicates`, field);
+      throw new ProjectTemplateValidationError(capabilityErrorCode, `${field} must not contain duplicates`, field);
     }
     seen.add(typedCapability);
     capabilities.push(typedCapability);
@@ -290,7 +310,7 @@ export function parsePortablePath(value: unknown, field: string): string {
   const path = requireString(value, field, 'INVALID_PATH', MAX_TEMPLATE_PATH_LENGTH);
   // Paths are relative to `.takt/`. The shared expression also blocks Windows
   // reserved names, ADS syntax, controls, traversal, and trailing dot/space.
-  if (!PROJECT_TEMPLATE_PATH_PATTERN.test(path)) {
+  if (path.normalize('NFC') !== path || !PROJECT_TEMPLATE_PATH_PATTERN.test(path)) {
     throw new ProjectTemplateValidationError('INVALID_PATH', `${field} must be a safe path relative to the .takt root`, field);
   }
   return path;
@@ -353,7 +373,7 @@ export interface PathIdentityEntry {
 
 export function validatePathIdentities(entries: PathIdentityEntry[], field: string): void {
   const exactPaths = new Map<string, PathIdentityEntry>();
-  const normalizedPaths = new Map<string, string>();
+  const compatibilityNormalizedPaths = new Map<string, string>();
   const caseInsensitivePaths = new Map<string, string>();
   for (const entry of entries) {
     const duplicate = exactPaths.get(entry.path);
@@ -363,8 +383,8 @@ export function validatePathIdentities(entries: PathIdentityEntry[], field: stri
       }
       throw new ProjectTemplateValidationError('DUPLICATE_ENTRY_PATH', `${field} contains duplicate path ${entry.path}`, field);
     }
-    const normalizedPath = entry.path.normalize('NFC');
-    const normalizationVariant = normalizedPaths.get(normalizedPath);
+    const normalizedPath = entry.path.normalize('NFKC');
+    const normalizationVariant = compatibilityNormalizedPaths.get(normalizedPath);
     if (normalizationVariant !== undefined) {
       throw new ProjectTemplateValidationError('PATH_NORMALIZATION_COLLISION', `${entry.path} normalizes to the same path as ${normalizationVariant}`, field);
     }
@@ -374,7 +394,7 @@ export function validatePathIdentities(entries: PathIdentityEntry[], field: stri
       throw new ProjectTemplateValidationError('PATH_CASE_COLLISION', `${entry.path} conflicts with ${caseVariant} on case-insensitive file systems`, field);
     }
     exactPaths.set(entry.path, entry);
-    normalizedPaths.set(normalizedPath, entry.path);
+    compatibilityNormalizedPaths.set(normalizedPath, entry.path);
     caseInsensitivePaths.set(caseKey, entry.path);
   }
 }
