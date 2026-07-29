@@ -51,17 +51,13 @@ describe('project template export plan', () => {
         sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
     ]);
-    expect(plan.files).toEqual([
-      expect.objectContaining({
-        path: 'workflows/review.yaml',
-        absolutePath: join(root, '.takt', 'workflows/review.yaml'),
-      }),
-    ]);
+    expect((plan as unknown as Record<string, unknown>)['files']).toBeUndefined();
     expect(plan.report).toMatchObject({
       counts: { managed: 0, merge: 1, scaffold: 0, excluded: 1 },
       excludedReasons: { RUNTIME_STATE: 1 },
     });
     expect(JSON.stringify(plan.report)).not.toContain(root);
+    expect(JSON.stringify(plan)).not.toContain(root);
     expect(() => validateManifestLockPair(plan.manifest, plan.lock)).not.toThrow();
   });
 

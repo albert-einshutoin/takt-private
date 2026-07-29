@@ -75,7 +75,6 @@ export interface ProjectTemplateExportPlan {
   manifest: ProjectTemplateManifestV1;
   lock: TemplateLockV1;
   report: TaktpackExportReportV1;
-  files: ProjectTemplateExportFile[];
 }
 
 export interface TaktpackInspectResult {
@@ -85,11 +84,26 @@ export interface TaktpackInspectResult {
   report: TaktpackExportReportV1;
   archiveSha256: string;
   compatibility: {
-    compatible: boolean;
+    status: 'unknown' | 'compatible' | 'incompatible';
+    compatible?: boolean;
     currentVersion?: string;
     minVersion: string;
     maxVersion?: string;
   };
+}
+
+export type TaktpackLockSeedV1 = Omit<TemplateLockV1, 'manifestSha256'>;
+
+export interface TaktpackBlobIndexEntry {
+  sha256: string;
+  bytes: number;
+}
+
+export interface TaktpackIndexV1 extends TaktpackDescriptorV1 {
+  manifestSha256: string;
+  exportReportSha256: string;
+  lockSeed: TaktpackLockSeedV1;
+  blobs: TaktpackBlobIndexEntry[];
 }
 
 export interface InspectTaktpackOptions {

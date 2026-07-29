@@ -10,8 +10,13 @@ import {
   type TaktpackExportReportV1,
   type TaktpackInspectResult,
   type TaktpackLimits,
+  type TaktpackLockSeedV1,
+  type TaktpackBlobIndexEntry,
 } from './archive-types.js';
-import { validateManifestLockPair } from './binding.js';
+import {
+  calculateProjectTemplateManifestSha256,
+  validateManifestLockPair,
+} from './binding.js';
 import { validateDetectedTemplateCapabilities } from './capability-detection.js';
 import { classifyProjectTemplateEntry } from './classifier-core.js';
 import { TaktpackError } from './errors.js';
@@ -24,6 +29,8 @@ import type {
   TemplateLockV1,
 } from './types.js';
 import { compareSemVer, requireSemVer } from './validation.js';
+import { parseSha256 } from './validation.js';
+import { canonicalizeTaktpackJson } from './canonical-json.js';
 
 const TAR_BLOCK_BYTES = 512;
 const ZERO_BLOCK = Buffer.alloc(TAR_BLOCK_BYTES);
@@ -36,7 +43,10 @@ interface ParsedHeader {
 
 interface PackMetadata {
   descriptor: TaktpackDescriptorV1;
-  lock: TemplateLockV1;
+  manifestSha256: string;
+  exportReportSha256: string;
+  lockSeed: TaktpackLockSeedV1;
+  blobs: TaktpackBlobIndexEntry[];
 }
 
 function resolveLimits(input: Partial<TaktpackLimits> | undefined): TaktpackLimits {
@@ -107,7 +117,7 @@ function parseHeader(header: Buffer): ParsedHeader {
     || (!TAKTPACK_ENTRY_NAMES.includes(name as typeof TAKTPACK_ENTRY_NAMES[number])
       && !BLOB_NAME_PATTERN.test(name))
   ) {
-    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', `unsafe or unknown archive entry: ${name}`, 'entry.name');
+    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive entry name is unsafe or unknown', 'entry.name');
   }
   if (
     parseOctal(header.subarray(100, 108), 'header.mode') !== 0o644
@@ -121,8 +131,10 @@ function parseHeader(header: Buffer): ParsedHeader {
 }
 
 function parseJson(content: Buffer, field: string): unknown {
+  let text: string;
   try {
-    return JSON.parse(content.toString('utf8')) as unknown;
+    text = new TextDecoder('utf-8', { fatal: true }).decode(content);
+    return JSON.parse(text) as unknown;
   } catch {
     throw new TaktpackError('INVALID_PACK', `${field} is not valid UTF-8 JSON`, field);
   }
@@ -135,7 +147,16 @@ function parsePackMetadata(content: Buffer): PackMetadata {
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  const expected = ['archive', 'contentAddressed', 'format', 'lock', 'version'].sort();
+  const expected = [
+    'archive',
+    'blobs',
+    'contentAddressed',
+    'exportReportSha256',
+    'format',
+    'lockSeed',
+    'manifestSha256',
+    'version',
+  ].sort();
   if (JSON.stringify(keys) !== JSON.stringify(expected)
     || record['format'] !== 'taktpack'
     || record['version'] !== '1.0'
@@ -143,6 +164,46 @@ function parsePackMetadata(content: Buffer): PackMetadata {
     || record['contentAddressed'] !== true) {
     throw new TaktpackError('INVALID_PACK', 'unsupported pack descriptor', 'pack.json');
   }
+  if (canonicalizeTaktpackJson(value) !== content.toString('utf8')) {
+    throw new TaktpackError('INVALID_PACK', 'pack.json is not canonical JSON', 'pack.json');
+  }
+  if (!Array.isArray(record['blobs']) || record['blobs'].length > DEFAULT_TAKTPACK_LIMITS.maxEntries) {
+    throw new TaktpackError('INVALID_PACK', 'pack blob index is invalid', 'pack.json.blobs');
+  }
+  const blobs = record['blobs'].map((blob, index): TaktpackBlobIndexEntry => {
+    if (typeof blob !== 'object' || blob === null || Array.isArray(blob)) {
+      throw new TaktpackError('INVALID_PACK', 'pack blob index entry is invalid', `pack.json.blobs[${index}]`);
+    }
+    const blobRecord = blob as Record<string, unknown>;
+    if (JSON.stringify(Object.keys(blobRecord).sort()) !== JSON.stringify(['bytes', 'sha256'])) {
+      throw new TaktpackError('INVALID_PACK', 'pack blob index entry has unknown fields', `pack.json.blobs[${index}]`);
+    }
+    if (!Number.isSafeInteger(blobRecord['bytes']) || (blobRecord['bytes'] as number) < 0) {
+      throw new TaktpackError('INVALID_PACK', 'pack blob size is invalid', `pack.json.blobs[${index}].bytes`);
+    }
+    return {
+      sha256: parseSha256(blobRecord['sha256'], `pack.json.blobs[${index}].sha256`),
+      bytes: blobRecord['bytes'] as number,
+    };
+  });
+  const sortedHashes = blobs.map((blob) => blob.sha256);
+  if (
+    new Set(sortedHashes).size !== sortedHashes.length
+    || JSON.stringify(sortedHashes) !== JSON.stringify([...sortedHashes].sort())
+  ) {
+    throw new TaktpackError('INVALID_PACK', 'pack blob index must be unique and sorted', 'pack.json.blobs');
+  }
+  const parsedSeed = parseTemplateLock({
+    ...(record['lockSeed'] as object),
+    manifestSha256: '0'.repeat(64),
+  });
+  const lockSeed: TaktpackLockSeedV1 = {
+    schemaVersion: parsedSeed.schemaVersion,
+    packVersion: parsedSeed.packVersion,
+    source: parsedSeed.source,
+    capabilities: parsedSeed.capabilities,
+    entries: parsedSeed.entries,
+  };
   return {
     descriptor: {
       format: 'taktpack',
@@ -150,7 +211,10 @@ function parsePackMetadata(content: Buffer): PackMetadata {
       archive: 'ustar',
       contentAddressed: true,
     },
-    lock: parseTemplateLock(record['lock']),
+    manifestSha256: parseSha256(record['manifestSha256'], 'pack.json.manifestSha256'),
+    exportReportSha256: parseSha256(record['exportReportSha256'], 'pack.json.exportReportSha256'),
+    lockSeed,
+    blobs,
   };
 }
 
@@ -179,6 +243,9 @@ function parseReport(content: Buffer): TaktpackExportReportV1 {
   if (record['warnings'].length > 100
     || record['warnings'].some((warning) => typeof warning !== 'string' || warning.length > 1024)) {
     throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'export report warnings exceed limits', 'warnings');
+  }
+  if (canonicalizeTaktpackJson(value) !== content.toString('utf8')) {
+    throw new TaktpackError('INVALID_PACK', 'export report is not canonical JSON', 'export-report.json');
   }
   const excludedReasons = record['excludedReasons'] as Record<string, unknown>;
   if (Object.values(excludedReasons).some((count) => !Number.isSafeInteger(count) || (count as number) < 0)) {
@@ -256,7 +323,7 @@ export async function inspectTaktpack(
       }
       const header = parseHeader(headerBlock);
       if (header.size > limits.maxEntryBytes) {
-        throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive entry exceeds size limit', header.name);
+        throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive entry exceeds size limit', `entries[${entryCount - 1}]`);
       }
       totalPayloadBytes += header.size;
       if (totalPayloadBytes > limits.maxTotalBytes) {
@@ -265,17 +332,15 @@ export async function inspectTaktpack(
 
       const expectedName = entryCount <= TAKTPACK_ENTRY_NAMES.length
         ? TAKTPACK_ENTRY_NAMES[entryCount - 1]
-        : manifest === undefined
+          : metadata === undefined
           ? undefined
-          : [...new Set(manifest.entries.map((entry) => entry.sha256))]
-            .sort((left, right) => left.localeCompare(right, 'en-US'))[
-              entryCount - TAKTPACK_ENTRY_NAMES.length - 1
-            ]?.replace(/^/, TAKTPACK_BLOB_PREFIX);
+          : metadata.blobs[entryCount - TAKTPACK_ENTRY_NAMES.length - 1]
+            ?.sha256.replace(/^/, TAKTPACK_BLOB_PREFIX);
       if (expectedName === undefined) {
-        throw new TaktpackError('ORPHAN_BLOB', `unexpected archive entry: ${header.name}`, header.name);
+        throw new TaktpackError('ORPHAN_BLOB', 'archive contains an unexpected entry', `entries[${entryCount - 1}]`);
       }
       if (header.name !== expectedName) {
-        throw new TaktpackError('INVALID_ARCHIVE_ORDER', `expected ${expectedName}, got ${header.name}`, header.name);
+        throw new TaktpackError('INVALID_ARCHIVE_ORDER', 'archive entry order is not canonical', `entries[${entryCount - 1}]`);
       }
 
       // One entry is bounded independently. Blobs are discarded immediately
@@ -286,20 +351,39 @@ export async function inspectTaktpack(
         await readExact(paddingBytes),
         Buffer.alloc(TAR_BLOCK_BYTES - paddingBytes),
       ]))) {
-        throw new TaktpackError('INVALID_PACK', 'USTAR entry padding must be zero', header.name);
+        throw new TaktpackError('INVALID_PACK', 'USTAR entry padding must be zero', `entries[${entryCount - 1}]`);
       }
 
       if (header.name === 'pack.json') {
         metadata = parsePackMetadata(content);
       } else if (header.name === 'manifest.json') {
         manifest = parseProjectTemplateManifest(parseJson(content, 'manifest.json'));
+        if (
+          metadata === undefined
+          || calculateProjectTemplateManifestSha256(manifest) !== metadata.manifestSha256
+        ) {
+          throw new TaktpackError('HASH_MISMATCH', 'manifest digest does not match the pack index', 'manifest.json');
+        }
+        if (canonicalizeTaktpackJson(manifest) !== content.toString('utf8')) {
+          throw new TaktpackError('INVALID_PACK', 'manifest is not canonical JSON', 'manifest.json');
+        }
       } else if (header.name === 'export-report.json') {
+        if (
+          metadata === undefined
+          || createHash('sha256').update(content).digest('hex') !== metadata.exportReportSha256
+        ) {
+          throw new TaktpackError('HASH_MISMATCH', 'export report digest does not match the pack index', 'export-report.json');
+        }
         report = parseReport(content);
       } else {
         const match = BLOB_NAME_PATTERN.exec(header.name)!;
         const hash = createHash('sha256').update(content).digest('hex');
         if (hash !== match[1]) {
-          throw new TaktpackError('HASH_MISMATCH', 'blob content does not match its content address', header.name);
+          throw new TaktpackError('HASH_MISMATCH', 'blob content does not match its content address', `entries[${entryCount - 1}]`);
+        }
+        const indexedBlob = metadata!.blobs[entryCount - TAKTPACK_ENTRY_NAMES.length - 1]!;
+        if (indexedBlob.bytes !== content.byteLength) {
+          throw new TaktpackError('HASH_MISMATCH', 'blob size does not match the pack index', `entries[${entryCount - 1}]`);
         }
         for (const entry of manifest!.entries.filter((candidate) => candidate.sha256 === hash)) {
           const classification = classifyProjectTemplateEntry({
@@ -323,19 +407,28 @@ export async function inspectTaktpack(
     if (metadata === undefined || manifest === undefined || report === undefined) {
       throw new TaktpackError('MISSING_ARCHIVE_ENTRY', 'archive metadata is incomplete');
     }
-    const expectedEntries = TAKTPACK_ENTRY_NAMES.length
-      + new Set(manifest.entries.map((entry) => entry.sha256)).size;
+    const manifestHashes = [...new Set(manifest.entries.map((entry) => entry.sha256))]
+      .sort((left, right) => left.localeCompare(right, 'en-US'));
+    if (JSON.stringify(manifestHashes) !== JSON.stringify(metadata.blobs.map((blob) => blob.sha256))) {
+      throw new TaktpackError('MISSING_ARCHIVE_ENTRY', 'pack blob index does not match the manifest');
+    }
+    const expectedEntries = TAKTPACK_ENTRY_NAMES.length + metadata.blobs.length;
     if (entryCount !== expectedEntries) {
       throw new TaktpackError('MISSING_ARCHIVE_ENTRY', 'one or more content-addressed blobs are missing');
     }
-    validateManifestLockPair(manifest, metadata.lock);
+    const lock: TemplateLockV1 = {
+      ...metadata.lockSeed,
+      manifestSha256: metadata.manifestSha256,
+    };
+    validateManifestLockPair(manifest, lock);
     validateDetectedTemplateCapabilities(manifest, detections);
     validateReportAgainstManifest(report, manifest);
     const currentVersion = options.currentTaktVersion === undefined
       ? undefined
       : requireSemVer(options.currentTaktVersion, 'currentTaktVersion');
     const compatible = currentVersion === undefined
-      || (
+      ? undefined
+      : (
         compareSemVer(currentVersion, manifest.takt.minVersion) >= 0
         && (manifest.takt.maxVersion === undefined
           || compareSemVer(currentVersion, manifest.takt.maxVersion) <= 0)
@@ -343,11 +436,12 @@ export async function inspectTaktpack(
     return {
       descriptor: metadata.descriptor,
       manifest,
-      lock: metadata.lock,
+      lock,
       report,
       archiveSha256: archiveDigest.digest('hex'),
       compatibility: {
-        compatible,
+        status: compatible === undefined ? 'unknown' : compatible ? 'compatible' : 'incompatible',
+        ...(compatible === undefined ? {} : { compatible }),
         ...(currentVersion === undefined ? {} : { currentVersion }),
         minVersion: manifest.takt.minVersion,
         ...(manifest.takt.maxVersion === undefined ? {} : { maxVersion: manifest.takt.maxVersion }),

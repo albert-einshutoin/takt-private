@@ -5,6 +5,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -81,7 +82,9 @@ describe('taktpack deterministic writer', () => {
     const output = join(root, 'existing.taktpack');
     writeFileSync(output, 'keep-me');
 
-    await expect(writeTaktpack(output, plan)).rejects.toMatchObject({ code: 'OUTPUT_EXISTS' });
+    const error = await writeTaktpack(output, plan).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'OUTPUT_EXISTS' });
+    expect(String(error)).not.toContain(root);
     expect(readFileSync(output, 'utf8')).toBe('keep-me');
   });
 
@@ -95,5 +98,20 @@ describe('taktpack deterministic writer', () => {
     await writeTaktpack(output, plan, { force: true });
 
     expect(readFileSync(output, 'utf8')).not.toBe('old-pack');
+  });
+
+  it('rejects a symlink output target even when force is enabled', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const target = join(root, 'target.txt');
+    const output = join(root, 'linked.taktpack');
+    writeFileSync(target, 'keep-target');
+    symlinkSync(target, output);
+
+    await expect(writeTaktpack(output, plan, { force: true })).rejects.toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+    });
+    expect(readFileSync(target, 'utf8')).toBe('keep-target');
   });
 });

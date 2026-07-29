@@ -75,12 +75,24 @@ describe('taktpack streaming inspector', () => {
 
     expect(result).toMatchObject({
       descriptor: { format: 'taktpack', version: '1.0', archive: 'ustar' },
-      compatibility: { compatible: true },
+      compatibility: { status: 'compatible', compatible: true },
       report: { counts: { merge: 1 } },
     });
     expect(result.manifest.entries[0]?.path).toBe('workflows/review.yaml');
     expect(existsSync(join(root, 'pack.json'))).toBe(false);
     expect(existsSync(join(root, 'blobs'))).toBe(false);
+  });
+
+  it('reports compatibility as unknown when the caller provides no current version', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+
+    const result = await inspectTaktpack(pack);
+
+    expect(result.compatibility).toEqual({
+      status: 'unknown',
+      minVersion: '0.48.0',
+    });
   });
 
   it('rejects trailing bytes after the two USTAR end blocks', async () => {
@@ -102,9 +114,20 @@ describe('taktpack streaming inspector', () => {
     rewriteTarChecksum(bytes.subarray(0, 512));
     writeFileSync(pack, bytes);
 
-    await expect(inspectTaktpack(pack)).rejects.toMatchObject({
-      code: 'UNSAFE_ARCHIVE_ENTRY',
-    });
+    const error = await inspectTaktpack(pack).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'UNSAFE_ARCHIVE_ENTRY' });
+    expect(String(error)).not.toContain('../pack.json');
+  });
+
+  it('rejects report mutation through the pack index digest', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+    const bytes = readFileSync(pack);
+    const reportHeaderOffset = findTarEntryOffset(bytes, 'export-report.json');
+    bytes[reportHeaderOffset + 512] ^= 1;
+    writeFileSync(pack, bytes);
+
+    await expect(inspectTaktpack(pack)).rejects.toMatchObject({ code: 'HASH_MISMATCH' });
   });
 
   it('rejects a symlink entry', async () => {

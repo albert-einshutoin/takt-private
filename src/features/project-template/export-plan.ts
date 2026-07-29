@@ -1,11 +1,12 @@
 import { join } from 'node:path';
-import { lstat } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
 import { calculateProjectTemplateManifestSha256, validateManifestLockPair } from './binding.js';
 import { TaktpackError } from './errors.js';
 import { scanProjectTemplateDirectory } from './filesystem-scan.js';
 import { parseProjectTemplateManifest } from './manifest.js';
 import type {
   ProjectTemplateExportOptions,
+  ProjectTemplateExportFile,
   ProjectTemplateExportPlan,
   TaktpackDescriptorV1,
   TaktpackExportReportV1,
@@ -25,6 +26,20 @@ const DESCRIPTOR: TaktpackDescriptorV1 = {
   archive: 'ustar',
   contentAddressed: true,
 };
+
+interface ExportSourceState {
+  rootRealPath: string;
+  rootSnapshot: ProjectTemplateExportFile['snapshot'];
+  files: ProjectTemplateExportFile[];
+}
+
+const EXPORT_SOURCE_STATES = new WeakMap<ProjectTemplateExportPlan, ExportSourceState>();
+
+export function getProjectTemplateExportSourceState(
+  plan: ProjectTemplateExportPlan,
+): ExportSourceState | undefined {
+  return EXPORT_SOURCE_STATES.get(plan);
+}
 
 function incrementReason(
   reasons: Partial<Record<ProjectTemplateClassificationReason, number>>,
@@ -55,7 +70,7 @@ export async function createProjectTemplateExportPlan(
   const policies = options.policies ?? {};
   const includedPaths = new Set<string>();
   const entries: TemplateEntry[] = [];
-  const files: ProjectTemplateExportPlan['files'] = [];
+  const files: ProjectTemplateExportFile[] = [];
   const topCapabilities = new Set<TemplateCapability>();
   const excludedReasons: Partial<Record<ProjectTemplateClassificationReason, number>> = {};
   const counts: Record<TemplateEntryPolicy, number> = {
@@ -171,5 +186,22 @@ export async function createProjectTemplateExportPlan(
     excludedReasons,
     warnings: [],
   };
-  return { descriptor: DESCRIPTOR, manifest, lock, report, files };
+  const rootPath = join(projectRoot, '.takt');
+  const rootRealPath = await realpath(rootPath);
+  const rootStat = await lstat(rootPath);
+  const plan: ProjectTemplateExportPlan = { descriptor: DESCRIPTOR, manifest, lock, report };
+  EXPORT_SOURCE_STATES.set(plan, {
+    rootRealPath,
+    rootSnapshot: {
+      dev: rootStat.dev,
+      ino: rootStat.ino,
+      nlink: rootStat.nlink,
+      size: rootStat.size,
+      mode: rootStat.mode,
+      mtimeMs: rootStat.mtimeMs,
+      ctimeMs: rootStat.ctimeMs,
+    },
+    files,
+  });
+  return plan;
 }

@@ -7,17 +7,20 @@ import {
   existsSync,
   fsyncSync,
   linkSync,
+  lstatSync,
   openSync,
   renameSync,
   unlinkSync,
 } from 'node:fs';
-import { open } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { lstat, open, realpath } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { pack as createTarPack, type Headers, type Pack } from 'tar-stream';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import { TaktpackError } from './errors.js';
+import { calculateProjectTemplateManifestSha256 } from './binding.js';
+import { getProjectTemplateExportSourceState } from './export-plan.js';
 import {
   TAKTPACK_BLOB_PREFIX,
   type ProjectTemplateExportFile,
@@ -67,6 +70,11 @@ function assertSnapshot(file: ProjectTemplateExportFile, stat: Awaited<ReturnTyp
   }
 }
 
+function isInside(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return path === '' || (!path.startsWith('..') && !isAbsolute(path));
+}
+
 async function addBlobEntry(
   archive: Pack,
   file: ProjectTemplateExportFile,
@@ -111,8 +119,26 @@ function fsyncDirectory(path: string): void {
   }
 }
 
-function publishTempFile(tempPath: string, outputPath: string, force: boolean): void {
+function publishTempFile(
+  tempPath: string,
+  outputPath: string,
+  force: boolean,
+  expectedTarget: import('node:fs').Stats | undefined,
+): void {
   if (force) {
+    if (expectedTarget !== undefined) {
+      let current: import('node:fs').Stats;
+      try {
+        current = lstatSync(outputPath);
+      } catch {
+        throw new TaktpackError('UNSAFE_OUTPUT_TARGET', 'output target changed before publish', 'outputPath');
+      }
+      if (!areProjectTemplateFileStatsEqual(expectedTarget, current)) {
+        throw new TaktpackError('UNSAFE_OUTPUT_TARGET', 'output target changed before publish', 'outputPath');
+      }
+    } else if (existsSync(outputPath)) {
+      throw new TaktpackError('UNSAFE_OUTPUT_TARGET', 'output target appeared before publish', 'outputPath');
+    }
     renameSync(tempPath, outputPath);
     return;
   }
@@ -123,7 +149,7 @@ function publishTempFile(tempPath: string, outputPath: string, force: boolean): 
     unlinkSync(tempPath);
   } catch (error) {
     if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new TaktpackError('OUTPUT_EXISTS', `output already exists: ${outputPath}`, 'outputPath');
+      throw new TaktpackError('OUTPUT_EXISTS', 'output already exists', 'outputPath');
     }
     throw error;
   }
@@ -135,10 +161,30 @@ export async function writeTaktpack(
   options: WriteTaktpackOptions = {},
 ): Promise<WriteTaktpackResult> {
   const force = options.force === true;
+  let expectedTarget: import('node:fs').Stats | undefined;
+  if (existsSync(outputPath)) {
+    expectedTarget = lstatSync(outputPath);
+  }
   if (!force && existsSync(outputPath)) {
-    throw new TaktpackError('OUTPUT_EXISTS', `output already exists: ${outputPath}`, 'outputPath');
+    throw new TaktpackError('OUTPUT_EXISTS', 'output already exists', 'outputPath');
+  }
+  if (force && expectedTarget !== undefined && (!expectedTarget.isFile() || expectedTarget.nlink !== 1)) {
+    throw new TaktpackError('UNSAFE_OUTPUT_TARGET', 'output target must be a regular single-link file', 'outputPath');
   }
   options.signal?.throwIfAborted();
+  const sourceState = getProjectTemplateExportSourceState(plan);
+  if (sourceState === undefined) {
+    throw new TaktpackError('INVALID_EXPORT_PLAN', 'export plan has no bound source state', 'plan');
+  }
+  const rootStat = await lstat(sourceState.rootRealPath);
+  const expectedRoot = sourceState.rootSnapshot;
+  if (
+    !rootStat.isDirectory()
+    || rootStat.dev !== expectedRoot.dev
+    || rootStat.ino !== expectedRoot.ino
+  ) {
+    throw new TaktpackError('SOURCE_CHANGED', 'project template root changed after planning', 'projectRoot');
+  }
   const outputDirectory = dirname(outputPath);
   const tempPath = join(
     outputDirectory,
@@ -163,21 +209,35 @@ export async function writeTaktpack(
       ...(options.signal === undefined ? [] : [{ signal: options.signal }]),
     );
     try {
-      const packJson = canonicalizeTaktpackJson({ ...plan.descriptor, lock: plan.lock });
+      const manifestContent = Buffer.from(canonicalizeTaktpackJson(plan.manifest));
+      const reportContent = Buffer.from(canonicalizeTaktpackJson(plan.report));
+      const blobs = new Map(sourceState.files.map((file) => [file.sha256, file]));
+      const lockSeed = {
+        schemaVersion: plan.lock.schemaVersion,
+        packVersion: plan.lock.packVersion,
+        source: plan.lock.source,
+        capabilities: plan.lock.capabilities,
+        entries: plan.lock.entries,
+      };
+      const packJson = canonicalizeTaktpackJson({
+        ...plan.descriptor,
+        manifestSha256: calculateProjectTemplateManifestSha256(plan.manifest),
+        exportReportSha256: createHash('sha256').update(reportContent).digest('hex'),
+        lockSeed,
+        blobs: [...blobs.entries()]
+          .sort(([left], [right]) => left.localeCompare(right, 'en-US'))
+          .map(([sha256, file]) => ({ sha256, bytes: file.bytes })),
+      });
       await addBufferEntry(archive, 'pack.json', Buffer.from(packJson));
-      await addBufferEntry(
-        archive,
-        'manifest.json',
-        Buffer.from(canonicalizeTaktpackJson(plan.manifest)),
-      );
-      await addBufferEntry(
-        archive,
-        'export-report.json',
-        Buffer.from(canonicalizeTaktpackJson(plan.report)),
-      );
-      const blobs = new Map(plan.files.map((file) => [file.sha256, file]));
+      await addBufferEntry(archive, 'manifest.json', manifestContent);
+      await addBufferEntry(archive, 'export-report.json', reportContent);
       for (const hash of [...blobs.keys()].sort((left, right) => left.localeCompare(right, 'en-US'))) {
-        await addBlobEntry(archive, blobs.get(hash)!, options.signal);
+        const file = blobs.get(hash)!;
+        const resolvedPath = await realpath(file.absolutePath);
+        if (!isInside(sourceState.rootRealPath, resolvedPath)) {
+          throw new TaktpackError('SOURCE_CHANGED', 'source escaped the project template root', file.path);
+        }
+        await addBlobEntry(archive, file, options.signal);
       }
       archive.finalize();
       await outputPromise;
@@ -192,7 +252,7 @@ export async function writeTaktpack(
     } finally {
       closeSync(completedFd);
     }
-    publishTempFile(tempPath, outputPath, force);
+    publishTempFile(tempPath, outputPath, force, expectedTarget);
     fsyncDirectory(outputDirectory);
     return {
       outputPath,
