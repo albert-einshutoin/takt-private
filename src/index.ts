@@ -83,7 +83,10 @@ export {
   serializeProjectTemplateManifest,
   parseTemplateLock,
   serializeTemplateLock,
+  calculateProjectTemplateManifestSha256,
+  validateManifestLockPair,
   projectTemplateManifestV1JsonSchema,
+  projectTemplateLockV1JsonSchema,
   ProjectTemplateValidationError,
 } from './features/project-template/index.js';
 export type {
@@ -92,6 +95,10 @@ export type {
   TemplateEntry,
   TemplateEntryPolicy,
   TemplateLockV1,
+  TemplateLockEntry,
   TemplateSource,
+  GithubTemplateSource,
+  GitTemplateSource,
+  LocalTemplateSource,
   ProjectTemplateValidationErrorCode,
 } from './features/project-template/index.js';

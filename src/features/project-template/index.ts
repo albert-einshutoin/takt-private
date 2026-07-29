@@ -3,7 +3,14 @@ export {
   serializeProjectTemplateManifest,
 } from './manifest.js';
 export { parseTemplateLock, serializeTemplateLock } from './lock.js';
-export { projectTemplateManifestV1JsonSchema } from './schema.js';
+export {
+  calculateProjectTemplateManifestSha256,
+  validateManifestLockPair,
+} from './binding.js';
+export {
+  projectTemplateManifestV1JsonSchema,
+  projectTemplateLockV1JsonSchema,
+} from './schema.js';
 export { ProjectTemplateValidationError } from './errors.js';
 export type {
   ProjectTemplateManifestV1,
@@ -11,6 +18,10 @@ export type {
   TemplateEntry,
   TemplateEntryPolicy,
   TemplateLockV1,
+  TemplateLockEntry,
   TemplateSource,
+  GithubTemplateSource,
+  GitTemplateSource,
+  LocalTemplateSource,
 } from './types.js';
 export type { ProjectTemplateValidationErrorCode } from './errors.js';

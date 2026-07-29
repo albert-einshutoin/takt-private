@@ -7,14 +7,14 @@
   },
   "source": {
     "kind": "github",
-    "uri": "github:example/project-template",
+    "uri": "https://github.com/example/project-template",
     "ref": "v1.2.3",
     "commit": "0123456789abcdef0123456789abcdef01234567"
   },
   "capabilities": ["executable"],
   "entries": [
     {
-      "path": ".takt/hooks/prepare.sh",
+      "path": "hooks/prepare.sh",
       "policy": "managed",
       "mode": "0755",
       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

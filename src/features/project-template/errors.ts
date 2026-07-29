@@ -12,13 +12,19 @@ export type ProjectTemplateValidationErrorCode =
   | 'INVALID_MODE'
   | 'DUPLICATE_ENTRY_PATH'
   | 'PATH_CASE_COLLISION'
+  | 'PATH_NORMALIZATION_COLLISION'
   | 'POLICY_CONFLICT'
-  | 'UNDECLARED_CAPABILITY';
+  | 'UNDECLARED_CAPABILITY'
+  | 'NON_PLAIN_OBJECT'
+  | 'LIMIT_EXCEEDED'
+  | 'INVALID_VERSION_RANGE'
+  | 'LOCK_MISMATCH';
 
 export class ProjectTemplateValidationError extends Error {
   constructor(
     public readonly code: ProjectTemplateValidationErrorCode,
     message: string,
+    public readonly field?: string,
   ) {
     super(message);
     this.name = 'ProjectTemplateValidationError';
