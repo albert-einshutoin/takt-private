@@ -235,7 +235,10 @@ function parseMissingPathTracking(
       'missingPathTracking',
     );
   }
-  const result: Record<string, ProjectTemplateLocalSnapshotEntry['gitTrackingStatus']> = {};
+  const pairs: Array<[
+    string,
+    ProjectTemplateLocalSnapshotEntry['gitTrackingStatus'],
+  ]> = [];
   for (const [rawPath, status] of Object.entries(record)) {
     const path = parsePortablePath(rawPath, 'missingPathTracking');
     if (!knownPaths.has(path)) {
@@ -246,9 +249,14 @@ function parseMissingPathTracking(
     )) {
       invalidInput('missing path Git tracking status is invalid', 'missingPathTracking');
     }
-    result[path] = status as ProjectTemplateLocalSnapshotEntry['gitTrackingStatus'];
+    pairs.push([
+      path,
+      status as ProjectTemplateLocalSnapshotEntry['gitTrackingStatus'],
+    ]);
   }
-  return result;
+  // Object.fromEntries creates an own data property for "__proto__", unlike
+  // assignment on {}, so adversarial but portable filenames remain witnessed.
+  return Object.fromEntries(pairs);
 }
 
 function sameState(
@@ -446,6 +454,7 @@ function entryWithDecision(options: {
   reasonCode: ProjectTemplateApplyReasonCode;
   incomingContent: Buffer | undefined;
   contentReviewRequired: boolean;
+  gitTrackingStatus: ProjectTemplateApplyPlanEntry['gitTrackingStatus'];
 }): ProjectTemplateApplyPlanEntry {
   const {
     path,
@@ -457,6 +466,7 @@ function entryWithDecision(options: {
     reasonCode,
     incomingContent,
     contentReviewRequired,
+    gitTrackingStatus,
   } = options;
   let diff: ProjectTemplateEntryDiff | undefined;
   if (
@@ -478,8 +488,9 @@ function entryWithDecision(options: {
   const capabilitiesAfter = [...(incoming?.capabilities ?? [])];
   const reviewRequired = contentReviewRequired
     || capabilitiesChanged(capabilitiesBefore, capabilitiesAfter)
-    || local?.gitTrackingStatus === 'unavailable'
-    || local?.gitTrackingStatus === 'unmerged';
+    || gitTrackingStatus === 'staged'
+    || gitTrackingStatus === 'unavailable'
+    || gitTrackingStatus === 'unmerged';
   const common = {
     path,
     reasonCode,
@@ -501,8 +512,7 @@ function entryWithDecision(options: {
         : {}),
     capabilitiesBefore,
     capabilitiesAfter,
-    gitTrackingStatus: (local?.gitTrackingStatus ?? 'absent') as
-      ProjectTemplateApplyPlanEntry['gitTrackingStatus'],
+    gitTrackingStatus,
     rollbackImpact: rollbackFor(action),
     reviewRequired,
     ...(diff === undefined ? {} : { diff }),
@@ -552,39 +562,48 @@ function markRenameConflicts(
   const addedByHash = new Map<string, TemplateEntry[]>();
   for (const entry of added) {
     const key = portablePathKey(entry.path);
-    addedByPortableKey.set(key, [...(addedByPortableKey.get(key) ?? []), entry]);
-    addedByHash.set(entry.sha256, [...(addedByHash.get(entry.sha256) ?? []), entry]);
+    const portableBucket = addedByPortableKey.get(key);
+    if (portableBucket === undefined) addedByPortableKey.set(key, [entry]);
+    else portableBucket.push(entry);
+    const hashBucket = addedByHash.get(entry.sha256);
+    if (hashBucket === undefined) addedByHash.set(entry.sha256, [entry]);
+    else hashBucket.push(entry);
   }
-  const pairs: Array<{ oldPath: string; newPath: string; caseOnly: boolean }> = [];
+  const groups = new Map<string, {
+    caseOnly: boolean;
+    oldPaths: string[];
+    newEntries: readonly TemplateEntry[];
+  }>();
   for (const oldEntry of removed) {
     const caseMatches = addedByPortableKey.get(portablePathKey(oldEntry.path)) ?? [];
     const contentMatches = addedByHash.get(oldEntry.sha256) ?? [];
     const matches = caseMatches.length > 0 ? caseMatches : contentMatches;
-    for (const match of matches) {
-      pairs.push({
-        oldPath: oldEntry.path,
-        newPath: match.path,
-        caseOnly: caseMatches.length > 0,
+    if (matches.length === 0) continue;
+    const caseOnly = caseMatches.length > 0;
+    const groupKey = caseOnly
+      ? `case:${portablePathKey(oldEntry.path)}`
+      : `hash:${oldEntry.sha256}`;
+    const group = groups.get(groupKey);
+    if (group === undefined) {
+      groups.set(groupKey, {
+        caseOnly,
+        oldPaths: [oldEntry.path],
+        newEntries: matches,
       });
+    } else {
+      group.oldPaths.push(oldEntry.path);
     }
   }
-  const oldDegrees = new Map<string, number>();
-  const newDegrees = new Map<string, number>();
-  for (const pair of pairs) {
-    oldDegrees.set(pair.oldPath, (oldDegrees.get(pair.oldPath) ?? 0) + 1);
-    newDegrees.set(pair.newPath, (newDegrees.get(pair.newPath) ?? 0) + 1);
-  }
   const affected = new Map<string, ProjectTemplateApplyReasonCode>();
-  for (const pair of pairs) {
+  for (const group of groups.values()) {
     const reasonCode: ProjectTemplateApplyReasonCode =
-      (oldDegrees.get(pair.oldPath) ?? 0) > 1
-      || (newDegrees.get(pair.newPath) ?? 0) > 1
+      group.oldPaths.length > 1 || group.newEntries.length > 1
         ? 'AMBIGUOUS_RENAME'
-        : pair.caseOnly
+        : group.caseOnly
           ? 'CASE_ONLY_RENAME'
           : 'RENAME_DETECTED';
-    affected.set(pair.oldPath, reasonCode);
-    affected.set(pair.newPath, reasonCode);
+    for (const oldPath of group.oldPaths) affected.set(oldPath, reasonCode);
+    for (const newEntry of group.newEntries) affected.set(newEntry.path, reasonCode);
   }
   for (const [index, entry] of entries.entries()) {
     const reasonCode = affected.get(entry.path);
@@ -683,6 +702,19 @@ export function createProjectTemplateApplyPlan(
       invalidInput('a path cannot be both present and missing', 'missingPathTracking');
     }
   }
+  if (input['targetRootState'] === 'missing' && localEntries.length > 0) {
+    invalidInput('a missing target root cannot contain local entries', 'localEntries');
+  }
+  const localPortableKeys = new Set(localEntries.map((entry) => portablePathKey(entry.path)));
+  const targetEvidenceComplete = input['targetRootState'] !== undefined
+    && paths.every((path) => (
+      localByPath.has(path)
+      || Object.hasOwn(missingPathTracking, path)
+      || localPortableKeys.has(portablePathKey(path))
+    ));
+  const incomingEvidenceComplete = incomingManifest.entries.every(
+    (entry) => entry.policy === 'excluded' || incomingContents.has(entry.path),
+  );
   const entries = paths.map((path): ProjectTemplateApplyPlanEntry => {
     const base = baseByPath.get(path);
     const incoming = incomingByPath.get(path);
@@ -713,11 +745,15 @@ export function createProjectTemplateApplyPlan(
       ...decision,
       incomingContent: incomingContents.get(path),
       contentReviewRequired: contentReviewRequiredPaths.has(path),
+      gitTrackingStatus: local?.gitTrackingStatus
+        ?? missingPathTracking[path]
+        ?? 'absent',
     });
   });
   markRenameConflicts(entries, baseByPath, incomingByPath);
 
   const plannedPortableKeys = new Map<string, string>();
+  const entryIndexByPath = new Map(entries.map((entry, index) => [entry.path, index]));
   const localByPortableKey = new Map(
     localEntries.map((entry) => [portablePathKey(entry.path), entry.path]),
   );
@@ -726,7 +762,10 @@ export function createProjectTemplateApplyPlan(
     const existing = plannedPortableKeys.get(key);
     if (existing !== undefined && existing !== entry.path) {
       entries[index] = overrideConflict(entry, 'DESTINATION_CASE_COLLISION');
-      const existingIndex = entries.findIndex((candidate) => candidate.path === existing);
+      const existingIndex = entryIndexByPath.get(existing);
+      if (existingIndex === undefined) {
+        invalidInput('planned collision entry is missing', 'entries');
+      }
       entries[existingIndex] = overrideConflict(
         entries[existingIndex]!,
         'DESTINATION_CASE_COLLISION',
@@ -747,31 +786,27 @@ export function createProjectTemplateApplyPlan(
     }
   }
 
-  // Sorting portable identities lets a stack find every file/descendant
-  // collision in O(n log n), keeping maximum-size untrusted plans bounded.
-  const keyedEntries = entries
-    .map((entry, index) => ({ index, key: portablePathKey(entry.path) }))
-    .sort((left, right) => compareAscii(left.key, right.key));
-  const ancestors: Array<{ index: number; key: string }> = [];
-  for (const current of keyedEntries) {
-    while (
-      ancestors.length > 0
-      && !current.key.startsWith(`${ancestors.at(-1)!.key}/`)
-    ) {
-      ancestors.pop();
-    }
-    const parent = ancestors.at(-1);
-    if (parent !== undefined) {
-      entries[parent.index] = overrideConflict(
-        entries[parent.index]!,
+  // Each path has at most the validated segment count, so ancestor lookup is
+  // linear in total path length and cannot be confused by lexical siblings.
+  const indexByPortableKey = new Map(
+    entries.map((entry, index) => [portablePathKey(entry.path), index]),
+  );
+  for (const [index, entry] of entries.entries()) {
+    const segments = portablePathKey(entry.path).split('/');
+    let ancestorKey = '';
+    for (const segment of segments.slice(0, -1)) {
+      ancestorKey = ancestorKey === '' ? segment : `${ancestorKey}/${segment}`;
+      const ancestorIndex = indexByPortableKey.get(ancestorKey);
+      if (ancestorIndex === undefined) continue;
+      entries[ancestorIndex] = overrideConflict(
+        entries[ancestorIndex]!,
         'DESTINATION_PATH_COLLISION',
       );
-      entries[current.index] = overrideConflict(
-        entries[current.index]!,
+      entries[index] = overrideConflict(
+        entries[index]!,
         'DESTINATION_PATH_COLLISION',
       );
     }
-    ancestors.push(current);
   }
 
   const preconditionToken = sha256(canonicalizeTaktpackJson({
@@ -795,6 +830,8 @@ export function createProjectTemplateApplyPlan(
   const capabilitiesBefore = [...(baseLock?.capabilities ?? [])];
   const capabilitiesAfter = [...(incomingManifest.capabilities ?? [])];
   const reviewRequired = capabilitiesChanged(capabilitiesBefore, capabilitiesAfter)
+    || !targetEvidenceComplete
+    || !incomingEvidenceComplete
     || Object.values(missingPathTracking).some(
       (status) => status === 'staged'
         || status === 'tracked-modified'

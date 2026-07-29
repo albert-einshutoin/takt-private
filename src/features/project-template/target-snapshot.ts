@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants, type Stats } from 'node:fs';
+import { constants, type Dirent, type Stats } from 'node:fs';
 import {
   lstat,
   open,
+  readdir,
   realpath,
 } from 'node:fs/promises';
-import { join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import {
   areProjectTemplateFileStatsEqual,
@@ -333,7 +334,6 @@ export async function captureProjectTemplateTargetSnapshot(
   }
   try {
     rootBefore = await lstat(taktRoot);
-    rootRealPath = await realpath(taktRoot);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw unsafeTarget();
     const tracking = await gitTrackingForPaths(projectRoot, candidatePaths);
@@ -344,6 +344,11 @@ export async function captureProjectTemplateTargetSnapshot(
       missingPathTracking: Object.fromEntries(tracking),
       entries: [],
     };
+  }
+  try {
+    rootRealPath = await realpath(taktRoot);
+  } catch {
+    throw unsafeTarget();
   }
   if (
     rootBefore.isSymbolicLink()
@@ -356,6 +361,8 @@ export async function captureProjectTemplateTargetSnapshot(
   const ancestorSnapshots = new Map<string, Stats>([[taktRoot, rootBefore]]);
   const captured: CapturedTargetFile[] = [];
   const capturedActualPaths = new Set<string>();
+  const collisionPaths = new Set<string>();
+  const directoryEntries = new Map<string, Dirent[]>();
   const missingPaths: string[] = [];
   let totalBytes = 0;
   for (const path of candidatePaths) {
@@ -363,12 +370,54 @@ export async function captureProjectTemplateTargetSnapshot(
       missingPaths.push(path);
       continue;
     }
+    const parentRelative = dirname(path) === '.' ? '' : dirname(path);
+    const parentAbsolute = parentRelative === ''
+      ? taktRoot
+      : join(taktRoot, parentRelative);
+    let siblings = directoryEntries.get(parentAbsolute);
+    if (siblings === undefined) {
+      try {
+        siblings = await readdir(parentAbsolute, { withFileTypes: true });
+      } catch {
+        throw unsafeTarget();
+      }
+      if (siblings.length > MAX_TEMPLATE_ENTRIES * 2) {
+        throw new TaktpackError(
+          'ARCHIVE_LIMIT_EXCEEDED',
+          'project template target directory exceeds the inspection budget',
+          'target',
+        );
+      }
+      directoryEntries.set(parentAbsolute, siblings);
+    }
+    const requestedNameKey = basename(path).normalize('NFKC').toLowerCase();
+    for (const sibling of siblings) {
+      if (sibling.name.normalize('NFKC').toLowerCase() !== requestedNameKey) continue;
+      const siblingPath = parentRelative === ''
+        ? sibling.name
+        : `${parentRelative}/${sibling.name}`;
+      if (siblingPath !== path) collisionPaths.add(siblingPath);
+    }
     const entry = await captureFile(join(taktRoot, path), path, rootRealPath);
     if (entry === undefined) {
       missingPaths.push(path);
       continue;
     }
     if (capturedActualPaths.has(entry.entry.path)) continue;
+    capturedActualPaths.add(entry.entry.path);
+    totalBytes += entry.entry.bytes;
+    if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
+      throw new TaktpackError(
+        'ARCHIVE_LIMIT_EXCEEDED',
+        'project template target exceeds the snapshot byte budget',
+        'target',
+      );
+    }
+    captured.push(entry);
+  }
+  for (const path of [...collisionPaths].sort(compareAscii)) {
+    const entry = await captureFile(join(taktRoot, path), path, rootRealPath);
+    if (entry === undefined || capturedActualPaths.has(entry.entry.path)) continue;
     capturedActualPaths.add(entry.entry.path);
     totalBytes += entry.entry.bytes;
     if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {

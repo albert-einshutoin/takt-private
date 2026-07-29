@@ -203,6 +203,20 @@ describe('project template target snapshot', () => {
     });
   });
 
+  it('rejects a dangling .takt root symlink instead of treating it as missing', async () => {
+    const root = makeRoot(false);
+    rmSync(join(root, '.takt'), { recursive: true });
+    symlinkSync(join(root, 'does-not-exist'), join(root, '.takt'));
+
+    await expect(captureProjectTemplateTargetSnapshot(
+      root,
+      ['config.yaml'],
+    )).rejects.toMatchObject({
+      code: 'UNSAFE_ARCHIVE_ENTRY',
+      field: 'target',
+    });
+  });
+
   it('captures unstaged and staged tracked deletions for missing candidates', async () => {
     const root = makeRoot();
     writeTakt(root, 'config.yaml', 'base\n');

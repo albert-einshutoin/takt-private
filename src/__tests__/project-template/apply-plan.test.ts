@@ -81,6 +81,10 @@ function input(
       entries: incomingEntries,
     },
     localEntries,
+    targetRootState: 'directory',
+    missingPathTracking: local === undefined && (base !== undefined || incoming !== undefined)
+      ? { [path]: 'not-repository' }
+      : {},
     incomingContents: incoming === undefined
       ? []
       : [{ path, content: Buffer.from(incoming) }],
@@ -331,35 +335,77 @@ describe('project template three-way apply plan', () => {
     expect(stagedDeletion.preconditionToken).not.toBe(directory.preconditionToken);
     expect(stagedDeletion.reviewRequired).toBe(true);
     expect(stagedDeletion.defaultApplyPossible).toBe(false);
+    expect(stagedDeletion.entries[0]?.gitTrackingStatus).toBe('staged');
     expect(missingRoot.preconditionToken).not.toBe(directory.preconditionToken);
+  });
+
+  it('rejects an impossible missing-root snapshot with present entries', () => {
+    const planInput = input({ base: 'base', local: 'base', incoming: 'next' });
+    planInput.targetRootState = 'missing';
+
+    expect(() => createProjectTemplateApplyPlan(planInput)).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_ENTRY',
+        field: 'localEntries',
+      }),
+    );
+  });
+
+  it('preserves prototype-shaped missing paths in review and precondition evidence', () => {
+    const planInput = input({});
+    planInput.incomingManifest.entries = [manifestEntry('__proto__', 'next')];
+    planInput.incomingContents = [{
+      path: '__proto__',
+      content: Buffer.from('next'),
+    }];
+    const untracked = createProjectTemplateApplyPlan({
+      ...planInput,
+      missingPathTracking: JSON.parse('{"__proto__":"untracked"}') as Record<string, 'untracked'>,
+    });
+    const staged = createProjectTemplateApplyPlan({
+      ...planInput,
+      missingPathTracking: JSON.parse('{"__proto__":"staged"}') as Record<string, 'staged'>,
+    });
+
+    expect(staged.preconditionToken).not.toBe(untracked.preconditionToken);
+    expect(staged.reviewRequired).toBe(true);
+    expect(staged.defaultApplyPossible).toBe(false);
   });
 
   it('fails closed for file/directory prefix collisions', () => {
     const planInput = input({ incoming: 'file' });
     planInput.incomingManifest.entries = [
-      manifestEntry('config', 'file'),
-      manifestEntry('config/child.yaml', 'child'),
+      manifestEntry('a', 'file'),
+      manifestEntry('a-b', 'sibling'),
+      manifestEntry('a/child.yaml', 'child'),
     ];
     planInput.incomingContents = [
-      { path: 'config', content: Buffer.from('file') },
-      { path: 'config/child.yaml', content: Buffer.from('child') },
+      { path: 'a', content: Buffer.from('file') },
+      { path: 'a-b', content: Buffer.from('sibling') },
+      { path: 'a/child.yaml', content: Buffer.from('child') },
     ];
+    planInput.missingPathTracking = {
+      a: 'not-repository',
+      'a-b': 'not-repository',
+      'a/child.yaml': 'not-repository',
+    };
 
     const plan = createProjectTemplateApplyPlan(planInput);
 
     expect(plan.defaultApplyPossible).toBe(false);
-    expect(plan.entries).toEqual([
+    expect(plan.entries).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        path: 'config',
+        path: 'a',
         action: 'conflict',
         reasonCode: 'DESTINATION_PATH_COLLISION',
       }),
       expect.objectContaining({
-        path: 'config/child.yaml',
+        path: 'a/child.yaml',
         action: 'conflict',
         reasonCode: 'DESTINATION_PATH_COLLISION',
       }),
-    ]);
+      expect.objectContaining({ path: 'a-b', action: 'add' }),
+    ]));
   });
 
   it('marks N:1 content rename candidates as ambiguous', () => {
@@ -470,6 +516,17 @@ describe('project template three-way apply plan', () => {
     },
   );
 
+  it('requires review for staged existing content', () => {
+    const planInput = input({ base: 'base', local: 'base', incoming: 'next' });
+    planInput.localEntries[0]!.gitTrackingStatus = 'staged';
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.entries[0]?.gitTrackingStatus).toBe('staged');
+    expect(plan.reviewRequired).toBe(true);
+    expect(plan.defaultApplyPossible).toBe(false);
+  });
+
   it('binds plan identity to canonical incoming and base artifacts', () => {
     const firstInput = input({ base: 'base', local: 'base', incoming: 'next' });
     const secondInput = structuredClone(firstInput);
@@ -530,6 +587,17 @@ describe('project template three-way apply plan', () => {
         field: 'incomingContents[0].content',
       }),
     );
+  });
+
+  it('cannot default-apply when incoming content validation evidence is omitted', () => {
+    const planInput = input({ incoming: 'next' });
+    planInput.incomingContents = [];
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.entries[0]?.action).toBe('add');
+    expect(plan.reviewRequired).toBe(true);
+    expect(plan.defaultApplyPossible).toBe(false);
   });
 
   it('describes the effective after state instead of an unapplied incoming state', () => {
