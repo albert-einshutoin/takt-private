@@ -286,7 +286,11 @@ contract therefore uses a durable journal, deterministic per-file replacement,
 and compensation rollback under one exclusive lease. Every write, chmod,
 rename, file fsync, and directory fsync failure is treated as a transaction
 failure. Post-apply config/workflow doctor failure also restores the original
-tree. Operator rollback first verifies every expected post-apply hash, mode,
+tree. The doctor gates only adoption of the new template. Compensation,
+operator rollback, and recovery complete when the recorded historical
+hash/mode/absence witnesses are restored; a historical snapshot is not
+required to pass the current validator. Operator rollback first verifies every
+expected post-apply hash, mode,
 and absence marker; any drift stops rollback before its first mutation.
 If the process stops before it can publish an explicit recovery marker, a
 non-terminal durable journal still blocks later downloads, writes, and run

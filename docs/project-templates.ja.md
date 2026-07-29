@@ -238,7 +238,10 @@ contractにします。
 単一exclusive leaseの下でdurable journal、決定的なfile単位replace、補償rollbackを
 組み合わせます。write、chmod、rename、file fsync、directory fsyncのどの失敗も
 transaction failureとして扱い、適用後のconfig/workflow doctor失敗も元treeへ戻します。
-operator rollbackは、適用後に期待する全pathのhash・mode・absenceを最初に一括検証し、
+doctorは新templateを採用するときだけgateにします。補償、operator rollback、recoveryは
+記録済みのhistorical hash・mode・absence witnessへ復元できれば完了し、過去snapshotへ
+現在のvalidator通過を要求しません。operator rollbackは、適用後に期待する全pathの
+hash・mode・absenceを最初に一括検証し、
 driftが1件でもあれば最初の変更前に停止します。
 processが明示markerを書けない時点で停止しても、non-terminal durable journalが次の
 download/writeとrun開始をfail-closedで止めます。`recoverProjectTemplateApply`は
