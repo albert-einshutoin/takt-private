@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { lstat } from 'node:fs/promises';
 import { calculateProjectTemplateManifestSha256, validateManifestLockPair } from './binding.js';
 import { TaktpackError } from './errors.js';
 import { scanProjectTemplateDirectory } from './filesystem-scan.js';
@@ -103,12 +104,33 @@ export async function createProjectTemplateExportPlan(
         ? {}
         : { capabilities: result.detectedCapabilities.capabilities }),
     });
+    const absolutePath = join(projectRoot, '.takt', result.relativePath);
+    const snapshot = await lstat(absolutePath);
+    const snapshotMode = `0${(snapshot.mode & 0o777).toString(8).padStart(3, '0')}`;
+    if (
+      !snapshot.isFile()
+      || snapshot.isSymbolicLink()
+      || snapshot.nlink !== 1
+      || snapshot.size !== result.bytes
+      || snapshotMode !== result.mode
+    ) {
+      throw new TaktpackError('SOURCE_CHANGED', 'source changed after classification', result.relativePath);
+    }
     files.push({
       path: result.relativePath,
-      absolutePath: join(projectRoot, '.takt', result.relativePath),
+      absolutePath,
       bytes: result.bytes,
       mode: result.mode,
       sha256: result.sha256,
+      snapshot: {
+        dev: snapshot.dev,
+        ino: snapshot.ino,
+        nlink: snapshot.nlink,
+        size: snapshot.size,
+        mode: snapshot.mode,
+        mtimeMs: snapshot.mtimeMs,
+        ctimeMs: snapshot.ctimeMs,
+      },
     });
   }
 

@@ -59,6 +59,15 @@ export interface ProjectTemplateExportFile {
   bytes: number;
   mode: string;
   sha256: string;
+  snapshot: {
+    dev: number;
+    ino: number;
+    nlink: number;
+    size: number;
+    mode: number;
+    mtimeMs: number;
+    ctimeMs: number;
+  };
 }
 
 export interface ProjectTemplateExportPlan {
@@ -75,4 +84,15 @@ export interface TaktpackInspectResult {
   lock: TemplateLockV1;
   report: TaktpackExportReportV1;
   archiveSha256: string;
+}
+
+export interface WriteTaktpackOptions {
+  force?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface WriteTaktpackResult {
+  outputPath: string;
+  archiveSha256: string;
+  bytes: number;
 }
