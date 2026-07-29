@@ -207,7 +207,12 @@ manifest/lock seed照合とclassifierによるsecret・absolute path・binary・
 より前に、active/stale run、壊れたrun evidence、personal daemon、stop-request、
 persistent automationをread-only検査し、不明な証拠もfail-closedで拒否します。
 run/daemon開始とapplyは同じ短期coordination mutexを使うため、preflightとlease取得の
-間へ新しいrunnerが滑り込むこともありません。
+間へ新しいrunnerが滑り込むこともありません。task runはproject所有のworkflow、
+provider、runtime configを読み込み、`running` metadataをdurableに公開し終えるまで
+同じmutexを保持します。worktree実行は通常のmetadataをworktree側へ保存すると同時に、
+衝突しないcoordination mirrorを本体project rootにも公開します。初回または終了時の
+mirror書き込みが失敗してもfail-closedな証拠を残すため、applyがactive worktree runを
+見落としたり、古いtemplate世代を読み込んだrunと競合したりすることはありません。
 
 applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を変更します。正式lock
 は`.takt-template-lock.json`、privateなstaging・journal・世代数を制限したbackupは

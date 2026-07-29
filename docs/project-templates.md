@@ -249,7 +249,13 @@ Before downloading or writing content, apply inspects active and stale runs,
 malformed run evidence, personal daemon state, stop requests, and persistent
 automation. Unknown evidence blocks the operation. Run and daemon startup use
 the same short coordination mutex as apply, so a new runner cannot start in
-the gap between preflight and lease acquisition.
+the gap between preflight and lease acquisition. A task run holds that mutex
+while it reads project-owned workflow, provider, and runtime configuration and
+until its `running` metadata is durably published. Worktree runs publish the
+normal metadata in the worktree and a collision-resistant coordination mirror
+under the main project root. The mirror remains fail-closed if either initial
+or terminal publication fails, so apply cannot miss an active worktree run or
+race a run that loaded an older template generation.
 
 Apply stages and validates every output before changing `.takt/`. The formal
 lock is stored at `.takt-template-lock.json`. Private staging, journal, and
