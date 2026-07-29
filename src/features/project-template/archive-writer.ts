@@ -470,11 +470,18 @@ export async function writeTaktpackWithIoSeam(
       if (!outcome.ok) throw outcome.error;
       throw error;
     }
+    options.signal?.throwIfAborted();
     canonicalizeWrittenUstarHeaders(tempPath);
+    options.signal?.throwIfAborted();
     archiveHash = createHash('sha256');
     bytes = 0;
     ioSeam.onPhase?.('archive-read');
-    for await (const chunk of createReadStream(tempPath)) {
+    options.signal?.throwIfAborted();
+    const completedArchive = createReadStream(tempPath, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    for await (const chunk of completedArchive) {
+      options.signal?.throwIfAborted();
       const buffer = chunk as Buffer;
       bytes += buffer.byteLength;
       if (bytes > limits.maxArchiveBytes) {
@@ -482,8 +489,10 @@ export async function writeTaktpackWithIoSeam(
       }
       archiveHash.update(buffer);
     }
+    options.signal?.throwIfAborted();
     try {
       ioSeam.onPhase?.('file-fsync');
+      options.signal?.throwIfAborted();
       const completedFd = openSync(tempPath, constants.O_RDONLY);
       try {
         fsyncSync(completedFd);
@@ -495,6 +504,10 @@ export async function writeTaktpackWithIoSeam(
     }
     try {
       ioSeam.onPhase?.('publish');
+      // Publication is the cancellation commit boundary. Once link/rename
+      // begins, complete directory durability and report the published result
+      // instead of turning a visible artifact into an ambiguous abort.
+      options.signal?.throwIfAborted();
       publishTempFile(
         tempPath,
         outputPath,

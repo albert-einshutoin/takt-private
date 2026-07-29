@@ -348,6 +348,69 @@ describe('taktpack deterministic writer', () => {
     expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
+  it.each([
+    'archive-read',
+    'file-fsync',
+    'publish',
+  ] as const)(
+    'honors an abort requested by the %s seam before publication',
+    async (abortPhase) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const output = join(root, `${abortPhase}-aborted.taktpack`);
+      const controller = new AbortController();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+
+      try {
+        const error = await writeTaktpackWithIoSeam(
+          output,
+          plan,
+          { signal: controller.signal },
+          {
+            onPhase(phase) {
+              if (phase === abortPhase) controller.abort();
+            },
+          },
+        ).catch((caught: unknown) => caught);
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(error).toMatchObject({ name: 'AbortError' });
+        expect(existsSync(output)).toBe(false);
+        expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    },
+  );
+
+  it('finishes directory durability after publication even if cancellation arrives there', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'published-before-abort.taktpack');
+    const controller = new AbortController();
+
+    const result = await writeTaktpackWithIoSeam(
+      output,
+      plan,
+      { signal: controller.signal },
+      {
+        onPhase(phase) {
+          if (phase === 'directory-fsync') controller.abort();
+        },
+      },
+    );
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.outputPath).toBe(output);
+    expect(existsSync(output)).toBe(true);
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
   it('rejects a copied plan with recomputed-looking control data before creating a temp file', async () => {
     const root = makeRoot();
     writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
