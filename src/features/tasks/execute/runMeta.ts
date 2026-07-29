@@ -5,20 +5,23 @@
  * .takt/runs/{slug}/meta.json へ書き出す責務を担う。
  */
 
-import { writeFileAtomic, ensureDir } from '../../../infra/config/index.js';
 import type { RunMeta } from '../../../core/workflow/run/run-meta.js';
 import type { RunPaths } from '../../../core/workflow/run/run-paths.js';
 import type { WorkflowResumePoint } from '../../../core/models/index.js';
 import type { WorkflowTraceDiscovery } from '../../../core/workflow/observability/traceDiscovery.js';
 import { createHash } from 'node:crypto';
 import { existsSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import {
   assertProjectTemplateRunStartPermitOwned,
   ProjectTemplateCoordinationError,
   withProjectTemplateRunStartPermit,
   type ProjectTemplateRunStartPermit,
 } from '../../project-template/apply-lease.js';
+import {
+  writeRunMetaFileDurably,
+  type RunMetaStorageIo,
+} from './runMetaStorage.js';
 
 export interface DirectResumeMetadata {
   readonly sourceRunSlug: string;
@@ -29,7 +32,7 @@ export interface RunMetaManagerOptions {
   readonly traceDiscovery?: WorkflowTraceDiscovery;
   readonly projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit;
   readonly projectTemplateCoordinationRoot?: string;
-  readonly writeRunMetaFile?: (path: string, content: string) => void;
+  readonly runMetaStorageIo?: RunMetaStorageIo;
 }
 
 type PersistedRunMeta = Omit<RunMeta, 'resumePoint' | 'sourceRunSlug' | 'resumeMode'> & {
@@ -43,7 +46,7 @@ export class RunMetaManager {
   private readonly metaAbs: string;
   private readonly mirrorMetaAbs?: string;
   private readonly mirrorRunRootAbs?: string;
-  private readonly writeRunMetaFile: (path: string, content: string) => void;
+  private readonly runMetaStorageIo: RunMetaStorageIo | undefined;
   private finalized = false;
 
   constructor(
@@ -53,25 +56,35 @@ export class RunMetaManager {
     directResume?: DirectResumeMetadata,
     options?: RunMetaManagerOptions,
   ) {
-    this.metaAbs = runPaths.metaAbs;
-    this.writeRunMetaFile = options?.writeRunMetaFile ?? writeFileAtomic;
+    this.runMetaStorageIo = options?.runMetaStorageIo;
     if (
       options?.projectTemplateCoordinationRoot !== undefined
       && options.projectTemplateRunStartPermit === undefined
     ) {
       throw new ProjectTemplateCoordinationError();
     }
-    const actualProjectRoot = resolve(runPaths.runRootAbs, '../../..');
-    const coordinationRoot = options?.projectTemplateCoordinationRoot === undefined
+    const requestedActualProjectRoot = resolve(runPaths.runRootAbs, '../../..');
+    // Workspace aliases such as macOS /tmp are legitimate. Canonicalize the
+    // trusted project root once, then keep all RunMeta writes beneath it so the
+    // storage layer can still reject symlinks introduced inside the project.
+    const actualProjectRoot = existsSync(requestedActualProjectRoot)
+      ? realpathSync.native(requestedActualProjectRoot)
+      : requestedActualProjectRoot;
+    this.metaAbs = resolve(
+      actualProjectRoot,
+      relative(requestedActualProjectRoot, runPaths.metaAbs),
+    );
+    const requestedCoordinationRoot = options?.projectTemplateCoordinationRoot === undefined
       ? actualProjectRoot
       : resolve(options.projectTemplateCoordinationRoot);
+    const coordinationRoot = existsSync(requestedCoordinationRoot)
+      ? realpathSync.native(requestedCoordinationRoot)
+      : requestedCoordinationRoot;
     if (options?.projectTemplateCoordinationRoot !== undefined) {
-      const canonicalActualRoot = realpathSync.native(actualProjectRoot);
-      const canonicalCoordinationRoot = realpathSync.native(coordinationRoot);
-      if (canonicalActualRoot !== canonicalCoordinationRoot) {
+      if (actualProjectRoot !== coordinationRoot) {
         const mirrorSlug = resolveProjectTemplateRunMirrorSlug(
-          canonicalCoordinationRoot,
-          canonicalActualRoot,
+          coordinationRoot,
+          actualProjectRoot,
           runPaths.slug,
         );
         const mirrorPaths = buildMirrorRunPaths(coordinationRoot, mirrorSlug);
@@ -103,10 +116,6 @@ export class RunMetaManager {
     // mutex used by template apply. This closes the preflight/start race.
     const projectRoot = coordinationRoot;
     const publishRunningEvidence = () => {
-      ensureDir(runPaths.runRootAbs);
-      if (this.mirrorRunRootAbs !== undefined) {
-        ensureDir(this.mirrorRunRootAbs);
-      }
       this.writeRunMeta(this.runMeta);
     };
     // Some embedding callers intentionally bootstrap a brand-new project path.
@@ -114,7 +123,7 @@ export class RunMetaManager {
     // the legacy creation flow is safe; existing roots remain fail-closed.
     if (options?.projectTemplateRunStartPermit) {
       assertProjectTemplateRunStartPermitOwned(
-        projectRoot,
+        requestedCoordinationRoot,
         options.projectTemplateRunStartPermit,
       );
       publishRunningEvidence();
@@ -175,9 +184,13 @@ export class RunMetaManager {
     // is deliberately written second so any mirror failure leaves either a
     // running record or unreadable/missing evidence in the coordination root,
     // both of which keep template apply fail-closed.
-    this.writeRunMetaFile(this.metaAbs, content);
+    writeRunMetaFileDurably(this.metaAbs, content, this.runMetaStorageIo);
     if (this.mirrorMetaAbs !== undefined) {
-      this.writeRunMetaFile(this.mirrorMetaAbs, content);
+      writeRunMetaFileDurably(
+        this.mirrorMetaAbs,
+        content,
+        this.runMetaStorageIo,
+      );
     }
   }
 }

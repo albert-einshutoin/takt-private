@@ -30,6 +30,10 @@ vi.mock('../infra/config/index.js', () => ({
   writeFileAtomic: mockWriteFileAtomic,
 }));
 
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteFileAtomic,
+}));
+
 vi.mock('../infra/config/resolveConfigValue.js', () => ({
   resolveConfigValueWithSource: vi.fn(() => ({ value: 'mock', source: 'global' })),
   resolveProviderOptionsWithTrace: vi.fn(() => ({
@@ -201,7 +205,7 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
     });
 
     const metaWrite = mockWriteFileAtomic.mock.calls.find((call) =>
-      call[0] === join(projectDir, '.takt/runs/direct-resume/meta.json')
+      String(call[0]).endsWith('/.takt/runs/direct-resume/meta.json')
     );
     expect(metaWrite).toBeDefined();
     const meta = JSON.parse(String(metaWrite![1])) as {

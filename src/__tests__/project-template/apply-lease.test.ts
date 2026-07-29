@@ -36,8 +36,8 @@ import {
   resolveProjectTemplateRunMirrorSlug,
   RunMetaManager,
 } from '../../features/tasks/execute/runMeta.js';
+import { createRunMetaStorageIo } from '../../features/tasks/execute/runMetaStorage.js';
 import { writePersonalDaemonState } from '../../devloopd/personalLifecycle.js';
-import { writeFileAtomic } from '../../infra/config/index.js';
 
 const roots: string[] = [];
 
@@ -211,6 +211,32 @@ describe('project template apply/run-start coordination', () => {
     expect(existsSync(resolveProjectTemplateRunStartMutexPath(root))).toBe(false);
   });
 
+  it('publishes beneath the canonical project root through a workspace symlink', () => {
+    const root = makeRoot();
+    const aliasParent = makeRoot();
+    const alias = join(aliasParent, 'workspace-alias');
+    const runSlug = 'canonical-workspace-run';
+    symlinkSync(root, alias);
+
+    withProjectTemplateRunStartPermit(root, (permit) => {
+      new RunMetaManager(
+        buildRunPaths(alias, runSlug),
+        'canonical workspace task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: permit,
+          projectTemplateCoordinationRoot: root,
+        },
+      );
+    });
+
+    expect(JSON.parse(readFileSync(
+      join(root, '.takt', 'runs', runSlug, 'meta.json'),
+      'utf8',
+    ))).toMatchObject({ status: 'running', runSlug });
+  });
+
   it('mirrors a worktree run into the coordination root until finalize', () => {
     const projectRoot = makeRoot();
     const worktreeRoot = makeRoot();
@@ -238,6 +264,53 @@ describe('project template apply/run-start coordination', () => {
     manager!.finalize('completed', 1);
     expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed)
       .toBe(true);
+  });
+
+  it('hands off only after actual and mirror names are durably published', () => {
+    const projectRoot = makeRoot();
+    const worktreeRoot = makeRoot();
+    const runSlug = 'durable-handoff';
+    const canonicalProjectRoot = realpathSync.native(projectRoot);
+    const canonicalWorktreeRoot = realpathSync.native(worktreeRoot);
+    const actualRunRoot = join(canonicalWorktreeRoot, '.takt', 'runs', runSlug);
+    const mirrorSlug = resolveProjectTemplateRunMirrorSlug(
+      canonicalProjectRoot,
+      canonicalWorktreeRoot,
+      runSlug,
+    );
+    const mirrorRunRoot = join(canonicalProjectRoot, '.takt', 'runs', mirrorSlug);
+    const events: string[] = [];
+    const io = createRunMetaStorageIo({
+      before(operation, path) {
+        if (
+          operation === 'directory-fsync'
+          && (path === actualRunRoot || path === mirrorRunRoot)
+        ) {
+          events.push(path === actualRunRoot ? 'actual-durable' : 'mirror-durable');
+        }
+      },
+    });
+
+    withProjectTemplateRunStartPermit(projectRoot, (permit) => {
+      new RunMetaManager(
+        buildRunPaths(worktreeRoot, runSlug),
+        'durable handoff task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: permit,
+          projectTemplateCoordinationRoot: projectRoot,
+          runMetaStorageIo: io,
+        },
+      );
+      events.push('handoff');
+    });
+
+    expect(events).toEqual([
+      'actual-durable',
+      'mirror-durable',
+      'handoff',
+    ]);
   });
 
   it('uses collision-safe mirror slugs for concurrent worktree runs', () => {
@@ -286,6 +359,20 @@ describe('project template apply/run-start coordination', () => {
     const writes: string[] = [];
     let rejectMirrorWrite = false;
     let manager: RunMetaManager | undefined;
+    const canonicalProjectRoot = realpathSync.native(projectRoot);
+    const canonicalWorktreeRoot = realpathSync.native(worktreeRoot);
+    const io = createRunMetaStorageIo({
+      before(operation, path) {
+        if (operation === 'rename') writes.push(path);
+        if (
+          rejectMirrorWrite
+          && operation === 'file-fsync'
+          && path.startsWith(join(canonicalProjectRoot, '.takt', 'runs'))
+        ) {
+          throw new Error('injected mirror write failure');
+        }
+      },
+    });
 
     withProjectTemplateRunStartPermit(projectRoot, (permit) => {
       manager = new RunMetaManager(
@@ -296,16 +383,7 @@ describe('project template apply/run-start coordination', () => {
         {
           projectTemplateRunStartPermit: permit,
           projectTemplateCoordinationRoot: projectRoot,
-          writeRunMetaFile(path, content) {
-            writes.push(path);
-            if (
-              rejectMirrorWrite
-              && path.startsWith(join(projectRoot, '.takt', 'runs'))
-            ) {
-              throw new Error('injected mirror write failure');
-            }
-            writeFileAtomic(path, content);
-          },
+          runMetaStorageIo: io,
         },
       );
     });
@@ -316,13 +394,13 @@ describe('project template apply/run-start coordination', () => {
       .toThrow('injected mirror write failure');
     const finalizeWrites = writes.slice(writesBeforeFinalize);
     expect(finalizeWrites[0]).toBe(join(
-      worktreeRoot,
+      canonicalWorktreeRoot,
       '.takt',
       'runs',
       'mirror-failure',
       'meta.json',
     ));
-    expect(finalizeWrites[1]).toContain(join(projectRoot, '.takt', 'runs'));
+    expect(finalizeWrites).toHaveLength(1);
     expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
       .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
   });
@@ -330,6 +408,18 @@ describe('project template apply/run-start coordination', () => {
   it('leaves missing mirror metadata that blocks apply when initial mirror publication fails', () => {
     const projectRoot = makeRoot();
     const worktreeRoot = makeRoot();
+    const canonicalProjectRoot = realpathSync.native(projectRoot);
+    let handedOff = false;
+    const io = createRunMetaStorageIo({
+      before(operation, path) {
+        if (
+          operation === 'file-fsync'
+          && path.startsWith(join(canonicalProjectRoot, '.takt', 'runs'))
+        ) {
+          throw new Error('injected initial mirror write failure');
+        }
+      },
+    });
 
     expect(() => withProjectTemplateRunStartPermit(projectRoot, (permit) => {
       new RunMetaManager(
@@ -340,16 +430,13 @@ describe('project template apply/run-start coordination', () => {
         {
           projectTemplateRunStartPermit: permit,
           projectTemplateCoordinationRoot: projectRoot,
-          writeRunMetaFile(path, content) {
-            if (path.startsWith(join(projectRoot, '.takt', 'runs'))) {
-              throw new Error('injected initial mirror write failure');
-            }
-            writeFileAtomic(path, content);
-          },
+          runMetaStorageIo: io,
         },
       );
+      handedOff = true;
     })).toThrow('injected initial mirror write failure');
 
+    expect(handedOff).toBe(false);
     expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
       .toContainEqual(expect.objectContaining({
         code: 'RUN_METADATA_MISSING',
