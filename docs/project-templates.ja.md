@@ -70,6 +70,12 @@ entry はさらに `executable` の宣言が必須です。利用できる名前
 安定した `code` と `field` を持つ `ProjectTemplateValidationError` なので、
 呼び出し側は文言ではなく code を判定に使用してください。
 
+package 利用側は、documented API を `takt` package root から import してください。
+内部の `dist/**` module は review・storage の trust boundary を迂回し得るため、
+意図的に export しません。この `exports` 境界は `takt`、`takt-dev`、`takt-cli`、
+`devloopd` command を変更しませんが、未サポートの deep import に依存していた
+consumer に対しては semver-visible な変更です。
+
 lock は manifest と同じ `schemaVersion`、`packVersion`、`source`、トップレベル
 capability と、path/policy/mode/digest/capability の entry 一覧を記録します。
 さらに canonical manifest の `manifestSha256` を保持するため、意味が変わった別の

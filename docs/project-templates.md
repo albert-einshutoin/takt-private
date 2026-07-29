@@ -101,6 +101,13 @@ Validation errors are `ProjectTemplateValidationError` values with a stable
 `code` and `field`; callers should branch on the code rather than matching error
 text.
 
+Package consumers must import these documented APIs from the `takt` package
+root. Internal `dist/**` modules are intentionally not exported because a deep
+import can bypass review and storage trust boundaries. The `exports` boundary
+does not change the `takt`, `takt-dev`, `takt-cli`, or `devloopd` commands, but
+it is intentionally semver-visible for consumers that relied on unsupported
+deep imports.
+
 The schemas cover structural and single-field constraints. Rules that compare
 multiple values remain runtime-only: minimum/maximum TAKT ordering, duplicate,
 case and Unicode-normalization path collisions, executable/top-level capability
