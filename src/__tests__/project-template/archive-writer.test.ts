@@ -227,6 +227,73 @@ describe('taktpack deterministic writer', () => {
     expect(String(error)).not.toContain(root);
   });
 
+  it('records publication before a post-link temp unlink failure', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'post-link.taktpack');
+
+    const error = await writeTaktpackWithIoSeam(output, plan, {}, {
+      onPhase(phase) {
+        if (phase === 'post-link-unlink') {
+          throw new Error(`raw unlink ${root}`);
+        }
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'published',
+      field: 'temporaryArchive',
+    });
+    expect(existsSync(output)).toBe(true);
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+    expect(String(error)).not.toContain(root);
+  });
+
+  it('does not let final cleanup mask a post-link unlink failure', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'post-link-primary.taktpack');
+
+    const error = await writeTaktpackWithIoSeam(output, plan, {}, {
+      onPhase(phase) {
+        if (phase === 'post-link-unlink' || phase === 'cleanup') {
+          throw new Error(`raw ${phase} ${root}`);
+        }
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'published',
+      field: 'temporaryArchive',
+    });
+    expect(existsSync(output)).toBe(true);
+    expect(String(error)).not.toContain(root);
+  });
+
+  it('records forced rename publication before directory durability failure', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'forced-state.taktpack');
+    writeFileSync(output, 'old');
+
+    const error = await writeTaktpackWithIoSeam(output, plan, { force: true }, {
+      onPhase(phase) {
+        if (phase === 'directory-fsync') throw new Error(`raw fsync ${root}`);
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'DURABILITY_FAILED',
+      artifactState: 'published',
+    });
+    expect(readFileSync(output, 'utf8')).not.toBe('old');
+  });
+
   it('does not overwrite an existing output without force', async () => {
     const root = makeRoot();
     writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');

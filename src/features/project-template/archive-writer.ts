@@ -225,6 +225,7 @@ export type TaktpackWriterIoPhase =
   | 'archive-read'
   | 'file-fsync'
   | 'publish'
+  | 'post-link-unlink'
   | 'directory-fsync'
   | 'cleanup';
 
@@ -254,6 +255,8 @@ function publishTempFile(
   outputPath: string,
   force: boolean,
   expectedTarget: import('node:fs').Stats | undefined,
+  onPublished: () => void,
+  beforeNoForceTempUnlink: () => void,
 ): void {
   if (force) {
     if (expectedTarget !== undefined) {
@@ -270,12 +273,15 @@ function publishTempFile(
       throw new TaktpackError('UNSAFE_OUTPUT_TARGET', 'output target appeared before publish', 'outputPath');
     }
     renameSync(tempPath, outputPath);
+    onPublished();
     return;
   }
   try {
     // A hard-link publish is the portable no-clobber primitive: unlike a
     // preflight exists check it remains safe if another writer wins the race.
     linkSync(tempPath, outputPath);
+    onPublished();
+    beforeNoForceTempUnlink();
     unlinkSync(tempPath);
   } catch (error) {
     if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -489,10 +495,25 @@ export async function writeTaktpackWithIoSeam(
     }
     try {
       ioSeam.onPhase?.('publish');
-      publishTempFile(tempPath, outputPath, force, expectedTarget);
-      published = true;
+      publishTempFile(
+        tempPath,
+        outputPath,
+        force,
+        expectedTarget,
+        () => {
+          // link/rename is the externally visible commit point. Record it
+          // before any later temp cleanup or directory durability operation.
+          published = true;
+        },
+        () => ioSeam.onPhase?.('post-link-unlink'),
+      );
     } catch (error) {
-      throw normalizeWriterIoError(error, 'ARCHIVE_WRITE_FAILED', 'publish', 'not-published');
+      throw normalizeWriterIoError(
+        error,
+        published ? 'CLEANUP_FAILED' : 'ARCHIVE_WRITE_FAILED',
+        published ? 'temporaryArchive' : 'publish',
+        published ? 'published' : 'not-published',
+      );
     }
     try {
       ioSeam.onPhase?.('directory-fsync');
