@@ -11,6 +11,7 @@ import {
   parseSource,
   requireArray,
   requireRecord,
+  requireSchemaVersionV1,
   requireSemVer,
   validateDeclaredCapabilities,
   validatePathIdentities,
@@ -26,7 +27,7 @@ function parseLockEntry(value: unknown, index: number): TemplateLockEntry {
   }
   return {
     path: parsePortablePath(entry['path'], `${field}.path`),
-    policy: parsePolicy(entry['policy'], `${field}.policy`),
+    policy: parsePolicy(entry['policy'], `${field}.policy`, 'INVALID_LOCK'),
     mode: parsePosixMode(entry['mode'], `${field}.mode`),
     sha256: parseSha256(entry['sha256'], `${field}.sha256`),
     capabilities,
@@ -36,9 +37,7 @@ function parseLockEntry(value: unknown, index: number): TemplateLockEntry {
 export function parseTemplateLock(value: unknown): TemplateLockV1 {
   const lock = requireRecord(value, 'lock');
   assertAllowedKeys(lock, ['schemaVersion', 'manifestSha256', 'packVersion', 'source', 'capabilities', 'entries'], 'lock');
-  if (lock['schemaVersion'] !== '1.0') {
-    throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_MAJOR', 'lock schemaVersion major 1 is required', 'lock.schemaVersion');
-  }
+  requireSchemaVersionV1(lock['schemaVersion'], 'lock.schemaVersion', 'INVALID_LOCK');
   const rawEntries = requireArray(lock['entries'], 'lock.entries', MAX_TEMPLATE_ENTRIES, 'INVALID_LOCK');
   const capabilities = parseCapabilities(lock['capabilities'], 'lock.capabilities', 'INVALID_LOCK');
   if (capabilities === undefined) {

@@ -30,6 +30,37 @@ function expectValidationCode(value: unknown, code: string): void {
   throw new Error(`Expected validation error ${code}`);
 }
 
+const validLock = (): Record<string, unknown> => ({
+  schemaVersion: '1.0',
+  manifestSha256: 'b'.repeat(64),
+  packVersion: '1.2.3',
+  source: {
+    kind: 'github',
+    uri: 'https://github.com/example/project-template',
+    ref: 'v1.2.3',
+    commit: '0123456789abcdef0123456789abcdef01234567',
+  },
+  capabilities: [],
+  entries: [{
+    path: 'config.yaml',
+    policy: 'managed',
+    mode: '0644',
+    sha256: 'a'.repeat(64),
+    capabilities: [],
+  }],
+});
+
+function expectLockValidationCode(value: unknown, code: string): void {
+  try {
+    parseTemplateLock(value);
+  } catch (error) {
+    expect(error).toBeInstanceOf(ProjectTemplateValidationError);
+    expect((error as ProjectTemplateValidationError).code).toBe(code);
+    return;
+  }
+  throw new Error(`Expected lock validation error ${code}`);
+}
+
 describe('project template manifest public contract', () => {
   it('should parse and serialize a version 1 manifest without losing its provenance or entry policy', async () => {
     const publicApi = (await import('../../index.js')) as unknown as Record<string, unknown>;
@@ -79,6 +110,46 @@ describe('project template manifest public contract', () => {
     const manifest = validManifest();
     manifest['schemaVersion'] = '2.0';
     expectValidationCode(manifest, 'UNSUPPORTED_SCHEMA_MAJOR');
+  });
+
+  it.each([
+    ['manifest', undefined, 'INVALID_MANIFEST'],
+    ['manifest', 1, 'INVALID_MANIFEST'],
+    ['manifest', '1.1', 'UNSUPPORTED_SCHEMA_VERSION'],
+    ['manifest', '2.0', 'UNSUPPORTED_SCHEMA_MAJOR'],
+  ])('should classify %s schemaVersion %j precisely', (_kind, schemaVersion, code) => {
+    const manifest = validManifest();
+    if (schemaVersion === undefined) {
+      delete manifest['schemaVersion'];
+    } else {
+      manifest['schemaVersion'] = schemaVersion;
+    }
+    expectValidationCode(manifest, code);
+  });
+
+  it.each([
+    ['lock', undefined, 'INVALID_LOCK'],
+    ['lock', 1, 'INVALID_LOCK'],
+    ['lock', '1.1', 'UNSUPPORTED_SCHEMA_VERSION'],
+    ['lock', '2.0', 'UNSUPPORTED_SCHEMA_MAJOR'],
+  ])('should classify %s schemaVersion %j precisely', (_kind, schemaVersion, code) => {
+    const lock = validLock();
+    if (schemaVersion === undefined) {
+      delete lock['schemaVersion'];
+    } else {
+      lock['schemaVersion'] = schemaVersion;
+    }
+    expectLockValidationCode(lock, code);
+  });
+
+  it('should keep invalid policy codes scoped to the parsed document', () => {
+    const manifest = validManifest();
+    (manifest['entries'] as Array<Record<string, unknown>>)[0]!['policy'] = 'overwrite';
+    expectValidationCode(manifest, 'INVALID_ENTRY');
+
+    const lock = validLock();
+    (lock['entries'] as Array<Record<string, unknown>>)[0]!['policy'] = 'overwrite';
+    expectLockValidationCode(lock, 'INVALID_LOCK');
   });
 
   it('should reject unknown keys at every contract boundary', () => {

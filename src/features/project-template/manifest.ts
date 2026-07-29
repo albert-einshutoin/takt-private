@@ -12,6 +12,7 @@ import {
   parseSource,
   requireArray,
   requireRecord,
+  requireSchemaVersionV1,
   requireSemVer,
   validateDeclaredCapabilities,
   validatePathIdentities,
@@ -35,9 +36,7 @@ function parseEntry(value: unknown, index: number): TemplateEntry {
 export function parseProjectTemplateManifest(value: unknown): ProjectTemplateManifestV1 {
   const manifest = requireRecord(value, 'manifest');
   assertAllowedKeys(manifest, ['schemaVersion', 'packVersion', 'takt', 'source', 'capabilities', 'entries'], 'manifest');
-  if (manifest['schemaVersion'] !== '1.0') {
-    throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_MAJOR', 'schemaVersion major 1 is required', 'schemaVersion');
-  }
+  requireSchemaVersionV1(manifest['schemaVersion'], 'schemaVersion', 'INVALID_MANIFEST');
   const takt = requireRecord(manifest['takt'], 'takt');
   assertAllowedKeys(takt, ['minVersion', 'maxVersion'], 'takt');
   const rawEntries = requireArray(manifest['entries'], 'entries', MAX_TEMPLATE_ENTRIES, 'INVALID_MANIFEST');

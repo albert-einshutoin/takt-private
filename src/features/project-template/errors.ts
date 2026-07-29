@@ -1,6 +1,7 @@
 export type ProjectTemplateValidationErrorCode =
   | 'INVALID_MANIFEST'
   | 'UNSUPPORTED_SCHEMA_MAJOR'
+  | 'UNSUPPORTED_SCHEMA_VERSION'
   | 'UNKNOWN_KEY'
   | 'INVALID_ENTRY'
   | 'INVALID_LOCK'

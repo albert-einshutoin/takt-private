@@ -133,6 +133,27 @@ export function requireSemVer(value: unknown, field: string): string {
   return version;
 }
 
+export function requireSchemaVersionV1(
+  value: unknown,
+  field: string,
+  invalidCode: 'INVALID_MANIFEST' | 'INVALID_LOCK',
+): '1.0' {
+  if (typeof value !== 'string') {
+    throw new ProjectTemplateValidationError(invalidCode, `${field} must be a string`, field);
+  }
+  const match = /^(\d+)\.(\d+)$/.exec(value);
+  if (match === null) {
+    throw new ProjectTemplateValidationError(invalidCode, `${field} must use major.minor notation`, field);
+  }
+  if (match[1] !== '1') {
+    throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_MAJOR', `${field} major ${match[1]} is not supported`, field);
+  }
+  if (value !== '1.0') {
+    throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_VERSION', `${field} version ${value} is not supported`, field);
+  }
+  return '1.0';
+}
+
 function compareNumericIdentifiers(left: string, right: string): number {
   if (left.length !== right.length) return left.length - right.length;
   return left === right ? 0 : (left < right ? -1 : 1);
@@ -254,9 +275,13 @@ export function parseCapabilities(
   return capabilities;
 }
 
-export function parsePolicy(value: unknown, field: string): TemplateEntryPolicy {
+export function parsePolicy(
+  value: unknown,
+  field: string,
+  errorCode: 'INVALID_ENTRY' | 'INVALID_LOCK' = 'INVALID_ENTRY',
+): TemplateEntryPolicy {
   if (!TEMPLATE_ENTRY_POLICIES.includes(value as TemplateEntryPolicy)) {
-    throw new ProjectTemplateValidationError('INVALID_ENTRY', `${field} is not a supported policy`, field);
+    throw new ProjectTemplateValidationError(errorCode, `${field} is not a supported policy`, field);
   }
   return value as TemplateEntryPolicy;
 }
