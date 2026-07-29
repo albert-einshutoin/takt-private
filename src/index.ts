@@ -75,3 +75,32 @@ export {
   decomposeTask,
 } from './agents/agent-usecases.js';
 export type { JudgeStatusResult } from './agents/agent-usecases.js';
+
+// Portable project-template contract. This remains side-effect free so tools
+// can validate a pack before applying it to a working tree.
+export {
+  parseProjectTemplateManifest,
+  serializeProjectTemplateManifest,
+  parseTemplateLock,
+  serializeTemplateLock,
+  calculateProjectTemplateManifestSha256,
+  validateManifestLockPair,
+  validateDetectedTemplateCapabilities,
+  projectTemplateManifestV1JsonSchema,
+  projectTemplateLockV1JsonSchema,
+  ProjectTemplateValidationError,
+} from './features/project-template/index.js';
+export type {
+  ProjectTemplateManifestV1,
+  TemplateCapability,
+  TemplateEntry,
+  TemplateEntryPolicy,
+  TemplateLockV1,
+  TemplateLockEntry,
+  TemplateSource,
+  GithubTemplateSource,
+  GitTemplateSource,
+  LocalTemplateSource,
+  DetectedTemplateCapabilities,
+  ProjectTemplateValidationErrorCode,
+} from './features/project-template/index.js';
