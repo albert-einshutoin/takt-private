@@ -54,6 +54,7 @@ export type ProjectTemplateApplyReasonCode =
   | 'AMBIGUOUS_RENAME'
   | 'CASE_ONLY_RENAME'
   | 'DESTINATION_CASE_COLLISION'
+  | 'DESTINATION_PATH_COLLISION'
   | 'LOCAL_DELETED'
   | 'LOCAL_DELETED_UPSTREAM_CHANGED';
 
@@ -68,6 +69,7 @@ export type ProjectTemplateEntryDiff =
   | { kind: 'text'; text: string; truncated: boolean }
   | { kind: 'binary' }
   | { kind: 'too-large' }
+  | { kind: 'redacted' }
   | { kind: 'unavailable' };
 
 interface ProjectTemplateApplyPlanEntryBase {
@@ -82,6 +84,7 @@ interface ProjectTemplateApplyPlanEntryBase {
   capabilitiesAfter: readonly TemplateCapability[];
   gitTrackingStatus: ProjectTemplateGitTrackingStatus | 'absent';
   rollbackImpact: ProjectTemplateRollbackImpact;
+  reviewRequired: boolean;
   diff?: ProjectTemplateEntryDiff;
 }
 
@@ -125,8 +128,11 @@ export interface ProjectTemplateApplyPlan {
   schemaVersion: '1.0';
   planId: string;
   preconditionToken: string;
+  baseLockSha256?: string;
+  incomingManifestSha256: string;
   basePackVersion?: string;
   incomingPackVersion: string;
+  reviewRequired: boolean;
   defaultApplyPossible: boolean;
   entries: readonly ProjectTemplateApplyPlanEntry[];
   summary: ProjectTemplateApplyPlanSummary;

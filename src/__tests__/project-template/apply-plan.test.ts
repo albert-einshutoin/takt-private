@@ -1,0 +1,439 @@
+import { createHash } from 'node:crypto';
+import { describe, expect, it } from 'vitest';
+import {
+  createProjectTemplateApplyPlan,
+  type ProjectTemplateApplyPlanInput,
+  type ProjectTemplateLocalSnapshotEntry,
+  type TemplateEntryPolicy,
+} from '../../features/project-template/index.js';
+
+const source = {
+  kind: 'local' as const,
+  uri: '.',
+  ref: 'workspace' as const,
+  commit: 'a'.repeat(40),
+};
+
+function hash(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function manifestEntry(
+  path: string,
+  content: string,
+  policy: TemplateEntryPolicy = 'managed',
+) {
+  return {
+    path,
+    policy,
+    mode: '0644',
+    sha256: hash(content),
+  };
+}
+
+function input(
+  {
+    base,
+    local,
+    incoming,
+    policy = 'managed',
+  }: {
+    base?: string;
+    local?: string;
+    incoming?: string;
+    policy?: TemplateEntryPolicy;
+  },
+): ProjectTemplateApplyPlanInput {
+  const path = 'config.yaml';
+  const incomingEntries = incoming === undefined
+    ? []
+    : [manifestEntry(path, incoming, policy)];
+  const baseEntries = base === undefined
+    ? []
+    : [{
+        ...manifestEntry(path, base, policy),
+        capabilities: [],
+      }];
+  const localEntries: ProjectTemplateLocalSnapshotEntry[] = local === undefined
+    ? []
+    : [{
+        path,
+        mode: '0644',
+        sha256: hash(local),
+        bytes: Buffer.byteLength(local),
+        content: Buffer.from(local),
+        gitTrackingStatus: 'tracked-clean',
+      }];
+  return {
+    baseLock: {
+      schemaVersion: '1.0',
+      manifestSha256: 'b'.repeat(64),
+      packVersion: '1.0.0',
+      source,
+      capabilities: [],
+      entries: baseEntries,
+    },
+    incomingManifest: {
+      schemaVersion: '1.0',
+      packVersion: '2.0.0',
+      takt: { minVersion: '0.48.0' },
+      source,
+      entries: incomingEntries,
+    },
+    localEntries,
+    incomingContents: incoming === undefined
+      ? []
+      : [{ path, content: Buffer.from(incoming) }],
+  };
+}
+
+describe('project template three-way apply plan', () => {
+  it.each([
+    ['unchanged / changed', 'base', 'base', 'next', 'update', 'UPSTREAM_CHANGED'],
+    ['changed / unchanged', 'base', 'local', 'base', 'keep', 'LOCAL_CHANGED'],
+    ['both changed', 'base', 'local', 'next', 'conflict', 'BOTH_CHANGED'],
+    ['both changed identically', 'base', 'next', 'next', 'keep', 'ALREADY_CURRENT'],
+    ['all unchanged', 'base', 'base', 'base', 'keep', 'UNCHANGED'],
+    ['new missing destination', undefined, undefined, 'next', 'add', 'NEW_ENTRY'],
+    ['new occupied destination', undefined, 'local', 'next', 'conflict', 'DESTINATION_EXISTS'],
+  ] as const)(
+    'plans managed %s deterministically',
+    (_label, base, local, incoming, action, reasonCode) => {
+      const plan = createProjectTemplateApplyPlan(input({ base, local, incoming }));
+
+      expect(plan.entries).toHaveLength(1);
+      expect(plan.entries[0]).toMatchObject({
+        path: 'config.yaml',
+        policy: 'managed',
+        action,
+        reasonCode,
+      });
+      expect(plan.defaultApplyPossible).toBe(action !== 'conflict');
+      expect(plan.planId).toMatch(/^[a-f0-9]{64}$/);
+      expect(plan.preconditionToken).toMatch(/^[a-f0-9]{64}$/);
+    },
+  );
+
+  it.each([
+    ['unchanged local', 'base', 'delete', 'LOCAL_UNCHANGED_TEMPLATE_DELETED'],
+    ['changed local', 'local', 'conflict', 'LOCAL_CHANGED_TEMPLATE_DELETED'],
+    ['already absent', undefined, 'keep', 'ALREADY_ABSENT'],
+  ] as const)(
+    'handles a managed upstream deletion with %s',
+    (_label, local, action, reasonCode) => {
+      const plan = createProjectTemplateApplyPlan(input({
+        base: 'base',
+        local,
+        incoming: undefined,
+      }));
+
+      expect(plan.entries[0]).toMatchObject({ action, reasonCode });
+    },
+  );
+
+  it('routes divergent merge-policy changes to semantic merge without mutating the target', () => {
+    const planInput = input({
+      base: 'base',
+      local: 'local',
+      incoming: 'next',
+      policy: 'merge',
+    });
+    const before = planInput.localEntries.map((entry) => ({
+      ...entry,
+      ...(entry.content === undefined ? {} : { content: Buffer.from(entry.content) }),
+    }));
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.entries[0]).toMatchObject({
+      policy: 'merge',
+      action: 'conflict',
+      reasonCode: 'SEMANTIC_MERGE_REQUIRED',
+    });
+    expect(planInput.localEntries).toEqual(before);
+  });
+
+  it.each([
+    [undefined, 'add', 'SCAFFOLD_MISSING'],
+    ['local', 'keep', 'SCAFFOLD_PRESERVED'],
+  ] as const)('limits scaffold to create-when-missing for local=%s', (local, action, reasonCode) => {
+    const plan = createProjectTemplateApplyPlan(input({
+      base: 'base',
+      local,
+      incoming: 'next',
+      policy: 'scaffold',
+    }));
+
+    expect(plan.entries[0]).toMatchObject({
+      policy: 'scaffold',
+      action,
+      reasonCode,
+    });
+    expect(plan.entries[0]?.action).not.toBe('update');
+    expect(plan.entries[0]?.action).not.toBe('delete');
+  });
+
+  it('never copies an excluded manifest entry', () => {
+    const plan = createProjectTemplateApplyPlan(input({
+      incoming: 'private',
+      policy: 'excluded',
+    }));
+
+    expect(plan.entries[0]).toMatchObject({
+      policy: 'excluded',
+      action: 'excluded',
+      reasonCode: 'POLICY_EXCLUDED',
+    });
+  });
+
+  it('fails closed for a legacy occupied target unless an identical baseline is explicitly adopted', () => {
+    const legacy = input({ local: 'local', incoming: 'next' });
+    delete (legacy as { baseLock?: unknown }).baseLock;
+
+    const conflict = createProjectTemplateApplyPlan(legacy);
+    const adopted = createProjectTemplateApplyPlan({
+      ...legacy,
+      localEntries: [{
+        ...legacy.localEntries[0]!,
+        sha256: hash('next'),
+        bytes: 4,
+        content: Buffer.from('next'),
+      }],
+      baselineStrategy: 'adopt-identical',
+    });
+
+    expect(conflict.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'LEGACY_BASELINE_REQUIRED',
+    });
+    expect(adopted.entries[0]).toMatchObject({
+      action: 'keep',
+      reasonCode: 'BASELINE_ADOPTED',
+    });
+  });
+
+  it.each([
+    ['content rename', 'old.yaml', 'new.yaml'],
+    ['case-only rename', 'Config.yaml', 'config.yaml'],
+  ])('marks a %s as conflict', (_label, oldPath, newPath) => {
+    const baseContent = 'same';
+    const plan = createProjectTemplateApplyPlan({
+      ...input({}),
+      baseLock: {
+        schemaVersion: '1.0',
+        manifestSha256: 'b'.repeat(64),
+        packVersion: '1.0.0',
+        source,
+        capabilities: [],
+        entries: [{
+          ...manifestEntry(oldPath, baseContent),
+          capabilities: [],
+        }],
+      },
+      incomingManifest: {
+        schemaVersion: '1.0',
+        packVersion: '2.0.0',
+        takt: { minVersion: '0.48.0' },
+        source,
+        entries: [manifestEntry(newPath, baseContent)],
+      },
+      localEntries: [{
+        path: oldPath,
+        mode: '0644',
+        sha256: hash(baseContent),
+        bytes: 4,
+        content: Buffer.from(baseContent),
+        gitTrackingStatus: 'tracked-clean',
+      }],
+      incomingContents: [{ path: newPath, content: Buffer.from(baseContent) }],
+    });
+
+    expect(plan.defaultApplyPossible).toBe(false);
+    expect(plan.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: oldPath, action: 'conflict' }),
+      expect.objectContaining({ path: newPath, action: 'conflict' }),
+    ]));
+  });
+
+  it('produces stable JSON/human summaries and a bounded text diff', () => {
+    const planInput = input({ base: 'old\n', local: 'old\n', incoming: 'new\n' });
+
+    const first = createProjectTemplateApplyPlan(planInput);
+    const second = createProjectTemplateApplyPlan(structuredClone(planInput));
+
+    expect(second).toEqual(first);
+    expect(first.summary.counts.update).toBe(1);
+    expect(first.summary.human).toContain('更新 1');
+    expect(first.entries[0]?.diff).toMatchObject({
+      kind: 'text',
+      truncated: false,
+    });
+    expect(first.entries[0]?.diff?.text).toContain('-old');
+    expect(first.entries[0]?.diff?.text).toContain('+new');
+  });
+
+  it.each([
+    ['binary', Buffer.from([0, 1, 2]), 'binary'],
+    ['large', Buffer.alloc(70 * 1024, 0x61), 'too-large'],
+  ] as const)('does not emit a %s file body diff', (_label, content, kind) => {
+    const planInput = input({ base: 'old', local: 'old', incoming: 'next' });
+    planInput.incomingContents = [{ path: 'config.yaml', content }];
+    planInput.incomingManifest.entries[0]!.sha256 =
+      createHash('sha256').update(content).digest('hex');
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.entries[0]?.diff).toMatchObject({ kind });
+    expect(plan.entries[0]?.diff).not.toHaveProperty('text');
+  });
+
+  it('changes the precondition token when the local hash, mode, or Git status changes', () => {
+    const original = input({ base: 'base', local: 'base', incoming: 'next' });
+    const first = createProjectTemplateApplyPlan(original);
+    const variants = [
+      {
+        ...original.localEntries[0]!,
+        sha256: hash('changed'),
+        bytes: 7,
+        content: Buffer.from('changed'),
+      },
+      { ...original.localEntries[0]!, mode: '0755' },
+      { ...original.localEntries[0]!, gitTrackingStatus: 'tracked-modified' as const },
+    ];
+
+    for (const localEntry of variants) {
+      const changed = createProjectTemplateApplyPlan({
+        ...original,
+        localEntries: [localEntry],
+      });
+      expect(changed.preconditionToken).not.toBe(first.preconditionToken);
+    }
+  });
+
+  it('fails closed for file/directory prefix collisions', () => {
+    const planInput = input({ incoming: 'file' });
+    planInput.incomingManifest.entries = [
+      manifestEntry('config', 'file'),
+      manifestEntry('config/child.yaml', 'child'),
+    ];
+    planInput.incomingContents = [
+      { path: 'config', content: Buffer.from('file') },
+      { path: 'config/child.yaml', content: Buffer.from('child') },
+    ];
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.defaultApplyPossible).toBe(false);
+    expect(plan.entries).toEqual([
+      expect.objectContaining({
+        path: 'config',
+        action: 'conflict',
+        reasonCode: 'DESTINATION_PATH_COLLISION',
+      }),
+      expect.objectContaining({
+        path: 'config/child.yaml',
+        action: 'conflict',
+        reasonCode: 'DESTINATION_PATH_COLLISION',
+      }),
+    ]);
+  });
+
+  it('marks N:1 content rename candidates as ambiguous', () => {
+    const planInput = input({});
+    planInput.baseLock!.entries = [
+      { ...manifestEntry('old-a.yaml', 'same'), capabilities: [] },
+      { ...manifestEntry('old-b.yaml', 'same'), capabilities: [] },
+    ];
+    planInput.incomingManifest.entries = [manifestEntry('new.yaml', 'same')];
+    planInput.localEntries = planInput.baseLock!.entries.map((entry) => ({
+      path: entry.path,
+      mode: entry.mode,
+      sha256: entry.sha256,
+      bytes: 4,
+      content: Buffer.from('same'),
+      gitTrackingStatus: 'tracked-clean',
+    }));
+    planInput.incomingContents = [{ path: 'new.yaml', content: Buffer.from('same') }];
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.entries).toHaveLength(3);
+    expect(plan.entries.every(
+      (entry) => entry.action === 'conflict' && entry.reasonCode === 'AMBIGUOUS_RENAME',
+    )).toBe(true);
+  });
+
+  it('requires review and disables default apply when capabilities are added', () => {
+    const planInput = input({ base: 'base', local: 'base', incoming: 'next' });
+    planInput.incomingManifest.capabilities = ['external-command'];
+    planInput.incomingManifest.entries[0]!.capabilities = ['external-command'];
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.reviewRequired).toBe(true);
+    expect(plan.defaultApplyPossible).toBe(false);
+    expect(plan.entries[0]).toMatchObject({
+      action: 'update',
+      reviewRequired: true,
+      capabilitiesBefore: [],
+      capabilitiesAfter: ['external-command'],
+    });
+  });
+
+  it.each(['unavailable', 'unmerged'] as const)(
+    'disables default apply when Git tracking is %s',
+    (gitTrackingStatus) => {
+      const planInput = input({ base: 'base', local: 'base', incoming: 'next' });
+      planInput.localEntries[0]!.gitTrackingStatus = gitTrackingStatus;
+
+      const plan = createProjectTemplateApplyPlan(planInput);
+
+      expect(plan.defaultApplyPossible).toBe(false);
+      expect(plan.reviewRequired).toBe(true);
+    },
+  );
+
+  it('binds plan identity to canonical incoming and base artifacts', () => {
+    const firstInput = input({ base: 'base', local: 'base', incoming: 'next' });
+    const secondInput = structuredClone(firstInput);
+    secondInput.incomingManifest.source.commit = 'c'.repeat(40);
+
+    const first = createProjectTemplateApplyPlan(firstInput);
+    const second = createProjectTemplateApplyPlan(secondInput);
+
+    expect(first.incomingManifestSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.baseLockSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(second.incomingManifestSha256).not.toBe(first.incomingManifestSha256);
+    expect(second.planId).not.toBe(first.planId);
+  });
+
+  it('redacts secret-bearing content from every serialized diff', () => {
+    const secret = 'ghp_syntheticcredential123456';
+    const planInput = input({ base: 'base', local: 'base', incoming: secret });
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+    const serialized = JSON.stringify(plan);
+
+    expect(plan.entries[0]?.diff).toEqual({ kind: 'redacted' });
+    expect(serialized).not.toContain(secret);
+  });
+
+  it('returns a deeply frozen plan and stable ASCII path ordering', () => {
+    const planInput = input({});
+    planInput.incomingManifest.entries = [
+      manifestEntry('z.yaml', 'z'),
+      manifestEntry('A.yaml', 'a'),
+    ];
+    planInput.incomingContents = [
+      { path: 'z.yaml', content: Buffer.from('z') },
+      { path: 'A.yaml', content: Buffer.from('a') },
+    ];
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.entries.map((entry) => entry.path)).toEqual(['A.yaml', 'z.yaml']);
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(Object.isFrozen(plan.entries)).toBe(true);
+    expect(Object.isFrozen(plan.entries[0])).toBe(true);
+  });
+});

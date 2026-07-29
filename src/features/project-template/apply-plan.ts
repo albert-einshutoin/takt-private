@@ -6,6 +6,7 @@ import { ProjectTemplateValidationError } from './errors.js';
 import { portablePathKey } from './filesystem-scan.js';
 import { parseTemplateLock } from './lock.js';
 import { parseProjectTemplateManifest } from './manifest.js';
+import { classifyProjectTemplateEntry } from './classifier-core.js';
 import type {
   ProjectTemplateApplyAction,
   ProjectTemplateApplyPlan,
@@ -34,6 +35,7 @@ import {
 const MAX_DIFF_INPUT_BYTES = 64 * 1024;
 const MAX_DIFF_LINES = 1_000;
 const MAX_DIFF_OUTPUT_CHARS = 16 * 1024;
+const MAX_LOCAL_TOTAL_BYTES = 32 * 1024 * 1024;
 const TRACKING_STATUSES = new Set<ProjectTemplateLocalSnapshotEntry['gitTrackingStatus']>([
   'tracked-clean',
   'tracked-modified',
@@ -47,6 +49,10 @@ const TRACKING_STATUSES = new Set<ProjectTemplateLocalSnapshotEntry['gitTracking
 
 function sha256(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function compareAscii(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function deepFreeze<T>(value: T): T {
@@ -72,11 +78,12 @@ function parseLocalEntries(value: unknown): ProjectTemplateLocalSnapshotEntry[] 
   const values = requireArray(
     value,
     'localEntries',
-    MAX_TEMPLATE_ENTRIES,
+    MAX_TEMPLATE_ENTRIES * 2,
     'INVALID_ENTRY',
   );
   const paths = new Set<string>();
   const portableKeys = new Set<string>();
+  let totalBytes = 0;
   return values.map((raw, index) => {
     const field = `localEntries[${index}]`;
     const entry = requireRecord(raw, field);
@@ -96,6 +103,22 @@ function parseLocalEntries(value: unknown): ProjectTemplateLocalSnapshotEntry[] 
     const digest = parseSha256(entry['sha256'], `${field}.sha256`);
     if (!Number.isSafeInteger(entry['bytes']) || (entry['bytes'] as number) < 0) {
       invalidInput('local entry bytes must be a nonnegative safe integer', `${field}.bytes`);
+    }
+    const bytes = entry['bytes'] as number;
+    if (bytes > MAX_LOCAL_TOTAL_BYTES) {
+      throw new ProjectTemplateValidationError(
+        'LIMIT_EXCEEDED',
+        'local entry exceeds the snapshot byte limit',
+        `${field}.bytes`,
+      );
+    }
+    totalBytes += bytes;
+    if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
+      throw new ProjectTemplateValidationError(
+        'LIMIT_EXCEEDED',
+        'local entries exceed the snapshot byte budget',
+        'localEntries',
+      );
     }
     if (!TRACKING_STATUSES.has(
       entry['gitTrackingStatus'] as ProjectTemplateLocalSnapshotEntry['gitTrackingStatus'],
@@ -120,7 +143,7 @@ function parseLocalEntries(value: unknown): ProjectTemplateLocalSnapshotEntry[] 
       path,
       mode,
       sha256: digest,
-      bytes: entry['bytes'] as number,
+      bytes,
       ...(copiedContent === undefined ? {} : { content: copiedContent }),
       gitTrackingStatus:
         entry['gitTrackingStatus'] as ProjectTemplateLocalSnapshotEntry['gitTrackingStatus'],
@@ -139,6 +162,7 @@ function parseIncomingContents(
     'INVALID_ENTRY',
   );
   const contents = new Map<string, Buffer>();
+  let totalBytes = 0;
   for (const [index, raw] of values.entries()) {
     const field = `incomingContents[${index}]`;
     const item = requireRecord(raw, field);
@@ -155,6 +179,14 @@ function parseIncomingContents(
         'LIMIT_EXCEEDED',
         'incoming content exceeds the blob byte limit',
         `${field}.content`,
+      );
+    }
+    totalBytes += item['content'].byteLength;
+    if (totalBytes > DEFAULT_TAKTPACK_LIMITS.maxTotalBytes) {
+      throw new ProjectTemplateValidationError(
+        'LIMIT_EXCEEDED',
+        'incoming contents exceed the total byte limit',
+        'incomingContents',
       );
     }
     const manifestEntry = incomingByPath.get(path);
@@ -248,6 +280,34 @@ function buildTextDiff(local: Buffer, incoming: Buffer): ProjectTemplateEntryDif
     text: `${text.slice(0, MAX_DIFF_OUTPUT_CHARS)}\n[diff truncated]\n`,
     truncated: true,
   };
+}
+
+function mustRedactDiff(
+  path: string,
+  mode: string,
+  digest: string,
+  content: Buffer,
+): boolean {
+  const classification = classifyProjectTemplateEntry({
+    relativePath: path,
+    mode,
+    sha256: digest,
+    bytes: content.byteLength,
+    content,
+  });
+  return classification.classification === 'blocked'
+    && (
+      classification.reasonCode === 'SECRET_CONTENT'
+      || classification.reasonCode === 'ABSOLUTE_PATH_CONTENT'
+    );
+}
+
+function capabilitiesChanged(
+  before: readonly string[],
+  after: readonly string[],
+): boolean {
+  return before.length !== after.length
+    || before.some((capability, index) => capability !== after[index]);
 }
 
 function decideAction(options: {
@@ -352,8 +412,16 @@ function entryWithDecision(options: {
       ? { kind: 'too-large' }
       : local.content === undefined || incomingContent === undefined
         ? { kind: 'unavailable' }
-        : buildTextDiff(Buffer.from(local.content), incomingContent);
+        : mustRedactDiff(path, local.mode, local.sha256, Buffer.from(local.content))
+          || mustRedactDiff(path, incoming.mode, incoming.sha256, incomingContent)
+          ? { kind: 'redacted' }
+          : buildTextDiff(Buffer.from(local.content), incomingContent);
   }
+  const capabilitiesBefore = [...(base?.capabilities ?? [])];
+  const capabilitiesAfter = [...(incoming?.capabilities ?? [])];
+  const reviewRequired = capabilitiesChanged(capabilitiesBefore, capabilitiesAfter)
+    || local?.gitTrackingStatus === 'unavailable'
+    || local?.gitTrackingStatus === 'unmerged';
   const common = {
     path,
     reasonCode,
@@ -366,11 +434,12 @@ function entryWithDecision(options: {
       afterSha256: incoming.sha256,
       afterMode: incoming.mode,
     }),
-    capabilitiesBefore: [...(base?.capabilities ?? [])],
-    capabilitiesAfter: [...(incoming?.capabilities ?? [])],
+    capabilitiesBefore,
+    capabilitiesAfter,
     gitTrackingStatus: (local?.gitTrackingStatus ?? 'absent') as
       ProjectTemplateApplyPlanEntry['gitTrackingStatus'],
     rollbackImpact: rollbackFor(action),
+    reviewRequired,
     ...(diff === undefined ? {} : { diff }),
   };
   switch (policy) {
@@ -414,21 +483,38 @@ function markRenameConflicts(
 ): void {
   const removed = [...baseByPath.values()].filter((entry) => !incomingByPath.has(entry.path));
   const added = [...incomingByPath.values()].filter((entry) => !baseByPath.has(entry.path));
-  const affected = new Map<string, ProjectTemplateApplyReasonCode>();
+  const pairs: Array<{ oldPath: string; newPath: string; caseOnly: boolean }> = [];
   for (const oldEntry of removed) {
     const caseMatches = added.filter(
       (newEntry) => portablePathKey(newEntry.path) === portablePathKey(oldEntry.path),
     );
     const contentMatches = added.filter((newEntry) => newEntry.sha256 === oldEntry.sha256);
     const matches = caseMatches.length > 0 ? caseMatches : contentMatches;
-    if (matches.length === 0) continue;
-    const reasonCode: ProjectTemplateApplyReasonCode = caseMatches.length > 0
-      ? 'CASE_ONLY_RENAME'
-      : matches.length > 1
+    for (const match of matches) {
+      pairs.push({
+        oldPath: oldEntry.path,
+        newPath: match.path,
+        caseOnly: caseMatches.length > 0,
+      });
+    }
+  }
+  const oldDegrees = new Map<string, number>();
+  const newDegrees = new Map<string, number>();
+  for (const pair of pairs) {
+    oldDegrees.set(pair.oldPath, (oldDegrees.get(pair.oldPath) ?? 0) + 1);
+    newDegrees.set(pair.newPath, (newDegrees.get(pair.newPath) ?? 0) + 1);
+  }
+  const affected = new Map<string, ProjectTemplateApplyReasonCode>();
+  for (const pair of pairs) {
+    const reasonCode: ProjectTemplateApplyReasonCode =
+      (oldDegrees.get(pair.oldPath) ?? 0) > 1
+      || (newDegrees.get(pair.newPath) ?? 0) > 1
         ? 'AMBIGUOUS_RENAME'
-        : 'RENAME_DETECTED';
-    affected.set(oldEntry.path, reasonCode);
-    for (const match of matches) affected.set(match.path, reasonCode);
+        : pair.caseOnly
+          ? 'CASE_ONLY_RENAME'
+          : 'RENAME_DETECTED';
+    affected.set(pair.oldPath, reasonCode);
+    affected.set(pair.newPath, reasonCode);
   }
   for (const [index, entry] of entries.entries()) {
     const reasonCode = affected.get(entry.path);
@@ -499,7 +585,7 @@ export function createProjectTemplateApplyPlan(
   const incomingContents = parseIncomingContents(input['incomingContents'], incomingByPath);
 
   const paths = [...new Set([...baseByPath.keys(), ...incomingByPath.keys()])]
-    .sort((left, right) => left.localeCompare(right, 'en-US'));
+    .sort(compareAscii);
   const entries = paths.map((path): ProjectTemplateApplyPlanEntry => {
     const base = baseByPath.get(path);
     const incoming = incomingByPath.get(path);
@@ -556,6 +642,23 @@ export function createProjectTemplateApplyPlan(
     }
   }
 
+  // A file cannot coexist with a descendant path on any supported target
+  // filesystem. Treating this as a plan conflict prevents apply from depending
+  // on host-specific mkdir/write ordering.
+  for (let left = 0; left < entries.length; left += 1) {
+    for (let right = left + 1; right < entries.length; right += 1) {
+      const leftKey = portablePathKey(entries[left]!.path);
+      const rightKey = portablePathKey(entries[right]!.path);
+      if (
+        rightKey.startsWith(`${leftKey}/`)
+        || leftKey.startsWith(`${rightKey}/`)
+      ) {
+        entries[left] = overrideConflict(entries[left]!, 'DESTINATION_PATH_COLLISION');
+        entries[right] = overrideConflict(entries[right]!, 'DESTINATION_PATH_COLLISION');
+      }
+    }
+  }
+
   const preconditionToken = sha256(canonicalizeTaktpackJson({
     candidatePaths: paths,
     entries: localEntries
@@ -566,15 +669,25 @@ export function createProjectTemplateApplyPlan(
         bytes,
         gitTrackingStatus,
       }))
-      .sort((left, right) => left.path.localeCompare(right.path, 'en-US')),
+      .sort((left, right) => compareAscii(left.path, right.path)),
   }));
-  const defaultApplyPossible = !entries.some((entry) => entry.action === 'conflict');
+  const incomingManifestSha256 = sha256(canonicalizeTaktpackJson(incomingManifest));
+  const baseLockSha256 = baseLock === undefined
+    ? undefined
+    : sha256(canonicalizeTaktpackJson(baseLock));
+  const reviewRequired = entries.some(
+    (entry) => entry.action === 'conflict' || entry.reviewRequired,
+  );
+  const defaultApplyPossible = !reviewRequired;
   const summary = createSummary(entries);
   const planBody = {
     schemaVersion: '1.0' as const,
     preconditionToken,
+    ...(baseLockSha256 === undefined ? {} : { baseLockSha256 }),
+    incomingManifestSha256,
     ...(baseLock === undefined ? {} : { basePackVersion: baseLock.packVersion }),
     incomingPackVersion: incomingManifest.packVersion,
+    reviewRequired,
     defaultApplyPossible,
     entries,
     summary,
