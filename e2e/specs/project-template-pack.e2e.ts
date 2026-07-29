@@ -59,4 +59,28 @@ describe('project template pack E2E', () => {
       code: 'INVALID_EXPORT_PLAN',
     });
   });
+
+  it('round-trips a valid 2,600-entry pack whose control documents exceed 1 MiB', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'taktpack-large-e2e-'));
+    roots.push(root);
+    const longSegments = ['a'.repeat(110), 'b'.repeat(110), 'c'.repeat(110)];
+    for (let index = 0; index < 2_600; index += 1) {
+      const path = join(
+        root,
+        '.takt',
+        'workflows',
+        ...longSegments,
+        `review-${index.toString().padStart(4, '0')}.yaml`,
+      );
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `name: review-${index}\n`);
+    }
+    const plan = await createProjectTemplateExportPlan(root, options);
+    const output = join(root, 'large.taktpack');
+
+    await writeTaktpack(output, plan);
+    const inspected = await inspectTaktpack(output);
+
+    expect(inspected.manifest.entries).toHaveLength(2_600);
+  }, 120_000);
 });

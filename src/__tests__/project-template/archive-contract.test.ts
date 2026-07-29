@@ -29,7 +29,10 @@ describe('taktpack v1 archive contract', () => {
   it('uses bounded defaults for hostile archive inspection', () => {
     expect(DEFAULT_TAKTPACK_LIMITS).toEqual({
       maxEntries: 4_099,
-      maxEntryBytes: 1024 * 1024,
+      maxPackJsonBytes: 4 * 1024 * 1024,
+      maxManifestJsonBytes: 4 * 1024 * 1024,
+      maxExportReportJsonBytes: 1024 * 1024,
+      maxBlobBytes: 1024 * 1024,
       maxTotalBytes: 32 * 1024 * 1024,
       maxArchiveBytes: 40 * 1024 * 1024,
     });

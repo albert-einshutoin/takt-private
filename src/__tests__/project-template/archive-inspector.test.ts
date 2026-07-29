@@ -162,6 +162,18 @@ describe('taktpack streaming inspector', () => {
     })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' });
   });
 
+  it('allows callers to tighten but not raise each entry-kind budget', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+
+    await expect(inspectTaktpack(pack, {
+      limits: { maxManifestJsonBytes: 1 },
+    })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' });
+    await expect(inspectTaktpack(pack, {
+      limits: { maxManifestJsonBytes: Number.MAX_SAFE_INTEGER },
+    })).resolves.toMatchObject({ descriptor: { format: 'taktpack' } });
+  });
+
   it('rejects a blob whose content does not match its content address', async () => {
     const root = makeRoot();
     const pack = await makePack(root);

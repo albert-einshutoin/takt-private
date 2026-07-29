@@ -32,6 +32,10 @@ import {
   type WriteTaktpackResult,
 } from './archive-types.js';
 import { areProjectTemplateFileStatsEqual } from './bounded-file-read.js';
+import {
+  maxBytesForTaktpackEntry,
+  resolveTaktpackLimits,
+} from './archive-limits.js';
 
 const ARCHIVE_MODE = 0o644;
 const ARCHIVE_EPOCH = new Date(0);
@@ -164,6 +168,7 @@ export async function writeTaktpack(
   options: WriteTaktpackOptions = {},
 ): Promise<WriteTaktpackResult> {
   const force = options.force === true;
+  const limits = resolveTaktpackLimits(options.limits);
   validateManifestLockPair(plan.manifest, plan.lock);
   let expectedTarget: import('node:fs').Stats | undefined;
   if (existsSync(outputPath)) {
@@ -197,10 +202,53 @@ export async function writeTaktpack(
   const archiveHash = createHash('sha256');
   let bytes = 0;
   try {
+    const manifestContent = Buffer.from(canonicalizeTaktpackJson(plan.manifest));
+    const reportContent = Buffer.from(canonicalizeTaktpackJson(plan.report));
+    const blobs = new Map(sourceState.files.map((file) => [file.sha256, file]));
+    const lockSeed = {
+        schemaVersion: plan.lock.schemaVersion,
+        packVersion: plan.lock.packVersion,
+        source: plan.lock.source,
+        capabilities: plan.lock.capabilities,
+        entries: plan.lock.entries,
+      };
+    const packContent = Buffer.from(canonicalizeTaktpackJson({
+        ...plan.descriptor,
+        manifestSha256: calculateProjectTemplateManifestSha256(plan.manifest),
+        exportReportSha256: createHash('sha256').update(reportContent).digest('hex'),
+        lockSeed,
+        blobs: [...blobs.entries()]
+          .sort(([left], [right]) => left.localeCompare(right, 'en-US'))
+          .map(([sha256, file]) => ({ sha256, bytes: file.bytes })),
+      }));
+    const controlEntries = [
+      ['pack', packContent],
+      ['manifest', manifestContent],
+      ['report', reportContent],
+    ] as const;
+    for (const [kind, content] of controlEntries) {
+      if (content.byteLength > maxBytesForTaktpackEntry(kind, limits)) {
+        throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', `${kind} entry exceeds size limit`, kind);
+      }
+    }
+    if (sourceState.files.some((file) => file.bytes > limits.maxBlobBytes)) {
+      throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'blob entry exceeds size limit', 'blob');
+    }
+    const totalPayloadBytes = controlEntries.reduce((sum, [, content]) => sum + content.byteLength, 0)
+      + [...blobs.values()].reduce((sum, file) => sum + file.bytes, 0);
+    if (controlEntries.length + blobs.size > limits.maxEntries
+      || totalPayloadBytes > limits.maxTotalBytes) {
+      throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive envelope exceeds safety limits');
+    }
+
     const output = createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
     const hashStream = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
         bytes += chunk.byteLength;
+        if (bytes > limits.maxArchiveBytes) {
+          callback(new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive exceeds size limit'));
+          return;
+        }
         archiveHash.update(chunk);
         callback(null, chunk);
       },
@@ -213,26 +261,7 @@ export async function writeTaktpack(
       ...(options.signal === undefined ? [] : [{ signal: options.signal }]),
     );
     try {
-      const manifestContent = Buffer.from(canonicalizeTaktpackJson(plan.manifest));
-      const reportContent = Buffer.from(canonicalizeTaktpackJson(plan.report));
-      const blobs = new Map(sourceState.files.map((file) => [file.sha256, file]));
-      const lockSeed = {
-        schemaVersion: plan.lock.schemaVersion,
-        packVersion: plan.lock.packVersion,
-        source: plan.lock.source,
-        capabilities: plan.lock.capabilities,
-        entries: plan.lock.entries,
-      };
-      const packJson = canonicalizeTaktpackJson({
-        ...plan.descriptor,
-        manifestSha256: calculateProjectTemplateManifestSha256(plan.manifest),
-        exportReportSha256: createHash('sha256').update(reportContent).digest('hex'),
-        lockSeed,
-        blobs: [...blobs.entries()]
-          .sort(([left], [right]) => left.localeCompare(right, 'en-US'))
-          .map(([sha256, file]) => ({ sha256, bytes: file.bytes })),
-      });
-      await addBufferEntry(archive, 'pack.json', Buffer.from(packJson));
+      await addBufferEntry(archive, 'pack.json', packContent);
       await addBufferEntry(archive, 'manifest.json', manifestContent);
       await addBufferEntry(archive, 'export-report.json', reportContent);
       for (const hash of [...blobs.keys()].sort((left, right) => left.localeCompare(right, 'en-US'))) {

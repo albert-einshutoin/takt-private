@@ -19,14 +19,20 @@ export const TAKTPACK_BLOB_PREFIX = 'blobs/sha256/';
 
 export interface TaktpackLimits {
   maxEntries: number;
-  maxEntryBytes: number;
+  maxPackJsonBytes: number;
+  maxManifestJsonBytes: number;
+  maxExportReportJsonBytes: number;
+  maxBlobBytes: number;
   maxTotalBytes: number;
   maxArchiveBytes: number;
 }
 
 export const DEFAULT_TAKTPACK_LIMITS: Readonly<TaktpackLimits> = Object.freeze({
   maxEntries: 4_099,
-  maxEntryBytes: 1024 * 1024,
+  maxPackJsonBytes: 4 * 1024 * 1024,
+  maxManifestJsonBytes: 4 * 1024 * 1024,
+  maxExportReportJsonBytes: 1024 * 1024,
+  maxBlobBytes: 1024 * 1024,
   maxTotalBytes: 32 * 1024 * 1024,
   maxArchiveBytes: 40 * 1024 * 1024,
 });
@@ -114,6 +120,7 @@ export interface InspectTaktpackOptions {
 export interface WriteTaktpackOptions {
   force?: boolean;
   signal?: AbortSignal;
+  limits?: Partial<TaktpackLimits>;
 }
 
 export interface WriteTaktpackResult {

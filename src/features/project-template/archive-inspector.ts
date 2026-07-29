@@ -31,6 +31,11 @@ import type {
 import { compareSemVer, requireSemVer } from './validation.js';
 import { parseSha256 } from './validation.js';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
+import {
+  maxBytesForTaktpackEntry,
+  resolveTaktpackLimits,
+  type TaktpackEntryKind,
+} from './archive-limits.js';
 
 const TAR_BLOCK_BYTES = 512;
 const ZERO_BLOCK = Buffer.alloc(TAR_BLOCK_BYTES);
@@ -47,22 +52,6 @@ interface PackMetadata {
   exportReportSha256: string;
   lockSeed: TaktpackLockSeedV1;
   blobs: TaktpackBlobIndexEntry[];
-}
-
-function resolveLimits(input: Partial<TaktpackLimits> | undefined): TaktpackLimits {
-  const bounded = (key: keyof TaktpackLimits): number => {
-    const requested = input?.[key] ?? DEFAULT_TAKTPACK_LIMITS[key];
-    if (!Number.isSafeInteger(requested) || requested < 0) {
-      throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', `${key} must be a non-negative safe integer`, key);
-    }
-    return Math.min(requested, DEFAULT_TAKTPACK_LIMITS[key]);
-  };
-  return {
-    maxEntries: bounded('maxEntries'),
-    maxEntryBytes: bounded('maxEntryBytes'),
-    maxTotalBytes: bounded('maxTotalBytes'),
-    maxArchiveBytes: bounded('maxArchiveBytes'),
-  };
 }
 
 function parseOctal(field: Buffer, name: string): number {
@@ -286,7 +275,7 @@ export async function inspectTaktpack(
   archivePath: string,
   options: InspectTaktpackOptions = {},
 ): Promise<TaktpackInspectResult> {
-  const limits = resolveLimits(options.limits);
+  const limits = resolveTaktpackLimits(options.limits);
   const pathSnapshot = await lstat(archivePath);
   if (pathSnapshot.isSymbolicLink() || !pathSnapshot.isFile() || pathSnapshot.nlink !== 1) {
     throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input must be a regular single-link file', 'archive');
@@ -351,7 +340,14 @@ export async function inspectTaktpack(
         throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive entry count exceeds limit', 'entries');
       }
       const header = parseHeader(headerBlock);
-      if (header.size > limits.maxEntryBytes) {
+      const entryKind: TaktpackEntryKind = header.name === 'pack.json'
+        ? 'pack'
+        : header.name === 'manifest.json'
+          ? 'manifest'
+          : header.name === 'export-report.json'
+            ? 'report'
+            : 'blob';
+      if (header.size > maxBytesForTaktpackEntry(entryKind, limits)) {
         throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive entry exceeds size limit', `entries[${entryCount - 1}]`);
       }
       totalPayloadBytes += header.size;
