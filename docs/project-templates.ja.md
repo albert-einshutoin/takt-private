@@ -109,15 +109,29 @@ portable candidate は共有 `workflows/`、`facets/`、`provider-options/` だ�
 project config、automation、quality gate は `project-owned` として明示的な policy
 review を要求し、unknown path は default deny で excluded になります。runtime state、
 log、cache、sensitive filename は candidate content として読みません。secret、
-workstation の絶対 path、binary、symlink、hard link、special file、realpath escape、
+workstation の絶対 path（POSIX、home 相対、drive letter、UNC）、binary、symlink、
+hard link、special file、realpath escape、
 portable-name collision、独立した各 resource 上限超過は blocked です。
+
+classifier は manifest と同じ `parsePortablePath` validator を再利用します。不正または
+sensitive な入力名は元の名前を返さず、固定の redacted sentinel として報告します。
+public input も bounded で、content は 1 MiB 以下、bytes は content と一致する
+nonnegative safe integer、mode と digest は manifest と同じ形式、信頼済み absolute
+path hint は件数・各長さ・合計長の独立上限を満たす必要があります。
 
 `scanStatus` は `complete` / `incomplete` / `blocked` を区別します。`canExport` が true
 になるのは scan が complete で blocked と project-owned entry がない場合だけで、
 project-owned がある場合は `reviewRequired` が true になります。各 file preview は
 bytes、mode、SHA-256、安定した reason code、redacted summary、suggested policy、
 warning、`validateDetectedTemplateCapabilities` に渡せる capability evidenceを返します。
+capability evidence は `inspectionStatus` も返します。空の capability list が
+authoritative なのは `complete` の場合だけで、metadata skip は `incomplete`、block
+された検査は `blocked` です。executable、GitHub write、external command、曖昧な
+command behavior の検出時は `reviewRequired` になります。
 
+directory 列挙は bounded `opendir` stream を使い、`maxNodes + 1` で停止します。
+そのため攻撃者が大量に作った child 名を一括で memory に展開しません。directory は
+列挙前後にtype、device、inode、link count、timestamp、realpathを照合します。
 scanner は open 済み file の stat snapshot を比較して走査中の変更を検出しますが、
 成功した snapshot は恒久的な安全証明ではありません。archive 作成時と apply 時には
 type、containment、link count、size、mode、digest、capability evidence を reopen して
