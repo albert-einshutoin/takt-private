@@ -3,7 +3,7 @@ import { constants, type Stats } from 'node:fs';
 import {
   lstat,
   open,
-  readdir,
+  opendir,
   realpath,
 } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -47,10 +47,24 @@ function safeMode(mode: number): string {
   return `0${(mode & 0o777).toString(8).padStart(3, '0')}`;
 }
 
-function portablePathKey(path: string): string {
+export function portablePathKey(path: string): string {
   // Case-insensitive NFKC catches collisions that would overwrite entries on
   // common destination filesystems even when the source filesystem permits them.
   return path.normalize('NFKC').toLocaleLowerCase('en-US');
+}
+
+export function areProjectTemplateDirectorySnapshotsStable(
+  before: Stats,
+  after: Stats,
+): boolean {
+  return before.isDirectory()
+    && after.isDirectory()
+    && before.dev === after.dev
+    && before.ino === after.ino
+    && before.mode === after.mode
+    && before.nlink === after.nlink
+    && before.mtimeMs === after.mtimeMs
+    && before.ctimeMs === after.ctimeMs;
 }
 
 function isInside(base: string, candidate: string): boolean {
@@ -178,12 +192,15 @@ async function walkDirectory(
   depth: number,
   rootRealPath: string,
   absolutePathPrefixes: readonly string[],
+  expectedStat: Stats,
   limits: ProjectTemplateScanLimits,
   scan: MutableScan,
 ): Promise<void> {
-  let names: string[];
+  let before: Stats;
+  let directoryRealPath: string;
   try {
-    names = await readdir(absoluteDirectory);
+    before = await lstat(absoluteDirectory);
+    directoryRealPath = await realpath(absoluteDirectory);
   } catch {
     scan.entries.push(createProjectTemplateBlockedResult(
       relativeDirectory || '.',
@@ -192,40 +209,94 @@ async function walkDirectory(
     scan.incomplete = true;
     return;
   }
+  if (
+    before.isSymbolicLink()
+    || !areProjectTemplateDirectorySnapshotsStable(expectedStat, before)
+    || !isInside(rootRealPath, directoryRealPath)
+  ) {
+    limitEntry(scan, relativeDirectory || '.', 'DIRECTORY_CHANGED_DURING_SCAN');
+    return;
+  }
 
+  const names: string[] = [];
+  try {
+    const directory = await opendir(absoluteDirectory);
+    for await (const entry of directory) {
+      scan.nodes += 1;
+      if (scan.nodes > limits.maxNodes) {
+        limitEntry(scan, '[node-limit]', 'NODE_LIMIT_EXCEEDED');
+        return;
+      }
+      names.push(entry.name);
+    }
+  } catch {
+    scan.entries.push(createProjectTemplateBlockedResult(
+      relativeDirectory || '.',
+      'READ_FAILED',
+    ));
+    scan.incomplete = true;
+    return;
+  }
+  try {
+    const after = await lstat(absoluteDirectory);
+    const afterRealPath = await realpath(absoluteDirectory);
+    if (
+      !areProjectTemplateDirectorySnapshotsStable(before, after)
+      || afterRealPath !== directoryRealPath
+    ) {
+      limitEntry(scan, relativeDirectory || '.', 'DIRECTORY_CHANGED_DURING_SCAN');
+      return;
+    }
+  } catch {
+    limitEntry(scan, relativeDirectory || '.', 'DIRECTORY_CHANGED_DURING_SCAN');
+    return;
+  }
   names.sort((left, right) => left.localeCompare(right, 'en-US'));
   for (const name of names) {
     const absolutePath = join(absoluteDirectory, name);
     const relativePath = relativeDirectory === '' ? name : `${relativeDirectory}/${name}`;
-    scan.nodes += 1;
-    if (scan.nodes > limits.maxNodes) {
-      limitEntry(scan, relativePath, 'NODE_LIMIT_EXCEEDED');
-      return;
-    }
-    if (depth + 1 > limits.maxDepth) {
-      limitEntry(scan, relativePath, 'DEPTH_LIMIT_EXCEEDED');
-      continue;
-    }
-
-    const collisionKey = portablePathKey(relativePath);
-    if (scan.portablePathKeys.has(collisionKey)) {
-      limitEntry(scan, relativePath, 'PATH_COLLISION');
-      continue;
-    }
-    scan.portablePathKeys.add(collisionKey);
+    const pathPreflight = classifyProjectTemplateEntry({ relativePath, bytes: 0 });
+    const displayPath = pathPreflight.relativePath;
 
     let entryStat: Stats;
     try {
       entryStat = await lstat(absolutePath);
     } catch {
-      scan.entries.push(createProjectTemplateBlockedResult(relativePath, 'READ_FAILED'));
+      scan.entries.push(createProjectTemplateBlockedResult(displayPath, 'READ_FAILED'));
       scan.incomplete = true;
       continue;
     }
     if (entryStat.isSymbolicLink()) {
-      limitEntry(scan, relativePath, 'SYMLINK', entryStat.size);
+      limitEntry(scan, displayPath, 'SYMLINK', entryStat.size);
       continue;
     }
+    if (!entryStat.isDirectory() && !entryStat.isFile()) {
+      limitEntry(scan, displayPath, 'UNSUPPORTED_FILE_TYPE', entryStat.size);
+      continue;
+    }
+    if (entryStat.isFile() && entryStat.nlink > 1) {
+      limitEntry(scan, displayPath, 'HARD_LINK', entryStat.size);
+      continue;
+    }
+    if (pathPreflight.classification === 'blocked') {
+      scan.entries.push(classifyProjectTemplateEntry({
+        relativePath,
+        bytes: entryStat.size,
+        mode: safeMode(entryStat.mode),
+      }));
+      scan.blocked = true;
+      continue;
+    }
+    if (depth + 1 > limits.maxDepth) {
+      limitEntry(scan, displayPath, 'DEPTH_LIMIT_EXCEEDED');
+      continue;
+    }
+    const collisionKey = portablePathKey(relativePath);
+    if (scan.portablePathKeys.has(collisionKey)) {
+      limitEntry(scan, displayPath, 'PATH_COLLISION');
+      continue;
+    }
+    scan.portablePathKeys.add(collisionKey);
 
     const metadataClassification = classifyProjectTemplateEntry({
       relativePath,
@@ -246,12 +317,12 @@ async function walkDirectory(
     try {
       resolvedPath = await realpath(absolutePath);
     } catch {
-      scan.entries.push(createProjectTemplateBlockedResult(relativePath, 'READ_FAILED'));
+      scan.entries.push(createProjectTemplateBlockedResult(displayPath, 'READ_FAILED'));
       scan.incomplete = true;
       continue;
     }
     if (!isInside(rootRealPath, resolvedPath)) {
-      limitEntry(scan, relativePath, 'PATH_ESCAPE', entryStat.size);
+      limitEntry(scan, displayPath, 'PATH_ESCAPE', entryStat.size);
       continue;
     }
     if (entryStat.isDirectory()) {
@@ -261,13 +332,10 @@ async function walkDirectory(
         depth + 1,
         rootRealPath,
         absolutePathPrefixes,
+        entryStat,
         limits,
         scan,
       );
-      continue;
-    }
-    if (!entryStat.isFile()) {
-      limitEntry(scan, relativePath, 'UNSUPPORTED_FILE_TYPE', entryStat.size);
       continue;
     }
     await scanFile(
@@ -338,6 +406,7 @@ export async function scanProjectTemplateDirectory(
       0,
       rootRealPath,
       [resolve(projectRoot), projectRealPath, rootRealPath, dirname(rootRealPath)],
+      rootStat,
       limits,
       scan,
     );
@@ -350,7 +419,7 @@ export async function scanProjectTemplateDirectory(
 
 function finish(scan: MutableScan): ProjectTemplateScanResult {
   const hasBlockedEntry = scan.entries.some((entry) => entry.classification === 'blocked');
-  const reviewRequired = scan.entries.some((entry) => entry.classification === 'project-owned');
+  const reviewRequired = scan.entries.some((entry) => entry.reviewRequired);
   const scanStatus = scan.blocked
     ? 'blocked'
     : scan.incomplete
