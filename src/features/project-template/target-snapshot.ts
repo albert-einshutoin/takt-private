@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants, type Dirent, type Stats } from 'node:fs';
+import { constants, type Stats } from 'node:fs';
 import {
   lstat,
   open,
@@ -170,14 +170,28 @@ async function gitTrackingForPaths(
   projectRoot: string,
   existingPaths: readonly string[],
 ): Promise<Map<string, ProjectTemplateGitTrackingStatus>> {
+  let inside: string;
   try {
-    const inside = (await runGit(
+    inside = (await runGit(
       projectRoot,
       ['rev-parse', '--is-inside-work-tree'],
       64 * 1024,
     )).toString('utf8').trim();
-    if (inside !== 'true') throw new Error('not a work tree');
-  } catch {
+  } catch (error) {
+    const failure = error as {
+      code?: unknown;
+      stderr?: string | Buffer;
+    };
+    const stderr = Buffer.isBuffer(failure.stderr)
+      ? failure.stderr.toString('utf8')
+      : failure.stderr ?? '';
+    const status: ProjectTemplateGitTrackingStatus =
+      failure.code === 128 && /not a git repository|not a work tree/i.test(stderr)
+        ? 'not-repository'
+        : 'unavailable';
+    return new Map(existingPaths.map((path) => [path, status]));
+  }
+  if (inside !== 'true') {
     return new Map(existingPaths.map((path) => [path, 'not-repository']));
   }
 
@@ -362,7 +376,11 @@ export async function captureProjectTemplateTargetSnapshot(
   const captured: CapturedTargetFile[] = [];
   const capturedActualPaths = new Set<string>();
   const collisionPaths = new Set<string>();
-  const directoryEntries = new Map<string, Dirent[]>();
+  const requestedNamesByParent = new Map<string, {
+    relative: string;
+    names: Set<string>;
+  }>();
+  const presentCandidatePaths: string[] = [];
   const missingPaths: string[] = [];
   let totalBytes = 0;
   for (const path of candidatePaths) {
@@ -370,34 +388,47 @@ export async function captureProjectTemplateTargetSnapshot(
       missingPaths.push(path);
       continue;
     }
+    presentCandidatePaths.push(path);
     const parentRelative = dirname(path) === '.' ? '' : dirname(path);
     const parentAbsolute = parentRelative === ''
       ? taktRoot
       : join(taktRoot, parentRelative);
-    let siblings = directoryEntries.get(parentAbsolute);
-    if (siblings === undefined) {
-      try {
-        siblings = await readdir(parentAbsolute, { withFileTypes: true });
-      } catch {
-        throw unsafeTarget();
-      }
-      if (siblings.length > MAX_TEMPLATE_ENTRIES * 2) {
-        throw new TaktpackError(
-          'ARCHIVE_LIMIT_EXCEEDED',
-          'project template target directory exceeds the inspection budget',
-          'target',
-        );
-      }
-      directoryEntries.set(parentAbsolute, siblings);
-    }
     const requestedNameKey = basename(path).normalize('NFKC').toLowerCase();
-    for (const sibling of siblings) {
-      if (sibling.name.normalize('NFKC').toLowerCase() !== requestedNameKey) continue;
-      const siblingPath = parentRelative === ''
-        ? sibling.name
-        : `${parentRelative}/${sibling.name}`;
-      if (siblingPath !== path) collisionPaths.add(siblingPath);
+    const group = requestedNamesByParent.get(parentAbsolute);
+    if (group === undefined) {
+      requestedNamesByParent.set(parentAbsolute, {
+        relative: parentRelative,
+        names: new Set([requestedNameKey]),
+      });
+    } else {
+      group.names.add(requestedNameKey);
     }
+  }
+  let scannedDirectoryEntries = 0;
+  for (const [parentAbsolute, group] of requestedNamesByParent) {
+    let siblings;
+    try {
+      siblings = await readdir(parentAbsolute, { withFileTypes: true });
+    } catch {
+      throw unsafeTarget();
+    }
+    scannedDirectoryEntries += siblings.length;
+    if (scannedDirectoryEntries > MAX_TEMPLATE_ENTRIES * 2) {
+      throw new TaktpackError(
+        'ARCHIVE_LIMIT_EXCEEDED',
+        'project template target directories exceed the inspection budget',
+        'target',
+      );
+    }
+    for (const sibling of siblings) {
+      if (!group.names.has(sibling.name.normalize('NFKC').toLowerCase())) continue;
+      const siblingPath = group.relative === ''
+        ? sibling.name
+        : `${group.relative}/${sibling.name}`;
+      collisionPaths.add(siblingPath);
+    }
+  }
+  for (const path of presentCandidatePaths) {
     const entry = await captureFile(join(taktRoot, path), path, rootRealPath);
     if (entry === undefined) {
       missingPaths.push(path);

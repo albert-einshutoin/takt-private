@@ -141,6 +141,20 @@ describe('project template target snapshot', () => {
     expect(localSnapshot.entries[0]?.gitTrackingStatus).toBe('not-repository');
   });
 
+  it('marks Git execution failures unavailable instead of treating them as non-repository', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'config.yaml', 'local\n');
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = '';
+    try {
+      const snapshot = await captureProjectTemplateTargetSnapshot(root, ['config.yaml']);
+      expect(snapshot.entries[0]?.gitTrackingStatus).toBe('unavailable');
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+    }
+  });
+
   it('rejects a symlink or hard-linked destination without exposing its path', async () => {
     const root = makeRoot(false);
     writeFileSync(join(root, 'outside'), 'secret');
