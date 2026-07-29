@@ -46,6 +46,7 @@ import {
 } from './apply-storage.js';
 import { parseProjectTemplateManifest } from './manifest.js';
 import { parseTemplateLock } from './lock.js';
+import { invalidateResolvedConfigCache } from '../../infra/config/resolutionCache.js';
 import {
   calculateProjectTemplateTargetPreconditionToken,
   captureProjectTemplateTargetSnapshot,
@@ -987,12 +988,10 @@ export async function applyProjectTemplatePlan(options: {
           new Set(completedOperations),
         );
         await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
-        if (
-          !await verifyManifestState(storage, manifest, 'before')
-          || !runProjectTemplateDoctor(options.projectRoot).passed
-        ) {
+        if (!await verifyManifestState(storage, manifest, 'before')) {
           throw new Error('compensation verification failed');
         }
+        invalidateResolvedConfigCache(options.projectRoot);
         await writeJournal(storage, {
           transactionId,
           planId: options.plan.planId,
@@ -1114,12 +1113,10 @@ export async function rollbackProjectTemplateApply(options: {
         });
       }
       await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
-      if (
-        !await verifyManifestState(storage, manifest, 'before')
-        || !runProjectTemplateDoctor(options.projectRoot).passed
-      ) {
+      if (!await verifyManifestState(storage, manifest, 'before')) {
         throw new Error('rollback verification failed');
       }
+      invalidateResolvedConfigCache(options.projectRoot);
       await writeJournal(storage, {
         transactionId,
         planId: manifest.planId,
@@ -1261,10 +1258,9 @@ export async function recoverProjectTemplateApply(options: {
     }
 
     if (journal.state === 'committed') {
-      if (
-        !await verifyManifestState(storage, manifest, 'after')
-        || !runProjectTemplateDoctor(options.projectRoot).passed
-      ) throw new Error('committed state verification failed');
+      if (!await verifyManifestState(storage, manifest, 'after')) {
+        throw new Error('committed state verification failed');
+      }
       await removeProjectTemplateStagingTransaction({
         storage,
         transactionId: journal.transactionId,
@@ -1277,10 +1273,10 @@ export async function recoverProjectTemplateApply(options: {
       };
     }
     if (journal.state === 'rolled-back') {
-      if (
-        !await verifyManifestState(storage, manifest, 'before')
-        || !runProjectTemplateDoctor(options.projectRoot).passed
-      ) throw new Error('rolled back state verification failed');
+      if (!await verifyManifestState(storage, manifest, 'before')) {
+        throw new Error('rolled back state verification failed');
+      }
+      invalidateResolvedConfigCache(options.projectRoot);
       await removeProjectTemplateStagingTransaction({
         storage,
         transactionId: journal.transactionId,
@@ -1322,10 +1318,10 @@ export async function recoverProjectTemplateApply(options: {
       restored.push(key);
     }
     await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
-    if (
-      !await verifyManifestState(storage, manifest, 'before')
-      || !runProjectTemplateDoctor(options.projectRoot).passed
-    ) throw new Error('recovery verification failed');
+    if (!await verifyManifestState(storage, manifest, 'before')) {
+      throw new Error('recovery verification failed');
+    }
+    invalidateResolvedConfigCache(options.projectRoot);
     await writeJournal(storage, {
       transactionId: journal.transactionId,
       planId: journal.planId,

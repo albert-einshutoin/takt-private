@@ -1216,6 +1216,150 @@ describe('project template atomic apply executor', () => {
     expect(inspectProjectTemplateApplyGuard({ repoPath: root }).passed).toBe(true);
   });
 
+  it('compensates to an exact historical invalid config without creating recovery state', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'config.yaml', 'language: [\n');
+    const incomingManifest = manifest({ 'settings.yaml': 'enabled: true\n' });
+    const blobs = incomingContents({ 'settings.yaml': 'enabled: true\n' });
+    const plan = await createPlan(root, incomingManifest, blobs);
+
+    const result = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+
+    expect(result).toMatchObject({
+      status: 'not_started',
+      code: 'APPLY_FAILED_ROLLED_BACK',
+    });
+    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'))
+      .toBe('language: [\n');
+    expect(existsSync(join(root, '.takt', 'settings.yaml'))).toBe(false);
+    expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+    expect(existsSync(join(
+      root,
+      '.takt-template-state',
+      'recovery-required.json',
+    ))).toBe(false);
+  });
+
+  it('operator rollback accepts an exact historical invalid config witness', async () => {
+    const root = makeRoot();
+    const historical = 'language: [\n';
+    writeTakt(root, 'config.yaml', historical);
+    const baseManifest = manifest({ 'config.yaml': historical });
+    const baseLock = baseLockFor(baseManifest);
+    writeFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      `${JSON.stringify(baseLock)}\n`,
+    );
+    const incomingManifest = manifest({ 'config.yaml': 'language: ja\n' });
+    const blobs = incomingContents({ 'config.yaml': 'language: ja\n' });
+    const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+    expect(applied.status).toBe('committed');
+
+    const rollback = await rollbackProjectTemplateApply({
+      projectRoot: root,
+      backupId: applied.status === 'committed' ? applied.backupId : '',
+    });
+
+    expect(rollback.status).toBe('rolled_back');
+    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'))
+      .toBe(historical);
+    expect(existsSync(join(
+      root,
+      '.takt-template-state',
+      'recovery-required.json',
+    ))).toBe(false);
+  });
+
+  it('non-terminal recovery converges to an exact historical invalid config witness', async () => {
+    const root = makeRoot();
+    const historical = 'language: [\n';
+    writeTakt(root, 'config.yaml', historical);
+    const baseManifest = manifest({ 'config.yaml': historical });
+    const baseLock = baseLockFor(baseManifest);
+    writeFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      `${JSON.stringify(baseLock)}\n`,
+    );
+    const incomingManifest = manifest({ 'config.yaml': 'language: ja\n' });
+    const blobs = incomingContents({ 'config.yaml': 'language: ja\n' });
+    const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+    expect(applied.status).toBe('committed');
+    let injected = false;
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (
+          !injected
+          && operation === 'rename'
+          && path.endsWith('/.takt/config.yaml')
+        ) {
+          injected = true;
+          throw new Error('injected historical restore fault');
+        }
+      },
+    });
+    const failedRollback = await rollbackProjectTemplateApply({
+      projectRoot: root,
+      backupId: applied.status === 'committed' ? applied.backupId : '',
+      io,
+    });
+    expect(injected).toBe(true);
+    expect(failedRollback.status).toBe('recovery_required');
+
+    const recovered = await recoverProjectTemplateApply({ projectRoot: root });
+
+    expect(recovered.status).toBe('rolled_back');
+    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'))
+      .toBe(historical);
+    expect(existsSync(join(
+      root,
+      '.takt-template-state',
+      'recovery-required.json',
+    ))).toBe(false);
+  });
+
+  it('accepts an exact committed journal without re-running doctor on unrelated later config', async () => {
+    const root = makeRoot();
+    const incomingManifest = manifest({ 'settings.yaml': 'enabled: true\n' });
+    const blobs = incomingContents({ 'settings.yaml': 'enabled: true\n' });
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+    expect(applied.status).toBe('committed');
+    // This unmanaged file appeared after commit. The committed journal already
+    // proves that the post-apply doctor gate passed for the transaction.
+    writeTakt(root, 'config.yaml', 'language: [\n');
+
+    const recovered = await recoverProjectTemplateApply({ projectRoot: root });
+
+    expect(recovered).toMatchObject({
+      status: 'committed',
+      backupId: applied.status === 'committed' ? applied.backupId : '',
+    });
+    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'))
+      .toBe('language: [\n');
+  });
+
   it('converges idempotently from a non-terminal journal even if its marker was lost', async () => {
     const root = makeRoot();
     rmSync(join(root, '.takt'), { recursive: true });
