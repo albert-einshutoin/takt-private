@@ -1,3 +1,8 @@
+import { createHash } from 'node:crypto';
+import {
+  PROJECT_RUNTIME_DIRECTORY_NAMES,
+  PROJECT_RUNTIME_FILE_NAMES,
+} from '../../shared/constants/projectTaktPaths.js';
 import { sanitizeSensitiveText } from '../../shared/utils/sensitiveText.js';
 import type {
   ProjectTemplateClassification,
@@ -10,7 +15,9 @@ import {
   parsePortablePath,
   parsePosixMode,
   parseSha256,
+  assertAllowedKeys,
   requireArray,
+  requireRecord,
 } from './validation.js';
 
 const MAX_CLASSIFIER_CONTENT_BYTES = 1024 * 1024;
@@ -18,19 +25,11 @@ const MAX_ABSOLUTE_PATH_PREFIXES = 8;
 const MAX_ABSOLUTE_PATH_PREFIX_LENGTH = 1024;
 const MAX_ABSOLUTE_PATH_PREFIX_TOTAL = 4096;
 
-const RUNTIME_ROOTS = new Set([
+const RUNTIME_ROOTS = new Set<string>([
   '.devloop',
-  'runs',
-  'tmp',
-  'worktrees',
-  'tasks',
-  'completed',
-  'logs',
-  'session',
-  'persona',
-  'staged',
-  'cache',
+  ...PROJECT_RUNTIME_DIRECTORY_NAMES,
 ]);
+const RUNTIME_FILES = new Set<string>(PROJECT_RUNTIME_FILE_NAMES);
 
 const SUMMARY_BY_REASON: Record<ProjectTemplateClassificationReason, string> = {
   PROJECT_CONFIG: 'Project-owned configuration requires review',
@@ -88,6 +87,7 @@ function classifyPath(relativePath: string): {
   }
   if (
     RUNTIME_ROOTS.has(segments[0] ?? '')
+    || (segments.length === 1 && RUNTIME_FILES.has(basename))
     || (segments[0] === 'quality-gates' && segments[1] === 'logs')
   ) {
     return { classification: 'excluded', reasonCode: 'RUNTIME_STATE' };
@@ -156,7 +156,7 @@ function detectedCapabilities(
   relativePath: string,
   mode: string | undefined,
   text: string | undefined,
-): TemplateCapability[] {
+): { capabilities: TemplateCapability[]; inspectionStatus: 'complete' | 'incomplete' } {
   const capabilities: TemplateCapability[] = [];
   if (mode !== undefined && (Number.parseInt(mode, 8) & 0o111) !== 0) {
     capabilities.push('executable');
@@ -164,16 +164,10 @@ function detectedCapabilities(
   if (
     text !== undefined
     && (
-      /\bgh\s+(?:pr|issue)\s+(?:create|edit|close|merge|reopen)\b/i.test(text)
-      || /\bgh\s+release\s+(?:create|delete|edit|upload)\b/i.test(text)
-      || /\bgh\s+workflow\s+run\b/i.test(text)
-      || /\bgh\s+secret\s+(?:set|delete)\b/i.test(text)
-      || /\bgh\s+api\b[^\n]*(?:-X|--method)\s*(?:POST|PUT|PATCH|DELETE)\b/i.test(text)
-      || /\bgh\s+api\b[^\n]*--input(?:=|\s+)/i.test(text)
-      || (
-        /\bcurl\b[^\n]*https:\/\/api\.github\.com\b/i.test(text)
-        && /(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b|(?:-d|--data(?:-raw|-binary|-urlencode)?)\s+/i.test(text)
-      )
+      // Preview classification prioritizes review over distinguishing read-only
+      // operations because aliases/extensions can turn any `gh` command into a write.
+      /\bgh(?:\s|$)/i.test(text)
+      || /\bcurl\b[^\n]*https:\/\/api\.github\.com(?:\/|\b)/i.test(text)
       || /\bgit\s+push\b/i.test(text)
     )
   ) {
@@ -191,7 +185,23 @@ function detectedCapabilities(
   ) {
     capabilities.push('external-command');
   }
-  return capabilities;
+  const knownCommand = /^(?:npm|pnpm|yarn|bun|make|cargo|go|swift|python|ruby|bash|sh|gh|git|curl)(?:\s|$)/i;
+  const hasUnknownDeclaredCommand = text !== undefined
+    && Array.from(text.matchAll(/^\s*(?:run|command|script)\s*:\s*(.+)$/gmi))
+      .some((match) => !knownCommand.test(match[1]!.trim()));
+  const automationCommand = text?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line !== '' && !line.startsWith('#'));
+  const hasUnknownAutomationCommand = relativePath.startsWith('automation/')
+    && (automationCommand === undefined || !knownCommand.test(automationCommand));
+  return {
+    capabilities,
+    inspectionStatus: text === undefined
+      || hasUnknownDeclaredCommand
+      || hasUnknownAutomationCommand
+      ? 'incomplete'
+      : 'complete',
+  };
 }
 
 function blocked(
@@ -224,39 +234,53 @@ function invalidClassifierInput(): ProjectTemplateClassificationResult {
 function parseClassifierInput(
   value: ProjectTemplateClassifierInput,
 ): ProjectTemplateClassifierInput | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  if (Object.values(descriptors).some((descriptor) => !('value' in descriptor))) return undefined;
-  const allowed = new Set([
+  const record = requireRecord(value, 'classifier');
+  assertAllowedKeys(record, [
     'relativePath',
     'content',
     'absolutePathPrefixes',
     'bytes',
     'mode',
     'sha256',
-  ]);
-  if (Object.keys(value).some((key) => !allowed.has(key))) return undefined;
+  ], 'classifier');
   if (
-    typeof value.relativePath !== 'string'
-    || !Number.isSafeInteger(value.bytes)
-    || value.bytes < 0
-    || (value.content !== undefined && !(value.content instanceof Uint8Array))
-    || (value.content !== undefined && value.content.byteLength > MAX_CLASSIFIER_CONTENT_BYTES)
-    || (value.content !== undefined && value.content.byteLength !== value.bytes)
+    typeof record['relativePath'] !== 'string'
+    || !Number.isSafeInteger(record['bytes'])
+    || (record['bytes'] as number) < 0
+    || (record['content'] !== undefined && !(record['content'] instanceof Uint8Array))
+    || (
+      record['content'] instanceof Uint8Array
+      && record['content'].byteLength > MAX_CLASSIFIER_CONTENT_BYTES
+    )
+    || (
+      record['content'] instanceof Uint8Array
+      && record['content'].byteLength !== record['bytes']
+    )
   ) {
     return undefined;
   }
+  const relativePath = record['relativePath'];
+  const bytes = record['bytes'] as number;
+  const content = record['content'] as Uint8Array | undefined;
+  const mode = record['mode'];
+  const suppliedSha256 = record['sha256'];
+  let sha256: string | undefined;
   try {
-    if (value.mode !== undefined) parsePosixMode(value.mode, 'classifier.mode');
-    if (value.sha256 !== undefined) parseSha256(value.sha256, 'classifier.sha256');
+    if (mode !== undefined) parsePosixMode(mode, 'classifier.mode');
+    if (suppliedSha256 !== undefined) parseSha256(suppliedSha256, 'classifier.sha256');
   } catch {
     return undefined;
   }
-  if (value.absolutePathPrefixes !== undefined) {
+  if (content !== undefined) {
+    sha256 = createHash('sha256').update(content).digest('hex');
+    if (suppliedSha256 !== undefined && suppliedSha256 !== sha256) return undefined;
+  }
+  let absolutePathPrefixes: readonly string[] | undefined;
+  if (record['absolutePathPrefixes'] !== undefined) {
     let prefixes: unknown[];
     try {
       prefixes = requireArray(
-        value.absolutePathPrefixes,
+        record['absolutePathPrefixes'],
         'classifier.absolutePathPrefixes',
         MAX_ABSOLUTE_PATH_PREFIXES,
         'LIMIT_EXCEEDED',
@@ -274,8 +298,18 @@ function parseClassifierInput(
       0,
     );
     if (totalLength > MAX_ABSOLUTE_PATH_PREFIX_TOTAL) return undefined;
+    absolutePathPrefixes = prefixes as string[];
   }
-  return value;
+  // Return a fresh data-only object so later classification never observes
+  // prototype state or a caller mutation through the original container.
+  return {
+    relativePath,
+    bytes,
+    ...(content === undefined ? {} : { content }),
+    ...(absolutePathPrefixes === undefined ? {} : { absolutePathPrefixes }),
+    ...(mode === undefined ? {} : { mode: mode as string }),
+    ...(sha256 === undefined ? {} : { sha256 }),
+  };
 }
 
 export function classifyProjectTemplateEntry(
@@ -344,9 +378,11 @@ export function classifyProjectTemplateEntry(
     }
   }
 
-  const capabilities = detectedCapabilities(relativePath, parsedInput.mode, text);
+  const detection = detectedCapabilities(relativePath, parsedInput.mode, text);
+  const { capabilities } = detection;
   const reviewRequired = pathClassification.classification === 'project-owned'
-    || capabilities.length > 0;
+    || capabilities.length > 0
+    || detection.inspectionStatus !== 'complete';
   return {
     relativePath,
     ...pathClassification,
@@ -357,7 +393,7 @@ export function classifyProjectTemplateEntry(
     detectedCapabilities: {
       path: relativePath,
       capabilities,
-      inspectionStatus: text === undefined ? 'incomplete' : 'complete',
+      inspectionStatus: detection.inspectionStatus,
     },
     reviewRequired,
     warnings: capabilities.includes('external-command')

@@ -12,6 +12,7 @@ import {
 } from 'node:fs';
 import { open as openFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -53,6 +54,7 @@ const api = projectTemplate as unknown as Record<string, unknown>;
 const classify = api['classifyProjectTemplateEntry'] as (input: {
   relativePath: string;
   content?: Uint8Array;
+  absolutePathPrefixes?: readonly string[];
   bytes: number;
   mode?: string;
   sha256?: string;
@@ -122,7 +124,6 @@ describe('project template pure classifier', () => {
       content: encoder.encode('safe fixture content'),
       bytes: 20,
       mode: '0644',
-      sha256: 'a'.repeat(64),
     });
     expect(result).toMatchObject({
       relativePath: reasonCode === 'SENSITIVE_FILENAME' ? '[sensitive-path]' : relativePath,
@@ -140,7 +141,6 @@ describe('project template pure classifier', () => {
         content: encoder.encode(fixture['content']!),
         bytes: fixture['content']!.length,
         mode: '0644',
-        sha256: 'a'.repeat(64),
       });
       expect(result).toMatchObject({
         classification: fixture['classification'],
@@ -159,7 +159,6 @@ describe('project template pure classifier', () => {
       content: encoder.encode(content),
       bytes: content.length,
       mode: '0644',
-      sha256: 'a'.repeat(64),
     });
     expect(result).toMatchObject({ classification: 'blocked', reasonCode: 'SECRET_CONTENT' });
     expect(JSON.stringify(result)).not.toContain(content);
@@ -175,7 +174,6 @@ describe('project template pure classifier', () => {
       content: encoder.encode(content),
       bytes: content.length,
       mode: '0644',
-      sha256: 'a'.repeat(64),
     });
     expect(result).toMatchObject({ classification: 'blocked', reasonCode: 'ABSOLUTE_PATH_CONTENT' });
     expect(JSON.stringify(result)).not.toContain(content);
@@ -249,6 +247,52 @@ describe('project template pure classifier', () => {
       reasonCode: 'INVALID_CLASSIFIER_INPUT',
     });
   });
+  it('should compute content digests and reject a mismatched supplied digest', () => {
+    const content = encoder.encode('name: portable');
+    const digest = createHash('sha256').update(content).digest('hex');
+
+    expect(classify({
+      relativePath: 'workflows/portable.yaml',
+      content,
+      bytes: content.byteLength,
+    })).toMatchObject({
+      sha256: digest,
+      detectedCapabilities: { inspectionStatus: 'complete' },
+    });
+    expect(classify({
+      relativePath: 'workflows/portable.yaml',
+      content,
+      bytes: content.byteLength,
+      sha256: '0'.repeat(64),
+    })).toMatchObject({
+      relativePath: '[invalid-input]',
+      reasonCode: 'INVALID_CLASSIFIER_INPUT',
+    });
+  });
+  it('should not expose caller-supplied digest as metadata-only evidence', () => {
+    const result = classify({
+      relativePath: 'workflows/portable.yaml',
+      bytes: 12,
+      sha256: 'a'.repeat(64),
+    });
+
+    expect(result).not.toHaveProperty('sha256');
+    expect(result.detectedCapabilities.inspectionStatus).toBe('incomplete');
+    expect(result.reviewRequired).toBe(true);
+  });
+  it('should accept only plain own-data classifier objects', () => {
+    const inherited = Object.create({
+      relativePath: 'workflows/inherited.yaml',
+      bytes: 0,
+    }) as Record<string, unknown>;
+    inherited['relativePath'] = 'workflows/own.yaml';
+    inherited['bytes'] = 0;
+
+    expect(classify(inherited as never)).toMatchObject({
+      relativePath: '[invalid-input]',
+      reasonCode: 'INVALID_CLASSIFIER_INPUT',
+    });
+  });
   it('should fail closed when hostile input traps throw', () => {
     const hostile = new Proxy({}, {
       ownKeys: () => {
@@ -301,7 +345,6 @@ describe('project template pure classifier', () => {
       content: new Uint8Array([65, 0, 66]),
       bytes: 3,
       mode: '0644',
-      sha256: 'a'.repeat(64),
     });
     expect(binary).toMatchObject({ classification: 'blocked', reasonCode: 'BINARY_CONTENT' });
     const script = classify({
@@ -309,7 +352,6 @@ describe('project template pure classifier', () => {
       content: encoder.encode('gh pr create --fill'),
       bytes: 19,
       mode: '0755',
-      sha256: 'b'.repeat(64),
     });
     expect(script.detectedCapabilities).toEqual({
       path: 'automation/release.sh',
@@ -319,11 +361,14 @@ describe('project template pure classifier', () => {
     expect(script.reviewRequired).toBe(true);
   });
   it.each([
+    'gh repo view owner/repo',
+    'gh auth status',
     'gh release create v1.0.0',
     'gh workflow run release',
     'gh secret set TOKEN',
     'gh api repos/o/r/actions --input payload.json',
     'curl -X POST https://api.github.com/repos/o/r/releases',
+    'curl https://api.github.com/repos/o/r/releases',
     'curl https://api.github.com/repos/o/r/releases --data "{}"',
   ])('should conservatively detect GitHub writes: %s', (content) => {
     expect(classify({
@@ -347,8 +392,23 @@ describe('project template pure classifier', () => {
     })).toMatchObject({
       reviewRequired: true,
       detectedCapabilities: {
-        inspectionStatus: 'complete',
+        inspectionStatus: 'incomplete',
         capabilities: ['external-command'],
+      },
+    });
+  });
+  it('should leave automation inspection incomplete for an unknown script command', () => {
+    const content = 'company-deployer --production';
+    expect(classify({
+      relativePath: 'automation/deploy.sh',
+      content: encoder.encode(content),
+      bytes: content.length,
+      mode: '0755',
+    })).toMatchObject({
+      reviewRequired: true,
+      detectedCapabilities: {
+        inspectionStatus: 'incomplete',
+        capabilities: expect.arrayContaining(['executable', 'external-command']),
       },
     });
   });
@@ -509,7 +569,7 @@ describe('project template filesystem scan adapter', () => {
     const result = await scan(root);
     expect(result.scanStatus).toBe('blocked');
     expect(result.entries).toEqual(expect.arrayContaining([
-      expect.objectContaining({ relativePath: 'workflows/link.yaml', reasonCode: 'SYMLINK' }),
+      expect.objectContaining({ relativePath: '[unverified-entry]', reasonCode: 'SYMLINK' }),
       expect.objectContaining({ relativePath: 'workflows/hard.yaml', reasonCode: 'HARD_LINK' }),
     ]));
   });
@@ -594,6 +654,50 @@ describe('project template filesystem scan adapter', () => {
         reasonCode: 'NODE_LIMIT_EXCEEDED',
       }),
     ]));
+  });
+  it('should stop every sibling recursion after the global node limit is reached', async () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.takt/a/one'), { recursive: true });
+    mkdirSync(join(root, '.takt/a/two'), { recursive: true });
+    write(root, '.takt/z-sibling/workflows/must-not-be-visited.yaml', 'safe');
+
+    const result = await scan(root, { maxNodes: 3 });
+
+    expect(result.counts.nodes).toBe(4);
+    expect(result.entries.filter((entry) => entry.reasonCode === 'NODE_LIMIT_EXCEEDED')).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain('must-not-be-visited');
+    expect(JSON.stringify(result)).not.toContain('z-sibling');
+  });
+  it.each([
+    'sessions/private.json',
+    'personas/private.md',
+    'language-cache/private.json',
+    'tasks.yaml',
+    'staged-devloop-state.json',
+  ])('should classify generated runtime path %s as runtime state', (relativePath) => {
+    expect(classify({ relativePath, bytes: 0 })).toMatchObject({
+      classification: 'excluded',
+      reasonCode: 'RUNTIME_STATE',
+      detectedCapabilities: { inspectionStatus: 'incomplete' },
+    });
+  });
+  it('should record runtime directory roots without traversing or disclosing child names', async () => {
+    const root = makeRoot();
+    write(root, '.takt/sessions/private-session-name.json', 'secret');
+    write(root, '.takt/personas/private-persona-name.md', 'secret');
+    write(root, '.takt/language-cache/private-language-name.json', 'secret');
+
+    const result = await scan(root);
+    const serialized = JSON.stringify(result);
+
+    expect(result.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relativePath: 'sessions', reasonCode: 'RUNTIME_STATE' }),
+      expect.objectContaining({ relativePath: 'personas', reasonCode: 'RUNTIME_STATE' }),
+      expect.objectContaining({ relativePath: 'language-cache', reasonCode: 'RUNTIME_STATE' }),
+    ]));
+    expect(serialized).not.toContain('private-session-name');
+    expect(serialized).not.toContain('private-persona-name');
+    expect(serialized).not.toContain('private-language-name');
   });
   it('should block a single non-ASCII path before collision processing', async () => {
     const root = makeRoot();

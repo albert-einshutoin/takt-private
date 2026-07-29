@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
 import {
   lstat,
@@ -40,6 +39,7 @@ interface MutableScan {
   scannedBytes: number;
   incomplete: boolean;
   blocked: boolean;
+  nodeLimitReached: boolean;
   portablePathKeys: Set<string>;
 }
 
@@ -176,7 +176,6 @@ async function scanFile(
       absolutePathPrefixes,
       bytes: content.byteLength,
       mode: safeMode(before.mode),
-      sha256: createHash('sha256').update(content).digest('hex'),
     }));
   } catch {
     scan.entries.push(createProjectTemplateBlockedResult(relativePath, 'READ_FAILED', initialStat.size));
@@ -196,6 +195,7 @@ async function walkDirectory(
   limits: ProjectTemplateScanLimits,
   scan: MutableScan,
 ): Promise<void> {
+  if (scan.nodeLimitReached) return;
   let before: Stats;
   let directoryRealPath: string;
   try {
@@ -224,6 +224,9 @@ async function walkDirectory(
     for await (const entry of directory) {
       scan.nodes += 1;
       if (scan.nodes > limits.maxNodes) {
+        // maxNodes is shared by the whole walk. Ancestors check this flag after
+        // recursion so no sibling can consume another entry after maxNodes + 1.
+        scan.nodeLimitReached = true;
         limitEntry(scan, '[node-limit]', 'NODE_LIMIT_EXCEEDED');
         return;
       }
@@ -253,29 +256,23 @@ async function walkDirectory(
   }
   names.sort((left, right) => left.localeCompare(right, 'en-US'));
   for (const name of names) {
+    if (scan.nodeLimitReached) return;
     const absolutePath = join(absoluteDirectory, name);
     const relativePath = relativeDirectory === '' ? name : `${relativeDirectory}/${name}`;
     const pathPreflight = classifyProjectTemplateEntry({ relativePath, bytes: 0 });
-    const displayPath = pathPreflight.relativePath;
 
     let entryStat: Stats;
     try {
       entryStat = await lstat(absolutePath);
     } catch {
-      scan.entries.push(createProjectTemplateBlockedResult(displayPath, 'READ_FAILED'));
+      // Names returned by directory enumeration are untrusted until the named
+      // inode and its real path are verified, so failures use a fixed sentinel.
+      scan.entries.push(createProjectTemplateBlockedResult('[unverified-entry]', 'READ_FAILED'));
       scan.incomplete = true;
       continue;
     }
     if (entryStat.isSymbolicLink()) {
-      limitEntry(scan, displayPath, 'SYMLINK', entryStat.size);
-      continue;
-    }
-    if (!entryStat.isDirectory() && !entryStat.isFile()) {
-      limitEntry(scan, displayPath, 'UNSUPPORTED_FILE_TYPE', entryStat.size);
-      continue;
-    }
-    if (entryStat.isFile() && entryStat.nlink > 1) {
-      limitEntry(scan, displayPath, 'HARD_LINK', entryStat.size);
+      limitEntry(scan, '[unverified-entry]', 'SYMLINK', entryStat.size);
       continue;
     }
     if (pathPreflight.classification === 'blocked') {
@@ -287,16 +284,41 @@ async function walkDirectory(
       scan.blocked = true;
       continue;
     }
-    if (depth + 1 > limits.maxDepth) {
-      limitEntry(scan, displayPath, 'DEPTH_LIMIT_EXCEEDED');
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = await realpath(absolutePath);
+    } catch {
+      scan.entries.push(createProjectTemplateBlockedResult('[unverified-entry]', 'READ_FAILED'));
+      scan.incomplete = true;
       continue;
     }
+    if (!isInside(rootRealPath, resolvedPath)) {
+      limitEntry(scan, '[unverified-entry]', 'PATH_ESCAPE', entryStat.size);
+      continue;
+    }
+
+    // The raw relative path becomes evidence only after inode lookup and
+    // realpath containment both succeed.
+    const displayPath = relativePath;
     const collisionKey = portablePathKey(relativePath);
     if (scan.portablePathKeys.has(collisionKey)) {
       limitEntry(scan, displayPath, 'PATH_COLLISION');
       continue;
     }
     scan.portablePathKeys.add(collisionKey);
+    if (!entryStat.isDirectory() && !entryStat.isFile()) {
+      limitEntry(scan, displayPath, 'UNSUPPORTED_FILE_TYPE', entryStat.size);
+      continue;
+    }
+    if (entryStat.isFile() && entryStat.nlink > 1) {
+      limitEntry(scan, displayPath, 'HARD_LINK', entryStat.size);
+      continue;
+    }
+    if (depth + 1 > limits.maxDepth) {
+      limitEntry(scan, displayPath, 'DEPTH_LIMIT_EXCEEDED');
+      continue;
+    }
 
     const metadataClassification = classifyProjectTemplateEntry({
       relativePath,
@@ -312,19 +334,6 @@ async function walkDirectory(
       if (metadataClassification.classification === 'blocked') scan.blocked = true;
       continue;
     }
-
-    let resolvedPath: string;
-    try {
-      resolvedPath = await realpath(absolutePath);
-    } catch {
-      scan.entries.push(createProjectTemplateBlockedResult(displayPath, 'READ_FAILED'));
-      scan.incomplete = true;
-      continue;
-    }
-    if (!isInside(rootRealPath, resolvedPath)) {
-      limitEntry(scan, displayPath, 'PATH_ESCAPE', entryStat.size);
-      continue;
-    }
     if (entryStat.isDirectory()) {
       await walkDirectory(
         absolutePath,
@@ -336,6 +345,7 @@ async function walkDirectory(
         limits,
         scan,
       );
+      if (scan.nodeLimitReached) return;
       continue;
     }
     await scanFile(
@@ -363,6 +373,7 @@ export async function scanProjectTemplateDirectory(
     scannedBytes: 0,
     incomplete: false,
     blocked: false,
+    nodeLimitReached: false,
     portablePathKeys: new Set(),
   };
   if (limits === undefined) {
