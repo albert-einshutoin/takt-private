@@ -16,6 +16,7 @@ const {
   mockEnsureCurrentTmpDirExists,
   mockGetProvider,
   mockRunAgent,
+  mockWriteRunMeta,
 } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { EventEmitter: EE } = require('node:events') as typeof import('node:events');
@@ -75,6 +76,7 @@ const {
     mockEnsureCurrentTmpDirExists: vi.fn(() => getTmpdir()),
     mockGetProvider: vi.fn(),
     mockRunAgent: vi.fn(),
+    mockWriteRunMeta: vi.fn(),
   };
 });
 
@@ -117,7 +119,11 @@ vi.mock('../infra/config/index.js', async (importOriginal) => ({
   }),
   saveSessionState: vi.fn(),
   ensureDir: vi.fn(),
-  writeFileAtomic: vi.fn(),
+  writeFileAtomic: mockWriteRunMeta,
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteRunMeta,
 }));
 
 vi.mock('../shared/context.js', () => ({
