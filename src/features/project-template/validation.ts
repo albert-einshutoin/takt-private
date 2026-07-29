@@ -34,8 +34,9 @@ export const CONTROL_FREE_PATTERN_SOURCE = '^[^\\u0000-\\u001F\\u007F]*$';
 export const GITHUB_URI_PATTERN_SOURCE = '^(?!.*\\.git$)https://github\\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$';
 export const GIT_URI_PATTERN_SOURCE = '^https://(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}(?::[1-9][0-9]{0,4})?/[A-Za-z0-9._~!$&\'()*+,;=:@%/-]+$';
 export const SOURCE_REF_PATTERN_SOURCE = '^(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\.lock(?:/|$))[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,254}[A-Za-z0-9_-])?$';
-export const LOCAL_SOURCE_URI_PATTERN_SOURCE = '^(?!\\.takt(?:/|$))(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(?!.*[\\u0000-\\u001F\\u007F])(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)[^/]*[ .](?:/|$))(?!.*//)[^/]+(?:/[^/]+)*$';
-export const PROJECT_TEMPLATE_PATH_PATTERN_SOURCE = LOCAL_SOURCE_URI_PATTERN_SOURCE;
+const PORTABLE_RELATIVE_PATH_BODY_SOURCE = '(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(?!.*[\\u0000-\\u001F\\u007F])(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)[^/]*[ .](?:/|$))(?!.*//)[^/]+(?:/[^/]+)*';
+export const LOCAL_SOURCE_URI_PATTERN_SOURCE = `^(?:\\.|${PORTABLE_RELATIVE_PATH_BODY_SOURCE})$`;
+export const PROJECT_TEMPLATE_PATH_PATTERN_SOURCE = `^(?!\\.takt(?:/|$))${PORTABLE_RELATIVE_PATH_BODY_SOURCE}$`;
 
 const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE);
 const SHA256_PATTERN = new RegExp(SHA256_PATTERN_SOURCE);
@@ -134,7 +135,7 @@ export function requireSemVer(value: unknown, field: string): string {
 
 function compareNumericIdentifiers(left: string, right: string): number {
   if (left.length !== right.length) return left.length - right.length;
-  return left.localeCompare(right, 'en-US');
+  return left === right ? 0 : (left < right ? -1 : 1);
 }
 
 function compareIdentifiers(left: string, right: string): number {
@@ -142,7 +143,7 @@ function compareIdentifiers(left: string, right: string): number {
   const rightNumeric = /^\d+$/.test(right);
   if (leftNumeric && rightNumeric) return compareNumericIdentifiers(left, right);
   if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
-  return left.localeCompare(right, 'en-US');
+  return left === right ? 0 : (left < right ? -1 : 1);
 }
 
 export function compareSemVer(left: string, right: string): number {

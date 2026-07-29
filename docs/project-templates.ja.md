@@ -29,7 +29,8 @@ ADS の `:`、control 文字、末尾の dot/space は拒否されます。大�
 
 `source` は kind ごとの discriminated union です。`github` は `.git` なしの
 `https://github.com/owner/repository`、`git` は credential を含まない HTTPS URL、
-`local` は相対 POSIX path と固定 ref `workspace` を使用します。query、fragment、
+`local` は `.` または `.takt/templates/...` を含む相対 POSIX path と固定 ref
+`workspace` を使用します。query、fragment、
 control 文字、local workstation の絶対 path は保存できません。すべての source は
 小文字 hexadecimal 40 または 64 文字の commit に固定します。
 

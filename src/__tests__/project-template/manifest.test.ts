@@ -237,6 +237,17 @@ describe('project template manifest public contract', () => {
     expectValidationCode(manifest, 'INVALID_SOURCE');
   });
 
+  it.each(['.', '.takt/templates/default'])('should accept a portable local source uri: %s', (uri) => {
+    const manifest = validManifest();
+    manifest['source'] = {
+      kind: 'local',
+      uri,
+      ref: 'workspace',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+    };
+    expect(parseProjectTemplateManifest(manifest).source).toMatchObject({ kind: 'local', uri });
+  });
+
   it('should validate and round-trip a lock pinned to the source commit', () => {
     const lock = {
       schemaVersion: '1.0',

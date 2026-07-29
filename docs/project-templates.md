@@ -48,8 +48,8 @@ four-digit POSIX mode and `sha256` is a lowercase SHA-256 digest.
 
 `source` is a discriminated union. `github` uses a canonical
 `https://github.com/owner/repository` URL without `.git`; `git` uses a
-credential-free HTTPS URL; `local` uses a portable relative POSIX path and the
-literal ref `workspace`. Query strings, fragments, control characters, and
+credential-free HTTPS URL; `local` uses `.` or a portable relative POSIX path
+(including `.takt/templates/...`) and the literal ref `workspace`. Query strings, fragments, control characters, and
 absolute local workstation paths are forbidden. Every source pins an exact
 40- or 64-character lowercase hexadecimal commit.
 
