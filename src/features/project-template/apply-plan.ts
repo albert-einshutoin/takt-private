@@ -154,7 +154,10 @@ function parseLocalEntries(value: unknown): ProjectTemplateLocalSnapshotEntry[] 
 function parseIncomingContents(
   value: unknown,
   incomingByPath: ReadonlyMap<string, TemplateEntry>,
-): Map<string, Buffer> {
+): {
+  contents: Map<string, Buffer>;
+  reviewRequiredPaths: Set<string>;
+} {
   const values = requireArray(
     value ?? [],
     'incomingContents',
@@ -162,6 +165,7 @@ function parseIncomingContents(
     'INVALID_ENTRY',
   );
   const contents = new Map<string, Buffer>();
+  const reviewRequiredPaths = new Set<string>();
   let totalBytes = 0;
   for (const [index, raw] of values.entries()) {
     const field = `incomingContents[${index}]`;
@@ -197,9 +201,25 @@ function parseIncomingContents(
     if (sha256(content) !== manifestEntry.sha256) {
       invalidInput('incoming content does not match the manifest', `${field}.content`);
     }
+    if (content.byteLength > MAX_DIFF_INPUT_BYTES || content.includes(0)) {
+      // Full portability inspection belongs to the validated archive boundary.
+      // Raw large/binary inputs remain plannable, but never default-applicable.
+      reviewRequiredPaths.add(path);
+    } else {
+      const classification = classifyProjectTemplateEntry({
+        relativePath: path,
+        mode: manifestEntry.mode,
+        sha256: manifestEntry.sha256,
+        bytes: content.byteLength,
+        content,
+      });
+      if (classification.classification === 'blocked') {
+        invalidInput('incoming content is blocked by portability policy', `${field}.content`);
+      }
+    }
     contents.set(path, content);
   }
-  return contents;
+  return { contents, reviewRequiredPaths };
 }
 
 function sameState(
@@ -299,6 +319,7 @@ function mustRedactDiff(
     && (
       classification.reasonCode === 'SECRET_CONTENT'
       || classification.reasonCode === 'ABSOLUTE_PATH_CONTENT'
+      || classification.reasonCode === 'SENSITIVE_FILENAME'
     );
 }
 
@@ -326,16 +347,21 @@ function decideAction(options: {
     hasFormalBaseline,
     baselineStrategy,
   } = options;
+  if (base !== undefined && incoming !== undefined && base.policy !== incoming.policy) {
+    return { action: 'conflict', reasonCode: 'POLICY_CHANGED' };
+  }
   if (policy === 'excluded') {
     return { action: 'excluded', reasonCode: 'POLICY_EXCLUDED' };
   }
-  if (policy === 'scaffold' && incoming !== undefined) {
+  if (policy === 'scaffold') {
+    if (incoming !== undefined) {
+      return local === undefined
+        ? { action: 'add', reasonCode: 'SCAFFOLD_MISSING' }
+        : { action: 'keep', reasonCode: 'SCAFFOLD_PRESERVED' };
+    }
     return local === undefined
-      ? { action: 'add', reasonCode: 'SCAFFOLD_MISSING' }
+      ? { action: 'keep', reasonCode: 'ALREADY_ABSENT' }
       : { action: 'keep', reasonCode: 'SCAFFOLD_PRESERVED' };
-  }
-  if (base !== undefined && incoming !== undefined && base.policy !== incoming.policy) {
-    return { action: 'conflict', reasonCode: 'POLICY_CHANGED' };
   }
   if (base === undefined && incoming !== undefined) {
     if (local === undefined) return { action: 'add', reasonCode: 'NEW_ENTRY' };
@@ -390,6 +416,7 @@ function entryWithDecision(options: {
   action: ProjectTemplateApplyAction;
   reasonCode: ProjectTemplateApplyReasonCode;
   incomingContent: Buffer | undefined;
+  contentReviewRequired: boolean;
 }): ProjectTemplateApplyPlanEntry {
   const {
     path,
@@ -400,6 +427,7 @@ function entryWithDecision(options: {
     action,
     reasonCode,
     incomingContent,
+    contentReviewRequired,
   } = options;
   let diff: ProjectTemplateEntryDiff | undefined;
   if (
@@ -419,7 +447,8 @@ function entryWithDecision(options: {
   }
   const capabilitiesBefore = [...(base?.capabilities ?? [])];
   const capabilitiesAfter = [...(incoming?.capabilities ?? [])];
-  const reviewRequired = capabilitiesChanged(capabilitiesBefore, capabilitiesAfter)
+  const reviewRequired = contentReviewRequired
+    || capabilitiesChanged(capabilitiesBefore, capabilitiesAfter)
     || local?.gitTrackingStatus === 'unavailable'
     || local?.gitTrackingStatus === 'unmerged';
   const common = {
@@ -431,9 +460,16 @@ function entryWithDecision(options: {
     }),
     ...(base === undefined ? {} : { baseSha256: base.sha256 }),
     ...(incoming === undefined ? {} : {
-      afterSha256: incoming.sha256,
-      afterMode: incoming.mode,
+      incomingSha256: incoming.sha256,
+      incomingMode: incoming.mode,
     }),
+    ...(action === 'add' || action === 'update'
+      ? { afterSha256: incoming!.sha256, afterMode: incoming!.mode }
+      : action === 'keep' || action === 'excluded'
+        ? local === undefined
+          ? {}
+          : { afterSha256: local.sha256, afterMode: local.mode }
+        : {}),
     capabilitiesBefore,
     capabilitiesAfter,
     gitTrackingStatus: (local?.gitTrackingStatus ?? 'absent') as
@@ -483,12 +519,17 @@ function markRenameConflicts(
 ): void {
   const removed = [...baseByPath.values()].filter((entry) => !incomingByPath.has(entry.path));
   const added = [...incomingByPath.values()].filter((entry) => !baseByPath.has(entry.path));
+  const addedByPortableKey = new Map<string, TemplateEntry[]>();
+  const addedByHash = new Map<string, TemplateEntry[]>();
+  for (const entry of added) {
+    const key = portablePathKey(entry.path);
+    addedByPortableKey.set(key, [...(addedByPortableKey.get(key) ?? []), entry]);
+    addedByHash.set(entry.sha256, [...(addedByHash.get(entry.sha256) ?? []), entry]);
+  }
   const pairs: Array<{ oldPath: string; newPath: string; caseOnly: boolean }> = [];
   for (const oldEntry of removed) {
-    const caseMatches = added.filter(
-      (newEntry) => portablePathKey(newEntry.path) === portablePathKey(oldEntry.path),
-    );
-    const contentMatches = added.filter((newEntry) => newEntry.sha256 === oldEntry.sha256);
+    const caseMatches = addedByPortableKey.get(portablePathKey(oldEntry.path)) ?? [];
+    const contentMatches = addedByHash.get(oldEntry.sha256) ?? [];
     const matches = caseMatches.length > 0 ? caseMatches : contentMatches;
     for (const match of matches) {
       pairs.push({
@@ -582,7 +623,10 @@ export function createProjectTemplateApplyPlan(
     incomingManifest.entries.map((entry) => [entry.path, entry]),
   );
   const localByPath = new Map(localEntries.map((entry) => [entry.path, entry]));
-  const incomingContents = parseIncomingContents(input['incomingContents'], incomingByPath);
+  const {
+    contents: incomingContents,
+    reviewRequiredPaths: contentReviewRequiredPaths,
+  } = parseIncomingContents(input['incomingContents'], incomingByPath);
 
   const paths = [...new Set([...baseByPath.keys(), ...incomingByPath.keys()])]
     .sort(compareAscii);
@@ -590,7 +634,14 @@ export function createProjectTemplateApplyPlan(
     const base = baseByPath.get(path);
     const incoming = incomingByPath.get(path);
     const local = localByPath.get(path);
-    const policy = incoming?.policy ?? base!.policy;
+    // An unresolved policy transition still belongs to the previously applied
+    // policy; this keeps the union honest instead of representing a conflict
+    // as an already-excluded destination.
+    const policy = base !== undefined
+      && incoming !== undefined
+      && base.policy !== incoming.policy
+      ? base.policy
+      : incoming?.policy ?? base!.policy;
     const decision = decideAction({
       base,
       local,
@@ -608,6 +659,7 @@ export function createProjectTemplateApplyPlan(
       policy,
       ...decision,
       incomingContent: incomingContents.get(path),
+      contentReviewRequired: contentReviewRequiredPaths.has(path),
     });
   });
   markRenameConflicts(entries, baseByPath, incomingByPath);
@@ -642,21 +694,31 @@ export function createProjectTemplateApplyPlan(
     }
   }
 
-  // A file cannot coexist with a descendant path on any supported target
-  // filesystem. Treating this as a plan conflict prevents apply from depending
-  // on host-specific mkdir/write ordering.
-  for (let left = 0; left < entries.length; left += 1) {
-    for (let right = left + 1; right < entries.length; right += 1) {
-      const leftKey = portablePathKey(entries[left]!.path);
-      const rightKey = portablePathKey(entries[right]!.path);
-      if (
-        rightKey.startsWith(`${leftKey}/`)
-        || leftKey.startsWith(`${rightKey}/`)
-      ) {
-        entries[left] = overrideConflict(entries[left]!, 'DESTINATION_PATH_COLLISION');
-        entries[right] = overrideConflict(entries[right]!, 'DESTINATION_PATH_COLLISION');
-      }
+  // Sorting portable identities lets a stack find every file/descendant
+  // collision in O(n log n), keeping maximum-size untrusted plans bounded.
+  const keyedEntries = entries
+    .map((entry, index) => ({ index, key: portablePathKey(entry.path) }))
+    .sort((left, right) => compareAscii(left.key, right.key));
+  const ancestors: Array<{ index: number; key: string }> = [];
+  for (const current of keyedEntries) {
+    while (
+      ancestors.length > 0
+      && !current.key.startsWith(`${ancestors.at(-1)!.key}/`)
+    ) {
+      ancestors.pop();
     }
+    const parent = ancestors.at(-1);
+    if (parent !== undefined) {
+      entries[parent.index] = overrideConflict(
+        entries[parent.index]!,
+        'DESTINATION_PATH_COLLISION',
+      );
+      entries[current.index] = overrideConflict(
+        entries[current.index]!,
+        'DESTINATION_PATH_COLLISION',
+      );
+    }
+    ancestors.push(current);
   }
 
   const preconditionToken = sha256(canonicalizeTaktpackJson({
@@ -675,9 +737,12 @@ export function createProjectTemplateApplyPlan(
   const baseLockSha256 = baseLock === undefined
     ? undefined
     : sha256(canonicalizeTaktpackJson(baseLock));
-  const reviewRequired = entries.some(
-    (entry) => entry.action === 'conflict' || entry.reviewRequired,
-  );
+  const capabilitiesBefore = [...(baseLock?.capabilities ?? [])];
+  const capabilitiesAfter = [...(incomingManifest.capabilities ?? [])];
+  const reviewRequired = capabilitiesChanged(capabilitiesBefore, capabilitiesAfter)
+    || entries.some(
+      (entry) => entry.action === 'conflict' || entry.reviewRequired,
+    );
   const defaultApplyPossible = !reviewRequired;
   const summary = createSummary(entries);
   const planBody = {
@@ -685,6 +750,8 @@ export function createProjectTemplateApplyPlan(
     preconditionToken,
     ...(baseLockSha256 === undefined ? {} : { baseLockSha256 }),
     incomingManifestSha256,
+    capabilitiesBefore,
+    capabilitiesAfter,
     ...(baseLock === undefined ? {} : { basePackVersion: baseLock.packVersion }),
     incomingPackVersion: incomingManifest.packVersion,
     reviewRequired,

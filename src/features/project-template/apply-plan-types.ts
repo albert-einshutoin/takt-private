@@ -77,8 +77,10 @@ interface ProjectTemplateApplyPlanEntryBase {
   reasonCode: ProjectTemplateApplyReasonCode;
   beforeSha256?: string;
   baseSha256?: string;
+  incomingSha256?: string;
   afterSha256?: string;
   beforeMode?: string;
+  incomingMode?: string;
   afterMode?: string;
   capabilitiesBefore: readonly TemplateCapability[];
   capabilitiesAfter: readonly TemplateCapability[];
@@ -130,6 +132,8 @@ export interface ProjectTemplateApplyPlan {
   preconditionToken: string;
   baseLockSha256?: string;
   incomingManifestSha256: string;
+  capabilitiesBefore: readonly TemplateCapability[];
+  capabilitiesAfter: readonly TemplateCapability[];
   basePackVersion?: string;
   incomingPackVersion: string;
   reviewRequired: boolean;

@@ -380,6 +380,59 @@ describe('project template three-way apply plan', () => {
     });
   });
 
+  it('requires review for a top-level-only capability escalation', () => {
+    const planInput = input({ base: 'base', local: 'base', incoming: 'next' });
+    planInput.incomingManifest.capabilities = ['external-command'];
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.capabilitiesBefore).toEqual([]);
+    expect(plan.capabilitiesAfter).toEqual(['external-command']);
+    expect(plan.reviewRequired).toBe(true);
+    expect(plan.defaultApplyPossible).toBe(false);
+  });
+
+  it.each([
+    ['scaffold', 'SCAFFOLD_PRESERVED'],
+    ['excluded', 'POLICY_EXCLUDED'],
+  ] as const)(
+    'treats managed to %s policy changes as conflicts before policy behavior',
+    (policy, _oldReason) => {
+      const planInput = input({ base: 'base', local: 'base', incoming: 'next' });
+      planInput.incomingManifest.entries[0]!.policy = policy;
+
+      const plan = createProjectTemplateApplyPlan(planInput);
+
+      expect(plan.entries[0]).toMatchObject({
+        action: 'conflict',
+        reasonCode: 'POLICY_CHANGED',
+      });
+      expect(plan.defaultApplyPossible).toBe(false);
+    },
+  );
+
+  it.each([
+    ['present', 'base'],
+    ['changed', 'local'],
+    ['absent', undefined],
+  ] as const)(
+    'preserves a %s local destination when an upstream scaffold is removed',
+    (_label, local) => {
+      const plan = createProjectTemplateApplyPlan(input({
+        base: 'base',
+        local,
+        incoming: undefined,
+        policy: 'scaffold',
+      }));
+
+      expect(plan.entries[0]).toMatchObject({
+        policy: 'scaffold',
+        action: 'keep',
+        reasonCode: local === undefined ? 'ALREADY_ABSENT' : 'SCAFFOLD_PRESERVED',
+      });
+    },
+  );
+
   it.each(['unavailable', 'unmerged'] as const)(
     'disables default apply when Git tracking is %s',
     (gitTrackingStatus) => {
@@ -409,13 +462,86 @@ describe('project template three-way apply plan', () => {
 
   it('redacts secret-bearing content from every serialized diff', () => {
     const secret = 'ghp_syntheticcredential123456';
-    const planInput = input({ base: 'base', local: 'base', incoming: secret });
+    const planInput = input({ base: 'base', local: secret, incoming: 'next' });
 
     const plan = createProjectTemplateApplyPlan(planInput);
     const serialized = JSON.stringify(plan);
 
     expect(plan.entries[0]?.diff).toEqual({ kind: 'redacted' });
     expect(serialized).not.toContain(secret);
+  });
+
+  it('rejects incoming content associated with a sensitive filename', () => {
+    const secret = 'local-password=synthetic';
+    const planInput = input({ base: 'base', local: 'base', incoming: 'next' });
+    planInput.baseLock!.entries[0]!.path = 'secrets.yaml';
+    planInput.incomingManifest.entries[0]!.path = 'secrets.yaml';
+    planInput.localEntries[0] = {
+      ...planInput.localEntries[0]!,
+      path: 'secrets.yaml',
+      sha256: hash(secret),
+      bytes: Buffer.byteLength(secret),
+      content: Buffer.from(secret),
+    };
+    planInput.incomingContents = [{
+      path: 'secrets.yaml',
+      content: Buffer.from('next'),
+    }];
+
+    expect(() => createProjectTemplateApplyPlan(planInput)).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_ENTRY',
+        field: 'incomingContents[0].content',
+      }),
+    );
+  });
+
+  it('rejects blocked content even when a new destination has no diff', () => {
+    const secret = 'Authorization: Bearer ghp_syntheticcredential123456';
+    const planInput = input({ incoming: secret });
+
+    expect(() => createProjectTemplateApplyPlan(planInput)).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_ENTRY',
+        field: 'incomingContents[0].content',
+      }),
+    );
+  });
+
+  it('describes the effective after state instead of an unapplied incoming state', () => {
+    const scaffold = createProjectTemplateApplyPlan(input({
+      base: 'base',
+      local: 'local',
+      incoming: 'next',
+      policy: 'scaffold',
+    }));
+    const deleted = createProjectTemplateApplyPlan(input({
+      base: 'base',
+      local: 'base',
+      incoming: undefined,
+    }));
+    const conflict = createProjectTemplateApplyPlan(input({
+      base: 'base',
+      local: 'local',
+      incoming: 'next',
+    }));
+
+    expect(scaffold.entries[0]).toMatchObject({
+      action: 'keep',
+      beforeSha256: hash('local'),
+      afterSha256: hash('local'),
+      incomingSha256: hash('next'),
+    });
+    expect(deleted.entries[0]).toMatchObject({
+      action: 'delete',
+      beforeSha256: hash('base'),
+    });
+    expect(deleted.entries[0]).not.toHaveProperty('afterSha256');
+    expect(conflict.entries[0]).toMatchObject({
+      action: 'conflict',
+      incomingSha256: hash('next'),
+    });
+    expect(conflict.entries[0]).not.toHaveProperty('afterSha256');
   });
 
   it('returns a deeply frozen plan and stable ASCII path ordering', () => {
