@@ -4,7 +4,7 @@ import { constants, type Stats } from 'node:fs';
 import {
   lstat,
   open,
-  readdir,
+  opendir,
   realpath,
 } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -28,6 +28,7 @@ const MAX_LOCAL_TOTAL_BYTES = 32 * 1024 * 1024;
 const MAX_DIFF_CONTENT_BYTES = 64 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
 const GIT_TIMEOUT_MS = 5_000;
+const MAX_DIRECTORY_SCAN_ENTRIES = MAX_TEMPLATE_ENTRIES * 2;
 
 export type ProjectTemplateGitTrackingStatus =
   | 'tracked-clean'
@@ -227,6 +228,8 @@ async function inspectAncestors(
   taktRoot: string,
   relativePath: string,
   snapshots: Map<string, Stats>,
+  directoryNames: Map<string, string[]>,
+  scanBudget: { entries: number },
 ): Promise<'present' | 'missing'> {
   const segments = relativePath.split('/');
   let current = taktRoot;
@@ -236,13 +239,73 @@ async function inspectAncestors(
     try {
       stat = await lstat(current);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        const parent = dirname(current);
+        const names = await readBoundedDirectory(parent, directoryNames, scanBudget);
+        const segmentKey = segment.normalize('NFKC').toLowerCase();
+        if (names.some((name) => name.normalize('NFKC').toLowerCase() === segmentKey)) {
+          throw unsafeTarget();
+        }
+        return 'missing';
+      }
       throw unsafeTarget();
     }
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw unsafeTarget();
+    let actualRelative: string;
+    try {
+      actualRelative = relative(taktRoot, await realpath(current)).split(sep).join('/');
+    } catch {
+      throw unsafeTarget();
+    }
+    const requestedRelative = relative(taktRoot, current).split(sep).join('/');
+    if (actualRelative !== requestedRelative) throw unsafeTarget();
     snapshots.set(current, stat);
   }
   return 'present';
+}
+
+async function readBoundedDirectory(
+  directory: string,
+  cache: Map<string, string[]>,
+  budget: { entries: number },
+): Promise<string[]> {
+  const cached = cache.get(directory);
+  if (cached !== undefined) return cached;
+  let handle: Awaited<ReturnType<typeof opendir>>;
+  try {
+    handle = await opendir(directory);
+  } catch {
+    throw unsafeTarget();
+  }
+  const names: string[] = [];
+  let primaryError: Error | undefined;
+  try {
+    for (;;) {
+      const entry = await handle.read();
+      if (entry === null) break;
+      budget.entries += 1;
+      if (budget.entries > MAX_DIRECTORY_SCAN_ENTRIES) {
+        throw new TaktpackError(
+          'ARCHIVE_LIMIT_EXCEEDED',
+          'project template target directories exceed the inspection budget',
+          'target',
+        );
+      }
+      names.push(entry.name);
+    }
+  } catch (error) {
+    primaryError = error instanceof TaktpackError ? error : unsafeTarget();
+  }
+  try {
+    await handle.close();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ERR_DIR_CLOSED') {
+      primaryError ??= unsafeTarget();
+    }
+  }
+  if (primaryError !== undefined) throw primaryError;
+  cache.set(directory, names);
+  return names;
 }
 
 async function captureFile(
@@ -376,6 +439,8 @@ export async function captureProjectTemplateTargetSnapshot(
   const captured: CapturedTargetFile[] = [];
   const capturedActualPaths = new Set<string>();
   const collisionPaths = new Set<string>();
+  const directoryNames = new Map<string, string[]>();
+  const directoryScanBudget = { entries: 0 };
   const requestedNamesByParent = new Map<string, {
     relative: string;
     names: Set<string>;
@@ -384,7 +449,13 @@ export async function captureProjectTemplateTargetSnapshot(
   const missingPaths: string[] = [];
   let totalBytes = 0;
   for (const path of candidatePaths) {
-    if (await inspectAncestors(taktRoot, path, ancestorSnapshots) === 'missing') {
+    if (await inspectAncestors(
+      taktRoot,
+      path,
+      ancestorSnapshots,
+      directoryNames,
+      directoryScanBudget,
+    ) === 'missing') {
       missingPaths.push(path);
       continue;
     }
@@ -404,27 +475,17 @@ export async function captureProjectTemplateTargetSnapshot(
       group.names.add(requestedNameKey);
     }
   }
-  let scannedDirectoryEntries = 0;
   for (const [parentAbsolute, group] of requestedNamesByParent) {
-    let siblings;
-    try {
-      siblings = await readdir(parentAbsolute, { withFileTypes: true });
-    } catch {
-      throw unsafeTarget();
-    }
-    scannedDirectoryEntries += siblings.length;
-    if (scannedDirectoryEntries > MAX_TEMPLATE_ENTRIES * 2) {
-      throw new TaktpackError(
-        'ARCHIVE_LIMIT_EXCEEDED',
-        'project template target directories exceed the inspection budget',
-        'target',
-      );
-    }
+    const siblings = await readBoundedDirectory(
+      parentAbsolute,
+      directoryNames,
+      directoryScanBudget,
+    );
     for (const sibling of siblings) {
-      if (!group.names.has(sibling.name.normalize('NFKC').toLowerCase())) continue;
+      if (!group.names.has(sibling.normalize('NFKC').toLowerCase())) continue;
       const siblingPath = group.relative === ''
-        ? sibling.name
-        : `${group.relative}/${sibling.name}`;
+        ? sibling
+        : `${group.relative}/${sibling}`;
       collisionPaths.add(siblingPath);
     }
   }

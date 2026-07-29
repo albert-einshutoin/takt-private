@@ -231,6 +231,19 @@ describe('project template target snapshot', () => {
     });
   });
 
+  it('rejects case-only ancestor directory collisions', async () => {
+    const root = makeRoot(false);
+    writeTakt(root, 'Workflows/local.yaml', 'local\n');
+
+    await expect(captureProjectTemplateTargetSnapshot(
+      root,
+      ['workflows/new.yaml'],
+    )).rejects.toMatchObject({
+      code: 'UNSAFE_ARCHIVE_ENTRY',
+      field: 'target',
+    });
+  });
+
   it('captures unstaged and staged tracked deletions for missing candidates', async () => {
     const root = makeRoot();
     writeTakt(root, 'config.yaml', 'base\n');

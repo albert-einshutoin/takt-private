@@ -57,6 +57,7 @@ export { createProjectTemplateApplyPlan } from './apply-plan.js';
 export type {
   ProjectTemplateLocalSnapshotEntry,
   ProjectTemplateIncomingContent,
+  ProjectTemplateIncomingInspectionEvidence,
   ProjectTemplateApplyPlanInput,
   ProjectTemplateApplyAction,
   ProjectTemplateApplyReasonCode,

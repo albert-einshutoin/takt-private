@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  calculateProjectTemplateManifestSha256,
   createProjectTemplateApplyPlan,
   type ProjectTemplateApplyPlanInput,
   type ProjectTemplateLocalSnapshotEntry,
@@ -64,7 +65,7 @@ function input(
         content: Buffer.from(local),
         gitTrackingStatus: 'tracked-clean',
       }];
-  return {
+  const planInput: ProjectTemplateApplyPlanInput = {
     baseLock: {
       schemaVersion: '1.0',
       manifestSha256: 'b'.repeat(64),
@@ -89,6 +90,12 @@ function input(
       ? []
       : [{ path, content: Buffer.from(incoming) }],
   };
+  planInput.incomingInspection = {
+    archiveSha256: 'd'.repeat(64),
+    manifestSha256: calculateProjectTemplateManifestSha256(planInput.incomingManifest),
+    compatibilityStatus: 'compatible',
+  };
+  return planInput;
 }
 
 describe('project template three-way apply plan', () => {
@@ -596,6 +603,47 @@ describe('project template three-way apply plan', () => {
     const plan = createProjectTemplateApplyPlan(planInput);
 
     expect(plan.entries[0]?.action).toBe('add');
+    expect(plan.reviewRequired).toBe(true);
+    expect(plan.defaultApplyPossible).toBe(false);
+  });
+
+  it('binds archive compatibility evidence and fails closed when incompatible', () => {
+    const planInput = input({ incoming: 'next' });
+    planInput.incomingManifest.takt.minVersion = '999.0.0';
+    planInput.incomingInspection = {
+      archiveSha256: 'e'.repeat(64),
+      manifestSha256: calculateProjectTemplateManifestSha256(
+        planInput.incomingManifest,
+      ),
+      compatibilityStatus: 'incompatible',
+    };
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.incomingArchiveSha256).toBe('e'.repeat(64));
+    expect(plan.incomingCompatibility).toBe('incompatible');
+    expect(plan.reviewRequired).toBe(true);
+    expect(plan.defaultApplyPossible).toBe(false);
+  });
+
+  it('rejects content with a capability omitted from the manifest', () => {
+    const planInput = input({ incoming: 'run: npm test\n' });
+
+    expect(() => createProjectTemplateApplyPlan(planInput)).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_ENTRY',
+        field: 'incomingContents[0].content',
+      }),
+    );
+  });
+
+  it('requires review when a missing tracked path is reported clean', () => {
+    const planInput = input({ incoming: 'next' });
+    planInput.missingPathTracking = { 'config.yaml': 'tracked-clean' };
+
+    const plan = createProjectTemplateApplyPlan(planInput);
+
+    expect(plan.entries[0]?.gitTrackingStatus).toBe('tracked-clean');
     expect(plan.reviewRequired).toBe(true);
     expect(plan.defaultApplyPossible).toBe(false);
   });

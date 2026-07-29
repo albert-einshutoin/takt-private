@@ -16,6 +16,12 @@ export interface ProjectTemplateIncomingContent {
   content: Uint8Array;
 }
 
+export interface ProjectTemplateIncomingInspectionEvidence {
+  archiveSha256: string;
+  manifestSha256: string;
+  compatibilityStatus: 'compatible' | 'unknown' | 'incompatible';
+}
+
 export interface ProjectTemplateApplyPlanInput {
   baseLock?: TemplateLockV1;
   incomingManifest: ProjectTemplateManifestV1;
@@ -23,6 +29,7 @@ export interface ProjectTemplateApplyPlanInput {
   targetRootState?: 'missing' | 'directory';
   missingPathTracking?: Readonly<Record<string, ProjectTemplateGitTrackingStatus>>;
   incomingContents?: readonly ProjectTemplateIncomingContent[];
+  incomingInspection?: ProjectTemplateIncomingInspectionEvidence;
   baselineStrategy?: 'conflict' | 'adopt-identical';
 }
 
@@ -134,6 +141,8 @@ export interface ProjectTemplateApplyPlan {
   preconditionToken: string;
   baseLockSha256?: string;
   incomingManifestSha256: string;
+  incomingArchiveSha256?: string;
+  incomingCompatibility: 'compatible' | 'unknown' | 'incompatible' | 'unverified';
   capabilitiesBefore: readonly TemplateCapability[];
   capabilitiesAfter: readonly TemplateCapability[];
   basePackVersion?: string;

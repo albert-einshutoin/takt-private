@@ -141,6 +141,7 @@ export type {
   ProjectTemplateTargetSnapshot,
   ProjectTemplateLocalSnapshotEntry,
   ProjectTemplateIncomingContent,
+  ProjectTemplateIncomingInspectionEvidence,
   ProjectTemplateApplyPlanInput,
   ProjectTemplateApplyAction,
   ProjectTemplateApplyReasonCode,

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
+import { calculateProjectTemplateManifestSha256 } from './binding.js';
 import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
 import { ProjectTemplateValidationError } from './errors.js';
 import { portablePathKey } from './filesystem-scan.js';
@@ -156,7 +157,8 @@ function parseIncomingContents(
   incomingByPath: ReadonlyMap<string, TemplateEntry>,
 ): {
   contents: Map<string, Buffer>;
-  reviewRequiredPaths: Set<string>;
+  opaqueReviewRequiredPaths: Set<string>;
+  classifierReviewRequiredPaths: Set<string>;
 } {
   const values = requireArray(
     value ?? [],
@@ -165,7 +167,8 @@ function parseIncomingContents(
     'INVALID_ENTRY',
   );
   const contents = new Map<string, Buffer>();
-  const reviewRequiredPaths = new Set<string>();
+  const opaqueReviewRequiredPaths = new Set<string>();
+  const classifierReviewRequiredPaths = new Set<string>();
   let totalBytes = 0;
   for (const [index, raw] of values.entries()) {
     const field = `incomingContents[${index}]`;
@@ -204,7 +207,7 @@ function parseIncomingContents(
     if (content.byteLength > MAX_DIFF_INPUT_BYTES || content.includes(0)) {
       // Full portability inspection belongs to the validated archive boundary.
       // Raw large/binary inputs remain plannable, but never default-applicable.
-      reviewRequiredPaths.add(path);
+      opaqueReviewRequiredPaths.add(path);
     } else {
       const classification = classifyProjectTemplateEntry({
         relativePath: path,
@@ -216,10 +219,67 @@ function parseIncomingContents(
       if (classification.classification === 'blocked') {
         invalidInput('incoming content is blocked by portability policy', `${field}.content`);
       }
+      const declaredCapabilities = new Set(manifestEntry.capabilities ?? []);
+      if (classification.detectedCapabilities.capabilities.some(
+        (capability) => !declaredCapabilities.has(capability),
+      )) {
+        invalidInput(
+          'incoming content has an undeclared detected capability',
+          `${field}.content`,
+        );
+      }
+      if (classification.reviewRequired) classifierReviewRequiredPaths.add(path);
     }
     contents.set(path, content);
   }
-  return { contents, reviewRequiredPaths };
+  return {
+    contents,
+    opaqueReviewRequiredPaths,
+    classifierReviewRequiredPaths,
+  };
+}
+
+function parseIncomingInspection(
+  value: unknown,
+  actualManifestSha256: string,
+): {
+  archiveSha256?: string;
+  compatibility: 'compatible' | 'unknown' | 'incompatible' | 'unverified';
+  trusted: boolean;
+} {
+  if (value === undefined) {
+    return { compatibility: 'unverified', trusted: false };
+  }
+  const evidence = requireRecord(value, 'incomingInspection');
+  assertAllowedKeys(
+    evidence,
+    ['archiveSha256', 'manifestSha256', 'compatibilityStatus'],
+    'incomingInspection',
+  );
+  const archiveSha256 = parseSha256(
+    evidence['archiveSha256'],
+    'incomingInspection.archiveSha256',
+  );
+  const manifestSha256 = parseSha256(
+    evidence['manifestSha256'],
+    'incomingInspection.manifestSha256',
+  );
+  const compatibility = evidence['compatibilityStatus'];
+  if (
+    compatibility !== 'compatible'
+    && compatibility !== 'unknown'
+    && compatibility !== 'incompatible'
+  ) {
+    invalidInput(
+      'incoming compatibility status is invalid',
+      'incomingInspection.compatibilityStatus',
+    );
+  }
+  return {
+    archiveSha256,
+    compatibility,
+    trusted: manifestSha256 === actualManifestSha256 && compatibility === 'compatible',
+  };
 }
 
 function parseMissingPathTracking(
@@ -658,6 +718,7 @@ export function createProjectTemplateApplyPlan(
       'targetRootState',
       'missingPathTracking',
       'incomingContents',
+      'incomingInspection',
       'baselineStrategy',
     ],
     'applyPlan',
@@ -673,6 +734,12 @@ export function createProjectTemplateApplyPlan(
     ? undefined
     : parseTemplateLock(input['baseLock']);
   const incomingManifest = parseProjectTemplateManifest(input['incomingManifest']);
+  const incomingManifestSha256 =
+    calculateProjectTemplateManifestSha256(incomingManifest);
+  const incomingInspection = parseIncomingInspection(
+    input['incomingInspection'],
+    incomingManifestSha256,
+  );
   const localEntries = parseLocalEntries(input['localEntries']);
   const baseByPath = new Map(baseLock?.entries.map((entry) => [entry.path, entry]) ?? []);
   const incomingByPath = new Map(
@@ -688,7 +755,8 @@ export function createProjectTemplateApplyPlan(
   }
   const {
     contents: incomingContents,
-    reviewRequiredPaths: contentReviewRequiredPaths,
+    opaqueReviewRequiredPaths,
+    classifierReviewRequiredPaths,
   } = parseIncomingContents(input['incomingContents'], incomingByPath);
 
   const paths = [...new Set([...baseByPath.keys(), ...incomingByPath.keys()])]
@@ -744,7 +812,11 @@ export function createProjectTemplateApplyPlan(
       policy,
       ...decision,
       incomingContent: incomingContents.get(path),
-      contentReviewRequired: contentReviewRequiredPaths.has(path),
+      contentReviewRequired: opaqueReviewRequiredPaths.has(path)
+        || (
+          !incomingInspection.trusted
+          && classifierReviewRequiredPaths.has(path)
+        ),
       gitTrackingStatus: local?.gitTrackingStatus
         ?? missingPathTracking[path]
         ?? 'absent',
@@ -823,7 +895,6 @@ export function createProjectTemplateApplyPlan(
       }))
       .sort((left, right) => compareAscii(left.path, right.path)),
   }));
-  const incomingManifestSha256 = sha256(canonicalizeTaktpackJson(incomingManifest));
   const baseLockSha256 = baseLock === undefined
     ? undefined
     : sha256(canonicalizeTaktpackJson(baseLock));
@@ -832,8 +903,10 @@ export function createProjectTemplateApplyPlan(
   const reviewRequired = capabilitiesChanged(capabilitiesBefore, capabilitiesAfter)
     || !targetEvidenceComplete
     || !incomingEvidenceComplete
+    || !incomingInspection.trusted
     || Object.values(missingPathTracking).some(
-      (status) => status === 'staged'
+      (status) => status === 'tracked-clean'
+        || status === 'staged'
         || status === 'tracked-modified'
         || status === 'unmerged'
         || status === 'unavailable',
@@ -848,6 +921,10 @@ export function createProjectTemplateApplyPlan(
     preconditionToken,
     ...(baseLockSha256 === undefined ? {} : { baseLockSha256 }),
     incomingManifestSha256,
+    ...(incomingInspection.archiveSha256 === undefined
+      ? {}
+      : { incomingArchiveSha256: incomingInspection.archiveSha256 }),
+    incomingCompatibility: incomingInspection.compatibility,
     capabilitiesBefore,
     capabilitiesAfter,
     ...(baseLock === undefined ? {} : { basePackVersion: baseLock.packVersion }),
