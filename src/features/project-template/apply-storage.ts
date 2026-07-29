@@ -789,8 +789,13 @@ export async function captureProjectTemplateBackupFile(options: {
     || before.dev !== options.storage.device
     || before.size > options.maxBytes
   ) {
+    const isOversizedSafeFile = before.isFile()
+      && !before.isSymbolicLink()
+      && before.nlink === 1
+      && before.dev === options.storage.device
+      && before.size > options.maxBytes;
     throw new ProjectTemplateApplyStorageError(
-      before.size > options.maxBytes ? 'LIMIT_EXCEEDED' : 'UNSAFE_TARGET',
+      isOversizedSafeFile ? 'LIMIT_EXCEEDED' : 'UNSAFE_TARGET',
       'backup source is not a safe bounded regular file',
     );
   }

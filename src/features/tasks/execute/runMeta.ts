@@ -10,6 +10,7 @@ import type { RunMeta } from '../../../core/workflow/run/run-meta.js';
 import type { RunPaths } from '../../../core/workflow/run/run-paths.js';
 import type { WorkflowResumePoint } from '../../../core/models/index.js';
 import type { WorkflowTraceDiscovery } from '../../../core/workflow/observability/traceDiscovery.js';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { withProjectTemplateRunStartPermit } from '../../project-template/apply-lease.js';
 
@@ -64,10 +65,18 @@ export class RunMetaManager {
     // Publish running evidence while holding the same short coordination
     // mutex used by template apply. This closes the preflight/start race.
     const projectRoot = resolve(runPaths.runRootAbs, '../../..');
-    withProjectTemplateRunStartPermit(projectRoot, () => {
+    const publishRunningEvidence = () => {
       ensureDir(runPaths.runRootAbs);
       this.writeRunMeta(this.runMeta);
-    });
+    };
+    // Some embedding callers intentionally bootstrap a brand-new project path.
+    // No template apply can own a lease before that root exists, so preserving
+    // the legacy creation flow is safe; existing roots remain fail-closed.
+    if (existsSync(projectRoot)) {
+      withProjectTemplateRunStartPermit(projectRoot, publishRunningEvidence);
+    } else {
+      publishRunningEvidence();
+    }
   }
 
   updateStep(stepName: string, iteration: number, resumePoint?: WorkflowResumePoint): void {
