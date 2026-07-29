@@ -191,6 +191,37 @@ archive bytes. Issue #138 archive creation and apply must reopen and revalidate
 type, containment, link count, size, mode, digest, and capability evidence
 before trusting the bytes.
 
+## `.taktpack` export and inspection
+
+`.taktpack` v1 is an uncompressed, content-addressed USTAR archive. Its entry
+order is fixed: `pack.json`, `manifest.json`, `export-report.json`, then
+`blobs/sha256/<SHA-256>` sorted by digest. Destination paths exist only in the
+manifest. Fixed uid, gid, mtime, and mode metadata plus canonical JSON make the
+same input byte-for-byte deterministic.
+
+`createProjectTemplateExportPlan` fails closed for blocked or incomplete scans,
+unapproved capabilities, and project-owned entries without an explicit policy.
+Runtime and sensitive paths are not opened just to hash them; only redacted
+reason counts enter the export report. Absolute source paths and inode snapshots
+are process-local state and are omitted from serialized plans.
+
+`writeTaktpack` reopens every source with `O_NOFOLLOW` and revalidates root
+containment, type, inode, link count, size, mode, timestamps, and SHA-256. It
+streams to a same-directory `wx` temporary file, fsyncs it, and then publishes
+atomically. Non-force publication uses a hard-link no-clobber operation.
+Forced publication accepts only an unchanged, regular, single-link target and
+keeps the completed old file until the new pack is ready to rename.
+
+`inspectTaktpack` neither extracts files nor invokes an external `tar`. It
+validates USTAR blocks sequentially and rejects directories, PAX/GNU extensions,
+sparse files, links, devices, FIFOs, unknown names, ordering errors, duplicates,
+truncation, trailing data, and independent resource overruns before any write.
+The pack index binds the manifest, export report, and each blob's digest and
+size. Inspection also validates the manifest/lock seed pair and reruns secret,
+absolute-path, binary, and capability classification. Omitting
+`currentTaktVersion` yields `status: "unknown"` rather than assuming
+compatibility.
+
 ## Compatibility and v2 migration
 
 Clients must reject an unknown schema major. A compatible v1 client may accept

@@ -155,6 +155,34 @@ scanner は open 済み file の stat snapshot を比較して走査中の変更
 Issue #138 の archive 作成時と apply 時には type、containment、link count、size、
 mode、digest、capability evidence を reopen して再検証してください。
 
+## `.taktpack` export・inspect
+
+`.taktpack` v1 は非圧縮のcontent-addressed USTARです。entry順は
+`pack.json`、`manifest.json`、`export-report.json`、続いて
+`blobs/sha256/<SHA-256>` のhash昇順に固定されます。destination pathはmanifestだけが
+保持し、blob名にproject pathを含めません。headerのuid、gid、mtime、modeを固定し、
+canonical JSONを使用するため、同一inputはbyte-for-byteで同じartifactになります。
+
+`createProjectTemplateExportPlan` はclassifierがblocked/incompleteの場合、未承認の
+capabilityがある場合、project-owned entryのpolicyが未指定の場合にfail-closedです。
+runtimeやsensitive pathを開いてhash化せず、除外reasonの件数だけをredacted reportへ
+記録します。source fileの絶対pathとinode snapshotはplanのJSONには含まれない
+process-local stateとして保持されます。
+
+`writeTaktpack` はsourceを`O_NOFOLLOW`でreopenし、root containment、type、inode、
+link count、size、mode、timestamp、SHA-256を再検証します。同一directoryの`wx` tempへ
+streamし、fsync後にpublishします。`force: false`はhard-link publishで競合時にも
+no-clobberを維持し、`force: true`もregular single-link file以外を拒否して、完成した
+新packをrenameするまで既存fileを保持します。
+
+`inspectTaktpack` はextractも外部`tar`も使いません。USTAR blockを順次読み、
+directory、PAX/GNU extension、sparse、symlink、hardlink、device、FIFO、unknown name、
+順序違反、duplicate、truncation、trailing data、各resource上限超過をwrite前に
+拒否します。pack indexがmanifest、export report、blobのhashとsizeを束縛し、
+manifest/lock seed照合とclassifierによるsecret・absolute path・binary・capabilityの
+再検査も行います。`currentTaktVersion`を省略した互換性は安全を仮定せず
+`status: "unknown"`です。
+
 ## 互換性と v2 への移行
 
 クライアントは未知の schema major を必ず拒否します。v1 は security に関係する

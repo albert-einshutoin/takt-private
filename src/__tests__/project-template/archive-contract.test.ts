@@ -5,6 +5,7 @@ import {
   TaktpackError,
   canonicalizeTaktpackJson,
 } from '../../features/project-template/index.js';
+import * as publicApi from '../../index.js';
 
 describe('taktpack v1 archive contract', () => {
   it('serializes JSON with recursively sorted object keys and a trailing newline', () => {
@@ -41,5 +42,11 @@ describe('taktpack v1 archive contract', () => {
       code: 'UNSAFE_ARCHIVE_ENTRY',
       field: 'entry.type',
     });
+  });
+
+  it('publishes export and inspect as structured library APIs', () => {
+    expect(publicApi.createProjectTemplateExportPlan).toBeTypeOf('function');
+    expect(publicApi.writeTaktpack).toBeTypeOf('function');
+    expect(publicApi.inspectTaktpack).toBeTypeOf('function');
   });
 });

@@ -34,6 +34,11 @@ export type {
   ProjectTemplateExportFile,
   ProjectTemplateExportPlan,
   TaktpackInspectResult,
+  InspectTaktpackOptions,
+  WriteTaktpackOptions,
+  WriteTaktpackResult,
+  TaktpackIndexV1,
+  TaktpackLockSeedV1,
 } from './archive-types.js';
 export { canonicalizeTaktpackJson } from './canonical-json.js';
 export { createProjectTemplateExportPlan } from './export-plan.js';
