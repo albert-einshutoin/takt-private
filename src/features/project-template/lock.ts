@@ -29,6 +29,20 @@ export function parseTemplateLock(value: unknown): TemplateLockV1 {
       sha256: parseSha256(entry['sha256'], 'lock entry.sha256'),
     };
   });
+  const paths = new Set<string>();
+  const caseInsensitivePaths = new Map<string, string>();
+  for (const entry of entries) {
+    if (paths.has(entry.path)) {
+      throw new ProjectTemplateValidationError('DUPLICATE_ENTRY_PATH', `lock entries contains duplicate path ${entry.path}`);
+    }
+    const normalizedPath = entry.path.toLocaleLowerCase('en-US');
+    const previousCaseVariant = caseInsensitivePaths.get(normalizedPath);
+    if (previousCaseVariant !== undefined) {
+      throw new ProjectTemplateValidationError('PATH_CASE_COLLISION', `${entry.path} conflicts with ${previousCaseVariant} on case-insensitive file systems`);
+    }
+    paths.add(entry.path);
+    caseInsensitivePaths.set(normalizedPath, entry.path);
+  }
   return {
     schemaVersion: '1.0',
     packVersion: requireSemVer(lock['packVersion'], 'lock.packVersion'),

@@ -177,4 +177,25 @@ describe('project template manifest public contract', () => {
 
     expect(JSON.parse(serializeTemplateLock(parseTemplateLock(lock)))).toEqual(lock);
   });
+
+  it('should reject duplicate and case-colliding paths in a lock', () => {
+    const lock = {
+      schemaVersion: '1.0',
+      packVersion: '1.2.3',
+      source: {
+        kind: 'github',
+        uri: 'github:example/project-template',
+        ref: 'v1.2.3',
+        commit: '0123456789abcdef0123456789abcdef01234567',
+      },
+      entries: [
+        { path: '.takt/config.json', mode: '0644', sha256: 'a'.repeat(64) },
+        { path: '.takt/config.json', mode: '0644', sha256: 'b'.repeat(64) },
+      ],
+    };
+
+    expect(() => parseTemplateLock(lock)).toThrow(expect.objectContaining({ code: 'DUPLICATE_ENTRY_PATH' }));
+    lock.entries[1]!.path = '.takt/CONFIG.json';
+    expect(() => parseTemplateLock(lock)).toThrow(expect.objectContaining({ code: 'PATH_CASE_COLLISION' }));
+  });
 });
