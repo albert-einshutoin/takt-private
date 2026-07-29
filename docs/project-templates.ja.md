@@ -108,7 +108,10 @@ redacted preview を返します。`entries` の path は `.takt` 相対です�
 portable candidate は共有 `workflows/`、`facets/`、`provider-options/` だけです。
 project config、automation、quality gate は `project-owned` として明示的な policy
 review を要求し、unknown path は default deny で excluded になります。runtime state、
-log、cache、sensitive filename は candidate content として読みません。secret、
+log、cache、sensitive filename は candidate content として読みません。生成される
+`sessions/`、`personas/`、`language-cache/`、`runs/`、`worktrees/` と、
+`tasks.yaml`、`staged-devloop-state.json` も runtime state です。runtime directory は
+検証済みの相対 root だけを記録し、配下を走査しません。secret、
 workstation の絶対 path（POSIX、home 相対、drive letter、UNC）、binary、symlink、
 hard link、special file、realpath escape、
 portable-name collision、独立した各 resource 上限超過は blocked です。
@@ -117,7 +120,10 @@ classifier は manifest と同じ `parsePortablePath` validator を再利用し�
 sensitive な入力名は元の名前を返さず、固定の redacted sentinel として報告します。
 public input も bounded で、content は 1 MiB 以下、bytes は content と一致する
 nonnegative safe integer、mode と digest は manifest と同じ形式、信頼済み absolute
-path hint は件数・各長さ・合計長の独立上限を満たす必要があります。
+path hint は件数・各長さ・合計長の独立上限を満たす必要があります。content がある
+場合は core 自身が SHA-256 を計算し、caller 指定値との不一致を拒否します。
+metadata-only 呼び出しでは caller 指定 digest を証拠として返さず、inspection は
+`incomplete` です。
 
 `scanStatus` は `complete` / `incomplete` / `blocked` を区別します。`canExport` が true
 になるのは scan が complete で blocked と project-owned entry がない場合だけで、
@@ -128,14 +134,20 @@ capability evidence は `inspectionStatus` も返します。空の capability l
 authoritative なのは `complete` の場合だけで、metadata skip は `incomplete`、block
 された検査は `blocked` です。executable、GitHub write、external command、曖昧な
 command behavior の検出時は `reviewRequired` になります。
+すべての `gh` command と GitHub API 向け `curl` は、保守的に `github-write` と
+`external-command` の両方として扱います。unknown command は inspection を
+`incomplete` にして review を要求します。
 
 directory 列挙は bounded `opendir` stream を使い、`maxNodes + 1` で停止します。
-そのため攻撃者が大量に作った child 名を一括で memory に展開しません。directory は
+この global witness に達すると残りの再帰と sibling もすべて停止します。inode と
+realpath の検証に失敗した名前は `[unverified-entry]` としてだけ記録し、列挙された
+raw name を error 証拠へ返しません。そのため攻撃者が大量に作った child 名を一括で
+memory に展開しません。directory は
 列挙前後にtype、device、inode、link count、timestamp、realpathを照合します。
 scanner は open 済み file の stat snapshot を比較して走査中の変更を検出しますが、
-成功した snapshot は恒久的な安全証明ではありません。archive 作成時と apply 時には
-type、containment、link count、size、mode、digest、capability evidence を reopen して
-再検証してください。
+成功した snapshot は恒久的な安全証明でも、後続 archive bytes の証明でもありません。
+Issue #138 の archive 作成時と apply 時には type、containment、link count、size、
+mode、digest、capability evidence を reopen して再検証してください。
 
 ## 互換性と v2 への移行
 

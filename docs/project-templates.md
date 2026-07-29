@@ -139,7 +139,11 @@ Only shared `workflows/`, `facets/`, and `provider-options/` entries are
 portable candidates. Project configuration, automation, and quality gates are
 `project-owned` and require an explicit policy review. Unknown paths are
 excluded by default. Runtime state, logs, caches, and sensitive filenames are
-never read as candidate content. The scanner blocks secrets, workstation
+never read as candidate content. This includes generated roots such as
+`sessions/`, `personas/`, `language-cache/`, `runs/`, and `worktrees/`, plus
+generated files such as `tasks.yaml` and `staged-devloop-state.json`. Runtime
+directories are represented by their verified relative root only and are not
+traversed. The scanner blocks secrets, workstation
 absolute paths (POSIX, home-relative, drive-letter, and UNC forms), binary
 content, symlinks, hard links, special files, path
 escapes, portable-name collisions, and independently bounded resource
@@ -150,7 +154,9 @@ sensitive input names are reported as fixed redacted sentinels instead of
 echoing the source name. Its public input is also bounded: content is at most
 1 MiB, byte counts must be exact safe integers, mode and digest use the manifest
 formats, and trusted absolute-path hints have independent count and length
-limits.
+limits. The core computes SHA-256 whenever content is supplied and rejects a
+different caller-supplied digest. Metadata-only calls never return a supplied
+digest as evidence and report incomplete inspection.
 
 `scanStatus` distinguishes `complete`, `incomplete`, and `blocked` scans.
 `canExport` is true only for a complete scan without blocked or project-owned
@@ -162,15 +168,22 @@ Capability evidence includes `inspectionStatus`. An empty capability list is
 authoritative only with `complete`; skipped metadata is `incomplete` and blocked
 inspection is `blocked`. Detected executable, GitHub-write, external, or
 ambiguous command behavior sets `reviewRequired`.
+All `gh` commands and `curl` calls to the GitHub API are conservatively reported
+as both GitHub-write and external-command capabilities. An unknown command
+leaves inspection incomplete and requires review.
 
 Directory enumeration uses a bounded `opendir` stream and stops after
 `maxNodes + 1`, so a directory with an attacker-controlled number of children
-cannot be materialized in memory. Directories are checked by type, device,
+cannot be materialized in memory. Reaching that global witness stops all
+remaining recursion and siblings. A name that fails inode/realpath verification
+is represented only as `[unverified-entry]`; raw enumerated names are not
+returned as error evidence. Directories are checked by type, device,
 inode, link count, timestamps, and realpath before and after enumeration.
 The scanner uses open-file stat snapshots to detect changes during inspection,
-but a successful snapshot is not permanent proof. Archive creation and apply
-must reopen and revalidate type, containment, link count, size, mode, digest,
-and capability evidence before trusting the bytes.
+but a successful snapshot is neither permanent proof nor proof of the later
+archive bytes. Issue #138 archive creation and apply must reopen and revalidate
+type, containment, link count, size, mode, digest, and capability evidence
+before trusting the bytes.
 
 ## Compatibility and v2 migration
 
