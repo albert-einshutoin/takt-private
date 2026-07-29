@@ -45,7 +45,7 @@ export interface GitTemplateSource {
 
 export interface LocalTemplateSource {
   kind: 'local';
-  /** Portable relative POSIX path; absolute workstation paths are forbidden. */
+  /** Portable ASCII relative POSIX path; absolute workstation paths are forbidden. */
   uri: string;
   ref: 'workspace';
   commit: string;
@@ -54,7 +54,7 @@ export interface LocalTemplateSource {
 export type TemplateSource = GithubTemplateSource | GitTemplateSource | LocalTemplateSource;
 
 export interface TemplateEntry {
-  /** Relative to the `.takt/` root; the path must not include a `.takt/` prefix. */
+  /** ASCII path relative to `.takt/`; it must not include a `.takt/` prefix. */
   path: string;
   policy: TemplateEntryPolicy;
   mode: string;

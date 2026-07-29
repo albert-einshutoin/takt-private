@@ -214,6 +214,8 @@ describe('project template manifest public contract', () => {
     'workflows/task.yaml.',
     'workflows/task.yaml ',
     'workflows/ta\u0001sk.yaml',
+    'workflows/ς.yaml',
+    'workflows/σ.yaml',
   ])('should reject an unsafe POSIX or Windows path: %s', (path) => {
     const manifest = validManifest();
     (manifest['entries'] as Array<Record<string, unknown>>)[0]!['path'] = path;
@@ -239,15 +241,10 @@ describe('project template manifest public contract', () => {
     expectValidationCode(manifest, 'UNDECLARED_CAPABILITY');
   });
 
-  it('should reject NFKC compatibility path collisions', () => {
+  it('should reject non-ASCII compatibility path characters before collision checks', () => {
     const manifest = validManifest();
-    const entry = (manifest['entries'] as Array<Record<string, unknown>>)[0]!;
-    entry['path'] = 'workflows/Ａ.yaml';
-    (manifest['entries'] as Array<Record<string, unknown>>).push({
-      ...entry,
-      path: 'workflows/A.yaml',
-    });
-    expectValidationCode(manifest, 'PATH_NORMALIZATION_COLLISION');
+    (manifest['entries'] as Array<Record<string, unknown>>)[0]!['path'] = 'workflows/Ａ.yaml';
+    expectValidationCode(manifest, 'INVALID_PATH');
   });
 
   it('should require every entry path to already be NFC normalized', () => {
@@ -317,6 +314,7 @@ describe('project template manifest public contract', () => {
     ['local', '/Users/example/template', 'workspace'],
     ['local', '../template', 'workspace'],
     ['local', 'templates/default', 'main'],
+    ['local', 'templates/σ', 'workspace'],
   ])('should reject non-canonical %s source provenance', (kind, uri, ref) => {
     const manifest = validManifest();
     manifest['source'] = {
@@ -488,6 +486,9 @@ describe('project template manifest public contract', () => {
       },
       (value: Record<string, unknown>) => {
         (value['entries'] as Array<Record<string, unknown>>)[0]!['path'] = 'workflows/CONOUT$.yaml';
+      },
+      (value: Record<string, unknown>) => {
+        (value['entries'] as Array<Record<string, unknown>>)[0]!['path'] = 'workflows/σ.yaml';
       },
       (value: Record<string, unknown>) => {
         value['source'] = {
