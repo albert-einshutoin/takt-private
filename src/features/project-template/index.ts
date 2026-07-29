@@ -47,6 +47,31 @@ export { canonicalizeTaktpackJson } from './canonical-json.js';
 export { createProjectTemplateExportPlan } from './export-plan.js';
 export { writeTaktpack } from './archive-writer.js';
 export { inspectTaktpack } from './archive-inspector.js';
+export { captureProjectTemplateTargetSnapshot } from './target-snapshot.js';
+export type {
+  ProjectTemplateGitTrackingStatus,
+  CapturedProjectTemplateTargetEntry,
+  ProjectTemplateTargetSnapshot,
+} from './target-snapshot.js';
+export { createProjectTemplateApplyPlan } from './apply-plan.js';
+export type {
+  ProjectTemplateLocalSnapshotEntry,
+  ProjectTemplateIncomingContent,
+  ProjectTemplateIncomingInspectionEvidence,
+  ProjectTemplateApplyPlanInput,
+  ProjectTemplateApplyAction,
+  ProjectTemplateApplyReasonCode,
+  ProjectTemplateRollbackImpact,
+  ProjectTemplateEntryDiff,
+  ManagedProjectTemplateApplyPlanEntry,
+  MergeProjectTemplateApplyPlanEntry,
+  ScaffoldProjectTemplateApplyPlanEntry,
+  ExcludedProjectTemplateApplyPlanEntry,
+  ProjectTemplateApplyPlanEntry,
+  ProjectTemplateApplyPlanSummary,
+  ProjectTemplateApplyPlan,
+  ProjectTemplatePolicyActionMap,
+} from './apply-plan-types.js';
 export type {
   ProjectTemplateManifestV1,
   TemplateCapability,
