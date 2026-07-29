@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1.0",
+  "packVersion": "1.2.3",
+  "takt": {
+    "minVersion": "0.48.0"
+  },
+  "source": {
+    "kind": "github",
+    "uri": "github:example/project-template",
+    "ref": "v1.2.3",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "entries": [],
+  "unexpected": true
+}
