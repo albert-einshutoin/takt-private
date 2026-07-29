@@ -24,14 +24,16 @@ lock の内容が再現可能になります。
 たとえば `.takt/hooks/prepare.sh` は `hooks/prepare.sh` と記録します。
 `.takt/` prefix、絶対パス、`..`、空セグメント、Windows の区切り文字・予約名、
 ADS の `:`、control 文字、末尾の dot/space は拒否されます。大文字小文字だけが
-異なる path だけでなく、path 自体を NFC に限定し、NFKC と locale-aware lowercase
-で同一になる compatibility 文字・NFC/NFD の衝突も拒否します。Windows の
+異なる path の解釈差を避けるため、v1 の各 path segment は ASCII の英数字と
+`.` `_` `-` のみに限定します。Unicode はファイル内容では制限されず、可搬 path
+名だけの制約です。NFC 検証と NFKC + locale-aware lowercase の collision key は
+defense-in-depth として維持します。Windows の
 `CONIN$` と `CONOUT$` も予約名です。これにより macOS と Windows で
 検証結果が変わらないようにします。
 
 `source` は kind ごとの discriminated union です。`github` は `.git` なしの
 `https://github.com/owner/repository`、`git` は credential を含まない HTTPS URL、
-`local` は `.` または `.takt/templates/...` を含む相対 POSIX path と固定 ref
+`local` は `.` または `.takt/templates/...` を含む ASCII 相対 POSIX path と固定 ref
 `workspace` を使用します。query、fragment、
 control 文字、local workstation の絶対 path は保存できません。すべての source は
 小文字 hexadecimal 40 または 64 文字の commit に固定します。
@@ -84,7 +86,7 @@ entry が検出結果にないことや、検出処理自体を実行してい�
 なりません。呼び出し側は inspection の完了状態を別に管理し、必要な証拠がなければ
 apply を拒否します。
 
-WHATWG URL の canonical round-trip、NFC 必須、NFKC collision key、capability
+WHATWG URL の canonical round-trip、ASCII path 境界、NFC 必須、NFKC collision key、capability
 detection の完了性は runtime-only です。draft-07 schema は editor feedback 用であり、
 runtime parser と検出照合の代わりにはなりません。
 

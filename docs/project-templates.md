@@ -42,15 +42,17 @@ lock data are reproducible.
 is represented as `hooks/prepare.sh`; a `.takt/` prefix is rejected. Absolute
 paths, `..`, empty segments, Windows separators and reserved device names,
 alternate data stream (`:`) syntax, control characters, and trailing dot or
-space are rejected. Paths must already be NFC. Collision keys additionally use
-NFKC plus locale-aware lowercase comparison, covering compatibility characters,
-NFC/NFD, and case-only aliases. Windows `CONIN$` and `CONOUT$` are reserved as
+space are rejected. Version 1 limits every path segment to ASCII letters,
+digits, `.`, `_`, and `-` for deterministic behavior across file systems.
+Unicode remains fully supported inside file content; only portable path names
+are restricted. NFC validation and NFKC plus locale-aware lowercase collision
+keys remain as defense in depth. Windows `CONIN$` and `CONOUT$` are reserved as
 well. These rules keep validation consistent on every supported file system.
 `mode` is a four-digit POSIX mode and `sha256` is a lowercase SHA-256 digest.
 
 `source` is a discriminated union. `github` uses a canonical
 `https://github.com/owner/repository` URL without `.git`; `git` uses a
-credential-free HTTPS URL; `local` uses `.` or a portable relative POSIX path
+credential-free HTTPS URL; `local` uses `.` or a portable ASCII relative POSIX path
 (including `.takt/templates/...`) and the literal ref `workspace`. Query
 strings, fragments, control characters, and absolute local workstation paths
 are forbidden. Every source pins an exact 40- or 64-character lowercase
@@ -105,7 +107,7 @@ rejected. An omitted entry or an inspection that was never run is **not**
 evidence that the entry is trusted; callers must track inspection completeness
 and refuse apply when their policy requires evidence that is missing.
 
-WHATWG URL round-trip checks, NFC enforcement, conservative NFKC collision
+WHATWG URL round-trip checks, the ASCII path boundary, NFC enforcement, conservative NFKC collision
 keys, and capability detection completeness are runtime-only. The draft-07
 schemas remain suitable for editor feedback, but they do not replace runtime
 validation.
