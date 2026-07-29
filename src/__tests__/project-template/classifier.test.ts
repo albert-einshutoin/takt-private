@@ -172,6 +172,23 @@ describe('project template pure classifier', () => {
     expect(JSON.stringify(result)).not.toContain('/Users/');
     expect(JSON.stringify(result)).not.toContain('/Volumes/');
   });
+  it.each([
+    '/Users/example/project/config.yaml',
+    '../outside.yaml',
+    'C:\\Users\\example\\config.yaml',
+  ])('should redact an unsafe entry path supplied to the pure API', (relativePath) => {
+    const result = classify({
+      relativePath,
+      content: encoder.encode('safe'),
+      bytes: 4,
+    });
+    expect(result).toMatchObject({
+      relativePath: '[unsafe-path]',
+      classification: 'blocked',
+      reasonCode: 'UNSAFE_ENTRY_PATH',
+    });
+    expect(JSON.stringify(result)).not.toContain(relativePath);
+  });
   it('should block binary NUL content and expose bounded capability evidence', () => {
     const binary = classify({
       relativePath: 'workflows/binary.yaml',
@@ -328,5 +345,15 @@ describe('project template filesystem scan adapter', () => {
       expect(result.scanStatus).not.toBe('complete');
       expect(result.entries.some((entry) => entry.reasonCode.endsWith('LIMIT_EXCEEDED'))).toBe(true);
     }
+  });
+  it('should reject invalid budgets instead of weakening scan bounds', async () => {
+    const root = makeRoot();
+    write(root, '.takt/workflows/a.yaml', 'safe');
+
+    await expect(scan(root, { maxNodes: Number.POSITIVE_INFINITY })).resolves.toMatchObject({
+      scanStatus: 'blocked',
+      canExport: false,
+      entries: [expect.objectContaining({ reasonCode: 'ROOT_UNSAFE' })],
+    });
   });
 });

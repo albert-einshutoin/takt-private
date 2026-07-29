@@ -68,10 +68,24 @@ function limitEntry(
 }
 
 function validateLimits(options: ProjectTemplateScanOptions): ProjectTemplateScanLimits | undefined {
-  const limits = { ...DEFAULT_LIMITS, ...options };
-  return Object.values(limits).every(
-    (value) => Number.isSafeInteger(value) && value >= 0,
-  ) ? limits : undefined;
+  const bounded = (key: keyof ProjectTemplateScanLimits): number | undefined => {
+    const defaultValue = DEFAULT_LIMITS[key];
+    const requested = options[key] ?? defaultValue;
+    if (!Number.isSafeInteger(requested) || requested < 0) return undefined;
+    // Callers may tighten a budget, but cannot turn a bounded public API into
+    // an unbounded allocator by raising its built-in safety ceilings.
+    return Math.min(requested, defaultValue);
+  };
+  const limits = {
+    maxNodes: bounded('maxNodes'),
+    maxFiles: bounded('maxFiles'),
+    maxSingleFileBytes: bounded('maxSingleFileBytes'),
+    maxTotalBytes: bounded('maxTotalBytes'),
+    maxScanBytes: bounded('maxScanBytes'),
+    maxDepth: bounded('maxDepth'),
+  };
+  if (Object.values(limits).some((value) => value === undefined)) return undefined;
+  return limits as ProjectTemplateScanLimits;
 }
 
 async function scanFile(

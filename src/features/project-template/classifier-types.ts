@@ -25,6 +25,7 @@ export type ProjectTemplateClassificationReason =
   | 'UNSUPPORTED_FILE_TYPE'
   | 'PATH_ESCAPE'
   | 'PATH_COLLISION'
+  | 'UNSAFE_ENTRY_PATH'
   | 'NODE_LIMIT_EXCEEDED'
   | 'FILE_LIMIT_EXCEEDED'
   | 'SINGLE_FILE_LIMIT_EXCEEDED'

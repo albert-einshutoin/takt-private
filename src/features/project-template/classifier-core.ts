@@ -40,6 +40,7 @@ const SUMMARY_BY_REASON: Record<ProjectTemplateClassificationReason, string> = {
   UNSUPPORTED_FILE_TYPE: 'Unsupported file type is blocked',
   PATH_ESCAPE: 'Path outside the project root is blocked',
   PATH_COLLISION: 'Portable path collision is blocked',
+  UNSAFE_ENTRY_PATH: 'Unsafe entry path is blocked',
   NODE_LIMIT_EXCEEDED: 'Node limit exceeded',
   FILE_LIMIT_EXCEEDED: 'File limit exceeded',
   SINGLE_FILE_LIMIT_EXCEEDED: 'Single-file byte limit exceeded',
@@ -187,6 +188,17 @@ function blocked(
 export function classifyProjectTemplateEntry(
   input: ProjectTemplateClassifierInput,
 ): ProjectTemplateClassificationResult {
+  if (
+    input.relativePath === ''
+    || input.relativePath.includes('\\')
+    || input.relativePath.includes('\0')
+    || input.relativePath.startsWith('/')
+    || /^[A-Za-z]:/.test(input.relativePath)
+    || input.relativePath.split('/').some((segment) => segment === '..' || segment === '')
+  ) {
+    // Never echo an attacker-controlled absolute/traversal path into a preview.
+    return blocked(input, '[unsafe-path]', 'UNSAFE_ENTRY_PATH');
+  }
   const relativePath = normalizeRelativePath(input.relativePath);
   const pathClassification = classifyPath(relativePath);
 
