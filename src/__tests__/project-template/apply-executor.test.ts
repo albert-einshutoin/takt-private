@@ -167,6 +167,10 @@ describe('project template atomic apply executor', () => {
     expect(statSync(join(root, '.takt', 'generated/check.txt')).mode & 0o777).toBe(0o644);
     expect(JSON.parse(readFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), 'utf-8')))
       .toMatchObject({ packVersion: '2.0.0' });
+    expect(execFileSync('git', ['status', '--short'], {
+      cwd: root,
+      encoding: 'utf8',
+    })).not.toContain('.takt-template-state');
     const backupManifest = JSON.parse(readFileSync(
       join(
         root,

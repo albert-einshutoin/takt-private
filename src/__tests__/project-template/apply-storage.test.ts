@@ -85,6 +85,8 @@ describe('project template apply storage', () => {
     expect(lstatSync(storage.stagingRoot).mode & 0o777).toBe(0o700);
     expect(lstatSync(storage.backupsRoot).mode & 0o777).toBe(0o700);
     expect(lstatSync(storage.controlRoot).dev).toBe(lstatSync(storage.targetRoot).dev);
+    expect(readFileSync(join(storage.controlRoot, '.gitignore'), 'utf8')).toBe('*\n');
+    expect(lstatSync(join(storage.controlRoot, '.gitignore')).mode & 0o077).toBe(0);
   });
 
   it('writes a hash-verified 0600 staging file and rejects unsafe paths', async () => {

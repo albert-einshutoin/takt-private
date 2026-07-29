@@ -25,6 +25,7 @@ const PRIVATE_FILE_MODE = 0o600;
 const MAX_CONTROL_DIRECTORY_ENTRIES = 8_192;
 const MAX_CONTROL_TREE_DEPTH = 16;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+const CONTROL_GITIGNORE_CONTENT = Buffer.from('*\n');
 
 export type ProjectTemplateApplyStorageIoOperation =
   | 'lstat'
@@ -410,6 +411,10 @@ export function createProjectTemplateApplyStorageIo(
     },
     fsyncDirectory: async (path) => {
       runHook(hooks, 'before', 'directory-fsync', path);
+      if (process.platform === 'win32') {
+        runHook(hooks, 'after', 'directory-fsync', path);
+        return;
+      }
       let handle: Awaited<ReturnType<typeof open>> | undefined;
       let primaryError: unknown;
       try {
@@ -645,7 +650,7 @@ export async function initializeProjectTemplateApplyStorage(options: {
     );
   }
 
-  return {
+  const storage: ProjectTemplateApplyStorage = {
     repoRoot,
     targetRoot,
     lockTargetPath: join(repoRoot, '.takt-template-lock.json'),
@@ -657,6 +662,38 @@ export async function initializeProjectTemplateApplyStorage(options: {
     device: repoStat.dev,
     io,
   };
+  const controlIgnorePath = join(controlRoot, '.gitignore');
+  const existingIgnore = await tryLstat(io, controlIgnorePath);
+  if (existingIgnore === undefined) {
+    await writePrivateDurableFile({
+      storage,
+      finalPath: controlIgnorePath,
+      content: CONTROL_GITIGNORE_CONTENT,
+      replace: false,
+      io,
+    });
+  } else {
+    if (
+      existingIgnore.isSymbolicLink()
+      || !existingIgnore.isFile()
+      || existingIgnore.nlink !== 1
+      || existingIgnore.dev !== storage.device
+      || (existingIgnore.mode & 0o077) !== 0
+      || existingIgnore.size !== CONTROL_GITIGNORE_CONTENT.byteLength
+      || !(
+        await io.readFile(
+          controlIgnorePath,
+          CONTROL_GITIGNORE_CONTENT.byteLength,
+        )
+      ).equals(CONTROL_GITIGNORE_CONTENT)
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'project template control ignore file is unsafe',
+      );
+    }
+  }
+  return storage;
 }
 
 async function writePrivateDurableFile(options: {

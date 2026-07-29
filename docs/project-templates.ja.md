@@ -212,7 +212,8 @@ run/daemon開始とapplyは同じ短期coordination mutexを使うため、prefl
 applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を変更します。正式lock
 は`.takt-template-lock.json`、privateなstaging・journal・世代数を制限したbackupは
 `.takt-template-state/`へ保存します。後者はGit ignore対象かつowner-only permission
-です。backup対象は変更するtemplate entryと正式lockだけで、runtime stateやexcluded
+です。各control root自身にも`*`のprivate `.gitignore`を生成するため、任意の適用先で
+backupが`git add -A`へ混入しません。backup対象は変更するtemplate entryと正式lockだけで、runtime stateやexcluded
 contentを新しく収集しません。backup manifestは元のhash、mode、timestampを監査用に
 記録します。復元の一致判定は、replaceでtimestamp自体が更新されるためhash、mode、
 absenceとdoctor結果を正式なcontractにします。
@@ -231,6 +232,8 @@ crashで残ったcoordination fileはowner PIDが確実に停止している場�
 malformed、判定不能なownerは拒否します。v1の脅威境界は共通leaseに従うTAKT/devloopd
 writerです。Node標準APIにはdirectory fd相対のrenameがないため、同じOS userの敵対的
 processが直前witnessとrenameの間で親directoryを差し替える競合は対象外です。
+Windowsはdirectory fsyncを提供しないため、file fsync後のdirectory durabilityだけを
+best-effortとして扱います。
 
 entry種別ごとのceilingは独立し、callerは縮小だけできます。`pack.json`と
 `manifest.json`は各4 MiB、`export-report.json`と各blobは各1 MiBで、entry count、

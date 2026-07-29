@@ -40,6 +40,10 @@ export interface ProjectTemplateRecoveryRequiredIdentity {
 }
 
 function syncDirectory(path: string): void {
+  // Windows does not support opening directories for fsync. File contents are
+  // still fsynced before publication; directory durability is best-effort on
+  // that platform, matching the existing taktpack writer contract.
+  if (process.platform === 'win32') return;
   const fd = openSync(path, constants.O_RDONLY);
   try {
     fsyncSync(fd);

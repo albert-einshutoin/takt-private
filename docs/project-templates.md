@@ -254,7 +254,9 @@ the gap between preflight and lease acquisition.
 Apply stages and validates every output before changing `.takt/`. The formal
 lock is stored at `.takt-template-lock.json`. Private staging, journal, and
 bounded backup generations live under `.takt-template-state/`, which must be
-ignored by Git and is created with owner-only permissions. Backups contain
+ignored by Git and is created with owner-only permissions. Every control root
+contains a private `*` `.gitignore`, preventing backup data from entering
+`git add -A` in arbitrary target repositories. Backups contain
 only affected template entries and the formal lock; runtime state and excluded
 content are never collected. The backup manifest records each original hash,
 mode, and timestamp for audit. Because replacement necessarily changes the
@@ -279,6 +281,8 @@ remains blocked. The v1 threat boundary covers cooperating TAKT/devloopd
 writers that honor the shared lease. Node does not expose directory-fd-relative
 rename, so a hostile process under the same OS user racing a parent-directory
 replacement between the final witness and rename is outside that boundary.
+Windows does not provide directory fsync, so directory durability after
+file-level fsync is best-effort on that platform.
 
 Entry-kind ceilings are independent and callers may only tighten them:
 `pack.json` and `manifest.json` are at most 4 MiB, `export-report.json` and each
