@@ -179,7 +179,7 @@ function detectedCapabilities(
       relativePath.startsWith('automation/')
       || /^#!\s*\//.test(text)
       || /\b(?:npm|pnpm|yarn|bun|make|cargo|go|swift|python|ruby|bash|sh|gh|git)\s+/m.test(text)
-      || /^\s*(?:run|command|script)\s*:\s*\S+/m.test(text)
+      || /^\s*(?:-\s*)?(?:run|command|script)\s*:\s*\S+/m.test(text)
       || /\bcurl\s+/m.test(text)
     )
   ) {
@@ -187,7 +187,7 @@ function detectedCapabilities(
   }
   const knownCommand = /^(?:npm|pnpm|yarn|bun|make|cargo|go|swift|python|ruby|bash|sh|gh|git|curl)(?:\s|$)/i;
   const hasUnknownDeclaredCommand = text !== undefined
-    && Array.from(text.matchAll(/^\s*(?:run|command|script)\s*:\s*(.+)$/gmi))
+    && Array.from(text.matchAll(/^\s*(?:-\s*)?(?:run|command|script)\s*:\s*(.+)$/gmi))
       .some((match) => !knownCommand.test(match[1]!.trim()));
   const automationCommand = text?.split(/\r?\n/)
     .map((line) => line.trim())

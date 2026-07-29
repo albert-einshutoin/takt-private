@@ -397,6 +397,23 @@ describe('project template pure classifier', () => {
       },
     });
   });
+  it.each([
+    '- run: company-deployer --production',
+    'steps:\n  - command: company-deployer --production',
+    'pipeline:\n    - script: company-deployer --production',
+  ])('should detect unknown commands in YAML block sequences: %s', (content) => {
+    expect(classify({
+      relativePath: 'workflows/custom.yaml',
+      content: encoder.encode(content),
+      bytes: content.length,
+    })).toMatchObject({
+      reviewRequired: true,
+      detectedCapabilities: {
+        inspectionStatus: 'incomplete',
+        capabilities: ['external-command'],
+      },
+    });
+  });
   it('should leave automation inspection incomplete for an unknown script command', () => {
     const content = 'company-deployer --production';
     expect(classify({
@@ -674,6 +691,11 @@ describe('project template filesystem scan adapter', () => {
     'language-cache/private.json',
     'tasks.yaml',
     'staged-devloop-state.json',
+    'worktree-sessions/private.json',
+    'clone-meta/private.json',
+    'input_history',
+    'persona_sessions.json',
+    'session-state.json',
   ])('should classify generated runtime path %s as runtime state', (relativePath) => {
     expect(classify({ relativePath, bytes: 0 })).toMatchObject({
       classification: 'excluded',
@@ -698,6 +720,21 @@ describe('project template filesystem scan adapter', () => {
     expect(serialized).not.toContain('private-session-name');
     expect(serialized).not.toContain('private-persona-name');
     expect(serialized).not.toContain('private-language-name');
+  });
+  it('should hide producer-owned names derived from branches and absolute worktree paths', async () => {
+    const root = makeRoot();
+    write(root, '.takt/worktree-sessions/-Users-private-project.json', 'secret');
+    write(root, '.takt/clone-meta/feature--private-customer.json', 'secret');
+
+    const result = await scan(root);
+    const serialized = JSON.stringify(result);
+
+    expect(result.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relativePath: 'worktree-sessions', reasonCode: 'RUNTIME_STATE' }),
+      expect.objectContaining({ relativePath: 'clone-meta', reasonCode: 'RUNTIME_STATE' }),
+    ]));
+    expect(serialized).not.toContain('-Users-private-project');
+    expect(serialized).not.toContain('feature--private-customer');
   });
   it('should block a single non-ASCII path before collision processing', async () => {
     const root = makeRoot();
