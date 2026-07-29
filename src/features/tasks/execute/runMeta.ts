@@ -22,6 +22,7 @@ import {
   writeRunMetaFileDurably,
   type RunMetaStorageIo,
 } from './runMetaStorage.js';
+import { isDebugLoggerRunSlug } from '../../../shared/utils/debug.js';
 
 export interface DirectResumeMetadata {
   readonly sourceRunSlug: string;
@@ -58,6 +59,9 @@ export class RunMetaManager {
     directResume?: DirectResumeMetadata,
     options?: RunMetaManagerOptions,
   ) {
+    if (isDebugLoggerRunSlug(runPaths.slug)) {
+      throw new Error('run metadata slug is reserved for DebugLogger');
+    }
     this.runMetaStorageIo = options?.runMetaStorageIo;
     if (
       options?.projectTemplateCoordinationRoot !== undefined

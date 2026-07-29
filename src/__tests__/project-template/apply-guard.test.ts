@@ -137,6 +137,54 @@ describe('project template apply guard', () => {
     expect(blockCodes(repoPath)).toContain('RUN_METADATA_MISSING');
   });
 
+  it('ignores only a structurally valid DebugLogger directory without meta.json', () => {
+    const repoPath = makeTempRepo();
+    mkdirSync(
+      join(repoPath, '.takt', 'runs', 'debug-2026-07-30T11-22-33', 'logs'),
+      { recursive: true },
+    );
+
+    expect(blockCodes(repoPath)).not.toContain('RUN_METADATA_MISSING');
+  });
+
+  it('does not treat a DebugLogger-shaped symlink as an ignorable run directory', () => {
+    const repoPath = makeTempRepo();
+    const target = join(repoPath, 'debug-log-target');
+    mkdirSync(target, { recursive: true });
+    mkdirSync(join(repoPath, '.takt', 'runs'), { recursive: true });
+    symlinkSync(
+      target,
+      join(repoPath, '.takt', 'runs', 'debug-2026-07-30T11-22-33'),
+    );
+
+    expect(blockCodes(repoPath)).toContain('RUN_METADATA_UNREADABLE');
+  });
+
+  it.each([
+    'debug-custom',
+    'debug-2026-99-99T99-99-99',
+    'debug-2026-07-30T11-22-33-extra',
+  ])('keeps unknown or malformed debug-like run directory %s fail-closed', (slug) => {
+    const repoPath = makeTempRepo();
+    mkdirSync(join(repoPath, '.takt', 'runs', slug), { recursive: true });
+
+    expect(blockCodes(repoPath)).toContain('RUN_METADATA_MISSING');
+  });
+
+  it('keeps a DebugLogger-named directory with malformed meta.json fail-closed', () => {
+    const repoPath = makeTempRepo();
+    const runDir = join(
+      repoPath,
+      '.takt',
+      'runs',
+      'debug-2026-07-30T11-22-33',
+    );
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, 'meta.json'), '{broken');
+
+    expect(blockCodes(repoPath)).toContain('RUN_METADATA_INVALID');
+  });
+
   it('blocks a live personal daemon', () => {
     const repoPath = makeTempRepo();
     writeLifecycleFile(repoPath, 'state.json', {

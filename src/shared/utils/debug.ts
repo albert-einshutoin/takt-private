@@ -15,6 +15,20 @@ interface DebugConfig {
 }
 
 /**
+ * Identifies the reserved run-directory shape created by DebugLogger.
+ * A real UTC calendar timestamp is required so arbitrary `debug-*` names
+ * cannot bypass fail-closed run metadata inspection.
+ */
+export function isDebugLoggerRunSlug(slug: string): boolean {
+  const match = /^debug-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})$/
+    .exec(slug);
+  if (match === null) return false;
+  const timestamp = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}.000Z`;
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime()) && date.toISOString() === timestamp;
+}
+
+/**
  * Debug logger singleton.
  * Manages file-based debug logging and verbose console output.
  */

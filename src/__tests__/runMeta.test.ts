@@ -42,6 +42,17 @@ describe('RunMetaManager', () => {
     vi.clearAllMocks();
   });
 
+  it('rejects DebugLogger-reserved slugs for actual run metadata', () => {
+    const paths = {
+      ...createRunPaths(),
+      slug: 'debug-2026-07-30T11-22-33',
+    };
+
+    expect(() => new RunMetaManager(paths, 'Reserved debug task', 'default'))
+      .toThrow('reserved for DebugLogger');
+    expect(mockWriteRunMeta).not.toHaveBeenCalled();
+  });
+
   it('should persist currentStep and currentIteration on updateStep', () => {
     const manager = new RunMetaManager(createRunPaths(), 'Force fail task', 'default');
 

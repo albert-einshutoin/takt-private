@@ -12,6 +12,7 @@ import {
 import { join, resolve } from 'node:path';
 import { isProcessAlive } from '../../infra/task/process.js';
 import { parseProjectTemplateApplyJournal } from './apply-storage.js';
+import { isDebugLoggerRunSlug } from '../../shared/utils/debug.js';
 
 const DEFAULT_STALE_AFTER_MINUTES = 180;
 const MAX_GUARD_JSON_BYTES = 1024 * 1024;
@@ -478,6 +479,14 @@ function isValidStopRequest(value: unknown): boolean {
     && value['reason'].trim().length > 0;
 }
 
+function isRealDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function inspectRuns(
   repoPath: string,
   now: Date,
@@ -511,8 +520,16 @@ function inspectRuns(
       }
       continue;
     }
-    const metaPath = join(runsDir, entry.name, 'meta.json');
+    const runDir = join(runsDir, entry.name);
+    const metaPath = join(runDir, 'meta.json');
     const read = readProjectTemplateJsonStrict(metaPath);
+    if (
+      read.kind === 'missing'
+      && isDebugLoggerRunSlug(entry.name)
+      && isRealDirectory(runDir)
+    ) {
+      continue;
+    }
     if (read.kind !== 'value') {
       const code = read.kind === 'missing'
         ? 'RUN_METADATA_MISSING'

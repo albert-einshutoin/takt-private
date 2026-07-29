@@ -15,6 +15,7 @@ import {
   infoLog,
   errorLog,
   writePromptLog,
+  isDebugLoggerRunSlug,
 } from '../shared/utils/index.js';
 import { existsSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -36,6 +37,24 @@ describe('debug logging', () => {
 
   afterEach(() => {
     resetDebugLogger();
+  });
+
+  describe('isDebugLoggerRunSlug', () => {
+    it.each([
+      'debug-2026-07-30T11-22-33',
+      'debug-2024-02-29T23-59-59',
+    ])('accepts a real UTC DebugLogger timestamp: %s', (slug) => {
+      expect(isDebugLoggerRunSlug(slug)).toBe(true);
+    });
+
+    it.each([
+      'debug-custom',
+      'debug-2025-02-29T11-22-33',
+      'debug-2026-07-30T24-00-00',
+      'debug-2026-07-30T11-22-33-extra',
+    ])('rejects a malformed or impossible DebugLogger timestamp: %s', (slug) => {
+      expect(isDebugLoggerRunSlug(slug)).toBe(false);
+    });
   });
 
   describe('initDebugLogger', () => {
