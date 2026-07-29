@@ -193,6 +193,8 @@ export interface ProjectTemplateBackupManifest {
   planId: string;
   preconditionToken: string;
   createdAt: string;
+  /** Target-root-relative directories absent before this transaction. */
+  createdTargetDirectories: readonly string[];
   entries: readonly ProjectTemplateBackupManifestEntry[];
 }
 
@@ -212,6 +214,7 @@ export interface ProjectTemplateApplyJournal {
   backupId: string;
   state: ProjectTemplateApplyJournalState;
   completedOperations: readonly string[];
+  createdTargetDirectories: readonly string[];
   updatedAt: string;
 }
 
@@ -1001,14 +1004,71 @@ function validateBackupManifest(
       after: validateBackupState(entry.after),
     };
   });
+  const createdTargetDirectories = validateCreatedTargetDirectories(
+    manifest.createdTargetDirectories,
+    'INVALID_MANIFEST',
+  );
+  const allowedCreatedDirectories = new Set<string>();
+  for (const entry of entries) {
+    if (entry.target.kind === 'lock') continue;
+    allowedCreatedDirectories.add('');
+    const parent = dirname(entry.target.path).split('/').filter(
+      (segment) => segment !== '.',
+    );
+    let current = '';
+    for (const segment of parent) {
+      current = current === '' ? segment : `${current}/${segment}`;
+      allowedCreatedDirectories.add(current);
+    }
+  }
+  if (createdTargetDirectories.some((path) => !allowedCreatedDirectories.has(path))) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST',
+      'created target directory is not an ancestor of a template target',
+    );
+  }
   return {
     schemaVersion: '1.0',
     backupId: assertSafeIdentifier(manifest.backupId, 'backupId'),
     planId: assertHash(manifest.planId, 'planId'),
     preconditionToken: assertHash(manifest.preconditionToken, 'preconditionToken'),
     createdAt: assertTimestamp(manifest.createdAt, 'createdAt'),
+    createdTargetDirectories,
     entries,
   };
+}
+
+function validateCreatedTargetDirectories(
+  value: unknown,
+  code: 'INVALID_MANIFEST' | 'INVALID_JOURNAL',
+): string[] {
+  if (!Array.isArray(value) || value.length > MAX_CONTROL_DIRECTORY_ENTRIES) {
+    throw new ProjectTemplateApplyStorageError(code, 'created target directories are invalid');
+  }
+  const seen = new Set<string>();
+  const directories = value.map((path) => {
+    if (typeof path !== 'string') {
+      throw new ProjectTemplateApplyStorageError(code, 'created target directory is invalid');
+    }
+    const normalized = path === '' ? '' : safeRelativePath(path);
+    if (seen.has(normalized)) {
+      throw new ProjectTemplateApplyStorageError(code, 'created target directories contain duplicates');
+    }
+    seen.add(normalized);
+    return normalized;
+  });
+  const canonical = [...directories].sort((left, right) => {
+    const leftDepth = left === '' ? 0 : left.split('/').length;
+    const rightDepth = right === '' ? 0 : right.split('/').length;
+    return leftDepth - rightDepth || left.localeCompare(right);
+  });
+  if (directories.some((path, index) => path !== canonical[index])) {
+    throw new ProjectTemplateApplyStorageError(
+      code,
+      'created target directories are not in canonical order',
+    );
+  }
+  return directories;
 }
 
 export async function writeProjectTemplateBackupManifest(options: {
@@ -1067,6 +1127,10 @@ export function parseProjectTemplateApplyJournal(
       'apply journal shape is invalid',
     );
   }
+  const createdTargetDirectories = validateCreatedTargetDirectories(
+    journal.createdTargetDirectories,
+    'INVALID_JOURNAL',
+  );
   return {
     schemaVersion: '1.0',
     transactionId: assertSafeIdentifier(journal.transactionId, 'transactionId'),
@@ -1074,6 +1138,7 @@ export function parseProjectTemplateApplyJournal(
     backupId: assertSafeIdentifier(journal.backupId, 'backupId'),
     state: journal.state,
     completedOperations: [...journal.completedOperations],
+    createdTargetDirectories,
     updatedAt: assertTimestamp(journal.updatedAt, 'updatedAt'),
   };
 }

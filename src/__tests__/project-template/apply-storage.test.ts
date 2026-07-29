@@ -50,6 +50,7 @@ function manifest(backupId: string, createdAt: string): ProjectTemplateBackupMan
     planId: 'a'.repeat(64),
     preconditionToken: 'b'.repeat(64),
     createdAt,
+    createdTargetDirectories: [],
     entries: [],
   };
 }
@@ -62,6 +63,7 @@ function journal(): ProjectTemplateApplyJournal {
     backupId: 'backup-1',
     state: 'prepared',
     completedOperations: [],
+    createdTargetDirectories: [],
     updatedAt: '2026-07-30T00:00:00.000Z',
   };
 }
@@ -217,6 +219,43 @@ describe('project template apply storage', () => {
       storage,
       manifest: backupManifest,
     })).rejects.toMatchObject({ code: 'ALREADY_EXISTS' });
+  });
+
+  it.each([
+    ['unrelated directory', [''], [{ kind: 'lock' as const }]],
+    ['non-ancestor directory', ['', 'unrelated'], [{
+      kind: 'template-entry' as const,
+      path: 'generated/file.yaml',
+    }]],
+    ['non-canonical order', ['generated', ''], [{
+      kind: 'template-entry' as const,
+      path: 'generated/file.yaml',
+    }]],
+    ['duplicate directory', ['', ''], [{
+      kind: 'template-entry' as const,
+      path: 'generated/file.yaml',
+    }]],
+  ])('rejects %s in created-directory evidence', async (
+    _label,
+    createdTargetDirectories,
+    targets,
+  ) => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    const invalid: ProjectTemplateBackupManifest = {
+      ...manifest(`backup-${roots.length}`, '2026-07-30T00:00:00.000Z'),
+      createdTargetDirectories,
+      entries: targets.map((target) => ({
+        target,
+        action: 'add' as const,
+        before: { kind: 'absent' as const },
+        after: { kind: 'absent' as const },
+      })),
+    };
+
+    await expect(writeProjectTemplateBackupManifest({
+      storage,
+      manifest: invalid,
+    })).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
   });
 
   it.each<ProjectTemplateApplyStorageIoOperation>([

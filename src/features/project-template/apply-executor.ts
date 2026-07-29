@@ -278,11 +278,90 @@ async function ensureTargetParent(
     let stat = await safeLstat(current);
     if (stat === undefined) {
       await storage.io.mkdir(current, 0o700);
+      // A directory is part of the transaction's visible state. Persist its
+      // parent entry before publishing a file beneath it so recovery can
+      // converge after a crash between mkdir and rename.
+      await storage.io.fsyncDirectory(dirname(current));
       stat = await storage.io.lstat(current);
     }
     if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== storage.device) {
       throw new Error('target parent is unsafe');
     }
+  }
+}
+
+function targetParentDirectories(
+  storage: ProjectTemplateApplyStorage,
+  target: ProjectTemplateApplyTarget,
+): string[] {
+  if (target.kind === 'lock') return [];
+  const resolved = resolveProjectTemplateApplyTarget(storage, target);
+  const relativeParent = relative(storage.targetRoot, dirname(resolved.absolutePath))
+    .split(sep).join('/');
+  const segments = relativeParent === '' ? [] : relativeParent.split('/');
+  const directories = [''];
+  let current = '';
+  for (const segment of segments) {
+    current = current === '' ? segment : `${current}/${segment}`;
+    directories.push(current);
+  }
+  return directories;
+}
+
+async function collectMissingTargetDirectories(
+  storage: ProjectTemplateApplyStorage,
+  operations: readonly ApplyOperation[],
+): Promise<string[]> {
+  const candidates = new Set(
+    operations.flatMap((operation) => targetParentDirectories(storage, operation.target)),
+  );
+  const missing: string[] = [];
+  for (const relativePath of [...candidates].sort(
+    (left, right) => left.split('/').length - right.split('/').length
+      || left.localeCompare(right),
+  )) {
+    const absolutePath = relativePath === ''
+      ? storage.targetRoot
+      : join(storage.targetRoot, relativePath);
+    const stat = await safeLstat(absolutePath);
+    if (stat === undefined) {
+      missing.push(relativePath);
+      continue;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== storage.device) {
+      throw new Error('target parent is unsafe');
+    }
+  }
+  return missing;
+}
+
+async function removeCreatedTargetDirectories(
+  storage: ProjectTemplateApplyStorage,
+  createdTargetDirectories: readonly string[],
+): Promise<void> {
+  const deepestFirst = [...createdTargetDirectories].sort(
+    (left, right) => right.split('/').length - left.split('/').length
+      || right.localeCompare(left),
+  );
+  for (const relativePath of deepestFirst) {
+    const absolutePath = relativePath === ''
+      ? storage.targetRoot
+      : join(storage.targetRoot, relativePath);
+    const before = await safeLstat(absolutePath);
+    if (before === undefined) continue;
+    if (before.isSymbolicLink() || !before.isDirectory() || before.dev !== storage.device) {
+      throw new Error('created target directory is unsafe');
+    }
+    try {
+      // rmdir performs the emptiness check atomically in the filesystem. Avoid
+      // an unbounded pre-scan and preserve any directory that gained content.
+      await storage.io.rmdir(absolutePath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTEMPTY' || code === 'EEXIST') continue;
+      throw error;
+    }
+    await storage.io.fsyncDirectory(dirname(absolutePath));
   }
 }
 
@@ -507,6 +586,7 @@ export async function applyProjectTemplatePlan(options: {
   let backupId: string | undefined;
   let transactionId: string | undefined;
   let manifest: ProjectTemplateBackupManifest | undefined;
+  let createdTargetDirectories: string[] = [];
   const completedOperations: string[] = [];
   let intentOperationKey: string | undefined;
   try {
@@ -609,12 +689,14 @@ export async function applyProjectTemplatePlan(options: {
       staged: stagedLock,
     });
 
+    createdTargetDirectories = await collectMissingTargetDirectories(storage, operations);
     manifest = {
       schemaVersion: '1.0',
       backupId,
       planId: options.plan.planId,
       preconditionToken: options.plan.preconditionToken,
       createdAt: (options.now ?? new Date()).toISOString(),
+      createdTargetDirectories,
       entries: operations.map<ProjectTemplateBackupManifestEntry>((operation) => ({
         target: operation.target,
         action: operation.action,
@@ -629,6 +711,7 @@ export async function applyProjectTemplatePlan(options: {
       backupId,
       state: 'prepared',
       completedOperations,
+      createdTargetDirectories,
       updatedAt: (options.now ?? new Date()).toISOString(),
     });
     for (const operation of operations) {
@@ -641,6 +724,7 @@ export async function applyProjectTemplatePlan(options: {
         backupId,
         state: 'committing',
         completedOperations,
+        createdTargetDirectories,
         updatedAt: new Date().toISOString(),
       });
       if (!stateMatches(
@@ -658,6 +742,7 @@ export async function applyProjectTemplatePlan(options: {
         backupId,
         state: 'committing',
         completedOperations,
+        createdTargetDirectories,
         updatedAt: new Date().toISOString(),
       });
       intentOperationKey = undefined;
@@ -668,6 +753,7 @@ export async function applyProjectTemplatePlan(options: {
       backupId,
       state: 'verifying',
       completedOperations,
+      createdTargetDirectories,
       updatedAt: new Date().toISOString(),
     });
     if (!runProjectTemplateDoctor(options.projectRoot).passed) {
@@ -679,6 +765,7 @@ export async function applyProjectTemplatePlan(options: {
       backupId,
       state: 'committed',
       completedOperations,
+      createdTargetDirectories,
       updatedAt: new Date().toISOString(),
     });
     await removeProjectTemplateStagingTransaction({ storage, transactionId });
@@ -710,6 +797,7 @@ export async function applyProjectTemplatePlan(options: {
           }
         }
         if (completedOperations.length === 0) {
+          await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
           if (!await verifyManifestState(storage, manifest, 'before')) {
             throw new Error('pre-mutation state cannot be verified');
           }
@@ -719,6 +807,7 @@ export async function applyProjectTemplatePlan(options: {
             backupId: manifest.backupId,
             state: 'rolled-back',
             completedOperations,
+            createdTargetDirectories,
             updatedAt: new Date().toISOString(),
           });
           await removeProjectTemplateStagingTransaction({ storage, transactionId });
@@ -733,6 +822,7 @@ export async function applyProjectTemplatePlan(options: {
           backupId: manifest.backupId,
           state: 'rolling-back',
           completedOperations,
+          createdTargetDirectories,
           updatedAt: new Date().toISOString(),
         });
         await restoreOperations(
@@ -741,6 +831,7 @@ export async function applyProjectTemplatePlan(options: {
           `restore-${randomUUID()}`,
           new Set(completedOperations),
         );
+        await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
         if (
           !await verifyManifestState(storage, manifest, 'before')
           || !runProjectTemplateDoctor(options.projectRoot).passed
@@ -753,6 +844,7 @@ export async function applyProjectTemplatePlan(options: {
           backupId: manifest.backupId,
           state: 'rolled-back',
           completedOperations,
+          createdTargetDirectories,
           updatedAt: new Date().toISOString(),
         });
         return notStarted('APPLY_FAILED_ROLLED_BACK', 'apply failed and was rolled back');
@@ -768,6 +860,7 @@ export async function applyProjectTemplatePlan(options: {
             backupId: manifest.backupId,
             state: 'restore-failed',
             completedOperations,
+            createdTargetDirectories,
             updatedAt: new Date().toISOString(),
           });
         } catch {
@@ -841,6 +934,7 @@ export async function rollbackProjectTemplateApply(options: {
           backupId: manifest.backupId,
           state: 'rolling-back',
           completedOperations: restoredOperations,
+          createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
         });
         await restoreOperations(
@@ -856,9 +950,11 @@ export async function rollbackProjectTemplateApply(options: {
           backupId: manifest.backupId,
           state: 'rolling-back',
           completedOperations: restoredOperations,
+          createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
         });
       }
+      await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
       if (
         !await verifyManifestState(storage, manifest, 'before')
         || !runProjectTemplateDoctor(options.projectRoot).passed
@@ -871,6 +967,7 @@ export async function rollbackProjectTemplateApply(options: {
         backupId: manifest.backupId,
         state: 'rolled-back',
         completedOperations: restoredOperations,
+        createdTargetDirectories: manifest.createdTargetDirectories,
         updatedAt: new Date().toISOString(),
       });
       await removeProjectTemplateStagingTransaction({ storage, transactionId });
@@ -887,6 +984,7 @@ export async function rollbackProjectTemplateApply(options: {
           backupId: manifest.backupId,
           state: 'restore-failed',
           completedOperations: restoredOperations,
+          createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
         });
       } catch {
@@ -994,6 +1092,14 @@ export async function recoverProjectTemplateApply(options: {
       backupId: journal.backupId,
     });
     if (manifest.planId !== journal.planId) throw new Error('journal plan mismatch');
+    if (
+      manifest.createdTargetDirectories.length !== journal.createdTargetDirectories.length
+      || manifest.createdTargetDirectories.some(
+        (path, index) => path !== journal!.createdTargetDirectories[index],
+      )
+    ) {
+      throw new Error('journal created-directory evidence mismatch');
+    }
 
     if (journal.state === 'committed') {
       if (
@@ -1045,6 +1151,7 @@ export async function recoverProjectTemplateApply(options: {
         backupId: journal.backupId,
         state: 'rolling-back',
         completedOperations: restored,
+        createdTargetDirectories: manifest.createdTargetDirectories,
         updatedAt: new Date().toISOString(),
       });
       await restoreOperations(
@@ -1055,6 +1162,7 @@ export async function recoverProjectTemplateApply(options: {
       );
       restored.push(key);
     }
+    await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
     if (
       !await verifyManifestState(storage, manifest, 'before')
       || !runProjectTemplateDoctor(options.projectRoot).passed
@@ -1065,6 +1173,7 @@ export async function recoverProjectTemplateApply(options: {
       backupId: journal.backupId,
       state: 'rolled-back',
       completedOperations: restored,
+      createdTargetDirectories: manifest.createdTargetDirectories,
       updatedAt: new Date().toISOString(),
     });
     await removeProjectTemplateStagingTransaction({

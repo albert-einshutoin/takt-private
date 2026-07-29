@@ -215,8 +215,11 @@ applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を�
 です。各control root自身にも`*`のprivate `.gitignore`を生成するため、任意の適用先で
 backupが`git add -A`へ混入しません。backup対象は変更するtemplate entryと正式lockだけで、runtime stateやexcluded
 contentを新しく収集しません。backup manifestは元のhash、mode、timestampを監査用に
-記録します。復元の一致判定は、replaceでtimestamp自体が更新されるためhash、mode、
-absenceとdoctor結果を正式なcontractにします。
+記録し、transaction前には存在しなかった適用先の親directoryも証拠として保持します。
+補償、recovery、operator rollbackは、それらが空のままである場合だけ深い順に削除し、
+既存directoryや後から内容が追加されたdirectoryは保持します。復元の一致判定は、
+replaceでtimestamp自体が更新されるためhash、mode、absenceとdoctor結果を正式な
+contractにします。
 
 複数の独立fileをfilesystemのrenameだけで同時切替することはできません。そのためv1は
 単一exclusive leaseの下でdurable journal、決定的なfile単位replace、補償rollbackを

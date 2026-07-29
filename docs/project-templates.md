@@ -259,9 +259,12 @@ contains a private `*` `.gitignore`, preventing backup data from entering
 `git add -A` in arbitrary target repositories. Backups contain
 only affected template entries and the formal lock; runtime state and excluded
 content are never collected. The backup manifest records each original hash,
-mode, and timestamp for audit. Because replacement necessarily changes the
-filesystem timestamp, restore conformance is defined by hash, mode, absence,
-and the doctor result.
+mode, and timestamp for audit. It also records target parent directories that
+were absent before the transaction. Compensation, recovery, and operator
+rollback remove those parents deepest-first only while they remain empty;
+pre-existing or subsequently populated directories are preserved. Because
+replacement necessarily changes the filesystem timestamp, restore conformance
+is defined by hash, mode, absence, and the doctor result.
 
 The filesystem cannot atomically rename multiple independent files. The v1
 contract therefore uses a durable journal, deterministic per-file replacement,

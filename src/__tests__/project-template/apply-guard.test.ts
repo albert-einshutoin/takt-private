@@ -439,6 +439,7 @@ describe('project template apply guard', () => {
       backupId: 'backup-1',
       state: 'committing',
       completedOperations: [],
+      createdTargetDirectories: [],
       updatedAt: now.toISOString(),
     }));
 

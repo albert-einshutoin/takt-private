@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyProjectTemplatePlan,
@@ -201,6 +201,141 @@ describe('project template atomic apply executor', () => {
     expect(() => readFileSync(join(root, '.takt', 'generated/check.txt'))).toThrow();
   });
 
+  it('removes transaction-created target parents after rollback so a missing-root plan can retry', async () => {
+    const root = makeRoot();
+    rmSync(join(root, '.takt'), { recursive: true });
+    const contents = { 'generated/nested/config.yaml': 'language: ja\n' };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+    expect(applied.status).toBe('committed');
+    const expectedCreatedDirectories = ['', 'generated', 'generated/nested'];
+    const backupId = applied.status === 'committed' ? applied.backupId : '';
+    expect(JSON.parse(readFileSync(join(
+      root,
+      '.takt-template-state',
+      'backups',
+      backupId,
+      'manifest.json',
+    ), 'utf8'))).toMatchObject({
+      createdTargetDirectories: expectedCreatedDirectories,
+    });
+    expect(JSON.parse(readFileSync(join(
+      root,
+      '.takt-template-state',
+      'journal.json',
+    ), 'utf8'))).toMatchObject({
+      createdTargetDirectories: expectedCreatedDirectories,
+    });
+
+    const rollback = await rollbackProjectTemplateApply({
+      projectRoot: root,
+      backupId,
+    });
+
+    expect(rollback.status).toBe('rolled_back');
+    expect(existsSync(join(root, '.takt'))).toBe(false);
+    mkdirSync(join(root, '.takt'));
+    const terminalRecovery = await recoverProjectTemplateApply({ projectRoot: root });
+    expect(terminalRecovery.status).toBe('rolled_back');
+    expect(existsSync(join(root, '.takt'))).toBe(true);
+    rmSync(join(root, '.takt'), { recursive: true });
+    const retried = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+    expect(retried.status).toBe('committed');
+  });
+
+  it('preserves existing and newly non-empty parent directories during rollback', async () => {
+    const root = makeRoot();
+    const contents = {
+      'created/managed.yaml': 'managed: true\n',
+    };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+    expect(applied.status).toBe('committed');
+    writeFileSync(join(root, '.takt', 'created', 'user.txt'), 'preserve\n');
+
+    const rollback = await rollbackProjectTemplateApply({
+      projectRoot: root,
+      backupId: applied.status === 'committed' ? applied.backupId : '',
+    });
+
+    expect(rollback.status).toBe('rolled_back');
+    expect(existsSync(join(root, '.takt'))).toBe(true);
+    expect(readFileSync(join(root, '.takt', 'created', 'user.txt'), 'utf8')).toBe('preserve\n');
+    expect(existsSync(join(root, '.takt', 'created', 'managed.yaml'))).toBe(false);
+  });
+
+  it.each(['rmdir', 'directory-fsync'] as const)(
+    'converges recovery when created-directory %s fails during rollback',
+    async (faultOperation) => {
+      const root = makeRoot();
+      rmSync(join(root, '.takt'), { recursive: true });
+      const contents = { 'generated/config.yaml': 'language: ja\n' };
+      const incomingManifest = manifest(contents);
+      const blobs = incomingContents(contents);
+      const plan = await createPlan(root, incomingManifest, blobs);
+      const applied = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: blobs,
+      });
+      expect(applied.status).toBe('committed');
+      let injected = false;
+      const io = createProjectTemplateApplyStorageIo({
+        before(operation, path) {
+          if (
+            !injected
+            && operation === faultOperation
+            && (
+              (
+                operation === 'rmdir'
+                && basename(path) === '.takt'
+              )
+              || (
+                operation === 'directory-fsync'
+                && basename(path) === basename(root)
+              )
+            )
+          ) {
+            injected = true;
+            throw new Error('injected created-directory cleanup fault');
+          }
+        },
+      });
+
+      const rollback = await rollbackProjectTemplateApply({
+        projectRoot: root,
+        backupId: applied.status === 'committed' ? applied.backupId : '',
+        io,
+      });
+
+      expect(injected).toBe(true);
+      expect(rollback.status).toBe('recovery_required');
+      await expect(recoverProjectTemplateApply({ projectRoot: root }))
+        .resolves.toMatchObject({ status: 'rolled_back' });
+      expect(existsSync(join(root, '.takt'))).toBe(false);
+    },
+  );
+
   it('rejects target drift before creating backup or changing bytes', async () => {
     const root = makeRoot();
     const contents = { 'config.yaml': 'language: ja\n' };
@@ -375,6 +510,7 @@ describe('project template atomic apply executor', () => {
 
   it('automatically restores the original tree when post-apply doctor fails', async () => {
     const root = makeRoot();
+    rmSync(join(root, '.takt'), { recursive: true });
     const contents = { 'workflows/broken.yaml': 'broken: [\n' };
     const incomingManifest = manifest(contents);
     const blobs = incomingContents(contents);
@@ -392,11 +528,13 @@ describe('project template atomic apply executor', () => {
       code: 'APPLY_FAILED_ROLLED_BACK',
     });
     expect(existsSync(join(root, '.takt', 'workflows', 'broken.yaml'))).toBe(false);
+    expect(existsSync(join(root, '.takt'))).toBe(false);
     expect(inspectProjectTemplateApplyGuard({ repoPath: root }).passed).toBe(true);
   });
 
   it('converges idempotently from a non-terminal journal even if its marker was lost', async () => {
     const root = makeRoot();
+    rmSync(join(root, '.takt'), { recursive: true });
     const contents = { 'config.yaml': 'language: ja\n' };
     const incomingManifest = manifest(contents);
     const blobs = incomingContents(contents);
@@ -438,6 +576,7 @@ describe('project template atomic apply executor', () => {
 
     const recovered = await recoverProjectTemplateApply({ projectRoot: root });
     expect(recovered.status).toBe('rolled_back');
+    expect(existsSync(join(root, '.takt'))).toBe(false);
     expect(existsSync(markerPath)).toBe(false);
     await expect(recoverProjectTemplateApply({ projectRoot: root }))
       .resolves.toMatchObject({ status: 'rolled_back' });
