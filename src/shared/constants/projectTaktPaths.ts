@@ -6,6 +6,7 @@ export const PROJECT_TAKT_DIRECTORY = '.takt';
 export const PROJECT_TASKS_FILE = 'tasks.yaml';
 export const PROJECT_STAGED_DEVLOOP_STATE_FILE = 'staged-devloop-state.json';
 export const PROJECT_CLONE_META_DIRECTORY = 'clone-meta';
+export const PROJECT_FINDINGS_DIRECTORY = 'findings';
 export const PROJECT_WORKTREE_SESSIONS_DIRECTORY = 'worktree-sessions';
 export const PROJECT_INPUT_HISTORY_FILE = 'input_history';
 export const PROJECT_PERSONA_SESSIONS_FILE = 'persona_sessions.json';
@@ -16,10 +17,10 @@ export const PROJECT_RUNTIME_DIRECTORY_NAMES = [
   'cache',
   PROJECT_CLONE_META_DIRECTORY,
   'completed',
+  PROJECT_FINDINGS_DIRECTORY,
   'language-cache',
   'logs',
   'persona',
-  'personas',
   'runs',
   'session',
   'sessions',

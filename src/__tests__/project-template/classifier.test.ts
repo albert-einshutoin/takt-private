@@ -401,6 +401,9 @@ describe('project template pure classifier', () => {
     '- run: company-deployer --production',
     'steps:\n  - command: company-deployer --production',
     'pipeline:\n    - script: company-deployer --production',
+    '{"steps": [{"run": "company-deployer --production"}]}',
+    '"run": company-deployer --production',
+    'steps:\n  - run: >\n      company-deployer\n      --production',
   ])('should detect unknown commands in YAML block sequences: %s', (content) => {
     expect(classify({
       relativePath: 'workflows/custom.yaml',
@@ -410,6 +413,39 @@ describe('project template pure classifier', () => {
       reviewRequired: true,
       detectedCapabilities: {
         inspectionStatus: 'incomplete',
+        capabilities: ['external-command'],
+      },
+    });
+  });
+  it.each([
+    ['parse error', 'steps:\n  - run: ['],
+    ['duplicate key', 'run: npm test\nrun: npm lint'],
+    ['multiple documents', 'run: npm test\n---\nname: second'],
+    ['alias value', 'command: &command npm test\nrun: *command'],
+    ['non-scalar value', 'run:\n  - npm test'],
+    ['excessive depth', `${'nested:\n  '.repeat(40)}run: npm test`],
+  ])('should fail closed for ambiguous YAML command inspection: %s', (_label, content) => {
+    expect(classify({
+      relativePath: 'workflows/custom.yaml',
+      content: encoder.encode(content),
+      bytes: content.length,
+    })).toMatchObject({
+      reviewRequired: true,
+      detectedCapabilities: {
+        inspectionStatus: 'incomplete',
+      },
+    });
+  });
+  it('should recognize a known command in a YAML sequence without marking inspection incomplete', () => {
+    const content = 'steps:\n  - run: npm test';
+    expect(classify({
+      relativePath: 'workflows/custom.yaml',
+      content: encoder.encode(content),
+      bytes: content.length,
+    })).toMatchObject({
+      reviewRequired: true,
+      detectedCapabilities: {
+        inspectionStatus: 'complete',
         capabilities: ['external-command'],
       },
     });
@@ -687,12 +723,12 @@ describe('project template filesystem scan adapter', () => {
   });
   it.each([
     'sessions/private.json',
-    'personas/private.md',
     'language-cache/private.json',
     'tasks.yaml',
     'staged-devloop-state.json',
     'worktree-sessions/private.json',
     'clone-meta/private.json',
+    'findings/private.json',
     'input_history',
     'persona_sessions.json',
     'session-state.json',
@@ -706,7 +742,6 @@ describe('project template filesystem scan adapter', () => {
   it('should record runtime directory roots without traversing or disclosing child names', async () => {
     const root = makeRoot();
     write(root, '.takt/sessions/private-session-name.json', 'secret');
-    write(root, '.takt/personas/private-persona-name.md', 'secret');
     write(root, '.takt/language-cache/private-language-name.json', 'secret');
 
     const result = await scan(root);
@@ -714,17 +749,20 @@ describe('project template filesystem scan adapter', () => {
 
     expect(result.entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ relativePath: 'sessions', reasonCode: 'RUNTIME_STATE' }),
-      expect.objectContaining({ relativePath: 'personas', reasonCode: 'RUNTIME_STATE' }),
       expect.objectContaining({ relativePath: 'language-cache', reasonCode: 'RUNTIME_STATE' }),
     ]));
     expect(serialized).not.toContain('private-session-name');
-    expect(serialized).not.toContain('private-persona-name');
     expect(serialized).not.toContain('private-language-name');
+  });
+  it('should not misclassify the user-authored personas root as runtime state', () => {
+    expect(classify({ relativePath: 'personas/custom.md', bytes: 0 }).reasonCode)
+      .not.toBe('RUNTIME_STATE');
   });
   it('should hide producer-owned names derived from branches and absolute worktree paths', async () => {
     const root = makeRoot();
     write(root, '.takt/worktree-sessions/-Users-private-project.json', 'secret');
     write(root, '.takt/clone-meta/feature--private-customer.json', 'secret');
+    write(root, '.takt/findings/raw/private-run-id.reviewers.json', 'secret');
 
     const result = await scan(root);
     const serialized = JSON.stringify(result);
@@ -732,9 +770,11 @@ describe('project template filesystem scan adapter', () => {
     expect(result.entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ relativePath: 'worktree-sessions', reasonCode: 'RUNTIME_STATE' }),
       expect.objectContaining({ relativePath: 'clone-meta', reasonCode: 'RUNTIME_STATE' }),
+      expect.objectContaining({ relativePath: 'findings', reasonCode: 'RUNTIME_STATE' }),
     ]));
     expect(serialized).not.toContain('-Users-private-project');
     expect(serialized).not.toContain('feature--private-customer');
+    expect(serialized).not.toContain('private-run-id');
   });
   it('should block a single non-ASCII path before collision processing', async () => {
     const root = makeRoot();

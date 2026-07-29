@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto';
 import {
+  isAlias,
+  isMap,
+  isScalar,
+  isSeq,
+  parseDocument,
+  type Node as YamlNode,
+  type Pair as YamlPair,
+} from 'yaml';
+import {
   PROJECT_RUNTIME_DIRECTORY_NAMES,
   PROJECT_RUNTIME_FILE_NAMES,
 } from '../../shared/constants/projectTaktPaths.js';
@@ -24,6 +33,11 @@ const MAX_CLASSIFIER_CONTENT_BYTES = 1024 * 1024;
 const MAX_ABSOLUTE_PATH_PREFIXES = 8;
 const MAX_ABSOLUTE_PATH_PREFIX_LENGTH = 1024;
 const MAX_ABSOLUTE_PATH_PREFIX_TOTAL = 4096;
+const MAX_YAML_INSPECTION_NODES = 4096;
+const MAX_YAML_INSPECTION_DEPTH = 32;
+const KNOWN_COMMAND_PATTERN =
+  /^(?:npm|pnpm|yarn|bun|make|cargo|go|swift|python|ruby|bash|sh|gh|git|curl)(?:\s|$)/i;
+const EXECUTION_KEYS = new Set(['run', 'command', 'script']);
 
 const RUNTIME_ROOTS = new Set<string>([
   '.devloop',
@@ -152,12 +166,79 @@ function hasSensitivePathSegment(relativePath: string): boolean {
   });
 }
 
+function inspectYamlCommands(text: string): {
+  hasExternalCommand: boolean;
+  incomplete: boolean;
+} {
+  let document: ReturnType<typeof parseDocument>;
+  try {
+    // Inspect nodes directly: resolving aliases into JS values would obscure
+    // both resource usage and the source location of execution keys.
+    document = parseDocument(text, { strict: true, uniqueKeys: true });
+  } catch {
+    return { hasExternalCommand: false, incomplete: true };
+  }
+
+  let hasExternalCommand = false;
+  let incomplete = document.errors.length > 0 || document.warnings.length > 0;
+  let visitedNodes = 0;
+
+  const visit = (node: YamlNode | null, depth: number): void => {
+    if (node === null || incomplete && visitedNodes > MAX_YAML_INSPECTION_NODES) return;
+    visitedNodes += 1;
+    if (visitedNodes > MAX_YAML_INSPECTION_NODES || depth > MAX_YAML_INSPECTION_DEPTH) {
+      incomplete = true;
+      return;
+    }
+    if (isAlias(node)) {
+      incomplete = true;
+      return;
+    }
+    if (isSeq(node)) {
+      for (const item of node.items) visit(item as YamlNode | null, depth + 1);
+      return;
+    }
+    if (!isMap(node)) return;
+
+    for (const pair of node.items as Array<YamlPair<YamlNode, YamlNode>>) {
+      const key = pair.key;
+      const value = pair.value;
+      if (isAlias(key)) {
+        incomplete = true;
+      }
+      const keyText = isScalar(key) && typeof key.value === 'string'
+        ? key.value.toLocaleLowerCase('en-US')
+        : undefined;
+      if (keyText !== undefined && EXECUTION_KEYS.has(keyText)) {
+        hasExternalCommand = true;
+        if (
+          value === null
+          || isAlias(value)
+          || !isScalar(value)
+          || typeof value.value !== 'string'
+          || !KNOWN_COMMAND_PATTERN.test(value.value.trim())
+        ) {
+          incomplete = true;
+        }
+      }
+      visit(key, depth + 1);
+      visit(value, depth + 1);
+    }
+  };
+
+  visit(document.contents, 0);
+  return { hasExternalCommand, incomplete };
+}
+
 function detectedCapabilities(
   relativePath: string,
   mode: string | undefined,
   text: string | undefined,
 ): { capabilities: TemplateCapability[]; inspectionStatus: 'complete' | 'incomplete' } {
   const capabilities: TemplateCapability[] = [];
+  const yamlInspection = text !== undefined && /\.ya?ml$/i.test(relativePath)
+    ? inspectYamlCommands(text)
+    : { hasExternalCommand: false, incomplete: false };
   if (mode !== undefined && (Number.parseInt(mode, 8) & 0o111) !== 0) {
     capabilities.push('executable');
   }
@@ -179,25 +260,21 @@ function detectedCapabilities(
       relativePath.startsWith('automation/')
       || /^#!\s*\//.test(text)
       || /\b(?:npm|pnpm|yarn|bun|make|cargo|go|swift|python|ruby|bash|sh|gh|git)\s+/m.test(text)
-      || /^\s*(?:-\s*)?(?:run|command|script)\s*:\s*\S+/m.test(text)
+      || yamlInspection.hasExternalCommand
       || /\bcurl\s+/m.test(text)
     )
   ) {
     capabilities.push('external-command');
   }
-  const knownCommand = /^(?:npm|pnpm|yarn|bun|make|cargo|go|swift|python|ruby|bash|sh|gh|git|curl)(?:\s|$)/i;
-  const hasUnknownDeclaredCommand = text !== undefined
-    && Array.from(text.matchAll(/^\s*(?:-\s*)?(?:run|command|script)\s*:\s*(.+)$/gmi))
-      .some((match) => !knownCommand.test(match[1]!.trim()));
   const automationCommand = text?.split(/\r?\n/)
     .map((line) => line.trim())
     .find((line) => line !== '' && !line.startsWith('#'));
   const hasUnknownAutomationCommand = relativePath.startsWith('automation/')
-    && (automationCommand === undefined || !knownCommand.test(automationCommand));
+    && (automationCommand === undefined || !KNOWN_COMMAND_PATTERN.test(automationCommand));
   return {
     capabilities,
     inspectionStatus: text === undefined
-      || hasUnknownDeclaredCommand
+      || yamlInspection.incomplete
       || hasUnknownAutomationCommand
       ? 'incomplete'
       : 'complete',
