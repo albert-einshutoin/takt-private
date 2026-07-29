@@ -1,0 +1,78 @@
+import type {
+  ProjectTemplateClassificationReason,
+} from './classifier-types.js';
+import type {
+  ProjectTemplateManifestV1,
+  TemplateCapability,
+  TemplateEntryPolicy,
+  TemplateLockV1,
+  TemplateSource,
+} from './types.js';
+
+export const TAKTPACK_ENTRY_NAMES = [
+  'pack.json',
+  'manifest.json',
+  'export-report.json',
+] as const;
+
+export const TAKTPACK_BLOB_PREFIX = 'blobs/sha256/';
+
+export interface TaktpackLimits {
+  maxEntries: number;
+  maxEntryBytes: number;
+  maxTotalBytes: number;
+  maxArchiveBytes: number;
+}
+
+export const DEFAULT_TAKTPACK_LIMITS: Readonly<TaktpackLimits> = Object.freeze({
+  maxEntries: 4_099,
+  maxEntryBytes: 1024 * 1024,
+  maxTotalBytes: 32 * 1024 * 1024,
+  maxArchiveBytes: 40 * 1024 * 1024,
+});
+
+export interface TaktpackDescriptorV1 {
+  format: 'taktpack';
+  version: '1.0';
+  archive: 'ustar';
+  contentAddressed: true;
+}
+
+export interface TaktpackExportReportV1 {
+  schemaVersion: '1.0';
+  counts: Record<TemplateEntryPolicy, number>;
+  excludedReasons: Partial<Record<ProjectTemplateClassificationReason, number>>;
+  warnings: string[];
+}
+
+export interface ProjectTemplateExportOptions {
+  packVersion: string;
+  takt: { minVersion: string; maxVersion?: string };
+  source: TemplateSource;
+  policies?: Readonly<Record<string, Exclude<TemplateEntryPolicy, 'excluded'>>>;
+  approvedCapabilities?: readonly TemplateCapability[];
+}
+
+export interface ProjectTemplateExportFile {
+  path: string;
+  absolutePath: string;
+  bytes: number;
+  mode: string;
+  sha256: string;
+}
+
+export interface ProjectTemplateExportPlan {
+  descriptor: TaktpackDescriptorV1;
+  manifest: ProjectTemplateManifestV1;
+  lock: TemplateLockV1;
+  report: TaktpackExportReportV1;
+  files: ProjectTemplateExportFile[];
+}
+
+export interface TaktpackInspectResult {
+  descriptor: TaktpackDescriptorV1;
+  manifest: ProjectTemplateManifestV1;
+  lock: TemplateLockV1;
+  report: TaktpackExportReportV1;
+  archiveSha256: string;
+}
