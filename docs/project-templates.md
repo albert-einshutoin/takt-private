@@ -127,6 +127,35 @@ own-property JSON-style objects and dense arrays; accessors, class instances,
 inherited values, sparse arrays, and extended arrays are rejected before entry
 processing.
 
+## Classifying a local project
+
+`scanProjectTemplateDirectory(projectRoot)` inspects `projectRoot/.takt` and
+returns a redacted preview. Paths in `entries` are relative to `.takt`; a
+sibling `.devloop` directory is represented only by the fixed `.devloop`
+excluded sentinel and is never traversed. `classifyProjectTemplateEntry` is the
+side-effect-free core for integrations that already hold bounded content.
+
+Only shared `workflows/`, `facets/`, and `provider-options/` entries are
+portable candidates. Project configuration, automation, and quality gates are
+`project-owned` and require an explicit policy review. Unknown paths are
+excluded by default. Runtime state, logs, caches, and sensitive filenames are
+never read as candidate content. The scanner blocks secrets, workstation
+absolute paths, binary content, symlinks, hard links, special files, path
+escapes, portable-name collisions, and independently bounded resource
+overruns.
+
+`scanStatus` distinguishes `complete`, `incomplete`, and `blocked` scans.
+`canExport` is true only for a complete scan without blocked or project-owned
+entries; `reviewRequired` identifies the project-owned case. Each file preview
+contains bytes, mode, SHA-256, a stable reason code, a redacted summary,
+suggested policy, warnings, and capability evidence suitable for
+`validateDetectedTemplateCapabilities`.
+
+The scanner uses open-file stat snapshots to detect changes during inspection,
+but a successful snapshot is not permanent proof. Archive creation and apply
+must reopen and revalidate type, containment, link count, size, mode, digest,
+and capability evidence before trusting the bytes.
+
 ## Compatibility and v2 migration
 
 Clients must reject an unknown schema major. A compatible v1 client may accept
