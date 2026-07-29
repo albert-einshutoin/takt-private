@@ -18,7 +18,10 @@ import {
 } from './binding.js';
 import { validateDetectedTemplateCapabilities } from './capability-detection.js';
 import { classifyProjectTemplateEntry } from './classifier-core.js';
-import { TaktpackError } from './errors.js';
+import {
+  ProjectTemplateValidationError,
+  TaktpackError,
+} from './errors.js';
 import { parseTemplateLock } from './lock.js';
 import { parseProjectTemplateManifest } from './manifest.js';
 import type {
@@ -341,6 +344,9 @@ export async function inspectTaktpackWithIoSeam(
   options: InspectTaktpackOptions = {},
   ioSeam: TaktpackInspectorIoSeam = {},
 ): Promise<TaktpackInspectResult> {
+  const currentVersion = options.currentTaktVersion === undefined
+    ? undefined
+    : requireSemVer(options.currentTaktVersion, 'currentTaktVersion');
   const limits = resolveTaktpackLimits(options.limits);
   let pathSnapshot: Awaited<ReturnType<typeof lstat>>;
   try {
@@ -365,13 +371,23 @@ export async function inspectTaktpackWithIoSeam(
   let manifest: ProjectTemplateManifestV1 | undefined;
   let report: TaktpackExportReportV1 | undefined;
   const detections: DetectedTemplateCapabilities[] = [];
-  let currentIoField = 'archive.stat';
   let primaryError: Error | undefined;
   let closeFailure: unknown;
   let result: TaktpackInspectResult | undefined;
+  const runIo = async <Value>(
+    phase: Exclude<TaktpackInspectorIoPhase, 'close'>,
+    field: string,
+    operation: () => Promise<Value>,
+  ): Promise<Value> => {
+    try {
+      ioSeam.onPhase?.(phase);
+      return await operation();
+    } catch (error) {
+      throw normalizeInspectorIoError(error, field);
+    }
+  };
   try {
-    ioSeam.onPhase?.('handle-stat');
-    const stat = await handle.stat();
+    const stat = await runIo('handle-stat', 'archive.stat', () => handle.stat());
     if (
       !stat.isFile()
       || stat.nlink !== 1
@@ -391,9 +407,11 @@ export async function inspectTaktpackWithIoSeam(
       let offset = 0;
       while (offset < length) {
         const requestedBytes = Math.min(64 * 1024, length - offset);
-        currentIoField = 'archive.read';
-        ioSeam.onPhase?.('read');
-        const { bytesRead } = await handle.read(buffer, offset, requestedBytes, position + offset);
+        const { bytesRead } = await runIo(
+          'read',
+          'archive.read',
+          () => handle.read(buffer, offset, requestedBytes, position + offset),
+        );
         if (bytesRead === 0) {
           throw new TaktpackError('TRUNCATED_ARCHIVE', 'archive ended before the declared USTAR boundary');
         }
@@ -543,9 +561,7 @@ export async function inspectTaktpackWithIoSeam(
     validateManifestLockPair(manifest, lock);
     validateDetectedTemplateCapabilities(manifest, detections);
     validateReportAgainstManifest(report, manifest);
-    currentIoField = 'archive.finalStat';
-    ioSeam.onPhase?.('final-stat');
-    const finalStat = await handle.stat();
+    const finalStat = await runIo('final-stat', 'archive.finalStat', () => handle.stat());
     if (
       finalStat.dev !== stat.dev
       || finalStat.ino !== stat.ino
@@ -555,9 +571,6 @@ export async function inspectTaktpackWithIoSeam(
     ) {
       throw new TaktpackError('SOURCE_CHANGED', 'archive changed while it was inspected', 'archive');
     }
-    const currentVersion = options.currentTaktVersion === undefined
-      ? undefined
-      : requireSemVer(options.currentTaktVersion, 'currentTaktVersion');
     const compatible = currentVersion === undefined
       ? undefined
       : (
@@ -580,7 +593,14 @@ export async function inspectTaktpackWithIoSeam(
       },
     };
   } catch (error) {
-    primaryError = normalizeInspectorIoError(error, currentIoField);
+    primaryError = error instanceof TaktpackError
+      || error instanceof ProjectTemplateValidationError
+      ? error
+      : new TaktpackError(
+        'INVALID_PACK',
+        'archive semantic validation failed',
+        'archive',
+      );
   } finally {
     try {
       ioSeam.onPhase?.('close');

@@ -51,6 +51,26 @@ async function makePack(root: string, withExcludedRuntime = false): Promise<stri
   return output;
 }
 
+async function makeCapabilityPack(root: string): Promise<string> {
+  const sourcePath = join(root, '.takt', 'workflows', 'release.yaml');
+  mkdirSync(dirname(sourcePath), { recursive: true });
+  writeFileSync(sourcePath, 'steps:\n  - run: npm test\n');
+  const plan = await createProjectTemplateExportPlan(root, {
+    packVersion: '1.0.0',
+    takt: { minVersion: '0.48.0' },
+    source: {
+      kind: 'local',
+      uri: '.',
+      ref: 'workspace',
+      commit: 'a'.repeat(40),
+    },
+    approvedCapabilities: ['external-command'],
+  });
+  const output = join(root, 'capability.taktpack');
+  await writeTaktpack(output, plan);
+  return output;
+}
+
 function replaceExcludedReason(pack: string, replacement: string): void {
   const bytes = readFileSync(pack);
   const reportHeaderOffset = findTarEntryOffset(bytes, 'export-report.json');
@@ -136,6 +156,62 @@ describe('taktpack streaming inspector', () => {
       status: 'unknown',
       minVersion: '0.48.0',
     });
+  });
+
+  it('validates currentTaktVersion before opening the archive and preserves INVALID_SEMVER', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+    const phases: TaktpackInspectorIoPhase[] = [];
+
+    const error = await inspectTaktpackWithIoSeam(pack, {
+      currentTaktVersion: 'not-semver',
+    }, {
+      onPhase(phase) {
+        phases.push(phase);
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'INVALID_SEMVER',
+      field: 'currentTaktVersion',
+    });
+    expect(phases).toEqual([]);
+  });
+
+  it.each([
+    ['manifest semver', 'INVALID_SEMVER', async (root: string) => {
+      const pack = await makePack(root);
+      const bytes = readFileSync(pack);
+      const offset = findTarEntryOffset(bytes, 'manifest.json');
+      const content = bytes.subarray(offset + 512);
+      const marker = content.indexOf(Buffer.from('"packVersion":"1.0.0"'));
+      content.write('"packVersion":"not-a"', marker, 21, 'ascii');
+      writeFileSync(pack, bytes);
+      return pack;
+    }],
+    ['lock seed semver', 'INVALID_SEMVER', async (root: string) => {
+      const pack = await makePack(root);
+      const bytes = readFileSync(pack);
+      const marker = bytes.indexOf(Buffer.from('"packVersion":"1.0.0"'));
+      bytes.write('"packVersion":"not-a"', marker, 21, 'ascii');
+      writeFileSync(pack, bytes);
+      return pack;
+    }],
+    ['manifest capability', 'UNDECLARED_CAPABILITY', async (root: string) => {
+      const pack = await makeCapabilityPack(root);
+      const bytes = readFileSync(pack);
+      const offset = findTarEntryOffset(bytes, 'manifest.json');
+      const content = bytes.subarray(offset + 512);
+      const marker = content.indexOf(Buffer.from('external-command'));
+      content.write('unknown-capabili', marker, 16, 'ascii');
+      writeFileSync(pack, bytes);
+      return pack;
+    }],
+  ])('preserves the stable semantic code for malformed %s', async (_label, code, mutate) => {
+    const root = makeRoot();
+    const pack = await mutate(root);
+
+    await expect(inspectTaktpack(pack)).rejects.toMatchObject({ code });
   });
 
   it('redacts an unreadable archive path and token marker', async () => {
