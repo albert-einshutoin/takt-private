@@ -3,6 +3,10 @@ import * as path from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { TasksFileSchema, serializeTasksFileData, type TasksFileData } from './schema.js';
 import { createLogger } from '../../shared/utils/index.js';
+import {
+  PROJECT_TASKS_FILE,
+  PROJECT_TAKT_DIRECTORY,
+} from '../../shared/constants/projectTaktPaths.js';
 
 const log = createLogger('task-store');
 
@@ -12,8 +16,8 @@ export class TaskStore {
   private locked = false;
 
   constructor(private readonly projectDir: string) {
-    this.taktDir = path.join(projectDir, '.takt');
-    this.tasksFile = path.join(this.taktDir, 'tasks.yaml');
+    this.taktDir = path.join(projectDir, PROJECT_TAKT_DIRECTORY);
+    this.tasksFile = path.join(this.taktDir, PROJECT_TASKS_FILE);
   }
 
   getTasksFilePath(): string {

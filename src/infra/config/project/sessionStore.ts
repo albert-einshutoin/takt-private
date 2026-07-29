@@ -8,6 +8,11 @@ import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdi
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { getProjectConfigDir, ensureDir } from '../paths.js';
+import {
+  PROJECT_INPUT_HISTORY_FILE,
+  PROJECT_PERSONA_SESSIONS_FILE,
+  PROJECT_WORKTREE_SESSIONS_DIRECTORY,
+} from '../../../shared/constants/projectTaktPaths.js';
 
 /**
  * Write file atomically using temp file + rename.
@@ -34,7 +39,7 @@ export function writeFileAtomic(filePath: string, content: string): void {
 
 /** Get path for storing input history */
 export function getInputHistoryPath(projectDir: string): string {
-  return join(getProjectConfigDir(projectDir), 'input_history');
+  return join(getProjectConfigDir(projectDir), PROJECT_INPUT_HISTORY_FILE);
 }
 
 /** Maximum number of input history entries to keep */
@@ -157,7 +162,7 @@ function updateSessionData(
 
 /** Get path for storing persona sessions */
 export function getPersonaSessionsPath(projectDir: string): string {
-  return join(getProjectConfigDir(projectDir), 'persona_sessions.json');
+  return join(getProjectConfigDir(projectDir), PROJECT_PERSONA_SESSIONS_FILE);
 }
 
 /** Load saved persona sessions. Returns empty if provider has changed. */
@@ -240,7 +245,7 @@ export function clearPersonaSessions(projectDir: string): void {
 
 /** Get the worktree sessions directory */
 export function getWorktreeSessionsDir(projectDir: string): string {
-  return join(getProjectConfigDir(projectDir), 'worktree-sessions');
+  return join(getProjectConfigDir(projectDir), PROJECT_WORKTREE_SESSIONS_DIRECTORY);
 }
 
 /** Encode a worktree path to a safe filename */

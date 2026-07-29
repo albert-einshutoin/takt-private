@@ -1,6 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  PROJECT_STAGED_DEVLOOP_STATE_FILE,
+  PROJECT_TAKT_DIRECTORY,
+} from '../shared/constants/projectTaktPaths.js';
+import {
   runDevloopAutomationStage,
   type DevloopAutomationStage,
   type DevloopAutomationStageReport,
@@ -241,7 +245,7 @@ function resolveSafetyBudgets(
 }
 
 function defaultStatePath(repoPath: string): string {
-  return resolve(repoPath, '.takt/staged-devloop-state.json');
+  return resolve(repoPath, PROJECT_TAKT_DIRECTORY, PROJECT_STAGED_DEVLOOP_STATE_FILE);
 }
 
 function emptyState(): StagedDevloopState {

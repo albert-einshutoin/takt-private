@@ -127,6 +127,70 @@ own-property JSON-style objects and dense arrays; accessors, class instances,
 inherited values, sparse arrays, and extended arrays are rejected before entry
 processing.
 
+## Classifying a local project
+
+`scanProjectTemplateDirectory(projectRoot)` inspects `projectRoot/.takt` and
+returns a redacted preview. Paths in `entries` are relative to `.takt`; a
+sibling `.devloop` directory is represented only by the fixed `.devloop`
+excluded sentinel and is never traversed. `classifyProjectTemplateEntry` is the
+side-effect-free core for integrations that already hold bounded content.
+
+Only shared `workflows/`, `facets/`, and `provider-options/` entries are
+portable candidates. Project configuration, automation, and quality gates are
+`project-owned` and require an explicit policy review. Unknown paths are
+excluded by default. Runtime state, logs, caches, and sensitive filenames are
+never read as candidate content. This includes generated roots such as
+`sessions/`, `worktree-sessions/`, `clone-meta/`, `findings/`,
+`language-cache/`, `runs/`, and `worktrees/`, plus generated files such as
+`input_history`, `persona_sessions.json`, `session-state.json`, `tasks.yaml`,
+and `staged-devloop-state.json`. Runtime
+directories are represented by their verified relative root only and are not
+traversed. The scanner blocks secrets, workstation
+absolute paths (POSIX, home-relative, drive-letter, and UNC forms), binary
+content, symlinks, hard links, special files, path
+escapes, portable-name collisions, and independently bounded resource
+overruns.
+
+The classifier reuses the manifest's `parsePortablePath` validator. Invalid or
+sensitive input names are reported as fixed redacted sentinels instead of
+echoing the source name. Its public input is also bounded: content is at most
+1 MiB, byte counts must be exact safe integers, mode and digest use the manifest
+formats, and trusted absolute-path hints have independent count and length
+limits. The core computes SHA-256 whenever content is supplied and rejects a
+different caller-supplied digest. Metadata-only calls never return a supplied
+digest as evidence and report incomplete inspection.
+
+`scanStatus` distinguishes `complete`, `incomplete`, and `blocked` scans.
+`canExport` is true only for a complete scan without blocked or project-owned
+entries; `reviewRequired` identifies the project-owned case. Each file preview
+contains bytes, mode, SHA-256, a stable reason code, a redacted summary,
+suggested policy, warnings, and capability evidence suitable for
+`validateDetectedTemplateCapabilities`.
+Capability evidence includes `inspectionStatus`. An empty capability list is
+authoritative only with `complete`; skipped metadata is `incomplete` and blocked
+inspection is `blocked`. Detected executable, GitHub-write, external, or
+ambiguous command behavior sets `reviewRequired`.
+All `gh` commands and `curl` calls to the GitHub API are conservatively reported
+as both GitHub-write and external-command capabilities. An unknown command
+leaves inspection incomplete and requires review, including command keys inside
+YAML block sequences such as `- run:`. YAML capability inspection walks the
+bounded syntax tree without expanding aliases. Parse errors, duplicate keys,
+multiple documents, aliases, non-scalar execution values, and inspection
+depth/node overruns remain incomplete and review-required.
+
+Directory enumeration uses a bounded `opendir` stream and stops after
+`maxNodes + 1`, so a directory with an attacker-controlled number of children
+cannot be materialized in memory. Reaching that global witness stops all
+remaining recursion and siblings. A name that fails inode/realpath verification
+is represented only as `[unverified-entry]`; raw enumerated names are not
+returned as error evidence. Directories are checked by type, device,
+inode, link count, timestamps, and realpath before and after enumeration.
+The scanner uses open-file stat snapshots to detect changes during inspection,
+but a successful snapshot is neither permanent proof nor proof of the later
+archive bytes. Issue #138 archive creation and apply must reopen and revalidate
+type, containment, link count, size, mode, digest, and capability evidence
+before trusting the bytes.
+
 ## Compatibility and v2 migration
 
 Clients must reject an unknown schema major. A compatible v1 client may accept
