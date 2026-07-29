@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   captureProjectTemplateBackupFile,
@@ -89,6 +89,175 @@ describe('project template apply storage', () => {
     expect(lstatSync(storage.controlRoot).dev).toBe(lstatSync(storage.targetRoot).dev);
     expect(readFileSync(join(storage.controlRoot, '.gitignore'), 'utf8')).toBe('*\n');
     expect(lstatSync(join(storage.controlRoot, '.gitignore')).mode & 0o077).toBe(0);
+  });
+
+  it('durably publishes each newly created control directory in its parent', async () => {
+    const repoPath = makeRepo();
+    const events: Array<[ProjectTemplateApplyStorageIoOperation, string]> = [];
+    const io = createProjectTemplateApplyStorageIo({
+      after: (operation, path) => {
+        if (operation === 'mkdir' || operation === 'directory-fsync') {
+          events.push([operation, path]);
+        }
+      },
+    });
+
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath, io });
+
+    expect(events.slice(0, 6)).toEqual([
+      ['mkdir', storage.controlRoot],
+      ['directory-fsync', storage.repoRoot],
+      ['mkdir', storage.stagingRoot],
+      ['directory-fsync', storage.controlRoot],
+      ['mkdir', storage.backupsRoot],
+      ['directory-fsync', storage.controlRoot],
+    ]);
+  });
+
+  it('does not fsync parents for private directories that already exist', async () => {
+    const repoPath = makeRepo();
+    const controlRoot = join(repoPath, '.takt-template-state');
+    mkdirSync(join(controlRoot, 'staging'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(controlRoot, 'backups'), { mode: 0o700 });
+    writeFileSync(join(controlRoot, '.gitignore'), '*\n', { mode: 0o600 });
+    const events: ProjectTemplateApplyStorageIoOperation[] = [];
+    const io = createProjectTemplateApplyStorageIo({
+      after: (operation) => {
+        if (operation === 'mkdir' || operation === 'directory-fsync') {
+          events.push(operation);
+        }
+      },
+    });
+
+    await initializeProjectTemplateApplyStorage({ repoPath, io });
+
+    expect(events).toEqual([]);
+  });
+
+  it('durably publishes every newly created nested staging directory', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    const events: Array<[ProjectTemplateApplyStorageIoOperation, string]> = [];
+    const io = createProjectTemplateApplyStorageIo({
+      after: (operation, path) => {
+        if (operation === 'mkdir' || operation === 'directory-fsync') {
+          events.push([operation, path]);
+        }
+      },
+    });
+    const content = Buffer.from('language: ja\n');
+
+    const staged = await writeProjectTemplateStagingFile({
+      storage,
+      transactionId: 'nested-transaction',
+      target: { kind: 'template-entry', path: 'config/nested/config.yaml' },
+      content,
+      expectedSha256: hash(content),
+      targetMode: '0644',
+      io,
+    });
+    const transactionRoot = join(storage.stagingRoot, 'nested-transaction');
+    const entriesRoot = join(transactionRoot, 'entries');
+    const configRoot = join(entriesRoot, 'config');
+    const nestedRoot = dirname(staged.absolutePath);
+
+    expect(events.slice(0, 8)).toEqual([
+      ['mkdir', transactionRoot],
+      ['directory-fsync', storage.stagingRoot],
+      ['mkdir', entriesRoot],
+      ['directory-fsync', transactionRoot],
+      ['mkdir', configRoot],
+      ['directory-fsync', entriesRoot],
+      ['mkdir', nestedRoot],
+      ['directory-fsync', configRoot],
+    ]);
+  });
+
+  it('durably publishes newly created backup generation and blob directories', async () => {
+    const repoPath = makeRepo();
+    const target = join(repoPath, '.takt', 'config.yaml');
+    writeFileSync(target, 'language: ja\n', { mode: 0o644 });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath });
+    const events: Array<[ProjectTemplateApplyStorageIoOperation, string]> = [];
+    const io = createProjectTemplateApplyStorageIo({
+      after: (operation, path) => {
+        if (operation === 'mkdir' || operation === 'directory-fsync') {
+          events.push([operation, path]);
+        }
+      },
+    });
+
+    await captureProjectTemplateBackupFile({
+      storage,
+      backupId: 'durable-backup',
+      target: { kind: 'template-entry', path: 'config.yaml' },
+      expectedSha256: hash('language: ja\n'),
+      expectedMode: '0644',
+      maxBytes: 1024,
+      io,
+    });
+    const backupRoot = join(storage.backupsRoot, 'durable-backup');
+    const blobsRoot = join(backupRoot, 'blobs');
+
+    expect(events.slice(0, 4)).toEqual([
+      ['mkdir', backupRoot],
+      ['directory-fsync', storage.backupsRoot],
+      ['mkdir', blobsRoot],
+      ['directory-fsync', backupRoot],
+    ]);
+  });
+
+  it.each([
+    ['mkdir', 'mkdir' as const],
+    ['parent directory fsync', 'directory-fsync' as const],
+  ])('fails closed when new private directory %s fails', async (_label, faultOperation) => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    const transactionRoot = join(storage.stagingRoot, 'faulted-transaction');
+    const io = createProjectTemplateApplyStorageIo({
+      before: (operation, path) => {
+        if (
+          operation === faultOperation
+          && (
+            operation === 'mkdir'
+              ? path === transactionRoot
+              : path === storage.stagingRoot
+          )
+        ) {
+          throw new Error(`injected ${operation}`);
+        }
+      },
+    });
+    const content = Buffer.from('language: ja\n');
+
+    await expect(writeProjectTemplateStagingFile({
+      storage,
+      transactionId: 'faulted-transaction',
+      target: { kind: 'template-entry', path: 'config.yaml' },
+      content,
+      expectedSha256: hash(content),
+      targetMode: '0644',
+      io,
+    })).rejects.toMatchObject({ operation: faultOperation });
+    expect(existsSync(join(transactionRoot, 'entries'))).toBe(false);
+  });
+
+  it('treats directory fsync as best-effort on Windows', async () => {
+    const repoPath = makeRepo();
+    const fsyncAttempts: string[] = [];
+    const io = createProjectTemplateApplyStorageIo({
+      before: (operation, path) => {
+        if (operation === 'directory-fsync') {
+          fsyncAttempts.push(path);
+          throw new Error('directory fsync is unsupported');
+        }
+      },
+    }, 'win32');
+
+    await expect(initializeProjectTemplateApplyStorage({
+      repoPath,
+      io,
+      platform: 'win32',
+    })).resolves.toBeDefined();
+    expect(fsyncAttempts).toEqual([]);
   });
 
   it('does not treat POSIX mode bits as Windows control-plane evidence', async () => {

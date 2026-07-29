@@ -290,6 +290,7 @@ async function withIoHooks<Result>(
 
 export function createProjectTemplateApplyStorageIo(
   hooks: ProjectTemplateApplyStorageFaultHooks = {},
+  platform: NodeJS.Platform = process.platform,
 ): ProjectTemplateApplyStorageIo {
   return {
     lstat: async (path) => withIoHooks(hooks, 'lstat', path, () => lstat(path)),
@@ -440,11 +441,11 @@ export function createProjectTemplateApplyStorageIo(
       runHook(hooks, 'after', 'file-fsync', path);
     },
     fsyncDirectory: async (path) => {
+      // Windows does not expose portable directory fsync semantics. Files are
+      // still fsynced before rename; publishing their directory entries is
+      // therefore explicitly best-effort on that platform.
+      if (platform === 'win32') return;
       runHook(hooks, 'before', 'directory-fsync', path);
-      if (process.platform === 'win32') {
-        runHook(hooks, 'after', 'directory-fsync', path);
-        return;
-      }
       let handle: Awaited<ReturnType<typeof open>> | undefined;
       let primaryError: unknown;
       try {
@@ -587,10 +588,18 @@ async function ensurePrivateDirectory(
 ): Promise<void> {
   let entry = await tryLstat(io, path);
   if (entry === undefined) {
+    let created = false;
     try {
       await io.mkdir(path, PRIVATE_DIRECTORY_MODE);
+      created = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    if (created) {
+      // fsyncing content inside the new directory does not persist the new
+      // directory name itself. Sync its parent immediately so a reported
+      // backup/staging/control artifact survives a crash as a complete chain.
+      await io.fsyncDirectory(dirname(path));
     }
     entry = await io.lstat(path);
   }
@@ -626,8 +635,8 @@ export async function initializeProjectTemplateApplyStorage(options: {
   io?: ProjectTemplateApplyStorageIo;
   platform?: NodeJS.Platform;
 }): Promise<ProjectTemplateApplyStorage> {
-  const io = options.io ?? createProjectTemplateApplyStorageIo();
   const platform = options.platform ?? process.platform;
+  const io = options.io ?? createProjectTemplateApplyStorageIo({}, platform);
   let repoRoot: string;
   try {
     repoRoot = await io.realpath(resolve(options.repoPath));
