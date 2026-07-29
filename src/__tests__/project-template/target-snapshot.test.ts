@@ -97,8 +97,12 @@ describe('project template target snapshot', () => {
         sha256: hash('language: ja\n'),
       }),
     ]);
+    expect(snapshot.rootState).toBe('directory');
     expect(snapshot.candidatePaths).toEqual(['config.yaml', 'missing.yaml']);
     expect(snapshot.missingPaths).toEqual(['missing.yaml']);
+    expect(snapshot.missingPathTracking).toEqual({
+      'missing.yaml': 'untracked',
+    });
     expect(fingerprint(root)).toEqual(treeBefore);
     expect(execFileSync(
       'git',
@@ -164,15 +168,56 @@ describe('project template target snapshot', () => {
     });
   });
 
-  it('rejects duplicate portable candidate identities before reading files', async () => {
+  it('preserves case-only candidates while capturing an actual destination once', async () => {
     const root = makeRoot(false);
+    writeTakt(root, 'Config.yaml', 'local\n');
 
-    await expect(captureProjectTemplateTargetSnapshot(root, [
+    const snapshot = await captureProjectTemplateTargetSnapshot(root, [
       'Config.yaml',
       'config.yaml',
-    ])).rejects.toMatchObject({
-      code: 'INVALID_EXPORT_PLAN',
-      field: 'candidatePaths',
+    ]);
+
+    expect(snapshot.candidatePaths).toEqual(['Config.yaml', 'config.yaml']);
+    expect(snapshot.entries).toHaveLength(1);
+    expect(snapshot.entries[0]?.path).toBe('Config.yaml');
+  });
+
+  it('represents a missing .takt root as a stable onboarding snapshot', async () => {
+    const root = makeRoot(false);
+    rmSync(join(root, '.takt'), { recursive: true });
+
+    const snapshot = await captureProjectTemplateTargetSnapshot(root, [
+      'config.yaml',
+      'workflows/default.yaml',
+    ]);
+
+    expect(snapshot).toEqual({
+      rootState: 'missing',
+      candidatePaths: ['config.yaml', 'workflows/default.yaml'],
+      missingPaths: ['config.yaml', 'workflows/default.yaml'],
+      missingPathTracking: {
+        'config.yaml': 'not-repository',
+        'workflows/default.yaml': 'not-repository',
+      },
+      entries: [],
+    });
+  });
+
+  it('captures unstaged and staged tracked deletions for missing candidates', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'config.yaml', 'base\n');
+    commitAll(root);
+    rmSync(join(root, '.takt', 'config.yaml'));
+
+    const unstaged = await captureProjectTemplateTargetSnapshot(root, ['config.yaml']);
+    expect(unstaged.missingPathTracking).toEqual({
+      'config.yaml': 'tracked-modified',
+    });
+
+    execFileSync('git', ['add', '-A'], { cwd: root });
+    const staged = await captureProjectTemplateTargetSnapshot(root, ['config.yaml']);
+    expect(staged.missingPathTracking).toEqual({
+      'config.yaml': 'staged',
     });
   });
 });

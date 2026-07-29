@@ -310,6 +310,30 @@ describe('project template three-way apply plan', () => {
     }
   });
 
+  it('binds root and tracked-deletion evidence into the precondition', () => {
+    const planInput = input({ base: 'base', incoming: 'next' });
+    const directory = createProjectTemplateApplyPlan({
+      ...planInput,
+      targetRootState: 'directory',
+      missingPathTracking: { 'config.yaml': 'untracked' },
+    });
+    const stagedDeletion = createProjectTemplateApplyPlan({
+      ...planInput,
+      targetRootState: 'directory',
+      missingPathTracking: { 'config.yaml': 'staged' },
+    });
+    const missingRoot = createProjectTemplateApplyPlan({
+      ...planInput,
+      targetRootState: 'missing',
+      missingPathTracking: { 'config.yaml': 'not-repository' },
+    });
+
+    expect(stagedDeletion.preconditionToken).not.toBe(directory.preconditionToken);
+    expect(stagedDeletion.reviewRequired).toBe(true);
+    expect(stagedDeletion.defaultApplyPossible).toBe(false);
+    expect(missingRoot.preconditionToken).not.toBe(directory.preconditionToken);
+  });
+
   it('fails closed for file/directory prefix collisions', () => {
     const planInput = input({ incoming: 'file' });
     planInput.incomingManifest.entries = [

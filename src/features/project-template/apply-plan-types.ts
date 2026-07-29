@@ -20,6 +20,8 @@ export interface ProjectTemplateApplyPlanInput {
   baseLock?: TemplateLockV1;
   incomingManifest: ProjectTemplateManifestV1;
   localEntries: readonly ProjectTemplateLocalSnapshotEntry[];
+  targetRootState?: 'missing' | 'directory';
+  missingPathTracking?: Readonly<Record<string, ProjectTemplateGitTrackingStatus>>;
   incomingContents?: readonly ProjectTemplateIncomingContent[];
   baselineStrategy?: 'conflict' | 'adopt-identical';
 }

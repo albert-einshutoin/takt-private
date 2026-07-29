@@ -222,6 +222,35 @@ function parseIncomingContents(
   return { contents, reviewRequiredPaths };
 }
 
+function parseMissingPathTracking(
+  value: unknown,
+  knownPaths: ReadonlySet<string>,
+): Record<string, ProjectTemplateLocalSnapshotEntry['gitTrackingStatus']> {
+  if (value === undefined) return {};
+  const record = requireRecord(value, 'missingPathTracking');
+  if (Object.keys(record).length > MAX_TEMPLATE_ENTRIES * 2) {
+    throw new ProjectTemplateValidationError(
+      'LIMIT_EXCEEDED',
+      'missing path tracking exceeds the entry limit',
+      'missingPathTracking',
+    );
+  }
+  const result: Record<string, ProjectTemplateLocalSnapshotEntry['gitTrackingStatus']> = {};
+  for (const [rawPath, status] of Object.entries(record)) {
+    const path = parsePortablePath(rawPath, 'missingPathTracking');
+    if (!knownPaths.has(path)) {
+      invalidInput('missing path tracking has no candidate entry', 'missingPathTracking');
+    }
+    if (!TRACKING_STATUSES.has(
+      status as ProjectTemplateLocalSnapshotEntry['gitTrackingStatus'],
+    )) {
+      invalidInput('missing path Git tracking status is invalid', 'missingPathTracking');
+    }
+    result[path] = status as ProjectTemplateLocalSnapshotEntry['gitTrackingStatus'];
+  }
+  return result;
+}
+
 function sameState(
   left: Pick<TemplateLockEntry, 'sha256' | 'mode'> | ProjectTemplateLocalSnapshotEntry,
   right: Pick<TemplateEntry, 'sha256' | 'mode'> | TemplateLockEntry,
@@ -603,7 +632,15 @@ export function createProjectTemplateApplyPlan(
   const input = requireRecord(inputValue, 'applyPlan');
   assertAllowedKeys(
     input,
-    ['baseLock', 'incomingManifest', 'localEntries', 'incomingContents', 'baselineStrategy'],
+    [
+      'baseLock',
+      'incomingManifest',
+      'localEntries',
+      'targetRootState',
+      'missingPathTracking',
+      'incomingContents',
+      'baselineStrategy',
+    ],
     'applyPlan',
   );
   if (
@@ -623,6 +660,13 @@ export function createProjectTemplateApplyPlan(
     incomingManifest.entries.map((entry) => [entry.path, entry]),
   );
   const localByPath = new Map(localEntries.map((entry) => [entry.path, entry]));
+  if (
+    input['targetRootState'] !== undefined
+    && input['targetRootState'] !== 'missing'
+    && input['targetRootState'] !== 'directory'
+  ) {
+    invalidInput('target root state is invalid', 'targetRootState');
+  }
   const {
     contents: incomingContents,
     reviewRequiredPaths: contentReviewRequiredPaths,
@@ -630,6 +674,15 @@ export function createProjectTemplateApplyPlan(
 
   const paths = [...new Set([...baseByPath.keys(), ...incomingByPath.keys()])]
     .sort(compareAscii);
+  const missingPathTracking = parseMissingPathTracking(
+    input['missingPathTracking'],
+    new Set(paths),
+  );
+  for (const path of Object.keys(missingPathTracking)) {
+    if (localByPath.has(path)) {
+      invalidInput('a path cannot be both present and missing', 'missingPathTracking');
+    }
+  }
   const entries = paths.map((path): ProjectTemplateApplyPlanEntry => {
     const base = baseByPath.get(path);
     const incoming = incomingByPath.get(path);
@@ -723,6 +776,8 @@ export function createProjectTemplateApplyPlan(
 
   const preconditionToken = sha256(canonicalizeTaktpackJson({
     candidatePaths: paths,
+    targetRootState: input['targetRootState'] ?? 'directory',
+    missingPathTracking,
     entries: localEntries
       .map(({ path, mode, sha256: digest, bytes, gitTrackingStatus }) => ({
         path,
@@ -740,6 +795,12 @@ export function createProjectTemplateApplyPlan(
   const capabilitiesBefore = [...(baseLock?.capabilities ?? [])];
   const capabilitiesAfter = [...(incomingManifest.capabilities ?? [])];
   const reviewRequired = capabilitiesChanged(capabilitiesBefore, capabilitiesAfter)
+    || Object.values(missingPathTracking).some(
+      (status) => status === 'staged'
+        || status === 'tracked-modified'
+        || status === 'unmerged'
+        || status === 'unavailable',
+    )
     || entries.some(
       (entry) => entry.action === 'conflict' || entry.reviewRequired,
     );

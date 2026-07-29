@@ -14,7 +14,6 @@ import {
 import { TaktpackError } from './errors.js';
 import {
   areProjectTemplateDirectorySnapshotsStable,
-  portablePathKey,
 } from './filesystem-scan.js';
 import {
   MAX_TEMPLATE_ENTRIES,
@@ -49,8 +48,10 @@ export interface CapturedProjectTemplateTargetEntry {
 }
 
 export interface ProjectTemplateTargetSnapshot {
+  rootState: 'missing' | 'directory';
   candidatePaths: string[];
   missingPaths: string[];
+  missingPathTracking: Readonly<Record<string, ProjectTemplateGitTrackingStatus>>;
   entries: CapturedProjectTemplateTargetEntry[];
 }
 
@@ -94,18 +95,6 @@ function parseCandidatePaths(value: unknown): string[] {
       'candidate paths are invalid',
       'candidatePaths',
     );
-  }
-  const identities = new Set<string>();
-  for (const path of paths) {
-    const identity = portablePathKey(path);
-    if (identities.has(identity)) {
-      throw new TaktpackError(
-        'INVALID_EXPORT_PLAN',
-        'candidate paths contain a portable identity collision',
-        'candidatePaths',
-      );
-    }
-    identities.add(identity);
   }
   return [...paths].sort(compareAscii);
 }
@@ -299,7 +288,9 @@ async function captureFile(
     if (!areProjectTemplateFileStatsEqual(before, after)) throw unsafeTarget();
     result = {
       entry: {
-        path: relativePath,
+        // realpath supplies the on-disk spelling on case-insensitive targets.
+        // Keeping that spelling is required for case-only rename conflicts.
+        path: relative(rootRealPath, resolvedPath).split(sep).join('/'),
         mode: safeMode(before.mode),
         sha256: digest.digest('hex'),
         bytes: before.size,
@@ -333,14 +324,26 @@ export async function captureProjectTemplateTargetSnapshot(
   const candidatePaths = parseCandidatePaths(candidateValue);
   const taktRoot = resolve(projectRoot, '.takt');
   let projectRealPath: string;
-  let rootRealPath: string;
-  let rootBefore: Stats;
+  let rootRealPath: string | undefined;
+  let rootBefore: Stats | undefined;
   try {
     projectRealPath = await realpath(projectRoot);
-    rootRealPath = await realpath(taktRoot);
-    rootBefore = await lstat(taktRoot);
   } catch {
     throw unsafeTarget();
+  }
+  try {
+    rootBefore = await lstat(taktRoot);
+    rootRealPath = await realpath(taktRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw unsafeTarget();
+    const tracking = await gitTrackingForPaths(projectRoot, candidatePaths);
+    return {
+      rootState: 'missing',
+      candidatePaths,
+      missingPaths: candidatePaths,
+      missingPathTracking: Object.fromEntries(tracking),
+      entries: [],
+    };
   }
   if (
     rootBefore.isSymbolicLink()
@@ -352,6 +355,7 @@ export async function captureProjectTemplateTargetSnapshot(
 
   const ancestorSnapshots = new Map<string, Stats>([[taktRoot, rootBefore]]);
   const captured: CapturedTargetFile[] = [];
+  const capturedActualPaths = new Set<string>();
   const missingPaths: string[] = [];
   let totalBytes = 0;
   for (const path of candidatePaths) {
@@ -364,6 +368,8 @@ export async function captureProjectTemplateTargetSnapshot(
       missingPaths.push(path);
       continue;
     }
+    if (capturedActualPaths.has(entry.entry.path)) continue;
+    capturedActualPaths.add(entry.entry.path);
     totalBytes += entry.entry.bytes;
     if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
       throw new TaktpackError(
@@ -377,7 +383,7 @@ export async function captureProjectTemplateTargetSnapshot(
 
   const tracking = await gitTrackingForPaths(
     projectRoot,
-    captured.map(({ entry }) => entry.path),
+    candidatePaths,
   );
 
   // Git inspection takes time and can race with editors. Revalidate both
@@ -417,8 +423,12 @@ export async function captureProjectTemplateTargetSnapshot(
     gitTrackingStatus: tracking.get(entry.path) ?? 'unavailable',
   }));
   return {
+    rootState: 'directory',
     candidatePaths,
     missingPaths,
+    missingPathTracking: Object.fromEntries(
+      missingPaths.map((path) => [path, tracking.get(path) ?? 'unavailable']),
+    ),
     entries,
   };
 }
