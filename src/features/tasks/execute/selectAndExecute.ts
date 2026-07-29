@@ -115,9 +115,14 @@ export async function selectAndExecuteTask(
   options?: SelectAndExecuteOptions,
   agentOverrides?: TaskExecutionOptions,
 ): Promise<boolean> {
-  // Workflow selection, attachment staging, timezone reads, and task-list
-  // mutation all precede workflow bootstrap. Keep one generation reserved for
-  // the complete direct execution so those prepared inputs cannot be mixed.
+  // Selection returns only an identifier and carries no loaded template
+  // content forward. Avoid creating an audit run for cancellation, then hold
+  // one generation while that identifier is loaded and all inputs are staged.
+  const workflowIdentifier = await determineWorkflow(cwd, options?.workflow);
+  if (workflowIdentifier === null) {
+    info('Cancelled');
+    return false;
+  }
   const preparationReservation = beginProjectTemplatePreparation({
     projectRoot: cwd,
     task,
@@ -127,6 +132,7 @@ export async function selectAndExecuteTask(
     const result = await selectAndExecuteTaskUnderReservation(
       cwd,
       task,
+      workflowIdentifier,
       options,
       agentOverrides,
     );
@@ -147,16 +153,10 @@ export async function selectAndExecuteTask(
 async function selectAndExecuteTaskUnderReservation(
   cwd: string,
   task: string,
+  workflowIdentifier: string,
   options?: SelectAndExecuteOptions,
   agentOverrides?: TaskExecutionOptions,
 ): Promise<boolean> {
-  const workflowIdentifier = await determineWorkflow(cwd, options?.workflow);
-
-  if (workflowIdentifier === null) {
-    info('Cancelled');
-    return false;
-  }
-
   const execCwd = cwd;
   log.info('Starting task execution', { workflow: workflowIdentifier, worktree: false });
   const taskRunner = new TaskRunner(cwd, { onWarning: warn });
