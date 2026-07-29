@@ -128,6 +128,32 @@ describe('taktpack deterministic writer', () => {
     expect(existsSync(output)).toBe(false);
   });
 
+  it('redacts absolute source paths when a planned source disappears', async () => {
+    const root = makeRoot();
+    const marker = 'LEAK_CANARY_SOURCE';
+    writeProjectFile(root, `workflows/${marker}.yaml`, 'name: source\n');
+    const plan = await makePlan(root);
+    rmSync(join(root, '.takt', 'workflows', `${marker}.yaml`));
+
+    const error = await writeTaktpack(join(root, 'missing.taktpack'), plan)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'SOURCE_CHANGED' });
+    expect(String(error)).not.toContain(root);
+    expect(JSON.stringify(error)).not.toContain(marker);
+  });
+
+  it('enforces the archive ceiling before reopening sources or creating output', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    writeProjectFile(root, 'workflows/a.yaml', 'name: changed\n');
+
+    await expect(writeTaktpack(join(root, 'limited.taktpack'), plan, {
+      limits: { maxArchiveBytes: 1 },
+    })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' });
+  });
+
   it('does not overwrite an existing output without force', async () => {
     const root = makeRoot();
     writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');

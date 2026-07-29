@@ -315,11 +315,21 @@ export async function inspectTaktpack(
   options: InspectTaktpackOptions = {},
 ): Promise<TaktpackInspectResult> {
   const limits = resolveTaktpackLimits(options.limits);
-  const pathSnapshot = await lstat(archivePath);
+  let pathSnapshot: Awaited<ReturnType<typeof lstat>>;
+  try {
+    pathSnapshot = await lstat(archivePath);
+  } catch {
+    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input cannot be read safely', 'archive');
+  }
   if (pathSnapshot.isSymbolicLink() || !pathSnapshot.isFile() || pathSnapshot.nlink !== 1) {
     throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input must be a regular single-link file', 'archive');
   }
-  const handle = await open(archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input cannot be opened safely', 'archive');
+  }
   const archiveDigest = createHash('sha256');
   let position = 0;
   let totalPayloadBytes = 0;

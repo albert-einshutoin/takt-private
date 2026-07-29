@@ -134,6 +134,17 @@ describe('taktpack streaming inspector', () => {
     });
   });
 
+  it('redacts an unreadable archive path and token marker', async () => {
+    const root = makeRoot();
+    const archivePath = join(root, 'TOKEN_MARKER_ARCHIVE.taktpack');
+
+    const error = await inspectTaktpack(archivePath).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'UNSAFE_ARCHIVE_ENTRY', field: 'archive' });
+    expect(String(error)).not.toContain(root);
+    expect(JSON.stringify(error)).not.toContain('TOKEN_MARKER_ARCHIVE');
+  });
+
   it('rejects trailing bytes after the two USTAR end blocks', async () => {
     const root = makeRoot();
     const pack = await makePack(root);

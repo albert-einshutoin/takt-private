@@ -269,6 +269,60 @@ export async function writeTaktpack(
   }
   const sealedPlan = sourceState.sealedPlan;
   validateManifestLockPair(sealedPlan.manifest, sealedPlan.lock);
+  const manifestContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.manifest));
+  const reportContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.report));
+  const blobs = new Map<string, ProjectTemplateExportFile[]>();
+  for (const file of sourceState.files) {
+    const sources = blobs.get(file.sha256) ?? [];
+    sources.push(file);
+    blobs.set(file.sha256, sources);
+  }
+  const lockSeed = {
+    kind: 'project-template-lock-seed' as const,
+    schemaVersion: sealedPlan.lock.schemaVersion,
+    packVersion: sealedPlan.lock.packVersion,
+    source: sealedPlan.lock.source,
+    capabilities: sealedPlan.lock.capabilities,
+    entries: sealedPlan.lock.entries,
+  };
+  const packContent = Buffer.from(canonicalizeTaktpackJson({
+    ...sealedPlan.descriptor,
+    manifestSha256: calculateProjectTemplateManifestSha256(sealedPlan.manifest),
+    exportReportSha256: createHash('sha256').update(reportContent).digest('hex'),
+    lockSeed,
+    blobs: [...blobs.entries()]
+      .sort(([left], [right]) => left.localeCompare(right, 'en-US'))
+      .map(([sha256, files]) => ({ sha256, bytes: files[0]!.bytes })),
+  }));
+  const controlEntries = [
+    ['pack', packContent],
+    ['manifest', manifestContent],
+    ['report', reportContent],
+  ] as const;
+  for (const [kind, content] of controlEntries) {
+    if (content.byteLength > maxBytesForTaktpackEntry(kind, limits)) {
+      throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', `${kind} entry exceeds size limit`, kind);
+    }
+  }
+  if (sourceState.files.some((file) => file.bytes > limits.maxBlobBytes)) {
+    throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'blob entry exceeds size limit', 'blob');
+  }
+  const blobFiles = [...blobs.values()].map((files) => files[0]!);
+  const totalPayloadBytes = controlEntries.reduce((sum, [, content]) => sum + content.byteLength, 0)
+    + blobFiles.reduce((sum, file) => sum + file.bytes, 0);
+  const expectedArchiveBytes = 2 * TAR_BLOCK_BYTES
+    + [...controlEntries.map(([, content]) => content.byteLength), ...blobFiles.map((file) => file.bytes)]
+      .reduce(
+        (sum, size) => sum + TAR_BLOCK_BYTES + Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES,
+        0,
+      );
+  if (
+    controlEntries.length + blobs.size > limits.maxEntries
+    || totalPayloadBytes > limits.maxTotalBytes
+    || expectedArchiveBytes > limits.maxArchiveBytes
+  ) {
+    throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive envelope exceeds safety limits');
+  }
   let expectedTarget: import('node:fs').Stats | undefined;
   if (existsSync(outputPath)) {
     expectedTarget = lstatSync(outputPath);
@@ -297,61 +351,20 @@ export async function writeTaktpack(
   let archiveHash = createHash('sha256');
   let bytes = 0;
   try {
-    const manifestContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.manifest));
-    const reportContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.report));
-    const blobs = new Map<string, ProjectTemplateExportFile[]>();
-    for (const file of sourceState.files) {
-      const sources = blobs.get(file.sha256) ?? [];
-      sources.push(file);
-      blobs.set(file.sha256, sources);
-    }
-    const lockSeed = {
-        kind: 'project-template-lock-seed' as const,
-        schemaVersion: sealedPlan.lock.schemaVersion,
-        packVersion: sealedPlan.lock.packVersion,
-        source: sealedPlan.lock.source,
-        capabilities: sealedPlan.lock.capabilities,
-        entries: sealedPlan.lock.entries,
-      };
-    const packContent = Buffer.from(canonicalizeTaktpackJson({
-        ...sealedPlan.descriptor,
-        manifestSha256: calculateProjectTemplateManifestSha256(sealedPlan.manifest),
-        exportReportSha256: createHash('sha256').update(reportContent).digest('hex'),
-        lockSeed,
-        blobs: [...blobs.entries()]
-          .sort(([left], [right]) => left.localeCompare(right, 'en-US'))
-          .map(([sha256, files]) => ({ sha256, bytes: files[0]!.bytes })),
-      }));
-    const controlEntries = [
-      ['pack', packContent],
-      ['manifest', manifestContent],
-      ['report', reportContent],
-    ] as const;
-    for (const [kind, content] of controlEntries) {
-      if (content.byteLength > maxBytesForTaktpackEntry(kind, limits)) {
-        throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', `${kind} entry exceeds size limit`, kind);
-      }
-    }
-    if (sourceState.files.some((file) => file.bytes > limits.maxBlobBytes)) {
-      throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'blob entry exceeds size limit', 'blob');
-    }
-    const totalPayloadBytes = controlEntries.reduce((sum, [, content]) => sum + content.byteLength, 0)
-      + [...blobs.values()].reduce((sum, files) => sum + files[0]!.bytes, 0);
-    if (controlEntries.length + blobs.size > limits.maxEntries
-      || totalPayloadBytes > limits.maxTotalBytes) {
-      throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive envelope exceeds safety limits');
-    }
-
     for (const [sourceIndex, file] of sourceState.files.entries()) {
-      const resolvedPath = await realpath(file.absolutePath);
-      if (!isInside(sourceState.rootRealPath, resolvedPath)) {
-        throw new TaktpackError(
-          'SOURCE_CHANGED',
-          'source escaped the project template root',
-          `sourceFiles[${sourceIndex}]`,
-        );
+      const field = `sourceFiles[${sourceIndex}]`;
+      try {
+        const resolvedPath = await realpath(file.absolutePath);
+        if (!isInside(sourceState.rootRealPath, resolvedPath)) {
+          throw new TaktpackError('SOURCE_CHANGED', 'source escaped the project template root', field);
+        }
+        await verifySourceFile(file, options.signal, field);
+      } catch (error) {
+        if (error instanceof TaktpackError || (error instanceof Error && error.name === 'AbortError')) {
+          throw error;
+        }
+        throw new TaktpackError('SOURCE_CHANGED', 'source could not be reopened safely', field);
       }
-      await verifySourceFile(file, options.signal, `sourceFiles[${sourceIndex}]`);
     }
 
     const output = createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
