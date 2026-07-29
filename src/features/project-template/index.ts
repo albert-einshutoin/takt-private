@@ -16,7 +16,37 @@ export {
   projectTemplateManifestV1JsonSchema,
   projectTemplateLockV1JsonSchema,
 } from './schema.js';
-export { ProjectTemplateValidationError } from './errors.js';
+export {
+  ProjectTemplateValidationError,
+  TaktpackError,
+} from './errors.js';
+export type {
+  TaktpackArtifactState,
+  TaktpackErrorCode,
+} from './errors.js';
+export {
+  TAKTPACK_ENTRY_NAMES,
+  TAKTPACK_BLOB_PREFIX,
+  DEFAULT_TAKTPACK_LIMITS,
+} from './archive-types.js';
+export type {
+  TaktpackLimits,
+  TaktpackDescriptorV1,
+  TaktpackExportReportV1,
+  ProjectTemplateExportOptions,
+  ProjectTemplateExportPlan,
+  TaktpackInspectResult,
+  InspectTaktpackOptions,
+  WriteTaktpackOptions,
+  WriteTaktpackResult,
+  TaktpackIndexV1,
+  TaktpackLockSeedV1,
+  DeepReadonly,
+} from './archive-types.js';
+export { canonicalizeTaktpackJson } from './canonical-json.js';
+export { createProjectTemplateExportPlan } from './export-plan.js';
+export { writeTaktpack } from './archive-writer.js';
+export { inspectTaktpack } from './archive-inspector.js';
 export type {
   ProjectTemplateManifestV1,
   TemplateCapability,

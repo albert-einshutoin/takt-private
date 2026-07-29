@@ -21,9 +21,10 @@ import type {
   ProjectTemplateScanOptions,
   ProjectTemplateScanResult,
 } from './classifier-types.js';
+import { DEFAULT_PROJECT_TEMPLATE_MAX_NODES } from './classifier-types.js';
 
 const DEFAULT_LIMITS: ProjectTemplateScanLimits = {
-  maxNodes: 8_192,
+  maxNodes: DEFAULT_PROJECT_TEMPLATE_MAX_NODES,
   maxFiles: 4_096,
   maxSingleFileBytes: 1024 * 1024,
   maxTotalBytes: 32 * 1024 * 1024,

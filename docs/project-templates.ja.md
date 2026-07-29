@@ -155,6 +155,63 @@ scanner は open 済み file の stat snapshot を比較して走査中の変更
 Issue #138 の archive 作成時と apply 時には type、containment、link count、size、
 mode、digest、capability evidence を reopen して再検証してください。
 
+## `.taktpack` export・inspect
+
+`.taktpack` v1 は非圧縮のcontent-addressed USTARです。entry順は
+`pack.json`、`manifest.json`、`export-report.json`、続いて
+`blobs/sha256/<SHA-256>` のhash昇順に固定されます。destination pathはmanifestだけが
+保持し、blob名にproject pathを含めません。headerのuid、gid、mtime、modeを固定し、
+canonical JSONを使用するため、同一inputはbyte-for-byteで同じartifactになります。
+
+`createProjectTemplateExportPlan` はclassifierがblocked/incompleteの場合、未承認の
+capabilityがある場合、project-owned entryのpolicyが未指定の場合にfail-closedです。
+runtimeやsensitive pathを開いてhash化せず、除外reasonの件数だけをredacted reportへ
+記録します。source fileの絶対pathとinode snapshotはplanのJSONには含まれない
+process-local stateとして保持されます。返却planは再帰的readonly/deep freezeで、
+process-localなcanonical sealに束縛されます。writerはsealed snapshotからcontrol
+documentを再構築し、copy・mutationされたplanをtemp作成前に拒否します。v1の
+`warnings`はclosedな空fieldです。`excludedReasons`はclassifier reason codeだけを
+許可し、bounded countの合計が`counts.excluded`と一致しなければなりません。
+
+`writeTaktpack` はsourceを`O_NOFOLLOW`でreopenし、root containment、type、inode、
+link count、size、mode、timestamp、SHA-256を再検証します。同一digestを複数pathが
+共有する場合も全sourceを検証し、全件成功後に代表blobだけを同一directoryの`wx`
+tempへstreamし、fsync後にpublishします。`force: false`はhard-link publishで競合時にも
+no-clobberを維持し、`force: true`もregular single-link file以外を拒否して、完成した
+新packをrenameするまで既存fileを保持します。
+Windowsでは完成fileのfsync後、directory fsyncをunsupportedとして扱い、正常に
+publish済みのartifactを失敗とは報告しません。
+
+writer/inspectorのfilesystem failureはすべて、pathをredactした安定
+`TaktpackError` codeへ正規化します。writerはarchive entryをawaitする前にpipeline
+rejection handlerを即時attachします。`ARCHIVE_WRITE_FAILED`、
+`ARCHIVE_READ_FAILED`、`DURABILITY_FAILED`、`CLEANUP_FAILED`はsource/tempのraw
+pathを含みません。writerのI/O errorには`artifactState`があり、`not-published`は
+destination未publish、durability errorの`published`は完成artifactが存在する一方で
+directory durabilityを確認できなかった状態です。cleanup failureがprimary failureを
+上書きすることはありません。
+
+`inspectTaktpack` はextractも外部`tar`も使いません。USTAR blockを順次読み、
+directory、PAX/GNU extension、sparse、symlink、hardlink、device、FIFO、unknown name、
+順序違反、duplicate、truncation、trailing data、各resource上限超過をwrite前に
+拒否します。pack indexがmanifest、export report、blobのhashとsizeを束縛し、
+manifest/lock seed照合とclassifierによるsecret・absolute path・binary・capabilityの
+再検査も行います。`currentTaktVersion`を省略した互換性は安全を仮定せず
+`status: "unknown"`です。inspect結果は正式な`TemplateLockV1`ではなく、構造的に
+異なる`{ kind: "project-template-lock-seed", ... }`を返します。承認と正式lock作成は
+後続のapply段階の責務です。
+
+entry種別ごとのceilingは独立し、callerは縮小だけできます。`pack.json`と
+`manifest.json`は各4 MiB、`export-report.json`と各blobは各1 MiBで、entry count、
+total payload、archive全体にも別上限があります。USTARのoctal、checksum、
+uname/gname、device、prefix、reserved bytesはv1 canonical encodingとの完全一致が
+必要です。
+
+writerは`tar-stream` 3.1.7をdirect dependencyとして固定しています。readerは
+security境界を明確にするため自前のbounded USTAR parserを使います。3.2.0で追加された
+writerに不要な`bare-fs`依存を取り込まず、supply-chain surfaceとNode以外のruntime向け
+optional経路を増やさないためのpinです。
+
 ## 互換性と v2 への移行
 
 クライアントは未知の schema major を必ず拒否します。v1 は security に関係する

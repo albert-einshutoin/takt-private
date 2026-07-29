@@ -191,6 +191,68 @@ archive bytes. Issue #138 archive creation and apply must reopen and revalidate
 type, containment, link count, size, mode, digest, and capability evidence
 before trusting the bytes.
 
+## `.taktpack` export and inspection
+
+`.taktpack` v1 is an uncompressed, content-addressed USTAR archive. Its entry
+order is fixed: `pack.json`, `manifest.json`, `export-report.json`, then
+`blobs/sha256/<SHA-256>` sorted by digest. Destination paths exist only in the
+manifest. Fixed uid, gid, mtime, and mode metadata plus canonical JSON make the
+same input byte-for-byte deterministic.
+
+`createProjectTemplateExportPlan` fails closed for blocked or incomplete scans,
+unapproved capabilities, and project-owned entries without an explicit policy.
+Runtime and sensitive paths are not opened just to hash them; only redacted
+reason counts enter the export report. Absolute source paths and inode snapshots
+are process-local state and are omitted from serialized plans. The returned plan
+is deeply read-only/frozen and bound to a process-local canonical seal; the
+writer rebuilds control documents from the sealed snapshot and rejects copied
+or mutated plans before creating a temporary file. Report `warnings` is an
+empty closed field in v1. `excludedReasons` accepts classifier reason codes
+only, with bounded counts whose sum must equal `counts.excluded`.
+
+`writeTaktpack` reopens every source with `O_NOFOLLOW` and revalidates root
+containment, type, inode, link count, size, mode, timestamps, and SHA-256. It
+checks every source path even when several paths share one digest, and streams
+only one blob after all duplicate sources pass verification. It
+streams to a same-directory `wx` temporary file, fsyncs it, and then publishes
+atomically. Non-force publication uses a hard-link no-clobber operation.
+Forced publication accepts only an unchanged, regular, single-link target and
+keeps the completed old file until the new pack is ready to rename. Windows
+records directory fsync as unsupported after the completed file is fsynced,
+instead of reporting a successfully published artifact as failed.
+
+All writer and inspector filesystem failures are normalized to stable,
+path-redacted `TaktpackError` codes. The writer attaches a pipeline rejection
+handler immediately, before awaiting archive entries. `ARCHIVE_WRITE_FAILED`,
+`ARCHIVE_READ_FAILED`, `DURABILITY_FAILED`, and `CLEANUP_FAILED` never include
+raw source or temporary paths. Writer I/O errors include `artifactState`:
+`not-published` means no destination was published, while `published` on a
+durability error means the complete artifact exists but directory durability
+could not be confirmed. A cleanup failure never replaces the primary failure.
+
+`inspectTaktpack` neither extracts files nor invokes an external `tar`. It
+validates USTAR blocks sequentially and rejects directories, PAX/GNU extensions,
+sparse files, links, devices, FIFOs, unknown names, ordering errors, duplicates,
+truncation, trailing data, and independent resource overruns before any write.
+The pack index binds the manifest, export report, and each blob's digest and
+size. Inspection also validates the manifest/lock seed pair and reruns secret,
+absolute-path, binary, and capability classification. Omitting
+`currentTaktVersion` yields `status: "unknown"` rather than assuming
+compatibility. Inspection returns a structurally distinct
+`{ kind: "project-template-lock-seed", ... }` value, not an approved
+`TemplateLockV1`; approval and formal lock creation remain a later apply step.
+
+Entry-kind ceilings are independent and callers may only tighten them:
+`pack.json` and `manifest.json` are at most 4 MiB, `export-report.json` and each
+blob are at most 1 MiB, with separate entry-count, total-payload, and archive
+budgets. USTAR octal, checksum, uname/gname, device, prefix, and reserved bytes
+must match the canonical v1 encoding exactly.
+
+The writer pins `tar-stream` 3.1.7 as a direct dependency, while the security
+boundary reader uses its own bounded USTAR parser. Version 3.2.0 added a
+`bare-fs` dependency that the writer does not need; the pin avoids expanding
+the supply-chain surface and optional non-Node runtime paths.
+
 ## Compatibility and v2 migration
 
 Clients must reject an unknown schema major. A compatible v1 client may accept
