@@ -38,6 +38,7 @@ export type {
   WriteTaktpackResult,
   TaktpackIndexV1,
   TaktpackLockSeedV1,
+  DeepReadonly,
 } from './archive-types.js';
 export { canonicalizeTaktpackJson } from './canonical-json.js';
 export { createProjectTemplateExportPlan } from './export-plan.js';

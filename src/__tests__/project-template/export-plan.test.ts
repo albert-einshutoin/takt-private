@@ -114,4 +114,37 @@ describe('project template export plan', () => {
     });
     expect(approved.manifest.entries[0]?.policy).toBe('managed');
   });
+
+  it('redacts unknown policy keys and hostile path markers from errors', async () => {
+    const root = makeProject({ 'workflows/review.yaml': 'name: review\n' });
+    const marker = 'TOKEN_MARKER_ABC';
+
+    const error = await createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0',
+      takt: { minVersion: '0.48.0' },
+      source,
+      policies: { [`workflows/${marker}.yaml`]: 'managed' },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'INVALID_EXPORT_PLAN', field: 'policies' });
+    expect(JSON.stringify(error)).not.toContain(marker);
+    expect(JSON.stringify(error)).not.toContain(root);
+  });
+
+  it('deep-freezes every public plan branch', async () => {
+    const root = makeProject({ 'workflows/review.yaml': 'name: review\n' });
+    const plan = await createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0',
+      takt: { minVersion: '0.48.0' },
+      source,
+    });
+
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(Object.isFrozen(plan.manifest)).toBe(true);
+    expect(Object.isFrozen(plan.manifest.entries)).toBe(true);
+    expect(Object.isFrozen(plan.manifest.entries[0])).toBe(true);
+    expect(Object.isFrozen(plan.lock)).toBe(true);
+    expect(Object.isFrozen(plan.report)).toBe(true);
+    expect(Reflect.set(plan.report.counts, 'merge', 99)).toBe(false);
+  });
 });

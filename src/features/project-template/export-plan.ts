@@ -1,9 +1,11 @@
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { calculateProjectTemplateManifestSha256, validateManifestLockPair } from './binding.js';
 import { TaktpackError } from './errors.js';
 import { scanProjectTemplateDirectory } from './filesystem-scan.js';
 import { parseProjectTemplateManifest } from './manifest.js';
+import { canonicalizeTaktpackJson } from './canonical-json.js';
 import type {
   ProjectTemplateExportOptions,
   ProjectTemplateExportFile,
@@ -18,6 +20,7 @@ import type {
   TemplateCapability,
   TemplateEntry,
   TemplateEntryPolicy,
+  TemplateLockV1,
 } from './types.js';
 
 const DESCRIPTOR: TaktpackDescriptorV1 = {
@@ -31,9 +34,42 @@ interface ExportSourceState {
   rootRealPath: string;
   rootSnapshot: ProjectTemplateExportFile['snapshot'];
   files: ProjectTemplateExportFile[];
+  seal: string;
+  sealedPlan: {
+    descriptor: TaktpackDescriptorV1;
+    manifest: ReturnType<typeof parseProjectTemplateManifest>;
+    lock: TemplateLockV1;
+    report: TaktpackExportReportV1;
+  };
 }
 
 const EXPORT_SOURCE_STATES = new WeakMap<ProjectTemplateExportPlan, ExportSourceState>();
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
+function calculatePlanSeal(
+  plan: Pick<ProjectTemplateExportPlan, 'descriptor' | 'manifest' | 'lock' | 'report'>,
+  files: readonly ProjectTemplateExportFile[],
+): string {
+  return createHash('sha256').update(canonicalizeTaktpackJson({
+    descriptor: plan.descriptor,
+    manifest: plan.manifest,
+    lock: plan.lock,
+    report: plan.report,
+    files: files.map(({ path, bytes, mode, sha256 }) => ({ path, bytes, mode, sha256 })),
+  })).digest('hex');
+}
+
+export function validateProjectTemplateExportPlanSeal(
+  plan: ProjectTemplateExportPlan,
+  state: ExportSourceState,
+): boolean {
+  return calculatePlanSeal(plan, state.files) === state.seal;
+}
 
 export function getProjectTemplateExportSourceState(
   plan: ProjectTemplateExportPlan,
@@ -80,30 +116,31 @@ export async function createProjectTemplateExportPlan(
     excluded: 0,
   };
 
-  for (const result of scan.entries) {
+  for (const [entryIndex, result] of scan.entries.entries()) {
+    const entryField = `entries[${entryIndex}]`;
     if (result.classification === 'excluded') {
       counts.excluded += 1;
       incrementReason(excludedReasons, result.reasonCode);
       continue;
     }
     if (result.classification === 'blocked' || result.sha256 === undefined || result.mode === undefined) {
-      throw new TaktpackError('INVALID_EXPORT_PLAN', `entry cannot be exported: ${result.reasonCode}`, result.relativePath);
+      throw new TaktpackError('INVALID_EXPORT_PLAN', `entry cannot be exported: ${result.reasonCode}`, entryField);
     }
     if (result.detectedCapabilities.inspectionStatus !== 'complete') {
-      throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'capability inspection is incomplete', result.relativePath);
+      throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'capability inspection is incomplete', entryField);
     }
 
     const explicitPolicy = policies[result.relativePath];
     if (result.classification === 'project-owned' && explicitPolicy === undefined) {
-      throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'project-owned entry requires an explicit policy', result.relativePath);
+      throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'project-owned entry requires an explicit policy', entryField);
     }
     const policy = explicitPolicy ?? result.suggestedPolicy;
     if (policy === undefined || policy === 'excluded') {
-      throw new TaktpackError('INVALID_EXPORT_PLAN', 'included entry requires an export policy', result.relativePath);
+      throw new TaktpackError('INVALID_EXPORT_PLAN', 'included entry requires an export policy', entryField);
     }
     for (const capability of result.detectedCapabilities.capabilities) {
       if (!approvedCapabilities.has(capability)) {
-        throw new TaktpackError('EXPORT_REVIEW_REQUIRED', `capability requires approval: ${capability}`, result.relativePath);
+        throw new TaktpackError('EXPORT_REVIEW_REQUIRED', `capability requires approval: ${capability}`, entryField);
       }
       topCapabilities.add(capability);
     }
@@ -129,7 +166,7 @@ export async function createProjectTemplateExportPlan(
       || snapshot.size !== result.bytes
       || snapshotMode !== result.mode
     ) {
-      throw new TaktpackError('SOURCE_CHANGED', 'source changed after classification', result.relativePath);
+      throw new TaktpackError('SOURCE_CHANGED', 'source changed after classification', entryField);
     }
     files.push({
       path: result.relativePath,
@@ -151,7 +188,7 @@ export async function createProjectTemplateExportPlan(
 
   const unknownPolicies = Object.keys(policies).filter((path) => !includedPaths.has(path));
   if (unknownPolicies.length > 0) {
-    throw new TaktpackError('INVALID_EXPORT_PLAN', 'policy references a non-exportable path', unknownPolicies[0]);
+    throw new TaktpackError('INVALID_EXPORT_PLAN', 'policy references a non-exportable path', 'policies');
   }
 
   entries.sort((left, right) => left.path.localeCompare(right.path, 'en-US'));
@@ -189,7 +226,10 @@ export async function createProjectTemplateExportPlan(
   const rootPath = join(projectRoot, '.takt');
   const rootRealPath = await realpath(rootPath);
   const rootStat = await lstat(rootPath);
-  const plan: ProjectTemplateExportPlan = { descriptor: DESCRIPTOR, manifest, lock, report };
+  const mutablePlan = { descriptor: structuredClone(DESCRIPTOR), manifest, lock, report };
+  const sealedPlan = structuredClone(mutablePlan);
+  const seal = calculatePlanSeal(mutablePlan, files);
+  const plan = deepFreeze(mutablePlan) as ProjectTemplateExportPlan;
   EXPORT_SOURCE_STATES.set(plan, {
     rootRealPath,
     rootSnapshot: {
@@ -201,7 +241,9 @@ export async function createProjectTemplateExportPlan(
       mtimeMs: rootStat.mtimeMs,
       ctimeMs: rootStat.ctimeMs,
     },
-    files,
+    files: deepFreeze(files),
+    seal,
+    sealedPlan: deepFreeze(sealedPlan),
   });
   return plan;
 }

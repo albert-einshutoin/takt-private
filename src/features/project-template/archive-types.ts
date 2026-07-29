@@ -76,11 +76,19 @@ export interface ProjectTemplateExportFile {
   };
 }
 
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer Item)[]
+    ? readonly DeepReadonly<Item>[]
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
+
 export interface ProjectTemplateExportPlan {
-  descriptor: TaktpackDescriptorV1;
-  manifest: ProjectTemplateManifestV1;
-  lock: TemplateLockV1;
-  report: TaktpackExportReportV1;
+  readonly descriptor: DeepReadonly<TaktpackDescriptorV1>;
+  readonly manifest: DeepReadonly<ProjectTemplateManifestV1>;
+  readonly lock: DeepReadonly<TemplateLockV1>;
+  readonly report: DeepReadonly<TaktpackExportReportV1>;
 }
 
 export interface TaktpackInspectResult {

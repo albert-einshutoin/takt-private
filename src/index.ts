@@ -132,4 +132,5 @@ export type {
   TaktpackExportReportV1,
   TaktpackIndexV1,
   TaktpackLockSeedV1,
+  DeepReadonly,
 } from './features/project-template/index.js';

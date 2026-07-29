@@ -435,7 +435,8 @@ export async function inspectTaktpack(
         if (indexedBlob.bytes !== content.byteLength) {
           throw new TaktpackError('HASH_MISMATCH', 'blob size does not match the pack index', `entries[${entryCount - 1}]`);
         }
-        for (const entry of manifest!.entries.filter((candidate) => candidate.sha256 === hash)) {
+        for (const [manifestIndex, entry] of manifest!.entries.entries()) {
+          if (entry.sha256 !== hash) continue;
           const classification = classifyProjectTemplateEntry({
             relativePath: entry.path,
             content,
@@ -448,7 +449,11 @@ export async function inspectTaktpack(
             || classification.classification === 'excluded'
             || classification.detectedCapabilities.inspectionStatus !== 'complete'
           ) {
-            throw new TaktpackError('INVALID_PACK', `blob failed semantic inspection: ${classification.reasonCode}`, entry.path);
+            throw new TaktpackError(
+              'INVALID_PACK',
+              `blob failed semantic inspection: ${classification.reasonCode}`,
+              `manifest.entries[${manifestIndex}]`,
+            );
           }
           detections.push(classification.detectedCapabilities);
         }

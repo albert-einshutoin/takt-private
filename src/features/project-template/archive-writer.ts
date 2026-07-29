@@ -23,7 +23,10 @@ import {
   calculateProjectTemplateManifestSha256,
   validateManifestLockPair,
 } from './binding.js';
-import { getProjectTemplateExportSourceState } from './export-plan.js';
+import {
+  getProjectTemplateExportSourceState,
+  validateProjectTemplateExportPlanSeal,
+} from './export-plan.js';
 import {
   TAKTPACK_BLOB_PREFIX,
   type ProjectTemplateExportFile,
@@ -61,7 +64,11 @@ function addBufferEntry(archive: Pack, name: string, content: Buffer): Promise<v
   });
 }
 
-function assertSnapshot(file: ProjectTemplateExportFile, stat: Awaited<ReturnType<typeof open>> extends never ? never : import('node:fs').Stats): void {
+function assertSnapshot(
+  file: ProjectTemplateExportFile,
+  stat: import('node:fs').Stats,
+  field: string,
+): void {
   const expected = file.snapshot;
   if (
     !stat.isFile()
@@ -73,7 +80,7 @@ function assertSnapshot(file: ProjectTemplateExportFile, stat: Awaited<ReturnTyp
     || stat.mtimeMs !== expected.mtimeMs
     || stat.ctimeMs !== expected.ctimeMs
   ) {
-    throw new TaktpackError('SOURCE_CHANGED', 'source identity changed after planning', file.path);
+    throw new TaktpackError('SOURCE_CHANGED', 'source identity changed after planning', field);
   }
 }
 
@@ -86,11 +93,12 @@ async function addBlobEntry(
   archive: Pack,
   file: ProjectTemplateExportFile,
   signal: AbortSignal | undefined,
+  field: string,
 ): Promise<void> {
   const handle = await open(file.absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const before = await handle.stat();
-    assertSnapshot(file, before);
+    assertSnapshot(file, before, field);
     const digest = createHash('sha256');
     const hashStream = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
@@ -107,10 +115,36 @@ async function addBlobEntry(
     );
     const after = await handle.stat();
     if (!areProjectTemplateFileStatsEqual(before, after)) {
-      throw new TaktpackError('SOURCE_CHANGED', 'source changed while it was archived', file.path);
+      throw new TaktpackError('SOURCE_CHANGED', 'source changed while it was archived', field);
     }
     if (digest.digest('hex') !== file.sha256) {
-      throw new TaktpackError('SOURCE_CHANGED', 'source content no longer matches its planned hash', file.path);
+      throw new TaktpackError('SOURCE_CHANGED', 'source content no longer matches its planned hash', field);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+async function verifySourceFile(
+  file: ProjectTemplateExportFile,
+  signal: AbortSignal | undefined,
+  field: string,
+): Promise<void> {
+  const handle = await open(file.absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await handle.stat();
+    assertSnapshot(file, before, field);
+    const digest = createHash('sha256');
+    const stream = createReadStream(file.absolutePath, {
+      fd: handle.fd,
+      autoClose: false,
+      ...(signal === undefined ? {} : { signal }),
+    });
+    for await (const chunk of stream) digest.update(chunk as Buffer);
+    const after = await handle.stat();
+    if (!areProjectTemplateFileStatsEqual(before, after)
+      || digest.digest('hex') !== file.sha256) {
+      throw new TaktpackError('SOURCE_CHANGED', 'source changed during export verification', field);
     }
   } finally {
     await handle.close();
@@ -169,7 +203,12 @@ export async function writeTaktpack(
 ): Promise<WriteTaktpackResult> {
   const force = options.force === true;
   const limits = resolveTaktpackLimits(options.limits);
-  validateManifestLockPair(plan.manifest, plan.lock);
+  const sourceState = getProjectTemplateExportSourceState(plan);
+  if (sourceState === undefined || !validateProjectTemplateExportPlanSeal(plan, sourceState)) {
+    throw new TaktpackError('INVALID_EXPORT_PLAN', 'export plan seal is missing or invalid', 'plan');
+  }
+  const sealedPlan = sourceState.sealedPlan;
+  validateManifestLockPair(sealedPlan.manifest, sealedPlan.lock);
   let expectedTarget: import('node:fs').Stats | undefined;
   if (existsSync(outputPath)) {
     expectedTarget = lstatSync(outputPath);
@@ -181,10 +220,6 @@ export async function writeTaktpack(
     throw new TaktpackError('UNSAFE_OUTPUT_TARGET', 'output target must be a regular single-link file', 'outputPath');
   }
   options.signal?.throwIfAborted();
-  const sourceState = getProjectTemplateExportSourceState(plan);
-  if (sourceState === undefined) {
-    throw new TaktpackError('INVALID_EXPORT_PLAN', 'export plan has no bound source state', 'plan');
-  }
   const rootStat = await lstat(sourceState.rootRealPath);
   const expectedRoot = sourceState.rootSnapshot;
   if (
@@ -202,25 +237,30 @@ export async function writeTaktpack(
   const archiveHash = createHash('sha256');
   let bytes = 0;
   try {
-    const manifestContent = Buffer.from(canonicalizeTaktpackJson(plan.manifest));
-    const reportContent = Buffer.from(canonicalizeTaktpackJson(plan.report));
-    const blobs = new Map(sourceState.files.map((file) => [file.sha256, file]));
+    const manifestContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.manifest));
+    const reportContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.report));
+    const blobs = new Map<string, ProjectTemplateExportFile[]>();
+    for (const file of sourceState.files) {
+      const sources = blobs.get(file.sha256) ?? [];
+      sources.push(file);
+      blobs.set(file.sha256, sources);
+    }
     const lockSeed = {
         kind: 'project-template-lock-seed' as const,
-        schemaVersion: plan.lock.schemaVersion,
-        packVersion: plan.lock.packVersion,
-        source: plan.lock.source,
-        capabilities: plan.lock.capabilities,
-        entries: plan.lock.entries,
+        schemaVersion: sealedPlan.lock.schemaVersion,
+        packVersion: sealedPlan.lock.packVersion,
+        source: sealedPlan.lock.source,
+        capabilities: sealedPlan.lock.capabilities,
+        entries: sealedPlan.lock.entries,
       };
     const packContent = Buffer.from(canonicalizeTaktpackJson({
-        ...plan.descriptor,
-        manifestSha256: calculateProjectTemplateManifestSha256(plan.manifest),
+        ...sealedPlan.descriptor,
+        manifestSha256: calculateProjectTemplateManifestSha256(sealedPlan.manifest),
         exportReportSha256: createHash('sha256').update(reportContent).digest('hex'),
         lockSeed,
         blobs: [...blobs.entries()]
           .sort(([left], [right]) => left.localeCompare(right, 'en-US'))
-          .map(([sha256, file]) => ({ sha256, bytes: file.bytes })),
+          .map(([sha256, files]) => ({ sha256, bytes: files[0]!.bytes })),
       }));
     const controlEntries = [
       ['pack', packContent],
@@ -236,10 +276,22 @@ export async function writeTaktpack(
       throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'blob entry exceeds size limit', 'blob');
     }
     const totalPayloadBytes = controlEntries.reduce((sum, [, content]) => sum + content.byteLength, 0)
-      + [...blobs.values()].reduce((sum, file) => sum + file.bytes, 0);
+      + [...blobs.values()].reduce((sum, files) => sum + files[0]!.bytes, 0);
     if (controlEntries.length + blobs.size > limits.maxEntries
       || totalPayloadBytes > limits.maxTotalBytes) {
       throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive envelope exceeds safety limits');
+    }
+
+    for (const [sourceIndex, file] of sourceState.files.entries()) {
+      const resolvedPath = await realpath(file.absolutePath);
+      if (!isInside(sourceState.rootRealPath, resolvedPath)) {
+        throw new TaktpackError(
+          'SOURCE_CHANGED',
+          'source escaped the project template root',
+          `sourceFiles[${sourceIndex}]`,
+        );
+      }
+      await verifySourceFile(file, options.signal, `sourceFiles[${sourceIndex}]`);
     }
 
     const output = createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
@@ -266,12 +318,8 @@ export async function writeTaktpack(
       await addBufferEntry(archive, 'manifest.json', manifestContent);
       await addBufferEntry(archive, 'export-report.json', reportContent);
       for (const hash of [...blobs.keys()].sort((left, right) => left.localeCompare(right, 'en-US'))) {
-        const file = blobs.get(hash)!;
-        const resolvedPath = await realpath(file.absolutePath);
-        if (!isInside(sourceState.rootRealPath, resolvedPath)) {
-          throw new TaktpackError('SOURCE_CHANGED', 'source escaped the project template root', file.path);
-        }
-        await addBlobEntry(archive, file, options.signal);
+        const file = blobs.get(hash)![0]!;
+        await addBlobEntry(archive, file, options.signal, 'blob');
       }
       archive.finalize();
       await outputPromise;

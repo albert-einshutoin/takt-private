@@ -75,6 +75,20 @@ describe('taktpack deterministic writer', () => {
     expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
+  it('reopens and verifies every source when multiple paths share one blob hash', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: same\n');
+    writeProjectFile(root, 'workflows/b.yaml', 'name: same\n');
+    const plan = await makePlan(root);
+    writeProjectFile(root, 'workflows/a.yaml', 'name: evil\n');
+    const output = join(root, 'deduplicated.taktpack');
+
+    await expect(writeTaktpack(output, plan)).rejects.toMatchObject({
+      code: 'SOURCE_CHANGED',
+    });
+    expect(existsSync(output)).toBe(false);
+  });
+
   it('does not overwrite an existing output without force', async () => {
     const root = makeRoot();
     writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
@@ -125,6 +139,27 @@ describe('taktpack deterministic writer', () => {
 
     await expect(writeTaktpack(output, plan, { signal: controller.signal }))
       .rejects.toMatchObject({ name: 'AbortError' });
+    expect(existsSync(output)).toBe(false);
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('rejects a copied plan with recomputed-looking control data before creating a temp file', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const forged = {
+      ...plan,
+      report: {
+        ...plan.report,
+        counts: { ...plan.report.counts, merge: 99 },
+      },
+    };
+    const output = join(root, 'forged.taktpack');
+
+    await expect(writeTaktpack(output, forged)).rejects.toMatchObject({
+      code: 'INVALID_EXPORT_PLAN',
+      field: 'plan',
+    });
     expect(existsSync(output)).toBe(false);
     expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
