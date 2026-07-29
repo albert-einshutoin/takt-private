@@ -9,7 +9,7 @@ lock 化できます。
 
 manifest には `schemaVersion: "1.0"`、SemVer の `packVersion`、対応する
 `takt.minVersion`（任意で `maxVersion`）、`kind`・`uri`・`ref`・不変の `commit`
-を含む `source`、そして `entries` を指定します。各 entry は相対 POSIX パス、
+を含む `source`、そして `entries` を指定します。各 entry は `.takt/` root 相対の POSIX パス、
 `managed` / `merge` / `scaffold` / `excluded` の policy、4 桁 POSIX mode、
 小文字の SHA-256 を必ず持ちます。
 
@@ -21,9 +21,17 @@ manifest には `schemaVersion: "1.0"`、SemVer の `packVersion`、対応する
 `excluded` を含め、すべての entry に digest を持たせます。これによりプレビューと
 lock の内容が再現可能になります。
 
-`path` は常に相対 POSIX パスです。絶対パス、`..`、空セグメント、Windows の
-区切り文字は拒否されます。これにより macOS での検証結果が Windows で別の意味に
-ならないようにします。
+たとえば `.takt/hooks/prepare.sh` は `hooks/prepare.sh` と記録します。
+`.takt/` prefix、絶対パス、`..`、空セグメント、Windows の区切り文字・予約名、
+ADS の `:`、control 文字、末尾の dot/space は拒否されます。大文字小文字だけが
+異なる path と NFC/NFD で同一になる path の衝突も拒否し、macOS と Windows で
+検証結果が変わらないようにします。
+
+`source` は kind ごとの discriminated union です。`github` は `.git` なしの
+`https://github.com/owner/repository`、`git` は credential を含まない HTTPS URL、
+`local` は相対 POSIX path と固定 ref `workspace` を使用します。query、fragment、
+control 文字、local workstation の絶対 path は保存できません。すべての source は
+小文字 hexadecimal 40 または 64 文字の commit に固定します。
 
 ## capability
 
@@ -40,13 +48,26 @@ entry はさらに `executable` の宣言が必須です。利用できる名前
 公開 API は `parseProjectTemplateManifest`、
 `serializeProjectTemplateManifest`、`parseTemplateLock`、
 `serializeTemplateLock`、およびエディタや連携ツール向けの
-`projectTemplateManifestV1JsonSchema` を提供します。検証エラーは安定した `code`
-を持つ `ProjectTemplateValidationError` なので、呼び出し側は文言ではなく code を
-判定に使用してください。
+`calculateProjectTemplateManifestSha256`、`validateManifestLockPair`、
+`projectTemplateManifestV1JsonSchema`、`projectTemplateLockV1JsonSchema` を
+提供します。schema は Ajv 6 と互換の JSON Schema draft-07 です。検証エラーは
+安定した `code` と `field` を持つ `ProjectTemplateValidationError` なので、
+呼び出し側は文言ではなく code を判定に使用してください。
 
-lock は manifest と同じ `schemaVersion`、`packVersion`、`source` と、
-path/mode/digest の entry 一覧を記録します。確認済みのパックを後から適用する際も、
-選択した commit を固定できます。
+lock は manifest と同じ `schemaVersion`、`packVersion`、`source`、トップレベル
+capability と、path/policy/mode/digest/capability の entry 一覧を記録します。
+さらに canonical manifest の `manifestSha256` を保持するため、意味が変わった別の
+manifest に lock を流用できません。
+
+schema は構造と単一 field の制約を検証します。TAKT min/max の順序、path の重複・
+case・Unicode normalization 衝突、policy conflict、実行 bit と capability の関係、
+plain object/array、manifest と lock の照合は複数 field にまたがるため runtime-only
+です。schema が成功しても parser と `validateManifestLockPair` を必ず実行します。
+
+入力上限は entry 4,096 件、path/source URI 512 code point、ref 256 code point、
+capability 3 件です。parser は own property だけの plain JSON object と密な array
+のみ受け入れ、継承値、accessor、class instance、sparse/拡張 array は entry 処理前に
+拒否します。
 
 ## 互換性と v2 への移行
 
