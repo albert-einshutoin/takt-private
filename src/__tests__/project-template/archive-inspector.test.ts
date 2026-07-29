@@ -130,17 +130,36 @@ describe('taktpack streaming inspector', () => {
     await expect(inspectTaktpack(pack)).rejects.toMatchObject({ code: 'HASH_MISMATCH' });
   });
 
-  it('rejects a symlink entry', async () => {
+  it.each([
+    ['hardlink', '1'],
+    ['symlink', '2'],
+    ['character device', '3'],
+    ['block device', '4'],
+    ['directory', '5'],
+    ['FIFO', '6'],
+    ['PAX header', 'x'],
+    ['GNU long path', 'L'],
+  ])('rejects a %s entry', async (_label, type) => {
     const root = makeRoot();
     const pack = await makePack(root);
     const bytes = readFileSync(pack);
-    bytes[156] = '2'.charCodeAt(0);
+    bytes[156] = type.charCodeAt(0);
     rewriteTarChecksum(bytes.subarray(0, 512));
     writeFileSync(pack, bytes);
 
     await expect(inspectTaktpack(pack)).rejects.toMatchObject({
       code: 'UNSAFE_ARCHIVE_ENTRY',
     });
+  });
+
+  it('enforces a caller-tightened archive byte budget', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+    const archiveBytes = readFileSync(pack).byteLength;
+
+    await expect(inspectTaktpack(pack, {
+      limits: { maxArchiveBytes: archiveBytes - 1 },
+    })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' });
   });
 
   it('rejects a blob whose content does not match its content address', async () => {

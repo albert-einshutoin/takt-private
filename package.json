@@ -94,7 +94,7 @@
     "commander": "^12.1.0",
     "cross-spawn": "^7.0.6",
     "faceted-prompting": "^0.5.0",
-    "tar-stream": "^3.2.0",
+    "tar-stream": "3.1.7",
     "traced-config": "^0.3.0",
     "update-notifier": "^7.3.1",
     "wanakana": "^5.3.1",

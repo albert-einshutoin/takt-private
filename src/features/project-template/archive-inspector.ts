@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { lstat, open } from 'node:fs/promises';
 import {
   DEFAULT_TAKTPACK_LIMITS,
   TAKTPACK_BLOB_PREFIX,
@@ -224,6 +224,12 @@ function parseReport(content: Buffer): TaktpackExportReportV1 {
     throw new TaktpackError('INVALID_PACK', 'export report must be an object', 'export-report.json');
   }
   const record = value as Record<string, unknown>;
+  if (
+    JSON.stringify(Object.keys(record).sort())
+      !== JSON.stringify(['counts', 'excludedReasons', 'schemaVersion', 'warnings'])
+  ) {
+    throw new TaktpackError('INVALID_PACK', 'export report has unknown fields', 'export-report.json');
+  }
   if (record['schemaVersion'] !== '1.0'
     || typeof record['counts'] !== 'object' || record['counts'] === null
     || typeof record['excludedReasons'] !== 'object' || record['excludedReasons'] === null
@@ -232,6 +238,12 @@ function parseReport(content: Buffer): TaktpackExportReportV1 {
     throw new TaktpackError('INVALID_PACK', 'invalid export report', 'export-report.json');
   }
   const countsRecord = record['counts'] as Record<string, unknown>;
+  if (
+    JSON.stringify(Object.keys(countsRecord).sort())
+      !== JSON.stringify(['excluded', 'managed', 'merge', 'scaffold'])
+  ) {
+    throw new TaktpackError('INVALID_PACK', 'export report counts have unknown fields', 'counts');
+  }
   const counts = {} as Record<TemplateEntryPolicy, number>;
   for (const policy of ['managed', 'merge', 'scaffold', 'excluded'] as const) {
     const count = countsRecord[policy];
@@ -275,6 +287,10 @@ export async function inspectTaktpack(
   options: InspectTaktpackOptions = {},
 ): Promise<TaktpackInspectResult> {
   const limits = resolveLimits(options.limits);
+  const pathSnapshot = await lstat(archivePath);
+  if (pathSnapshot.isSymbolicLink() || !pathSnapshot.isFile() || pathSnapshot.nlink !== 1) {
+    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input must be a regular single-link file', 'archive');
+  }
   const handle = await open(archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   const archiveDigest = createHash('sha256');
   let position = 0;
@@ -286,22 +302,35 @@ export async function inspectTaktpack(
   const detections: DetectedTemplateCapabilities[] = [];
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > limits.maxArchiveBytes) {
+    if (
+      !stat.isFile()
+      || stat.nlink !== 1
+      || stat.dev !== pathSnapshot.dev
+      || stat.ino !== pathSnapshot.ino
+      || stat.size !== pathSnapshot.size
+      || stat.size > limits.maxArchiveBytes
+    ) {
       throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive file exceeds safety limits', 'archive');
     }
 
-    const readExact = async (length: number): Promise<Buffer> => {
+    const readExact = async (
+      length: number,
+      payloadDigest?: ReturnType<typeof createHash>,
+    ): Promise<Buffer> => {
       const buffer = Buffer.alloc(length);
       let offset = 0;
       while (offset < length) {
-        const { bytesRead } = await handle.read(buffer, offset, length - offset, position + offset);
+        const requestedBytes = Math.min(64 * 1024, length - offset);
+        const { bytesRead } = await handle.read(buffer, offset, requestedBytes, position + offset);
         if (bytesRead === 0) {
           throw new TaktpackError('TRUNCATED_ARCHIVE', 'archive ended before the declared USTAR boundary');
         }
+        const chunk = buffer.subarray(offset, offset + bytesRead);
+        archiveDigest.update(chunk);
+        payloadDigest?.update(chunk);
         offset += bytesRead;
       }
       position += length;
-      archiveDigest.update(buffer);
       return buffer;
     };
 
@@ -345,7 +374,10 @@ export async function inspectTaktpack(
 
       // One entry is bounded independently. Blobs are discarded immediately
       // after hashing and reclassification instead of accumulating the archive.
-      const content = await readExact(header.size);
+      const blobDigest = header.name.startsWith(TAKTPACK_BLOB_PREFIX)
+        ? createHash('sha256')
+        : undefined;
+      const content = await readExact(header.size, blobDigest);
       const paddingBytes = (TAR_BLOCK_BYTES - (header.size % TAR_BLOCK_BYTES)) % TAR_BLOCK_BYTES;
       if (paddingBytes > 0 && !isZeroBlock(Buffer.concat([
         await readExact(paddingBytes),
@@ -377,7 +409,7 @@ export async function inspectTaktpack(
         report = parseReport(content);
       } else {
         const match = BLOB_NAME_PATTERN.exec(header.name)!;
-        const hash = createHash('sha256').update(content).digest('hex');
+        const hash = blobDigest!.digest('hex');
         if (hash !== match[1]) {
           throw new TaktpackError('HASH_MISMATCH', 'blob content does not match its content address', `entries[${entryCount - 1}]`);
         }
@@ -423,6 +455,16 @@ export async function inspectTaktpack(
     validateManifestLockPair(manifest, lock);
     validateDetectedTemplateCapabilities(manifest, detections);
     validateReportAgainstManifest(report, manifest);
+    const finalStat = await handle.stat();
+    if (
+      finalStat.dev !== stat.dev
+      || finalStat.ino !== stat.ino
+      || finalStat.size !== stat.size
+      || finalStat.mtimeMs !== stat.mtimeMs
+      || finalStat.ctimeMs !== stat.ctimeMs
+    ) {
+      throw new TaktpackError('SOURCE_CHANGED', 'archive changed while it was inspected', 'archive');
+    }
     const currentVersion = options.currentTaktVersion === undefined
       ? undefined
       : requireSemVer(options.currentTaktVersion, 'currentTaktVersion');

@@ -222,6 +222,11 @@ absolute-path, binary, and capability classification. Omitting
 `currentTaktVersion` yields `status: "unknown"` rather than assuming
 compatibility.
 
+The writer pins `tar-stream` 3.1.7 as a direct dependency, while the security
+boundary reader uses its own bounded USTAR parser. Version 3.2.0 added a
+`bare-fs` dependency that the writer does not need; the pin avoids expanding
+the supply-chain surface and optional non-Node runtime paths.
+
 ## Compatibility and v2 migration
 
 Clients must reject an unknown schema major. A compatible v1 client may accept

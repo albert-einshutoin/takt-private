@@ -31,7 +31,6 @@ export type {
   TaktpackDescriptorV1,
   TaktpackExportReportV1,
   ProjectTemplateExportOptions,
-  ProjectTemplateExportFile,
   ProjectTemplateExportPlan,
   TaktpackInspectResult,
   InspectTaktpackOptions,

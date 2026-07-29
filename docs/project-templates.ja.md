@@ -183,6 +183,11 @@ manifest/lock seed照合とclassifierによるsecret・absolute path・binary・
 再検査も行います。`currentTaktVersion`を省略した互換性は安全を仮定せず
 `status: "unknown"`です。
 
+writerは`tar-stream` 3.1.7をdirect dependencyとして固定しています。readerは
+security境界を明確にするため自前のbounded USTAR parserを使います。3.2.0で追加された
+writerに不要な`bare-fs`依存を取り込まず、supply-chain surfaceとNode以外のruntime向け
+optional経路を増やさないためのpinです。
+
 ## 互換性と v2 への移行
 
 クライアントは未知の schema major を必ず拒否します。v1 は security に関係する

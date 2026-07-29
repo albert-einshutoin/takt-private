@@ -19,7 +19,10 @@ import { pipeline } from 'node:stream/promises';
 import { pack as createTarPack, type Headers, type Pack } from 'tar-stream';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import { TaktpackError } from './errors.js';
-import { calculateProjectTemplateManifestSha256 } from './binding.js';
+import {
+  calculateProjectTemplateManifestSha256,
+  validateManifestLockPair,
+} from './binding.js';
 import { getProjectTemplateExportSourceState } from './export-plan.js';
 import {
   TAKTPACK_BLOB_PREFIX,
@@ -161,6 +164,7 @@ export async function writeTaktpack(
   options: WriteTaktpackOptions = {},
 ): Promise<WriteTaktpackResult> {
   const force = options.force === true;
+  validateManifestLockPair(plan.manifest, plan.lock);
   let expectedTarget: import('node:fs').Stats | undefined;
   if (existsSync(outputPath)) {
     expectedTarget = lstatSync(outputPath);

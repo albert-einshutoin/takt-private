@@ -114,4 +114,18 @@ describe('taktpack deterministic writer', () => {
     });
     expect(readFileSync(target, 'utf8')).toBe('keep-target');
   });
+
+  it('leaves no partial artifact when export is aborted', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'aborted.taktpack');
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(writeTaktpack(output, plan, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(existsSync(output)).toBe(false);
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
 });
