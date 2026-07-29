@@ -47,7 +47,9 @@ digits, `.`, `_`, and `-` for deterministic behavior across file systems.
 Unicode remains fully supported inside file content; only portable path names
 are restricted. NFC validation and NFKC plus locale-aware lowercase collision
 keys remain as defense in depth. Windows `CONIN$` and `CONOUT$` are reserved as
-well. These rules keep validation consistent on every supported file system.
+well. Each segment is limited to 255 ASCII characters while the full path keeps
+its 512-character limit. These rules keep validation consistent on every
+supported file system.
 `mode` is a four-digit POSIX mode and `sha256` is a lowercase SHA-256 digest.
 
 `source` is a discriminated union. `github` uses a canonical
@@ -62,6 +64,12 @@ round-trip to the exact input. User information, query, fragment, dot segments,
 encoded slash/backslash, default-port and host-case aliases, and other
 non-canonical forms are rejected. GitHub owner/repository `.` and `..` aliases
 are invalid.
+
+`source.ref` follows the portable subset of `git check-ref-format`. `HEAD` and
+ordinary refs such as `feature/review-152` are valid. The parser rejects `..`,
+segments beginning with `.`, a trailing `.`, segments ending in `.lock`, `@{`,
+backslash, controls, spaces, and Git-invalid `~ ^ : ? * [` characters. The
+existing 256-character total limit remains in force.
 
 A lock keeps `packVersion`, `source`, top-level capabilities, and each entry's
 path, policy, mode, digest, and capabilities. It additionally stores
@@ -112,8 +120,9 @@ keys, and capability detection completeness are runtime-only. The draft-07
 schemas remain suitable for editor feedback, but they do not replace runtime
 validation.
 
-Inputs are bounded to 4,096 entries, 512 code points per path/source URI, 256
-code points per ref, and three capabilities. Parsers accept only plain,
+Inputs are bounded to 4,096 entries, 512 ASCII characters per path/source URI,
+255 characters per path segment, 256 code points per ref, and three
+capabilities. Parsers accept only plain,
 own-property JSON-style objects and dense arrays; accessors, class instances,
 inherited values, sparse arrays, and extended arrays are rejected before entry
 processing.

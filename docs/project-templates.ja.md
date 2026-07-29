@@ -29,7 +29,8 @@ ADS の `:`、control 文字、末尾の dot/space は拒否されます。大�
 名だけの制約です。NFC 検証と NFKC + locale-aware lowercase の collision key は
 defense-in-depth として維持します。Windows の
 `CONIN$` と `CONOUT$` も予約名です。これにより macOS と Windows で
-検証結果が変わらないようにします。
+検証結果が変わらないようにします。各 segment はASCII 255文字、path全体は
+512文字を上限とします。
 
 `source` は kind ごとの discriminated union です。`github` は `.git` なしの
 `https://github.com/owner/repository`、`git` は credential を含まない HTTPS URL、
@@ -41,6 +42,11 @@ Git/GitHub URI は WHATWG URL でも解析し、入力と完全に round-trip �
 表現だけを許可します。userinfo、query、fragment、dot segment、percent-encoded
 slash/backslash、default port や host の大文字小文字による別名は拒否します。
 GitHub owner/repository の `.` と `..` も無効です。
+
+`source.ref` は `git check-ref-format` のportable subsetです。`HEAD` や
+`feature/review-152` は有効ですが、`..`、`.` で始まるsegment、末尾`.`、
+`.lock` で終わるsegment、`@{`、backslash、control、space、およびGitが禁止する
+`~ ^ : ? * [` を拒否します。ref全体の上限は従来どおり256文字です。
 
 ## capability
 
@@ -74,8 +80,9 @@ case・Unicode normalization 衝突、policy conflict、実行 bit と capabilit
 plain object/array、manifest と lock の照合は複数 field にまたがるため runtime-only
 です。schema が成功しても parser と `validateManifestLockPair` を必ず実行します。
 
-入力上限は entry 4,096 件、path/source URI 512 code point、ref 256 code point、
-capability 3 件です。parser は own property だけの plain JSON object と密な array
+入力上限はentry 4,096件、path/source URI 512 ASCII文字、各path segment
+255文字、ref 256 code point、capability 3件です。parser はown propertyだけの
+plain JSON objectと密なarray
 のみ受け入れ、継承値、accessor、class instance、sparse/拡張 array は entry 処理前に
 拒否します。
 
