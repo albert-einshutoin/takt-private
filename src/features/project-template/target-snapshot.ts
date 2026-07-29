@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import {
   areProjectTemplateFileStatsEqual,
 } from './bounded-file-read.js';
+import { canonicalizeTaktpackJson } from './canonical-json.js';
 import { TaktpackError } from './errors.js';
 import {
   areProjectTemplateDirectorySnapshotsStable,
@@ -55,6 +56,32 @@ export interface ProjectTemplateTargetSnapshot {
   missingPaths: string[];
   missingPathTracking: Readonly<Record<string, ProjectTemplateGitTrackingStatus>>;
   entries: CapturedProjectTemplateTargetEntry[];
+}
+
+/**
+ * Seals only the filesystem and Git evidence that must still be true at
+ * commit time. Content bytes are deliberately excluded: retaining another
+ * copy would increase secret exposure without strengthening the hash witness.
+ */
+export function calculateProjectTemplateTargetPreconditionToken(
+  snapshot: ProjectTemplateTargetSnapshot,
+): string {
+  const candidatePaths = [...snapshot.candidatePaths].sort(compareAscii);
+  const entries = snapshot.entries
+    .map(({ path, mode, sha256, bytes, gitTrackingStatus }) => ({
+      path,
+      mode,
+      sha256,
+      bytes,
+      gitTrackingStatus,
+    }))
+    .sort((left, right) => compareAscii(left.path, right.path));
+  return createHash('sha256').update(canonicalizeTaktpackJson({
+    candidatePaths,
+    targetRootState: snapshot.rootState,
+    missingPathTracking: snapshot.missingPathTracking,
+    entries,
+  })).digest('hex');
 }
 
 interface CapturedTargetFile {

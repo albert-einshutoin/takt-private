@@ -24,6 +24,9 @@ import type {
   TemplateLockEntry,
 } from './types.js';
 import {
+  calculateProjectTemplateTargetPreconditionToken,
+} from './target-snapshot.js';
+import {
   assertAllowedKeys,
   MAX_TEMPLATE_ENTRIES,
   compareSemVer,
@@ -905,20 +908,13 @@ export function createProjectTemplateApplyPlan(
     }
   }
 
-  const preconditionToken = sha256(canonicalizeTaktpackJson({
+  const preconditionToken = calculateProjectTemplateTargetPreconditionToken({
+    rootState: input['targetRootState'] ?? 'directory',
     candidatePaths: paths,
-    targetRootState: input['targetRootState'] ?? 'directory',
+    missingPaths: paths.filter((path) => !localByPath.has(path)),
     missingPathTracking,
-    entries: localEntries
-      .map(({ path, mode, sha256: digest, bytes, gitTrackingStatus }) => ({
-        path,
-        mode,
-        sha256: digest,
-        bytes,
-        gitTrackingStatus,
-      }))
-      .sort((left, right) => compareAscii(left.path, right.path)),
-  }));
+    entries: localEntries,
+  });
   const baseLockSha256 = baseLock === undefined
     ? undefined
     : sha256(canonicalizeTaktpackJson(baseLock));

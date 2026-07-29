@@ -18,6 +18,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   captureProjectTemplateTargetSnapshot,
 } from '../../features/project-template/index.js';
+import {
+  calculateProjectTemplateTargetPreconditionToken,
+} from '../../features/project-template/target-snapshot.js';
 
 const roots: string[] = [];
 
@@ -73,6 +76,39 @@ afterEach(() => {
 });
 
 describe('project template target snapshot', () => {
+  it('derives a stable precondition token without retaining local content bytes', () => {
+    const token = calculateProjectTemplateTargetPreconditionToken({
+      rootState: 'directory',
+      candidatePaths: ['z.yaml', 'config.yaml'],
+      missingPaths: ['z.yaml'],
+      missingPathTracking: { 'z.yaml': 'untracked' },
+      entries: [{
+        path: 'config.yaml',
+        mode: '0644',
+        sha256: hash('language: ja\n'),
+        bytes: 13,
+        content: Buffer.from('language: ja\n'),
+        gitTrackingStatus: 'tracked-clean',
+      }],
+    });
+    const sameEvidenceWithoutContent = calculateProjectTemplateTargetPreconditionToken({
+      rootState: 'directory',
+      candidatePaths: ['config.yaml', 'z.yaml'],
+      missingPaths: ['z.yaml'],
+      missingPathTracking: { 'z.yaml': 'untracked' },
+      entries: [{
+        path: 'config.yaml',
+        mode: '0644',
+        sha256: hash('language: ja\n'),
+        bytes: 13,
+        gitTrackingStatus: 'tracked-clean',
+      }],
+    });
+
+    expect(token).toMatch(/^[a-f0-9]{64}$/);
+    expect(sameEvidenceWithoutContent).toBe(token);
+  });
+
   it('captures tracked and missing candidates without changing target or Git state', async () => {
     const root = makeRoot();
     writeTakt(root, 'config.yaml', 'language: ja\n');
