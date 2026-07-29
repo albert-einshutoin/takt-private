@@ -91,6 +91,32 @@ describe('project template apply storage', () => {
     expect(lstatSync(join(storage.controlRoot, '.gitignore')).mode & 0o077).toBe(0);
   });
 
+  it('does not treat POSIX mode bits as Windows control-plane evidence', async () => {
+    const repoPath = makeRepo();
+    const controlRoot = join(repoPath, '.takt-template-state');
+    mkdirSync(join(controlRoot, 'staging'), { recursive: true, mode: 0o755 });
+    mkdirSync(join(controlRoot, 'backups'), { mode: 0o755 });
+    writeFileSync(join(controlRoot, '.gitignore'), '*\n', { mode: 0o644 });
+
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath,
+      platform: 'win32',
+    });
+    const content = Buffer.from('language: ja\n');
+    await expect(writeProjectTemplateStagingFile({
+      storage,
+      transactionId: 'windows-transaction',
+      target: { kind: 'template-entry', path: 'config.yaml' },
+      content,
+      expectedSha256: hash(content),
+      targetMode: '0644',
+    })).resolves.toMatchObject({ bytes: content.byteLength });
+    await expect(writeProjectTemplateBackupManifest({
+      storage,
+      manifest: manifest('windows-backup', '2026-07-30T00:00:00.000Z'),
+    })).resolves.toContain('manifest.json');
+  });
+
   it('writes a hash-verified 0600 staging file and rejects unsafe paths', async () => {
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
     const content = Buffer.from('language: ja\n');
@@ -371,5 +397,17 @@ describe('project template apply storage', () => {
       transactionId: 'transaction-1',
     })).rejects.toMatchObject({ code: 'UNSAFE_CONTROL_ROOT' });
     expect(existsSync(outside)).toBe(true);
+  });
+
+  it('stops directory iteration as soon as its entry budget is exceeded', async () => {
+    const repoPath = makeRepo();
+    const directory = join(repoPath, 'bounded-directory');
+    mkdirSync(directory);
+    writeFileSync(join(directory, 'first'), '');
+    writeFileSync(join(directory, 'second'), '');
+    const io = createProjectTemplateApplyStorageIo();
+
+    await expect(io.readdir(directory, 1))
+      .rejects.toMatchObject({ code: 'LIMIT_EXCEEDED' });
   });
 });

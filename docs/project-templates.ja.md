@@ -213,7 +213,9 @@ applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を�
 は`.takt-template-lock.json`、privateなstaging・journal・世代数を制限したbackupは
 `.takt-template-state/`へ保存します。後者はGit ignore対象かつowner-only permission
 です。各control root自身にも`*`のprivate `.gitignore`を生成するため、任意の適用先で
-backupが`git add -A`へ混入しません。backup対象は変更するtemplate entryと正式lockだけで、runtime stateやexcluded
+backupが`git add -A`へ混入しません。このignore fileをdurableに作成・検証してからだけ
+run-start mutex、apply lease、recovery markerを公開します。backup対象は変更する
+template entryと正式lockだけで、runtime stateやexcluded
 contentを新しく収集しません。backup manifestは元のhash、mode、timestampを監査用に
 記録し、transaction前には存在しなかった適用先の親directoryも証拠として保持します。
 補償、recovery、operator rollbackは、それらが空のままである場合だけ深い順に削除し、
@@ -231,12 +233,17 @@ processが明示markerを書けない時点で停止しても、non-terminal dur
 download/writeとrun開始をfail-closedで止めます。`recoverProjectTemplateApply`は
 journalとbackup manifestからcommittedまたはrolled-backへ収束し、検証成功後だけ
 recovery markerを所有identity付きで解除します。
+準備中の失敗では、そのtransactionが所有するstagingと未完成backupを削除します。
+cleanup自体が中断された場合は、次のexclusive apply leaseがtarget変更前にboundedな
+orphan回収を行い、valid manifestのある世代は保持し、壊れた証拠はfail-closedにします。
 crashで残ったcoordination fileはowner PIDが確実に停止している場合だけ回収し、live、
 malformed、判定不能なownerは拒否します。v1の脅威境界は共通leaseに従うTAKT/devloopd
 writerです。Node標準APIにはdirectory fd相対のrenameがないため、同じOS userの敵対的
 processが直前witnessとrenameの間で親directoryを差し替える競合は対象外です。
 Windowsはdirectory fsyncを提供しないため、file fsync後のdirectory durabilityだけを
-best-effortとして扱います。
+best-effortとして扱います。NodeがWindowsで公開するchmod semanticsはPOSIXの一部だけ
+なので、Windowsではcontentとbyte lengthをtransaction witnessとし、manifest modeは
+advisoryとして扱います。POSIX platformでは引き続きmodeの完全一致を要求します。
 
 entry種別ごとのceilingは独立し、callerは縮小だけできます。`pack.json`と
 `manifest.json`は各4 MiB、`export-report.json`と各blobは各1 MiBで、entry count、

@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -19,6 +21,11 @@ import {
   type ProjectTemplateApplyLeaseIdentity,
 } from './apply-guard.js';
 import { isProcessAlive } from '../../infra/task/process.js';
+import {
+  isProjectTemplateOwnerOnlyMode,
+  PROJECT_TEMPLATE_CONTROL_DIRECTORY,
+  PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT,
+} from './control-root-contract.js';
 
 export class ProjectTemplateCoordinationError extends Error {
   readonly code = 'PROJECT_TEMPLATE_COORDINATION_UNAVAILABLE';
@@ -39,16 +46,136 @@ export interface ProjectTemplateRecoveryRequiredIdentity {
   transactionId: string;
 }
 
-function syncDirectory(path: string): void {
-  // Windows does not support opening directories for fsync. File contents are
-  // still fsynced before publication; directory durability is best-effort on
-  // that platform, matching the existing taktpack writer contract.
-  if (process.platform === 'win32') return;
+const CONTROL_GITIGNORE_CONTENT = Buffer.from(PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT);
+
+function syncDirectoryDescriptor(path: string): void {
   const fd = openSync(path, constants.O_RDONLY);
   try {
     fsyncSync(fd);
   } finally {
     closeSync(fd);
+  }
+}
+
+export function syncProjectTemplateCoordinationDirectory(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+  sync: (directory: string) => void = syncDirectoryDescriptor,
+): 'synced' | 'unsupported' {
+  // Windows does not support opening directories for fsync. File contents are
+  // still fsynced before publication; directory durability is best-effort on
+  // that platform, matching the existing taktpack writer contract.
+  if (platform === 'win32') return 'unsupported';
+  sync(path);
+  return 'synced';
+}
+
+function syncDirectory(path: string): void {
+  syncProjectTemplateCoordinationDirectory(path);
+}
+
+export function isSafeProjectTemplateControlIgnore(
+  path: string,
+  expectedDevice: number,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  let pathEntry: ReturnType<typeof lstatSync>;
+  try {
+    pathEntry = lstatSync(path);
+  } catch {
+    return false;
+  }
+  if (
+    pathEntry.isSymbolicLink()
+    || !pathEntry.isFile()
+    || pathEntry.nlink !== 1
+    || pathEntry.dev !== expectedDevice
+    || !isProjectTemplateOwnerOnlyMode(pathEntry.mode, platform)
+    || pathEntry.size !== CONTROL_GITIGNORE_CONTENT.byteLength
+  ) {
+    return false;
+  }
+  let fd: number;
+  try {
+    // Windows does not expose O_NOFOLLOW. The lstat/fstat identity check
+    // provides the corresponding reparse-point and replacement witness there.
+    const noFollow = platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+    fd = openSync(path, constants.O_RDONLY | noFollow);
+  } catch {
+    return false;
+  }
+  let safe = false;
+  try {
+    const before = fstatSync(fd);
+    if (
+      before.isFile()
+      && before.nlink === 1
+      && before.dev === expectedDevice
+      && isProjectTemplateOwnerOnlyMode(before.mode, platform)
+      && before.size === CONTROL_GITIGNORE_CONTENT.byteLength
+      && pathEntry.dev === before.dev
+      && pathEntry.ino === before.ino
+      && pathEntry.mode === before.mode
+      && pathEntry.nlink === before.nlink
+      && pathEntry.size === before.size
+      && pathEntry.mtimeMs === before.mtimeMs
+      && pathEntry.ctimeMs === before.ctimeMs
+    ) {
+      const content = Buffer.alloc(CONTROL_GITIGNORE_CONTENT.byteLength);
+      const bytesRead = readSync(fd, content, 0, content.byteLength, 0);
+      const extra = Buffer.alloc(1);
+      const extraBytes = readSync(fd, extra, 0, 1, bytesRead);
+      const after = fstatSync(fd);
+      safe = bytesRead === content.byteLength
+        && extraBytes === 0
+        && content.equals(CONTROL_GITIGNORE_CONTENT)
+        && before.dev === after.dev
+        && before.ino === after.ino
+        && before.mode === after.mode
+        && before.nlink === after.nlink
+        && before.size === after.size
+        && before.mtimeMs === after.mtimeMs
+        && before.ctimeMs === after.ctimeMs;
+    }
+  } catch {
+    safe = false;
+  }
+  try {
+    closeSync(fd);
+  } catch {
+    safe = false;
+  }
+  return safe;
+}
+
+function ensureControlIgnore(controlRoot: string, expectedDevice: number): void {
+  const path = join(controlRoot, '.gitignore');
+  try {
+    const fd = openSync(
+      path,
+      constants.O_CREAT
+        | constants.O_EXCL
+        | constants.O_WRONLY
+        | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      writeFileSync(fd, CONTROL_GITIGNORE_CONTENT);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw new ProjectTemplateCoordinationError();
+    }
+  }
+  // The coordination namespace must be durable before any visible lock file
+  // can be published. Repeating the directory sync also repairs the durability
+  // boundary after a prior process failed between file and directory fsync.
+  syncDirectory(controlRoot);
+  if (!isSafeProjectTemplateControlIgnore(path, expectedDevice)) {
+    throw new ProjectTemplateCoordinationError();
   }
 }
 
@@ -58,7 +185,7 @@ function ensureControlRoot(repoPath: string): string {
   if (!repoStat.isDirectory() || repoStat.isSymbolicLink()) {
     throw new ProjectTemplateCoordinationError();
   }
-  const controlRoot = join(repoRoot, '.takt-template-state');
+  const controlRoot = join(repoRoot, PROJECT_TEMPLATE_CONTROL_DIRECTORY);
   try {
     mkdirSync(controlRoot, { mode: 0o700 });
     syncDirectory(repoRoot);
@@ -71,10 +198,14 @@ function ensureControlRoot(repoPath: string): string {
   if (
     !stat.isDirectory()
     || stat.isSymbolicLink()
-    || (stat.mode & 0o077) !== 0
+    || stat.dev !== repoStat.dev
+    || !isProjectTemplateOwnerOnlyMode(stat.mode)
   ) {
     throw new ProjectTemplateCoordinationError();
   }
+  // Ignore publication precedes every mutex/lease file so even a process crash
+  // cannot expose coordination artifacts to `git add -A`.
+  ensureControlIgnore(controlRoot, repoStat.dev);
   return controlRoot;
 }
 

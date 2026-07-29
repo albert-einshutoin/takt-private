@@ -24,8 +24,10 @@ import {
   captureProjectTemplateBackupFile,
   initializeProjectTemplateApplyStorage,
   pruneProjectTemplateBackupGenerations,
+  reclaimProjectTemplatePreparationOrphans,
   parseProjectTemplateApplyJournal,
   readProjectTemplateBackupManifest,
+  removeProjectTemplateBackupGeneration,
   removeProjectTemplateStagingTransaction,
   resolveProjectTemplateApplyTarget,
   writeProjectTemplateApplyJournal,
@@ -210,13 +212,16 @@ async function currentState(
 function stateMatches(
   actual: ProjectTemplateBackupEntryState,
   expected: ProjectTemplateBackupEntryState,
+  platform: NodeJS.Platform,
 ): boolean {
   return actual.kind === 'absent'
     ? expected.kind === 'absent'
     : expected.kind === 'file'
       && actual.sha256 === expected.sha256
       && actual.bytes === expected.bytes
-      && actual.mode === expected.mode;
+      // Windows exposes only a subset of POSIX chmod semantics, so content
+      // identity remains the transaction witness while mode is advisory.
+      && (platform === 'win32' || actual.mode === expected.mode);
 }
 
 function operationKey(
@@ -509,7 +514,11 @@ async function verifyManifestState(
   side: 'before' | 'after',
 ): Promise<boolean> {
   for (const entry of manifest.entries) {
-    if (!stateMatches(await currentState(storage, entry.target), entry[side])) {
+    if (!stateMatches(
+      await currentState(storage, entry.target),
+      entry[side],
+      storage.platform,
+    )) {
       return false;
     }
   }
@@ -528,7 +537,11 @@ async function restoreOperations(
   for (const entry of [...selected].reverse()) {
     // The whole-set precheck is not enough: an editor can race between two
     // restores, so every target is witnessed again immediately before mutation.
-    if (!stateMatches(await currentState(storage, entry.target), entry.after)) {
+    if (!stateMatches(
+      await currentState(storage, entry.target),
+      entry.after,
+      storage.platform,
+    )) {
       throw new Error('restore target drifted');
     }
     if (entry.before.kind === 'absent') {
@@ -586,6 +599,7 @@ export async function applyProjectTemplatePlan(options: {
   let backupId: string | undefined;
   let transactionId: string | undefined;
   let manifest: ProjectTemplateBackupManifest | undefined;
+  let backupManifestPublished = false;
   let createdTargetDirectories: string[] = [];
   const completedOperations: string[] = [];
   let intentOperationKey: string | undefined;
@@ -605,6 +619,7 @@ export async function applyProjectTemplatePlan(options: {
       repoPath: options.projectRoot,
       ...(options.io === undefined ? {} : { io: options.io }),
     });
+    await reclaimProjectTemplatePreparationOrphans({ storage });
     if (!await verifyBaseLock(storage, options.plan)) {
       return notStarted('BASE_LOCK_DRIFT', 'formal template lock changed after preview');
     }
@@ -705,6 +720,7 @@ export async function applyProjectTemplatePlan(options: {
       })),
     };
     await writeProjectTemplateBackupManifest({ storage, manifest });
+    backupManifestPublished = true;
     await writeJournal(storage, {
       transactionId,
       planId: options.plan.planId,
@@ -730,6 +746,7 @@ export async function applyProjectTemplatePlan(options: {
       if (!stateMatches(
         await currentState(storage, operation.target),
         operation.before,
+        storage.platform,
       )) {
         throw new Error('target drifted immediately before commit');
       }
@@ -775,6 +792,29 @@ export async function applyProjectTemplatePlan(options: {
     });
     return { status: 'committed', backupId, planId: options.plan.planId };
   } catch {
+    if (
+      storage !== undefined
+      && !backupManifestPublished
+      && backupId !== undefined
+      && transactionId !== undefined
+    ) {
+      try {
+        await removeProjectTemplateStagingTransaction({ storage, transactionId });
+        await removeProjectTemplateBackupGeneration({ storage, backupId });
+        return notStarted(
+          'APPLY_FAILED_ROLLED_BACK',
+          'apply preparation failed and partial artifacts were removed',
+        );
+      } catch {
+        // No manifest/journal exists yet, so a recovery marker would be
+        // impossible to clear through the recovery protocol. Leave the bounded
+        // orphan for the next lease holder's preparation sweep instead.
+        return notStarted(
+          'APPLY_FAILED_ROLLED_BACK',
+          'apply preparation failed; partial artifacts will be reclaimed on retry',
+        );
+      }
+    }
     if (storage !== undefined && manifest !== undefined && transactionId !== undefined) {
       try {
         if (
@@ -786,12 +826,20 @@ export async function applyProjectTemplatePlan(options: {
           );
           if (
             pending !== undefined
-            && stateMatches(await currentState(storage, pending.target), pending.after)
+            && stateMatches(
+              await currentState(storage, pending.target),
+              pending.after,
+              storage.platform,
+            )
           ) {
             completedOperations.push(intentOperationKey);
           } else if (
             pending !== undefined
-            && !stateMatches(await currentState(storage, pending.target), pending.before)
+            && !stateMatches(
+              await currentState(storage, pending.target),
+              pending.before,
+              storage.platform,
+            )
           ) {
             throw new Error('pending operation state is indeterminate');
           }
@@ -919,7 +967,11 @@ export async function rollbackProjectTemplateApply(options: {
       backupId: options.backupId,
     });
     for (const entry of manifest.entries) {
-      if (!stateMatches(await currentState(storage, entry.target), entry.after)) {
+      if (!stateMatches(
+        await currentState(storage, entry.target),
+        entry.after,
+        storage.platform,
+      )) {
         return rollbackNotStarted('ROLLBACK_DRIFT', 'an applied target changed after apply');
       }
     }
@@ -1133,8 +1185,8 @@ export async function recoverProjectTemplateApply(options: {
     const mustRestore = new Set<string>();
     for (const entry of manifest.entries) {
       const actual = await currentState(storage, entry.target);
-      if (stateMatches(actual, entry.before)) continue;
-      if (stateMatches(actual, entry.after)) {
+      if (stateMatches(actual, entry.before, storage.platform)) continue;
+      if (stateMatches(actual, entry.after, storage.platform)) {
         mustRestore.add(operationKey(storage, entry.target));
         continue;
       }

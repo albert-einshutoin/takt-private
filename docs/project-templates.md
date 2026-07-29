@@ -256,7 +256,9 @@ lock is stored at `.takt-template-lock.json`. Private staging, journal, and
 bounded backup generations live under `.takt-template-state/`, which must be
 ignored by Git and is created with owner-only permissions. Every control root
 contains a private `*` `.gitignore`, preventing backup data from entering
-`git add -A` in arbitrary target repositories. Backups contain
+`git add -A` in arbitrary target repositories. The ignore file is durably
+created and verified before any run-start mutex, apply lease, or recovery
+marker is published. Backups contain
 only affected template entries and the formal lock; runtime state and excluded
 content are never collected. The backup manifest records each original hash,
 mode, and timestamp for audit. It also records target parent directories that
@@ -278,6 +280,10 @@ non-terminal durable journal still blocks later downloads, writes, and run
 startup. `recoverProjectTemplateApply` converges the journal and backup
 manifest to either committed or rolled-back state, and clears an
 identity-owned recovery marker only after verification succeeds.
+Preparation failures remove their owned staging and incomplete backup roots.
+If cleanup itself is interrupted, the next exclusive apply lease performs a
+bounded orphan sweep before any target mutation; generations with a valid
+manifest are preserved and malformed evidence fails closed.
 Coordination files left by a crash are reclaimed only when their recorded
 owner PID is definitely dead; live, malformed, or indeterminate ownership
 remains blocked. The v1 threat boundary covers cooperating TAKT/devloopd
@@ -285,7 +291,10 @@ writers that honor the shared lease. Node does not expose directory-fd-relative
 rename, so a hostile process under the same OS user racing a parent-directory
 replacement between the final witness and rename is outside that boundary.
 Windows does not provide directory fsync, so directory durability after
-file-level fsync is best-effort on that platform.
+file-level fsync is best-effort on that platform. Node exposes only a subset of
+POSIX chmod semantics on Windows; apply therefore uses content and byte length
+as its transaction witness there and treats the manifest mode as advisory.
+POSIX platforms continue to require exact mode restoration.
 
 Entry-kind ceilings are independent and callers may only tighten them:
 `pack.json` and `manifest.json` are at most 4 MiB, `export-report.json` and each

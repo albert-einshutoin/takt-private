@@ -5,7 +5,7 @@ import {
   lstat,
   mkdir,
   open,
-  readdir,
+  opendir,
   realpath,
   rename,
   rmdir,
@@ -14,10 +14,17 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
+import {
+  isProjectTemplateOwnerOnlyMode,
+  isProjectTemplatePrivateDirectoryMode,
+  isProjectTemplatePrivateFileMode,
+  PROJECT_TEMPLATE_CONTROL_DIRECTORY,
+  PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT,
+} from './control-root-contract.js';
 import { areProjectTemplateFileStatsEqual } from './bounded-file-read.js';
 import { parsePortablePath } from './validation.js';
 
-export const PROJECT_TEMPLATE_CONTROL_DIRECTORY = '.takt-template-state';
+export { PROJECT_TEMPLATE_CONTROL_DIRECTORY } from './control-root-contract.js';
 export const DEFAULT_PROJECT_TEMPLATE_BACKUP_GENERATIONS = 5;
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
@@ -25,7 +32,7 @@ const PRIVATE_FILE_MODE = 0o600;
 const MAX_CONTROL_DIRECTORY_ENTRIES = 8_192;
 const MAX_CONTROL_TREE_DEPTH = 16;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
-const CONTROL_GITIGNORE_CONTENT = Buffer.from('*\n');
+const CONTROL_GITIGNORE_CONTENT = Buffer.from(PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT);
 
 export type ProjectTemplateApplyStorageIoOperation =
   | 'lstat'
@@ -112,7 +119,7 @@ export interface ProjectTemplateApplyStorageIo {
   stat(path: string): Promise<Stats>;
   realpath(path: string): Promise<string>;
   mkdir(path: string, mode: number): Promise<void>;
-  readdir(path: string): Promise<Dirent[]>;
+  readdir(path: string, maxEntries: number): Promise<Dirent[]>;
   readFile(path: string, maxBytes: number): Promise<Buffer>;
   writeExclusive(path: string, content: Uint8Array, mode: number): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
@@ -133,6 +140,7 @@ export interface ProjectTemplateApplyStorage {
   journalPath: string;
   lockPath: string;
   device: number;
+  platform: NodeJS.Platform;
   io: ProjectTemplateApplyStorageIo;
 }
 
@@ -295,11 +303,30 @@ export function createProjectTemplateApplyStorageIo(
         await mkdir(path, { mode });
       },
     ),
-    readdir: async (path) => withIoHooks(
+    readdir: async (path, maxEntries) => withIoHooks(
       hooks,
       'readdir',
       path,
-      () => readdir(path, { withFileTypes: true }),
+      async () => {
+        if (!Number.isSafeInteger(maxEntries) || maxEntries < 0) {
+          throw new ProjectTemplateApplyStorageError(
+            'LIMIT_EXCEEDED',
+            'project template directory read budget is invalid',
+          );
+        }
+        const entries: Dirent[] = [];
+        const directory = await opendir(path);
+        for await (const entry of directory) {
+          if (entries.length >= maxEntries) {
+            throw new ProjectTemplateApplyStorageError(
+              'LIMIT_EXCEEDED',
+              'project template directory exceeds the entry limit',
+            );
+          }
+          entries.push(entry);
+        }
+        return entries;
+      },
     ),
     readFile: async (path, maxBytes) => {
       runHook(hooks, 'before', 'read', path);
@@ -556,6 +583,7 @@ async function ensurePrivateDirectory(
   io: ProjectTemplateApplyStorageIo,
   path: string,
   expectedParentDevice: number,
+  platform: NodeJS.Platform,
 ): Promise<void> {
   let entry = await tryLstat(io, path);
   if (entry === undefined) {
@@ -570,7 +598,7 @@ async function ensurePrivateDirectory(
     entry.isSymbolicLink()
     || !entry.isDirectory()
     || entry.dev !== expectedParentDevice
-    || (entry.mode & 0o777) !== PRIVATE_DIRECTORY_MODE
+    || !isProjectTemplatePrivateDirectoryMode(entry.mode, platform)
   ) {
     throw new ProjectTemplateApplyStorageError(
       'UNSAFE_CONTROL_ROOT',
@@ -589,15 +617,17 @@ async function ensurePrivateParents(
   let current = root;
   for (const segment of segments.slice(0, -1)) {
     current = join(current, segment);
-    await ensurePrivateDirectory(io, current, storage.device);
+    await ensurePrivateDirectory(io, current, storage.device, storage.platform);
   }
 }
 
 export async function initializeProjectTemplateApplyStorage(options: {
   repoPath: string;
   io?: ProjectTemplateApplyStorageIo;
+  platform?: NodeJS.Platform;
 }): Promise<ProjectTemplateApplyStorage> {
   const io = options.io ?? createProjectTemplateApplyStorageIo();
+  const platform = options.platform ?? process.platform;
   let repoRoot: string;
   try {
     repoRoot = await io.realpath(resolve(options.repoPath));
@@ -634,9 +664,9 @@ export async function initializeProjectTemplateApplyStorage(options: {
   const controlRoot = join(repoRoot, PROJECT_TEMPLATE_CONTROL_DIRECTORY);
   const stagingRoot = join(controlRoot, 'staging');
   const backupsRoot = join(controlRoot, 'backups');
-  await ensurePrivateDirectory(io, controlRoot, repoStat.dev);
-  await ensurePrivateDirectory(io, stagingRoot, repoStat.dev);
-  await ensurePrivateDirectory(io, backupsRoot, repoStat.dev);
+  await ensurePrivateDirectory(io, controlRoot, repoStat.dev, platform);
+  await ensurePrivateDirectory(io, stagingRoot, repoStat.dev, platform);
+  await ensurePrivateDirectory(io, backupsRoot, repoStat.dev, platform);
 
   const controlRealPath = await io.realpath(controlRoot);
   if (controlRealPath !== controlRoot) {
@@ -663,6 +693,7 @@ export async function initializeProjectTemplateApplyStorage(options: {
     journalPath: join(controlRoot, 'journal.json'),
     lockPath: join(controlRoot, 'apply.lock'),
     device: repoStat.dev,
+    platform,
     io,
   };
   const controlIgnorePath = join(controlRoot, '.gitignore');
@@ -681,7 +712,7 @@ export async function initializeProjectTemplateApplyStorage(options: {
       || !existingIgnore.isFile()
       || existingIgnore.nlink !== 1
       || existingIgnore.dev !== storage.device
-      || (existingIgnore.mode & 0o077) !== 0
+      || !isProjectTemplateOwnerOnlyMode(existingIgnore.mode, platform)
       || existingIgnore.size !== CONTROL_GITIGNORE_CONTENT.byteLength
       || !(
         await io.readFile(
@@ -714,7 +745,7 @@ async function writePrivateDurableFile(options: {
   );
   let published = false;
   try {
-    await ensurePrivateDirectory(io, parent, storage.device);
+    await ensurePrivateDirectory(io, parent, storage.device, storage.platform);
     if (!replace && await tryLstat(io, finalPath) !== undefined) {
       throw new ProjectTemplateApplyStorageError(
         'ALREADY_EXISTS',
@@ -769,7 +800,12 @@ export async function writeProjectTemplateStagingFile(options: {
   }
   const io = options.io ?? options.storage.io;
   const transactionRoot = join(options.storage.stagingRoot, transactionId);
-  await ensurePrivateDirectory(io, transactionRoot, options.storage.device);
+  await ensurePrivateDirectory(
+    io,
+    transactionRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
   await ensurePrivateParents(
     options.storage,
     transactionRoot,
@@ -864,8 +900,18 @@ export async function captureProjectTemplateBackupFile(options: {
 
   const backupRoot = join(options.storage.backupsRoot, backupId);
   const blobsRoot = join(backupRoot, 'blobs');
-  await ensurePrivateDirectory(io, backupRoot, options.storage.device);
-  await ensurePrivateDirectory(io, blobsRoot, options.storage.device);
+  await ensurePrivateDirectory(
+    io,
+    backupRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
+  await ensurePrivateDirectory(
+    io,
+    blobsRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
   const absolutePath = join(blobsRoot, digest);
   const existing = await tryLstat(io, absolutePath);
   if (existing === undefined) {
@@ -881,7 +927,7 @@ export async function captureProjectTemplateBackupFile(options: {
     || !existing.isFile()
     || existing.nlink !== 1
     || existing.dev !== options.storage.device
-    || (existing.mode & 0o777) !== PRIVATE_FILE_MODE
+    || !isProjectTemplatePrivateFileMode(existing.mode, options.storage.platform)
     || existing.size !== content.byteLength
     || sha256(await io.readFile(absolutePath, options.maxBytes)) !== digest
   ) {
@@ -1079,7 +1125,12 @@ export async function writeProjectTemplateBackupManifest(options: {
   const manifest = validateBackupManifest(options.manifest);
   const io = options.io ?? options.storage.io;
   const backupRoot = join(options.storage.backupsRoot, manifest.backupId);
-  await ensurePrivateDirectory(io, backupRoot, options.storage.device);
+  await ensurePrivateDirectory(
+    io,
+    backupRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
   return writePrivateDurableFile({
     storage: options.storage,
     finalPath: join(backupRoot, 'manifest.json'),
@@ -1213,7 +1264,10 @@ async function removeControlTree(
     );
   }
   if (entry.isDirectory()) {
-    for (const child of await io.readdir(path)) {
+    for (const child of await io.readdir(
+      path,
+      MAX_CONTROL_DIRECTORY_ENTRIES - budget.entries,
+    )) {
       await removeControlTree(storage, join(path, child.name), io, budget, depth + 1);
     }
     await io.rmdir(path);
@@ -1280,6 +1334,71 @@ export async function removeProjectTemplateBackupGeneration(options: {
   });
 }
 
+/**
+ * Reclaims preparation artifacts left before a manifest could be published.
+ * The caller must hold the apply lease: without an active owner, every staging
+ * transaction is orphaned, while a backup is reclaimable only when its
+ * generation never reached the durable manifest commit point.
+ */
+export async function reclaimProjectTemplatePreparationOrphans(options: {
+  storage: ProjectTemplateApplyStorage;
+  io?: ProjectTemplateApplyStorageIo;
+}): Promise<{ stagingTransactionIds: string[]; backupIds: string[] }> {
+  const io = options.io ?? options.storage.io;
+  const stagingEntries = await io.readdir(
+    options.storage.stagingRoot,
+    MAX_CONTROL_DIRECTORY_ENTRIES,
+  );
+  const backupEntries = await io.readdir(
+    options.storage.backupsRoot,
+    MAX_CONTROL_DIRECTORY_ENTRIES,
+  );
+  const stagingTransactionIds: string[] = [];
+  for (const entry of stagingEntries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'staging root contains an unsafe entry',
+      );
+    }
+    const transactionId = assertSafeIdentifier(entry.name, 'transactionId');
+    await removeProjectTemplateStagingTransaction({
+      storage: options.storage,
+      transactionId,
+      io,
+    });
+    stagingTransactionIds.push(transactionId);
+  }
+  const backupIds: string[] = [];
+  for (const entry of backupEntries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'backup root contains an unsafe entry',
+      );
+    }
+    const backupId = assertSafeIdentifier(entry.name, 'backupId');
+    const manifestPath = join(options.storage.backupsRoot, backupId, 'manifest.json');
+    if (await tryLstat(io, manifestPath) !== undefined) {
+      // Validate completed generations before target mutation. A malformed or
+      // replaced manifest is not a preparation orphan and must fail closed.
+      await readProjectTemplateBackupManifest({
+        storage: options.storage,
+        backupId,
+        io,
+      });
+      continue;
+    }
+    await removeProjectTemplateBackupGeneration({
+      storage: options.storage,
+      backupId,
+      io,
+    });
+    backupIds.push(backupId);
+  }
+  return { stagingTransactionIds, backupIds };
+}
+
 export async function pruneProjectTemplateBackupGenerations(options: {
   storage: ProjectTemplateApplyStorage;
   maxGenerations?: number;
@@ -1313,13 +1432,10 @@ export async function pruneProjectTemplateBackupGenerations(options: {
       (backupId) => assertSafeIdentifier(backupId, 'protectedBackupId'),
     ),
   );
-  const directoryEntries = await io.readdir(options.storage.backupsRoot);
-  if (directoryEntries.length > MAX_CONTROL_DIRECTORY_ENTRIES) {
-    throw new ProjectTemplateApplyStorageError(
-      'LIMIT_EXCEEDED',
-      'backup generation directory exceeds the entry limit',
-    );
-  }
+  const directoryEntries = await io.readdir(
+    options.storage.backupsRoot,
+    MAX_CONTROL_DIRECTORY_ENTRIES,
+  );
   const generations: Array<{ backupId: string; createdAt: string }> = [];
   for (const entry of directoryEntries) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) {

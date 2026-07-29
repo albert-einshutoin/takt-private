@@ -6,13 +6,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyProjectTemplatePlan,
@@ -31,6 +32,7 @@ import {
 } from '../../features/project-template/index.js';
 import {
   createProjectTemplateApplyStorageIo,
+  initializeProjectTemplateApplyStorage,
 } from '../../features/project-template/apply-storage.js';
 
 const roots: string[] = [];
@@ -201,6 +203,51 @@ describe('project template atomic apply executor', () => {
     expect(() => readFileSync(join(root, '.takt', 'generated/check.txt'))).toThrow();
   });
 
+  it('uses content rather than unsupported POSIX mode bits as the Windows transaction witness', async () => {
+    const root = makeRoot();
+    const contents = { 'generated/config.yaml': 'language: ja\n' };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const io = createProjectTemplateApplyStorageIo({
+      after(operation, path) {
+        if (
+          operation === 'rename'
+          && (
+            path.startsWith(`${join(root, '.takt')}${sep}`)
+            || path === join(root, PROJECT_TEMPLATE_LOCK_PATH)
+          )
+        ) {
+          // Model the reduced chmod representation documented by Node on Windows.
+          chmodSync(path, 0o666);
+        }
+      },
+    });
+
+    try {
+      Object.defineProperty(process, 'platform', {
+        ...platformDescriptor,
+        value: 'win32',
+      });
+      const applied = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: blobs,
+        io,
+      });
+      expect(applied.status).toBe('committed');
+      await expect(rollbackProjectTemplateApply({
+        projectRoot: root,
+        backupId: applied.status === 'committed' ? applied.backupId : '',
+        io,
+      })).resolves.toMatchObject({ status: 'rolled_back' });
+    } finally {
+      Object.defineProperty(process, 'platform', platformDescriptor);
+    }
+  });
+
   it('removes transaction-created target parents after rollback so a missing-root plan can retry', async () => {
     const root = makeRoot();
     rmSync(join(root, '.takt'), { recursive: true });
@@ -353,6 +400,228 @@ describe('project template atomic apply executor', () => {
 
     expect(result).toMatchObject({ status: 'not_started', code: 'TARGET_DRIFT' });
     expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf-8')).toBe('local drift\n');
+  });
+
+  it('removes partial staging artifacts after preparation fails and permits retry', async () => {
+    const root = makeRoot();
+    const contents = { 'generated/config.yaml': 'language: ja\n' };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    let injected = false;
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (
+          !injected
+          && operation === 'file-fsync'
+          && path.includes(`${sep}staging${sep}`)
+        ) {
+          injected = true;
+          throw new Error('injected staging preparation fault');
+        }
+      },
+    });
+
+    const failed = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+      io,
+    });
+
+    expect(failed).toMatchObject({
+      status: 'not_started',
+      code: 'APPLY_FAILED_ROLLED_BACK',
+    });
+    expect(readdirSync(join(root, '.takt-template-state', 'staging'))).toEqual([]);
+    expect(readdirSync(join(root, '.takt-template-state', 'backups'))).toEqual([]);
+    await expect(applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    })).resolves.toMatchObject({ status: 'committed' });
+  });
+
+  it('removes partial backup artifacts after capture fails and permits retry', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'config.yaml', 'language: en\n');
+    const baseManifest = manifest({ 'config.yaml': 'language: en\n' });
+    const baseLock: TemplateLockV1 = {
+      schemaVersion: '1.0',
+      manifestSha256: calculateProjectTemplateManifestSha256(baseManifest),
+      packVersion: '1.0.0',
+      source,
+      capabilities: [],
+      entries: [{
+        path: 'config.yaml',
+        policy: 'managed',
+        mode: '0644',
+        sha256: hash('language: en\n'),
+        capabilities: [],
+      }],
+    };
+    writeFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), `${JSON.stringify(baseLock)}\n`);
+    const contents = { 'config.yaml': 'language: ja\n' };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+    let injected = false;
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (
+          !injected
+          && operation === 'file-fsync'
+          && path.includes(`${sep}backups${sep}`)
+        ) {
+          injected = true;
+          throw new Error('injected backup preparation fault');
+        }
+      },
+    });
+
+    const failed = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+      io,
+    });
+
+    expect(failed).toMatchObject({
+      status: 'not_started',
+      code: 'APPLY_FAILED_ROLLED_BACK',
+    });
+    expect(readdirSync(join(root, '.takt-template-state', 'staging'))).toEqual([]);
+    expect(readdirSync(join(root, '.takt-template-state', 'backups'))).toEqual([]);
+    await expect(applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    })).resolves.toMatchObject({ status: 'committed' });
+  });
+
+  it('does not publish a terminal journal when the backup manifest fails before publication', async () => {
+    const root = makeRoot();
+    const contents = { 'generated/config.yaml': 'language: ja\n' };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    let injected = false;
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (
+          !injected
+          && operation === 'file-fsync'
+          && path.includes(`${sep}backups${sep}`)
+          && path.includes('.manifest.json.')
+        ) {
+          injected = true;
+          throw new Error('injected manifest publication fault');
+        }
+      },
+    });
+
+    const failed = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+      io,
+    });
+
+    expect(injected).toBe(true);
+    expect(failed).toMatchObject({
+      status: 'not_started',
+      code: 'APPLY_FAILED_ROLLED_BACK',
+    });
+    expect(existsSync(join(root, '.takt-template-state', 'journal.json'))).toBe(false);
+    await expect(recoverProjectTemplateApply({ projectRoot: root }))
+      .resolves.toMatchObject({ status: 'not_started', code: 'NO_RECOVERY_STATE' });
+    await expect(applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    })).resolves.toMatchObject({ status: 'committed' });
+  });
+
+  it('fails closed when preparation artifact cleanup fails', async () => {
+    const root = makeRoot();
+    const contents = { 'generated/config.yaml': 'language: ja\n' };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    let preparationFailed = false;
+    let cleanupFailed = false;
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (
+          !preparationFailed
+          && operation === 'file-fsync'
+          && path.includes(`${sep}staging${sep}`)
+        ) {
+          preparationFailed = true;
+          throw new Error('injected preparation fault');
+        }
+        if (
+          preparationFailed
+          && !cleanupFailed
+          && operation === 'rmdir'
+          && path.includes(`${sep}staging${sep}`)
+        ) {
+          cleanupFailed = true;
+          throw new Error('injected cleanup fault');
+        }
+      },
+    });
+
+    const failed = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+      io,
+    });
+
+    expect(cleanupFailed).toBe(true);
+    expect(failed).toMatchObject({
+      status: 'not_started',
+      code: 'APPLY_FAILED_ROLLED_BACK',
+    });
+    expect(inspectProjectTemplateApplyGuard({ repoPath: root }).passed).toBe(true);
+    await expect(applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    })).resolves.toMatchObject({ status: 'committed' });
+  });
+
+  it('reclaims crash-left preparation orphans under the next apply lease', async () => {
+    const root = makeRoot();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: root });
+    mkdirSync(join(storage.stagingRoot, 'crashed-transaction'), { recursive: true });
+    writeFileSync(join(storage.stagingRoot, 'crashed-transaction', 'partial'), 'partial');
+    mkdirSync(join(storage.backupsRoot, 'crashed-backup', 'blobs'), { recursive: true });
+    writeFileSync(join(storage.backupsRoot, 'crashed-backup', 'blobs', 'partial'), 'partial');
+    const contents = { 'config.yaml': 'language: ja\n' };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+
+    expect(applied.status).toBe('committed');
+    expect(existsSync(join(storage.stagingRoot, 'crashed-transaction'))).toBe(false);
+    expect(existsSync(join(storage.backupsRoot, 'crashed-backup'))).toBe(false);
   });
 
   it('does not create control or target bytes while an active run exists', async () => {
