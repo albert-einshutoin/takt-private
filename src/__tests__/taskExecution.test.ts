@@ -371,11 +371,16 @@ describe('executeAndCompleteTask', () => {
     });
     mockResolveTaskExecution.mockRejectedValue(new Error('injected preparation failure'));
 
-    await expect(executeAndCompleteTaskWithoutWorkflow(
+    const cleanupFailure = await executeAndCompleteTaskWithoutWorkflow(
       createTask('preparation-cleanup'),
       createTaskRunnerMock(),
       projectRoot,
-    )).rejects.toThrow('injected reservation cleanup failure');
+    ).catch((error: unknown) => error);
+    expect(cleanupFailure).toBeInstanceOf(AggregateError);
+    expect((cleanupFailure as AggregateError).errors).toEqual([
+      expect.objectContaining({ message: 'injected preparation failure' }),
+      expect.objectContaining({ message: 'injected reservation cleanup failure' }),
+    ]);
 
     expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
       .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));

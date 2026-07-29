@@ -18,7 +18,10 @@ import { executeRunTaskAndComplete, type RunTaskExecutionContext } from '../exec
 import { EXIT_SIGINT } from '../../../shared/exitCodes.js';
 import { ShutdownManager } from '../execute/shutdownManager.js';
 import type { RunAllTasksOptions, TaskExecutionOptions } from '../execute/types.js';
-import { beginProjectTemplatePreparation } from '../execute/projectTemplatePreparationReservation.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+} from '../execute/projectTemplatePreparationReservation.js';
 
 function resolveWatchExecutionOptions(options?: RunAllTasksOptions): {
   agentOverrides?: TaskExecutionOptions;
@@ -58,7 +61,7 @@ export async function watchTasks(cwd: string, options?: RunAllTasksOptions): Pro
     await watchTasksUnderReservation(cwd, options);
     preparationReservation.complete();
   } catch (error) {
-    preparationReservation.abort();
+    abortProjectTemplatePreparationAfterError(preparationReservation, error);
     throw error;
   }
 }

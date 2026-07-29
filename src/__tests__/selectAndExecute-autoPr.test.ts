@@ -81,6 +81,9 @@ vi.mock('../features/tasks/execute/taskExecution.js', () => ({
 }));
 
 vi.mock('../features/tasks/execute/projectTemplatePreparationReservation.js', () => ({
+  abortProjectTemplatePreparationAfterError: (
+    reservation: { abort(): void },
+  ) => reservation.abort(),
   beginProjectTemplatePreparation: (...args: unknown[]) => {
     mockBeginProjectTemplatePreparation(...args);
     return {
@@ -203,6 +206,8 @@ describe('selectAndExecuteTask (execute path)', () => {
     expect(mockAddTask).toHaveBeenCalledWith('test task', { workflow: 'default' });
     expect(mockFailTask).toHaveBeenCalledTimes(1);
     expect(mockCompleteTask).not.toHaveBeenCalled();
+    expect(mockCompleteProjectTemplatePreparation.mock.invocationCallOrder[0])
+      .toBeLessThan(processExitSpy.mock.invocationCallOrder[0]!);
     processExitSpy.mockRestore();
   });
 });

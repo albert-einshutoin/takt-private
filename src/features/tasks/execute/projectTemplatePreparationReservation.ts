@@ -18,6 +18,25 @@ export interface ProjectTemplatePreparationReservation {
   abort(): void;
 }
 
+/**
+ * Preserve both the protected-operation failure and a fail-closed
+ * terminalization failure. Losing the first error makes runtime diagnosis
+ * misleading, while losing the second hides uncertain coordination state.
+ */
+export function abortProjectTemplatePreparationAfterError(
+  reservation: ProjectTemplatePreparationReservation,
+  primaryError: unknown,
+): void {
+  try {
+    reservation.abort();
+  } catch (terminalizationError) {
+    throw new AggregateError(
+      [primaryError, terminalizationError],
+      'Project template preparation and abort publication both failed',
+    );
+  }
+}
+
 class RunMetaPreparationReservation implements ProjectTemplatePreparationReservation {
   private terminalizationStarted = false;
 

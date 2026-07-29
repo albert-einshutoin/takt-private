@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { inspectProjectTemplateApplyGuard } from '../features/project-template/apply-guard.js';
-import { beginProjectTemplatePreparation } from '../features/tasks/execute/projectTemplatePreparationReservation.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+} from '../features/tasks/execute/projectTemplatePreparationReservation.js';
 
 function readOnlyRunMeta(projectRoot: string): { status: string; workflow: string } {
   const runsRoot = join(projectRoot, '.takt', 'runs');
@@ -58,5 +61,19 @@ describe('project template preparation reservation', () => {
     });
     expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed).toBe(true);
     rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('preserves both the primary and abort publication failures', () => {
+    const primary = new Error('workflow failed');
+    const terminalization = new Error('abort fsync failed');
+
+    expect(() => abortProjectTemplatePreparationAfterError({
+      complete() {},
+      abort() {
+        throw terminalization;
+      },
+    }, primary)).toThrow(expect.objectContaining({
+      errors: [primary, terminalization],
+    }));
   });
 });

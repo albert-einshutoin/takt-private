@@ -23,6 +23,7 @@ import {
 } from './taskResultHandler.js';
 import { executeTaskWorkflow } from './taskWorkflowExecution.js';
 import {
+  abortProjectTemplatePreparationAfterError,
   beginProjectTemplatePreparation,
   type ProjectTemplatePreparationReservation,
 } from './projectTemplatePreparationReservation.js';
@@ -80,6 +81,8 @@ export async function executeTaskAndCompleteWithResult(
   const externalAbortSignal = parallelOptions?.abortSignal;
   const taskAbortSignal = externalAbortSignal ? taskAbortController.signal : undefined;
   let preparationReservation: ProjectTemplatePreparationReservation | undefined;
+  let preparationPrimaryError: unknown;
+  let hasPreparationPrimaryError = false;
 
   const onExternalAbort = (): void => {
     taskAbortController.abort();
@@ -243,11 +246,22 @@ export async function executeTaskAndCompleteWithResult(
     persistTaskResult(taskRunner, taskResult);
     return taskRunResult.success;
   } catch (err) {
+    preparationPrimaryError = err;
+    hasPreparationPrimaryError = true;
     const completedAt = new Date().toISOString();
     persistTaskError(taskRunner, taskForPersistence, startedAt, completedAt, err);
     return false;
   } finally {
-    preparationReservation?.abort();
+    if (preparationReservation !== undefined) {
+      if (!hasPreparationPrimaryError) {
+        preparationReservation.abort();
+      } else {
+        abortProjectTemplatePreparationAfterError(
+          preparationReservation,
+          preparationPrimaryError,
+        );
+      }
+    }
     if (externalAbortSignal) {
       externalAbortSignal.removeEventListener('abort', onExternalAbort);
     }

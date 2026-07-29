@@ -57,6 +57,9 @@ vi.mock('../features/tasks/execute/runTaskExecution.js', () => ({
 }));
 
 vi.mock('../features/tasks/execute/projectTemplatePreparationReservation.js', () => ({
+  abortProjectTemplatePreparationAfterError: (
+    reservation: { abort(): void },
+  ) => reservation.abort(),
   beginProjectTemplatePreparation: (...args: unknown[]) => {
     mockBeginProjectTemplatePreparation(...args);
     return {

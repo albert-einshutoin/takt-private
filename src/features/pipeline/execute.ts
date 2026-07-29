@@ -19,7 +19,10 @@ import {
 } from './steps.js';
 import { submitPullRequest } from './prSubmission.js';
 import { sanitizeTerminalText } from '../../shared/utils/text.js';
-import { beginProjectTemplatePreparation } from '../tasks/execute/projectTemplatePreparationReservation.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+} from '../tasks/execute/projectTemplatePreparationReservation.js';
 
 export type { PipelineExecutionOptions };
 
@@ -43,7 +46,7 @@ async function runPipeline(options: PipelineExecutionOptions): Promise<PipelineO
     preparationReservation.complete();
     return outcome;
   } catch (error) {
-    preparationReservation.abort();
+    abortProjectTemplatePreparationAfterError(preparationReservation, error);
     throw error;
   }
 }

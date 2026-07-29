@@ -17,7 +17,10 @@ import { buildBooleanTaskResult, persistTaskError, persistTaskResult } from './t
 import { prepareTaskSpecDirectory, cleanupPreparedTaskSpec } from '../attachments.js';
 import { cleanupStagedTaskSpec, stageTaskSpecForExecution, type StagedTaskSpec } from './taskSpecContext.js';
 import { buildTraceTaskMetadata } from './traceTaskMetadata.js';
-import { beginProjectTemplatePreparation } from './projectTemplatePreparationReservation.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+} from './projectTemplatePreparationReservation.js';
 
 export type { WorktreeConfirmationResult, SelectAndExecuteOptions };
 
@@ -128,9 +131,15 @@ export async function selectAndExecuteTask(
       agentOverrides,
     );
     preparationReservation.complete();
+    // A normal workflow failure is not a crashed preparation. Publish the
+    // terminal reservation before honoring the CLI's legacy immediate-exit
+    // behavior, otherwise process.exit would leave a stale active record.
+    if (!result && options?.exitOnFailure !== false) {
+      process.exit(1);
+    }
     return result;
   } catch (error) {
-    preparationReservation.abort();
+    abortProjectTemplatePreparationAfterError(preparationReservation, error);
     throw error;
   }
 }
@@ -235,8 +244,5 @@ async function selectAndExecuteTaskUnderReservation(
     persistTaskResult(taskRunner, taskResult);
   }
 
-  if (!taskSuccess && options?.exitOnFailure !== false) {
-    process.exit(1);
-  }
   return taskSuccess;
 }

@@ -24,6 +24,7 @@ import type { DirectResumeMetadata } from '../execute/runMeta.js';
 import type { TaskExecutionOptions } from '../execute/types.js';
 import { buildTraceTaskMetadata } from '../execute/traceTaskMetadata.js';
 import {
+  abortProjectTemplatePreparationAfterError,
   beginProjectTemplatePreparation,
   type ProjectTemplatePreparationReservation,
 } from '../execute/projectTemplatePreparationReservation.js';
@@ -339,6 +340,8 @@ export async function resumeDirectRun(
     task: run.meta.task,
     workflow: 'direct-resume-preparation',
   });
+  let primaryError: unknown;
+  let hasPrimaryError = false;
   try {
     const context = buildExecutionContext(projectDir, run);
     if (action === 'requeue') {
@@ -364,7 +367,18 @@ export async function resumeDirectRun(
       agentOverrides,
       preparationReservation,
     );
+  } catch (error) {
+    primaryError = error;
+    hasPrimaryError = true;
+    throw error;
   } finally {
-    preparationReservation.abort();
+    if (!hasPrimaryError) {
+      preparationReservation.abort();
+    } else {
+      abortProjectTemplatePreparationAfterError(
+        preparationReservation,
+        primaryError,
+      );
+    }
   }
 }

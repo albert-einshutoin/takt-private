@@ -15,7 +15,10 @@ import { getLabel } from '../../../shared/i18n/index.js';
 import type { RunAllTasksOptions, TaskExecutionOptions } from './types.js';
 import { runWithWorkerPool } from './parallelExecution.js';
 import { toSlackTaskDetail } from './slackSummaryAdapter.js';
-import { beginProjectTemplatePreparation } from './projectTemplatePreparationReservation.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+} from './projectTemplatePreparationReservation.js';
 
 export async function runAllTasks(
   cwd: string,
@@ -33,7 +36,7 @@ export async function runAllTasks(
     await runAllTasksUnderReservation(cwd, options);
     preparationReservation.complete();
   } catch (error) {
-    preparationReservation.abort();
+    abortProjectTemplatePreparationAfterError(preparationReservation, error);
     throw error;
   }
 }
