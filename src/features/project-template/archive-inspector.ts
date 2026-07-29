@@ -204,7 +204,8 @@ function parsePackMetadata(content: Buffer): PackMetadata {
     || (record['lockSeed'] as Record<string, unknown>)['kind'] !== 'project-template-lock-seed') {
     throw new TaktpackError('INVALID_PACK', 'pack lock seed is invalid', 'pack.json.lockSeed');
   }
-  const { kind: _kind, ...seedFields } = record['lockSeed'] as Record<string, unknown>;
+  const seedFields = { ...record['lockSeed'] as Record<string, unknown> };
+  delete seedFields['kind'];
   const parsedSeed = parseTemplateLock({
     ...seedFields,
     manifestSha256: '0'.repeat(64),
@@ -487,12 +488,12 @@ export async function inspectTaktpack(
     if (entryCount !== expectedEntries) {
       throw new TaktpackError('MISSING_ARCHIVE_ENTRY', 'one or more content-addressed blobs are missing');
     }
-    const {
-      kind: _lockSeedKind,
-      ...formalLockFields
-    } = metadata.lockSeed;
     const lock: TemplateLockV1 = {
-      ...formalLockFields,
+      schemaVersion: metadata.lockSeed.schemaVersion,
+      packVersion: metadata.lockSeed.packVersion,
+      source: metadata.lockSeed.source,
+      capabilities: metadata.lockSeed.capabilities,
+      entries: metadata.lockSeed.entries,
       manifestSha256: metadata.manifestSha256,
     };
     validateManifestLockPair(manifest, lock);
