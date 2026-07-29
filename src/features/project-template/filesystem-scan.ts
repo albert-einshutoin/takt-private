@@ -1,0 +1,358 @@
+import { createHash } from 'node:crypto';
+import { constants, type Stats } from 'node:fs';
+import {
+  lstat,
+  open,
+  readdir,
+  realpath,
+} from 'node:fs/promises';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import {
+  classifyProjectTemplateEntry,
+  createProjectTemplateBlockedResult,
+} from './classifier-core.js';
+import {
+  areProjectTemplateFileStatsEqual,
+  readBoundedProjectTemplateFile,
+} from './bounded-file-read.js';
+import type {
+  ProjectTemplateClassificationReason,
+  ProjectTemplateClassificationResult,
+  ProjectTemplateScanLimits,
+  ProjectTemplateScanOptions,
+  ProjectTemplateScanResult,
+} from './classifier-types.js';
+
+const DEFAULT_LIMITS: ProjectTemplateScanLimits = {
+  maxNodes: 8_192,
+  maxFiles: 4_096,
+  maxSingleFileBytes: 1024 * 1024,
+  maxTotalBytes: 32 * 1024 * 1024,
+  maxScanBytes: 4 * 1024 * 1024,
+  maxDepth: 8,
+};
+
+interface MutableScan {
+  entries: ProjectTemplateClassificationResult[];
+  nodes: number;
+  files: number;
+  bytes: number;
+  scannedBytes: number;
+  incomplete: boolean;
+  blocked: boolean;
+  portablePathKeys: Set<string>;
+}
+
+function safeMode(mode: number): string {
+  return `0${(mode & 0o777).toString(8).padStart(3, '0')}`;
+}
+
+function portablePathKey(path: string): string {
+  // Case-insensitive NFKC catches collisions that would overwrite entries on
+  // common destination filesystems even when the source filesystem permits them.
+  return path.normalize('NFKC').toLocaleLowerCase('en-US');
+}
+
+function isInside(base: string, candidate: string): boolean {
+  return candidate === base || candidate.startsWith(`${base}${sep}`);
+}
+
+function limitEntry(
+  scan: MutableScan,
+  relativePath: string,
+  reasonCode: ProjectTemplateClassificationReason,
+  bytes = 0,
+): void {
+  scan.entries.push(createProjectTemplateBlockedResult(relativePath, reasonCode, bytes));
+  scan.blocked = true;
+}
+
+function validateLimits(options: ProjectTemplateScanOptions): ProjectTemplateScanLimits | undefined {
+  const limits = { ...DEFAULT_LIMITS, ...options };
+  return Object.values(limits).every(
+    (value) => Number.isSafeInteger(value) && value >= 0,
+  ) ? limits : undefined;
+}
+
+async function scanFile(
+  absolutePath: string,
+  relativePath: string,
+  rootRealPath: string,
+  absolutePathPrefixes: readonly string[],
+  initialStat: Stats,
+  limits: ProjectTemplateScanLimits,
+  scan: MutableScan,
+): Promise<void> {
+  scan.files += 1;
+  if (scan.files > limits.maxFiles) {
+    limitEntry(scan, relativePath, 'FILE_LIMIT_EXCEEDED', initialStat.size);
+    return;
+  }
+  if (initialStat.nlink > 1) {
+    limitEntry(scan, relativePath, 'HARD_LINK', initialStat.size);
+    return;
+  }
+  if (initialStat.size > limits.maxSingleFileBytes) {
+    limitEntry(scan, relativePath, 'SINGLE_FILE_LIMIT_EXCEEDED', initialStat.size);
+    return;
+  }
+  if (scan.bytes + initialStat.size > limits.maxTotalBytes) {
+    limitEntry(scan, relativePath, 'TOTAL_BYTES_LIMIT_EXCEEDED', initialStat.size);
+    return;
+  }
+  if (scan.scannedBytes + initialStat.size > limits.maxScanBytes) {
+    limitEntry(scan, relativePath, 'SCAN_LIMIT_EXCEEDED', initialStat.size);
+    return;
+  }
+
+  scan.bytes += initialStat.size;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const resolvedPath = await realpath(absolutePath);
+    if (!isInside(rootRealPath, resolvedPath)) {
+      limitEntry(scan, relativePath, 'PATH_ESCAPE', initialStat.size);
+      return;
+    }
+
+    // Opening first and comparing fstat snapshots prevents a path swap from
+    // making the scanner hash a different object than the one it classified.
+    handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = await handle.stat();
+    if (!before.isFile()) {
+      limitEntry(scan, relativePath, 'UNSUPPORTED_FILE_TYPE', before.size);
+      return;
+    }
+    if (!areProjectTemplateFileStatsEqual(initialStat, before)) {
+      limitEntry(scan, relativePath, 'FILE_CHANGED_DURING_SCAN', before.size);
+      return;
+    }
+    if (before.nlink > 1) {
+      limitEntry(scan, relativePath, 'HARD_LINK', before.size);
+      return;
+    }
+    const readResult = await readBoundedProjectTemplateFile(handle, before.size);
+    if (readResult.status === 'overflow') {
+      limitEntry(scan, relativePath, readResult.reasonCode, before.size);
+      return;
+    }
+    const { content } = readResult;
+    const after = await handle.stat();
+    if (!areProjectTemplateFileStatsEqual(before, after)) {
+      limitEntry(scan, relativePath, 'FILE_CHANGED_DURING_SCAN', after.size);
+      return;
+    }
+    scan.scannedBytes += content.byteLength;
+    scan.entries.push(classifyProjectTemplateEntry({
+      relativePath,
+      content,
+      absolutePathPrefixes,
+      bytes: content.byteLength,
+      mode: safeMode(before.mode),
+      sha256: createHash('sha256').update(content).digest('hex'),
+    }));
+  } catch {
+    scan.entries.push(createProjectTemplateBlockedResult(relativePath, 'READ_FAILED', initialStat.size));
+    scan.incomplete = true;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function walkDirectory(
+  absoluteDirectory: string,
+  relativeDirectory: string,
+  depth: number,
+  rootRealPath: string,
+  absolutePathPrefixes: readonly string[],
+  limits: ProjectTemplateScanLimits,
+  scan: MutableScan,
+): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(absoluteDirectory);
+  } catch {
+    scan.entries.push(createProjectTemplateBlockedResult(
+      relativeDirectory || '.',
+      'READ_FAILED',
+    ));
+    scan.incomplete = true;
+    return;
+  }
+
+  names.sort((left, right) => left.localeCompare(right, 'en-US'));
+  for (const name of names) {
+    const absolutePath = join(absoluteDirectory, name);
+    const relativePath = relativeDirectory === '' ? name : `${relativeDirectory}/${name}`;
+    scan.nodes += 1;
+    if (scan.nodes > limits.maxNodes) {
+      limitEntry(scan, relativePath, 'NODE_LIMIT_EXCEEDED');
+      return;
+    }
+    if (depth + 1 > limits.maxDepth) {
+      limitEntry(scan, relativePath, 'DEPTH_LIMIT_EXCEEDED');
+      continue;
+    }
+
+    const collisionKey = portablePathKey(relativePath);
+    if (scan.portablePathKeys.has(collisionKey)) {
+      limitEntry(scan, relativePath, 'PATH_COLLISION');
+      continue;
+    }
+    scan.portablePathKeys.add(collisionKey);
+
+    let entryStat: Stats;
+    try {
+      entryStat = await lstat(absolutePath);
+    } catch {
+      scan.entries.push(createProjectTemplateBlockedResult(relativePath, 'READ_FAILED'));
+      scan.incomplete = true;
+      continue;
+    }
+    if (entryStat.isSymbolicLink()) {
+      limitEntry(scan, relativePath, 'SYMLINK', entryStat.size);
+      continue;
+    }
+
+    const metadataClassification = classifyProjectTemplateEntry({
+      relativePath,
+      bytes: entryStat.size,
+      mode: safeMode(entryStat.mode),
+    });
+    if (
+      metadataClassification.reasonCode === 'RUNTIME_STATE'
+      || metadataClassification.reasonCode === 'SENSITIVE_FILENAME'
+      || (entryStat.isFile() && metadataClassification.classification === 'excluded')
+    ) {
+      scan.entries.push(metadataClassification);
+      if (metadataClassification.classification === 'blocked') scan.blocked = true;
+      continue;
+    }
+
+    let resolvedPath: string;
+    try {
+      resolvedPath = await realpath(absolutePath);
+    } catch {
+      scan.entries.push(createProjectTemplateBlockedResult(relativePath, 'READ_FAILED'));
+      scan.incomplete = true;
+      continue;
+    }
+    if (!isInside(rootRealPath, resolvedPath)) {
+      limitEntry(scan, relativePath, 'PATH_ESCAPE', entryStat.size);
+      continue;
+    }
+    if (entryStat.isDirectory()) {
+      await walkDirectory(
+        absolutePath,
+        relativePath,
+        depth + 1,
+        rootRealPath,
+        absolutePathPrefixes,
+        limits,
+        scan,
+      );
+      continue;
+    }
+    if (!entryStat.isFile()) {
+      limitEntry(scan, relativePath, 'UNSUPPORTED_FILE_TYPE', entryStat.size);
+      continue;
+    }
+    await scanFile(
+      absolutePath,
+      relativePath,
+      rootRealPath,
+      absolutePathPrefixes,
+      entryStat,
+      limits,
+      scan,
+    );
+  }
+}
+
+export async function scanProjectTemplateDirectory(
+  projectRoot: string,
+  options: ProjectTemplateScanOptions = {},
+): Promise<ProjectTemplateScanResult> {
+  const limits = validateLimits(options);
+  const scan: MutableScan = {
+    entries: [],
+    nodes: 0,
+    files: 0,
+    bytes: 0,
+    scannedBytes: 0,
+    incomplete: false,
+    blocked: false,
+    portablePathKeys: new Set(),
+  };
+  if (limits === undefined) {
+    limitEntry(scan, '.', 'ROOT_UNSAFE');
+    return finish(scan);
+  }
+
+  const taktRoot = resolve(projectRoot, '.takt');
+  try {
+    const rootStat = await lstat(taktRoot);
+    if (rootStat.isSymbolicLink()) {
+      limitEntry(scan, '.', 'ROOT_SYMLINK');
+      return finish(scan);
+    }
+    if (!rootStat.isDirectory()) {
+      limitEntry(scan, '.', 'ROOT_UNSAFE');
+      return finish(scan);
+    }
+    const projectRealPath = await realpath(projectRoot);
+    const rootRealPath = await realpath(taktRoot);
+    if (!isInside(projectRealPath, rootRealPath) || relative(projectRealPath, rootRealPath) !== '.takt') {
+      limitEntry(scan, '.', 'PATH_ESCAPE');
+      return finish(scan);
+    }
+
+    // `.devloop` is a sibling runtime tree. Recording only a fixed sentinel
+    // proves it was excluded without opening or disclosing any of its children.
+    try {
+      await lstat(resolve(projectRoot, '.devloop'));
+      scan.entries.push(classifyProjectTemplateEntry({
+        relativePath: '.devloop',
+        bytes: 0,
+      }));
+    } catch {
+      // Absence is expected and does not affect exportability.
+    }
+
+    await walkDirectory(
+      taktRoot,
+      '',
+      0,
+      rootRealPath,
+      [resolve(projectRoot), projectRealPath, rootRealPath, dirname(rootRealPath)],
+      limits,
+      scan,
+    );
+  } catch {
+    scan.entries.push(createProjectTemplateBlockedResult('.', 'ROOT_UNSAFE'));
+    scan.blocked = true;
+  }
+  return finish(scan);
+}
+
+function finish(scan: MutableScan): ProjectTemplateScanResult {
+  const hasBlockedEntry = scan.entries.some((entry) => entry.classification === 'blocked');
+  const reviewRequired = scan.entries.some((entry) => entry.classification === 'project-owned');
+  const scanStatus = scan.blocked
+    ? 'blocked'
+    : scan.incomplete
+      ? 'incomplete'
+      : hasBlockedEntry
+        ? 'blocked'
+        : 'complete';
+  return {
+    scanStatus,
+    canExport: scanStatus === 'complete' && !reviewRequired,
+    reviewRequired,
+    entries: scan.entries,
+    counts: {
+      nodes: scan.nodes,
+      files: scan.files,
+      bytes: scan.bytes,
+    },
+  };
+}

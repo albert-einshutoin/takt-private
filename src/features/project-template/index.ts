@@ -11,6 +11,7 @@ export { validateDetectedTemplateCapabilities } from './capability-detection.js'
 export {
   classifyProjectTemplateEntry,
 } from './classifier-core.js';
+export { scanProjectTemplateDirectory } from './filesystem-scan.js';
 export {
   projectTemplateManifestV1JsonSchema,
   projectTemplateLockV1JsonSchema,

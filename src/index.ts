@@ -87,6 +87,7 @@ export {
   validateManifestLockPair,
   validateDetectedTemplateCapabilities,
   classifyProjectTemplateEntry,
+  scanProjectTemplateDirectory,
   projectTemplateManifestV1JsonSchema,
   projectTemplateLockV1JsonSchema,
   ProjectTemplateValidationError,
