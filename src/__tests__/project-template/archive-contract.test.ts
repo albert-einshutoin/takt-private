@@ -6,6 +6,10 @@ import {
   canonicalizeTaktpackJson,
 } from '../../features/project-template/index.js';
 import * as publicApi from '../../index.js';
+import type {
+  TaktpackInspectResult,
+  TaktpackLockSeedV1,
+} from '../../features/project-template/index.js';
 
 describe('taktpack v1 archive contract', () => {
   it('serializes JSON with recursively sorted object keys and a trailing newline', () => {
@@ -51,5 +55,25 @@ describe('taktpack v1 archive contract', () => {
     expect(publicApi.createProjectTemplateExportPlan).toBeTypeOf('function');
     expect(publicApi.writeTaktpack).toBeTypeOf('function');
     expect(publicApi.inspectTaktpack).toBeTypeOf('function');
+  });
+
+  it('keeps an inspected lock seed structurally distinct from a formal lock', () => {
+    const seed: TaktpackLockSeedV1 = {
+      kind: 'project-template-lock-seed',
+      schemaVersion: '1.0',
+      packVersion: '1.0.0',
+      source: {
+        kind: 'local',
+        uri: '.',
+        ref: 'workspace',
+        commit: 'a'.repeat(40),
+      },
+      capabilities: [],
+      entries: [],
+    };
+    const resultKey: keyof TaktpackInspectResult = 'lockSeed';
+
+    expect(seed.kind).toBe('project-template-lock-seed');
+    expect(resultKey).toBe('lockSeed');
   });
 });

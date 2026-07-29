@@ -48,7 +48,7 @@ export interface TaktpackExportReportV1 {
   schemaVersion: '1.0';
   counts: Record<TemplateEntryPolicy, number>;
   excludedReasons: Partial<Record<ProjectTemplateClassificationReason, number>>;
-  warnings: string[];
+  warnings: readonly [];
 }
 
 export interface ProjectTemplateExportOptions {
@@ -86,7 +86,7 @@ export interface ProjectTemplateExportPlan {
 export interface TaktpackInspectResult {
   descriptor: TaktpackDescriptorV1;
   manifest: ProjectTemplateManifestV1;
-  lock: TemplateLockV1;
+  lockSeed: TaktpackLockSeedV1;
   report: TaktpackExportReportV1;
   archiveSha256: string;
   compatibility: {
@@ -98,7 +98,14 @@ export interface TaktpackInspectResult {
   };
 }
 
-export type TaktpackLockSeedV1 = Omit<TemplateLockV1, 'manifestSha256'>;
+export interface TaktpackLockSeedV1 {
+  kind: 'project-template-lock-seed';
+  schemaVersion: TemplateLockV1['schemaVersion'];
+  packVersion: TemplateLockV1['packVersion'];
+  source: TemplateLockV1['source'];
+  capabilities: TemplateLockV1['capabilities'];
+  entries: TemplateLockV1['entries'];
+}
 
 export interface TaktpackBlobIndexEntry {
   sha256: string;

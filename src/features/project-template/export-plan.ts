@@ -184,7 +184,7 @@ export async function createProjectTemplateExportPlan(
     schemaVersion: '1.0',
     counts,
     excludedReasons,
-    warnings: [],
+    warnings: Object.freeze([]),
   };
   const rootPath = join(projectRoot, '.takt');
   const rootRealPath = await realpath(rootPath);

@@ -206,6 +206,7 @@ export async function writeTaktpack(
     const reportContent = Buffer.from(canonicalizeTaktpackJson(plan.report));
     const blobs = new Map(sourceState.files.map((file) => [file.sha256, file]));
     const lockSeed = {
+        kind: 'project-template-lock-seed' as const,
         schemaVersion: plan.lock.schemaVersion,
         packVersion: plan.lock.packVersion,
         source: plan.lock.source,

@@ -9,7 +9,6 @@ import {
   type TaktpackDescriptorV1,
   type TaktpackExportReportV1,
   type TaktpackInspectResult,
-  type TaktpackLimits,
   type TaktpackLockSeedV1,
   type TaktpackBlobIndexEntry,
 } from './archive-types.js';
@@ -31,6 +30,7 @@ import type {
 import { compareSemVer, requireSemVer } from './validation.js';
 import { parseSha256 } from './validation.js';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
+import { PROJECT_TEMPLATE_CLASSIFICATION_REASONS } from './classifier-types.js';
 import {
   maxBytesForTaktpackEntry,
   resolveTaktpackLimits,
@@ -182,11 +182,19 @@ function parsePackMetadata(content: Buffer): PackMetadata {
   ) {
     throw new TaktpackError('INVALID_PACK', 'pack blob index must be unique and sorted', 'pack.json.blobs');
   }
+  if (typeof record['lockSeed'] !== 'object'
+    || record['lockSeed'] === null
+    || Array.isArray(record['lockSeed'])
+    || (record['lockSeed'] as Record<string, unknown>)['kind'] !== 'project-template-lock-seed') {
+    throw new TaktpackError('INVALID_PACK', 'pack lock seed is invalid', 'pack.json.lockSeed');
+  }
+  const { kind: _kind, ...seedFields } = record['lockSeed'] as Record<string, unknown>;
   const parsedSeed = parseTemplateLock({
-    ...(record['lockSeed'] as object),
+    ...seedFields,
     manifestSha256: '0'.repeat(64),
   });
   const lockSeed: TaktpackLockSeedV1 = {
+    kind: 'project-template-lock-seed',
     schemaVersion: parsedSeed.schemaVersion,
     packVersion: parsedSeed.packVersion,
     source: parsedSeed.source,
@@ -241,22 +249,36 @@ function parseReport(content: Buffer): TaktpackExportReportV1 {
     }
     counts[policy] = count as number;
   }
-  if (record['warnings'].length > 100
-    || record['warnings'].some((warning) => typeof warning !== 'string' || warning.length > 1024)) {
-    throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'export report warnings exceed limits', 'warnings');
+  if (record['warnings'].length !== 0) {
+    throw new TaktpackError('INVALID_PACK', 'export report warnings are not supported in v1', 'warnings');
   }
   if (canonicalizeTaktpackJson(value) !== content.toString('utf8')) {
     throw new TaktpackError('INVALID_PACK', 'export report is not canonical JSON', 'export-report.json');
   }
   const excludedReasons = record['excludedReasons'] as Record<string, unknown>;
-  if (Object.values(excludedReasons).some((count) => !Number.isSafeInteger(count) || (count as number) < 0)) {
+  const allowedReasons = new Set<string>(PROJECT_TEMPLATE_CLASSIFICATION_REASONS);
+  const reasonEntries = Object.entries(excludedReasons);
+  if (
+    Array.isArray(record['excludedReasons'])
+    || reasonEntries.length > PROJECT_TEMPLATE_CLASSIFICATION_REASONS.length
+    || reasonEntries.some(([reason, count]) => (
+      !allowedReasons.has(reason)
+      || !Number.isSafeInteger(count)
+      || (count as number) < 0
+      || (count as number) > 4_096
+    ))
+  ) {
     throw new TaktpackError('INVALID_PACK', 'invalid excluded reason count', 'excludedReasons');
+  }
+  const excludedTotal = reasonEntries.reduce((sum, [, count]) => sum + (count as number), 0);
+  if (excludedTotal !== counts.excluded || excludedTotal > 4_096) {
+    throw new TaktpackError('INVALID_PACK', 'excluded reason counts do not match excluded total', 'excludedReasons');
   }
   return {
     schemaVersion: '1.0',
     counts,
     excludedReasons: excludedReasons as TaktpackExportReportV1['excludedReasons'],
-    warnings: record['warnings'] as string[],
+    warnings: Object.freeze([]),
   };
 }
 
@@ -444,8 +466,12 @@ export async function inspectTaktpack(
     if (entryCount !== expectedEntries) {
       throw new TaktpackError('MISSING_ARCHIVE_ENTRY', 'one or more content-addressed blobs are missing');
     }
+    const {
+      kind: _lockSeedKind,
+      ...formalLockFields
+    } = metadata.lockSeed;
     const lock: TemplateLockV1 = {
-      ...metadata.lockSeed,
+      ...formalLockFields,
       manifestSha256: metadata.manifestSha256,
     };
     validateManifestLockPair(manifest, lock);
@@ -474,7 +500,7 @@ export async function inspectTaktpack(
     return {
       descriptor: metadata.descriptor,
       manifest,
-      lock,
+      lockSeed: metadata.lockSeed,
       report,
       archiveSha256: archiveDigest.digest('hex'),
       compatibility: {

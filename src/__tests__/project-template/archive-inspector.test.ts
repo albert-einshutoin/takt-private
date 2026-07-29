@@ -7,6 +7,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -24,10 +25,13 @@ function makeRoot(): string {
   return root;
 }
 
-async function makePack(root: string): Promise<string> {
+async function makePack(root: string, withExcludedRuntime = false): Promise<string> {
   const sourcePath = join(root, '.takt', 'workflows', 'review.yaml');
   mkdirSync(dirname(sourcePath), { recursive: true });
   writeFileSync(sourcePath, 'name: review\n');
+  if (withExcludedRuntime) {
+    writeFileSync(join(root, '.takt', 'tasks.yaml'), 'runtime task\n');
+  }
   const plan = await createProjectTemplateExportPlan(root, {
     packVersion: '1.0.0',
     takt: { minVersion: '0.48.0' },
@@ -41,6 +45,36 @@ async function makePack(root: string): Promise<string> {
   const output = join(root, 'valid.taktpack');
   await writeTaktpack(output, plan);
   return output;
+}
+
+function replaceExcludedReason(pack: string, replacement: string): void {
+  const bytes = readFileSync(pack);
+  const reportHeaderOffset = findTarEntryOffset(bytes, 'export-report.json');
+  const reportSize = Number.parseInt(
+    bytes.subarray(reportHeaderOffset + 124, reportHeaderOffset + 136).toString('ascii'),
+    8,
+  );
+  const report = bytes.subarray(
+    reportHeaderOffset + 512,
+    reportHeaderOffset + 512 + reportSize,
+  );
+  const oldReason = Buffer.from('RUNTIME_STATE');
+  const reasonOffset = report.indexOf(oldReason);
+  expect(reasonOffset).toBeGreaterThanOrEqual(0);
+  expect(Buffer.byteLength(replacement)).toBe(oldReason.byteLength);
+  report.write(replacement, reasonOffset, oldReason.byteLength, 'ascii');
+
+  const packHeaderOffset = findTarEntryOffset(bytes, 'pack.json');
+  const packSize = Number.parseInt(
+    bytes.subarray(packHeaderOffset + 124, packHeaderOffset + 136).toString('ascii'),
+    8,
+  );
+  const packContent = bytes.subarray(packHeaderOffset + 512, packHeaderOffset + 512 + packSize);
+  const metadata = JSON.parse(packContent.toString('utf8')) as { exportReportSha256: string };
+  const digestOffset = packContent.indexOf(Buffer.from(metadata.exportReportSha256));
+  const newDigest = createHash('sha256').update(report).digest('hex');
+  packContent.write(newDigest, digestOffset, 64, 'ascii');
+  writeFileSync(pack, bytes);
 }
 
 function rewriteTarChecksum(header: Buffer): void {
@@ -79,6 +113,11 @@ describe('taktpack streaming inspector', () => {
       report: { counts: { merge: 1 } },
     });
     expect(result.manifest.entries[0]?.path).toBe('workflows/review.yaml');
+    expect(result).not.toHaveProperty('lock');
+    expect(result.lockSeed).toMatchObject({
+      kind: 'project-template-lock-seed',
+      schemaVersion: '1.0',
+    });
     expect(existsSync(join(root, 'pack.json'))).toBe(false);
     expect(existsSync(join(root, 'blobs'))).toBe(false);
   });
@@ -128,6 +167,20 @@ describe('taktpack streaming inspector', () => {
     writeFileSync(pack, bytes);
 
     await expect(inspectTaktpack(pack)).rejects.toMatchObject({ code: 'HASH_MISMATCH' });
+  });
+
+  it.each([
+    ['unknown reason', 'TOKEN_MARKERX', 'TOKEN_MARKERX'],
+    ['control character reason', '\\u001bTOKENXX', 'TOKENXX'],
+  ])('rejects and redacts an excludedReasons %s', async (_label, replacement, marker) => {
+    const root = makeRoot();
+    const pack = await makePack(root, true);
+    replaceExcludedReason(pack, replacement);
+
+    const error = await inspectTaktpack(pack).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'INVALID_PACK', field: 'excludedReasons' });
+    expect(String(error)).not.toContain(marker);
   });
 
   it.each([

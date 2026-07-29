@@ -55,7 +55,9 @@ describe('project template export plan', () => {
     expect(plan.report).toMatchObject({
       counts: { managed: 0, merge: 1, scaffold: 0, excluded: 1 },
       excludedReasons: { RUNTIME_STATE: 1 },
+      warnings: [],
     });
+    expect(Object.isFrozen(plan.report.warnings)).toBe(true);
     expect(JSON.stringify(plan.report)).not.toContain(root);
     expect(JSON.stringify(plan)).not.toContain(root);
     expect(() => validateManifestLockPair(plan.manifest, plan.lock)).not.toThrow();
