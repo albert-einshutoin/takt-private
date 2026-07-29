@@ -242,6 +242,44 @@ compatibility. Inspection returns a structurally distinct
 `{ kind: "project-template-lock-seed", ... }` value, not an approved
 `TemplateLockV1`; approval and formal lock creation remain a later apply step.
 
+## Atomic apply and rollback boundary
+
+Only a sealed, conflict-free apply plan may enter the mutation boundary.
+Before downloading or writing content, apply inspects active and stale runs,
+malformed run evidence, personal daemon state, stop requests, and persistent
+automation. Unknown evidence blocks the operation. Run and daemon startup use
+the same short coordination mutex as apply, so a new runner cannot start in
+the gap between preflight and lease acquisition.
+
+Apply stages and validates every output before changing `.takt/`. The formal
+lock is stored at `.takt-template-lock.json`. Private staging, journal, and
+bounded backup generations live under `.takt-template-state/`, which must be
+ignored by Git and is created with owner-only permissions. Backups contain
+only affected template entries and the formal lock; runtime state and excluded
+content are never collected. The backup manifest records each original hash,
+mode, and timestamp for audit. Because replacement necessarily changes the
+filesystem timestamp, restore conformance is defined by hash, mode, absence,
+and the doctor result.
+
+The filesystem cannot atomically rename multiple independent files. The v1
+contract therefore uses a durable journal, deterministic per-file replacement,
+and compensation rollback under one exclusive lease. Every write, chmod,
+rename, file fsync, and directory fsync failure is treated as a transaction
+failure. Post-apply config/workflow doctor failure also restores the original
+tree. Operator rollback first verifies every expected post-apply hash, mode,
+and absence marker; any drift stops rollback before its first mutation.
+If the process stops before it can publish an explicit recovery marker, a
+non-terminal durable journal still blocks later downloads, writes, and run
+startup. `recoverProjectTemplateApply` converges the journal and backup
+manifest to either committed or rolled-back state, and clears an
+identity-owned recovery marker only after verification succeeds.
+Coordination files left by a crash are reclaimed only when their recorded
+owner PID is definitely dead; live, malformed, or indeterminate ownership
+remains blocked. The v1 threat boundary covers cooperating TAKT/devloopd
+writers that honor the shared lease. Node does not expose directory-fd-relative
+rename, so a hostile process under the same OS user racing a parent-directory
+replacement between the final witness and rename is outside that boundary.
+
 Entry-kind ceilings are independent and callers may only tighten them:
 `pack.json` and `manifest.json` are at most 4 MiB, `export-report.json` and each
 blob are at most 1 MiB, with separate entry-count, total-payload, and archive

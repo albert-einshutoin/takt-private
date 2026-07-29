@@ -201,6 +201,37 @@ manifest/lock seed照合とclassifierによるsecret・absolute path・binary・
 異なる`{ kind: "project-template-lock-seed", ... }`を返します。承認と正式lock作成は
 後続のapply段階の責務です。
 
+## atomic applyとrollbackの境界
+
+変更境界へ進めるのは、seal検証済みで競合のないapply planだけです。downloadやwrite
+より前に、active/stale run、壊れたrun evidence、personal daemon、stop-request、
+persistent automationをread-only検査し、不明な証拠もfail-closedで拒否します。
+run/daemon開始とapplyは同じ短期coordination mutexを使うため、preflightとlease取得の
+間へ新しいrunnerが滑り込むこともありません。
+
+applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を変更します。正式lock
+は`.takt-template-lock.json`、privateなstaging・journal・世代数を制限したbackupは
+`.takt-template-state/`へ保存します。後者はGit ignore対象かつowner-only permission
+です。backup対象は変更するtemplate entryと正式lockだけで、runtime stateやexcluded
+contentを新しく収集しません。backup manifestは元のhash、mode、timestampを監査用に
+記録します。復元の一致判定は、replaceでtimestamp自体が更新されるためhash、mode、
+absenceとdoctor結果を正式なcontractにします。
+
+複数の独立fileをfilesystemのrenameだけで同時切替することはできません。そのためv1は
+単一exclusive leaseの下でdurable journal、決定的なfile単位replace、補償rollbackを
+組み合わせます。write、chmod、rename、file fsync、directory fsyncのどの失敗も
+transaction failureとして扱い、適用後のconfig/workflow doctor失敗も元treeへ戻します。
+operator rollbackは、適用後に期待する全pathのhash・mode・absenceを最初に一括検証し、
+driftが1件でもあれば最初の変更前に停止します。
+processが明示markerを書けない時点で停止しても、non-terminal durable journalが次の
+download/writeとrun開始をfail-closedで止めます。`recoverProjectTemplateApply`は
+journalとbackup manifestからcommittedまたはrolled-backへ収束し、検証成功後だけ
+recovery markerを所有identity付きで解除します。
+crashで残ったcoordination fileはowner PIDが確実に停止している場合だけ回収し、live、
+malformed、判定不能なownerは拒否します。v1の脅威境界は共通leaseに従うTAKT/devloopd
+writerです。Node標準APIにはdirectory fd相対のrenameがないため、同じOS userの敵対的
+processが直前witnessとrenameの間で親directoryを差し替える競合は対象外です。
+
 entry種別ごとのceilingは独立し、callerは縮小だけできます。`pack.json`と
 `manifest.json`は各4 MiB、`export-report.json`と各blobは各1 MiBで、entry count、
 total payload、archive全体にも別上限があります。USTARのoctal、checksum、
