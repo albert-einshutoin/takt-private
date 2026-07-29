@@ -203,8 +203,14 @@ manifest/lock seed照合とclassifierによるsecret・absolute path・binary・
 
 ## atomic applyとrollbackの境界
 
-変更境界へ進めるのは、seal検証済みで競合のないapply planだけです。downloadやwrite
-より前に、active/stale run、壊れたrun evidence、personal daemon、stop-request、
+変更境界へ進めるのは、seal検証済みで競合のないapply planだけです。ただしplan sealは
+previewを運ぶためのintegrity checksumであり、変更権限ではありません。apply前に、
+独立したarchive inspection receipt、現在の正式lock、fresh target snapshot、incoming
+manifest、検証済みcontents、独立したbaseline採用判断からcanonical plan全体を
+再導出します。そのためaction、
+digest、mode、capability、entry集合、global decisionを改ざんしてsealを再計算しても、
+target変更前に拒否されます。downloadやwriteより前に、active/stale run、壊れたrun
+evidence、personal daemon、stop-request、
 persistent automationをread-only検査し、不明な証拠もfail-closedで拒否します。
 run/daemon開始とapplyは同じ短期coordination mutexを使うため、preflightとlease取得の
 間へ新しいrunnerが滑り込むこともありません。task runはproject所有のworkflow、

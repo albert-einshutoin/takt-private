@@ -245,6 +245,13 @@ compatibility. Inspection returns a structurally distinct
 ## Atomic apply and rollback boundary
 
 Only a sealed, conflict-free apply plan may enter the mutation boundary.
+The plan seal is an integrity checksum for preview transport, not an authority
+to mutate. Before apply, the executor re-derives the complete canonical plan
+from an independent archive-inspection receipt, the parsed current formal lock,
+a fresh target snapshot, the incoming manifest, its verified contents, and an
+independent baseline-adoption decision.
+Re-sealing a modified action, digest, mode, capability, entry set, or global
+decision therefore fails before target mutation.
 Before downloading or writing content, apply inspects active and stale runs,
 malformed run evidence, personal daemon state, stop requests, and persistent
 automation. Unknown evidence blocks the operation. Run and daemon startup use
