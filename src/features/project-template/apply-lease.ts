@@ -41,6 +41,15 @@ export interface ProjectTemplateApplyLease
   release(): void;
 }
 
+export interface ProjectTemplateRunStartPermit {
+  readonly repoPath: string;
+  readonly lockPath: string;
+  readonly token: string;
+  readonly pid: number;
+}
+
+const activeRunStartPermits = new WeakSet<ProjectTemplateRunStartPermit>();
+
 export interface ProjectTemplateRecoveryRequiredIdentity {
   token: string;
   transactionId: string;
@@ -381,7 +390,7 @@ function acquireCoordinationFile(path: string): {
  */
 export function withProjectTemplateRunStartPermit<Result>(
   repoPathValue: string,
-  publishRunningEvidence: () => Result,
+  publishRunningEvidence: (permit: ProjectTemplateRunStartPermit) => Result,
 ): Result {
   const repoPath = resolve(repoPathValue);
   const controlRoot = ensureControlRoot(repoPath);
@@ -390,15 +399,61 @@ export function withProjectTemplateRunStartPermit<Result>(
     throw new ProjectTemplateCoordinationError();
   }
   const mutex = acquireCoordinationFile(mutexPath);
+  const permit = Object.freeze({
+    repoPath,
+    lockPath: mutexPath,
+    token: mutex.token,
+    pid: mutex.pid,
+  }) satisfies ProjectTemplateRunStartPermit;
+  activeRunStartPermits.add(permit);
   try {
     try {
       assertProjectTemplateApplyLeaseAvailable(repoPath);
     } catch {
       throw new ProjectTemplateCoordinationError();
     }
-    return publishRunningEvidence();
+    return publishRunningEvidence(permit);
   } finally {
+    activeRunStartPermits.delete(permit);
     mutex.release();
+  }
+}
+
+/**
+ * Proves that a run-start capability still owns the durable mutex immediately
+ * before running evidence is published. A delayed/custom executor must fail
+ * closed once the callback that issued its capability has returned.
+ */
+export function assertProjectTemplateRunStartPermitOwned(
+  repoPathValue: string,
+  permit: ProjectTemplateRunStartPermit,
+): void {
+  const repoPath = resolve(repoPathValue);
+  const lockPath = resolveProjectTemplateRunStartMutexPath(repoPath);
+  if (
+    !activeRunStartPermits.has(permit)
+    ||
+    permit.repoPath !== repoPath
+    || permit.lockPath !== lockPath
+    || permit.pid !== process.pid
+  ) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  const read = readProjectTemplateJsonStrict(lockPath);
+  if (
+    read.kind !== 'value'
+    || typeof read.value !== 'object'
+    || read.value === null
+  ) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  const value = read.value as Record<string, unknown>;
+  if (
+    value['version'] !== 1
+    || value['token'] !== permit.token
+    || value['pid'] !== permit.pid
+  ) {
+    throw new ProjectTemplateCoordinationError();
   }
 }
 

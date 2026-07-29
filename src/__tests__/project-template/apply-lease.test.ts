@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -22,6 +23,7 @@ import {
   syncProjectTemplateCoordinationDirectory,
   withProjectTemplateRunStartPermit,
   writeProjectTemplateRecoveryRequiredMarker,
+  type ProjectTemplateRunStartPermit,
 } from '../../features/project-template/apply-lease.js';
 import {
   inspectProjectTemplateApplyGuard,
@@ -30,8 +32,12 @@ import {
   resolveProjectTemplateRunStartMutexPath,
 } from '../../features/project-template/apply-guard.js';
 import { buildRunPaths } from '../../core/workflow/run/run-paths.js';
-import { RunMetaManager } from '../../features/tasks/execute/runMeta.js';
+import {
+  resolveProjectTemplateRunMirrorSlug,
+  RunMetaManager,
+} from '../../features/tasks/execute/runMeta.js';
 import { writePersonalDaemonState } from '../../devloopd/personalLifecycle.js';
+import { writeFileAtomic } from '../../infra/config/index.js';
 
 const roots: string[] = [];
 
@@ -175,6 +181,214 @@ describe('project template apply/run-start coordination', () => {
     });
 
     expect(existsSync(resolveProjectTemplateRunStartMutexPath(root))).toBe(false);
+  });
+
+  it('publishes run meta with an active capability before releasing the mutex', () => {
+    const root = makeRoot();
+    const runSlug = 'capability-published-run';
+    const metaPath = join(root, '.takt', 'runs', runSlug, 'meta.json');
+
+    withProjectTemplateRunStartPermit(root, (permit) => {
+      new RunMetaManager(
+        buildRunPaths(root, runSlug),
+        'capability task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: permit,
+          projectTemplateCoordinationRoot: root,
+        },
+      );
+      expect(JSON.parse(readFileSync(metaPath, 'utf8'))).toMatchObject({
+        status: 'running',
+        runSlug,
+      });
+      expect(() => acquireProjectTemplateApplyLease(root))
+        .toThrow(ProjectTemplateCoordinationError);
+    });
+
+    expect(existsSync(metaPath)).toBe(true);
+    expect(existsSync(resolveProjectTemplateRunStartMutexPath(root))).toBe(false);
+  });
+
+  it('mirrors a worktree run into the coordination root until finalize', () => {
+    const projectRoot = makeRoot();
+    const worktreeRoot = makeRoot();
+    let manager: RunMetaManager | undefined;
+
+    withProjectTemplateRunStartPermit(projectRoot, (permit) => {
+      manager = new RunMetaManager(
+        buildRunPaths(worktreeRoot, 'worktree-run'),
+        'worktree task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: permit,
+          projectTemplateCoordinationRoot: projectRoot,
+        },
+      );
+      expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+        .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+      expect(() => acquireProjectTemplateApplyLease(projectRoot))
+        .toThrow(ProjectTemplateCoordinationError);
+    });
+
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+      .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+    manager!.finalize('completed', 1);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed)
+      .toBe(true);
+  });
+
+  it('uses collision-safe mirror slugs for concurrent worktree runs', () => {
+    const projectRoot = makeRoot();
+    const firstWorktree = makeRoot();
+    const secondWorktree = makeRoot();
+    const managers: RunMetaManager[] = [];
+    const runSlug = 'same-run-slug';
+
+    for (const worktreeRoot of [firstWorktree, secondWorktree]) {
+      withProjectTemplateRunStartPermit(projectRoot, (permit) => {
+        managers.push(new RunMetaManager(
+          buildRunPaths(worktreeRoot, runSlug),
+          `task in ${worktreeRoot}`,
+          'default',
+          undefined,
+          {
+            projectTemplateRunStartPermit: permit,
+            projectTemplateCoordinationRoot: projectRoot,
+          },
+        ));
+      });
+    }
+
+    const expectedSlugs = [firstWorktree, secondWorktree].map((worktreeRoot) =>
+      resolveProjectTemplateRunMirrorSlug(
+        realpathSync.native(projectRoot),
+        realpathSync.native(worktreeRoot),
+        runSlug,
+      ));
+    expect(new Set(expectedSlugs).size).toBe(2);
+    const activeSlugs = inspectProjectTemplateApplyGuard({ repoPath: projectRoot })
+      .blocks
+      .filter((block) => block.code === 'ACTIVE_RUN')
+      .map((block) => 'slug' in block ? block.slug : undefined);
+    expect(activeSlugs).toEqual(expect.arrayContaining(expectedSlugs));
+
+    for (const manager of managers) manager.finalize('completed', 1);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed)
+      .toBe(true);
+  });
+
+  it('leaves a running mirror when a terminal mirror write fails', () => {
+    const projectRoot = makeRoot();
+    const worktreeRoot = makeRoot();
+    const writes: string[] = [];
+    let rejectMirrorWrite = false;
+    let manager: RunMetaManager | undefined;
+
+    withProjectTemplateRunStartPermit(projectRoot, (permit) => {
+      manager = new RunMetaManager(
+        buildRunPaths(worktreeRoot, 'mirror-failure'),
+        'mirror failure task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: permit,
+          projectTemplateCoordinationRoot: projectRoot,
+          writeRunMetaFile(path, content) {
+            writes.push(path);
+            if (
+              rejectMirrorWrite
+              && path.startsWith(join(projectRoot, '.takt', 'runs'))
+            ) {
+              throw new Error('injected mirror write failure');
+            }
+            writeFileAtomic(path, content);
+          },
+        },
+      );
+    });
+    rejectMirrorWrite = true;
+    const writesBeforeFinalize = writes.length;
+
+    expect(() => manager!.finalize('completed', 1))
+      .toThrow('injected mirror write failure');
+    const finalizeWrites = writes.slice(writesBeforeFinalize);
+    expect(finalizeWrites[0]).toBe(join(
+      worktreeRoot,
+      '.takt',
+      'runs',
+      'mirror-failure',
+      'meta.json',
+    ));
+    expect(finalizeWrites[1]).toContain(join(projectRoot, '.takt', 'runs'));
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+      .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+  });
+
+  it('leaves missing mirror metadata that blocks apply when initial mirror publication fails', () => {
+    const projectRoot = makeRoot();
+    const worktreeRoot = makeRoot();
+
+    expect(() => withProjectTemplateRunStartPermit(projectRoot, (permit) => {
+      new RunMetaManager(
+        buildRunPaths(worktreeRoot, 'initial-mirror-failure'),
+        'initial mirror failure task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: permit,
+          projectTemplateCoordinationRoot: projectRoot,
+          writeRunMetaFile(path, content) {
+            if (path.startsWith(join(projectRoot, '.takt', 'runs'))) {
+              throw new Error('injected initial mirror write failure');
+            }
+            writeFileAtomic(path, content);
+          },
+        },
+      );
+    })).toThrow('injected initial mirror write failure');
+
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+      .toContainEqual(expect.objectContaining({
+        code: 'RUN_METADATA_MISSING',
+      }));
+  });
+
+  it('rejects forged and expired run-start capabilities before publishing run evidence', () => {
+    const root = makeRoot();
+    let expiredPermit: ProjectTemplateRunStartPermit | undefined;
+
+    withProjectTemplateRunStartPermit(root, (permit) => {
+      expiredPermit = permit;
+      expect(() => new RunMetaManager(
+        buildRunPaths(root, 'forged-run'),
+        'forged task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: { ...permit },
+          projectTemplateCoordinationRoot: root,
+        },
+      )).toThrow(ProjectTemplateCoordinationError);
+      expect(existsSync(join(root, '.takt', 'runs', 'forged-run', 'meta.json')))
+        .toBe(false);
+    });
+
+    expect(expiredPermit).toBeDefined();
+    expect(() => new RunMetaManager(
+      buildRunPaths(root, 'delayed-run'),
+      'delayed task',
+      'default',
+      undefined,
+      {
+        projectTemplateRunStartPermit: expiredPermit!,
+        projectTemplateCoordinationRoot: root,
+      },
+    )).toThrow(ProjectTemplateCoordinationError);
+    expect(existsSync(join(root, '.takt', 'runs', 'delayed-run', 'meta.json')))
+      .toBe(false);
   });
 
   it('reclaims a coordination mutex only when its recorded owner is dead', () => {

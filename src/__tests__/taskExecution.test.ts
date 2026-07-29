@@ -5,6 +5,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { TaskInfo } from '../infra/task/index.js';
 import { attachWorkflowSourcePath, attachWorkflowTrustInfo } from '../infra/config/loaders/workflowSourceMetadata.js';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const { mockResolveTaskExecution, mockResolveTaskIssue, mockExecuteWorkflow, mockExecuteWorkflowForRun, mockLoadWorkflowByIdentifier, mockIsWorkflowPath, mockResolveWorkflowConfigValues, mockResolveProviderOptionsWithTrace, mockBuildBooleanTaskResult, mockBuildTaskResult, mockPersistExceededTaskResult, mockPersistTaskResult, mockPersistPrFailedTaskResult, mockPersistTaskError, mockPostExecutionFlow, mockUpdateRunningTaskExecution } =
   vi.hoisted(() => ({
@@ -50,6 +53,8 @@ vi.mock('../features/tasks/execute/postExecution.js', () => ({
 }));
 
 vi.mock('../infra/config/index.js', () => ({
+  ensureDir: vi.fn(),
+  writeFileAtomic: vi.fn(),
   loadWorkflowByIdentifier: (...args: unknown[]) => mockLoadWorkflowByIdentifier(...args),
   isWorkflowPath: (...args: unknown[]) => mockIsWorkflowPath(...args),
   resolveWorkflowConfigValues: (...args: unknown[]) => mockResolveWorkflowConfigValues(...args),
@@ -86,6 +91,13 @@ vi.mock('../shared/i18n/index.js', () => ({
 import { executeAndCompleteTask, executeTask } from '../features/tasks/execute/taskExecution.js';
 import { executeRunTaskAndComplete } from '../features/tasks/execute/runTaskExecution.js';
 import { error, info } from '../shared/ui/index.js';
+import {
+  acquireProjectTemplateApplyLease,
+  ProjectTemplateCoordinationError,
+} from '../features/project-template/apply-lease.js';
+import { resolveProjectTemplateRunStartMutexPath } from '../features/project-template/apply-guard.js';
+import { buildRunPaths } from '../core/workflow/run/run-paths.js';
+import { RunMetaManager } from '../features/tasks/execute/runMeta.js';
 
 const createTask = (name: string): TaskInfo => ({
   name,
@@ -179,6 +191,108 @@ describe('executeAndCompleteTask', () => {
         ...(execution.branch ? { branch: execution.branch } : {}),
       },
     }));
+  });
+
+  it('holds the run-start permit from project config reads through run publication', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-run-start-race-'));
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(projectRoot);
+    const barrier: string[] = [];
+    const workflow = {
+      name: 'permit-race',
+      steps: [],
+    };
+    mockLoadWorkflowByIdentifier.mockImplementation(() => {
+      expect(existsSync(mutexPath)).toBe(true);
+      barrier.push('workflow-read');
+      return workflow;
+    });
+    mockResolveWorkflowConfigValues.mockImplementation(() => {
+      expect(existsSync(mutexPath)).toBe(true);
+      barrier.push('config-read');
+      return {
+        language: 'en',
+        personaProviders: {},
+        providerProfiles: {},
+      };
+    });
+    mockResolveProviderOptionsWithTrace.mockImplementation(() => {
+      expect(existsSync(mutexPath)).toBe(true);
+      barrier.push('provider-options-read');
+      return {
+        value: {},
+        source: 'project',
+        originResolver: () => 'project',
+      };
+    });
+    mockExecuteWorkflow.mockImplementation((_workflow, _task, _cwd, executionOptions) => {
+      expect(executionOptions).toMatchObject({
+        projectTemplateRunStartPermit: {
+          repoPath: projectRoot,
+        },
+      });
+      // This callback is the deterministic bootstrap-entry barrier. The
+      // RunMetaManager integration test verifies the actual meta.json publish
+      // under the same capability.
+      expect(() => acquireProjectTemplateApplyLease(projectRoot))
+        .toThrow(ProjectTemplateCoordinationError);
+      barrier.push('bootstrap-entered');
+      return Promise.resolve({ success: true });
+    });
+
+    try {
+      await expect(executeTask({
+        task: 'Task: close template apply race',
+        cwd: projectRoot,
+        projectCwd: projectRoot,
+        workflowIdentifier: 'permit-race',
+      })).resolves.toBe(true);
+      expect(barrier).toEqual([
+        'workflow-read',
+        'config-read',
+        'provider-options-read',
+        'bootstrap-entered',
+      ]);
+      expect(existsSync(mutexPath)).toBe(false);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when a custom executor delays run publication past permit release', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-delayed-run-start-'));
+    const runSlug = 'delayed-custom-executor';
+    mockExecuteWorkflow.mockImplementation((_workflow, task, _cwd, executionOptions) =>
+      Promise.resolve().then(() => {
+        new RunMetaManager(
+          buildRunPaths(projectRoot, runSlug),
+          task,
+          'default',
+          undefined,
+          {
+            projectTemplateRunStartPermit: executionOptions.projectTemplateRunStartPermit,
+            projectTemplateCoordinationRoot: projectRoot,
+          },
+        );
+        return { success: true };
+      }));
+
+    try {
+      await expect(executeTask({
+        task: 'Task: delayed publication',
+        cwd: projectRoot,
+        projectCwd: projectRoot,
+        workflowIdentifier: 'default',
+      })).rejects.toThrow(ProjectTemplateCoordinationError);
+      expect(existsSync(join(
+        projectRoot,
+        '.takt',
+        'runs',
+        runSlug,
+        'meta.json',
+      ))).toBe(false);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 
   it('should pass taskDisplayLabel from parallel options into executeWorkflow', async () => {

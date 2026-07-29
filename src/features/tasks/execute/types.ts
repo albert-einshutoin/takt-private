@@ -17,6 +17,7 @@ import type {
 import type { DirectResumeMetadata } from './runMeta.js';
 import type { TaskAttachment } from '../attachments.js';
 import type { TraceTaskContext } from './traceTaskMetadata.js';
+import type { ProjectTemplateRunStartPermit } from '../../project-template/apply-lease.js';
 
 /** Info captured when iteration limit is hit in non-interactive mode */
 export interface ExceededInfo {
@@ -101,6 +102,8 @@ export interface WorkflowExecutionOptions {
   currentTaskIssueNumber?: number;
   /** Task metadata used only for trace discovery attributes. */
   traceTaskMetadata?: WorkflowTraceTaskMetadata;
+  /** Internal durable capability for the synchronous run-start section. */
+  projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit;
 }
 
 export interface TaskExecutionOptions {
