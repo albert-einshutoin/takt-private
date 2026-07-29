@@ -17,6 +17,8 @@ const { mockLoadConfigRaw } = vi.hoisted(() => ({
 
 // Mock dependencies before importing the module under test
 vi.mock('../infra/config/index.js', () => ({
+  ensureDir: vi.fn(),
+  writeFileAtomic: vi.fn(),
   loadWorkflowByIdentifier: vi.fn(),
   isWorkflowPath: vi.fn(() => false),
   loadConfig: (...args: unknown[]) => {

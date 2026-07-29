@@ -5,7 +5,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { TaskInfo } from '../infra/task/index.js';
 import { attachWorkflowSourcePath, attachWorkflowTrustInfo } from '../infra/config/loaders/workflowSourceMetadata.js';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -94,10 +102,13 @@ import { error, info } from '../shared/ui/index.js';
 import {
   acquireProjectTemplateApplyLease,
   ProjectTemplateCoordinationError,
+  withProjectTemplateRunStartPermit,
 } from '../features/project-template/apply-lease.js';
 import { resolveProjectTemplateRunStartMutexPath } from '../features/project-template/apply-guard.js';
+import { inspectProjectTemplateApplyGuard } from '../features/project-template/apply-guard.js';
 import { buildRunPaths } from '../core/workflow/run/run-paths.js';
 import { RunMetaManager } from '../features/tasks/execute/runMeta.js';
+import { ensureDir, writeFileAtomic } from '../infra/config/index.js';
 
 const createTask = (name: string): TaskInfo => ({
   name,
@@ -135,6 +146,8 @@ const mockInfo = vi.mocked(info);
 describe('executeAndCompleteTask', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(ensureDir).mockImplementation(() => {});
+    vi.mocked(writeFileAtomic).mockImplementation(() => {});
 
     mockLoadWorkflowByIdentifier.mockReturnValue({
       name: 'default',
@@ -191,6 +204,255 @@ describe('executeAndCompleteTask', () => {
         ...(execution.branch ? { branch: execution.branch } : {}),
       },
     }));
+  });
+
+  it.each([
+    ['in-place', {}],
+    ['new worktree', { isWorktree: true, worktreePath: '/tmp/new-worktree', branch: 'takt/new' }],
+    ['reused worktree', { isWorktree: true, worktreePath: '/tmp/reused-worktree', branch: 'takt/reused' }],
+    ['copy', { copyWorkspacePath: '/tmp/copy-workspace' }],
+    ['retry', { startStep: 'review', retryNote: 'retry', initialIterationOverride: 2 }],
+  ] as const)(
+    'publishes durable running evidence before asynchronous %s preparation starts',
+    async (_mode, resolvedOverrides) => {
+      const projectRoot = mkdtempSync(join(tmpdir(), 'takt-task-preparation-race-'));
+      vi.mocked(ensureDir).mockImplementation((path: string) => {
+        mkdirSync(path, { recursive: true });
+      });
+      vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
+        writeFileSync(path, content);
+      });
+      let resolvePreparation: ((value: {
+        execCwd: string;
+        workflowIdentifier: string;
+        isWorktree: boolean;
+        reportDirName: string;
+        autoPr: boolean;
+        draftPr: boolean;
+        managedPr: boolean;
+        shouldPublishBranchToOrigin: boolean;
+        worktreePath?: string;
+        copyWorkspacePath?: string;
+        branch?: string;
+        startStep?: string;
+        retryNote?: string;
+        initialIterationOverride?: number;
+      }) => void) | undefined;
+      mockResolveTaskExecution.mockImplementation(() => new Promise((resolve) => {
+        resolvePreparation = resolve;
+      }));
+
+      const execution = executeAndCompleteTaskWithoutWorkflow(
+        createTask('preparation-race'),
+        createTaskRunnerMock(),
+        projectRoot,
+      );
+      await vi.waitFor(() => {
+        expect(resolvePreparation).toBeDefined();
+      });
+
+      expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+        .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+
+      mockExecuteWorkflow.mockImplementation((_workflow, _task, _cwd, options) => {
+        options.onRunningEvidencePublished?.();
+        return Promise.resolve({ success: false });
+      });
+      resolvePreparation!({
+        execCwd: 'copyWorkspacePath' in resolvedOverrides
+          ? resolvedOverrides.copyWorkspacePath
+          : 'worktreePath' in resolvedOverrides
+            ? resolvedOverrides.worktreePath
+            : projectRoot,
+        workflowIdentifier: 'default',
+        isWorktree: 'isWorktree' in resolvedOverrides
+          ? resolvedOverrides.isWorktree
+          : false,
+        reportDirName: 'prepared-run',
+        autoPr: false,
+        draftPr: false,
+        managedPr: false,
+        shouldPublishBranchToOrigin: false,
+        ...resolvedOverrides,
+      });
+      await execution;
+      expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed)
+        .toBe(true);
+      rmSync(projectRoot, { recursive: true, force: true });
+    },
+  );
+
+  it('finalizes preparation evidence as aborted when resolution throws', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-task-preparation-error-'));
+    vi.mocked(ensureDir).mockImplementation((path: string) => {
+      mkdirSync(path, { recursive: true });
+    });
+    vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
+      writeFileSync(path, content);
+    });
+    mockResolveTaskExecution.mockRejectedValue(new Error('injected preparation failure'));
+
+    const result = await executeAndCompleteTaskWithoutWorkflow(
+      createTask('preparation-error'),
+      createTaskRunnerMock(),
+      projectRoot,
+    );
+
+    expect(result).toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed)
+      .toBe(true);
+    const [reservationSlug] = readdirSync(join(projectRoot, '.takt', 'runs'));
+    expect(JSON.parse(readFileSync(
+      join(projectRoot, '.takt', 'runs', reservationSlug!, 'meta.json'),
+      'utf8',
+    ))).toMatchObject({ status: 'aborted' });
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('finalizes preparation evidence when asynchronous resolution is aborted', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-task-preparation-abort-'));
+    vi.mocked(ensureDir).mockImplementation((path: string) => {
+      mkdirSync(path, { recursive: true });
+    });
+    vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
+      writeFileSync(path, content);
+    });
+    mockResolveTaskExecution.mockImplementation(
+      (_task, _cwd, signal: AbortSignal | undefined) => new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+          once: true,
+        });
+      }),
+    );
+    const controller = new AbortController();
+
+    const execution = executeAndCompleteTaskWithoutWorkflow(
+      createTask('preparation-abort'),
+      createTaskRunnerMock(),
+      projectRoot,
+      undefined,
+      { abortSignal: controller.signal },
+    );
+    await vi.waitFor(() => {
+      expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+        .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+    });
+    controller.abort();
+
+    await expect(execution).resolves.toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed)
+      .toBe(true);
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('leaves running evidence fail-closed when reservation cleanup fails', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-task-preparation-cleanup-'));
+    vi.mocked(ensureDir).mockImplementation((path: string) => {
+      mkdirSync(path, { recursive: true });
+    });
+    vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
+      const status = (JSON.parse(content) as { status?: string }).status;
+      if (status === 'aborted') {
+        throw new Error('injected reservation cleanup failure');
+      }
+      writeFileSync(path, content);
+    });
+    mockResolveTaskExecution.mockRejectedValue(new Error('injected preparation failure'));
+
+    await expect(executeAndCompleteTaskWithoutWorkflow(
+      createTask('preparation-cleanup'),
+      createTaskRunnerMock(),
+      projectRoot,
+    )).rejects.toThrow('injected reservation cleanup failure');
+
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+      .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('does not overwrite running reservation evidence when handoff finalization fails', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-task-preparation-handoff-failure-'));
+    vi.mocked(ensureDir).mockImplementation((path: string) => {
+      mkdirSync(path, { recursive: true });
+    });
+    vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
+      const meta = JSON.parse(content) as { status?: string; workflow?: string };
+      if (meta.status === 'completed' && meta.workflow === 'task-preparation') {
+        throw new Error('injected handoff finalization failure');
+      }
+      writeFileSync(path, content);
+    });
+    mockResolveTaskExecution.mockResolvedValue({
+      execCwd: projectRoot,
+      workflowIdentifier: 'default',
+      isWorktree: false,
+      reportDirName: 'canonical-run',
+      autoPr: false,
+      draftPr: false,
+      managedPr: false,
+      shouldPublishBranchToOrigin: false,
+    });
+    mockExecuteWorkflow.mockImplementation((_workflow, _task, _cwd, options) => {
+      options.onRunningEvidencePublished?.();
+      return Promise.resolve({ success: true });
+    });
+
+    const result = await executeAndCompleteTaskWithoutWorkflow(
+      createTask('handoff-failure'),
+      createTaskRunnerMock(),
+      projectRoot,
+    );
+
+    expect(result).toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+      .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+    const [reservationSlug] = readdirSync(join(projectRoot, '.takt', 'runs'));
+    expect(JSON.parse(readFileSync(
+      join(projectRoot, '.takt', 'runs', reservationSlug!, 'meta.json'),
+      'utf8',
+    ))).toMatchObject({ status: 'running' });
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('keeps apply blocked when preparation hands off to canonical worktree evidence', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-task-preparation-handoff-'));
+    const worktreeRoot = mkdtempSync(join(tmpdir(), 'takt-task-worktree-handoff-'));
+    vi.mocked(ensureDir).mockImplementation((path: string) => {
+      mkdirSync(path, { recursive: true });
+    });
+    vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
+      writeFileSync(path, content);
+    });
+    const reservation = new RunMetaManager(
+      buildRunPaths(projectRoot, 'preparation'),
+      'handoff task',
+      'task-preparation',
+    );
+    let canonical: RunMetaManager | undefined;
+
+    withProjectTemplateRunStartPermit(projectRoot, (permit) => {
+      canonical = new RunMetaManager(
+        buildRunPaths(worktreeRoot, 'canonical-run'),
+        'handoff task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: permit,
+          projectTemplateCoordinationRoot: projectRoot,
+        },
+      );
+      reservation.finalize('completed');
+      expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+        .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+    });
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks)
+      .toContainEqual(expect.objectContaining({ code: 'ACTIVE_RUN' }));
+
+    canonical!.finalize('completed');
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed)
+      .toBe(true);
+    rmSync(projectRoot, { recursive: true, force: true });
+    rmSync(worktreeRoot, { recursive: true, force: true });
   });
 
   it('holds the run-start permit from project config reads through run publication', async () => {

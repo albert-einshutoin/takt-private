@@ -46,6 +46,7 @@ export async function executeTaskWorkflow(
     maxStepsOverride,
     initialIterationOverride,
     currentTaskIssueNumber,
+    onRunningEvidencePublished,
   } = options;
   const startWorkflow = (
     projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit,
@@ -105,6 +106,7 @@ export async function executeTaskWorkflow(
       initialIterationOverride,
       currentTaskIssueNumber,
       traceTaskMetadata,
+      onRunningEvidencePublished,
       ...(projectTemplateRunStartPermit
         ? { projectTemplateRunStartPermit }
         : {}),

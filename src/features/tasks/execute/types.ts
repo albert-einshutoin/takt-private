@@ -104,6 +104,8 @@ export interface WorkflowExecutionOptions {
   traceTaskMetadata?: WorkflowTraceTaskMetadata;
   /** Internal durable capability for the synchronous run-start section. */
   projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit;
+  /** Internal hand-off after canonical running evidence is durable. */
+  onRunningEvidencePublished?: () => void;
 }
 
 export interface TaskExecutionOptions {
@@ -169,6 +171,8 @@ export interface ExecuteTaskOptions {
   traceTaskContext?: TraceTaskContext;
   /** Task metadata used only for trace discovery attributes. */
   traceTaskMetadata?: WorkflowTraceTaskMetadata;
+  /** Internal hand-off from task preparation reservation to canonical run meta. */
+  onRunningEvidencePublished?: () => void;
 }
 
 export interface PipelineExecutionOptions {

@@ -192,6 +192,7 @@ export async function createWorkflowExecutionBootstrap(
           : {}),
       },
     );
+    options.onRunningEvidencePublished?.();
     return {
       globalConfig,
       runSlug,
