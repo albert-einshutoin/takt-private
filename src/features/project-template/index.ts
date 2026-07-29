@@ -38,6 +38,7 @@ export type {
 export { canonicalizeTaktpackJson } from './canonical-json.js';
 export { createProjectTemplateExportPlan } from './export-plan.js';
 export { writeTaktpack } from './archive-writer.js';
+export { inspectTaktpack } from './archive-inspector.js';
 export type {
   ProjectTemplateManifestV1,
   TemplateCapability,

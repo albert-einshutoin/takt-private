@@ -84,6 +84,17 @@ export interface TaktpackInspectResult {
   lock: TemplateLockV1;
   report: TaktpackExportReportV1;
   archiveSha256: string;
+  compatibility: {
+    compatible: boolean;
+    currentVersion?: string;
+    minVersion: string;
+    maxVersion?: string;
+  };
+}
+
+export interface InspectTaktpackOptions {
+  currentTaktVersion?: string;
+  limits?: Partial<TaktpackLimits>;
 }
 
 export interface WriteTaktpackOptions {
