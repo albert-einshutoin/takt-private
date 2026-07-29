@@ -33,8 +33,8 @@ export const COMMIT_PATTERN_SOURCE = '^[a-f0-9]{40}(?:[a-f0-9]{24})?$';
 export const CONTROL_FREE_PATTERN_SOURCE = '^[^\\u0000-\\u001F\\u007F]*$';
 export const GITHUB_URI_PATTERN_SOURCE = '^(?!.*\\.git$)https://github\\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/(?!(?:\\.|\\.\\.)$)[A-Za-z0-9._-]{1,100}$';
 export const GIT_URI_PATTERN_SOURCE = '^(?!.*%(?:2[fF]|5[cC]))(?!.*\\/\\.{1,2}(?:\\/|$))https://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}(?::[1-9][0-9]{0,4})?/[A-Za-z0-9._~!$&\'()*+,;=:@%/-]+$';
-export const SOURCE_REF_PATTERN_SOURCE = '^(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)(?!.*\\.lock(?:/|$))[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,254}[A-Za-z0-9_-])?$';
-const PORTABLE_RELATIVE_PATH_BODY_SOURCE = '(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(?!.*[\\u0000-\\u001F\\u007F])(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Nn](?:[Ii][Nn]|[Oo][Uu][Tt])\\$|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)[^/]*[ .](?:/|$))(?!.*//)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*';
+export const SOURCE_REF_PATTERN_SOURCE = '^(?!@$)(?!/)(?!\\.)(?!.*//)(?!.*\\.\\.)(?!.*@\\{)(?!.*\\/\\.)(?!.*\\.lock(?:/|$))(?!.*\\.$)(?!.*[\\u0000-\\u0020\\u007F~^:?*\\[\\\\])[^/]+(?:/[^/]+)*$';
+const PORTABLE_RELATIVE_PATH_BODY_SOURCE = '(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(?!.*[\\u0000-\\u001F\\u007F])(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Nn](?:[Ii][Nn]|[Oo][Uu][Tt])\\$|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:/|$))(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)[^/]*[ .](?:/|$))(?!.*//)[A-Za-z0-9._-]{1,255}(?:/[A-Za-z0-9._-]{1,255})*';
 export const LOCAL_SOURCE_URI_PATTERN_SOURCE = `^(?:\\.|${PORTABLE_RELATIVE_PATH_BODY_SOURCE})$`;
 export const PROJECT_TEMPLATE_PATH_PATTERN_SOURCE = `^(?!\\.takt(?:/|$))${PORTABLE_RELATIVE_PATH_BODY_SOURCE}$`;
 
@@ -226,6 +226,17 @@ function parseRef(value: unknown): string {
   return ref;
 }
 
+function requirePortablePathSegmentLimit(path: string, field: string): void {
+  const oversizedSegment = path.split('/').find((segment) => segment.length > 255);
+  if (oversizedSegment !== undefined) {
+    throw new ProjectTemplateValidationError(
+      'LIMIT_EXCEEDED',
+      `${field} contains a path segment longer than 255 ASCII characters`,
+      field,
+    );
+  }
+}
+
 function isCanonicalHttpsUrl(uri: string): boolean {
   if (/%(?:2f|5c)/i.test(uri)) return false;
   try {
@@ -261,6 +272,7 @@ export function parseSource(value: unknown): TemplateSource {
     return { kind, uri: uri as `https://${string}`, ref: parseRef(source['ref']), commit };
   }
   if (kind === 'local') {
+    requirePortablePathSegmentLimit(uri, 'source.uri');
     if (!LOCAL_SOURCE_URI_PATTERN.test(uri) || source['ref'] !== 'workspace') {
       throw new ProjectTemplateValidationError('INVALID_SOURCE', 'local sources require a portable relative uri and ref "workspace"', 'source');
     }
@@ -308,6 +320,7 @@ export function parsePolicy(
 
 export function parsePortablePath(value: unknown, field: string): string {
   const path = requireString(value, field, 'INVALID_PATH', MAX_TEMPLATE_PATH_LENGTH);
+  requirePortablePathSegmentLimit(path, field);
   // Paths are relative to `.takt/`. The shared expression also blocks Windows
   // reserved names, ADS syntax, controls, traversal, trailing dot/space, and
   // non-ASCII names whose case folding differs across file systems.

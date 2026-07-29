@@ -337,6 +337,53 @@ describe('project template manifest public contract', () => {
     expect(parseProjectTemplateManifest(manifest).source).toMatchObject({ kind: 'local', uri });
   });
 
+  it.each([
+    'feature..name',
+    '.hidden',
+    'feature/.hidden',
+    'feature.',
+    'feature.lock',
+    'team/name.lock',
+    'feature@{1',
+    'feature\\name',
+    'feature name',
+    'feature~name',
+    'feature^name',
+    'feature:name',
+    'feature?name',
+    'feature*name',
+    'feature[name',
+  ])('should reject a Git-invalid source ref: %s', (ref) => {
+    const manifest = validManifest();
+    (manifest['source'] as Record<string, unknown>)['ref'] = ref;
+    expectValidationCode(manifest, 'INVALID_SOURCE');
+  });
+
+  it.each(['HEAD', 'feature/review-152', 'release/v1.0.0', 'feature@name'])(
+    'should accept a Git-valid source ref: %s',
+    (ref) => {
+      const manifest = validManifest();
+      (manifest['source'] as Record<string, unknown>)['ref'] = ref;
+      expect(parseProjectTemplateManifest(manifest).source.ref).toBe(ref);
+    },
+  );
+
+  it('should reject entry and local source path segments longer than 255 ASCII characters', () => {
+    const oversizedSegment = 'a'.repeat(256);
+    const manifest = validManifest();
+    (manifest['entries'] as Array<Record<string, unknown>>)[0]!['path'] = `workflows/${oversizedSegment}`;
+    expectValidationCode(manifest, 'LIMIT_EXCEEDED');
+
+    const localManifest = validManifest();
+    localManifest['source'] = {
+      kind: 'local',
+      uri: `templates/${oversizedSegment}`,
+      ref: 'workspace',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+    };
+    expectValidationCode(localManifest, 'LIMIT_EXCEEDED');
+  });
+
   it('should validate and round-trip a lock pinned to the source commit', () => {
     const lock = {
       schemaVersion: '1.0',
@@ -495,6 +542,20 @@ describe('project template manifest public contract', () => {
           kind: 'git',
           uri: 'https://GIT.example.com/project/template.git',
           ref: 'main',
+          commit: '0123456789abcdef0123456789abcdef01234567',
+        };
+      },
+      (value: Record<string, unknown>) => {
+        (value['source'] as Record<string, unknown>)['ref'] = 'feature..name';
+      },
+      (value: Record<string, unknown>) => {
+        (value['entries'] as Array<Record<string, unknown>>)[0]!['path'] = `workflows/${'a'.repeat(256)}`;
+      },
+      (value: Record<string, unknown>) => {
+        value['source'] = {
+          kind: 'local',
+          uri: `templates/${'a'.repeat(256)}`,
+          ref: 'workspace',
           commit: '0123456789abcdef0123456789abcdef01234567',
         };
       },
