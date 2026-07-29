@@ -106,8 +106,19 @@ function parseHeader(header: Buffer): ParsedHeader {
   ) {
     throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'link, device, or prefixed entries are not allowed', 'entry.header');
   }
-  const nameEnd = header.indexOf(0, 0);
-  const name = header.subarray(0, nameEnd === -1 || nameEnd > 100 ? 100 : nameEnd).toString('ascii');
+  const nameField = header.subarray(0, 100);
+  const nameEnd = nameField.indexOf(0);
+  if (
+    nameEnd === -1
+    || !nameField.subarray(nameEnd).equals(Buffer.alloc(100 - nameEnd))
+  ) {
+    throw new TaktpackError(
+      'INVALID_PACK',
+      'USTAR name field is not canonically terminated',
+      'entry.name',
+    );
+  }
+  const name = nameField.subarray(0, nameEnd).toString('ascii');
   if (
     name === ''
     || !/^[\x20-\x7e]+$/.test(name)

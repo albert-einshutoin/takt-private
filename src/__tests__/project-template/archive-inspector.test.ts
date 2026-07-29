@@ -276,6 +276,22 @@ describe('taktpack streaming inspector', () => {
     });
   });
 
+  it('rejects non-zero bytes after the USTAR name terminator', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+    const bytes = readFileSync(pack);
+    const nameTerminator = bytes.subarray(0, 100).indexOf(0);
+    expect(nameTerminator).toBeGreaterThanOrEqual(0);
+    bytes[nameTerminator + 1] = 0x41;
+    rewriteTarChecksum(bytes.subarray(0, 512));
+    writeFileSync(pack, bytes);
+
+    await expect(inspectTaktpack(pack)).rejects.toMatchObject({
+      code: 'INVALID_PACK',
+      field: 'entry.name',
+    });
+  });
+
   it('enforces a caller-tightened archive byte budget', async () => {
     const root = makeRoot();
     const pack = await makePack(root);
