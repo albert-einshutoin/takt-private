@@ -48,13 +48,20 @@ export type TaktpackErrorCode =
   | 'INVALID_PACK'
   | 'MISSING_ARCHIVE_ENTRY'
   | 'ORPHAN_BLOB'
-  | 'HASH_MISMATCH';
+  | 'HASH_MISMATCH'
+  | 'ARCHIVE_WRITE_FAILED'
+  | 'ARCHIVE_READ_FAILED'
+  | 'DURABILITY_FAILED'
+  | 'CLEANUP_FAILED';
+
+export type TaktpackArtifactState = 'not-published' | 'published';
 
 export class TaktpackError extends Error {
   constructor(
     public readonly code: TaktpackErrorCode,
     message: string,
     public readonly field?: string,
+    public readonly artifactState?: TaktpackArtifactState,
   ) {
     super(message);
     this.name = 'TaktpackError';

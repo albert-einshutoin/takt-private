@@ -310,9 +310,25 @@ function validateReportAgainstManifest(
   }
 }
 
-export async function inspectTaktpack(
+export type TaktpackInspectorIoPhase = 'handle-stat' | 'read' | 'final-stat' | 'close';
+
+export interface TaktpackInspectorIoSeam {
+  onPhase?(phase: TaktpackInspectorIoPhase): void;
+}
+
+function normalizeInspectorIoError(error: unknown, field: string): Error {
+  if (error instanceof TaktpackError) return error;
+  return new TaktpackError(
+    'ARCHIVE_READ_FAILED',
+    'archive read operation failed',
+    field,
+  );
+}
+
+export async function inspectTaktpackWithIoSeam(
   archivePath: string,
   options: InspectTaktpackOptions = {},
+  ioSeam: TaktpackInspectorIoSeam = {},
 ): Promise<TaktpackInspectResult> {
   const limits = resolveTaktpackLimits(options.limits);
   let pathSnapshot: Awaited<ReturnType<typeof lstat>>;
@@ -338,7 +354,12 @@ export async function inspectTaktpack(
   let manifest: ProjectTemplateManifestV1 | undefined;
   let report: TaktpackExportReportV1 | undefined;
   const detections: DetectedTemplateCapabilities[] = [];
+  let currentIoField = 'archive.stat';
+  let primaryError: Error | undefined;
+  let closeFailure: unknown;
+  let result: TaktpackInspectResult | undefined;
   try {
+    ioSeam.onPhase?.('handle-stat');
     const stat = await handle.stat();
     if (
       !stat.isFile()
@@ -359,6 +380,8 @@ export async function inspectTaktpack(
       let offset = 0;
       while (offset < length) {
         const requestedBytes = Math.min(64 * 1024, length - offset);
+        currentIoField = 'archive.read';
+        ioSeam.onPhase?.('read');
         const { bytesRead } = await handle.read(buffer, offset, requestedBytes, position + offset);
         if (bytesRead === 0) {
           throw new TaktpackError('TRUNCATED_ARCHIVE', 'archive ended before the declared USTAR boundary');
@@ -509,6 +532,8 @@ export async function inspectTaktpack(
     validateManifestLockPair(manifest, lock);
     validateDetectedTemplateCapabilities(manifest, detections);
     validateReportAgainstManifest(report, manifest);
+    currentIoField = 'archive.finalStat';
+    ioSeam.onPhase?.('final-stat');
     const finalStat = await handle.stat();
     if (
       finalStat.dev !== stat.dev
@@ -529,7 +554,7 @@ export async function inspectTaktpack(
         && (manifest.takt.maxVersion === undefined
           || compareSemVer(currentVersion, manifest.takt.maxVersion) <= 0)
       );
-    return {
+    result = {
       descriptor: metadata.descriptor,
       manifest,
       lockSeed: metadata.lockSeed,
@@ -543,7 +568,32 @@ export async function inspectTaktpack(
         ...(manifest.takt.maxVersion === undefined ? {} : { maxVersion: manifest.takt.maxVersion }),
       },
     };
+  } catch (error) {
+    primaryError = normalizeInspectorIoError(error, currentIoField);
   } finally {
-    await handle.close();
+    try {
+      ioSeam.onPhase?.('close');
+    } catch (error) {
+      closeFailure = error;
+    }
+    try {
+      await handle.close();
+    } catch (error) {
+      // Preserve the read/stat failure that explains the invalid inspection;
+      // a secondary close error must not replace it or expose file details.
+      if (closeFailure === undefined) closeFailure = error;
+    }
   }
+  if (primaryError !== undefined) throw primaryError;
+  if (closeFailure !== undefined) {
+    throw normalizeInspectorIoError(closeFailure, 'archive.close');
+  }
+  return result!;
+}
+
+export function inspectTaktpack(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+): Promise<TaktpackInspectResult> {
+  return inspectTaktpackWithIoSeam(archivePath, options);
 }

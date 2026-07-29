@@ -220,6 +220,35 @@ export function syncTaktpackOutputDirectory(
   return 'synced';
 }
 
+export type TaktpackWriterIoPhase =
+  | 'pipeline'
+  | 'archive-read'
+  | 'file-fsync'
+  | 'publish'
+  | 'directory-fsync'
+  | 'cleanup';
+
+export interface TaktpackWriterIoSeam {
+  onPhase?(phase: TaktpackWriterIoPhase): void;
+}
+
+function normalizeWriterIoError(
+  error: unknown,
+  code: 'ARCHIVE_WRITE_FAILED' | 'DURABILITY_FAILED' | 'CLEANUP_FAILED',
+  field: string,
+  artifactState: 'not-published' | 'published',
+): Error {
+  if (error instanceof TaktpackError || (error instanceof Error && error.name === 'AbortError')) {
+    return error;
+  }
+  const message = code === 'DURABILITY_FAILED'
+    ? 'archive durability operation failed'
+    : code === 'CLEANUP_FAILED'
+      ? 'archive temporary-file cleanup failed'
+      : 'archive write operation failed';
+  return new TaktpackError(code, message, field, artifactState);
+}
+
 function publishTempFile(
   tempPath: string,
   outputPath: string,
@@ -256,10 +285,11 @@ function publishTempFile(
   }
 }
 
-export async function writeTaktpack(
+export async function writeTaktpackWithIoSeam(
   outputPath: string,
   plan: ProjectTemplateExportPlan,
   options: WriteTaktpackOptions = {},
+  ioSeam: TaktpackWriterIoSeam = {},
 ): Promise<WriteTaktpackResult> {
   const force = options.force === true;
   const limits = resolveTaktpackLimits(options.limits);
@@ -268,7 +298,11 @@ export async function writeTaktpack(
     throw new TaktpackError('INVALID_EXPORT_PLAN', 'export plan seal is missing or invalid', 'plan');
   }
   const sealedPlan = sourceState.sealedPlan;
-  validateManifestLockPair(sealedPlan.manifest, sealedPlan.lock);
+  try {
+    validateManifestLockPair(sealedPlan.manifest, sealedPlan.lock);
+  } catch {
+    throw new TaktpackError('INVALID_EXPORT_PLAN', 'sealed export plan is invalid', 'plan');
+  }
   const manifestContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.manifest));
   const reportContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.report));
   const blobs = new Map<string, ProjectTemplateExportFile[]>();
@@ -324,8 +358,12 @@ export async function writeTaktpack(
     throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive envelope exceeds safety limits');
   }
   let expectedTarget: import('node:fs').Stats | undefined;
-  if (existsSync(outputPath)) {
-    expectedTarget = lstatSync(outputPath);
+  try {
+    if (existsSync(outputPath)) {
+      expectedTarget = lstatSync(outputPath);
+    }
+  } catch (error) {
+    throw normalizeWriterIoError(error, 'ARCHIVE_WRITE_FAILED', 'output', 'not-published');
   }
   if (!force && existsSync(outputPath)) {
     throw new TaktpackError('OUTPUT_EXISTS', 'output already exists', 'outputPath');
@@ -334,7 +372,12 @@ export async function writeTaktpack(
     throw new TaktpackError('UNSAFE_OUTPUT_TARGET', 'output target must be a regular single-link file', 'outputPath');
   }
   options.signal?.throwIfAborted();
-  const rootStat = await lstat(sourceState.rootRealPath);
+  let rootStat: Awaited<ReturnType<typeof lstat>>;
+  try {
+    rootStat = await lstat(sourceState.rootRealPath);
+  } catch (error) {
+    throw normalizeWriterIoError(error, 'ARCHIVE_WRITE_FAILED', 'sourceRoot', 'not-published');
+  }
   const expectedRoot = sourceState.rootSnapshot;
   if (
     !rootStat.isDirectory()
@@ -350,6 +393,10 @@ export async function writeTaktpack(
   );
   let archiveHash = createHash('sha256');
   let bytes = 0;
+  let primaryError: Error | undefined;
+  let cleanupFailure: unknown;
+  let published = false;
+  let result: WriteTaktpackResult | undefined;
   try {
     for (const [sourceIndex, file] of sourceState.files.entries()) {
       const field = `sourceFiles[${sourceIndex}]`;
@@ -379,13 +426,28 @@ export async function writeTaktpack(
       },
     });
     const archive = createTarPack();
-    const outputPromise = pipeline(
+    const rawOutputPromise = pipeline(
       archive,
       hashStream,
       output,
       ...(options.signal === undefined ? [] : [{ signal: options.signal }]),
     );
+    // Attach the rejection handler in the same turn as pipeline creation.
+    // Delaying it until archive.entry awaits can trigger unhandledRejection.
+    const outputOutcome = rawOutputPromise.then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({
+        ok: false as const,
+        error: normalizeWriterIoError(
+          error,
+          'ARCHIVE_WRITE_FAILED',
+          'output',
+          'not-published',
+        ),
+      }),
+    );
     try {
+      ioSeam.onPhase?.('pipeline');
       await addBufferEntry(archive, 'pack.json', packContent);
       await addBufferEntry(archive, 'manifest.json', manifestContent);
       await addBufferEntry(archive, 'export-report.json', reportContent);
@@ -394,15 +456,18 @@ export async function writeTaktpack(
         await addBlobEntry(archive, file, options.signal, 'blob');
       }
       archive.finalize();
-      await outputPromise;
+      const outcome = await outputOutcome;
+      if (!outcome.ok) throw outcome.error;
     } catch (error) {
       archive.destroy(error instanceof Error ? error : new Error(String(error)));
-      await outputPromise.catch(() => undefined);
+      const outcome = await outputOutcome;
+      if (!outcome.ok) throw outcome.error;
       throw error;
     }
     canonicalizeWrittenUstarHeaders(tempPath);
     archiveHash = createHash('sha256');
     bytes = 0;
+    ioSeam.onPhase?.('archive-read');
     for await (const chunk of createReadStream(tempPath)) {
       const buffer = chunk as Buffer;
       bytes += buffer.byteLength;
@@ -411,20 +476,70 @@ export async function writeTaktpack(
       }
       archiveHash.update(buffer);
     }
-    const completedFd = openSync(tempPath, constants.O_RDONLY);
     try {
-      fsyncSync(completedFd);
-    } finally {
-      closeSync(completedFd);
+      ioSeam.onPhase?.('file-fsync');
+      const completedFd = openSync(tempPath, constants.O_RDONLY);
+      try {
+        fsyncSync(completedFd);
+      } finally {
+        closeSync(completedFd);
+      }
+    } catch (error) {
+      throw normalizeWriterIoError(error, 'DURABILITY_FAILED', 'archive', 'not-published');
     }
-    publishTempFile(tempPath, outputPath, force, expectedTarget);
-    syncTaktpackOutputDirectory(outputDirectory);
-    return {
+    try {
+      ioSeam.onPhase?.('publish');
+      publishTempFile(tempPath, outputPath, force, expectedTarget);
+      published = true;
+    } catch (error) {
+      throw normalizeWriterIoError(error, 'ARCHIVE_WRITE_FAILED', 'publish', 'not-published');
+    }
+    try {
+      ioSeam.onPhase?.('directory-fsync');
+      syncTaktpackOutputDirectory(outputDirectory);
+    } catch (error) {
+      throw normalizeWriterIoError(error, 'DURABILITY_FAILED', 'outputDirectory', 'published');
+    }
+    result = {
       outputPath,
       archiveSha256: archiveHash.digest('hex'),
       bytes,
     };
+  } catch (error) {
+    primaryError = normalizeWriterIoError(
+      error,
+      'ARCHIVE_WRITE_FAILED',
+      'archive',
+      published ? 'published' : 'not-published',
+    );
   } finally {
-    if (existsSync(tempPath)) unlinkSync(tempPath);
+    try {
+      ioSeam.onPhase?.('cleanup');
+      if (existsSync(tempPath)) unlinkSync(tempPath);
+    } catch (caughtCleanupError) {
+      // Cleanup must never replace the primary failure: callers need the
+      // operation that caused the archive to fail, without a raw temp path.
+      if (primaryError === undefined) {
+        cleanupFailure = caughtCleanupError;
+      }
+    }
   }
+  if (primaryError !== undefined) throw primaryError;
+  if (cleanupFailure !== undefined) {
+    throw normalizeWriterIoError(
+      cleanupFailure,
+      'CLEANUP_FAILED',
+      'temporaryArchive',
+      published ? 'published' : 'not-published',
+    );
+  }
+  return result!;
+}
+
+export function writeTaktpack(
+  outputPath: string,
+  plan: ProjectTemplateExportPlan,
+  options: WriteTaktpackOptions = {},
+): Promise<WriteTaktpackResult> {
+  return writeTaktpackWithIoSeam(outputPath, plan, options);
 }

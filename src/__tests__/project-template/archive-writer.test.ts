@@ -15,7 +15,11 @@ import {
   createProjectTemplateExportPlan,
   writeTaktpack,
 } from '../../features/project-template/index.js';
-import { syncTaktpackOutputDirectory } from '../../features/project-template/archive-writer.js';
+import {
+  syncTaktpackOutputDirectory,
+  writeTaktpackWithIoSeam,
+  type TaktpackWriterIoPhase,
+} from '../../features/project-template/archive-writer.js';
 
 const roots: string[] = [];
 
@@ -152,6 +156,75 @@ describe('taktpack deterministic writer', () => {
     await expect(writeTaktpack(join(root, 'limited.taktpack'), plan, {
       limits: { maxArchiveBytes: 1 },
     })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' });
+  });
+
+  it('catches a missing output-directory pipeline rejection without crashing or leaking paths', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const marker = 'LEAK_CANARY_OUTPUT';
+    const output = join(root, marker, 'pack.taktpack');
+
+    const error = await writeTaktpack(output, plan).catch((caught: unknown) => caught);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(error).toMatchObject({
+      code: 'ARCHIVE_WRITE_FAILED',
+      field: 'output',
+      artifactState: 'not-published',
+    });
+    expect(String(error)).not.toContain(root);
+    expect(JSON.stringify(error)).not.toContain(marker);
+    expect(existsSync(output)).toBe(false);
+  });
+
+  it.each([
+    ['pipeline', 'ARCHIVE_WRITE_FAILED', 'not-published'],
+    ['archive-read', 'ARCHIVE_WRITE_FAILED', 'not-published'],
+    ['file-fsync', 'DURABILITY_FAILED', 'not-published'],
+    ['publish', 'ARCHIVE_WRITE_FAILED', 'not-published'],
+    ['directory-fsync', 'DURABILITY_FAILED', 'published'],
+  ] as const)(
+    'normalizes a %s I/O fault and reports artifact state',
+    async (phase, code, artifactState) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const output = join(root, `${phase}.taktpack`);
+
+      const error = await writeTaktpackWithIoSeam(output, plan, {}, {
+        onPhase(currentPhase) {
+          if (currentPhase === phase) throw new Error(`raw ${phase} ${root}`);
+        },
+      }).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code, artifactState });
+      expect(String(error)).not.toContain(root);
+      expect(existsSync(output)).toBe(artifactState === 'published');
+    },
+  );
+
+  it('does not let a cleanup failure mask the primary pipeline failure', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const phases: TaktpackWriterIoPhase[] = [];
+
+    const error = await writeTaktpackWithIoSeam(join(root, 'primary.taktpack'), plan, {}, {
+      onPhase(phase) {
+        phases.push(phase);
+        if (phase === 'pipeline' || phase === 'cleanup') {
+          throw new Error(`raw ${phase} ${root}`);
+        }
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(phases).toContain('cleanup');
+    expect(error).toMatchObject({
+      code: 'ARCHIVE_WRITE_FAILED',
+      artifactState: 'not-published',
+    });
+    expect(String(error)).not.toContain(root);
   });
 
   it('does not overwrite an existing output without force', async () => {

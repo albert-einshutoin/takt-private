@@ -20,7 +20,10 @@ export {
   ProjectTemplateValidationError,
   TaktpackError,
 } from './errors.js';
-export type { TaktpackErrorCode } from './errors.js';
+export type {
+  TaktpackArtifactState,
+  TaktpackErrorCode,
+} from './errors.js';
 export {
   TAKTPACK_ENTRY_NAMES,
   TAKTPACK_BLOB_PREFIX,

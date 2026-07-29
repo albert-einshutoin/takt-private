@@ -16,6 +16,10 @@ import {
   inspectTaktpack,
   writeTaktpack,
 } from '../../features/project-template/index.js';
+import {
+  inspectTaktpackWithIoSeam,
+  type TaktpackInspectorIoPhase,
+} from '../../features/project-template/archive-inspector.js';
 
 const roots: string[] = [];
 
@@ -143,6 +147,44 @@ describe('taktpack streaming inspector', () => {
     expect(error).toMatchObject({ code: 'UNSAFE_ARCHIVE_ENTRY', field: 'archive' });
     expect(String(error)).not.toContain(root);
     expect(JSON.stringify(error)).not.toContain('TOKEN_MARKER_ARCHIVE');
+  });
+
+  it.each([
+    ['handle-stat', 'archive.stat'],
+    ['read', 'archive.read'],
+    ['final-stat', 'archive.finalStat'],
+    ['close', 'archive.close'],
+  ] as const)('normalizes and redacts a %s I/O failure', async (phase, field) => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+
+    const error = await inspectTaktpackWithIoSeam(pack, {}, {
+      onPhase(currentPhase) {
+        if (currentPhase === phase) throw new Error(`raw ${phase} ${root}`);
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'ARCHIVE_READ_FAILED', field });
+    expect(String(error)).not.toContain(root);
+  });
+
+  it('does not let close failure mask the primary read failure', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+    const phases: TaktpackInspectorIoPhase[] = [];
+
+    const error = await inspectTaktpackWithIoSeam(pack, {}, {
+      onPhase(phase) {
+        phases.push(phase);
+        if (phase === 'read' || phase === 'close') {
+          throw new Error(`raw ${phase} ${root}`);
+        }
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(phases).toContain('close');
+    expect(error).toMatchObject({ code: 'ARCHIVE_READ_FAILED', field: 'archive.read' });
+    expect(String(error)).not.toContain(root);
   });
 
   it('rejects trailing bytes after the two USTAR end blocks', async () => {

@@ -127,6 +127,7 @@ export type {
   WriteTaktpackOptions,
   WriteTaktpackResult,
   TaktpackErrorCode,
+  TaktpackArtifactState,
   TaktpackLimits,
   TaktpackDescriptorV1,
   TaktpackExportReportV1,
