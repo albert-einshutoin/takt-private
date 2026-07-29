@@ -264,15 +264,24 @@ under the main project root. The mirror remains fail-closed if either initial
 or terminal publication fails, so apply cannot miss an active worktree run or
 race a run that loaded an older template generation.
 
-Queued tasks also publish a durable `task-preparation` running record before
-asynchronous isolation setup or retry resolution begins. That record blocks
-apply while TAKT creates, copies, or reuses a workspace. After the canonical
-run metadata and any coordination mirror are durable, TAKT terminalizes the
-preparation record, so there is no unprotected hand-off gap. Terminal
-preparation records remain in ordinary run history for audit and use the same
-retention policy as other runs. If preparation stops unexpectedly, its running
-record becomes stale and requires the existing explicit recovery flow; TAKT
-does not expire it by time alone or guess that a long copy is abandoned.
+Every template-dependent execution entry point publishes a durable preparation
+record before it reads project configuration or mutates runtime task state.
+This includes queued and resumed tasks, direct selection, pipelines, run-all
+dispatch, and the watch lifecycle. The record blocks apply while TAKT resolves
+retry state, creates or copies a workspace, stages attachments, claims another
+task, or waits for watched work. Consequently, an active watch intentionally
+blocks template apply even while it is idle; stop the watcher before applying
+a pack.
+
+The record is written through an owner-only same-directory temporary file,
+file-fsynced, renamed, and followed by parent-directory fsync on POSIX. After
+the canonical run metadata and any coordination mirror are durable, TAKT
+terminalizes the preparation record, so there is no unprotected hand-off gap.
+Terminal preparation records remain in ordinary run history for audit and use
+the same retention policy as other runs. If preparation stops unexpectedly,
+its running record becomes stale and requires the existing explicit recovery
+flow; TAKT does not expire it by time alone or guess that a long copy is
+abandoned.
 
 Apply stages and validates every output before changing `.takt/`. The formal
 lock is stored at `.takt-template-lock.json`. Private staging, journal, and
@@ -281,9 +290,11 @@ ignored by Git and is created with owner-only permissions. Every control root
 contains a private `*` `.gitignore`, preventing backup data from entering
 `git add -A` in arbitrary target repositories. The ignore file is durably
 created and verified before any run-start mutex, apply lease, or recovery
-marker is published. Backups contain
-only affected template entries and the formal lock; runtime state and excluded
-content are never collected. The backup manifest records each original hash,
+marker is published. Newly created private staging, backup, and blob
+directories are followed by parent-directory fsync on POSIX before their
+contents are trusted. Backups contain only affected template entries and the
+formal lock; runtime state and excluded content are never collected. The
+backup manifest records each original hash,
 mode, and timestamp for audit. It also records target parent directories that
 were absent before the transaction. Compensation, recovery, and operator
 rollback remove those parents deepest-first only while they remain empty;

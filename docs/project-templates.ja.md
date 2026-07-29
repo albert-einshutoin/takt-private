@@ -220,9 +220,15 @@ provider、runtime configを読み込み、`running` metadataをdurableに公開
 mirror書き込みが失敗してもfail-closedな証拠を残すため、applyがactive worktree runを
 見落としたり、古いtemplate世代を読み込んだrunと競合したりすることはありません。
 
-queue taskは、非同期のisolation準備やretry解決を始める前にも、durableな
-`task-preparation` running recordを公開します。TAKTがworkspaceを作成、copy、再利用
-している間は、このrecordがapplyを拒否します。canonical run metadataと必要な
+templateに依存するすべての実行入口は、project configを読む、またはruntime task stateを
+変更する前にdurableなpreparation recordを公開します。対象はqueue、direct resume、
+direct selection、pipeline、run-all dispatch、watch lifecycleです。このrecordはretry
+stateの解決、workspaceの作成・copy、attachment staging、次taskのclaim、watch待機中の
+applyを拒否します。そのため、activeなwatchはidle中も意図的にtemplate applyを拒否し、
+packを適用するときは先にwatchを停止する必要があります。
+
+recordはowner-onlyの同一directory temp fileへ書き、file fsync、rename、POSIXでの
+parent-directory fsyncを終えてから公開済みと扱います。canonical run metadataと必要な
 coordination mirrorをdurableに公開した後でpreparation recordをterminal化するため、
 引継ぎの瞬間にも保護の切れ目はありません。terminalなpreparation recordは監査用に
 通常のrun historyへ残り、他のrunと同じretention policyに従います。準備processが
@@ -234,8 +240,9 @@ applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を�
 `.takt-template-state/`へ保存します。後者はGit ignore対象かつowner-only permission
 です。各control root自身にも`*`のprivate `.gitignore`を生成するため、任意の適用先で
 backupが`git add -A`へ混入しません。このignore fileをdurableに作成・検証してからだけ
-run-start mutex、apply lease、recovery markerを公開します。backup対象は変更する
-template entryと正式lockだけで、runtime stateやexcluded
+run-start mutex、apply lease、recovery markerを公開します。新しく作ったprivateな
+staging、backup、blob directoryは、その内容を信頼する前にPOSIXでparent-directory
+fsyncも完了させます。backup対象は変更するtemplate entryと正式lockだけで、runtime stateやexcluded
 contentを新しく収集しません。backup manifestは元のhash、mode、timestampを監査用に
 記録し、transaction前には存在しなかった適用先の親directoryも証拠として保持します。
 補償、recovery、operator rollbackは、それらが空のままである場合だけ深い順に削除し、
