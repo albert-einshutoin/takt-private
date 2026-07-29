@@ -36,6 +36,7 @@ export type {
   TaktpackInspectResult,
 } from './archive-types.js';
 export { canonicalizeTaktpackJson } from './canonical-json.js';
+export { createProjectTemplateExportPlan } from './export-plan.js';
 export type {
   ProjectTemplateManifestV1,
   TemplateCapability,
