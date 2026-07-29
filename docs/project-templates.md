@@ -42,16 +42,24 @@ lock data are reproducible.
 is represented as `hooks/prepare.sh`; a `.takt/` prefix is rejected. Absolute
 paths, `..`, empty segments, Windows separators and reserved device names,
 alternate data stream (`:`) syntax, control characters, and trailing dot or
-space are rejected. NFC/NFD and case-only collisions are also rejected so
-validation has the same meaning on every supported file system. `mode` is a
-four-digit POSIX mode and `sha256` is a lowercase SHA-256 digest.
+space are rejected. Paths must already be NFC. Collision keys additionally use
+NFKC plus locale-aware lowercase comparison, covering compatibility characters,
+NFC/NFD, and case-only aliases. Windows `CONIN$` and `CONOUT$` are reserved as
+well. These rules keep validation consistent on every supported file system.
+`mode` is a four-digit POSIX mode and `sha256` is a lowercase SHA-256 digest.
 
 `source` is a discriminated union. `github` uses a canonical
 `https://github.com/owner/repository` URL without `.git`; `git` uses a
 credential-free HTTPS URL; `local` uses `.` or a portable relative POSIX path
-(including `.takt/templates/...`) and the literal ref `workspace`. Query strings, fragments, control characters, and
-absolute local workstation paths are forbidden. Every source pins an exact
-40- or 64-character lowercase hexadecimal commit.
+(including `.takt/templates/...`) and the literal ref `workspace`. Query
+strings, fragments, control characters, and absolute local workstation paths
+are forbidden. Every source pins an exact 40- or 64-character lowercase
+hexadecimal commit.
+Git and GitHub URLs are also parsed with the WHATWG URL implementation and must
+round-trip to the exact input. User information, query, fragment, dot segments,
+encoded slash/backslash, default-port and host-case aliases, and other
+non-canonical forms are rejected. GitHub owner/repository `.` and `..` aliases
+are invalid.
 
 A lock keeps `packVersion`, `source`, top-level capabilities, and each entry's
 path, policy, mode, digest, and capabilities. It additionally stores
@@ -73,8 +81,9 @@ request before users choose to apply it. Parsing never runs these capabilities.
 The public API exports `parseProjectTemplateManifest`,
 `serializeProjectTemplateManifest`, `parseTemplateLock`, and
 `serializeTemplateLock`. It also exports
-`calculateProjectTemplateManifestSha256`, and `validateManifestLockPair`. It
-also exports `projectTemplateManifestV1JsonSchema` and
+`calculateProjectTemplateManifestSha256`, `validateManifestLockPair`, and
+`validateDetectedTemplateCapabilities`, plus
+`projectTemplateManifestV1JsonSchema` and
 `projectTemplateLockV1JsonSchema` for editor and integration tooling. Both
 schemas use JSON Schema draft-07 so they work with the repository's Ajv 6
 runtime.
@@ -89,6 +98,18 @@ relationships, policy conflicts, plain-object checks, and manifest/lock
 binding. Consumers must call the parsers and `validateManifestLockPair` even
 after JSON Schema validation.
 
+Classifiers and archive inspectors pass `{ path, capabilities }` evidence to
+`validateDetectedTemplateCapabilities`. Every detected capability must be
+declared by both the matching entry and the manifest, and an unknown path is
+rejected. An omitted entry or an inspection that was never run is **not**
+evidence that the entry is trusted; callers must track inspection completeness
+and refuse apply when their policy requires evidence that is missing.
+
+WHATWG URL round-trip checks, NFC enforcement, conservative NFKC collision
+keys, and capability detection completeness are runtime-only. The draft-07
+schemas remain suitable for editor feedback, but they do not replace runtime
+validation.
+
 Inputs are bounded to 4,096 entries, 512 code points per path/source URI, 256
 code points per ref, and three capabilities. Parsers accept only plain,
 own-property JSON-style objects and dense arrays; accessors, class instances,
@@ -101,6 +122,10 @@ Clients must reject an unknown schema major. A compatible v1 client may accept
 new *minor* behavior only when the schema version remains `1.0` and no unknown
 keys are present; v1 deliberately fails closed on unknown keys to avoid silently
 discarding security-relevant data.
+Missing, non-string, or malformed schema versions use the document-specific
+`INVALID_MANIFEST` or `INVALID_LOCK` code. An unknown major uses
+`UNSUPPORTED_SCHEMA_MAJOR`; a well-formed but unsupported v1 minor such as
+`1.1` uses `UNSUPPORTED_SCHEMA_VERSION`.
 
 A future v2 must use `schemaVersion: "2.0"` and ship an explicit migration
 command or adapter. The adapter should parse v1 first, write a new v2 manifest

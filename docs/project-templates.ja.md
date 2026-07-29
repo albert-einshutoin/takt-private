@@ -24,7 +24,9 @@ lock の内容が再現可能になります。
 たとえば `.takt/hooks/prepare.sh` は `hooks/prepare.sh` と記録します。
 `.takt/` prefix、絶対パス、`..`、空セグメント、Windows の区切り文字・予約名、
 ADS の `:`、control 文字、末尾の dot/space は拒否されます。大文字小文字だけが
-異なる path と NFC/NFD で同一になる path の衝突も拒否し、macOS と Windows で
+異なる path だけでなく、path 自体を NFC に限定し、NFKC と locale-aware lowercase
+で同一になる compatibility 文字・NFC/NFD の衝突も拒否します。Windows の
+`CONIN$` と `CONOUT$` も予約名です。これにより macOS と Windows で
 検証結果が変わらないようにします。
 
 `source` は kind ごとの discriminated union です。`github` は `.git` なしの
@@ -33,6 +35,10 @@ ADS の `:`、control 文字、末尾の dot/space は拒否されます。大�
 `workspace` を使用します。query、fragment、
 control 文字、local workstation の絶対 path は保存できません。すべての source は
 小文字 hexadecimal 40 または 64 文字の commit に固定します。
+Git/GitHub URI は WHATWG URL でも解析し、入力と完全に round-trip する canonical
+表現だけを許可します。userinfo、query、fragment、dot segment、percent-encoded
+slash/backslash、default port や host の大文字小文字による別名は拒否します。
+GitHub owner/repository の `.` と `..` も無効です。
 
 ## capability
 
@@ -50,6 +56,7 @@ entry はさらに `executable` の宣言が必須です。利用できる名前
 `serializeProjectTemplateManifest`、`parseTemplateLock`、
 `serializeTemplateLock`、およびエディタや連携ツール向けの
 `calculateProjectTemplateManifestSha256`、`validateManifestLockPair`、
+`validateDetectedTemplateCapabilities`、
 `projectTemplateManifestV1JsonSchema`、`projectTemplateLockV1JsonSchema` を
 提供します。schema は Ajv 6 と互換の JSON Schema draft-07 です。検証エラーは
 安定した `code` と `field` を持つ `ProjectTemplateValidationError` なので、
@@ -70,10 +77,24 @@ capability 3 件です。parser は own property だけの plain JSON object と
 のみ受け入れ、継承値、accessor、class instance、sparse/拡張 array は entry 処理前に
 拒否します。
 
+classifier と archive inspector は `{ path, capabilities }` の検出証拠を
+`validateDetectedTemplateCapabilities` に渡します。検出 capability は対応 entry
+と manifest の両方で宣言済みでなければならず、未知 path は fail-closed で拒否します。
+entry が検出結果にないことや、検出処理自体を実行していないことは「trusted」の証拠に
+なりません。呼び出し側は inspection の完了状態を別に管理し、必要な証拠がなければ
+apply を拒否します。
+
+WHATWG URL の canonical round-trip、NFC 必須、NFKC collision key、capability
+detection の完了性は runtime-only です。draft-07 schema は editor feedback 用であり、
+runtime parser と検出照合の代わりにはなりません。
+
 ## 互換性と v2 への移行
 
 クライアントは未知の schema major を必ず拒否します。v1 は security に関係する
 データを黙って捨てないため、未知 key も fail-closed で拒否します。
+schema version の欠落・非 string・形式不正は document ごとの `INVALID_MANIFEST`
+または `INVALID_LOCK`、未知 major は `UNSUPPORTED_SCHEMA_MAJOR`、`1.1` のような
+major 1 の未対応 version は `UNSUPPORTED_SCHEMA_VERSION` になります。
 
 将来 v2 を導入する場合は `schemaVersion: "2.0"` を使い、明示的な移行コマンド
 または adapter を提供します。adapter はまず v1 を検証し、新しい v2 manifest と
