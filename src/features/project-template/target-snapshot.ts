@@ -228,28 +228,34 @@ async function inspectAncestors(
   taktRoot: string,
   relativePath: string,
   snapshots: Map<string, Stats>,
-  directoryNames: Map<string, string[]>,
+  directoryNames: Map<string, Map<string, string[]>>,
   scanBudget: { entries: number },
 ): Promise<'present' | 'missing'> {
   const segments = relativePath.split('/');
   let current = taktRoot;
   for (const segment of segments.slice(0, -1)) {
+    const parent = current;
     current = join(current, segment);
+    const names = await readBoundedDirectory(parent, directoryNames, scanBudget);
+    const segmentKey = segment.normalize('NFKC').toLowerCase();
+    const portableMatches = names.get(segmentKey) ?? [];
+    if (
+      portableMatches.length > 1
+      || (portableMatches.length === 1 && portableMatches[0] !== segment)
+    ) {
+      throw unsafeTarget();
+    }
     let stat: Stats;
     try {
       stat = await lstat(current);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        const parent = dirname(current);
-        const names = await readBoundedDirectory(parent, directoryNames, scanBudget);
-        const segmentKey = segment.normalize('NFKC').toLowerCase();
-        if (names.some((name) => name.normalize('NFKC').toLowerCase() === segmentKey)) {
-          throw unsafeTarget();
-        }
+        if (portableMatches.length > 0) throw unsafeTarget();
         return 'missing';
       }
       throw unsafeTarget();
     }
+    if (portableMatches.length !== 1) throw unsafeTarget();
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw unsafeTarget();
     let actualRelative: string;
     try {
@@ -266,9 +272,9 @@ async function inspectAncestors(
 
 async function readBoundedDirectory(
   directory: string,
-  cache: Map<string, string[]>,
+  cache: Map<string, Map<string, string[]>>,
   budget: { entries: number },
-): Promise<string[]> {
+): Promise<Map<string, string[]>> {
   const cached = cache.get(directory);
   if (cached !== undefined) return cached;
   let handle: Awaited<ReturnType<typeof opendir>>;
@@ -277,7 +283,7 @@ async function readBoundedDirectory(
   } catch {
     throw unsafeTarget();
   }
-  const names: string[] = [];
+  const names = new Map<string, string[]>();
   let primaryError: Error | undefined;
   try {
     for (;;) {
@@ -291,7 +297,10 @@ async function readBoundedDirectory(
           'target',
         );
       }
-      names.push(entry.name);
+      const key = entry.name.normalize('NFKC').toLowerCase();
+      const bucket = names.get(key);
+      if (bucket === undefined) names.set(key, [entry.name]);
+      else bucket.push(entry.name);
     }
   } catch (error) {
     primaryError = error instanceof TaktpackError ? error : unsafeTarget();
@@ -409,6 +418,23 @@ export async function captureProjectTemplateTargetSnapshot(
   } catch {
     throw unsafeTarget();
   }
+  const directoryNames = new Map<string, Map<string, string[]>>();
+  const directoryScanBudget = { entries: 0 };
+  const projectNames = await readBoundedDirectory(
+    projectRealPath,
+    directoryNames,
+    directoryScanBudget,
+  );
+  const rootPortableMatches = projectNames.get('.takt') ?? [];
+  if (
+    rootPortableMatches.length > 1
+    || (
+      rootPortableMatches.length === 1
+      && rootPortableMatches[0] !== '.takt'
+    )
+  ) {
+    throw unsafeTarget();
+  }
   try {
     rootBefore = await lstat(taktRoot);
   } catch (error) {
@@ -439,8 +465,6 @@ export async function captureProjectTemplateTargetSnapshot(
   const captured: CapturedTargetFile[] = [];
   const capturedActualPaths = new Set<string>();
   const collisionPaths = new Set<string>();
-  const directoryNames = new Map<string, string[]>();
-  const directoryScanBudget = { entries: 0 };
   const requestedNamesByParent = new Map<string, {
     relative: string;
     names: Set<string>;
@@ -481,12 +505,13 @@ export async function captureProjectTemplateTargetSnapshot(
       directoryNames,
       directoryScanBudget,
     );
-    for (const sibling of siblings) {
-      if (!group.names.has(sibling.normalize('NFKC').toLowerCase())) continue;
-      const siblingPath = group.relative === ''
-        ? sibling
-        : `${group.relative}/${sibling}`;
-      collisionPaths.add(siblingPath);
+    for (const requestedName of group.names) {
+      for (const sibling of siblings.get(requestedName) ?? []) {
+        const siblingPath = group.relative === ''
+          ? sibling
+          : `${group.relative}/${sibling}`;
+        collisionPaths.add(siblingPath);
+      }
     }
   }
   for (const path of presentCandidatePaths) {

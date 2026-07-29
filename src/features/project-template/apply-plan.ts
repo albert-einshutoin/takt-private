@@ -26,11 +26,13 @@ import type {
 import {
   assertAllowedKeys,
   MAX_TEMPLATE_ENTRIES,
+  compareSemVer,
   parsePortablePath,
   parsePosixMode,
   parseSha256,
   requireArray,
   requireRecord,
+  requireSemVer,
 } from './validation.js';
 
 const MAX_DIFF_INPUT_BYTES = 64 * 1024;
@@ -242,6 +244,7 @@ function parseIncomingContents(
 function parseIncomingInspection(
   value: unknown,
   actualManifestSha256: string,
+  requiredTakt: { minVersion: string; maxVersion?: string },
 ): {
   archiveSha256?: string;
   compatibility: 'compatible' | 'unknown' | 'incompatible' | 'unverified';
@@ -253,7 +256,7 @@ function parseIncomingInspection(
   const evidence = requireRecord(value, 'incomingInspection');
   assertAllowedKeys(
     evidence,
-    ['archiveSha256', 'manifestSha256', 'compatibilityStatus'],
+    ['archiveSha256', 'manifestSha256', 'currentTaktVersion', 'compatibilityStatus'],
     'incomingInspection',
   );
   const archiveSha256 = parseSha256(
@@ -275,10 +278,27 @@ function parseIncomingInspection(
       'incomingInspection.compatibilityStatus',
     );
   }
+  const currentTaktVersion = requireSemVer(
+    evidence['currentTaktVersion'],
+    'incomingInspection.currentTaktVersion',
+  );
+  const computedCompatible =
+    compareSemVer(currentTaktVersion, requiredTakt.minVersion) >= 0
+    && (
+      requiredTakt.maxVersion === undefined
+      || compareSemVer(currentTaktVersion, requiredTakt.maxVersion) <= 0
+    );
+  const effectiveCompatibility = compatibility === 'unknown'
+    ? 'unknown'
+    : computedCompatible && compatibility === 'compatible'
+      ? 'compatible'
+      : 'incompatible';
   return {
     archiveSha256,
-    compatibility,
-    trusted: manifestSha256 === actualManifestSha256 && compatibility === 'compatible',
+    compatibility: effectiveCompatibility,
+    trusted:
+      manifestSha256 === actualManifestSha256
+      && effectiveCompatibility === 'compatible',
   };
 }
 
@@ -739,6 +759,7 @@ export function createProjectTemplateApplyPlan(
   const incomingInspection = parseIncomingInspection(
     input['incomingInspection'],
     incomingManifestSha256,
+    incomingManifest.takt,
   );
   const localEntries = parseLocalEntries(input['localEntries']);
   const baseByPath = new Map(baseLock?.entries.map((entry) => [entry.path, entry]) ?? []);

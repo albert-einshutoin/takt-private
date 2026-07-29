@@ -19,6 +19,7 @@ export interface ProjectTemplateIncomingContent {
 export interface ProjectTemplateIncomingInspectionEvidence {
   archiveSha256: string;
   manifestSha256: string;
+  currentTaktVersion: string;
   compatibilityStatus: 'compatible' | 'unknown' | 'incompatible';
 }
 

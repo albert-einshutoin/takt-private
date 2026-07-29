@@ -93,6 +93,7 @@ function input(
   planInput.incomingInspection = {
     archiveSha256: 'd'.repeat(64),
     manifestSha256: calculateProjectTemplateManifestSha256(planInput.incomingManifest),
+    currentTaktVersion: '0.48.0',
     compatibilityStatus: 'compatible',
   };
   return planInput;
@@ -607,7 +608,7 @@ describe('project template three-way apply plan', () => {
     expect(plan.defaultApplyPossible).toBe(false);
   });
 
-  it('binds archive compatibility evidence and fails closed when incompatible', () => {
+  it('recomputes archive compatibility instead of trusting a compatible claim', () => {
     const planInput = input({ incoming: 'next' });
     planInput.incomingManifest.takt.minVersion = '999.0.0';
     planInput.incomingInspection = {
@@ -615,7 +616,8 @@ describe('project template three-way apply plan', () => {
       manifestSha256: calculateProjectTemplateManifestSha256(
         planInput.incomingManifest,
       ),
-      compatibilityStatus: 'incompatible',
+      currentTaktVersion: '0.48.0',
+      compatibilityStatus: 'compatible',
     };
 
     const plan = createProjectTemplateApplyPlan(planInput);

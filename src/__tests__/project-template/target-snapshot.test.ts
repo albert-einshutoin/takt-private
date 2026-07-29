@@ -231,6 +231,20 @@ describe('project template target snapshot', () => {
     });
   });
 
+  it('rejects a case-only .takt root sibling', async () => {
+    const root = makeRoot(false);
+    rmSync(join(root, '.takt'), { recursive: true });
+    mkdirSync(join(root, '.TAKT'));
+
+    await expect(captureProjectTemplateTargetSnapshot(
+      root,
+      ['config.yaml'],
+    )).rejects.toMatchObject({
+      code: 'UNSAFE_ARCHIVE_ENTRY',
+      field: 'target',
+    });
+  });
+
   it('rejects case-only ancestor directory collisions', async () => {
     const root = makeRoot(false);
     writeTakt(root, 'Workflows/local.yaml', 'local\n');
