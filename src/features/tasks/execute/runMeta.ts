@@ -10,6 +10,8 @@ import type { RunMeta } from '../../../core/workflow/run/run-meta.js';
 import type { RunPaths } from '../../../core/workflow/run/run-paths.js';
 import type { WorkflowResumePoint } from '../../../core/models/index.js';
 import type { WorkflowTraceDiscovery } from '../../../core/workflow/observability/traceDiscovery.js';
+import { resolve } from 'node:path';
+import { withProjectTemplateRunStartPermit } from '../../project-template/apply-lease.js';
 
 export interface DirectResumeMetadata {
   readonly sourceRunSlug: string;
@@ -59,8 +61,13 @@ export class RunMetaManager {
         },
       } : {}),
     };
-    ensureDir(runPaths.runRootAbs);
-    this.writeRunMeta(this.runMeta);
+    // Publish running evidence while holding the same short coordination
+    // mutex used by template apply. This closes the preflight/start race.
+    const projectRoot = resolve(runPaths.runRootAbs, '../../..');
+    withProjectTemplateRunStartPermit(projectRoot, () => {
+      ensureDir(runPaths.runRootAbs);
+      this.writeRunMeta(this.runMeta);
+    });
   }
 
   updateStep(stepName: string, iteration: number, resumePoint?: WorkflowResumePoint): void {
