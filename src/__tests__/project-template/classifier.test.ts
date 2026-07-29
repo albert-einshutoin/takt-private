@@ -237,6 +237,11 @@ describe('project template pure classifier', () => {
       bytes: 0,
       absolutePathPrefixes: Array.from({ length: 9 }, () => '/safe'),
     }],
+    ['sparse prefixes', {
+      relativePath: 'workflows/a.yaml',
+      bytes: 0,
+      absolutePathPrefixes: Array(1),
+    }],
   ])('should fail closed for invalid public input: %s', (_label, input) => {
     expect(classify(input as never)).toMatchObject({
       relativePath: '[invalid-input]',

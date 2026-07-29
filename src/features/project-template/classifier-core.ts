@@ -10,6 +10,7 @@ import {
   parsePortablePath,
   parsePosixMode,
   parseSha256,
+  requireArray,
 } from './validation.js';
 
 const MAX_CLASSIFIER_CONTENT_BYTES = 1024 * 1024;
@@ -252,17 +253,27 @@ function parseClassifierInput(
     return undefined;
   }
   if (value.absolutePathPrefixes !== undefined) {
-    const prefixes = value.absolutePathPrefixes;
-    if (
-      !Array.isArray(prefixes)
-      || prefixes.length > MAX_ABSOLUTE_PATH_PREFIXES
-      || prefixes.some(
-        (prefix) => typeof prefix !== 'string' || prefix.length > MAX_ABSOLUTE_PATH_PREFIX_LENGTH,
-      )
-      || prefixes.reduce((total, prefix) => total + prefix.length, 0) > MAX_ABSOLUTE_PATH_PREFIX_TOTAL
-    ) {
+    let prefixes: unknown[];
+    try {
+      prefixes = requireArray(
+        value.absolutePathPrefixes,
+        'classifier.absolutePathPrefixes',
+        MAX_ABSOLUTE_PATH_PREFIXES,
+        'LIMIT_EXCEEDED',
+      );
+    } catch {
       return undefined;
     }
+    if (prefixes.some(
+      (prefix) => typeof prefix !== 'string' || prefix.length > MAX_ABSOLUTE_PATH_PREFIX_LENGTH,
+    )) {
+      return undefined;
+    }
+    const totalLength = prefixes.reduce<number>(
+      (total, prefix) => total + (prefix as string).length,
+      0,
+    );
+    if (totalLength > MAX_ABSOLUTE_PATH_PREFIX_TOTAL) return undefined;
   }
   return value;
 }
