@@ -10,6 +10,9 @@ const {
   mockFailTask,
   mockExecuteTask,
   mockResolveWorkflowConfigValue,
+  mockBeginProjectTemplatePreparation,
+  mockCompleteProjectTemplatePreparation,
+  mockAbortProjectTemplatePreparation,
 } = vi.hoisted(() => ({
   mockAddTask: vi.fn(() => ({
     name: 'test-task',
@@ -23,6 +26,9 @@ const {
   mockFailTask: vi.fn(),
   mockExecuteTask: vi.fn(),
   mockResolveWorkflowConfigValue: vi.fn((_: string, key: string) => (key === 'autoPr' ? undefined : 'default')),
+  mockBeginProjectTemplatePreparation: vi.fn(),
+  mockCompleteProjectTemplatePreparation: vi.fn(),
+  mockAbortProjectTemplatePreparation: vi.fn(),
 }));
 
 vi.mock('../infra/config/index.js', () => ({
@@ -74,6 +80,16 @@ vi.mock('../features/tasks/execute/taskExecution.js', () => ({
   executeTask: (...args: unknown[]) => mockExecuteTask(...args),
 }));
 
+vi.mock('../features/tasks/execute/projectTemplatePreparationReservation.js', () => ({
+  beginProjectTemplatePreparation: (...args: unknown[]) => {
+    mockBeginProjectTemplatePreparation(...args);
+    return {
+      complete: mockCompleteProjectTemplatePreparation,
+      abort: mockAbortProjectTemplatePreparation,
+    };
+  },
+}));
+
 vi.mock('../features/workflowSelection/index.js', () => ({
   warnMissingWorkflows: vi.fn(),
   selectWorkflowFromCategorizedWorkflows: vi.fn(),
@@ -108,6 +124,10 @@ describe('selectAndExecuteTask (execute path)', () => {
     expect(mockExecuteTask).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: '/project', projectCwd: '/project' }),
     );
+    expect(mockBeginProjectTemplatePreparation.mock.invocationCallOrder[0])
+      .toBeLessThan(mockExecuteTask.mock.invocationCallOrder[0]!);
+    expect(mockCompleteProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+    expect(mockAbortProjectTemplatePreparation).not.toHaveBeenCalled();
   });
 
   it('should call selectWorkflow when no override is provided', async () => {

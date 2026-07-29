@@ -17,6 +17,7 @@ import { buildBooleanTaskResult, persistTaskError, persistTaskResult } from './t
 import { prepareTaskSpecDirectory, cleanupPreparedTaskSpec } from '../attachments.js';
 import { cleanupStagedTaskSpec, stageTaskSpecForExecution, type StagedTaskSpec } from './taskSpecContext.js';
 import { buildTraceTaskMetadata } from './traceTaskMetadata.js';
+import { beginProjectTemplatePreparation } from './projectTemplatePreparationReservation.js';
 
 export type { WorktreeConfirmationResult, SelectAndExecuteOptions };
 
@@ -106,6 +107,35 @@ export async function confirmAndCreateWorktree(
 }
 
 export async function selectAndExecuteTask(
+  cwd: string,
+  task: string,
+  options?: SelectAndExecuteOptions,
+  agentOverrides?: TaskExecutionOptions,
+): Promise<boolean> {
+  // Workflow selection, attachment staging, timezone reads, and task-list
+  // mutation all precede workflow bootstrap. Keep one generation reserved for
+  // the complete direct execution so those prepared inputs cannot be mixed.
+  const preparationReservation = beginProjectTemplatePreparation({
+    projectRoot: cwd,
+    task,
+    workflow: 'direct-task-preparation',
+  });
+  try {
+    const result = await selectAndExecuteTaskUnderReservation(
+      cwd,
+      task,
+      options,
+      agentOverrides,
+    );
+    preparationReservation.complete();
+    return result;
+  } catch (error) {
+    preparationReservation.abort();
+    throw error;
+  }
+}
+
+async function selectAndExecuteTaskUnderReservation(
   cwd: string,
   task: string,
   options?: SelectAndExecuteOptions,

@@ -23,6 +23,10 @@ import { executeTaskWithResult } from '../execute/taskExecution.js';
 import type { DirectResumeMetadata } from '../execute/runMeta.js';
 import type { TaskExecutionOptions } from '../execute/types.js';
 import { buildTraceTaskMetadata } from '../execute/traceTaskMetadata.js';
+import {
+  beginProjectTemplatePreparation,
+  type ProjectTemplatePreparationReservation,
+} from '../execute/projectTemplatePreparationReservation.js';
 import { runDirectInstructMode } from './directInstructMode.js';
 import { findLatestResumableDirectRun, type ResumableDirectRun } from './directRunFinder.js';
 
@@ -181,6 +185,7 @@ async function executeDirectResume(
   context: DirectRunResumeExecutionContext,
   resumeMode: DirectResumeMetadata['resumeMode'],
   agentOverrides: TaskExecutionOptions | undefined,
+  preparationReservation: ProjectTemplatePreparationReservation,
   retryNote?: string,
 ): Promise<boolean> {
   const result = await executeTaskWithResult({
@@ -198,6 +203,11 @@ async function executeDirectResume(
       taskSlug: context.run.slug,
     }),
   });
+  // Keep the preparation record active for the whole resumed workflow. This
+  // is intentionally longer than the queued-task hand-off and guarantees that
+  // context derived before an interactive retry cannot be mixed with a newer
+  // project template generation.
+  preparationReservation.complete();
   return result.success;
 }
 
@@ -252,6 +262,7 @@ async function retryDirectRun(
   projectDir: string,
   context: DirectRunResumeExecutionContext,
   agentOverrides: TaskExecutionOptions | undefined,
+  preparationReservation: ProjectTemplatePreparationReservation,
 ): Promise<boolean> {
   const retryContext = buildRetryContext(projectDir, context);
   const retryResult = await runDirectRetryMode(projectDir, retryContext);
@@ -263,6 +274,7 @@ async function retryDirectRun(
     context,
     'retry',
     agentOverrides,
+    preparationReservation,
     requireConversationNote(retryResult.task),
   );
 }
@@ -271,6 +283,7 @@ async function instructDirectRun(
   projectDir: string,
   context: DirectRunResumeExecutionContext,
   agentOverrides: TaskExecutionOptions | undefined,
+  preparationReservation: ProjectTemplatePreparationReservation,
 ): Promise<boolean> {
   const result = await runDirectInstructMode({
     cwd: projectDir,
@@ -288,6 +301,7 @@ async function instructDirectRun(
     context,
     'instruct',
     agentOverrides,
+    preparationReservation,
     requireConversationNote(result.task),
   );
 }
@@ -320,12 +334,37 @@ export async function resumeDirectRun(
     return true;
   }
 
-  const context = buildExecutionContext(projectDir, run);
-  if (action === 'requeue') {
-    return executeDirectResume(projectDir, context, 'requeue', agentOverrides);
+  const preparationReservation = beginProjectTemplatePreparation({
+    projectRoot: projectDir,
+    task: run.meta.task,
+    workflow: 'direct-resume-preparation',
+  });
+  try {
+    const context = buildExecutionContext(projectDir, run);
+    if (action === 'requeue') {
+      return await executeDirectResume(
+        projectDir,
+        context,
+        'requeue',
+        agentOverrides,
+        preparationReservation,
+      );
+    }
+    if (action === 'retry') {
+      return await retryDirectRun(
+        projectDir,
+        context,
+        agentOverrides,
+        preparationReservation,
+      );
+    }
+    return await instructDirectRun(
+      projectDir,
+      context,
+      agentOverrides,
+      preparationReservation,
+    );
+  } finally {
+    preparationReservation.abort();
   }
-  if (action === 'retry') {
-    return retryDirectRun(projectDir, context, agentOverrides);
-  }
-  return instructDirectRun(projectDir, context, agentOverrides);
 }

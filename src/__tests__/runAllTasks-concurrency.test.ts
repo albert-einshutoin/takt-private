@@ -5,7 +5,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { TaskInfo } from '../infra/task/index.js';
 
-const { mockLoadConfigRaw } = vi.hoisted(() => ({
+const {
+  mockLoadConfigRaw,
+  mockEnsureDir,
+  mockWriteFileAtomic,
+} = vi.hoisted(() => ({
   mockLoadConfigRaw: vi.fn(() => ({
     language: 'en',
     defaultWorkflow: 'default',
@@ -13,12 +17,14 @@ const { mockLoadConfigRaw } = vi.hoisted(() => ({
     concurrency: 1,
     taskPollIntervalMs: 500,
   })),
+  mockEnsureDir: vi.fn(),
+  mockWriteFileAtomic: vi.fn(),
 }));
 
 // Mock dependencies before importing the module under test
 vi.mock('../infra/config/index.js', () => ({
-  ensureDir: vi.fn(),
-  writeFileAtomic: vi.fn(),
+  ensureDir: mockEnsureDir,
+  writeFileAtomic: mockWriteFileAtomic,
   loadWorkflowByIdentifier: vi.fn(),
   isWorkflowPath: vi.fn(() => false),
   loadConfig: (...args: unknown[]) => {
@@ -56,6 +62,10 @@ vi.mock('../infra/config/index.js', () => ({
       : { ...raw, workflow: 'default', provider: 'claude', verbose: false };
     return { value: config[key], source: 'project' };
   },
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteFileAtomic,
 }));
 
 const mockLoadConfig = mockLoadConfigRaw;
@@ -228,6 +238,8 @@ function createTask(name: string): TaskInfo {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockClaimNextTasks.mockReset();
+  mockClaimNextTasks.mockReturnValue([]);
   mockFailInterruptedRunningTasks.mockReturnValue(0);
   mockUpdateRunningTaskExecution.mockImplementation(buildUpdatedTaskInfo);
 });
@@ -255,6 +267,34 @@ describe('runAllTasks concurrency', () => {
 
       // Then
       expect(mockInfo).toHaveBeenCalledWith('No pending tasks in .takt/tasks.yaml');
+    });
+
+    it('publishes coordinator evidence before config reads and initial claims', async () => {
+      mockClaimNextTasks.mockReturnValue([]);
+
+      await runAllTasks('/project');
+
+      const states = mockWriteFileAtomic.mock.calls.map((call) =>
+        (JSON.parse(String(call[1])) as { status: string }).status);
+      expect(states).toEqual(['running', 'completed']);
+      expect(mockWriteFileAtomic.mock.invocationCallOrder[0])
+        .toBeLessThan(mockLoadConfigRaw.mock.invocationCallOrder[0]!);
+      expect(mockWriteFileAtomic.mock.invocationCallOrder[0])
+        .toBeLessThan(mockFailInterruptedRunningTasks.mock.invocationCallOrder[0]!);
+      expect(mockWriteFileAtomic.mock.invocationCallOrder[0])
+        .toBeLessThan(mockClaimNextTasks.mock.invocationCallOrder[0]!);
+    });
+
+    it('aborts coordinator evidence when claiming tasks throws', async () => {
+      mockClaimNextTasks.mockImplementation(() => {
+        throw new Error('claim failed');
+      });
+
+      await expect(runAllTasks('/project')).rejects.toThrow('claim failed');
+
+      const states = mockWriteFileAtomic.mock.calls.map((call) =>
+        (JSON.parse(String(call[1])) as { status: string }).status);
+      expect(states).toEqual(['running', 'aborted']);
     });
 
     it('should execute tasks sequentially via worker pool when concurrency is 1', async () => {

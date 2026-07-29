@@ -15,6 +15,9 @@ const {
   mockPersistTaskResult,
   mockPersistTaskError,
   mockBuildBooleanTaskResult,
+  mockBeginProjectTemplatePreparation,
+  mockCompleteProjectTemplatePreparation,
+  mockAbortProjectTemplatePreparation,
 } = vi.hoisted(() => ({
   mockAddTask: vi.fn(() => ({
     name: 'test-task',
@@ -28,6 +31,9 @@ const {
   mockPersistTaskResult: vi.fn(),
   mockPersistTaskError: vi.fn(),
   mockBuildBooleanTaskResult: vi.fn(() => ({ task: 'mock-result' })),
+  mockBeginProjectTemplatePreparation: vi.fn(),
+  mockCompleteProjectTemplatePreparation: vi.fn(),
+  mockAbortProjectTemplatePreparation: vi.fn(),
 }));
 
 vi.mock('../shared/prompt/index.js', () => ({
@@ -79,6 +85,16 @@ vi.mock('../infra/github/index.js', () => ({
 
 vi.mock('../features/tasks/execute/taskExecution.js', () => ({
   executeTask: (...args: unknown[]) => mockExecuteTask(...args),
+}));
+
+vi.mock('../features/tasks/execute/projectTemplatePreparationReservation.js', () => ({
+  beginProjectTemplatePreparation: (...args: unknown[]) => {
+    mockBeginProjectTemplatePreparation(...args);
+    return {
+      complete: mockCompleteProjectTemplatePreparation,
+      abort: mockAbortProjectTemplatePreparation,
+    };
+  },
 }));
 
 vi.mock('../features/tasks/execute/taskResultHandler.js', () => ({

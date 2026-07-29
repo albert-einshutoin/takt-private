@@ -4,6 +4,16 @@ import * as path from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { info, error, success, status } from '../shared/ui/index.js';
 
+const {
+  mockBeginProjectTemplatePreparation,
+  mockCompleteProjectTemplatePreparation,
+  mockAbortProjectTemplatePreparation,
+} = vi.hoisted(() => ({
+  mockBeginProjectTemplatePreparation: vi.fn(),
+  mockCompleteProjectTemplatePreparation: vi.fn(),
+  mockAbortProjectTemplatePreparation: vi.fn(),
+}));
+
 const mockFetchIssue = vi.fn();
 const mockCheckGhCli = vi.fn().mockReturnValue({ available: true });
 const mockCreatePullRequest = vi.fn();
@@ -53,6 +63,16 @@ const mockConfirmAndCreateWorktree = vi.fn();
 vi.mock('../features/tasks/index.js', () => ({
   executeTask: mockExecuteTask,
   confirmAndCreateWorktree: mockConfirmAndCreateWorktree,
+}));
+
+vi.mock('../features/tasks/execute/projectTemplatePreparationReservation.js', () => ({
+  beginProjectTemplatePreparation: (...args: unknown[]) => {
+    mockBeginProjectTemplatePreparation(...args);
+    return {
+      complete: mockCompleteProjectTemplatePreparation,
+      abort: mockAbortProjectTemplatePreparation,
+    };
+  },
 }));
 
 vi.mock('../features/tasks/prImageAttachments.js', () => ({
@@ -142,6 +162,10 @@ describe('executePipeline', () => {
     });
 
     expect(exitCode).toBe(2);
+    expect(mockBeginProjectTemplatePreparation.mock.invocationCallOrder[0])
+      .toBeLessThan(mockResolveConfigValues.mock.invocationCallOrder[0]!);
+    expect(mockCompleteProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+    expect(mockAbortProjectTemplatePreparation).not.toHaveBeenCalled();
   });
 
   it('should return exit code 2 when gh CLI is not available', async () => {

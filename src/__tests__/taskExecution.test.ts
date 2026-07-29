@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const { mockResolveTaskExecution, mockResolveTaskIssue, mockExecuteWorkflow, mockExecuteWorkflowForRun, mockLoadWorkflowByIdentifier, mockIsWorkflowPath, mockResolveWorkflowConfigValues, mockResolveProviderOptionsWithTrace, mockBuildBooleanTaskResult, mockBuildTaskResult, mockPersistExceededTaskResult, mockPersistTaskResult, mockPersistPrFailedTaskResult, mockPersistTaskError, mockPostExecutionFlow, mockUpdateRunningTaskExecution } =
   vi.hoisted(() => ({
@@ -36,6 +36,9 @@ const { mockResolveTaskExecution, mockResolveTaskIssue, mockExecuteWorkflow, moc
     mockPostExecutionFlow: vi.fn(),
     mockUpdateRunningTaskExecution: vi.fn(),
   }));
+const { mockRunMetaWrite } = vi.hoisted(() => ({
+  mockRunMetaWrite: vi.fn(),
+}));
 
 vi.mock('../features/tasks/execute/resolveTask.js', () => ({
   resolveTaskExecution: (...args: unknown[]) => mockResolveTaskExecution(...args),
@@ -62,10 +65,14 @@ vi.mock('../features/tasks/execute/postExecution.js', () => ({
 
 vi.mock('../infra/config/index.js', () => ({
   ensureDir: vi.fn(),
-  writeFileAtomic: vi.fn(),
+  writeFileAtomic: mockRunMetaWrite,
   loadWorkflowByIdentifier: (...args: unknown[]) => mockLoadWorkflowByIdentifier(...args),
   isWorkflowPath: (...args: unknown[]) => mockIsWorkflowPath(...args),
   resolveWorkflowConfigValues: (...args: unknown[]) => mockResolveWorkflowConfigValues(...args),
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockRunMetaWrite,
 }));
 
 vi.mock('../infra/config/resolveConfigValue.js', async (importOriginal) => ({
@@ -142,6 +149,11 @@ const executeRunTaskAndCompleteWithRunOptions = executeRunTaskAndComplete as unk
 ) => Promise<boolean>;
 const mockError = vi.mocked(error);
 const mockInfo = vi.mocked(info);
+
+function writeRunMetaFixture(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
+}
 
 describe('executeAndCompleteTask', () => {
   beforeEach(() => {
@@ -220,7 +232,7 @@ describe('executeAndCompleteTask', () => {
         mkdirSync(path, { recursive: true });
       });
       vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
-        writeFileSync(path, content);
+        writeRunMetaFixture(path, content);
       });
       let resolvePreparation: ((value: {
         execCwd: string;
@@ -288,7 +300,7 @@ describe('executeAndCompleteTask', () => {
       mkdirSync(path, { recursive: true });
     });
     vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
-      writeFileSync(path, content);
+      writeRunMetaFixture(path, content);
     });
     mockResolveTaskExecution.mockRejectedValue(new Error('injected preparation failure'));
 
@@ -315,7 +327,7 @@ describe('executeAndCompleteTask', () => {
       mkdirSync(path, { recursive: true });
     });
     vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
-      writeFileSync(path, content);
+      writeRunMetaFixture(path, content);
     });
     mockResolveTaskExecution.mockImplementation(
       (_task, _cwd, signal: AbortSignal | undefined) => new Promise((_resolve, reject) => {
@@ -355,7 +367,7 @@ describe('executeAndCompleteTask', () => {
       if (status === 'aborted') {
         throw new Error('injected reservation cleanup failure');
       }
-      writeFileSync(path, content);
+      writeRunMetaFixture(path, content);
     });
     mockResolveTaskExecution.mockRejectedValue(new Error('injected preparation failure'));
 
@@ -380,7 +392,7 @@ describe('executeAndCompleteTask', () => {
       if (meta.status === 'completed' && meta.workflow === 'task-preparation') {
         throw new Error('injected handoff finalization failure');
       }
-      writeFileSync(path, content);
+      writeRunMetaFixture(path, content);
     });
     mockResolveTaskExecution.mockResolvedValue({
       execCwd: projectRoot,
@@ -421,7 +433,7 @@ describe('executeAndCompleteTask', () => {
       mkdirSync(path, { recursive: true });
     });
     vi.mocked(writeFileAtomic).mockImplementation((path: string, content: string) => {
-      writeFileSync(path, content);
+      writeRunMetaFixture(path, content);
     });
     const reservation = new RunMetaManager(
       buildRunPaths(projectRoot, 'preparation'),

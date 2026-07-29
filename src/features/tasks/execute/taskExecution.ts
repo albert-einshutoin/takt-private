@@ -22,9 +22,10 @@ import {
   persistTaskResult,
 } from './taskResultHandler.js';
 import { executeTaskWorkflow } from './taskWorkflowExecution.js';
-import { randomUUID } from 'node:crypto';
-import { buildRunPaths } from '../../../core/workflow/run/run-paths.js';
-import { RunMetaManager } from './runMeta.js';
+import {
+  beginProjectTemplatePreparation,
+  type ProjectTemplatePreparationReservation,
+} from './projectTemplatePreparationReservation.js';
 
 export type { TaskExecutionOptions, ExecuteTaskOptions };
 
@@ -78,8 +79,7 @@ export async function executeTaskAndCompleteWithResult(
   const taskAbortController = new AbortController();
   const externalAbortSignal = parallelOptions?.abortSignal;
   const taskAbortSignal = externalAbortSignal ? taskAbortController.signal : undefined;
-  let preparationReservation: RunMetaManager | undefined;
-  let preparationHandedOff = false;
+  let preparationReservation: ProjectTemplatePreparationReservation | undefined;
 
   const onExternalAbort = (): void => {
     taskAbortController.abort();
@@ -100,14 +100,11 @@ export async function executeTaskAndCompleteWithResult(
     // preparation records intentionally remain in run history for audit and
     // ordinary retention; a crash leaves `running`, which becomes STALE_RUN
     // and requires the existing explicit recovery flow instead of guessing.
-    preparationReservation = new RunMetaManager(
-      buildRunPaths(
-        cwd,
-        `project-template-preparation-${randomUUID()}`,
-      ),
-      task.content,
-      'task-preparation',
-    );
+    preparationReservation = beginProjectTemplatePreparation({
+      projectRoot: cwd,
+      task: task.content,
+      workflow: 'task-preparation',
+    });
     const {
       execCwd,
       workflowIdentifier,
@@ -167,9 +164,7 @@ export async function executeTaskAndCompleteWithResult(
         issueNumber,
       }),
       onRunningEvidencePublished: () => {
-        if (preparationHandedOff) return;
-        preparationHandedOff = true;
-        preparationReservation!.finalize('completed');
+        preparationReservation!.complete();
       },
     });
 
@@ -252,9 +247,7 @@ export async function executeTaskAndCompleteWithResult(
     persistTaskError(taskRunner, taskForPersistence, startedAt, completedAt, err);
     return false;
   } finally {
-    if (preparationReservation !== undefined && !preparationHandedOff) {
-      preparationReservation.finalize('aborted');
-    }
+    preparationReservation?.abort();
     if (externalAbortSignal) {
       externalAbortSignal.removeEventListener('abort', onExternalAbort);
     }

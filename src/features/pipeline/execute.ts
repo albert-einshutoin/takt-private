@@ -19,6 +19,7 @@ import {
 } from './steps.js';
 import { submitPullRequest } from './prSubmission.js';
 import { sanitizeTerminalText } from '../../shared/utils/text.js';
+import { beginProjectTemplatePreparation } from '../tasks/execute/projectTemplatePreparationReservation.js';
 
 export type { PipelineExecutionOptions };
 
@@ -30,6 +31,26 @@ interface PipelineOutcome {
 }
 
 async function runPipeline(options: PipelineExecutionOptions): Promise<PipelineOutcome> {
+  // Pipeline config, remote task material, copy/worktree creation, attachment
+  // staging, and post-run Git operations must observe one project generation.
+  const preparationReservation = beginProjectTemplatePreparation({
+    projectRoot: options.cwd,
+    task: options.task ?? `Pipeline ${options.workflow}`,
+    workflow: 'pipeline-preparation',
+  });
+  try {
+    const outcome = await runPipelineUnderReservation(options);
+    preparationReservation.complete();
+    return outcome;
+  } catch (error) {
+    preparationReservation.abort();
+    throw error;
+  }
+}
+
+async function runPipelineUnderReservation(
+  options: PipelineExecutionOptions,
+): Promise<PipelineOutcome> {
   const { cwd, workflow, autoPr, skipGit } = options;
   const pipelineConfig = resolveConfigValues(cwd, ['pipeline']).pipeline;
 
