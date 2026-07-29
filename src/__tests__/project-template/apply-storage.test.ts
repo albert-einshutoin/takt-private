@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -114,24 +115,30 @@ describe('project template apply storage', () => {
     ]);
   });
 
-  it('does not fsync parents for private directories that already exist', async () => {
+  it('re-fsyncs parents for private directories that already exist', async () => {
     const repoPath = makeRepo();
+    const canonicalRepoPath = realpathSync.native(repoPath);
     const controlRoot = join(repoPath, '.takt-template-state');
+    const canonicalControlRoot = join(canonicalRepoPath, '.takt-template-state');
     mkdirSync(join(controlRoot, 'staging'), { recursive: true, mode: 0o700 });
     mkdirSync(join(controlRoot, 'backups'), { mode: 0o700 });
     writeFileSync(join(controlRoot, '.gitignore'), '*\n', { mode: 0o600 });
-    const events: ProjectTemplateApplyStorageIoOperation[] = [];
+    const events: Array<[ProjectTemplateApplyStorageIoOperation, string]> = [];
     const io = createProjectTemplateApplyStorageIo({
-      after: (operation) => {
+      after: (operation, path) => {
         if (operation === 'mkdir' || operation === 'directory-fsync') {
-          events.push(operation);
+          events.push([operation, path]);
         }
       },
     });
 
     await initializeProjectTemplateApplyStorage({ repoPath, io });
 
-    expect(events).toEqual([]);
+    expect(events).toEqual([
+      ['directory-fsync', canonicalRepoPath],
+      ['directory-fsync', canonicalControlRoot],
+      ['directory-fsync', canonicalControlRoot],
+    ]);
   });
 
   it('durably publishes every newly created nested staging directory', async () => {
@@ -238,6 +245,33 @@ describe('project template apply storage', () => {
       io,
     })).rejects.toMatchObject({ operation: faultOperation });
     expect(existsSync(join(transactionRoot, 'entries'))).toBe(false);
+  });
+
+  it('re-fsyncs an existing private directory after a failed publication retry', async () => {
+    const repoPath = makeRepo();
+    const canonicalRepoPath = realpathSync.native(repoPath);
+    const controlRoot = join(repoPath, '.takt-template-state');
+    let failOnce = true;
+    const fsynced: string[] = [];
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (operation !== 'directory-fsync') return;
+        fsynced.push(path);
+        if (failOnce && path === canonicalRepoPath) {
+          failOnce = false;
+          throw new Error('injected first parent fsync failure');
+        }
+      },
+    });
+
+    await expect(initializeProjectTemplateApplyStorage({ repoPath, io }))
+      .rejects.toMatchObject({ operation: 'directory-fsync' });
+    expect(existsSync(controlRoot)).toBe(true);
+
+    fsynced.length = 0;
+    await expect(initializeProjectTemplateApplyStorage({ repoPath, io }))
+      .resolves.toBeDefined();
+    expect(fsynced[0]).toBe(canonicalRepoPath);
   });
 
   it('treats directory fsync as best-effort on Windows', async () => {

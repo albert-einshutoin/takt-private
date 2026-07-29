@@ -588,18 +588,10 @@ async function ensurePrivateDirectory(
 ): Promise<void> {
   let entry = await tryLstat(io, path);
   if (entry === undefined) {
-    let created = false;
     try {
       await io.mkdir(path, PRIVATE_DIRECTORY_MODE);
-      created = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    }
-    if (created) {
-      // fsyncing content inside the new directory does not persist the new
-      // directory name itself. Sync its parent immediately so a reported
-      // backup/staging/control artifact survives a crash as a complete chain.
-      await io.fsyncDirectory(dirname(path));
     }
     entry = await io.lstat(path);
   }
@@ -614,6 +606,10 @@ async function ensurePrivateDirectory(
       'project template control directory is unsafe',
     );
   }
+  // Existence (including EEXIST) does not prove this name survived a prior
+  // parent-fsync failure. Re-sync on every ensure so same-root retry can
+  // re-establish durability before depending on the directory.
+  await io.fsyncDirectory(dirname(path));
 }
 
 async function ensurePrivateParents(

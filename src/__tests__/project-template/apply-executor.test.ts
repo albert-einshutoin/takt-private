@@ -762,8 +762,12 @@ describe('project template atomic apply executor', () => {
       });
       expect(applied.status).toBe('committed');
       let injected = false;
+      let createdTaktRemovalStarted = false;
       const io = createProjectTemplateApplyStorageIo({
         before(operation, path) {
+          if (operation === 'rmdir' && basename(path) === '.takt') {
+            createdTaktRemovalStarted = true;
+          }
           if (
             !injected
             && operation === faultOperation
@@ -774,6 +778,7 @@ describe('project template atomic apply executor', () => {
               )
               || (
                 operation === 'directory-fsync'
+                && createdTaktRemovalStarted
                 && basename(path) === basename(root)
               )
             )

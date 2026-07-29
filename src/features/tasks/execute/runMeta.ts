@@ -44,8 +44,10 @@ type PersistedRunMeta = Omit<RunMeta, 'resumePoint' | 'sourceRunSlug' | 'resumeM
 export class RunMetaManager {
   private readonly runMeta: RunMeta;
   private readonly metaAbs: string;
+  private readonly actualProjectRoot: string;
   private readonly mirrorMetaAbs?: string;
   private readonly mirrorRunRootAbs?: string;
+  private readonly mirrorProjectRoot?: string;
   private readonly runMetaStorageIo: RunMetaStorageIo | undefined;
   private finalized = false;
 
@@ -70,6 +72,7 @@ export class RunMetaManager {
     const actualProjectRoot = existsSync(requestedActualProjectRoot)
       ? realpathSync.native(requestedActualProjectRoot)
       : requestedActualProjectRoot;
+    this.actualProjectRoot = actualProjectRoot;
     this.metaAbs = resolve(
       actualProjectRoot,
       relative(requestedActualProjectRoot, runPaths.metaAbs),
@@ -90,6 +93,7 @@ export class RunMetaManager {
         const mirrorPaths = buildMirrorRunPaths(coordinationRoot, mirrorSlug);
         this.mirrorMetaAbs = mirrorPaths.metaAbs;
         this.mirrorRunRootAbs = mirrorPaths.runRootAbs;
+        this.mirrorProjectRoot = coordinationRoot;
       }
     }
     this.runMeta = {
@@ -184,11 +188,17 @@ export class RunMetaManager {
     // is deliberately written second so any mirror failure leaves either a
     // running record or unreadable/missing evidence in the coordination root,
     // both of which keep template apply fail-closed.
-    writeRunMetaFileDurably(this.metaAbs, content, this.runMetaStorageIo);
+    writeRunMetaFileDurably(
+      this.metaAbs,
+      content,
+      this.actualProjectRoot,
+      this.runMetaStorageIo,
+    );
     if (this.mirrorMetaAbs !== undefined) {
       writeRunMetaFileDurably(
         this.mirrorMetaAbs,
         content,
+        this.mirrorProjectRoot!,
         this.runMetaStorageIo,
       );
     }

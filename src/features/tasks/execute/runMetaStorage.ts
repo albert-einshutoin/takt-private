@@ -11,7 +11,15 @@ import {
   writeFileSync,
   type Stats,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -123,54 +131,115 @@ function assertDirectory(path: string, entry: Stats): void {
   }
 }
 
-function ensurePrivateDirectoryChain(
+interface DirectoryIdentity {
+  path: string;
+  dev: number;
+  ino: number;
+}
+
+function resolveDirectoryChain(
+  trustedRoot: string,
+  directory: string,
+): string[] {
+  const root = resolve(trustedRoot);
+  const target = resolve(directory);
+  const relativeTarget = relative(root, target);
+  if (
+    relativeTarget === '..'
+    || relativeTarget.startsWith(`..${sep}`)
+    || isAbsolute(relativeTarget)
+  ) {
+    throw new Error('run metadata path is outside trusted project root');
+  }
+  return relativeTarget === ''
+    ? [root]
+    : [
+        root,
+        ...relativeTarget.split(sep).reduce<string[]>((paths, segment) => {
+          paths.push(join(paths.at(-1) ?? root, segment));
+          return paths;
+        }, []),
+      ];
+}
+
+function validateDirectoryChain(
+  trustedRoot: string,
+  directory: string,
+  io: RunMetaStorageIo,
+): DirectoryIdentity[] {
+  const chain = resolveDirectoryChain(trustedRoot, directory);
+  return chain.map((path) => {
+    const entry = io.lstat(path);
+    if (entry === undefined) {
+      throw new Error('run metadata directory disappeared during validation');
+    }
+    assertDirectory(path, entry);
+    return { path, dev: entry.dev, ino: entry.ino };
+  });
+}
+
+function assertDirectoryChainIdentity(
+  expected: readonly DirectoryIdentity[],
+  trustedRoot: string,
   directory: string,
   io: RunMetaStorageIo,
 ): void {
-  const missing: string[] = [];
-  let current = directory;
-  while (true) {
-    const entry = io.lstat(current);
-    if (entry !== undefined) {
-      assertDirectory(current, entry);
-      break;
-    }
-    missing.push(current);
-    const parent = dirname(current);
-    if (parent === current) {
-      throw new Error('run metadata directory chain has no existing ancestor');
-    }
-    current = parent;
+  const actual = validateDirectoryChain(trustedRoot, directory, io);
+  if (
+    actual.length !== expected.length
+    || actual.some((entry, index) => (
+      entry.path !== expected[index]?.path
+      || entry.dev !== expected[index]?.dev
+      || entry.ino !== expected[index]?.ino
+    ))
+  ) {
+    throw new Error('run metadata directory chain identity changed');
   }
+}
 
-  for (const path of missing.reverse()) {
-    let created = false;
-    try {
-      io.mkdir(path, PRIVATE_DIRECTORY_MODE);
-      created = true;
-    } catch (error) {
-      if (errorCode(error) !== 'EEXIST') throw error;
+function ensurePrivateDirectoryChain(
+  trustedRoot: string,
+  directory: string,
+  io: RunMetaStorageIo,
+): void {
+  const chain = resolveDirectoryChain(trustedRoot, directory);
+  const trustedEntry = io.lstat(chain[0]!);
+  if (trustedEntry === undefined) {
+    throw new Error('run metadata trusted project root does not exist');
+  }
+  assertDirectory(chain[0]!, trustedEntry);
+
+  for (const path of chain.slice(1)) {
+    const parent = dirname(path);
+    if (io.lstat(path) === undefined) {
+      try {
+        io.mkdir(path, PRIVATE_DIRECTORY_MODE);
+      } catch (error) {
+        if (errorCode(error) !== 'EEXIST') throw error;
+      }
     }
     const entry = io.lstat(path);
     if (entry === undefined) {
       throw new Error('run metadata directory disappeared during creation');
     }
     assertDirectory(path, entry);
-    if (created) {
-      // A later fsync inside the run directory cannot persist this directory's
-      // own name. Publish each new ancestor before proceeding to its child.
-      io.fsyncDirectory(dirname(path));
-    }
+    // Re-sync every dependency, including an EEXIST race or a retry after a
+    // prior fsync failure. Existence alone does not prove durable publication.
+    io.fsyncDirectory(parent);
   }
 }
 
 export function writeRunMetaFileDurably(
   path: string,
   content: string,
+  trustedRoot: string,
   io: RunMetaStorageIo = createRunMetaStorageIo(),
 ): void {
   const parent = dirname(path);
-  ensurePrivateDirectoryChain(parent, io);
+  ensurePrivateDirectoryChain(trustedRoot, parent, io);
+  // Revalidate the complete trusted-root-relative chain immediately before
+  // opening through pathnames to narrow directory replacement races.
+  const directoryIdentity = validateDirectoryChain(trustedRoot, parent, io);
   const tempPath = join(
     parent,
     `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`,
@@ -184,6 +253,14 @@ export function writeRunMetaFileDurably(
     const completedFd = fd;
     fd = undefined;
     io.close(completedFd, tempPath);
+    // The chain may have changed while the temp file was written. Never rename
+    // through a component that is now a symlink or outside the trusted root.
+    assertDirectoryChainIdentity(
+      directoryIdentity,
+      trustedRoot,
+      parent,
+      io,
+    );
     io.rename(tempPath, path);
     renamed = true;
     // Rename durability is a separate crash boundary from file durability.
@@ -199,6 +276,14 @@ export function writeRunMetaFileDurably(
     }
     if (!renamed) {
       try {
+        // Cleanup is safe only while the original parent chain still validates;
+        // otherwise pathname cleanup could unlink an attacker-controlled file.
+        assertDirectoryChainIdentity(
+          directoryIdentity,
+          trustedRoot,
+          parent,
+          io,
+        );
         io.unlink(tempPath);
       } catch {
         // Never unlink the destination as a fallback. A unique temp left by a

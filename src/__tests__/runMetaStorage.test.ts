@@ -1,10 +1,13 @@
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -38,7 +41,7 @@ describe('run meta durable storage', () => {
       before: (operation, path) => events.push([operation, path]),
     });
 
-    writeRunMetaFileDurably(metaPath, '{"status":"running"}', io);
+    writeRunMetaFileDurably(metaPath, '{"status":"running"}', root, io);
 
     const taktRoot = join(root, '.takt');
     const runsRoot = join(taktRoot, 'runs');
@@ -68,24 +71,30 @@ describe('run meta durable storage', () => {
       before: (operation) => phases.push(operation),
     });
 
-    writeRunMetaFileDurably(metaPath, '{"status":"running"}', io);
+    writeRunMetaFileDurably(metaPath, '{"status":"running"}', root, io);
     phases.length = 0;
-    writeRunMetaFileDurably(metaPath, '{"currentStep":"review"}', io);
-    writeRunMetaFileDurably(metaPath, '{"status":"completed"}', io);
+    writeRunMetaFileDurably(metaPath, '{"currentStep":"review"}', root, io);
+    writeRunMetaFileDurably(metaPath, '{"status":"completed"}', root, io);
 
     expect(phases.filter((phase) => [
+      'directory-fsync',
+      'open-temp',
+      'write',
+      'file-fsync',
+      'close',
+      'rename',
+    ].includes(phase))).toEqual([
+      'directory-fsync',
+      'directory-fsync',
+      'directory-fsync',
       'open-temp',
       'write',
       'file-fsync',
       'close',
       'rename',
       'directory-fsync',
-    ].includes(phase))).toEqual([
-      'open-temp',
-      'write',
-      'file-fsync',
-      'close',
-      'rename',
+      'directory-fsync',
+      'directory-fsync',
       'directory-fsync',
       'open-temp',
       'write',
@@ -121,12 +130,13 @@ describe('run meta durable storage', () => {
         }
       },
     });
-    writeRunMetaFileDurably(metaPath, '{"status":"running"}', io);
+    writeRunMetaFileDurably(metaPath, '{"status":"running"}', root, io);
     armFault = true;
 
     expect(() => writeRunMetaFileDurably(
       metaPath,
       '{"status":"completed"}',
+      root,
       io,
     )).toThrow(`injected ${faultOperation}`);
     expect(readFileSync(metaPath, 'utf8')).toBe(
@@ -149,7 +159,7 @@ describe('run meta durable storage', () => {
       },
     });
 
-    expect(() => writeRunMetaFileDurably(metaPath, '{}', io))
+    expect(() => writeRunMetaFileDurably(metaPath, '{}', root, io))
       .toThrow('injected mkdir publication failure');
     expect(existsSync(taktRoot)).toBe(true);
     expect(existsSync(join(taktRoot, 'runs'))).toBe(false);
@@ -168,8 +178,143 @@ describe('run meta durable storage', () => {
       },
     }, 'win32');
 
-    expect(() => writeRunMetaFileDurably(metaPath, '{}', io)).not.toThrow();
+    expect(() => writeRunMetaFileDurably(metaPath, '{}', root, io)).not.toThrow();
     expect(directoryFsyncAttempts).toEqual([]);
     expect(readFileSync(metaPath, 'utf8')).toBe('{}');
+  });
+
+  it('rejects path escape and a symlink anywhere below the trusted root', () => {
+    const root = makeRoot();
+    const outside = makeRoot();
+    mkdirSync(join(root, '.takt'), { mode: 0o700 });
+    symlinkSync(outside, join(root, '.takt', 'runs'));
+
+    expect(() => writeRunMetaFileDurably(
+      join(root, '..', 'escaped', 'meta.json'),
+      '{}',
+      root,
+    )).toThrow('outside trusted project root');
+    expect(() => writeRunMetaFileDurably(
+      join(root, '.takt', 'runs', 'run-1', 'meta.json'),
+      '{}',
+      root,
+    )).toThrow('directory chain is unsafe');
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it('revalidates the full chain after closing the temp and before rename', () => {
+    const root = makeRoot();
+    const outside = makeRoot();
+    const runRoot = join(root, '.takt', 'runs', 'run-1');
+    const displaced = join(root, 'displaced-run');
+    const metaPath = join(runRoot, 'meta.json');
+    let tempClosed = false;
+    let swapped = false;
+    const io = createRunMetaStorageIo({
+      before(operation, path) {
+        if (operation === 'close') tempClosed = true;
+        if (
+          tempClosed
+          && !swapped
+          && operation === 'lstat'
+          && path === root
+        ) {
+          renameSync(runRoot, displaced);
+          symlinkSync(outside, runRoot);
+          swapped = true;
+        }
+      },
+    });
+
+    expect(() => writeRunMetaFileDurably(metaPath, '{}', root, io))
+      .toThrow('directory chain is unsafe');
+    expect(existsSync(join(outside, 'meta.json'))).toBe(false);
+  });
+
+  it('does not rename or unlink when a directory is replaced with another directory', () => {
+    const root = makeRoot();
+    const runRoot = join(root, '.takt', 'runs', 'run-1');
+    const displaced = join(root, 'displaced-run');
+    const metaPath = join(runRoot, 'meta.json');
+    let tempClosed = false;
+    let replaced = false;
+    const publicationOperations: RunMetaStorageOperation[] = [];
+    const io = createRunMetaStorageIo({
+      before(operation, path) {
+        if (operation === 'close') tempClosed = true;
+        if (
+          tempClosed
+          && !replaced
+          && operation === 'lstat'
+          && path === root
+        ) {
+          renameSync(runRoot, displaced);
+          mkdirSync(runRoot, { mode: 0o700 });
+          replaced = true;
+        }
+        if (replaced && (operation === 'rename' || operation === 'unlink')) {
+          publicationOperations.push(operation);
+        }
+      },
+    });
+
+    expect(() => writeRunMetaFileDurably(metaPath, '{}', root, io))
+      .toThrow('directory chain identity changed');
+    expect(publicationOperations).toEqual([]);
+    expect(existsSync(metaPath)).toBe(false);
+  });
+
+  it('re-fsyncs an existing directory chain after a prior publication failure', () => {
+    const root = makeRoot();
+    const metaPath = join(root, '.takt', 'runs', 'run-1', 'meta.json');
+    let failOnce = true;
+    const fsynced: string[] = [];
+    const io = createRunMetaStorageIo({
+      before(operation, path) {
+        if (operation !== 'directory-fsync') return;
+        fsynced.push(path);
+        if (failOnce && path === root) {
+          failOnce = false;
+          throw new Error('injected first parent fsync failure');
+        }
+      },
+    });
+
+    expect(() => writeRunMetaFileDurably(metaPath, '{}', root, io))
+      .toThrow('injected first parent fsync failure');
+    fsynced.length = 0;
+    expect(() => writeRunMetaFileDurably(metaPath, '{}', root, io)).not.toThrow();
+    expect(fsynced.slice(0, 3)).toEqual([
+      root,
+      join(root, '.takt'),
+      join(root, '.takt', 'runs'),
+    ]);
+  });
+
+  it('fsyncs the parent after an EEXIST mkdir race', () => {
+    const root = makeRoot();
+    const taktRoot = join(root, '.takt');
+    mkdirSync(taktRoot, { mode: 0o700 });
+    const metaPath = join(taktRoot, 'runs', 'run-1', 'meta.json');
+    const baseIo = createRunMetaStorageIo();
+    let hideTaktOnce = true;
+    const fsynced: string[] = [];
+    const io = {
+      ...baseIo,
+      lstat(path: string) {
+        if (path === taktRoot && hideTaktOnce) {
+          hideTaktOnce = false;
+          return undefined;
+        }
+        return baseIo.lstat(path);
+      },
+      fsyncDirectory(path: string) {
+        fsynced.push(path);
+        baseIo.fsyncDirectory(path);
+      },
+    };
+
+    expect(() => writeRunMetaFileDurably(metaPath, '{}', root, io)).not.toThrow();
+    expect(fsynced[0]).toBe(root);
   });
 });
