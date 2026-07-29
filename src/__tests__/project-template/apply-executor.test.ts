@@ -3,12 +3,15 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -32,8 +35,13 @@ import {
   type TemplateLockV1,
 } from '../../features/project-template/index.js';
 import {
+  consumeProjectTemplateApplyApprovalEvidence,
+  issueTrustedProjectTemplateApplyApproval,
+} from '../../features/project-template/apply-approval.js';
+import {
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
+  readProjectTemplateApprovalRecord,
 } from '../../features/project-template/apply-storage.js';
 import { canonicalizeTaktpackJson } from '../../features/project-template/canonical-json.js';
 
@@ -484,6 +492,648 @@ describe('project template atomic apply executor', () => {
       .toMatchObject({
         manifestSha256: calculateProjectTemplateManifestSha256(incomingManifest),
       });
+  });
+
+  it('applies a capability-bearing first install with independently bound approval evidence', async () => {
+    const root = makeRoot();
+    const contents = {
+      'hooks/install.sh': '#!/bin/sh\necho approved\n',
+    };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    expect(plan).toMatchObject({
+      reviewRequired: true,
+      defaultApplyPossible: false,
+      capabilitiesAfter: ['executable'],
+    });
+    const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+
+    const result = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+      approvalEvidence,
+    });
+
+    expect(result.status).toBe('committed');
+    expect(readFileSync(
+      join(root, '.takt', 'hooks', 'install.sh'),
+      'utf8',
+    )).toBe(contents['hooks/install.sh']);
+    expect(JSON.parse(readFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      'utf8',
+    ))).toMatchObject({
+      capabilities: ['executable'],
+    });
+    expect(existsSync(join(
+      root,
+      '.takt-template-state',
+      'approvals',
+      `${approvalEvidence.approvalId}.json`,
+    ))).toBe(true);
+    expect(existsSync(join(
+      root,
+      '.takt-template-state',
+      'approval-claims',
+      `${approvalEvidence.approvalId}.json`,
+    ))).toBe(true);
+  });
+
+  it('rejects same-plan replay after rollback even when the issued record is restored', async () => {
+    const root = makeRoot();
+    const contents = {
+      'hooks/install.sh': '#!/bin/sh\necho approved\n',
+    };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+    const approvalPath = join(
+      root,
+      '.takt-template-state',
+      'approvals',
+      `${approvalEvidence.approvalId}.json`,
+    );
+    const issuedRecord = readFileSync(approvalPath);
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+      approvalEvidence,
+    });
+    expect(applied.status).toBe('committed');
+    if (applied.status !== 'committed') return;
+    await expect(rollbackProjectTemplateApply({
+      projectRoot: root,
+      backupId: applied.backupId,
+    })).resolves.toMatchObject({ status: 'rolled_back' });
+    writeFileSync(approvalPath, issuedRecord, { mode: 0o600 });
+    const journalPath = join(root, '.takt-template-state', 'journal.json');
+    const journalBeforeReplay = readFileSync(journalPath, 'utf8');
+
+    const replay = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+      approvalEvidence,
+    });
+
+    expect(replay).toMatchObject({
+      status: 'not_started',
+      code: 'INVALID_APPLY_INPUT',
+    });
+    expect(existsSync(join(root, '.takt', 'hooks', 'install.sh'))).toBe(false);
+    expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+    expect(readFileSync(journalPath, 'utf8')).toBe(journalBeforeReplay);
+  });
+
+  it('allows exactly one concurrent approval claim', async () => {
+    const root = makeRoot();
+    const contents = {
+      'hooks/install.sh': '#!/bin/sh\necho approved\n',
+    };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: root,
+    });
+
+    const results = await Promise.all([
+      consumeProjectTemplateApplyApprovalEvidence({
+        storage,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        evidence: approvalEvidence,
+      }),
+      consumeProjectTemplateApplyApprovalEvidence({
+        storage,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        evidence: approvalEvidence,
+      }),
+    ]);
+
+    expect(results.sort()).toEqual([false, true]);
+    expect(statSync(join(
+      root,
+      '.takt-template-state',
+      'approval-claims',
+      `${approvalEvidence.approvalId}.json`,
+    )).mode & 0o777).toBe(0o600);
+  });
+
+  it.each(['file-fsync', 'directory-fsync'] as const)(
+    'burns approval and fails closed when claim %s fails',
+    async (faultOperation) => {
+      const root = makeRoot();
+      const contents = {
+        'hooks/install.sh': '#!/bin/sh\necho approved\n',
+      };
+      const incomingManifest = manifest(contents);
+      const blobs = incomingContents(contents);
+      const plan = await createPlan(root, incomingManifest, blobs);
+      const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+        projectRoot: root,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        decision: 'approved',
+      });
+      let injected = false;
+      const io = createProjectTemplateApplyStorageIo({
+        before(operation, path) {
+          if (
+            !injected
+            && operation === faultOperation
+            && (
+              (
+                operation === 'file-fsync'
+                && path.endsWith(`${approvalEvidence.approvalId}.json`)
+              )
+              || (
+                operation === 'directory-fsync'
+                && basename(path) === 'approval-claims'
+              )
+            )
+          ) {
+            injected = true;
+            throw new Error('injected approval claim durability fault');
+          }
+        },
+      });
+      const storage = await initializeProjectTemplateApplyStorage({
+        repoPath: root,
+        io,
+      });
+
+      await expect(consumeProjectTemplateApplyApprovalEvidence({
+        storage,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        evidence: approvalEvidence,
+      })).resolves.toBe(false);
+
+      expect(injected).toBe(true);
+      expect(existsSync(join(
+        root,
+        '.takt-template-state',
+        'approval-claims',
+        `${approvalEvidence.approvalId}.json`,
+      ))).toBe(true);
+      const retryStorage = await initializeProjectTemplateApplyStorage({
+        repoPath: root,
+      });
+      await expect(consumeProjectTemplateApplyApprovalEvidence({
+        storage: retryStorage,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        evidence: approvalEvidence,
+      })).resolves.toBe(false);
+      expect(existsSync(join(root, '.takt', 'hooks', 'install.sh'))).toBe(false);
+      expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+      expect(existsSync(join(
+        root,
+        '.takt-template-state',
+        'journal.json',
+      ))).toBe(false);
+    },
+  );
+
+  it.each(['unlink', 'rename'] as const)(
+    'claims approval without relying on a fallible %s operation',
+    async (forbiddenOperation) => {
+      const root = makeRoot();
+      const contents = {
+        'hooks/install.sh': '#!/bin/sh\necho approved\n',
+      };
+      const incomingManifest = manifest(contents);
+      const blobs = incomingContents(contents);
+      const plan = await createPlan(root, incomingManifest, blobs);
+      const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+        projectRoot: root,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        decision: 'approved',
+      });
+      let invoked = false;
+      const io = createProjectTemplateApplyStorageIo({
+        before(operation) {
+          if (operation === forbiddenOperation) {
+            invoked = true;
+            throw new Error('claim used a forbidden destructive operation');
+          }
+        },
+      });
+      const storage = await initializeProjectTemplateApplyStorage({
+        repoPath: root,
+        io,
+      });
+
+      await expect(consumeProjectTemplateApplyApprovalEvidence({
+        storage,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        evidence: approvalEvidence,
+      })).resolves.toBe(true);
+      expect(invoked).toBe(false);
+    },
+  );
+
+  it('rejects missing, mismatched, replayed, rejected, and forged approval evidence before mutation', async () => {
+    const root = makeRoot();
+    const contents = {
+      'hooks/install.sh': '#!/bin/sh\necho approved\n',
+    };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const valid = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+    const approvalsRoot = join(root, '.takt-template-state', 'approvals');
+    expect(statSync(approvalsRoot).mode & 0o777).toBe(0o700);
+    expect(statSync(join(
+      approvalsRoot,
+      `${valid.approvalId}.json`,
+    )).mode & 0o777).toBe(0o600);
+    const replayManifest = manifest({
+      'hooks/install.sh': '#!/bin/sh\necho different plan\n',
+    });
+    const replayPlan = await createPlan(
+      root,
+      replayManifest,
+      incomingContents({
+        'hooks/install.sh': '#!/bin/sh\necho different plan\n',
+      }),
+    );
+    const replayed = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan: replayPlan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+    const rejected = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'rejected',
+    });
+    const expired = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+      now: new Date('2020-01-01T00:00:00.000Z'),
+      expiresInMs: 1,
+    });
+    const forgedRecord = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+    const forgedRecordPath = join(
+      root,
+      '.takt-template-state',
+      'approvals',
+      `${forgedRecord.approvalId}.json`,
+    );
+    const forgedRecordBody = JSON.parse(
+      readFileSync(forgedRecordPath, 'utf8'),
+    ) as Record<string, unknown>;
+    forgedRecordBody['reviewSurfaceSha256'] = 'f'.repeat(64);
+    writeFileSync(forgedRecordPath, `${JSON.stringify(forgedRecordBody)}\n`);
+    const cases: Array<{ name: string; evidence?: unknown }> = [
+      { name: 'missing' },
+      {
+        name: 'mismatched nonce',
+        evidence: { ...valid, nonce: '00000000-0000-0000-0000-000000000000' },
+      },
+      { name: 'replayed for another plan', evidence: replayed },
+      { name: 'rejected decision', evidence: rejected },
+      { name: 'expired decision', evidence: expired },
+      { name: 'forged durable review context', evidence: forgedRecord },
+      {
+        name: 'forged approval reference',
+        evidence: {
+          ...valid,
+          approvalId: 'approval-forged',
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: blobs,
+        ...(testCase.evidence === undefined
+          ? {}
+          : { approvalEvidence: testCase.evidence as typeof valid }),
+      });
+
+      expect(result, testCase.name).toMatchObject({
+        status: 'not_started',
+        code: 'INVALID_APPLY_INPUT',
+      });
+      expect(existsSync(join(root, '.takt', 'hooks', 'install.sh')), testCase.name)
+        .toBe(false);
+      expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH)), testCase.name)
+        .toBe(false);
+      expect(existsSync(
+        join(root, '.takt-template-state', 'journal.json'),
+      ), testCase.name).toBe(false);
+    }
+  });
+
+  it.each(['mode-0400', 'mode-0700', 'hardlink', 'symlink', 'oversize'] as const)(
+    'rejects an unsafe approval record with %s before mutation',
+    async (unsafeKind) => {
+      const root = makeRoot();
+      const contents = {
+        'hooks/install.sh': '#!/bin/sh\necho approved\n',
+      };
+      const incomingManifest = manifest(contents);
+      const blobs = incomingContents(contents);
+      const plan = await createPlan(root, incomingManifest, blobs);
+      const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+        projectRoot: root,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        decision: 'approved',
+      });
+      const approvalPath = join(
+        root,
+        '.takt-template-state',
+        'approvals',
+        `${approvalEvidence.approvalId}.json`,
+      );
+      if (unsafeKind === 'mode-0400') {
+        chmodSync(approvalPath, 0o400);
+      } else if (unsafeKind === 'mode-0700') {
+        chmodSync(approvalPath, 0o700);
+      } else if (unsafeKind === 'hardlink') {
+        const linkedSource = join(root, 'linked-approval.json');
+        writeFileSync(linkedSource, readFileSync(approvalPath), { mode: 0o600 });
+        unlinkSync(approvalPath);
+        linkSync(linkedSource, approvalPath);
+      } else if (unsafeKind === 'symlink') {
+        const linkedSource = join(root, 'symlinked-approval.json');
+        writeFileSync(linkedSource, readFileSync(approvalPath), { mode: 0o600 });
+        unlinkSync(approvalPath);
+        symlinkSync(linkedSource, approvalPath);
+      } else {
+        writeFileSync(approvalPath, Buffer.alloc(64 * 1024 + 1));
+      }
+
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: blobs,
+        approvalEvidence,
+      });
+
+      expect(result).toMatchObject({
+        status: 'not_started',
+        code: 'INVALID_APPLY_INPUT',
+      });
+      expect(existsSync(join(root, '.takt', 'hooks', 'install.sh'))).toBe(false);
+      expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+      expect(existsSync(join(
+        root,
+        '.takt-template-state',
+        'journal.json',
+      ))).toBe(false);
+    },
+  );
+
+  it.each(['replacement', 'chmod'] as const)(
+    'rejects an approval record %s race observed after the opened-FD read',
+    async (raceKind) => {
+      const root = makeRoot();
+      const contents = {
+        'hooks/install.sh': '#!/bin/sh\necho approved\n',
+      };
+      const incomingManifest = manifest(contents);
+      const blobs = incomingContents(contents);
+      const plan = await createPlan(root, incomingManifest, blobs);
+      const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+        projectRoot: root,
+        plan,
+        baselineStrategy: 'adopt-identical',
+        decision: 'approved',
+      });
+      const approvalPath = join(
+        root,
+        '.takt-template-state',
+        'approvals',
+        `${approvalEvidence.approvalId}.json`,
+      );
+      let injected = false;
+      const io = createProjectTemplateApplyStorageIo({
+        after(operation, path) {
+          if (
+            !injected
+            && operation === 'read'
+            && path.endsWith(`${approvalEvidence.approvalId}.json`)
+          ) {
+            injected = true;
+            if (raceKind === 'replacement') {
+              const replacement = `${approvalPath}.replacement`;
+              writeFileSync(replacement, readFileSync(approvalPath), {
+                mode: 0o600,
+              });
+              renameSync(replacement, approvalPath);
+            } else {
+              chmodSync(approvalPath, 0o400);
+            }
+          }
+        },
+      });
+
+      const storage = await initializeProjectTemplateApplyStorage({
+        repoPath: root,
+        io,
+      });
+
+      await expect(readProjectTemplateApprovalRecord({
+        storage,
+        approvalId: approvalEvidence.approvalId,
+      })).rejects.toThrow();
+      expect(injected).toBe(true);
+      expect(existsSync(join(root, '.takt', 'hooks', 'install.sh'))).toBe(false);
+      expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+      expect(existsSync(join(
+        root,
+        '.takt-template-state',
+        'journal.json',
+      ))).toBe(false);
+    },
+  );
+
+  it('rejects a re-sealed reviewed plan even with newly generated matching approval evidence', async () => {
+    const root = makeRoot();
+    const contents = {
+      'hooks/install.sh': '#!/bin/sh\necho approved\n',
+    };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const forgedPlan = resealPlan(plan, (body) => {
+      const summary = body['summary'] as Record<string, unknown>;
+      summary['human'] = 'forged reviewed summary';
+    });
+    const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan: forgedPlan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+
+    const result = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan: forgedPlan,
+      incomingManifest,
+      incomingContents: blobs,
+      approvalEvidence,
+    });
+
+    expect(result).toMatchObject({
+      status: 'not_started',
+      code: 'INVALID_APPLY_INPUT',
+    });
+    expect(existsSync(join(root, '.takt', 'hooks', 'install.sh'))).toBe(false);
+    expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+    expect(existsSync(join(
+      root,
+      '.takt-template-state',
+      'journal.json',
+    ))).toBe(false);
+    expect(existsSync(join(
+      root,
+      '.takt-template-state',
+      'approvals',
+      `${approvalEvidence.approvalId}.json`,
+    ))).toBe(true);
+  });
+
+  it('rejects an approval record copied from another project with the same sealed plan', async () => {
+    const sourceRoot = makeRoot();
+    const targetRoot = makeRoot();
+    const contents = {
+      'hooks/install.sh': '#!/bin/sh\necho approved\n',
+    };
+    const incomingManifest = manifest(contents);
+    const blobs = incomingContents(contents);
+    const sourcePlan = await createPlan(sourceRoot, incomingManifest, blobs);
+    const targetPlan = await createPlan(targetRoot, incomingManifest, blobs);
+    expect(targetPlan.planId).toBe(sourcePlan.planId);
+    const approvalEvidence = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot: sourceRoot,
+      plan: sourcePlan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+    const approvalFileName = `${approvalEvidence.approvalId}.json`;
+    const copiedApprovalRoot = join(
+      targetRoot,
+      '.takt-template-state',
+      'approvals',
+    );
+    mkdirSync(copiedApprovalRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(copiedApprovalRoot, approvalFileName),
+      readFileSync(join(
+        sourceRoot,
+        '.takt-template-state',
+        'approvals',
+        approvalFileName,
+      )),
+      { mode: 0o600 },
+    );
+
+    const result = await applyProjectTemplatePlan({
+      projectRoot: targetRoot,
+      plan: targetPlan,
+      incomingManifest,
+      incomingContents: blobs,
+      approvalEvidence,
+    });
+
+    expect(result).toMatchObject({
+      status: 'not_started',
+      code: 'INVALID_APPLY_INPUT',
+    });
+    expect(existsSync(join(
+      targetRoot,
+      '.takt',
+      'hooks',
+      'install.sh',
+    ))).toBe(false);
+    expect(existsSync(join(
+      targetRoot,
+      PROJECT_TEMPLATE_LOCK_PATH,
+    ))).toBe(false);
+    expect(existsSync(join(
+      targetRoot,
+      '.takt-template-state',
+      'journal.json',
+    ))).toBe(false);
+  });
+
+  it('does not issue approval evidence for a plan with unresolved conflicts', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'config.yaml', 'local\n');
+    const baseManifest = manifest({ 'config.yaml': 'base\n' });
+    const baseLock = baseLockFor(baseManifest);
+    writeFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      `${JSON.stringify(baseLock)}\n`,
+    );
+    const incomingManifest = manifest({ 'config.yaml': 'incoming\n' });
+    const blobs = incomingContents({ 'config.yaml': 'incoming\n' });
+    const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+    expect(plan.entries[0]?.action).toBe('conflict');
+
+    await expect(issueTrustedProjectTemplateApplyApproval({
+      projectRoot: root,
+      plan,
+      baselineStrategy: 'conflict',
+      decision: 'approved',
+    })).rejects.toThrow('hard-blocked');
+
+    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8')).toBe('local\n');
+    expect(existsSync(join(
+      root,
+      '.takt-template-state',
+      'journal.json',
+    ))).toBe(false);
   });
 
   it('rejects adoption when the independent baseline strategy requires conflict', async () => {

@@ -161,6 +161,7 @@ export type {
   ProjectTemplateApplyPlanEntry,
   ProjectTemplateApplyPlanSummary,
   ProjectTemplateApplyPlan,
+  ProjectTemplateApplyApprovalEvidence,
   ProjectTemplatePolicyActionMap,
   ProjectTemplateApplyGuardBlockCode,
   ProjectTemplateApplyGuardBlock,

@@ -52,6 +52,11 @@ import {
   captureProjectTemplateTargetSnapshot,
 } from './target-snapshot.js';
 import type { ProjectTemplateManifestV1, TemplateLockV1 } from './types.js';
+import {
+  consumeProjectTemplateApplyApprovalEvidence,
+  isProjectTemplateApplyApprovalEvidence,
+  type ProjectTemplateApplyApprovalEvidence,
+} from './apply-approval.js';
 
 export const PROJECT_TEMPLATE_LOCK_PATH = '.takt-template-lock.json';
 
@@ -500,6 +505,7 @@ function validateApplyInput(options: {
   plan: ProjectTemplateApplyPlan;
   incomingManifest: ProjectTemplateManifestV1;
   incomingContents: readonly ProjectTemplateIncomingContent[];
+  approvalEvidence?: ProjectTemplateApplyApprovalEvidence;
 }): {
   manifest: ProjectTemplateManifestV1;
   contents: Map<string, Buffer>;
@@ -507,8 +513,20 @@ function validateApplyInput(options: {
   const manifest = parseProjectTemplateManifest(options.incomingManifest);
   if (options.plan.schemaVersion !== '1.0') throw new Error('apply plan schema is invalid');
   if (options.plan.planId !== planSeal(options.plan)) throw new Error('apply plan seal is invalid');
-  if (!options.plan.defaultApplyPossible || options.plan.reviewRequired) {
-    throw new Error('apply plan requires explicit review');
+  const hardBlocked = options.plan.incomingCompatibility === 'incompatible'
+    || options.plan.entries.some((entry) => entry.action === 'conflict');
+  if (hardBlocked) {
+    throw new Error('apply plan contains a hard blocker');
+  }
+  if (options.plan.reviewRequired) {
+    if (!isProjectTemplateApplyApprovalEvidence(options.approvalEvidence)) {
+      throw new Error('apply plan requires explicit review');
+    }
+  } else if (
+    !options.plan.defaultApplyPossible
+    || options.approvalEvidence !== undefined
+  ) {
+    throw new Error('apply plan approval state is invalid');
   }
   if (
     options.plan.incomingManifestSha256
@@ -666,6 +684,7 @@ export async function applyProjectTemplatePlan(options: {
   incomingContents: readonly ProjectTemplateIncomingContent[];
   incomingInspection: ProjectTemplateIncomingInspectionEvidence;
   baselineStrategy: 'conflict' | 'adopt-identical';
+  approvalEvidence?: ProjectTemplateApplyApprovalEvidence;
   now?: Date;
   io?: ProjectTemplateApplyStorageIo;
 }): Promise<ProjectTemplateApplyResult> {
@@ -730,6 +749,23 @@ export async function applyProjectTemplatePlan(options: {
       return notStarted(
         'INVALID_APPLY_INPUT',
         'apply plan semantics do not match current target and incoming manifest',
+      );
+    }
+    if (
+      options.plan.reviewRequired
+      && (
+        options.approvalEvidence === undefined
+        || !await consumeProjectTemplateApplyApprovalEvidence({
+          storage,
+          plan: options.plan,
+          baselineStrategy: options.baselineStrategy,
+          evidence: options.approvalEvidence,
+        })
+      )
+    ) {
+      return notStarted(
+        'INVALID_APPLY_INPUT',
+        'apply approval evidence is invalid or unavailable',
       );
     }
     backupId = `backup-${randomUUID()}`;

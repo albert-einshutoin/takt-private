@@ -86,6 +86,9 @@ export type {
   ProjectTemplateRollbackResult,
 } from './apply-executor.js';
 export type {
+  ProjectTemplateApplyApprovalEvidence,
+} from './apply-approval.js';
+export type {
   ProjectTemplateLocalSnapshotEntry,
   ProjectTemplateIncomingContent,
   ProjectTemplateIncomingInspectionEvidence,

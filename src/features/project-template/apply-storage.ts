@@ -21,7 +21,10 @@ import {
   PROJECT_TEMPLATE_CONTROL_DIRECTORY,
   PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT,
 } from './control-root-contract.js';
-import { areProjectTemplateFileStatsEqual } from './bounded-file-read.js';
+import {
+  areProjectTemplateFileStatsEqual,
+  readBoundedProjectTemplateFile,
+} from './bounded-file-read.js';
 import { parsePortablePath } from './validation.js';
 
 export { PROJECT_TEMPLATE_CONTROL_DIRECTORY } from './control-root-contract.js';
@@ -32,6 +35,7 @@ const PRIVATE_FILE_MODE = 0o600;
 const MAX_CONTROL_DIRECTORY_ENTRIES = 8_192;
 const MAX_CONTROL_TREE_DEPTH = 16;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+const MAX_APPROVAL_BYTES = 64 * 1024;
 const CONTROL_GITIGNORE_CONTENT = Buffer.from(PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT);
 
 export type ProjectTemplateApplyStorageIoOperation =
@@ -121,6 +125,7 @@ export interface ProjectTemplateApplyStorageIo {
   mkdir(path: string, mode: number): Promise<void>;
   readdir(path: string, maxEntries: number): Promise<Dirent[]>;
   readFile(path: string, maxBytes: number): Promise<Buffer>;
+  readPrivateFile(path: string, maxBytes: number, expectedDevice: number): Promise<Buffer>;
   writeExclusive(path: string, content: Uint8Array, mode: number): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
   fsyncFile(path: string): Promise<void>;
@@ -140,8 +145,121 @@ export interface ProjectTemplateApplyStorage {
   journalPath: string;
   lockPath: string;
   device: number;
+  inode: number;
   platform: NodeJS.Platform;
   io: ProjectTemplateApplyStorageIo;
+}
+
+function projectTemplateApprovalPath(
+  storage: ProjectTemplateApplyStorage,
+  approvalId: string,
+): { approvalsRoot: string; approvalPath: string } {
+  const safeApprovalId = assertSafeIdentifier(approvalId, 'approvalId');
+  const approvalsRoot = join(storage.controlRoot, 'approvals');
+  return {
+    approvalsRoot,
+    approvalPath: join(approvalsRoot, `${safeApprovalId}.json`),
+  };
+}
+
+function projectTemplateApprovalClaimPath(
+  storage: ProjectTemplateApplyStorage,
+  approvalId: string,
+): { claimsRoot: string; claimPath: string } {
+  const safeApprovalId = assertSafeIdentifier(approvalId, 'approvalId');
+  const claimsRoot = join(storage.controlRoot, 'approval-claims');
+  return {
+    claimsRoot,
+    claimPath: join(claimsRoot, `${safeApprovalId}.json`),
+  };
+}
+
+export async function writeProjectTemplateApprovalRecord(options: {
+  storage: ProjectTemplateApplyStorage;
+  approvalId: string;
+  record: unknown;
+}): Promise<void> {
+  const { approvalPath } = projectTemplateApprovalPath(
+    options.storage,
+    options.approvalId,
+  );
+  await writePrivateDurableFile({
+    storage: options.storage,
+    finalPath: approvalPath,
+    content: Buffer.from(`${canonicalizeTaktpackJson(options.record)}\n`),
+    replace: false,
+    io: options.storage.io,
+  });
+}
+
+export async function readProjectTemplateApprovalRecord(options: {
+  storage: ProjectTemplateApplyStorage;
+  approvalId: string;
+}): Promise<unknown> {
+  const { approvalPath } = projectTemplateApprovalPath(
+    options.storage,
+    options.approvalId,
+  );
+  const approvalsRoot = dirname(approvalPath);
+  await ensurePrivateDirectory(
+    options.storage.io,
+    approvalsRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
+  return JSON.parse(
+    (await options.storage.io.readPrivateFile(
+      approvalPath,
+      MAX_APPROVAL_BYTES,
+      options.storage.device,
+    ))
+      .toString('utf8'),
+  ) as unknown;
+}
+
+export async function hasProjectTemplateApprovalClaim(options: {
+  storage: ProjectTemplateApplyStorage;
+  approvalId: string;
+}): Promise<boolean> {
+  const { claimsRoot, claimPath } = projectTemplateApprovalClaimPath(
+    options.storage,
+    options.approvalId,
+  );
+  await ensurePrivateDirectory(
+    options.storage.io,
+    claimsRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
+  return await tryLstat(options.storage.io, claimPath) !== undefined;
+}
+
+export async function consumeProjectTemplateApprovalRecord(options: {
+  storage: ProjectTemplateApplyStorage;
+  approvalId: string;
+  claim: unknown;
+}): Promise<void> {
+  const { claimsRoot, claimPath } = projectTemplateApprovalClaimPath(
+    options.storage,
+    options.approvalId,
+  );
+  await ensurePrivateDirectory(
+    options.storage.io,
+    claimsRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
+  // O_EXCL is the one-shot linearization point. Never remove a published or
+  // partially published claim: any uncertainty permanently burns the approval
+  // and therefore fails closed if the issued record is later restored.
+  await options.storage.io.writeExclusive(
+    claimPath,
+    Buffer.from(`${canonicalizeTaktpackJson(options.claim)}\n`),
+    PRIVATE_FILE_MODE,
+  );
+  await options.storage.io.chmod(claimPath, PRIVATE_FILE_MODE);
+  await options.storage.io.fsyncFile(claimPath);
+  await options.storage.io.fsyncDirectory(claimsRoot);
 }
 
 export type ProjectTemplateApplyTarget =
@@ -383,6 +501,75 @@ export function createProjectTemplateApplyStorageIo(
         );
       }
       runHook(hooks, 'after', 'read', path);
+      return content;
+    },
+    readPrivateFile: async (path, maxBytes, expectedDevice) => {
+      runHook(hooks, 'before', 'read', path);
+      const pathBefore = await lstat(path);
+      if (
+        pathBefore.isSymbolicLink()
+        || !pathBefore.isFile()
+        || pathBefore.nlink !== 1
+        || pathBefore.dev !== expectedDevice
+        || !isProjectTemplatePrivateFileMode(pathBefore.mode, platform)
+        || pathBefore.size < 0
+        || pathBefore.size > maxBytes
+      ) {
+        throw new ProjectTemplateApplyStorageError(
+          'UNSAFE_CONTROL_ROOT',
+          'project template private record is unsafe',
+        );
+      }
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let content: Buffer | undefined;
+      let primaryError: unknown;
+      try {
+        const before = await handle.stat();
+        if (
+          !areProjectTemplateFileStatsEqual(pathBefore, before)
+        ) {
+          throw new ProjectTemplateApplyStorageError(
+            'UNSAFE_CONTROL_ROOT',
+            'project template private record changed before it was opened',
+          );
+        }
+        const bounded = await readBoundedProjectTemplateFile(
+          handle,
+          before.size,
+        );
+        const after = await handle.stat();
+        // The private-read hook intentionally runs before the final path
+        // witness so fault tests can model replacement/chmod races in the
+        // otherwise narrow post-read validation window.
+        runHook(hooks, 'after', 'read', path);
+        const pathAfter = await lstat(path);
+        if (
+          bounded.status !== 'complete'
+          || bounded.content.byteLength !== before.size
+          || !areProjectTemplateFileStatsEqual(before, after)
+          || !areProjectTemplateFileStatsEqual(after, pathAfter)
+        ) {
+          throw new ProjectTemplateApplyStorageError(
+            'UNSAFE_CONTROL_ROOT',
+            'project template private record changed while it was read',
+          );
+        }
+        content = bounded.content;
+      } catch (error) {
+        primaryError = error;
+      }
+      try {
+        await handle.close();
+      } catch (error) {
+        primaryError ??= error;
+      }
+      if (primaryError !== undefined) throw primaryError;
+      if (content === undefined) {
+        throw new ProjectTemplateApplyStorageError(
+          'UNSAFE_CONTROL_ROOT',
+          'project template private record could not be read',
+        );
+      }
       return content;
     },
     writeExclusive: async (path, content, mode) => {
@@ -698,6 +885,7 @@ export async function initializeProjectTemplateApplyStorage(options: {
     journalPath: join(controlRoot, 'journal.json'),
     lockPath: join(controlRoot, 'apply.lock'),
     device: repoStat.dev,
+    inode: repoStat.ino,
     platform,
     io,
   };
