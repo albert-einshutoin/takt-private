@@ -205,6 +205,24 @@ describe('taktpack streaming inspector', () => {
     });
   });
 
+  it.each([
+    ['uname', 265],
+    ['gname', 297],
+    ['reserved header bytes', 500],
+  ])('rejects non-zero %s bytes', async (_label, offset) => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+    const bytes = readFileSync(pack);
+    bytes[offset] = 0x41;
+    rewriteTarChecksum(bytes.subarray(0, 512));
+    writeFileSync(pack, bytes);
+
+    await expect(inspectTaktpack(pack)).rejects.toMatchObject({
+      code: 'INVALID_PACK',
+      field: 'entry.metadata',
+    });
+  });
+
   it('enforces a caller-tightened archive byte budget', async () => {
     const root = makeRoot();
     const pack = await makePack(root);

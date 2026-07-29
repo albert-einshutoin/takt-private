@@ -15,6 +15,7 @@ import {
   createProjectTemplateExportPlan,
   writeTaktpack,
 } from '../../features/project-template/index.js';
+import { syncTaktpackOutputDirectory } from '../../features/project-template/archive-writer.js';
 
 const roots: string[] = [];
 
@@ -48,6 +49,24 @@ afterEach(() => {
 });
 
 describe('taktpack deterministic writer', () => {
+  it('treats directory fsync as unsupported on Windows without reporting failure', () => {
+    let calls = 0;
+
+    const result = syncTaktpackOutputDirectory('C:\\pack', 'win32', () => {
+      calls += 1;
+      throw new Error('directory handles are unsupported');
+    });
+
+    expect(result).toBe('unsupported');
+    expect(calls).toBe(0);
+  });
+
+  it('keeps POSIX directory durability failures observable before claiming success', () => {
+    expect(() => syncTaktpackOutputDirectory('/pack', 'darwin', () => {
+      throw new Error('fsync failed');
+    })).toThrow('fsync failed');
+  });
+
   it('produces identical bytes from the same export plan', async () => {
     const root = makeRoot();
     writeProjectFile(root, 'workflows/b.yaml', 'name: b\n');
@@ -61,6 +80,26 @@ describe('taktpack deterministic writer', () => {
 
     expect(readFileSync(first)).toEqual(readFileSync(second));
     expect(firstResult.archiveSha256).toBe(secondResult.archiveSha256);
+  });
+
+  it('writes canonical USTAR identity, numeric, checksum, and reserved header bytes', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'header.taktpack');
+
+    await writeTaktpack(output, plan);
+
+    const header = readFileSync(output).subarray(0, 512);
+    expect(header.subarray(100, 108)).toEqual(Buffer.from('0000644\u0000', 'binary'));
+    expect(header.subarray(108, 116)).toEqual(Buffer.from('0000000\u0000', 'binary'));
+    expect(header.subarray(116, 124)).toEqual(Buffer.from('0000000\u0000', 'binary'));
+    expect(header.subarray(136, 148)).toEqual(Buffer.from('00000000000\u0000', 'binary'));
+    expect(header.subarray(148, 156).toString('binary')).toMatch(/^[0-7]{6}\u0000 $/);
+    expect(header.subarray(265, 329)).toEqual(Buffer.alloc(64));
+    expect(header.subarray(329, 337)).toEqual(Buffer.from('0000000\u0000', 'binary'));
+    expect(header.subarray(337, 345)).toEqual(Buffer.from('0000000\u0000', 'binary'));
+    expect(header.subarray(500, 512)).toEqual(Buffer.alloc(12));
   });
 
   it('rejects a source that changed after planning', async () => {

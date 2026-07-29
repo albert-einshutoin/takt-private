@@ -9,8 +9,10 @@ import {
   linkSync,
   lstatSync,
   openSync,
+  readSync,
   renameSync,
   unlinkSync,
+  writeSync,
 } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
@@ -42,6 +44,7 @@ import {
 
 const ARCHIVE_MODE = 0o644;
 const ARCHIVE_EPOCH = new Date(0);
+const TAR_BLOCK_BYTES = 512;
 
 function regularHeader(name: string, size: number): Headers {
   return {
@@ -53,6 +56,50 @@ function regularHeader(name: string, size: number): Headers {
     gid: 0,
     mtime: ARCHIVE_EPOCH,
   };
+}
+
+function writeCanonicalOctal(header: Buffer, offset: number, length: number, value: number): void {
+  header.write(`${value.toString(8).padStart(length - 1, '0')}\0`, offset, length, 'ascii');
+}
+
+/**
+ * tar-stream owns framing, while this pass owns the byte-level v1 header
+ * contract. Pinning every numeric and identity field prevents dependency or
+ * platform defaults from changing otherwise identical pack bytes.
+ */
+function canonicalizeWrittenUstarHeaders(path: string): void {
+  const fd = openSync(path, constants.O_RDWR);
+  try {
+    const header = Buffer.alloc(TAR_BLOCK_BYTES);
+    let position = 0;
+    while (true) {
+      if (readSync(fd, header, 0, TAR_BLOCK_BYTES, position) !== TAR_BLOCK_BYTES) {
+        throw new TaktpackError('TRUNCATED_ARCHIVE', 'writer produced a truncated USTAR header');
+      }
+      if (header.equals(Buffer.alloc(TAR_BLOCK_BYTES))) break;
+      const size = Number.parseInt(header.subarray(124, 136).toString('ascii'), 8);
+      if (!Number.isSafeInteger(size) || size < 0) {
+        throw new TaktpackError('INVALID_PACK', 'writer produced an invalid USTAR size');
+      }
+      writeCanonicalOctal(header, 100, 8, ARCHIVE_MODE);
+      writeCanonicalOctal(header, 108, 8, 0);
+      writeCanonicalOctal(header, 116, 8, 0);
+      writeCanonicalOctal(header, 124, 12, size);
+      writeCanonicalOctal(header, 136, 12, 0);
+      header.fill(0, 157, 257);
+      header.fill(0, 265, 329);
+      writeCanonicalOctal(header, 329, 8, 0);
+      writeCanonicalOctal(header, 337, 8, 0);
+      header.fill(0, 345, 512);
+      header.fill(0x20, 148, 156);
+      const checksum = header.reduce((sum, byte) => sum + byte, 0);
+      header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
+      writeSync(fd, header, 0, TAR_BLOCK_BYTES, position);
+      position += TAR_BLOCK_BYTES + Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
+    }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function addBufferEntry(archive: Pack, name: string, content: Buffer): Promise<void> {
@@ -160,6 +207,19 @@ function fsyncDirectory(path: string): void {
   }
 }
 
+export function syncTaktpackOutputDirectory(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+  sync: (directory: string) => void = fsyncDirectory,
+): 'synced' | 'unsupported' {
+  // Windows does not offer portable directory fsync semantics. The completed
+  // file itself was already fsynced before publish, so a platform limitation
+  // must not turn a successfully published artifact into a reported failure.
+  if (platform === 'win32') return 'unsupported';
+  sync(path);
+  return 'synced';
+}
+
 function publishTempFile(
   tempPath: string,
   outputPath: string,
@@ -234,7 +294,7 @@ export async function writeTaktpack(
     outputDirectory,
     `.${basename(outputPath)}.${process.pid}.${randomUUID()}.tmp`,
   );
-  const archiveHash = createHash('sha256');
+  let archiveHash = createHash('sha256');
   let bytes = 0;
   try {
     const manifestContent = Buffer.from(canonicalizeTaktpackJson(sealedPlan.manifest));
@@ -302,7 +362,6 @@ export async function writeTaktpack(
           callback(new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive exceeds size limit'));
           return;
         }
-        archiveHash.update(chunk);
         callback(null, chunk);
       },
     });
@@ -328,6 +387,17 @@ export async function writeTaktpack(
       await outputPromise.catch(() => undefined);
       throw error;
     }
+    canonicalizeWrittenUstarHeaders(tempPath);
+    archiveHash = createHash('sha256');
+    bytes = 0;
+    for await (const chunk of createReadStream(tempPath)) {
+      const buffer = chunk as Buffer;
+      bytes += buffer.byteLength;
+      if (bytes > limits.maxArchiveBytes) {
+        throw new TaktpackError('ARCHIVE_LIMIT_EXCEEDED', 'archive exceeds size limit');
+      }
+      archiveHash.update(buffer);
+    }
     const completedFd = openSync(tempPath, constants.O_RDONLY);
     try {
       fsyncSync(completedFd);
@@ -335,7 +405,7 @@ export async function writeTaktpack(
       closeSync(completedFd);
     }
     publishTempFile(tempPath, outputPath, force, expectedTarget);
-    fsyncDirectory(outputDirectory);
+    syncTaktpackOutputDirectory(outputDirectory);
     return {
       outputPath,
       archiveSha256: archiveHash.digest('hex'),

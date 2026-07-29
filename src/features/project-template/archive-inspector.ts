@@ -78,12 +78,22 @@ function checksumFor(header: Buffer): number {
   return sum;
 }
 
+function canonicalOctal(value: number, length: number): Buffer {
+  return Buffer.from(`${value.toString(8).padStart(length - 1, '0')}\0`, 'ascii');
+}
+
 function parseHeader(header: Buffer): ParsedHeader {
   if (header.subarray(257, 263).toString('binary') !== 'ustar\0'
     || header.subarray(263, 265).toString('ascii') !== '00') {
     throw new TaktpackError('INVALID_PACK', 'archive must use POSIX USTAR headers', 'header.magic');
   }
-  if (parseOctal(header.subarray(148, 156), 'header.checksum') !== checksumFor(header)) {
+  const checksum = checksumFor(header);
+  if (
+    parseOctal(header.subarray(148, 156), 'header.checksum') !== checksum
+    || !header.subarray(148, 156).equals(
+      Buffer.from(`${checksum.toString(8).padStart(6, '0')}\0 `, 'ascii'),
+    )
+  ) {
     throw new TaktpackError('INVALID_PACK', 'USTAR header checksum mismatch', 'header.checksum');
   }
   const type = header[156];
@@ -93,8 +103,6 @@ function parseHeader(header: Buffer): ParsedHeader {
   if (
     !header.subarray(157, 257).equals(Buffer.alloc(100))
     || !header.subarray(345, 500).equals(Buffer.alloc(155))
-    || parseOctal(header.subarray(329, 337), 'header.devmajor') !== 0
-    || parseOctal(header.subarray(337, 345), 'header.devminor') !== 0
   ) {
     throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'link, device, or prefixed entries are not allowed', 'entry.header');
   }
@@ -109,10 +117,18 @@ function parseHeader(header: Buffer): ParsedHeader {
     throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive entry name is unsafe or unknown', 'entry.name');
   }
   if (
-    parseOctal(header.subarray(100, 108), 'header.mode') !== 0o644
-    || parseOctal(header.subarray(108, 116), 'header.uid') !== 0
-    || parseOctal(header.subarray(116, 124), 'header.gid') !== 0
-    || parseOctal(header.subarray(136, 148), 'header.mtime') !== 0
+    !header.subarray(100, 108).equals(canonicalOctal(0o644, 8))
+    || !header.subarray(108, 116).equals(canonicalOctal(0, 8))
+    || !header.subarray(116, 124).equals(canonicalOctal(0, 8))
+    || !header.subarray(124, 136).equals(canonicalOctal(
+      parseOctal(header.subarray(124, 136), 'header.size'),
+      12,
+    ))
+    || !header.subarray(136, 148).equals(canonicalOctal(0, 12))
+    || !header.subarray(265, 329).equals(Buffer.alloc(64))
+    || !header.subarray(329, 337).equals(canonicalOctal(0, 8))
+    || !header.subarray(337, 345).equals(canonicalOctal(0, 8))
+    || !header.subarray(500, 512).equals(Buffer.alloc(12))
   ) {
     throw new TaktpackError('INVALID_PACK', 'archive metadata is not canonical', 'entry.metadata');
   }
