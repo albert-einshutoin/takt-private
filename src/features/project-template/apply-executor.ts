@@ -18,7 +18,9 @@ import type {
   ProjectTemplateApplyPlan,
   ProjectTemplateApplyPlanEntry,
   ProjectTemplateIncomingContent,
+  ProjectTemplateIncomingInspectionEvidence,
 } from './apply-plan-types.js';
+import { createProjectTemplateApplyPlan } from './apply-plan.js';
 import { runProjectTemplateDoctor } from './apply-doctor.js';
 import {
   captureProjectTemplateBackupFile,
@@ -421,18 +423,75 @@ async function verifyPlanTarget(
 async function verifyBaseLock(
   storage: ProjectTemplateApplyStorage,
   plan: ProjectTemplateApplyPlan,
-): Promise<boolean> {
+): Promise<
+  | { matched: true; baseLock?: TemplateLockV1 }
+  | { matched: false }
+> {
   const state = await currentState(storage, { kind: 'lock' }, 4 * 1024 * 1024);
-  if (plan.baseLockSha256 === undefined) return state.kind === 'absent';
-  if (state.kind !== 'file') return false;
+  if (plan.baseLockSha256 === undefined) {
+    return state.kind === 'absent' ? { matched: true } : { matched: false };
+  }
+  if (state.kind !== 'file') return { matched: false };
   const content = await storage.io.readFile(storage.lockTargetPath, state.bytes);
   let parsed: TemplateLockV1;
   try {
     parsed = parseTemplateLock(JSON.parse(content.toString('utf8')) as unknown);
   } catch {
+    return { matched: false };
+  }
+  return hash(canonicalizeTaktpackJson(parsed)) === plan.baseLockSha256
+    ? { matched: true, baseLock: parsed }
+    : { matched: false };
+}
+
+async function verifyCompletePlanSemantics(options: {
+  projectRoot: string;
+  plan: ProjectTemplateApplyPlan;
+  manifest: ProjectTemplateManifestV1;
+  contents: ReadonlyMap<string, Buffer>;
+  incomingInspection: ProjectTemplateIncomingInspectionEvidence;
+  baselineStrategy: 'conflict' | 'adopt-identical';
+  baseLock?: TemplateLockV1;
+}): Promise<boolean> {
+  const candidatePaths = [
+    ...new Set([
+      ...(options.baseLock?.entries.map((entry) => entry.path) ?? []),
+      ...options.manifest.entries.map((entry) => entry.path),
+    ]),
+  ];
+  const snapshot = await captureProjectTemplateTargetSnapshot(
+    options.projectRoot,
+    candidatePaths,
+  );
+  let expected: ProjectTemplateApplyPlan;
+  try {
+    expected = createProjectTemplateApplyPlan({
+      ...(options.baseLock === undefined ? {} : { baseLock: options.baseLock }),
+      incomingManifest: options.manifest,
+      localEntries: snapshot.entries,
+      targetRootState: snapshot.rootState,
+      missingPathTracking: snapshot.missingPathTracking,
+      incomingContents: [...options.contents].map(([path, content]) => ({
+        path,
+        content,
+      })),
+      // This receipt comes from the archive inspection boundary, not from the
+      // persisted plan. It independently seals archive/manifest compatibility
+      // and prevents global plan fields from validating themselves.
+      incomingInspection: options.incomingInspection,
+      // Baseline adoption is an approval decision, not a fact that can be
+      // inferred from a persisted plan. Keep it independent so a caller cannot
+      // re-seal a conflict preview as an automatically adopted first install.
+      baselineStrategy: options.baselineStrategy,
+    });
+  } catch {
     return false;
   }
-  return hash(canonicalizeTaktpackJson(parsed)) === plan.baseLockSha256;
+  // The plan ID seals every entry field (path, action, policy, incoming/base/
+  // current witnesses, mode, capabilities), summary, precondition and lock
+  // intent metadata. Re-derivation prevents an attacker from changing a field
+  // and merely recomputing the self-referential checksum.
+  return expected.planId === options.plan.planId;
 }
 
 function validateApplyInput(options: {
@@ -454,6 +513,35 @@ function validateApplyInput(options: {
     !== calculateProjectTemplateManifestSha256(manifest)
   ) throw new Error('incoming manifest does not match the apply plan');
   const manifestByPath = new Map(manifest.entries.map((entry) => [entry.path, entry]));
+  const planByPath = new Map<string, ProjectTemplateApplyPlanEntry>();
+  for (const entry of options.plan.entries) {
+    if (planByPath.has(entry.path)) throw new Error('apply plan contains duplicate paths');
+    planByPath.set(entry.path, entry);
+  }
+  for (const incoming of manifest.entries) {
+    const planned = planByPath.get(incoming.path);
+    if (
+      planned === undefined
+      || planned.incomingSha256 !== incoming.sha256
+      || planned.incomingMode !== incoming.mode
+      || canonicalizeTaktpackJson(planned.capabilitiesAfter)
+        !== canonicalizeTaktpackJson(incoming.capabilities ?? [])
+    ) {
+      throw new Error('apply plan entries do not match the incoming manifest');
+    }
+  }
+  for (const planned of options.plan.entries) {
+    if (
+      !manifestByPath.has(planned.path)
+      && (
+        planned.incomingSha256 !== undefined
+        || planned.incomingMode !== undefined
+        || planned.capabilitiesAfter.length !== 0
+      )
+    ) {
+      throw new Error('apply plan contains an entry absent from the incoming manifest');
+    }
+  }
   const contents = new Map<string, Buffer>();
   for (const item of options.incomingContents) {
     const entry = manifestByPath.get(item.path);
@@ -574,6 +662,8 @@ export async function applyProjectTemplatePlan(options: {
   plan: ProjectTemplateApplyPlan;
   incomingManifest: ProjectTemplateManifestV1;
   incomingContents: readonly ProjectTemplateIncomingContent[];
+  incomingInspection: ProjectTemplateIncomingInspectionEvidence;
+  baselineStrategy: 'conflict' | 'adopt-identical';
   now?: Date;
   io?: ProjectTemplateApplyStorageIo;
 }): Promise<ProjectTemplateApplyResult> {
@@ -620,8 +710,25 @@ export async function applyProjectTemplatePlan(options: {
       ...(options.io === undefined ? {} : { io: options.io }),
     });
     await reclaimProjectTemplatePreparationOrphans({ storage });
-    if (!await verifyBaseLock(storage, options.plan)) {
+    const baseLockVerification = await verifyBaseLock(storage, options.plan);
+    if (!baseLockVerification.matched) {
       return notStarted('BASE_LOCK_DRIFT', 'formal template lock changed after preview');
+    }
+    if (!await verifyCompletePlanSemantics({
+      projectRoot: options.projectRoot,
+      plan: options.plan,
+      manifest: validated.manifest,
+      contents: validated.contents,
+      incomingInspection: options.incomingInspection,
+      baselineStrategy: options.baselineStrategy,
+      ...(baseLockVerification.baseLock === undefined
+        ? {}
+        : { baseLock: baseLockVerification.baseLock }),
+    })) {
+      return notStarted(
+        'INVALID_APPLY_INPUT',
+        'apply plan semantics do not match current target and incoming manifest',
+      );
     }
     backupId = `backup-${randomUUID()}`;
     transactionId = `apply-${randomUUID()}`;

@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, sep } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  applyProjectTemplatePlan,
+  applyProjectTemplatePlan as applyProjectTemplatePlanRaw,
   PROJECT_TEMPLATE_LOCK_PATH,
   recoverProjectTemplateApply,
   rollbackProjectTemplateApply,
@@ -28,12 +28,14 @@ import {
   inspectProjectTemplateApplyGuard,
   type ProjectTemplateManifestV1,
   type ProjectTemplateIncomingContent,
+  type ProjectTemplateIncomingInspectionEvidence,
   type TemplateLockV1,
 } from '../../features/project-template/index.js';
 import {
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
 } from '../../features/project-template/apply-storage.js';
+import { canonicalizeTaktpackJson } from '../../features/project-template/canonical-json.js';
 
 const roots: string[] = [];
 const source = {
@@ -91,6 +93,67 @@ function incomingContents(
   }));
 }
 
+function incomingInspection(
+  incomingManifest: ProjectTemplateManifestV1,
+): ProjectTemplateIncomingInspectionEvidence {
+  return {
+    archiveSha256: 'd'.repeat(64),
+    manifestSha256: calculateProjectTemplateManifestSha256(incomingManifest),
+    currentTaktVersion: '0.48.0',
+    compatibilityStatus: 'compatible',
+  };
+}
+
+type ApplyOptions = Parameters<typeof applyProjectTemplatePlanRaw>[0];
+
+function applyProjectTemplatePlan(
+  options: Omit<ApplyOptions, 'incomingInspection' | 'baselineStrategy'> & {
+    incomingInspection?: ProjectTemplateIncomingInspectionEvidence;
+    baselineStrategy?: 'conflict' | 'adopt-identical';
+  },
+) {
+  return applyProjectTemplatePlanRaw({
+    ...options,
+    incomingInspection: options.incomingInspection
+      ?? incomingInspection(options.incomingManifest),
+    baselineStrategy: options.baselineStrategy
+      ?? (options.plan.baseLockSha256 === undefined ? 'adopt-identical' : 'conflict'),
+  });
+}
+
+function resealPlan(
+  plan: Awaited<ReturnType<typeof createPlan>>,
+  mutate: (body: Record<string, unknown>) => void,
+): Awaited<ReturnType<typeof createPlan>> {
+  const body = structuredClone(plan) as unknown as Record<string, unknown>;
+  delete body['planId'];
+  mutate(body);
+  return {
+    ...body,
+    planId: hash(canonicalizeTaktpackJson(body)),
+  } as unknown as Awaited<ReturnType<typeof createPlan>>;
+}
+
+function baseLockFor(
+  baseManifest: ProjectTemplateManifestV1,
+  packVersion = '1.0.0',
+): TemplateLockV1 {
+  return {
+    schemaVersion: '1.0',
+    manifestSha256: calculateProjectTemplateManifestSha256(baseManifest),
+    packVersion,
+    source,
+    capabilities: [...(baseManifest.capabilities ?? [])],
+    entries: baseManifest.entries.map((entry) => ({
+      path: entry.path,
+      policy: entry.policy,
+      mode: entry.mode,
+      sha256: entry.sha256,
+      capabilities: [...(entry.capabilities ?? [])],
+    })),
+  };
+}
+
 async function createPlan(
   root: string,
   incomingManifest: ProjectTemplateManifestV1,
@@ -111,12 +174,7 @@ async function createPlan(
     targetRootState: snapshot.rootState,
     missingPathTracking: snapshot.missingPathTracking,
     incomingContents: contents,
-    incomingInspection: {
-      archiveSha256: 'd'.repeat(64),
-      manifestSha256: calculateProjectTemplateManifestSha256(incomingManifest),
-      currentTaktVersion: '0.48.0',
-      compatibilityStatus: 'compatible',
-    },
+    incomingInspection: incomingInspection(incomingManifest),
     baselineStrategy: baseLock === undefined ? 'adopt-identical' : 'conflict',
   });
 }
@@ -126,6 +184,363 @@ afterEach(() => {
 });
 
 describe('project template atomic apply executor', () => {
+  it('rejects a re-sealed plan whose update action was changed to keep', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'config.yaml', 'old\n');
+    const baseManifest = manifest({ 'config.yaml': 'old\n' });
+    const baseLock: TemplateLockV1 = {
+      schemaVersion: '1.0',
+      manifestSha256: calculateProjectTemplateManifestSha256(baseManifest),
+      packVersion: '1.0.0',
+      source,
+      capabilities: [],
+      entries: [{
+        path: 'config.yaml',
+        policy: 'managed',
+        mode: '0644',
+        sha256: hash('old\n'),
+        capabilities: [],
+      }],
+    };
+    writeFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), `${JSON.stringify(baseLock)}\n`);
+    const incomingManifest = manifest({ 'config.yaml': 'new\n' });
+    const blobs = incomingContents({ 'config.yaml': 'new\n' });
+    const original = await createPlan(root, incomingManifest, blobs, baseLock);
+    expect(original.entries[0]).toMatchObject({
+      path: 'config.yaml',
+      action: 'update',
+    });
+    const forgedBody = structuredClone(original) as Record<string, unknown>;
+    const forgedEntries = forgedBody['entries'] as Array<Record<string, unknown>>;
+    forgedEntries[0]!['action'] = 'keep';
+    delete forgedBody['planId'];
+    const forgedPlan = {
+      ...forgedBody,
+      planId: hash(canonicalizeTaktpackJson(forgedBody)),
+    } as unknown as typeof original;
+
+    const result = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan: forgedPlan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+
+    expect(result).toMatchObject({
+      status: 'not_started',
+      code: 'INVALID_APPLY_INPUT',
+    });
+    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8')).toBe('old\n');
+    expect(JSON.parse(readFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), 'utf8')))
+      .toMatchObject({ manifestSha256: baseLock.manifestSha256 });
+  });
+
+  it('rejects re-sealed entry and global semantic tampering without target, lock, or journal mutation', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'config.yaml', 'old\n');
+    const baseManifest = manifest({ 'config.yaml': 'old\n' });
+    const baseLock = baseLockFor(baseManifest);
+    const lockPath = join(root, PROJECT_TEMPLATE_LOCK_PATH);
+    const originalLock = `${JSON.stringify(baseLock)}\n`;
+    writeFileSync(lockPath, originalLock);
+    const incomingManifest = manifest({ 'config.yaml': 'new\n' });
+    const blobs = incomingContents({ 'config.yaml': 'new\n' });
+    const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+    const cases: Array<{
+      name: string;
+      mutate: (body: Record<string, unknown>) => void;
+    }> = [
+      {
+        name: 'incoming mode',
+        mutate(body) {
+          ((body['entries'] as Array<Record<string, unknown>>)[0]!)
+            ['incomingMode'] = '0755';
+        },
+      },
+      {
+        name: 'incoming digest',
+        mutate(body) {
+          ((body['entries'] as Array<Record<string, unknown>>)[0]!)
+            ['incomingSha256'] = 'e'.repeat(64);
+        },
+      },
+      {
+        name: 'entry capability',
+        mutate(body) {
+          ((body['entries'] as Array<Record<string, unknown>>)[0]!)
+            ['capabilitiesAfter'] = ['executable'];
+        },
+      },
+      {
+        name: 'missing entry',
+        mutate(body) {
+          body['entries'] = [];
+        },
+      },
+      {
+        name: 'extra entry',
+        mutate(body) {
+          const entries = body['entries'] as Array<Record<string, unknown>>;
+          entries.push({ ...entries[0]!, path: 'extra.yaml' });
+        },
+      },
+      {
+        name: 'global compatibility',
+        mutate(body) {
+          body['incomingCompatibility'] = 'unknown';
+        },
+      },
+      {
+        name: 'global archive digest',
+        mutate(body) {
+          body['incomingArchiveSha256'] = 'e'.repeat(64);
+        },
+      },
+      {
+        name: 'global capability',
+        mutate(body) {
+          body['capabilitiesAfter'] = ['executable'];
+        },
+      },
+      {
+        name: 'default apply flag',
+        mutate(body) {
+          body['defaultApplyPossible'] = false;
+        },
+      },
+      {
+        name: 'review flag',
+        mutate(body) {
+          body['reviewRequired'] = true;
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan: resealPlan(plan, testCase.mutate),
+        incomingManifest,
+        incomingContents: blobs,
+      });
+
+      expect(result, testCase.name).toMatchObject({
+        status: 'not_started',
+        code: 'INVALID_APPLY_INPUT',
+      });
+      expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'), testCase.name)
+        .toBe('old\n');
+      expect(readFileSync(lockPath, 'utf8'), testCase.name).toBe(originalLock);
+      expect(existsSync(join(root, '.takt-template-state', 'journal.json')), testCase.name)
+        .toBe(false);
+      const stagingRoot = join(root, '.takt-template-state', 'staging');
+      const backupsRoot = join(root, '.takt-template-state', 'backups');
+      if (existsSync(stagingRoot)) {
+        expect(readdirSync(stagingRoot), testCase.name).toEqual([]);
+      }
+      if (existsSync(backupsRoot)) {
+        expect(readdirSync(backupsRoot), testCase.name).toEqual([]);
+      }
+    }
+  });
+
+  it.each(['add', 'delete'] as const)(
+    'rejects a re-sealed %s action changed to keep',
+    async (scenario) => {
+      const root = makeRoot();
+      let incomingManifest: ProjectTemplateManifestV1;
+      let blobs: ProjectTemplateIncomingContent[];
+      let baseLock: TemplateLockV1 | undefined;
+      if (scenario === 'add') {
+        incomingManifest = manifest({ 'config.yaml': 'new\n' });
+        blobs = incomingContents({ 'config.yaml': 'new\n' });
+      } else {
+        writeTakt(root, 'config.yaml', 'old\n');
+        const baseManifest = manifest({ 'config.yaml': 'old\n' });
+        baseLock = baseLockFor(baseManifest);
+        writeFileSync(
+          join(root, PROJECT_TEMPLATE_LOCK_PATH),
+          `${JSON.stringify(baseLock)}\n`,
+        );
+        incomingManifest = manifest({});
+        blobs = [];
+      }
+      const plan = await createPlan(
+        root,
+        incomingManifest,
+        blobs,
+        baseLock,
+      );
+      expect(plan.entries[0]?.action).toBe(scenario);
+      const forged = resealPlan(plan, (body) => {
+        ((body['entries'] as Array<Record<string, unknown>>)[0]!)
+          ['action'] = 'keep';
+      });
+
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan: forged,
+        incomingManifest,
+        incomingContents: blobs,
+      });
+
+      expect(result).toMatchObject({
+        status: 'not_started',
+        code: 'INVALID_APPLY_INPUT',
+      });
+      expect(existsSync(join(root, '.takt-template-state', 'journal.json')))
+        .toBe(false);
+      expect(existsSync(join(root, '.takt', 'config.yaml'))).toBe(scenario === 'delete');
+    },
+  );
+
+  it('rejects receipt and incoming-content mismatches before mutation', async () => {
+    const root = makeRoot();
+    const incomingManifest = manifest({ 'config.yaml': 'new\n' });
+    const blobs = incomingContents({ 'config.yaml': 'new\n' });
+    const plan = await createPlan(root, incomingManifest, blobs);
+    const cases = [
+      {
+        name: 'receipt archive mismatch',
+        receipt: {
+          ...incomingInspection(incomingManifest),
+          archiveSha256: 'e'.repeat(64),
+        },
+        contents: blobs,
+      },
+      {
+        name: 'receipt manifest mismatch',
+        receipt: {
+          ...incomingInspection(incomingManifest),
+          manifestSha256: 'e'.repeat(64),
+        },
+        contents: blobs,
+      },
+      {
+        name: 'receipt compatibility mismatch',
+        receipt: {
+          ...incomingInspection(incomingManifest),
+          compatibilityStatus: 'unknown' as const,
+        },
+        contents: blobs,
+      },
+      {
+        name: 'missing content',
+        receipt: incomingInspection(incomingManifest),
+        contents: [],
+      },
+      {
+        name: 'extra content',
+        receipt: incomingInspection(incomingManifest),
+        contents: [
+          ...blobs,
+          { path: 'extra.yaml', content: Buffer.from('extra\n') },
+        ],
+      },
+    ];
+
+    for (const testCase of cases) {
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: testCase.contents,
+        incomingInspection: testCase.receipt,
+      });
+      expect(result, testCase.name).toMatchObject({
+        status: 'not_started',
+        code: 'INVALID_APPLY_INPUT',
+      });
+      expect(existsSync(join(root, '.takt', 'config.yaml')), testCase.name)
+        .toBe(false);
+      expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH)), testCase.name)
+        .toBe(false);
+      expect(existsSync(join(root, '.takt-template-state', 'journal.json')), testCase.name)
+        .toBe(false);
+    }
+  });
+
+  it('commits a legal keep plan and publishes the matching manifest lock', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'settings.yaml', 'same\n');
+    const incomingManifest = manifest({ 'settings.yaml': 'same\n' });
+    const blobs = incomingContents({ 'settings.yaml': 'same\n' });
+    const plan = await createPlan(root, incomingManifest, blobs);
+    expect(plan.entries[0]).toMatchObject({
+      action: 'keep',
+      reasonCode: 'BASELINE_ADOPTED',
+    });
+
+    const result = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+
+    expect(result.status).toBe('committed');
+    expect(readFileSync(join(root, '.takt', 'settings.yaml'), 'utf8')).toBe('same\n');
+    expect(JSON.parse(readFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), 'utf8')))
+      .toMatchObject({
+        manifestSha256: calculateProjectTemplateManifestSha256(incomingManifest),
+      });
+  });
+
+  it('rejects adoption when the independent baseline strategy requires conflict', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'settings.yaml', 'same\n');
+    const incomingManifest = manifest({ 'settings.yaml': 'same\n' });
+    const blobs = incomingContents({ 'settings.yaml': 'same\n' });
+    const snapshot = await captureProjectTemplateTargetSnapshot(
+      root,
+      ['settings.yaml'],
+    );
+    const receipt = incomingInspection(incomingManifest);
+    const conflictPlan = createProjectTemplateApplyPlan({
+      incomingManifest,
+      localEntries: snapshot.entries,
+      targetRootState: snapshot.rootState,
+      missingPathTracking: snapshot.missingPathTracking,
+      incomingContents: blobs,
+      incomingInspection: receipt,
+      baselineStrategy: 'conflict',
+    });
+    expect(conflictPlan.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'LEGACY_BASELINE_REQUIRED',
+    });
+    const forgedAdoptionPlan = createProjectTemplateApplyPlan({
+      incomingManifest,
+      localEntries: snapshot.entries,
+      targetRootState: snapshot.rootState,
+      missingPathTracking: snapshot.missingPathTracking,
+      incomingContents: blobs,
+      incomingInspection: receipt,
+      baselineStrategy: 'adopt-identical',
+    });
+    expect(forgedAdoptionPlan.entries[0]).toMatchObject({
+      action: 'keep',
+      reasonCode: 'BASELINE_ADOPTED',
+    });
+
+    const result = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan: forgedAdoptionPlan,
+      incomingManifest,
+      incomingContents: blobs,
+      incomingInspection: receipt,
+      baselineStrategy: 'conflict',
+    });
+
+    expect(result).toMatchObject({
+      status: 'not_started',
+      code: 'INVALID_APPLY_INPUT',
+    });
+    expect(readFileSync(join(root, '.takt', 'settings.yaml'), 'utf8')).toBe('same\n');
+    expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+    expect(existsSync(join(root, '.takt-template-state', 'journal.json'))).toBe(false);
+  });
+
   it('commits all planned files and a formal lock, then restores hash and mode', async () => {
     const root = makeRoot();
     writeTakt(root, 'old.yaml', 'old\n', 0o600);
