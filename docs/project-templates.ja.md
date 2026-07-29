@@ -182,6 +182,15 @@ no-clobberを維持し、`force: true`もregular single-link file以外を拒否
 Windowsでは完成fileのfsync後、directory fsyncをunsupportedとして扱い、正常に
 publish済みのartifactを失敗とは報告しません。
 
+writer/inspectorのfilesystem failureはすべて、pathをredactした安定
+`TaktpackError` codeへ正規化します。writerはarchive entryをawaitする前にpipeline
+rejection handlerを即時attachします。`ARCHIVE_WRITE_FAILED`、
+`ARCHIVE_READ_FAILED`、`DURABILITY_FAILED`、`CLEANUP_FAILED`はsource/tempのraw
+pathを含みません。writerのI/O errorには`artifactState`があり、`not-published`は
+destination未publish、durability errorの`published`は完成artifactが存在する一方で
+directory durabilityを確認できなかった状態です。cleanup failureがprimary failureを
+上書きすることはありません。
+
 `inspectTaktpack` はextractも外部`tar`も使いません。USTAR blockを順次読み、
 directory、PAX/GNU extension、sparse、symlink、hardlink、device、FIFO、unknown name、
 順序違反、duplicate、truncation、trailing data、各resource上限超過をwrite前に

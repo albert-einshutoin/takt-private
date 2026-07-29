@@ -221,6 +221,15 @@ keeps the completed old file until the new pack is ready to rename. Windows
 records directory fsync as unsupported after the completed file is fsynced,
 instead of reporting a successfully published artifact as failed.
 
+All writer and inspector filesystem failures are normalized to stable,
+path-redacted `TaktpackError` codes. The writer attaches a pipeline rejection
+handler immediately, before awaiting archive entries. `ARCHIVE_WRITE_FAILED`,
+`ARCHIVE_READ_FAILED`, `DURABILITY_FAILED`, and `CLEANUP_FAILED` never include
+raw source or temporary paths. Writer I/O errors include `artifactState`:
+`not-published` means no destination was published, while `published` on a
+durability error means the complete artifact exists but directory durability
+could not be confirmed. A cleanup failure never replaces the primary failure.
+
 `inspectTaktpack` neither extracts files nor invokes an external `tar`. It
 validates USTAR blocks sequentially and rejects directories, PAX/GNU extensions,
 sparse files, links, devices, FIFOs, unknown names, ordering errors, duplicates,
