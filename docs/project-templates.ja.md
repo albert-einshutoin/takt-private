@@ -220,6 +220,15 @@ provider、runtime configを読み込み、`running` metadataをdurableに公開
 mirror書き込みが失敗してもfail-closedな証拠を残すため、applyがactive worktree runを
 見落としたり、古いtemplate世代を読み込んだrunと競合したりすることはありません。
 
+queue taskは、非同期のisolation準備やretry解決を始める前にも、durableな
+`task-preparation` running recordを公開します。TAKTがworkspaceを作成、copy、再利用
+している間は、このrecordがapplyを拒否します。canonical run metadataと必要な
+coordination mirrorをdurableに公開した後でpreparation recordをterminal化するため、
+引継ぎの瞬間にも保護の切れ目はありません。terminalなpreparation recordは監査用に
+通常のrun historyへ残り、他のrunと同じretention policyに従います。準備processが
+予期せず停止した場合、running recordはstaleとなり、既存の明示的なrecovery flowを
+必要とします。長時間のcopyを放棄と推測して時間だけで自動解除することはありません。
+
 applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を変更します。正式lock
 は`.takt-template-lock.json`、privateなstaging・journal・世代数を制限したbackupは
 `.takt-template-state/`へ保存します。後者はGit ignore対象かつowner-only permission

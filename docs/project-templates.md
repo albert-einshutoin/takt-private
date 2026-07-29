@@ -264,6 +264,16 @@ under the main project root. The mirror remains fail-closed if either initial
 or terminal publication fails, so apply cannot miss an active worktree run or
 race a run that loaded an older template generation.
 
+Queued tasks also publish a durable `task-preparation` running record before
+asynchronous isolation setup or retry resolution begins. That record blocks
+apply while TAKT creates, copies, or reuses a workspace. After the canonical
+run metadata and any coordination mirror are durable, TAKT terminalizes the
+preparation record, so there is no unprotected hand-off gap. Terminal
+preparation records remain in ordinary run history for audit and use the same
+retention policy as other runs. If preparation stops unexpectedly, its running
+record becomes stale and requires the existing explicit recovery flow; TAKT
+does not expire it by time alone or guess that a long copy is abandoned.
+
 Apply stages and validates every output before changing `.takt/`. The formal
 lock is stored at `.takt-template-lock.json`. Private staging, journal, and
 bounded backup generations live under `.takt-template-state/`, which must be
