@@ -9,6 +9,9 @@ export {
 } from './binding.js';
 export { validateDetectedTemplateCapabilities } from './capability-detection.js';
 export {
+  classifyProjectTemplateEntry,
+} from './classifier-core.js';
+export {
   projectTemplateManifestV1JsonSchema,
   projectTemplateLockV1JsonSchema,
 } from './schema.js';
@@ -27,3 +30,12 @@ export type {
   DetectedTemplateCapabilities,
 } from './types.js';
 export type { ProjectTemplateValidationErrorCode } from './errors.js';
+export type {
+  ProjectTemplateClassification,
+  ProjectTemplateClassificationReason,
+  ProjectTemplateClassificationResult,
+  ProjectTemplateClassifierInput,
+  ProjectTemplateScanLimits,
+  ProjectTemplateScanOptions,
+  ProjectTemplateScanResult,
+} from './classifier-types.js';

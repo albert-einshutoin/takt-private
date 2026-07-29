@@ -1,0 +1,23 @@
+[
+  {
+    "fixture": "service-a",
+    "path": "workflows/release.yaml",
+    "content": "name: shared release review",
+    "classification": "portable-candidate",
+    "reasonCode": "SHARED_WORKFLOW"
+  },
+  {
+    "fixture": "library-b",
+    "path": "quality-gates/benchmark.yaml",
+    "content": "command: npm run benchmark",
+    "classification": "project-owned",
+    "reasonCode": "PROJECT_QUALITY_GATE"
+  },
+  {
+    "fixture": "desktop-c",
+    "path": "facets/accessibility.md",
+    "content": "Review keyboard and accessibility behavior.",
+    "classification": "portable-candidate",
+    "reasonCode": "SHARED_FACET"
+  }
+]
