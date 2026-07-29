@@ -109,8 +109,10 @@ portable candidate は共有 `workflows/`、`facets/`、`provider-options/` だ�
 project config、automation、quality gate は `project-owned` として明示的な policy
 review を要求し、unknown path は default deny で excluded になります。runtime state、
 log、cache、sensitive filename は candidate content として読みません。生成される
-`sessions/`、`personas/`、`language-cache/`、`runs/`、`worktrees/` と、
-`tasks.yaml`、`staged-devloop-state.json` も runtime state です。runtime directory は
+`sessions/`、`worktree-sessions/`、`clone-meta/`、`personas/`、
+`language-cache/`、`runs/`、`worktrees/` と、`input_history`、
+`persona_sessions.json`、`session-state.json`、`tasks.yaml`、
+`staged-devloop-state.json` も runtime state です。runtime directory は
 検証済みの相対 root だけを記録し、配下を走査しません。secret、
 workstation の絶対 path（POSIX、home 相対、drive letter、UNC）、binary、symlink、
 hard link、special file、realpath escape、
@@ -136,7 +138,8 @@ authoritative なのは `complete` の場合だけで、metadata skip は `incom
 command behavior の検出時は `reviewRequired` になります。
 すべての `gh` command と GitHub API 向け `curl` は、保守的に `github-write` と
 `external-command` の両方として扱います。unknown command は inspection を
-`incomplete` にして review を要求します。
+`incomplete` にして review を要求します。`- run:` のような YAML block sequence
+内の command key も同じように検出します。
 
 directory 列挙は bounded `opendir` stream を使い、`maxNodes + 1` で停止します。
 この global witness に達すると残りの再帰と sibling もすべて停止します。inode と

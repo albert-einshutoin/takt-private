@@ -140,8 +140,10 @@ portable candidates. Project configuration, automation, and quality gates are
 `project-owned` and require an explicit policy review. Unknown paths are
 excluded by default. Runtime state, logs, caches, and sensitive filenames are
 never read as candidate content. This includes generated roots such as
-`sessions/`, `personas/`, `language-cache/`, `runs/`, and `worktrees/`, plus
-generated files such as `tasks.yaml` and `staged-devloop-state.json`. Runtime
+`sessions/`, `worktree-sessions/`, `clone-meta/`, `personas/`,
+`language-cache/`, `runs/`, and `worktrees/`, plus generated files such as
+`input_history`, `persona_sessions.json`, `session-state.json`, `tasks.yaml`,
+and `staged-devloop-state.json`. Runtime
 directories are represented by their verified relative root only and are not
 traversed. The scanner blocks secrets, workstation
 absolute paths (POSIX, home-relative, drive-letter, and UNC forms), binary
@@ -170,7 +172,8 @@ inspection is `blocked`. Detected executable, GitHub-write, external, or
 ambiguous command behavior sets `reviewRequired`.
 All `gh` commands and `curl` calls to the GitHub API are conservatively reported
 as both GitHub-write and external-command capabilities. An unknown command
-leaves inspection incomplete and requires review.
+leaves inspection incomplete and requires review, including command keys inside
+YAML block sequences such as `- run:`.
 
 Directory enumeration uses a bounded `opendir` stream and stops after
 `maxNodes + 1`, so a directory with an attacker-controlled number of children
