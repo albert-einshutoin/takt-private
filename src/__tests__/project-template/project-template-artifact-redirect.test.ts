@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { inspect } from 'node:util';
 import {
   describe,
@@ -6,6 +7,7 @@ import {
   vi,
 } from 'vitest';
 import {
+  bootstrapProjectTemplateArtifactRedirect,
   createProjectTemplateArtifactRedirectState,
   ProjectTemplateArtifactRedirectError,
   validateProjectTemplateArtifactDnsAnswers,
@@ -378,6 +380,208 @@ describe('project-template artifact redirect state F2b-A', () => {
     hop.dispose();
     hop.dispose();
     expect(weakMapDelete).toHaveBeenCalled();
+  });
+});
+
+describe('project-template artifact redirect bootstrap F2b-C', () => {
+  it('keeps bootstrap nominal, opaque, disposable, and retryable', () => {
+    const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    const discarded = bootstrapProjectTemplateArtifactRedirect(
+      state,
+      302,
+      'https://objects.githubusercontent.com/bootstrap?sig=secret',
+    );
+
+    expect(Object.isFrozen(discarded)).toBe(true);
+    expect(Reflect.ownKeys(discarded)).toEqual(['consume', 'dispose']);
+    expect(JSON.stringify(discarded)).toBe('{}');
+    expect(inspect(discarded)).not.toContain('bootstrap');
+    expect(Reflect.ownKeys(state)).toEqual(['resolve', 'dispose']);
+    discarded.dispose();
+
+    const retry = bootstrapProjectTemplateArtifactRedirect(
+      state,
+      302,
+      'https://objects.githubusercontent.com/bootstrap?sig=retry',
+    );
+    const hop = retry.consume();
+    expect(Reflect.ownKeys(hop)).toEqual(['dispose']);
+    expect(inspect(hop)).not.toContain('retry');
+    hop.dispose();
+    state.dispose();
+  });
+
+  it('does not spend the three-hop unauthenticated redirect budget', () => {
+    const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    bootstrapProjectTemplateArtifactRedirect(
+      state,
+      302,
+      'https://objects.githubusercontent.com/bootstrap',
+    ).consume().dispose();
+
+    consumeRedirect(state, '/one');
+    consumeRedirect(state, '/two');
+    consumeRedirect(state, '/three');
+    expectCode(() => state.resolve(302, '/four'), 'REDIRECT_LIMIT');
+    state.dispose();
+  });
+
+  it('records the bootstrap target in the visited loop set', () => {
+    const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    bootstrapProjectTemplateArtifactRedirect(
+      state,
+      302,
+      'https://objects.githubusercontent.com/bootstrap',
+    ).consume().dispose();
+
+    expectCode(
+      () => state.resolve(
+        302,
+        'https://objects.githubusercontent.com/bootstrap',
+      ),
+      'REDIRECT_LOOP',
+    );
+    state.dispose();
+  });
+
+  it('shares strict status, target, and visited-loop validation', () => {
+    const invalidStatus = createProjectTemplateArtifactRedirectState(
+      ASSET_API_URL,
+    );
+    expectCode(
+      () => bootstrapProjectTemplateArtifactRedirect(
+        invalidStatus,
+        200,
+        'https://objects.githubusercontent.com/bootstrap',
+      ),
+      'INVALID_REDIRECT',
+    );
+    invalidStatus.dispose();
+
+    const forbidden = createProjectTemplateArtifactRedirectState(
+      ASSET_API_URL,
+    );
+    expectCode(
+      () => bootstrapProjectTemplateArtifactRedirect(
+        forbidden,
+        302,
+        'https://evil.example/private',
+      ),
+      'REDIRECT_FORBIDDEN',
+    );
+    forbidden.dispose();
+
+    const loop = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    expectCode(
+      () => bootstrapProjectTemplateArtifactRedirect(
+        loop,
+        302,
+        ASSET_API_URL,
+      ),
+      'REDIRECT_LOOP',
+    );
+    loop.dispose();
+  });
+
+  it('rejects bootstrap outside a pristine state without losing cleanup', () => {
+    const pending = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    const pendingGrant = pending.resolve(
+      302,
+      'https://objects.githubusercontent.com/pending',
+    );
+    expectCode(
+      () => bootstrapProjectTemplateArtifactRedirect(
+        pending,
+        302,
+        'https://objects.githubusercontent.com/bootstrap',
+      ),
+      'INVALID_ARGUMENT',
+    );
+    pendingGrant.dispose();
+    bootstrapProjectTemplateArtifactRedirect(
+      pending,
+      302,
+      'https://objects.githubusercontent.com/bootstrap',
+    ).consume().dispose();
+    expectCode(
+      () => bootstrapProjectTemplateArtifactRedirect(
+        pending,
+        302,
+        'https://objects.githubusercontent.com/again',
+      ),
+      'INVALID_ARGUMENT',
+    );
+    pending.dispose();
+
+    const consumed = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    consumeRedirect(
+      consumed,
+      'https://objects.githubusercontent.com/normal',
+    );
+    expectCode(
+      () => bootstrapProjectTemplateArtifactRedirect(
+        consumed,
+        302,
+        'https://objects.githubusercontent.com/bootstrap',
+      ),
+      'INVALID_ARGUMENT',
+    );
+    consumed.dispose();
+  });
+
+  it('rejects forged, proxied, disposed, and concurrently pending bootstrap', () => {
+    const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    const pending = bootstrapProjectTemplateArtifactRedirect(
+      state,
+      302,
+      'https://objects.githubusercontent.com/bootstrap',
+    );
+    expectCode(
+      () => bootstrapProjectTemplateArtifactRedirect(
+        state,
+        302,
+        'https://objects.githubusercontent.com/second',
+      ),
+      'INVALID_ARGUMENT',
+    );
+    pending.dispose();
+    state.dispose();
+
+    const proxied = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    const invalidStates = [
+      {},
+      new Proxy(proxied, {}),
+      state,
+    ];
+    for (const invalid of invalidStates) {
+      expectCode(
+        () => bootstrapProjectTemplateArtifactRedirect(
+          invalid as typeof state,
+          302,
+          'https://objects.githubusercontent.com/bootstrap',
+        ),
+        'INVALID_ARGUMENT',
+      );
+    }
+    proxied.dispose();
+  });
+
+  it('remains absent from root and project-template feature exports', () => {
+    const rootApi = readFileSync(
+      new URL('../../index.ts', import.meta.url),
+      'utf8',
+    );
+    const featureApi = readFileSync(
+      new URL('../../features/project-template/index.ts', import.meta.url),
+      'utf8',
+    );
+
+    expect(rootApi).not.toContain(
+      'bootstrapProjectTemplateArtifactRedirect',
+    );
+    expect(featureApi).not.toContain(
+      'bootstrapProjectTemplateArtifactRedirect',
+    );
   });
 });
 

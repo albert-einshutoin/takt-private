@@ -66,17 +66,22 @@ export interface DisposableProjectTemplateArtifactRedirectState {
 }
 
 interface RedirectStateAuthority {
+  baseUrl: URL | undefined;
+  baseIdentity: string | undefined;
   currentUrl: URL | undefined;
   visited: Set<string> | undefined;
   pendingGrant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
   children: Set<object> | undefined;
   redirectCount: number | undefined;
+  bootstrapAvailable: boolean;
+  phase: 'pristine' | 'bootstrap-pending' | 'active' | undefined;
 }
 
 interface RedirectGrantAuthority {
   owner: DisposableProjectTemplateArtifactRedirectState | undefined;
   targetUrl: URL | undefined;
   identity: string | undefined;
+  countsTowardLimit: boolean | undefined;
 }
 
 interface RedirectHopAuthority {
@@ -324,12 +329,23 @@ function disposeGrantAuthority(
   authority.owner = undefined;
   authority.targetUrl = undefined;
   authority.identity = undefined;
+  const countsTowardLimit = authority.countsTowardLimit;
+  authority.countsTowardLimit = undefined;
   grantAuthorities.delete(grant);
   const ownerAuthority = owner === undefined
     ? undefined
     : stateAuthorities.get(owner);
   if (ownerAuthority?.pendingGrant === grant) {
     ownerAuthority.pendingGrant = undefined;
+  }
+  if (
+    countsTowardLimit === false
+    && ownerAuthority?.phase === 'bootstrap-pending'
+  ) {
+    // A discarded bootstrap grant spends no state and may be retried. Only
+    // consume() commits the transition away from pristine authority.
+    ownerAuthority.phase = 'pristine';
+    ownerAuthority.bootstrapAvailable = true;
   }
   ownerAuthority?.children?.delete(grant);
 }
@@ -372,6 +388,7 @@ function createRedirectGrant(
   ownerAuthority: RedirectStateAuthority,
   targetUrl: URL,
   identity: string,
+  countsTowardLimit: boolean,
 ): DisposableProjectTemplateArtifactRedirectGrant {
   const grant = Object.freeze<DisposableProjectTemplateArtifactRedirectGrant>({
     consume(this: DisposableProjectTemplateArtifactRedirectGrant):
@@ -382,6 +399,7 @@ function createRedirectGrant(
         || authority.owner === undefined
         || authority.targetUrl === undefined
         || authority.identity === undefined
+        || authority.countsTowardLimit === undefined
       ) {
         throw invalidArgument();
       }
@@ -397,11 +415,14 @@ function createRedirectGrant(
       }
       const consumedTarget = authority.targetUrl;
       const consumedIdentity = authority.identity;
+      const countsTowardLimit = authority.countsTowardLimit;
       stateAuthority.currentUrl = consumedTarget;
       stateAuthority.visited.add(consumedIdentity);
-      stateAuthority.redirectCount += 1;
+      if (countsTowardLimit) stateAuthority.redirectCount += 1;
       const state = authority.owner;
       disposeGrantAuthority(this);
+      stateAuthority.bootstrapAvailable = false;
+      stateAuthority.phase = 'active';
       return createRedirectHop(state, stateAuthority, consumedTarget);
     },
     dispose(this: DisposableProjectTemplateArtifactRedirectGrant): void {
@@ -410,9 +431,61 @@ function createRedirectGrant(
     },
   });
   grantFacades.add(grant);
-  grantAuthorities.set(grant, { owner, targetUrl, identity });
+  grantAuthorities.set(grant, {
+    owner,
+    targetUrl,
+    identity,
+    countsTowardLimit,
+  });
   ownerAuthority.pendingGrant = grant;
   ownerAuthority.children?.add(grant);
+  return grant;
+}
+
+function resolveRedirectGrant(
+  state: DisposableProjectTemplateArtifactRedirectState,
+  authority: RedirectStateAuthority,
+  statusCode: number,
+  location: string,
+  countsTowardLimit: boolean,
+): DisposableProjectTemplateArtifactRedirectGrant {
+  if (
+    authority.currentUrl === undefined
+    || authority.visited === undefined
+    || authority.redirectCount === undefined
+    || authority.pendingGrant !== undefined
+  ) {
+    throw invalidArgument();
+  }
+  if (
+    typeof statusCode !== 'number'
+    || !Number.isSafeInteger(statusCode)
+    || !REDIRECT_STATUSES.has(statusCode)
+  ) {
+    throw invalidRedirect();
+  }
+  const target = parseAllowedRedirectTarget(
+    authority.currentUrl,
+    location,
+  );
+  const identity = canonicalRedirectIdentity(target);
+  if (authority.visited.has(identity)) {
+    throw redirectError('REDIRECT_LOOP');
+  }
+  if (countsTowardLimit && authority.redirectCount >= MAX_REDIRECTS) {
+    throw redirectError('REDIRECT_LIMIT');
+  }
+  const grant = createRedirectGrant(
+    state,
+    authority,
+    target,
+    identity,
+    countsTowardLimit,
+  );
+  if (!countsTowardLimit) {
+    authority.bootstrapAvailable = false;
+    authority.phase = 'bootstrap-pending';
+  }
   return grant;
 }
 
@@ -427,34 +500,14 @@ export function createProjectTemplateArtifactRedirectState(
       location: string,
     ): DisposableProjectTemplateArtifactRedirectGrant {
       const authority = stateAuthorities.get(this);
-      if (
-        authority === undefined
-        || authority.currentUrl === undefined
-        || authority.visited === undefined
-        || authority.redirectCount === undefined
-        || authority.pendingGrant !== undefined
-      ) {
-        throw invalidArgument();
-      }
-      if (
-        typeof statusCode !== 'number'
-        || !Number.isSafeInteger(statusCode)
-        || !REDIRECT_STATUSES.has(statusCode)
-      ) {
-        throw invalidRedirect();
-      }
-      const target = parseAllowedRedirectTarget(
-        authority.currentUrl,
+      if (authority === undefined) throw invalidArgument();
+      return resolveRedirectGrant(
+        this,
+        authority,
+        statusCode,
         location,
+        true,
       );
-      const identity = canonicalRedirectIdentity(target);
-      if (authority.visited.has(identity)) {
-        throw redirectError('REDIRECT_LOOP');
-      }
-      if (authority.redirectCount >= MAX_REDIRECTS) {
-        throw redirectError('REDIRECT_LIMIT');
-      }
-      return createRedirectGrant(this, authority, target, identity);
     },
     dispose(this: DisposableProjectTemplateArtifactRedirectState): void {
       if (!stateFacades.has(this)) throw invalidArgument();
@@ -473,23 +526,74 @@ export function createProjectTemplateArtifactRedirectState(
       }
       authority.children?.clear();
       authority.visited?.clear();
+      authority.baseUrl = undefined;
+      authority.baseIdentity = undefined;
       authority.currentUrl = undefined;
       authority.visited = undefined;
       authority.pendingGrant = undefined;
       authority.children = undefined;
       authority.redirectCount = undefined;
+      authority.bootstrapAvailable = false;
+      authority.phase = undefined;
       stateAuthorities.delete(this);
     },
   });
   stateFacades.add(state);
+  const baseIdentity = canonicalRedirectIdentity(base);
   stateAuthorities.set(state, {
+    baseUrl: base,
+    baseIdentity,
     currentUrl: base,
-    visited: new Set([canonicalRedirectIdentity(base)]),
+    visited: new Set([baseIdentity]),
     pendingGrant: undefined,
     children: new Set(),
     redirectCount: 0,
+    bootstrapAvailable: true,
+    phase: 'pristine',
   });
   return state;
+}
+
+/**
+ * Establishes the authenticated API response as the uncounted starting point
+ * for the private unauthenticated artifact redirect chain.
+ *
+ * @internal
+ */
+export function bootstrapProjectTemplateArtifactRedirect(
+  state: DisposableProjectTemplateArtifactRedirectState,
+  statusCode: number,
+  location: string,
+): DisposableProjectTemplateArtifactRedirectGrant {
+  const authority = (
+    typeof state === 'object'
+    && state !== null
+    && !types.isProxy(state)
+    && stateFacades.has(state)
+  )
+    ? stateAuthorities.get(state)
+    : undefined;
+  if (
+    authority === undefined
+    || authority.phase !== 'pristine'
+    || !authority.bootstrapAvailable
+    || authority.baseUrl === undefined
+    || authority.baseIdentity === undefined
+    || authority.currentUrl !== authority.baseUrl
+    || authority.redirectCount !== 0
+    || authority.pendingGrant !== undefined
+    || authority.visited?.size !== 1
+    || !authority.visited.has(authority.baseIdentity)
+  ) {
+    throw invalidArgument();
+  }
+  return resolveRedirectGrant(
+    state,
+    authority,
+    statusCode,
+    location,
+    false,
+  );
 }
 
 function exactDnsAnswerRecord(value: unknown): {
