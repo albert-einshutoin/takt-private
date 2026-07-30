@@ -384,6 +384,146 @@ describe('project-template gh credential bootstrap F1', () => {
     expect(String(error)).not.toContain('stdio accessor secret');
   });
 
+  it.each([
+    {
+      label: 'direct proxy',
+      makeStream(executions: { count: number }) {
+        return new Proxy(new PassThrough(), {
+          getPrototypeOf() {
+            executions.count += 1;
+            throw new Error('direct proxy prototype secret');
+          },
+        });
+      },
+      expectedExecutions: 0,
+    },
+    {
+      label: 'proxy prototype chain',
+      makeStream(executions: { count: number }) {
+        const prototype = new Proxy({}, {
+          getPrototypeOf() {
+            executions.count += 1;
+            throw new Error('prototype chain secret');
+          },
+        });
+        return Object.create(prototype) as PassThrough;
+      },
+      expectedExecutions: 1,
+    },
+  ])('contains $label stdio validation failures', async ({
+    makeStream,
+    expectedExecutions,
+  }) => {
+    const executions = { count: 0 };
+    const child = new FakeChildProcess();
+    Object.defineProperty(child, 'stdout', {
+      configurable: true,
+      value: makeStream(executions),
+    });
+    const { dependencies } = makeDependencies(child);
+    const pending = acquireProjectTemplateGhCredential(
+      { deadlineMs: 10_100 },
+      dependencies,
+    );
+    const observed = pending.catch((error: unknown) => error);
+    await Promise.resolve();
+    expect(executions.count).toBe(expectedExecutions);
+    expect(child.signals).toEqual(['SIGTERM']);
+    child.emit('close', 1, 'SIGTERM');
+    const error = await observed;
+    expect(error).toMatchObject({ code: 'PROCESS_FAILED' });
+    expect(String(error)).not.toContain('secret');
+  });
+
+  it('does not attach streams or timers after now reentrantly settles the child', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChildProcess();
+    const now = vi.fn()
+      .mockReturnValueOnce(100)
+      .mockImplementationOnce(() => {
+        child.emit('close', 1, null);
+        return 100;
+      });
+    const { dependencies } = makeDependencies(child, now);
+    const error = await acquireProjectTemplateGhCredential(
+      { deadlineMs: 10_100 },
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'PROCESS_FAILED' });
+    expect(child.stdout.listenerCount('data')).toBe(0);
+    expect(child.stderr.listenerCount('data')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not reattach after stream listener registration settles the child', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChildProcess();
+    child.stdout.once('newListener', (eventName) => {
+      if (eventName === 'data') child.emit('close', 1, null);
+    });
+    const { dependencies } = makeDependencies(child);
+    const error = await acquireProjectTemplateGhCredential(
+      { deadlineMs: 10_100 },
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'PROCESS_FAILED' });
+    expect(child.stdout.listenerCount('data')).toBe(0);
+    expect(child.stderr.listenerCount('data')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { label: 'plain object', chunk: Object.freeze({ secret: 'plain' }) },
+    {
+      label: 'proxy object',
+      chunk: new Proxy({}, {
+        get() {
+          throw new Error('chunk proxy secret getter');
+        },
+      }),
+    },
+  ])('terminates safely for a $label stdout chunk', async ({ chunk }) => {
+    const child = new FakeChildProcess();
+    const { dependencies } = makeDependencies(child);
+    const pending = acquireProjectTemplateGhCredential(
+      { deadlineMs: 10_100 },
+      dependencies,
+    );
+    const observed = pending.catch((error: unknown) => error);
+    expect(() => child.stdout.emit('data', chunk)).not.toThrow();
+    expect(child.signals).toEqual(['SIGTERM']);
+    child.emit('close', 1, 'SIGTERM');
+    const error = await observed;
+    expect(error).toMatchObject({ code: 'PROCESS_FAILED' });
+    expect(String(error)).not.toContain('secret');
+    expect(child.stdout.listenerCount('data')).toBe(0);
+    expect(child.stderr.listenerCount('data')).toBe(0);
+  });
+
+  it('zero-fills retained process output as soon as failure is selected', async () => {
+    const controller = new AbortController();
+    const child = new FakeChildProcess();
+    const { dependencies } = makeDependencies(child);
+    const fill = vi.spyOn(Buffer.prototype, 'fill');
+    const pending = acquireProjectTemplateGhCredential(
+      { signal: controller.signal, deadlineMs: 10_100 },
+      dependencies,
+    );
+    const observed = pending.catch((error: unknown) => error);
+    child.stderr.emit('data', Buffer.from('retained-secret'));
+    controller.abort();
+
+    const retained = fill.mock.instances.find(
+      (instance) => (instance as Buffer).length === 'retained-secret'.length,
+    ) as Buffer | undefined;
+    expect(retained).toBeDefined();
+    expect([...retained!]).toEqual(new Array(retained!.length).fill(0));
+    child.emit('close', 2, 'SIGTERM');
+    await expect(observed).resolves.toMatchObject({ code: 'ABORTED' });
+  });
+
   it('bounds reap cleanup when kill throws and close never arrives', async () => {
     vi.useFakeTimers();
     const controller = new AbortController();
