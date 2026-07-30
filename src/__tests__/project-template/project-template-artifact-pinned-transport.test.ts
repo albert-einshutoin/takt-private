@@ -2621,6 +2621,9 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     transport = createProjectTemplateArtifactPinnedTransport(hop, handlers);
 
     transport.start();
+    for (const event of ['data', 'end', 'aborted', 'error', 'close']) {
+      expect(finalResponse.listeners(event)).toHaveLength(1);
+    }
     const retainedBodyListeners = [
       ...finalResponse.listeners('data'),
       ...finalResponse.listeners('end'),
