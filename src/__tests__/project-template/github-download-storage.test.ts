@@ -1076,6 +1076,28 @@ describe('GitHub template existing global cache materialization', () => {
     expect(existsSync(staged.stagingPath)).toBe(false);
   });
 
+  it('classifies a native cache directory fsync failure as I/O', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    writeExistingCache(cacheRoot, content);
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        cacheFsync() {
+          throw new Error('ghp_native_fsync_secret');
+        },
+      },
+    })).rejects.toMatchObject({
+      code: 'IO_FAILURE',
+      artifactState: 'cache-published',
+    });
+    expect(existsSync(staged.stagingPath)).toBe(false);
+  });
+
   it('rejects a sha directory replaced before cache-hit durability sync', async () => {
     const cacheRoot = prepareCacheRoot();
     const outside = prepareCacheRoot();

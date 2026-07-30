@@ -121,6 +121,7 @@ export type GithubTemplateCachePhase =
 
 export interface GithubTemplateCacheIoSeam {
   onCachePhase?(phase: GithubTemplateCachePhase, path: string): void;
+  cacheFsync?(fd: number): void;
   cacheWrite?(
     fd: number,
     chunk: Uint8Array,
@@ -880,6 +881,28 @@ function runCachePhase(
   }
 }
 
+function syncCacheDirectoryDescriptor(
+  fd: number,
+  ioSeam: GithubTemplateCacheIoSeam | undefined,
+): void {
+  if (process.platform === 'win32') return;
+  try {
+    // This seam keeps the real fsync failure contract deterministic in tests;
+    // production always takes the native branch.
+    if (ioSeam?.cacheFsync !== undefined) {
+      ioSeam.cacheFsync(fd);
+    } else {
+      fsyncSync(fd);
+    }
+  } catch {
+    throw storageError(
+      'IO_FAILURE',
+      'GitHub template cache directory sync failed',
+      'cache-published',
+    );
+  }
+}
+
 function requirePrivateCacheDirectory(
   path: string,
   expectedDevice?: number,
@@ -1327,36 +1350,28 @@ export async function materializeGithubTemplateCache(
       'before-cache-hit-parent-fsync',
       cache.shaRoot,
     );
-    try {
-      // The retained directory descriptor prevents a path swap from turning
-      // durability repair into authority for a different cache directory.
-      assertCacheDirectoryAuthority(
-        cache.shaRoot,
-        cache.shaRootFd,
-        cache.device,
-        cache.shaRootInode,
-      );
-      if (process.platform !== 'win32') fsyncSync(cache.shaRootFd);
-      assertCacheDirectoryAuthority(
-        cache.shaRoot,
-        cache.shaRootFd,
-        cache.device,
-        cache.shaRootInode,
-      );
-      assertCacheFinalAuthority(
-        cachePath,
-        verified.fd,
-        cache.device,
-        verified.inode,
-        authority,
-      );
-    } catch {
-      throw storageError(
-        'CACHE_INVALID',
-        'GitHub template cache directory authority changed',
-        'cache-published',
-      );
-    }
+    // The retained directory descriptor prevents a path swap from turning
+    // durability repair into authority for a different cache directory.
+    assertCacheDirectoryAuthority(
+      cache.shaRoot,
+      cache.shaRootFd,
+      cache.device,
+      cache.shaRootInode,
+    );
+    syncCacheDirectoryDescriptor(cache.shaRootFd, claim.ioSeam);
+    assertCacheDirectoryAuthority(
+      cache.shaRoot,
+      cache.shaRootFd,
+      cache.device,
+      cache.shaRootInode,
+    );
+    assertCacheFinalAuthority(
+      cachePath,
+      verified.fd,
+      cache.device,
+      verified.inode,
+      authority,
+    );
     closeSync(stagingFd);
     stagingFd = undefined;
     result = Object.freeze({
