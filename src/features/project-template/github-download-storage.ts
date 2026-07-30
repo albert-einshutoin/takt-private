@@ -44,6 +44,8 @@ const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype) as object,
   'byteLength',
 )!.get!;
+const PROMISE_THEN = Promise.prototype.then;
+const MAX_PROTOCOL_PROTOTYPE_DEPTH = 32;
 
 export type GithubTemplateDownloadStorageErrorCode =
   | 'INVALID_ARGUMENT'
@@ -291,7 +293,7 @@ interface StageGithubTemplateDownloadSnapshot {
   readonly projectRoot: string;
   readonly expectedBytes: number;
   readonly expectedSha256: string;
-  readonly chunks: AsyncIterable<Uint8Array>;
+  readonly chunks: DownloadIterableSnapshot;
   readonly signal?: AbortSignalSnapshot;
   readonly ioSeam?: DownloadStorageIoSnapshot;
 }
@@ -312,6 +314,11 @@ interface DownloadIteratorSnapshot {
   readonly receiver: AsyncIterator<unknown>;
   readonly next: AsyncIterator<unknown>['next'];
   readonly close?: AsyncIterator<unknown>['return'];
+}
+
+interface DownloadIterableSnapshot {
+  readonly receiver: AsyncIterable<Uint8Array>;
+  readonly createIterator: () => AsyncIterator<Uint8Array>;
 }
 
 function storageError(
@@ -455,20 +462,23 @@ function snapshotIoSeam(
     || Object.entries(descriptors).some(
       ([key, descriptor]) => (
         !('value' in descriptor)
-        || typeof descriptor.value !== 'function'
+        || (
+          descriptor.value !== undefined
+          && typeof descriptor.value !== 'function'
+        )
         || !allowed.includes(key)
       ),
     )
   ) throw new Error();
   return Object.freeze({
     receiver: value,
-    ...(descriptors['onPhase'] === undefined
+    ...(descriptors['onPhase']?.value === undefined
       ? {}
       : {
         onPhase: descriptors['onPhase'].value as
           GithubTemplateDownloadStorageIoSeam['onPhase'],
       }),
-    ...(descriptors['write'] === undefined
+    ...(descriptors['write']?.value === undefined
       ? {}
       : {
         write: descriptors['write'].value as
@@ -542,6 +552,48 @@ function snapshotAbortSignal(
   });
 }
 
+function snapshotProtocolMethod(
+  receiver: object,
+  key: PropertyKey,
+  required: boolean,
+): ((...arguments_: never[]) => unknown) | undefined {
+  let current: object | null = receiver;
+  for (
+    let depth = 0;
+    current !== null && depth < MAX_PROTOCOL_PROTOTYPE_DEPTH;
+    depth += 1
+  ) {
+    if (types.isProxy(current)) throw new Error();
+    const descriptor = Object.getOwnPropertyDescriptor(current, key);
+    if (descriptor !== undefined) {
+      if (!('value' in descriptor)) throw new Error();
+      if (descriptor.value === undefined && !required) return undefined;
+      if (
+        typeof descriptor.value !== 'function'
+        || types.isProxy(descriptor.value)
+      ) throw new Error();
+      return descriptor.value as (...arguments_: never[]) => unknown;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  if (current !== null || required) throw new Error();
+  return undefined;
+}
+
+function snapshotDownloadIterable(
+  value: object,
+): DownloadIterableSnapshot {
+  const createIterator = snapshotProtocolMethod(
+    value,
+    Symbol.asyncIterator,
+    true,
+  )!;
+  return Object.freeze({
+    receiver: value as AsyncIterable<Uint8Array>,
+    createIterator: createIterator as () => AsyncIterator<Uint8Array>,
+  });
+}
+
 function snapshotOptions(
   value: StageGithubTemplateDownloadOptions,
 ): StageGithubTemplateDownloadSnapshot {
@@ -598,11 +650,12 @@ function snapshotOptions(
     }
     const signalSnapshot = snapshotAbortSignal(signal);
     const ioSnapshot = snapshotIoSeam(ioSeam);
+    const chunksSnapshot = snapshotDownloadIterable(chunks as object);
     return {
       projectRoot,
       expectedBytes,
       expectedSha256,
-      chunks: chunks as AsyncIterable<Uint8Array>,
+      chunks: chunksSnapshot,
       ...(signalSnapshot === undefined ? {} : { signal: signalSnapshot }),
       ...(ioSnapshot === undefined ? {} : { ioSeam: ioSnapshot }),
     };
@@ -615,13 +668,14 @@ function snapshotOptions(
 }
 
 function getDownloadIterator(
-  chunks: AsyncIterable<Uint8Array>,
+  chunks: DownloadIterableSnapshot,
 ): DownloadIteratorSnapshot {
   try {
-    if (types.isProxy(chunks)) throw new Error();
-    const createIterator = chunks[Symbol.asyncIterator];
-    if (typeof createIterator !== 'function') throw new Error();
-    const iterator = createIterator.call(chunks) as AsyncIterator<unknown>;
+    const iterator = Reflect.apply(
+      chunks.createIterator,
+      chunks.receiver,
+      [],
+    ) as AsyncIterator<unknown>;
     if (
       (typeof iterator !== 'object' || iterator === null)
       && typeof iterator !== 'function'
@@ -629,16 +683,14 @@ function getDownloadIterator(
       throw new Error();
     }
     if (types.isProxy(iterator)) throw new Error();
-    const next = iterator.next;
-    const close = iterator.return;
-    if (
-      typeof next !== 'function'
-      || (close !== undefined && typeof close !== 'function')
-    ) throw new Error();
+    const next = snapshotProtocolMethod(iterator, 'next', true)!;
+    const close = snapshotProtocolMethod(iterator, 'return', false);
     return Object.freeze({
       receiver: iterator,
-      next,
-      ...(close === undefined ? {} : { close }),
+      next: next as AsyncIterator<unknown>['next'],
+      ...(close === undefined
+        ? {}
+        : { close: close as AsyncIterator<unknown>['return'] }),
     });
   } catch {
     throw storageError(
@@ -646,6 +698,46 @@ function getDownloadIterator(
       'GitHub template download stream failed',
     );
   }
+}
+
+function snapshotIteratorResult(
+  result: unknown,
+): { done: boolean; value: unknown } {
+  if (
+    typeof result !== 'object'
+    || result === null
+    || types.isProxy(result)
+    || Object.getPrototypeOf(result) !== Object.prototype
+  ) throw new Error();
+  const descriptors = Object.getOwnPropertyDescriptors(result);
+  if (
+    Reflect.ownKeys(result).some(
+      (key) => key !== 'done' && key !== 'value',
+    )
+    || Object.values(descriptors).some(
+      (descriptor) => !('value' in descriptor),
+    )
+  ) throw new Error();
+  const doneDescriptor = descriptors['done'];
+  if (
+    doneDescriptor === undefined
+    || !('value' in doneDescriptor)
+    || typeof doneDescriptor.value !== 'boolean'
+  ) throw new Error();
+  const done = doneDescriptor.value;
+  const valueDescriptor = descriptors['value'];
+  if (
+    !done
+    && (
+      valueDescriptor === undefined
+      || !('value' in valueDescriptor)
+    )
+  ) throw new Error();
+  return {
+    done,
+    // A completed iterator's value is intentionally never observed.
+    value: done ? undefined : valueDescriptor!.value,
+  };
 }
 
 async function readDownloadChunk(
@@ -690,57 +782,27 @@ async function readDownloadChunk(
       ) {
         if (types.isProxy(pending)) throw new Error();
       }
-      Promise.resolve(pending).then(
-        (result) => {
-          if (settled) return;
-          try {
-            if (
-              typeof result !== 'object'
-              || result === null
-              || types.isProxy(result)
-              || Object.getPrototypeOf(result) !== Object.prototype
-            ) {
-              throw new Error();
-            }
-            const descriptors = Object.getOwnPropertyDescriptors(result);
-            if (
-              Reflect.ownKeys(result).some(
-                (key) => key !== 'done' && key !== 'value',
-              )
-              || Object.values(descriptors).some(
-                (descriptor) => !('value' in descriptor),
-              )
-            ) throw new Error();
-            const doneDescriptor = descriptors['done'];
-            if (
-              doneDescriptor === undefined
-              || !('value' in doneDescriptor)
-              || typeof doneDescriptor.value !== 'boolean'
-            ) throw new Error();
-            const done = doneDescriptor.value;
-            // A completed iterator's value is intentionally never observed.
-            const valueDescriptor = descriptors['value'];
-            if (
-              !done
-              && (
-                valueDescriptor === undefined
-                || !('value' in valueDescriptor)
-              )
-            ) throw new Error();
-            const value = done ? undefined : valueDescriptor!.value;
-            finish(() => resolve({ done, value }));
-          } catch {
-            finish(() => reject(storageError(
-              'STREAM_FAILED',
-              'GitHub template download stream failed',
-            )));
-          }
-        },
-        () => finish(() => reject(storageError(
-          'STREAM_FAILED',
-          'GitHub template download stream failed',
-        ))),
-      );
+      const accept = (result: unknown): void => {
+        if (settled) return;
+        try {
+          const snapshot = snapshotIteratorResult(result);
+          finish(() => resolve(snapshot));
+        } catch {
+          finish(() => reject(storageError(
+            'STREAM_FAILED',
+            'GitHub template download stream failed',
+          )));
+        }
+      };
+      const rejectPending = (): void => finish(() => reject(storageError(
+        'STREAM_FAILED',
+        'GitHub template download stream failed',
+      )));
+      if (types.isPromise(pending)) {
+        Reflect.apply(PROMISE_THEN, pending, [accept, rejectPending]);
+      } else {
+        accept(pending);
+      }
     } catch {
       finish(() => reject(storageError(
         'STREAM_FAILED',
@@ -756,11 +818,17 @@ function closeDownloadIterator(
   try {
     const close = iterator.close;
     if (typeof close === 'function') {
-      void Promise.resolve(Reflect.apply(
+      const pending = Reflect.apply(
         close,
         iterator.receiver,
         [],
-      )).catch(() => undefined);
+      );
+      if (types.isPromise(pending)) {
+        Reflect.apply(PROMISE_THEN, pending, [
+          () => undefined,
+          () => undefined,
+        ]);
+      }
     }
   } catch {
     // Iterator cleanup is best effort and never replaces the primary error.

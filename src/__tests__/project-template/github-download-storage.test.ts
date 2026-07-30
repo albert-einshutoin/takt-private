@@ -541,6 +541,201 @@ describe('GitHub template download staging', () => {
     expect(writes).toBe(0);
   });
 
+  it('uses the initially snapshotted inherited iterator factory', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let safeFactories = 0;
+    let replacedFactories = 0;
+    const prototype = {
+      [Symbol.asyncIterator]() {
+        safeFactories += 1;
+        return chunks(new Uint8Array([1]));
+      },
+    };
+    const source = Object.create(prototype) as AsyncIterable<Uint8Array>;
+    const error = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: sha256(new Uint8Array([1])),
+      chunks: source,
+      ioSeam: {
+        onPhase(phase) {
+          if (phase !== 'ingress-created') return;
+          Object.defineProperty(source, Symbol.asyncIterator, {
+            configurable: true,
+            value() {
+              replacedFactories += 1;
+              throw new Error('ghp_replaced_factory_secret');
+            },
+          });
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'INSPECTION_FAILED' });
+    expect({ safeFactories, replacedFactories }).toEqual({
+      safeFactories: 1,
+      replacedFactories: 0,
+    });
+  });
+
+  it('treats explicitly undefined io seam methods as absent', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    await expect(stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: sha256(new Uint8Array([1])),
+      chunks: chunks(new Uint8Array([1])),
+      ioSeam: {
+        onPhase: undefined,
+        write: undefined,
+      } as never,
+    })).rejects.toMatchObject({ code: 'INSPECTION_FAILED' });
+  });
+
+  it.each([
+    'async-iterator-accessor',
+    'prototype-proxy',
+    'factory-proxy',
+    'next-accessor',
+    'return-accessor',
+    'next-proxy',
+  ] as const)('rejects hostile iterator method boundary: %s', async (
+    boundary,
+  ) => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let traps = 0;
+    const methodProxy = new Proxy(() => undefined, {
+      apply() {
+        traps += 1;
+        throw new Error('ghp_method_proxy_secret');
+      },
+    });
+    let source: AsyncIterable<Uint8Array>;
+    if (boundary === 'async-iterator-accessor') {
+      source = Object.defineProperty({}, Symbol.asyncIterator, {
+        get() {
+          traps += 1;
+          throw new Error('ghp_async_iterator_accessor_secret');
+        },
+      }) as AsyncIterable<Uint8Array>;
+    } else if (boundary === 'prototype-proxy') {
+      const prototype = new Proxy({}, {
+        getOwnPropertyDescriptor() {
+          traps += 1;
+          return undefined;
+        },
+        getPrototypeOf() {
+          traps += 1;
+          return null;
+        },
+      });
+      source = Object.create(prototype) as AsyncIterable<Uint8Array>;
+    } else if (boundary === 'factory-proxy') {
+      source = {
+        [Symbol.asyncIterator]: methodProxy,
+      } as AsyncIterable<Uint8Array>;
+    } else {
+      const iterator: Record<PropertyKey, unknown> = {};
+      if (boundary === 'next-accessor') {
+        Object.defineProperty(iterator, 'next', {
+          get() {
+            traps += 1;
+            throw new Error('ghp_next_accessor_secret');
+          },
+        });
+      } else {
+        iterator['next'] = boundary === 'next-proxy'
+          ? methodProxy
+          : () => Promise.resolve({ done: true, value: undefined });
+      }
+      if (boundary === 'return-accessor') {
+        Object.defineProperty(iterator, 'return', {
+          get() {
+            traps += 1;
+            throw new Error('ghp_return_accessor_secret');
+          },
+        });
+      }
+      source = {
+        [Symbol.asyncIterator]() {
+          return iterator as unknown as AsyncIterator<Uint8Array>;
+        },
+      };
+    }
+    const error = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: source,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: boundary === 'async-iterator-accessor'
+        || boundary === 'prototype-proxy'
+        || boundary === 'factory-proxy'
+        ? 'INVALID_ARGUMENT'
+        : 'STREAM_FAILED',
+    });
+    expect(traps).toBe(0);
+  });
+
+  it('does not assimilate hostile thenables and accepts native or direct results', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let thenGets = 0;
+    const hostileThenable = {
+      [Symbol.asyncIterator]() {
+        return {
+          next() {
+            return Object.defineProperty({
+              done: false,
+              value: new Uint8Array([1]),
+            }, 'then', {
+              get() {
+                thenGets += 1;
+                throw new Error('ghp_then_getter_secret');
+              },
+            });
+          },
+        };
+      },
+    };
+    await expect(stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: hostileThenable as AsyncIterable<Uint8Array>,
+    })).rejects.toMatchObject({ code: 'STREAM_FAILED' });
+    expect(thenGets).toBe(0);
+
+    for (const promiseResult of [false, true]) {
+      let delivered = false;
+      const compatible = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              const result = delivered
+                ? { done: true as const, value: undefined }
+                : {
+                  done: false as const,
+                  value: new Uint8Array([1]),
+                };
+              delivered = true;
+              return promiseResult ? Promise.resolve(result) : result;
+            },
+          };
+        },
+      };
+      await expect(stageGithubTemplateDownload({
+        projectRoot,
+        expectedBytes: 1,
+        expectedSha256: sha256(new Uint8Array([1])),
+        chunks: compatible as AsyncIterable<Uint8Array>,
+      })).rejects.toMatchObject({ code: 'INSPECTION_FAILED' });
+    }
+  });
+
   it('fails boundedly when a write makes no progress', async () => {
     const projectRoot = makeRoot('takt-github-download-');
     prepareControlRoot(projectRoot);
