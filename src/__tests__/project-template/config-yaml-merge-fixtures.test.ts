@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { ProjectConfigSchema } from '../../core/models/config-schemas.js';
-import { assertSubscriptionOnlyConfig } from '../../core/subscription-only/policy.js';
+import { assertRawSubscriptionOnlyProjectConfig } from '../../core/subscription-only/policy.js';
 import { mergeProjectTemplateConfigYaml } from '../../features/project-template/config-yaml-merge.js';
 
 const fixtureRoot = join(
@@ -39,6 +39,9 @@ describe.each([
     // This is the same schema and effective subscription-only policy used by
     // runtime config loading, so fixture success cannot mask an unsafe route.
     const parsed = ProjectConfigSchema.parse(parse(text) as unknown);
-    expect(() => assertSubscriptionOnlyConfig(parsed)).not.toThrow();
+    expect(() => assertRawSubscriptionOnlyProjectConfig(
+      parsed,
+      'merged fixture config',
+    )).not.toThrow();
   });
 });

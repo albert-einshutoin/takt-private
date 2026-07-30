@@ -69,6 +69,22 @@ describe('project template config YAML merge adapters', () => {
     });
   });
 
+  it('rejects an incoming API provider introduced into an otherwise safe effective policy', () => {
+    const safe = 'subscription_only: true\nprovider: codex-cli\n';
+    const result = mergeProjectTemplateConfigYaml({
+      base: bytes(safe),
+      local: bytes(safe),
+      incoming: bytes('subscription_only: true\nprovider: codex\n'),
+    });
+
+    expect(result).toMatchObject({
+      status: 'blocked',
+      code: 'MERGED_CONFIG_INVALID',
+    });
+    expect(result.status === 'blocked' ? result.message : '')
+      .toMatch(/provider.*codex/i);
+  });
+
   it('preserves unknown keys but routes them to a validator error', () => {
     const result = mergeProjectTemplateConfigYaml({
       base: bytes('language: en\n'),

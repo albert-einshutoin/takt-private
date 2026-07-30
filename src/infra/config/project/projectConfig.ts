@@ -67,6 +67,7 @@ import {
 import { assertValidProjectConfig } from './projectConfigValidation.js';
 import {
   assertNoForbiddenSubscriptionOnlyConfigKeys,
+  assertRawSubscriptionOnlyProjectConfig,
   assertSubscriptionOnlyConfig,
 } from '../../../core/subscription-only/policy.js';
 
@@ -97,6 +98,10 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
   assertValidProjectConfig(parsedConfig, configPath, true);
   assertValidProjectConfig(rawConfig, configPath);
   const parsedConfigResult = ProjectConfigSchema.parse(rawConfig);
+  assertRawSubscriptionOnlyProjectConfig(
+    parsedConfigResult as Record<string, unknown>,
+    configPath,
+  );
 
   const {
     subscription_only,

@@ -1,6 +1,6 @@
 import { parse } from 'yaml';
 import { ProjectConfigSchema } from '../../core/models/config-schemas.js';
-import { assertNoForbiddenSubscriptionOnlyConfigKeys } from '../../core/subscription-only/policy.js';
+import { assertRawSubscriptionOnlyProjectConfig } from '../../core/subscription-only/policy.js';
 import {
   mergeProjectTemplateYamlDocument,
   type MergeProjectTemplateYamlDocumentOptions,
@@ -88,7 +88,10 @@ export function mergeProjectTemplateConfigYaml(
     );
   }
   try {
-    assertNoForbiddenSubscriptionOnlyConfigKeys(raw, 'merged project config');
+    assertRawSubscriptionOnlyProjectConfig(
+      parsed.data as Record<string, unknown>,
+      'merged project config',
+    );
   } catch (error) {
     return invalid(
       'MERGED_CONFIG_INVALID',
