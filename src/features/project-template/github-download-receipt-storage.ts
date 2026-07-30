@@ -22,6 +22,11 @@ import {
   isProjectTemplatePrivateFileMode,
 } from './control-root-contract.js';
 import {
+  createGithubTemplateDownloadReceiptTempName,
+  deriveGithubTemplateDownloadReceiptPaths,
+  type GithubTemplateDownloadReceiptPaths,
+} from './github-download-receipt-paths.js';
+import {
   calculateGithubTemplateDownloadReceiptKey,
   claimPreparedGithubTemplateDownloadReceiptForStorage,
   consumePreparedGithubTemplateDownloadReceiptStorageClaim,
@@ -32,9 +37,6 @@ import {
   type GithubTemplateDownloadReceiptV1,
 } from './github-download-receipt.js';
 
-const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const RECEIPT_TEMP_PATTERN =
-  /^\.tmp\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[a-f0-9]{64}$/;
 const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
 const DIRECTORY_FLAG = process.platform === 'win32' ? 0 : constants.O_DIRECTORY;
 const STORED_RECEIPT_CLAIM_BRAND: unique symbol =
@@ -791,20 +793,17 @@ function requireArtifactBinding(
 async function openAndVerifyArtifact(
   cacheRoot: DirectoryAuthority,
   receipt: GithubTemplateDownloadReceiptV1,
+  paths: GithubTemplateDownloadReceiptPaths,
   io: IoSnapshot | undefined,
   context: StoreContext,
 ): Promise<FileAuthority> {
   const archive = receipt.payload.archive;
-  const shaRootPath = join(cacheRoot.path, 'sha256');
-  const shaRoot = openDirectory(shaRootPath, cacheRoot.device);
+  const shaRoot = openDirectory(paths.artifactDirectory, cacheRoot.device);
   context.directories.push(shaRoot);
   let artifact: FileAuthority | undefined;
   try {
-    const artifactPath = join(shaRoot.path, `${archive.sha256}.taktpack`);
-    if (
-      dirname(artifactPath) !== shaRoot.path
-      || !SHA256_PATTERN.test(archive.sha256)
-    ) throw new Error();
+    const artifactPath = paths.artifactPath;
+    if (dirname(artifactPath) !== shaRoot.path) throw new Error();
     artifact = openFile(artifactPath, cacheRoot.device, archive.bytes);
     context.artifact = artifact;
     if (hashFile(artifact, io) !== archive.sha256) {
@@ -851,12 +850,19 @@ async function openAndVerifyArtifact(
 
 function createReceiptDirectories(
   cacheRoot: DirectoryAuthority,
-  receiptKey: string,
+  paths: GithubTemplateDownloadReceiptPaths,
   io: IoSnapshot | undefined,
   context: StoreContext,
 ): DirectoryAuthority {
   let current = cacheRoot;
-  for (const name of ['receipts', 'v1', 'sha256', receiptKey.slice(0, 2)]) {
+  for (const path of paths.receiptAncestors) {
+    if (dirname(path) !== current.path) {
+      throw storageError(
+        'CACHE_INVALID',
+        'GitHub template receipt ancestor path is invalid',
+      );
+    }
+    const name = basename(path);
     current = ensureDirectory(current, name, io);
     context.directories.push(current);
   }
@@ -870,13 +876,15 @@ function createTemporaryReceipt(
   io: IoSnapshot | undefined,
   context: StoreContext,
 ): FileAuthority {
-  const path = join(
-    parent.path,
-    `.tmp.${process.pid}.${randomUUID()}.${receiptKey}`,
-  );
+  const name = createGithubTemplateDownloadReceiptTempName({
+    pid: process.pid,
+    uuid: randomUUID(),
+    receiptKey,
+  });
+  const path = join(parent.path, name);
   if (
     dirname(path) !== parent.path
-    || !RECEIPT_TEMP_PATTERN.test(basename(path))
+    || basename(path) !== name
   ) {
     throw storageError(
       'IO_FAILURE',
@@ -975,13 +983,13 @@ function unlinkOwnedTemporary(
 async function publishReceipt(
   parent: DirectoryAuthority,
   temporary: FileAuthority,
+  finalPath: string,
   serialized: string,
   receiptKey: string,
   verifier: VerifierSnapshot,
   io: IoSnapshot | undefined,
   context: StoreContext,
 ): Promise<'stored' | 'existing'> {
-  const finalPath = join(parent.path, `${receiptKey}.json`);
   if (
     dirname(finalPath) !== parent.path
     || basename(finalPath) !== `${receiptKey}.json`
@@ -1322,15 +1330,21 @@ export async function storeGithubTemplateDownloadReceipt(
     }
     const cacheRoot = openDirectory(requestedRoot);
     context.directories.push(cacheRoot);
+    const paths = deriveGithubTemplateDownloadReceiptPaths({
+      cacheRoot: requestedRoot,
+      receiptKey: prepared.receiptKey,
+      archiveSha256: parsed.payload.archive.sha256,
+    });
     context.artifact = await openAndVerifyArtifact(
       cacheRoot,
       parsed,
+      paths,
       options.io,
       context,
     );
     const receiptParent = createReceiptDirectories(
       cacheRoot,
-      prepared.receiptKey,
+      paths,
       options.io,
       context,
     );
@@ -1394,6 +1408,7 @@ export async function storeGithubTemplateDownloadReceipt(
     const status = await publishReceipt(
       receiptParent,
       context.temporary,
+      paths.receiptPath,
       prepared.serialized,
       prepared.receiptKey,
       options.verifier,
