@@ -751,6 +751,90 @@ describe('project template apply/run-start coordination', () => {
     expect(existsSync(recoveryPath)).toBe(false);
   });
 
+  it('keeps a competing explicit recovery claim from mutating shared ownership', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const reclaimPath = `${mutexPath}.reclaim`;
+    const recoveryPath = `${reclaimPath}.recovery`;
+    const competingClaim = `${recoveryPath}.resume.${process.pid}.`
+      + '11111111-1111-4111-8111-111111111111';
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(mutexPath, JSON.stringify({
+      version: 1,
+      token: 'dead-main-owner',
+      pid: 99_999,
+    }));
+    const target = lstatSync(mutexPath);
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 2,
+      token: 'dead-reclaimer',
+      pid: 99_998,
+      operation: 'reclaim',
+      target: {
+        device: String(target.dev),
+        inode: String(target.ino),
+        token: 'dead-main-owner',
+        pid: 99_999,
+      },
+    }));
+    writeFileSync(recoveryPath, JSON.stringify({
+      version: 3,
+      token: 'dead-recovery-owner',
+      pid: 99_997,
+      operation: 'namespace-recovery',
+      namespaceToken: 'dead-reclaimer',
+    }));
+    linkSync(recoveryPath, competingClaim);
+
+    expect(recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(root, {
+      apply: true,
+      probeProcess: (pid) => pid === process.pid ? 'alive' : 'dead',
+    })).toMatchObject({ status: 'blocked', paths: [recoveryPath] });
+    expect(existsSync(mutexPath)).toBe(true);
+    expect(existsSync(reclaimPath)).toBe(true);
+    expect(existsSync(recoveryPath)).toBe(true);
+    expect(existsSync(competingClaim)).toBe(true);
+  });
+
+  it('reclaims a dead unique recovery claim before resuming cleanup', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const reclaimPath = `${mutexPath}.reclaim`;
+    const recoveryPath = `${reclaimPath}.recovery`;
+    const deadClaim = `${recoveryPath}.resume.99996.`
+      + '22222222-2222-4222-8222-222222222222';
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 2,
+      token: 'dead-publication',
+      pid: 99_998,
+      operation: 'publish',
+      mainToken: 'never-published',
+    }));
+    writeFileSync(recoveryPath, JSON.stringify({
+      version: 3,
+      token: 'dead-recovery-owner',
+      pid: 99_997,
+      operation: 'namespace-recovery',
+      namespaceToken: 'dead-publication',
+    }));
+    linkSync(recoveryPath, deadClaim);
+
+    expect(recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(root, {
+      apply: false,
+      probeProcess: () => 'dead',
+    }).status).toBe('recoverable');
+    expect(existsSync(deadClaim)).toBe(true);
+
+    expect(recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(root, {
+      apply: true,
+      probeProcess: () => 'dead',
+    }).status).toBe('recovered');
+    expect(existsSync(reclaimPath)).toBe(false);
+    expect(existsSync(recoveryPath)).toBe(false);
+    expect(existsSync(deadClaim)).toBe(false);
+  });
+
   it.each(['alive', 'unknown'] as const)(
     'keeps an abandoned recovery owner %s state fail-closed',
     (processState) => {
