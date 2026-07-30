@@ -1182,7 +1182,7 @@ function closeContextDescriptors(
   return failure;
 }
 
-async function verifyJointSuccessBoundary(
+async function verifyJointAsyncPreflight(
   context: StoreContext,
   receipt: GithubTemplateDownloadReceiptV1,
   serialized: string,
@@ -1210,8 +1210,27 @@ async function verifyJointSuccessBoundary(
       verifier,
       false,
     );
-    // The verifier is asynchronous. Recheck every retained path/FD and exact
-    // byte string after it returns, with no seam before native close.
+  } catch {
+    throw storageError(
+      'CACHE_INVALID',
+      'GitHub template receipt joint preflight failed',
+    );
+  }
+}
+
+function verifyJointAndCloseSynchronously(
+  context: StoreContext,
+  receipt: GithubTemplateDownloadReceiptV1,
+  serialized: string,
+  receiptKey: string,
+): GithubTemplateDownloadReceiptStorageError | undefined {
+  let failure: GithubTemplateDownloadReceiptStorageError | undefined;
+  try {
+    if (
+      context.artifact === undefined
+      || context.final === undefined
+      || context.receiptParent === undefined
+    ) throw new Error();
     const finalArtifactSha256 = hashFileNative(context.artifact);
     const finalReceiptBytes = readExactNative(
       context.final.fd,
@@ -1224,17 +1243,20 @@ async function verifyJointSuccessBoundary(
       || calculateGithubTemplateDownloadReceiptKey(finalSerialized)
         !== receiptKey
     ) throw new Error();
-    // Native reads are followed by synchronous path↔FD checks. From here to
-    // native close there is no caller callback and no await boundary.
+    // The final native reads and path↔FD assertions share one synchronous call
+    // stack with every native close attempt. No callback, Promise resolution,
+    // or await boundary can run between this assertion and descriptor close.
     for (const directory of context.directories) assertDirectory(directory);
     assertFile(context.artifact, 1);
     assertFile(context.final, 1);
   } catch {
-    throw storageError(
+    failure = storageError(
       'CACHE_INVALID',
       'GitHub template receipt joint authority changed before close',
     );
   }
+  const closeFailure = closeContextDescriptors(context);
+  return failure ?? closeFailure;
 }
 
 /**
@@ -1409,6 +1431,7 @@ export async function storeGithubTemplateDownloadReceipt(
   }
   const closeHookFailure = runContextCloseHooks(context, options.io);
   if (failure === undefined) failure = closeHookFailure;
+  let closedSynchronously = false;
   if (
     failure === undefined
     && jointReceipt !== undefined
@@ -1416,7 +1439,7 @@ export async function storeGithubTemplateDownloadReceipt(
     && jointReceiptKey !== undefined
   ) {
     try {
-      await verifyJointSuccessBoundary(
+      await verifyJointAsyncPreflight(
         context,
         jointReceipt,
         jointSerialized,
@@ -1427,9 +1450,20 @@ export async function storeGithubTemplateDownloadReceipt(
     } catch (error) {
       failure = normalizeFailure(error);
     }
+    if (failure === undefined) {
+      failure = verifyJointAndCloseSynchronously(
+        context,
+        jointReceipt,
+        jointSerialized,
+        jointReceiptKey,
+      );
+      closedSynchronously = true;
+    }
   }
-  const closeFailure = closeContextDescriptors(context);
-  if (failure === undefined) failure = closeFailure;
+  if (!closedSynchronously) {
+    const closeFailure = closeContextDescriptors(context);
+    if (failure === undefined) failure = closeFailure;
+  }
   try {
     consumePreparedGithubTemplateDownloadReceiptStorageClaim(claim);
   } catch {

@@ -795,6 +795,45 @@ describe('GitHub template authenticated receipt durable store D2a', () => {
     },
   );
 
+  it.each(['artifact', 'receipt'] as const)(
+    'rejects %s replacement from a nested final-verifier microtask',
+    async (target) => {
+      const fixture = await createFixture();
+      let verifications = 0;
+      await expect(storeGithubTemplateDownloadReceipt({
+        prepared: fixture.prepared,
+        cacheRoot: fixture.cacheRoot,
+        verifier: {
+          async verify(request) {
+            verifications += 1;
+            if (verifications === 4) {
+              const mutate = () => {
+                const path = target === 'artifact'
+                  ? fixture.materialized.cachePath
+                  : fixture.receiptPath;
+                const content = target === 'artifact'
+                  ? fixture.content
+                  : fixture.prepared.serialized;
+                renameSync(path, `${path}.nested-microtask`);
+                writeFileSync(path, content, { mode: 0o600 });
+              };
+              let schedule = mutate;
+              for (let depth = 0; depth < 6; depth += 1) {
+                const next = schedule;
+                schedule = () => queueMicrotask(next);
+              }
+              schedule();
+            }
+            return verifier().verify(request);
+          },
+        },
+      })).rejects.toMatchObject({
+        code: 'CACHE_INVALID',
+        receiptState: 'receipt-published',
+      });
+    },
+  );
+
   it('preserves the primary failure when a close hook also fails', async () => {
     const fixture = await createFixture();
     const error = await storeGithubTemplateDownloadReceipt({
