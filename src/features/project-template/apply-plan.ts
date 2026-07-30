@@ -65,6 +65,25 @@ function sha256(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function isSupportedSemanticConfig(
+  path: string,
+  policy: TemplateEntryPolicy,
+): boolean {
+  return policy === 'merge'
+    && (path === 'config.yaml' || path === 'devloopd.yaml');
+}
+
+function mergeSupportedSemanticConfig(options: {
+  path: 'config.yaml' | 'devloopd.yaml';
+  base: Uint8Array;
+  local: Uint8Array;
+  incoming: Uint8Array;
+}): ProjectTemplateConfigYamlMergeResult {
+  return options.path === 'config.yaml'
+    ? mergeProjectTemplateConfigYaml(options)
+    : mergeProjectTemplateDevloopPolicyYaml(options);
+}
+
 function compareAscii(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -230,7 +249,27 @@ function parseIncomingContents(
         content,
       });
       if (classification.classification === 'blocked') {
-        invalidInput('incoming content is blocked by portability policy', `${field}.content`);
+        const semanticValidation = isSupportedSemanticConfig(
+          path,
+          manifestEntry.policy,
+        )
+          ? mergeSupportedSemanticConfig({
+              path: path as 'config.yaml' | 'devloopd.yaml',
+              base: content,
+              local: content,
+              incoming: content,
+            })
+          : undefined;
+        // Supported config documents turn structural/schema/policy rejection
+        // into a sealed plan conflict. Classifier-only hazards (for example a
+        // secret hidden in an otherwise valid model string) remain hard input
+        // errors and never reach the apply plan.
+        if (
+          semanticValidation === undefined
+          || semanticValidation.status === 'merged'
+        ) {
+          invalidInput('incoming content is blocked by portability policy', `${field}.content`);
+        }
       }
       const declaredCapabilities = new Set(manifestEntry.capabilities ?? []);
       if (classification.detectedCapabilities.capabilities.some(
@@ -1111,25 +1150,64 @@ export function prepareProjectTemplateApplyPlan(
   const resolvedByPath = new Map<string, Buffer>();
 
   const entries = unresolvedPlan.entries.map((entry): ProjectTemplateApplyPlanEntry => {
+    const supportedPath =
+      entry.path === 'config.yaml' || entry.path === 'devloopd.yaml';
+    const semanticConflict = entry.action === 'conflict'
+      && (
+        entry.reasonCode === 'BOTH_CHANGED'
+        || entry.reasonCode === 'SEMANTIC_MERGE_REQUIRED'
+      );
     if (
       entry.policy !== 'merge'
-      || entry.action !== 'conflict'
+      || !supportedPath
       || (
-        entry.reasonCode !== 'BOTH_CHANGED'
-        && entry.reasonCode !== 'SEMANTIC_MERGE_REQUIRED'
+        entry.action !== 'add'
+        && entry.action !== 'update'
+        && entry.action !== 'keep'
+        && !semanticConflict
       )
-      || (entry.path !== 'config.yaml' && entry.path !== 'devloopd.yaml')
     ) {
       return entry;
     }
+    const formalBase = baseByPath.get(entry.path);
     const base = baseContents.get(entry.path);
     const local = localByPath.get(entry.path);
     const incoming = incomingContents.get(entry.path);
-    if (
-      base === undefined
-      || local?.content === undefined
-      || incoming === undefined
-    ) {
+    if (incoming === undefined) return entry;
+
+    const incomingValidation = mergeSupportedSemanticConfig({
+      path: entry.path as 'config.yaml' | 'devloopd.yaml',
+      base: incoming,
+      local: incoming,
+      incoming,
+    });
+    if (incomingValidation.status !== 'merged') {
+      const unresolved = overrideConflict(entry, 'CONFLICT');
+      return {
+        ...unresolved,
+        reviewRequired: true,
+        mergeDiagnostics: normalizeMergeDiagnostics(incomingValidation),
+      };
+    }
+
+    const hasCompleteExistingMerge =
+      formalBase !== undefined
+      && base !== undefined
+      && local?.content !== undefined;
+    const localDiffersFromIncoming = local !== undefined
+      && (
+        local.sha256 !== entry.incomingSha256
+        || local.mode !== entry.incomingMode
+      );
+    const needsUnavailableBase =
+      formalBase !== undefined
+      && !hasCompleteExistingMerge
+      && (
+        entry.action === 'update'
+        || semanticConflict
+        || localDiffersFromIncoming
+      );
+    if (needsUnavailableBase) {
       const unresolved = overrideConflict(entry, 'BASE_UNAVAILABLE');
       return {
         ...unresolved,
@@ -1141,17 +1219,19 @@ export function prepareProjectTemplateApplyPlan(
       };
     }
 
-    const merge = entry.path === 'config.yaml'
-      ? mergeProjectTemplateConfigYaml({
-          base,
-          local: local.content,
+    // Existing entries always use the formal three-way baseline so ownership
+    // rules apply even when the hash-level planner initially chose keep/update.
+    // A first install has no historical owner, so validating incoming against
+    // itself exercises the identical YAML/schema/policy gate without inventing
+    // a baseline.
+    const merge = hasCompleteExistingMerge
+      ? mergeSupportedSemanticConfig({
+          path: entry.path as 'config.yaml' | 'devloopd.yaml',
+          base: base!,
+          local: local!.content!,
           incoming,
         })
-      : mergeProjectTemplateDevloopPolicyYaml({
-          base,
-          local: local.content,
-          incoming,
-        });
+      : incomingValidation;
     const mergeDiagnostics = normalizeMergeDiagnostics(merge);
     if (merge.status !== 'merged') {
       const unresolved = overrideConflict(entry, 'CONFLICT');
@@ -1165,19 +1245,25 @@ export function prepareProjectTemplateApplyPlan(
     const content = Buffer.from(merge.content);
     const afterSha256 = sha256(content);
     const afterMode = entry.incomingMode!;
-    const action: 'keep' | 'update' =
-      afterSha256 === local.sha256 && afterMode === local.mode
+    const action: 'add' | 'keep' | 'update' = local === undefined
+      ? 'add'
+      : afterSha256 === local.sha256 && afterMode === local.mode
         ? 'keep'
         : 'update';
-    if (action === 'update' && afterSha256 !== entry.incomingSha256) {
+    if (
+      (action === 'add' || action === 'update')
+      && afterSha256 !== entry.incomingSha256
+    ) {
       resolvedByPath.set(entry.path, content);
     }
-    const diff = afterSha256 === local.sha256
+    const diff = local === undefined || afterSha256 === local.sha256
       ? undefined
-      : mustRedactDiff(entry.path, local.mode, local.sha256, Buffer.from(local.content))
+      : local.content === undefined
+        ? { kind: 'unavailable' as const }
+        : mustRedactDiff(entry.path, local.mode, local.sha256, Buffer.from(local.content))
           || mustRedactDiff(entry.path, afterMode, afterSha256, content)
-        ? { kind: 'redacted' as const }
-        : buildTextDiff(Buffer.from(local.content), content);
+          ? { kind: 'redacted' as const }
+          : buildTextDiff(Buffer.from(local.content), content);
     const reviewRequired = merge.reviewRequired
       || capabilitiesChanged(entry.capabilitiesBefore, entry.capabilitiesAfter)
       || entry.gitTrackingStatus === 'staged'
