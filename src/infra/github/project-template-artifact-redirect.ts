@@ -3,6 +3,8 @@ import { types } from 'node:util';
 
 const MAX_LOCATION_LENGTH = 8_192;
 const MAX_DNS_ANSWERS = 64;
+const MAX_IPV4_ADDRESS_LENGTH = 15;
+const MAX_IPV6_ADDRESS_LENGTH = 45;
 const MAX_REDIRECTS = 3;
 const MAX_ASSET_ID = BigInt(Number.MAX_SAFE_INTEGER);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -685,6 +687,18 @@ function snapshotPublicDnsAnswers(
       || (record.family !== 4 && record.family !== 6)
     ) {
       throw invalidArgument();
+    }
+    // Canonical IPv4/IPv6 text cannot exceed these RFC representation bounds.
+    // Reject by length before native or string parsing so hostile DNS adapters
+    // cannot turn one answer into unbounded validation work.
+    const maximumAddressLength = record.family === 4
+      ? MAX_IPV4_ADDRESS_LENGTH
+      : MAX_IPV6_ADDRESS_LENGTH;
+    if (
+      record.address.length === 0
+      || record.address.length > maximumAddressLength
+    ) {
+      throw redirectError('DNS_REJECTED');
     }
     const detectedFamily = isIP(record.address);
     if (detectedFamily !== 0 && detectedFamily !== record.family) {

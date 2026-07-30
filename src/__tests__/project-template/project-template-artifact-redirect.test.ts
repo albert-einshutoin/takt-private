@@ -480,6 +480,53 @@ describe('project-template artifact DNS validation F2b-A', () => {
     );
   });
 
+  it.each([
+    ['123.123.123.123', 4],
+    ['2606:50c0:ffff:ffff:ffff:ffff:255.255.255.255', 6],
+  ] as const)('accepts a maximum-length family address %#', (
+    address,
+    family,
+  ) => {
+    expect(validateProjectTemplateArtifactDnsAnswers([
+      { address, family },
+    ])).toBeUndefined();
+  });
+
+  it.each([
+    ['', 4],
+    ['', 6],
+    ['123.123.123.1234', 4],
+    ['2606:50c0:ffff:ffff:ffff:ffff:255.255.255.0255', 6],
+  ] as const)('rejects an address outside its family length bound %#', (
+    address,
+    family,
+  ) => {
+    expectCode(
+      () => validateProjectTemplateArtifactDnsAnswers([
+        { address, family },
+      ]),
+      'DNS_REJECTED',
+    );
+  });
+
+  it('rejects an 8 MiB address before entering the string parser', () => {
+    const address = `secret${'x'.repeat((8 * 1024 * 1024) - 6)}`;
+    const includes = vi.spyOn(String.prototype, 'includes');
+    try {
+      expectCode(
+        () => validateProjectTemplateArtifactDnsAnswers([
+          { address, family: 6 },
+        ]),
+        'DNS_REJECTED',
+      );
+      expect(includes.mock.instances.some(
+        (receiver) => String(receiver).length === address.length,
+      )).toBe(false);
+    } finally {
+      includes.mockRestore();
+    }
+  });
+
   it('rejects mixed public/private answers', () => {
     expectCode(
       () => validateProjectTemplateArtifactDnsAnswers([
