@@ -465,8 +465,8 @@ describe('project template atomic apply executor', () => {
 
   it('rejects a re-sealed plan whose update action was changed to keep', async () => {
     const root = makeRoot();
-    writeTakt(root, 'config.yaml', 'old\n');
-    const baseManifest = manifest({ 'config.yaml': 'old\n' });
+    writeTakt(root, 'notes.txt', 'old\n');
+    const baseManifest = manifest({ 'notes.txt': 'old\n' });
     const baseLock: TemplateLockV1 = {
       schemaVersion: '1.0',
       manifestSha256: calculateProjectTemplateManifestSha256(baseManifest),
@@ -474,7 +474,7 @@ describe('project template atomic apply executor', () => {
       source,
       capabilities: [],
       entries: [{
-        path: 'config.yaml',
+        path: 'notes.txt',
         policy: 'managed',
         mode: '0644',
         sha256: hash('old\n'),
@@ -482,11 +482,11 @@ describe('project template atomic apply executor', () => {
       }],
     };
     writeFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), `${JSON.stringify(baseLock)}\n`);
-    const incomingManifest = manifest({ 'config.yaml': 'new\n' });
-    const blobs = incomingContents({ 'config.yaml': 'new\n' });
+    const incomingManifest = manifest({ 'notes.txt': 'new\n' });
+    const blobs = incomingContents({ 'notes.txt': 'new\n' });
     const original = await createPlan(root, incomingManifest, blobs, baseLock);
     expect(original.entries[0]).toMatchObject({
-      path: 'config.yaml',
+      path: 'notes.txt',
       action: 'update',
     });
     const forgedBody = structuredClone(original) as Record<string, unknown>;
@@ -509,7 +509,7 @@ describe('project template atomic apply executor', () => {
       status: 'not_started',
       code: 'INVALID_APPLY_INPUT',
     });
-    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8')).toBe('old\n');
+    expect(readFileSync(join(root, '.takt', 'notes.txt'), 'utf8')).toBe('old\n');
     expect(JSON.parse(readFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), 'utf8')))
       .toMatchObject({ manifestSha256: baseLock.manifestSha256 });
   });
@@ -631,11 +631,11 @@ describe('project template atomic apply executor', () => {
       let blobs: ProjectTemplateIncomingContent[];
       let baseLock: TemplateLockV1 | undefined;
       if (scenario === 'add') {
-        incomingManifest = manifest({ 'config.yaml': 'new\n' });
-        blobs = incomingContents({ 'config.yaml': 'new\n' });
+        incomingManifest = manifest({ 'notes.txt': 'new\n' });
+        blobs = incomingContents({ 'notes.txt': 'new\n' });
       } else {
-        writeTakt(root, 'config.yaml', 'old\n');
-        const baseManifest = manifest({ 'config.yaml': 'old\n' });
+        writeTakt(root, 'notes.txt', 'old\n');
+        const baseManifest = manifest({ 'notes.txt': 'old\n' });
         baseLock = baseLockFor(baseManifest);
         writeFileSync(
           join(root, PROJECT_TEMPLATE_LOCK_PATH),
@@ -669,7 +669,7 @@ describe('project template atomic apply executor', () => {
       });
       expect(existsSync(join(root, '.takt-template-state', 'journal.json')))
         .toBe(false);
-      expect(existsSync(join(root, '.takt', 'config.yaml'))).toBe(scenario === 'delete');
+      expect(existsSync(join(root, '.takt', 'notes.txt'))).toBe(scenario === 'delete');
     },
   );
 

@@ -47,7 +47,7 @@ function input(
     policy?: TemplateEntryPolicy;
   },
 ): ProjectTemplateApplyPlanInput {
-  const path = 'config.yaml';
+  const path = policy === 'merge' ? 'config.yaml' : 'workflows/test.yaml';
   const incomingEntries = incoming === undefined
     ? []
     : [manifestEntry(path, incoming, policy)];
@@ -117,7 +117,7 @@ describe('project template three-way apply plan', () => {
 
       expect(plan.entries).toHaveLength(1);
       expect(plan.entries[0]).toMatchObject({
-        path: 'config.yaml',
+        path: 'workflows/test.yaml',
         policy: 'managed',
         action,
         reasonCode,
@@ -455,6 +455,35 @@ describe('project template three-way apply plan', () => {
     expect(prepared.plan.defaultApplyPossible).toBe(false);
     expect(prepared.resolvedContents).toEqual([]);
   });
+
+  it.each(['managed', 'scaffold'] as const)(
+    'requires semantic review when config.yaml is declared %s',
+    (policy) => {
+      const incoming = 'allow_git_hooks: true\n';
+      const planInput = input({
+        incoming,
+        policy,
+      });
+      planInput.incomingManifest.entries = [
+        manifestEntry('config.yaml', incoming, policy),
+      ];
+      planInput.incomingContents = [{
+        path: 'config.yaml',
+        content: Buffer.from(incoming),
+      }];
+      planInput.missingPathTracking = { 'config.yaml': 'not-repository' };
+
+      const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+      expect(prepared.plan.entries[0]).toMatchObject({
+        action: 'add',
+        policy,
+        reviewRequired: true,
+        mergeDiagnostics: { status: 'merged' },
+      });
+      expect(prepared.plan.defaultApplyPossible).toBe(false);
+    },
+  );
 
   it.each([
     ['git hooks', 'allow_git_hooks: true\n', ['allow_git_hooks'], []],
@@ -794,7 +823,7 @@ describe('project template three-way apply plan', () => {
     ['large', Buffer.alloc(70 * 1024, 0x61), 'too-large'],
   ] as const)('does not emit a %s file body diff', (_label, content, kind) => {
     const planInput = input({ base: 'old', local: 'old', incoming: 'next' });
-    planInput.incomingContents = [{ path: 'config.yaml', content }];
+    planInput.incomingContents = [{ path: 'workflows/test.yaml', content }];
     planInput.incomingManifest.entries[0]!.sha256 =
       createHash('sha256').update(content).digest('hex');
 
@@ -832,17 +861,17 @@ describe('project template three-way apply plan', () => {
     const directory = createProjectTemplateApplyPlan({
       ...planInput,
       targetRootState: 'directory',
-      missingPathTracking: { 'config.yaml': 'untracked' },
+      missingPathTracking: { 'workflows/test.yaml': 'untracked' },
     });
     const stagedDeletion = createProjectTemplateApplyPlan({
       ...planInput,
       targetRootState: 'directory',
-      missingPathTracking: { 'config.yaml': 'staged' },
+      missingPathTracking: { 'workflows/test.yaml': 'staged' },
     });
     const missingRoot = createProjectTemplateApplyPlan({
       ...planInput,
       targetRootState: 'missing',
-      missingPathTracking: { 'config.yaml': 'not-repository' },
+      missingPathTracking: { 'workflows/test.yaml': 'not-repository' },
     });
 
     expect(stagedDeletion.preconditionToken).not.toBe(directory.preconditionToken);
@@ -1146,7 +1175,7 @@ describe('project template three-way apply plan', () => {
 
   it('requires review when a missing tracked path is reported clean', () => {
     const planInput = input({ incoming: 'next' });
-    planInput.missingPathTracking = { 'config.yaml': 'tracked-clean' };
+    planInput.missingPathTracking = { 'workflows/test.yaml': 'tracked-clean' };
 
     const plan = createProjectTemplateApplyPlan(planInput);
 

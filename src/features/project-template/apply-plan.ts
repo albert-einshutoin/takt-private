@@ -1171,8 +1171,7 @@ export function prepareProjectTemplateApplyPlan(
         || entry.reasonCode === 'SEMANTIC_MERGE_REQUIRED'
       );
     if (
-      entry.policy !== 'merge'
-      || semanticDocument === undefined
+      semanticDocument === undefined
       || (
         entry.action !== 'add'
         && entry.action !== 'update'
@@ -1187,6 +1186,31 @@ export function prepareProjectTemplateApplyPlan(
     const local = localByPath.get(entry.path);
     const incoming = incomingContents.get(entry.path);
     if (incoming === undefined) return entry;
+    if (entry.policy !== 'merge') {
+      // A manifest policy must not bypass the security/schema checks attached
+      // to the runtime's well-known semantic config destinations.
+      const validation = mergeSupportedSemanticConfig({
+        document: semanticDocument,
+        base: incoming,
+        local: incoming,
+        incoming,
+        reviewIncomingDocument: true,
+      });
+      const mergeDiagnostics = normalizeMergeDiagnostics(validation);
+      if (validation.status !== 'merged') {
+        const unresolved = overrideConflict(entry, 'CONFLICT');
+        return {
+          ...unresolved,
+          reviewRequired: true,
+          mergeDiagnostics,
+        };
+      }
+      return {
+        ...entry,
+        reviewRequired: entry.reviewRequired || validation.reviewRequired,
+        mergeDiagnostics,
+      };
+    }
     // Executors predating immutable baseline storage can still prove historical
     // bytes when independently hashed incoming or captured local content matches
     // the formal lock. This migrates legacy configs without trusting an
