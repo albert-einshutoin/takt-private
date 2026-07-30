@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { PreparedProjectTemplateApplyPlan } from 'takt';
 
 interface PackageContract {
   exports?: unknown;
@@ -31,10 +32,20 @@ describe('package exports contract', () => {
 
     const result = runSelfReferenceImport(`
       const api = await import('takt');
-      process.stdout.write(typeof api.createProjectTemplateApplyPlan);
+      process.stdout.write(JSON.stringify({
+        create: typeof api.createProjectTemplateApplyPlan,
+        prepare: typeof api.prepareProjectTemplateApplyPlan,
+        apply: typeof api.applyProjectTemplatePlan,
+      }));
     `);
 
-    expect(result).toBe('function');
+    expect(JSON.parse(result)).toEqual({
+      create: 'function',
+      prepare: 'function',
+      apply: 'function',
+    });
+    expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
+      .toMatchTypeOf<readonly unknown[]>();
   });
 
   it('blocks internal project-template approval deep imports', () => {
