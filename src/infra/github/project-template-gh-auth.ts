@@ -9,6 +9,7 @@ import { Readable } from 'node:stream';
 import { types } from 'node:util';
 import { crossSpawn } from '../../shared/utils/spawn.js';
 import {
+  bootstrapProjectTemplateArtifactRedirect,
   createProjectTemplateArtifactRedirectState,
   type DisposableProjectTemplateArtifactRedirectGrant,
   type DisposableProjectTemplateArtifactRedirectState,
@@ -1088,7 +1089,13 @@ export function createProjectTemplateGithubReleaseAssetRequest(
       let grant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
       try {
         state = createProjectTemplateArtifactRedirectState(baseUrl);
-        grant = state.resolve(rawStatus, location);
+        // The authenticated API response establishes the bootstrap target;
+        // only later unauthenticated CDN redirects spend the bounded budget.
+        grant = bootstrapProjectTemplateArtifactRedirect(
+          state,
+          rawStatus,
+          location,
+        );
       } catch {
         try {
           grant?.dispose();

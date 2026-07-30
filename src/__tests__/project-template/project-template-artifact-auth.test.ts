@@ -14,10 +14,32 @@ import {
 const https = vi.hoisted(() => ({
   request: vi.fn(),
 }));
+const redirect = vi.hoisted(() => ({
+  bootstrap: vi.fn(),
+}));
 
 vi.mock('node:https', () => ({
   request: https.request,
 }));
+vi.mock(
+  '../../infra/github/project-template-artifact-redirect.js',
+  async (importOriginal) => {
+    const actual = await importOriginal<typeof import(
+      '../../infra/github/project-template-artifact-redirect.js'
+    )>();
+    return {
+      ...actual,
+      bootstrapProjectTemplateArtifactRedirect(
+        ...args: Parameters<
+          typeof actual.bootstrapProjectTemplateArtifactRedirect
+        >
+      ) {
+        redirect.bootstrap(...args);
+        return actual.bootstrapProjectTemplateArtifactRedirect(...args);
+      },
+    };
+  },
+);
 
 import {
   acquireProjectTemplateGhCredential,
@@ -28,6 +50,9 @@ import {
 import type {
   DisposableProjectTemplateArtifactRedirectGrant,
   DisposableProjectTemplateArtifactRedirectHop,
+} from '../../infra/github/project-template-artifact-redirect.js';
+import {
+  createProjectTemplateArtifactPinnedTransport,
 } from '../../infra/github/project-template-artifact-redirect.js';
 
 class FakeChildProcess extends EventEmitter {
@@ -120,6 +145,7 @@ function captureRequest(): {
 afterEach(() => {
   vi.restoreAllMocks();
   https.request.mockReset();
+  redirect.bootstrap.mockReset();
 });
 
 describe('project-template authenticated release asset boundary F2b-B', () => {
@@ -239,6 +265,11 @@ describe('project-template authenticated release asset boundary F2b-B', () => {
     attempt.respond(response);
 
     expect(destroy).toHaveBeenCalledTimes(1);
+    expect(redirect.bootstrap).toHaveBeenCalledTimes(1);
+    expect(redirect.bootstrap.mock.calls[0]!.slice(1)).toEqual([
+      302,
+      'https://objects.githubusercontent.com/private/file?token=secret',
+    ]);
     expect(handedOff).toBeDefined();
     expect(Reflect.ownKeys(handedOff!)).toEqual(['consume', 'dispose']);
     expect(inspect(handedOff)).not.toContain('token=secret');
@@ -248,6 +279,61 @@ describe('project-template authenticated release asset boundary F2b-B', () => {
     hop.dispose();
     credential.dispose();
   });
+
+  it.each([301, 302, 303, 307, 308])(
+    'hands initial status %i to the pinned transport bootstrap seam',
+    async (statusCode) => {
+      const attempt = captureRequest();
+      const credential = await acquireCredential();
+      let grant:
+        DisposableProjectTemplateArtifactRedirectGrant | undefined;
+      const onRedirect = vi.fn((
+        value: DisposableProjectTemplateArtifactRedirectGrant,
+      ) => {
+        grant = value;
+      });
+      const handlers = makeHandlers({
+        onRedirect,
+      });
+      const facade = createProjectTemplateGithubReleaseAssetRequest(
+        credential,
+        { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+      );
+      attempt.respond(new FakeResponse(statusCode, [
+        'Location',
+        'https://objects.githubusercontent.com/private/file?token=secret',
+      ]));
+
+      expect(redirect.bootstrap).toHaveBeenCalledTimes(1);
+      expect(onRedirect).toHaveBeenCalledTimes(1);
+      facade.dispose();
+      const transport = createProjectTemplateArtifactPinnedTransport(
+        grant!.consume(),
+        Object.freeze({
+          onDnsRejected: vi.fn(),
+          onResponse: vi.fn(),
+          onInvalidResponse: vi.fn(),
+          onData: vi.fn(),
+          onEnd: vi.fn(),
+          onResponseAborted: vi.fn(),
+          onResponseError: vi.fn(),
+          onResponseClose: vi.fn(),
+          onRequestError: vi.fn(),
+          onRequestClose: vi.fn(),
+        }),
+      );
+      expect(Reflect.ownKeys(transport)).toEqual([
+        'start',
+        'pause',
+        'resume',
+        'destroy',
+        'dispose',
+      ]);
+      expect(inspect(transport)).not.toContain('token=secret');
+      transport.dispose();
+      credential.dispose();
+    },
+  );
 
   it('reclaims a synchronously consumed hop when onRedirect throws', async () => {
     const attempt = captureRequest();
