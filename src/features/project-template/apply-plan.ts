@@ -1183,10 +1183,21 @@ export function prepareProjectTemplateApplyPlan(
       return entry;
     }
     const formalBase = baseByPath.get(entry.path);
-    const base = baseContents.get(entry.path);
+    const storedBase = baseContents.get(entry.path);
     const local = localByPath.get(entry.path);
     const incoming = incomingContents.get(entry.path);
     if (incoming === undefined) return entry;
+    // Executors predating immutable baseline storage can still prove the
+    // historical bytes when the independently inspected incoming blob matches
+    // the formal lock digest. This migrates locally edited legacy configs
+    // without trusting current target bytes or weakening three-way semantics.
+    const recoveredLegacyBase =
+      storedBase === undefined
+      && formalBase !== undefined
+      && sha256(incoming) === formalBase.sha256
+        ? incoming
+        : undefined;
+    const base = storedBase ?? recoveredLegacyBase;
 
     const incomingValidation = mergeSupportedSemanticConfig({
       document: semanticDocument,

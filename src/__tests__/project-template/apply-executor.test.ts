@@ -392,14 +392,15 @@ describe('project template atomic apply executor', () => {
   );
 
   it.each([
-    ['unchanged', true],
-    ['locally deleted', false],
+    ['unchanged', 'language: en\n'],
+    ['locally edited', 'language: ja\n'],
+    ['locally deleted', undefined],
   ] as const)(
     'bootstraps a missing legacy baseline when semantic config is %s',
-    async (_state, localPresent) => {
+    async (_state, localContent) => {
       const root = makeRoot();
       const config = 'language: en\n';
-      if (localPresent) writeTakt(root, 'config.yaml', config);
+      if (localContent !== undefined) writeTakt(root, 'config.yaml', localContent);
       const baseManifest = manifest({ 'config.yaml': config });
       baseManifest.entries[0]!.policy = 'merge';
       const baseLock = baseLockFor(baseManifest);
@@ -420,7 +421,12 @@ describe('project template atomic apply executor', () => {
       });
 
       expect(applied.status).toBe('committed');
-      expect(existsSync(join(root, '.takt', 'config.yaml'))).toBe(localPresent);
+      expect(existsSync(join(root, '.takt', 'config.yaml')))
+        .toBe(localContent !== undefined);
+      if (localContent !== undefined) {
+        expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'))
+          .toBe(localContent);
+      }
       const storage = await initializeProjectTemplateApplyStorage({ repoPath: root });
       await expect(readProjectTemplateMergeBaseline({
         storage,

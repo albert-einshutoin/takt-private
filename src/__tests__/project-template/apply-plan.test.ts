@@ -260,6 +260,26 @@ describe('project template three-way apply plan', () => {
     }
   });
 
+  it('recovers a legacy base from incoming bytes that match the formal lock', () => {
+    const base = 'language: en\n';
+    const local = 'language: ja\n';
+    const prepared = prepareProjectTemplateApplyPlan(input({
+      base,
+      local,
+      incoming: base,
+      policy: 'merge',
+    }));
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'keep',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeSha256: hash(local),
+      afterSha256: hash(local),
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
   it('blocks an unsafe devloop policy on a direct add', () => {
     const incoming = 'mode: unsafe\n';
     const planInput = input({});
