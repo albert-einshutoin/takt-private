@@ -371,6 +371,29 @@ function signatureInput(
   );
 }
 
+/**
+ * @internal Shared only with the durable receipt store. Keeping this canonical
+ * constructor in D1 prevents signing and verification byte domains drifting.
+ */
+export function createGithubTemplateDownloadReceiptAuthenticationInput(
+  receipt: GithubTemplateDownloadReceiptV1,
+): Uint8Array {
+  return signatureInput(
+    receipt.payload,
+    receipt.authentication.keyId,
+  );
+}
+
+/** @internal Computes the content-addressed receipt key without accepting paths. */
+export function calculateGithubTemplateDownloadReceiptKey(
+  serialized: string,
+): string {
+  return createHash('sha256')
+    .update(RECEIPT_KEY_DOMAIN, 'utf8')
+    .update(serialized, 'utf8')
+    .digest('hex');
+}
+
 export function serializeGithubTemplateDownloadReceipt(
   value: GithubTemplateDownloadReceiptV1,
 ): string {
@@ -757,10 +780,7 @@ export async function prepareGithubTemplateDownloadReceipt(
       },
     });
     const serialized = serializeGithubTemplateDownloadReceipt(receipt);
-    const receiptKey = createHash('sha256')
-      .update(RECEIPT_KEY_DOMAIN, 'utf8')
-      .update(serialized, 'utf8')
-      .digest('hex');
+    const receiptKey = calculateGithubTemplateDownloadReceiptKey(serialized);
     const prepared = Object.freeze({ receipt, serialized, receiptKey });
     PREPARED_RECEIPT_AUTHORITIES.set(prepared, { state: 'active' });
     return prepared;
