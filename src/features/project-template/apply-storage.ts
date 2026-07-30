@@ -3,6 +3,7 @@ import { constants, type Dirent, type Stats } from 'node:fs';
 import {
   chmod,
   lstat,
+  link,
   mkdir,
   open,
   opendir,
@@ -49,6 +50,7 @@ export type ProjectTemplateApplyStorageIoOperation =
   | 'chmod'
   | 'file-fsync'
   | 'directory-fsync'
+  | 'link'
   | 'rename'
   | 'unlink'
   | 'rmdir';
@@ -127,10 +129,17 @@ export interface ProjectTemplateApplyStorageIo {
   readFile(path: string, maxBytes: number): Promise<Buffer>;
   readPrivateFile(path: string, maxBytes: number, expectedDevice: number): Promise<Buffer>;
   writeExclusive(path: string, content: Uint8Array, mode: number): Promise<void>;
+  writePreparedExclusive(
+    path: string,
+    content: Uint8Array,
+    mode: number,
+    expectedDevice: number,
+  ): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
   fsyncFile(path: string): Promise<void>;
   fsyncDirectory(path: string): Promise<void>;
   rename(source: string, destination: string): Promise<void>;
+  link(source: string, destination: string): Promise<void>;
   unlink(path: string): Promise<void>;
   rmdir(path: string): Promise<void>;
 }
@@ -143,6 +152,8 @@ export interface ProjectTemplateApplyStorage {
   stagingRoot: string;
   backupsRoot: string;
   baselinesRoot: string;
+  baselinesDevice: number;
+  baselinesInode: number;
   journalPath: string;
   lockPath: string;
   device: number;
@@ -599,6 +610,60 @@ export function createProjectTemplateApplyStorageIo(
       }
       runHook(hooks, 'after', 'write', path);
     },
+    writePreparedExclusive: async (path, content, mode, expectedDevice) => {
+      runHook(hooks, 'before', 'write', path);
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
+      let primaryError: unknown;
+      try {
+        handle = await open(
+          path,
+          constants.O_WRONLY
+            | constants.O_CREAT
+            | constants.O_EXCL
+            | constants.O_NOFOLLOW,
+          mode,
+        );
+        await handle.writeFile(content);
+        // Keep the descriptor open across hooks and all durability operations.
+        // A pathname chmod/fsync here would let a concurrent replacement redirect
+        // those operations to an attacker-controlled target.
+        runHook(hooks, 'after', 'write', path);
+        runHook(hooks, 'before', 'chmod', path);
+        await handle.chmod(mode);
+        runHook(hooks, 'after', 'chmod', path);
+        runHook(hooks, 'before', 'file-fsync', path);
+        await handle.sync();
+        runHook(hooks, 'after', 'file-fsync', path);
+        const descriptorStat = await handle.stat();
+        const pathStat = await lstat(path);
+        if (
+          !descriptorStat.isFile()
+          || descriptorStat.nlink !== 1
+          || descriptorStat.dev !== expectedDevice
+          || descriptorStat.size !== content.byteLength
+          || !isProjectTemplatePrivateFileMode(descriptorStat.mode, platform)
+          || !areProjectTemplateFileStatsEqual(descriptorStat, pathStat)
+        ) {
+          throw new ProjectTemplateApplyStorageError(
+            'UNSAFE_CONTROL_ROOT',
+            'project template prepared record changed while it was written',
+          );
+        }
+      } catch (error) {
+        primaryError = error;
+      }
+      try {
+        await handle?.close();
+      } catch (error) {
+        primaryError ??= error;
+      }
+      if (primaryError !== undefined) {
+        if (primaryError instanceof ProjectTemplateApplyStorageError) {
+          throw primaryError;
+        }
+        throw new ProjectTemplateApplyStorageIoError('write', path, primaryError);
+      }
+    },
     chmod: async (path, mode) => {
       runHook(hooks, 'before', 'chmod', path);
       try {
@@ -660,6 +725,15 @@ export function createProjectTemplateApplyStorageIo(
         throw new ProjectTemplateApplyStorageIoError('rename', destination, error);
       }
       runHook(hooks, 'after', 'rename', destination);
+    },
+    link: async (source, destination) => {
+      runHook(hooks, 'before', 'link', destination);
+      try {
+        await link(source, destination);
+      } catch (error) {
+        throw new ProjectTemplateApplyStorageIoError('link', destination, error);
+      }
+      runHook(hooks, 'after', 'link', destination);
     },
     unlink: async (path) => withIoHooks(hooks, 'unlink', path, () => unlink(path)),
     rmdir: async (path) => withIoHooks(hooks, 'rmdir', path, () => rmdir(path)),
@@ -877,6 +951,20 @@ export async function initializeProjectTemplateApplyStorage(options: {
       'project template control root must share the target filesystem',
     );
   }
+  const baselinesRealPath = await io.realpath(baselinesRoot);
+  const baselinesStat = await io.lstat(baselinesRoot);
+  if (
+    baselinesRealPath !== baselinesRoot
+    || baselinesStat.isSymbolicLink()
+    || !baselinesStat.isDirectory()
+    || baselinesStat.dev !== repoStat.dev
+    || !isProjectTemplatePrivateDirectoryMode(baselinesStat.mode, platform)
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template merge baseline root changed identity',
+    );
+  }
 
   const storage: ProjectTemplateApplyStorage = {
     repoRoot,
@@ -886,6 +974,8 @@ export async function initializeProjectTemplateApplyStorage(options: {
     stagingRoot,
     backupsRoot,
     baselinesRoot,
+    baselinesDevice: baselinesStat.dev,
+    baselinesInode: baselinesStat.ino,
     journalPath: join(controlRoot, 'journal.json'),
     lockPath: join(controlRoot, 'apply.lock'),
     device: repoStat.dev,

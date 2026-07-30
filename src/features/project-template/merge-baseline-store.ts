@@ -1,11 +1,15 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import {
+  isProjectTemplatePrivateDirectoryMode,
+} from './control-root-contract.js';
 import {
   ProjectTemplateApplyStorageError,
   type ProjectTemplateApplyStorage,
 } from './apply-storage.js';
 
 export const MAX_PROJECT_TEMPLATE_MERGE_BASELINE_BYTES = 256 * 1024;
+const MAX_BASELINE_DIRECTORY_ENTRIES = 8_192;
 
 function sha256(content: Uint8Array): string {
   return createHash('sha256').update(content).digest('hex');
@@ -47,17 +51,83 @@ function baselinePath(
   return join(storage.baselinesRoot, assertBaselineHash(expectedSha256));
 }
 
+async function assertBaselineRootIdentity(
+  storage: ProjectTemplateApplyStorage,
+): Promise<void> {
+  const [resolved, entry] = await Promise.all([
+    storage.io.realpath(storage.baselinesRoot),
+    storage.io.lstat(storage.baselinesRoot),
+  ]);
+  if (
+    resolved !== storage.baselinesRoot
+    || entry.isSymbolicLink()
+    || !entry.isDirectory()
+    || entry.dev !== storage.baselinesDevice
+    || entry.ino !== storage.baselinesInode
+    || !isProjectTemplatePrivateDirectoryMode(entry.mode, storage.platform)
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template merge baseline root changed identity',
+    );
+  }
+}
+
+function baselineTempNamePattern(expectedSha256: string): RegExp {
+  return new RegExp(
+    `^\\.${expectedSha256}\\.[0-9]+\\.[0-9a-f-]{36}\\.tmp$`,
+  );
+}
+
+async function removeIfPresent(
+  storage: ProjectTemplateApplyStorage,
+  path: string,
+): Promise<void> {
+  try {
+    await storage.io.unlink(path);
+  } catch (error) {
+    if (!hasCode(error, 'ENOENT')) throw error;
+  }
+}
+
+async function cleanupPreparedBaselines(
+  storage: ProjectTemplateApplyStorage,
+  expectedSha256: string,
+): Promise<void> {
+  await assertBaselineRootIdentity(storage);
+  const pattern = baselineTempNamePattern(expectedSha256);
+  const entries = await storage.io.readdir(
+    storage.baselinesRoot,
+    MAX_BASELINE_DIRECTORY_ENTRIES,
+  );
+  for (const entry of entries) {
+    if (!pattern.test(entry.name)) continue;
+    if (!entry.isFile() && !entry.isSymbolicLink()) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'project template prepared merge baseline is unsafe',
+      );
+    }
+    // Names are generated from a validated digest plus fixed-format process and
+    // UUID components, so cleanup cannot escape the baseline directory.
+    await removeIfPresent(storage, join(storage.baselinesRoot, entry.name));
+  }
+  await assertBaselineRootIdentity(storage);
+}
+
 async function readAndVerifyBaseline(options: {
   storage: ProjectTemplateApplyStorage;
   expectedSha256: string;
   maxBytes: number;
 }): Promise<Buffer> {
+  await assertBaselineRootIdentity(options.storage);
   const path = baselinePath(options.storage, options.expectedSha256);
   const content = await options.storage.io.readPrivateFile(
     path,
     options.maxBytes,
-    options.storage.device,
+    options.storage.baselinesDevice,
   );
+  await assertBaselineRootIdentity(options.storage);
   if (sha256(content) !== options.expectedSha256) {
     throw new ProjectTemplateApplyStorageError(
       'HASH_MISMATCH',
@@ -84,9 +154,45 @@ export async function writeProjectTemplateMergeBaseline(options: {
     );
   }
   const path = baselinePath(options.storage, options.expectedSha256);
+  await cleanupPreparedBaselines(options.storage, options.expectedSha256);
   try {
-    await options.storage.io.writeExclusive(path, content, 0o600);
+    const existing = await readAndVerifyBaseline({
+      storage: options.storage,
+      expectedSha256: options.expectedSha256,
+      maxBytes,
+    });
+    if (!existing.equals(content)) {
+      throw new ProjectTemplateApplyStorageError(
+        'HASH_MISMATCH',
+        'project template merge baseline is not immutable',
+      );
+    }
+    await options.storage.io.fsyncFile(path);
+    await options.storage.io.fsyncDirectory(options.storage.baselinesRoot);
+    return 'reused';
   } catch (error) {
+    if (!hasCode(error, 'ENOENT')) throw error;
+  }
+
+  const tempPath = join(
+    options.storage.baselinesRoot,
+    `.${options.expectedSha256}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let prepared = false;
+  try {
+    await options.storage.io.writePreparedExclusive(
+      tempPath,
+      content,
+      0o600,
+      options.storage.baselinesDevice,
+    );
+    prepared = true;
+    await assertBaselineRootIdentity(options.storage);
+    // Hard-link publication is an atomic no-overwrite operation: a competing
+    // writer can win, but an existing immutable baseline is never replaced.
+    await options.storage.io.link(tempPath, path);
+  } catch (error) {
+    await removeIfPresent(options.storage, tempPath);
     if (!hasCode(error, 'EEXIST')) throw error;
     const existing = await readAndVerifyBaseline({
       storage: options.storage,
@@ -105,10 +211,23 @@ export async function writeProjectTemplateMergeBaseline(options: {
     await options.storage.io.fsyncDirectory(options.storage.baselinesRoot);
     return 'reused';
   }
-  await options.storage.io.chmod(path, 0o600);
-  await options.storage.io.fsyncFile(path);
-  await options.storage.io.fsyncDirectory(options.storage.baselinesRoot);
-  return 'stored';
+  try {
+    await assertBaselineRootIdentity(options.storage);
+    await removeIfPresent(options.storage, tempPath);
+    prepared = false;
+    await options.storage.io.fsyncDirectory(options.storage.baselinesRoot);
+    return 'stored';
+  } catch (error) {
+    if (prepared) {
+      try {
+        await removeIfPresent(options.storage, tempPath);
+      } catch {
+        // The published immutable inode remains recoverable. A later retry
+        // performs bounded cleanup and re-establishes directory durability.
+      }
+    }
+    throw error;
+  }
 }
 
 export async function readProjectTemplateMergeBaseline(options: {
