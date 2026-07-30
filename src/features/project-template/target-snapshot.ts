@@ -9,6 +9,7 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
+import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
 import {
   areProjectTemplateFileStatsEqual,
 } from './bounded-file-read.js';
@@ -16,6 +17,7 @@ import { canonicalizeTaktpackJson } from './canonical-json.js';
 import { TaktpackError } from './errors.js';
 import {
   areProjectTemplateDirectorySnapshotsStable,
+  portablePathKey,
 } from './filesystem-scan.js';
 import {
   MAX_TEMPLATE_ENTRIES,
@@ -99,6 +101,16 @@ function safeMode(mode: number): string {
 
 function isInside(base: string, candidate: string): boolean {
   return candidate === base || candidate.startsWith(`${base}${sep}`);
+}
+
+function retainedContentLimit(path: string): number {
+  const key = portablePathKey(path);
+  // Semantic config needs historical bytes for safe three-way migration. Keep
+  // that narrowly scoped exception bounded by the same accepted blob limit;
+  // unrelated large files remain opaque to minimize secret exposure.
+  return key === 'config.yaml' || key === 'devloopd.yaml'
+    ? DEFAULT_TAKTPACK_LIMITS.maxBlobBytes
+    : MAX_DIFF_CONTENT_BYTES;
 }
 
 function unsafeTarget(): TaktpackError {
@@ -404,6 +416,7 @@ async function captureFile(
     const digest = createHash('sha256');
     const contentChunks: Buffer[] = [];
     const buffer = Buffer.alloc(64 * 1024);
+    const contentLimit = retainedContentLimit(relativePath);
     let position = 0;
     while (position < before.size) {
       const requested = Math.min(buffer.byteLength, before.size - position);
@@ -411,7 +424,7 @@ async function captureFile(
       if (bytesRead === 0) throw unsafeTarget();
       const chunk = Buffer.from(buffer.subarray(0, bytesRead));
       digest.update(chunk);
-      if (before.size <= MAX_DIFF_CONTENT_BYTES) contentChunks.push(chunk);
+      if (before.size <= contentLimit) contentChunks.push(chunk);
       position += bytesRead;
     }
     const after = await handle.stat();
@@ -424,7 +437,7 @@ async function captureFile(
         mode: safeMode(before.mode),
         sha256: digest.digest('hex'),
         bytes: before.size,
-        ...(before.size <= MAX_DIFF_CONTENT_BYTES
+        ...(before.size <= contentLimit
           ? { content: Buffer.concat(contentChunks) }
           : {}),
       },
