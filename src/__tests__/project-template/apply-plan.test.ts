@@ -280,6 +280,27 @@ describe('project template three-way apply plan', () => {
     expect(prepared.resolvedContents).toEqual([]);
   });
 
+  it('recovers a legacy base from unchanged local bytes that match the formal lock', () => {
+    const base = 'language: en\n';
+    const incoming = `${base}timezone: UTC\n`;
+
+    const prepared = prepareProjectTemplateApplyPlan(input({
+      base,
+      local: base,
+      incoming,
+      policy: 'merge',
+    }));
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'update',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeSha256: hash(base),
+      afterSha256: hash(incoming),
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
   it('reuses a verified baseline when an unchanged large local snapshot omits content', () => {
     const base = `${'# padding\n'.repeat(8_000)}language: en\n`;
     const incoming = `${base}timezone: UTC\n`;

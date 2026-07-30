@@ -1187,15 +1187,19 @@ export function prepareProjectTemplateApplyPlan(
     const local = localByPath.get(entry.path);
     const incoming = incomingContents.get(entry.path);
     if (incoming === undefined) return entry;
-    // Executors predating immutable baseline storage can still prove the
-    // historical bytes when the independently inspected incoming blob matches
-    // the formal lock digest. This migrates locally edited legacy configs
-    // without trusting current target bytes or weakening three-way semantics.
+    // Executors predating immutable baseline storage can still prove historical
+    // bytes when independently hashed incoming or captured local content matches
+    // the formal lock. This migrates legacy configs without trusting an
+    // unverified current target or weakening three-way semantics.
     const recoveredLegacyBase =
       storedBase === undefined
       && formalBase !== undefined
-      && sha256(incoming) === formalBase.sha256
-        ? incoming
+        ? sha256(incoming) === formalBase.sha256
+          ? incoming
+          : local?.content !== undefined
+            && local.sha256 === formalBase.sha256
+            ? Buffer.from(local.content)
+            : undefined
         : undefined;
     const base = storedBase ?? recoveredLegacyBase;
 
