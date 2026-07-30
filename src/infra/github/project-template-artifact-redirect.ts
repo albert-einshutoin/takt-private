@@ -923,7 +923,10 @@ type PinnedTransportBodyEventKind =
 
 interface PinnedTransportBodyListenerToken {
   active: boolean;
-  dispatch?: (event: PinnedTransportBodyEventKind) => void;
+  dispatch?: (
+    event: PinnedTransportBodyEventKind,
+    chunk?: unknown,
+  ) => void;
 }
 
 interface PinnedTransportBody {
@@ -965,6 +968,7 @@ type PinnedTransportPumpEvent =
     readonly kind: 'body-event';
     readonly token: PinnedTransportBodyListenerToken;
     readonly event: PinnedTransportBodyEventKind;
+    chunk?: unknown;
   };
 
 interface PinnedTransportAuthority {
@@ -989,10 +993,16 @@ function createPinnedBodyListener(
   token: PinnedTransportBodyListenerToken,
   event: PinnedTransportBodyEventKind,
 ): (...args: unknown[]) => void {
-  return () => {
+  return (value?: unknown) => {
     if (!token.active) return;
     const dispatch = token.dispatch;
-    if (dispatch !== undefined) Reflect.apply(dispatch, undefined, [event]);
+    if (dispatch !== undefined) {
+      Reflect.apply(
+        dispatch,
+        undefined,
+        event === 'data' ? [event, value] : [event],
+      );
+    }
   };
 }
 
@@ -1508,6 +1518,33 @@ export function createProjectTemplateArtifactPinnedTransport(
     if (!destroyRequest(body.request, body.requestDestroy)) succeeded = false;
     return succeeded;
   };
+  const releaseDetachedBody = (
+    body: NonNullable<ReturnType<typeof detachBody>>,
+  ): void => {
+    removeRequestListeners(body.request, body.requestListeners);
+    if (body.response === undefined) return;
+    for (const [event, listener] of body.responseListeners) {
+      try {
+        EventEmitter.prototype.removeListener.call(
+          body.response,
+          event,
+          listener,
+        );
+      } catch {
+        // End already owns the terminal outcome; listener revocation remains
+        // authoritative even when host cleanup is monkey-patched.
+      }
+    }
+  };
+  const clearPendingEvents = (
+    events: PinnedTransportPumpEvent[],
+  ): void => {
+    for (const event of events) {
+      if (event.kind === 'response') containResponse(event.response);
+      if (event.kind === 'body-event') event.chunk = undefined;
+    }
+    events.length = 0;
+  };
   const terminate = (
     authority: PinnedTransportAuthority,
     notification?: keyof ProjectTemplateArtifactPinnedTransportHandlers,
@@ -1543,9 +1580,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     } catch {
       // Terminal capability deletion remains authoritative.
     }
-    for (const event of pendingEvents) {
-      if (event.kind === 'response') containResponse(event.response);
-    }
+    clearPendingEvents(pendingEvents);
     if (isDisposed(authority)) return;
     if (notification !== undefined) {
       invoke(notification);
@@ -1601,6 +1636,7 @@ export function createProjectTemplateArtifactPinnedTransport(
   const enqueue = (event: PinnedTransportPumpEvent): void => {
     if (isStopped(authority)) {
       if (event.kind === 'response') containResponse(event.response);
+      if (event.kind === 'body-event') event.chunk = undefined;
       return;
     }
     authority.pumpQueue.push(event);
@@ -1821,9 +1857,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     } catch {
       // Capability revocation is complete before disposal can re-enter.
     }
-    for (const event of pendingEvents) {
-      if (event.kind === 'response') containResponse(event.response);
-    }
+    clearPendingEvents(pendingEvents);
     if (isDisposed(current)) return;
     if (!cleaned) {
       invoke('onResponseError');
@@ -1859,8 +1893,13 @@ export function createProjectTemplateArtifactPinnedTransport(
     const listenerToken: PinnedTransportBodyListenerToken = {
       active: true,
     };
-    listenerToken.dispatch = (event) => {
-      enqueue({ kind: 'body-event', token: listenerToken, event });
+    listenerToken.dispatch = (event, chunk) => {
+      enqueue({
+        kind: 'body-event',
+        token: listenerToken,
+        event,
+        chunk: event === 'data' ? chunk : undefined,
+      });
     };
     const body: PinnedTransportBody = {
       listenerToken,
@@ -2015,12 +2054,81 @@ export function createProjectTemplateArtifactPinnedTransport(
     enqueue({ kind: 'begin', targetUrl: nextTargetUrl });
   };
 
+  const settleBody = (
+    current: PinnedTransportAuthority,
+    body: PinnedTransportBody,
+    notification:
+      | 'onEnd'
+      | 'onResponseAborted'
+      | 'onResponseError'
+      | 'onResponseClose',
+    destroyResources: boolean,
+  ): void => {
+    if (current.body !== body || isStopped(current)) return;
+    current.phase = 'terminal';
+    current.release();
+    const detached = detachBody(current, body);
+    const pendingEvents = current.pumpQueue.splice(0);
+    if (detached !== undefined) {
+      if (destroyResources) {
+        cleanDetachedBody(detached);
+      } else {
+        releaseDetachedBody(detached);
+      }
+    }
+    clearPendingEvents(pendingEvents);
+    if (isDisposed(current)) return;
+    invoke(notification);
+  };
+
+  const processBodyEvent = (
+    current: PinnedTransportAuthority,
+    event: Extract<PinnedTransportPumpEvent, { kind: 'body-event' }>,
+  ): void => {
+    const body = current.body;
+    if (
+      body === undefined
+      || body.listenerToken !== event.token
+      || !event.token.active
+    ) {
+      event.chunk = undefined;
+      return;
+    }
+    if (event.event === 'data') {
+      if (current.phase !== 'body-streaming') {
+        event.chunk = undefined;
+        terminate(current, 'onResponseError');
+        return;
+      }
+      let chunk = event.chunk;
+      event.chunk = undefined;
+      const delivered = invoke('onData', [chunk]);
+      chunk = undefined;
+      if (!delivered && !isStopped(current)) {
+        terminate(current, 'onResponseError');
+      }
+      return;
+    }
+    event.chunk = undefined;
+    if (event.event === 'end') {
+      settleBody(current, body, 'onEnd', false);
+      return;
+    }
+    const notification = event.event === 'aborted'
+      ? 'onResponseAborted'
+      : event.event === 'error'
+        ? 'onResponseError'
+        : 'onResponseClose';
+    settleBody(current, body, notification, true);
+  };
+
   const processPumpEvent = (
     current: PinnedTransportAuthority,
     event: PinnedTransportPumpEvent,
   ): void => {
     if (isStopped(current)) {
       if (event.kind === 'response') containResponse(event.response);
+      if (event.kind === 'body-event') event.chunk = undefined;
       return;
     }
     if (event.kind === 'begin') {
@@ -2047,8 +2155,7 @@ export function createProjectTemplateArtifactPinnedTransport(
       return;
     }
     if (event.kind === 'body-event') {
-      // Commit 1 establishes ownership only. The next slice will translate
-      // these bounded tokens into streaming callbacks.
+      processBodyEvent(current, event);
       return;
     }
     if (current.activeAttempt === event.attempt) {
@@ -2089,24 +2196,57 @@ export function createProjectTemplateArtifactPinnedTransport(
       const current = pinnedTransportAuthorities.get(this);
       if (
         current === undefined
-        || current.phase !== 'body-paused'
+        || (
+          current.phase !== 'body-paused'
+          && current.phase !== 'body-streaming'
+        )
         || current.body === undefined
       ) {
         throw invalidArgument();
       }
-      // The body is already paused; retaining the phase keeps this slice from
-      // exposing data before streaming ownership exists.
+      if (current.phase === 'body-paused') return;
+      const body = current.body;
+      const response = body.response;
+      const pause = body.pause;
+      current.phase = 'body-paused';
+      if (response === undefined || pause === undefined) {
+        terminate(current, 'onResponseError');
+        throw invalidArgument();
+      }
+      try {
+        Reflect.apply(pause, response, []);
+      } catch {
+        terminate(current, 'onResponseError');
+        throw invalidArgument();
+      }
     },
     resume(this: ProjectTemplateArtifactPinnedTransport): void {
       const current = pinnedTransportAuthorities.get(this);
       if (
         current === undefined
-        || current.phase !== 'body-paused'
+        || (
+          current.phase !== 'body-paused'
+          && current.phase !== 'body-streaming'
+        )
         || current.body === undefined
       ) {
         throw invalidArgument();
       }
-      // Streaming is intentionally activated by the next atomic commit.
+      if (current.phase === 'body-streaming') return;
+      const body = current.body;
+      const response = body.response;
+      const resume = body.resume;
+      current.phase = 'body-streaming';
+      if (response === undefined || resume === undefined) {
+        terminate(current, 'onResponseError');
+        throw invalidArgument();
+      }
+      try {
+        Reflect.apply(resume, response, []);
+      } catch {
+        terminate(current, 'onResponseError');
+        throw invalidArgument();
+      }
     },
     destroy(this: ProjectTemplateArtifactPinnedTransport): void {
       const current = pinnedTransportAuthorities.get(this);
@@ -2130,9 +2270,7 @@ export function createProjectTemplateArtifactPinnedTransport(
       pinnedTransportAuthorities.delete(this);
       if (detached !== undefined) cleanDetachedAttempt(detached);
       if (detachedBody !== undefined) cleanDetachedBody(detachedBody);
-      for (const event of pendingEvents) {
-        if (event.kind === 'response') containResponse(event.response);
-      }
+      clearPendingEvents(pendingEvents);
       try {
         ownedState?.dispose();
       } catch {

@@ -356,7 +356,7 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
       expect(revokedLookup.mock.calls[0]![0]).toBeInstanceOf(Error);
       expect(() => transport.pause()).not.toThrow();
       expect(() => transport.resume()).not.toThrow();
-      expect(response.isPaused()).toBe(true);
+      expect(response.isPaused()).toBe(false);
     });
     const handlers = makeHandlers({ onResponse });
     transport = createProjectTemplateArtifactPinnedTransport(
@@ -373,6 +373,340 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     transport.dispose();
     expect(destroy).toHaveBeenCalledTimes(1);
     expect(request.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('streams body data only after resume and ends without destroying resources', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    transport.start();
+    const chunk = Buffer.from('artifact body');
+
+    response.emit('data', Buffer.from('premature'));
+    expect(handlers.onData).not.toHaveBeenCalled();
+    expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+    transport.dispose();
+
+    const response2 = new FakeResponse(200);
+    const request2 = new FakeRequest();
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response2);
+      return request2;
+    });
+    const handlers2 = makeHandlers();
+    const transport2 = createProjectTemplateArtifactPinnedTransport(
+      makeHop('https://objects.githubusercontent.com/private/two'),
+      handlers2,
+    );
+    transport2.start();
+    transport2.resume();
+    response2.emit('data', chunk);
+    response2.emit('end');
+    response2.emit('close');
+
+    expect(handlers2.onData).toHaveBeenCalledTimes(1);
+    expect(handlers2.onData).toHaveBeenCalledWith(chunk);
+    expect(handlers2.onEnd).toHaveBeenCalledTimes(1);
+    expect(handlers2.onResponseClose).not.toHaveBeenCalled();
+    expect(response2.destroyed).toBe(false);
+    expect(request2.destroy).not.toHaveBeenCalled();
+    transport2.dispose();
+  });
+
+  it.each([
+    ['aborted', 'onResponseAborted'],
+    ['error', 'onResponseError'],
+    ['close', 'onResponseClose'],
+  ] as const)(
+    'settles body %s before end through %s',
+    (event, handlerName) => {
+      const request = new FakeRequest();
+      const response = new FakeResponse(200);
+      native.dnsLookup.mockImplementation((
+        _hostname: string,
+        _options: unknown,
+        callback: (...args: unknown[]) => void,
+      ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+      native.httpsRequest.mockImplementation((
+        _options: RequestOptions,
+        callback: (value: FakeResponse) => void,
+      ) => {
+        callback(response);
+        return request;
+      });
+      const handlers = makeHandlers();
+      const transport = createProjectTemplateArtifactPinnedTransport(
+        makeHop(),
+        handlers,
+      );
+      transport.start();
+      transport.resume();
+
+      if (event === 'error') {
+        response.emit(event, new Error('private response error'));
+      } else {
+        response.emit(event);
+      }
+      response.emit('end');
+
+      expect(handlers[handlerName]).toHaveBeenCalledTimes(1);
+      expect(handlers.onEnd).not.toHaveBeenCalled();
+      expect(request.destroy).toHaveBeenCalledTimes(1);
+      transport.dispose();
+    },
+  );
+
+  it.each(['pause', 'resume'] as const)(
+    'rolls back and throws a fixed error when body %s fails',
+    (operation) => {
+      const request = new FakeRequest();
+      const response = new FakeResponse(200);
+      native.dnsLookup.mockImplementation((
+        _hostname: string,
+        _options: unknown,
+        callback: (...args: unknown[]) => void,
+      ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+      native.httpsRequest.mockImplementation((
+        _options: RequestOptions,
+        callback: (value: FakeResponse) => void,
+      ) => {
+        callback(response);
+        return request;
+      });
+      const handlers = makeHandlers();
+      if (operation === 'pause') {
+        const nativePause = response.pause;
+        let pauseCalls = 0;
+        vi.spyOn(response, 'pause').mockImplementation(() => {
+          pauseCalls += 1;
+          if (pauseCalls === 1) {
+            return Reflect.apply(nativePause, response, []);
+          }
+          throw new Error('private stream method failure');
+        });
+      } else {
+        vi.spyOn(response, 'resume').mockImplementation(() => {
+          throw new Error('private stream method failure');
+        });
+      }
+      const transport = createProjectTemplateArtifactPinnedTransport(
+        makeHop(),
+        handlers,
+      );
+      transport.start();
+      if (operation === 'pause') transport.resume();
+
+      let thrown: unknown;
+      try {
+        transport[operation]();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toEqual(expect.objectContaining({
+        code: 'INVALID_ARGUMENT',
+      }));
+      expect(String(thrown)).not.toContain('private');
+      expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+      expect(request.destroy).toHaveBeenCalledTimes(1);
+      transport.dispose();
+    },
+  );
+
+  it('queues synchronous resume data and end after the response handler', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const order: string[] = [];
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    let transport!: ReturnType<
+      typeof createProjectTemplateArtifactPinnedTransport
+    >;
+    vi.spyOn(response, 'resume').mockImplementation(() => {
+      response.emit('data', Buffer.from('synchronous'));
+      response.emit('end');
+      return response;
+    });
+    const handlers = makeHandlers({
+      onResponse: vi.fn(() => {
+        order.push('response');
+        transport.resume();
+        order.push('response-return');
+      }),
+      onData: vi.fn(() => order.push('data')),
+      onEnd: vi.fn(() => order.push('end')),
+    });
+    transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    transport.start();
+
+    expect(order).toEqual(['response', 'response-return', 'data', 'end']);
+    transport.dispose();
+  });
+
+  it('serializes reentrant data and body flow control through the pump', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const pause = vi.spyOn(response, 'pause');
+    const resume = vi.spyOn(response, 'resume');
+    const order: string[] = [];
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    let transport!: ReturnType<
+      typeof createProjectTemplateArtifactPinnedTransport
+    >;
+    const handlers = makeHandlers({
+      onData: vi.fn((chunk: unknown) => {
+        const value = String(chunk);
+        order.push(`${value}-start`);
+        if (value === 'first') {
+          response.emit('data', Buffer.from('second'));
+          transport.pause();
+          transport.pause();
+          transport.resume();
+          transport.resume();
+        }
+        order.push(`${value}-end`);
+      }),
+    });
+    transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    transport.start();
+    transport.resume();
+
+    response.emit('data', Buffer.from('first'));
+
+    expect(order).toEqual([
+      'first-start',
+      'first-end',
+      'second-start',
+      'second-end',
+    ]);
+    expect(pause).toHaveBeenCalledTimes(2);
+    expect(resume).toHaveBeenCalledTimes(2);
+    transport.dispose();
+  });
+
+  it('terminates body ownership before reporting a data handler failure', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers({
+      onData: vi.fn(() => {
+        throw new Error('private data handler failure');
+      }),
+    });
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    transport.start();
+    transport.resume();
+
+    expect(() => response.emit('data', Buffer.from('private'))).not.toThrow();
+
+    expect(handlers.onData).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+    expect(responseDestroy).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    transport.dispose();
+  });
+
+  it('does not destroy a clean end or report an end-handler exception', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers({
+      onEnd: vi.fn(() => {
+        throw new Error('private end handler failure');
+      }),
+    });
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    transport.start();
+    transport.resume();
+
+    expect(() => response.emit('end')).not.toThrow();
+    response.emit('close');
+
+    expect(handlers.onEnd).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    expect(handlers.onResponseClose).not.toHaveBeenCalled();
+    expect(responseDestroy).not.toHaveBeenCalled();
+    expect(request.destroy).not.toHaveBeenCalled();
+    transport.dispose();
+    expect(responseDestroy).not.toHaveBeenCalled();
+    expect(request.destroy).not.toHaveBeenCalled();
   });
 
   it('revokes a retained body listener even when listener removal fails', () => {
