@@ -552,6 +552,14 @@ function recoverDeadCoordinationNamespace(
   }
 }
 
+/**
+ * Resume a terminal v3 recovery owner from the explicit operator recovery flow.
+ *
+ * Normal TAKT/apply processes remain blocked by v3, so only operator recovery
+ * can enter here. As with the existing personal recovery mutations, callers
+ * must serialize explicit recovery commands; portable Node filesystem APIs do
+ * not provide a crash-recoverable conditional unlink primitive.
+ */
 export function recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(
   repoPathValue: string,
   options: ProjectTemplateCoordinationRecoveryOptions,
