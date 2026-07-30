@@ -14,6 +14,7 @@ vi.mock('node:https', () => ({ request: native.httpsRequest }));
 
 import type { DisposableProjectTemplateGhCredential } from '../../infra/github/project-template-gh-auth.js';
 import {
+  bootstrapProjectTemplateArtifactRedirect,
   createProjectTemplateArtifactPinnedTransport,
   createProjectTemplateArtifactRedirectState,
   type DisposableProjectTemplateArtifactRedirectHop,
@@ -26,8 +27,17 @@ class FakeRequest extends EventEmitter {
 }
 
 class FakeResponse extends PassThrough {
-  constructor(readonly statusCode: number) {
+  constructor(
+    readonly statusCode: number,
+    rawHeaders: unknown = [],
+  ) {
     super();
+    Object.defineProperty(this, 'rawHeaders', {
+      configurable: true,
+      enumerable: true,
+      value: rawHeaders,
+      writable: true,
+    });
   }
 }
 
@@ -55,7 +65,11 @@ function makeHop(
   const state = createProjectTemplateArtifactRedirectState(
     'https://api.github.com/repos/octo/demo/releases/assets/123',
   );
-  return state.resolve(302, target).consume();
+  return bootstrapProjectTemplateArtifactRedirect(
+    state,
+    302,
+    target,
+  ).consume();
 }
 
 afterEach(() => {
@@ -546,5 +560,466 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
       { address: '2606:4700:4700::1111', family: 6 },
     ]);
     transport.dispose();
+  });
+
+  it('iteratively follows three synchronous redirects before terminal 200', () => {
+    const responses = [
+      new FakeResponse(301, [
+        'Location',
+        'https://release-assets.githubusercontent.com/one',
+      ]),
+      new FakeResponse(302, [
+        'location',
+        'https://github-releases.githubusercontent.com/two',
+      ]),
+      new FakeResponse(308, [
+        'LOCATION',
+        'https://objects.githubusercontent.com/three',
+      ]),
+      new FakeResponse(200),
+    ];
+    const responseDestroys = responses.map(
+      (response) => vi.spyOn(response, 'destroy'),
+    );
+    const requests: FakeRequest[] = [];
+    const options: RequestOptions[] = [];
+    let externalDepth = 0;
+    let maximumExternalDepth = 0;
+    const enterExternal = (): void => {
+      externalDepth += 1;
+      maximumExternalDepth = Math.max(maximumExternalDepth, externalDepth);
+    };
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => {
+      enterExternal();
+      callback(null, [{ address: '93.184.216.34', family: 4 }]);
+      externalDepth -= 1;
+    });
+    native.httpsRequest.mockImplementation((
+      value: RequestOptions,
+      callback: (response: FakeResponse) => void,
+    ) => {
+      enterExternal();
+      options.push(value);
+      const request = new FakeRequest();
+      requests.push(request);
+      callback(responses[requests.length - 1]!);
+      externalDepth -= 1;
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    transport.start();
+
+    expect(maximumExternalDepth).toBe(1);
+    expect(native.dnsLookup).toHaveBeenCalledTimes(4);
+    expect(native.httpsRequest).toHaveBeenCalledTimes(4);
+    expect(options.map((value) => value.hostname)).toEqual([
+      'objects.githubusercontent.com',
+      'release-assets.githubusercontent.com',
+      'github-releases.githubusercontent.com',
+      'objects.githubusercontent.com',
+    ]);
+    for (const value of options) {
+      expect(value.agent).toBe(false);
+      expect(value.servername).toBe(value.hostname);
+      expect((value.headers as Record<string, string>)['Host']).toBe(
+        value.hostname,
+      );
+    }
+    for (const destroy of responseDestroys) {
+      expect(destroy).toHaveBeenCalledTimes(1);
+    }
+    for (const request of requests) {
+      expect(request.destroy).toHaveBeenCalledTimes(1);
+    }
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledWith();
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(handlers.onData).not.toHaveBeenCalled();
+    expect(handlers.onEnd).not.toHaveBeenCalled();
+    transport.dispose();
+  });
+
+  it('rejects the fourth redirect without starting another attempt', () => {
+    const responses = [
+      new FakeResponse(301, [
+        'Location',
+        'https://release-assets.githubusercontent.com/one',
+      ]),
+      new FakeResponse(302, [
+        'Location',
+        'https://github-releases.githubusercontent.com/two',
+      ]),
+      new FakeResponse(307, [
+        'Location',
+        'https://objects.githubusercontent.com/three',
+      ]),
+      new FakeResponse(308, [
+        'Location',
+        'https://release-assets.githubusercontent.com/four',
+      ]),
+    ];
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (response: FakeResponse) => void,
+    ) => {
+      const request = new FakeRequest();
+      callback(responses[native.httpsRequest.mock.calls.length - 1]!);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    transport.start();
+
+    expect(native.dnsLookup).toHaveBeenCalledTimes(4);
+    expect(native.httpsRequest).toHaveBeenCalledTimes(4);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    transport.dispose();
+  });
+
+  it.each([
+    [],
+    ['Location', 'https://objects.githubusercontent.com/a', 'location',
+      'https://objects.githubusercontent.com/b'],
+    ['Location', 123],
+    Object.assign([
+      'Location',
+      'https://objects.githubusercontent.com/a',
+    ], { extra: true }),
+    (() => {
+      const sparse = new Array(2);
+      sparse[0] = 'Location';
+      return sparse;
+    })(),
+    new Proxy([
+      'Location',
+      'https://objects.githubusercontent.com/a',
+    ], {}),
+    new Array(258).fill('x'),
+    ['X-Large', 'x'.repeat(64 * 1024), 'Location',
+      'https://objects.githubusercontent.com/a'],
+  ])('rejects strict redirect rawHeaders %# without a next attempt', (headers) => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(302, headers);
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    expect(() => transport.start()).not.toThrow();
+    expect(native.dnsLookup).toHaveBeenCalledTimes(1);
+    expect(native.httpsRequest).toHaveBeenCalledTimes(1);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledWith();
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    transport.dispose();
+  });
+
+  it.each([
+    'https://objects.githubusercontent.com/private/file?sig=secret',
+    'https://evil.example/private',
+  ])('rejects loop or forbidden redirect %s without a next attempt', (location) => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(302, ['Location', location]);
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    transport.start();
+
+    expect(native.dnsLookup).toHaveBeenCalledTimes(1);
+    expect(native.httpsRequest).toHaveBeenCalledTimes(1);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    transport.dispose();
+  });
+
+  it('rejects accessor rawHeaders without invoking it', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(302);
+    const getter = vi.fn(() => [
+      'Location',
+      'https://release-assets.githubusercontent.com/private',
+    ]);
+    Object.defineProperty(response, 'rawHeaders', {
+      configurable: true,
+      get: getter,
+    });
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    transport.start();
+
+    expect(getter).not.toHaveBeenCalled();
+    expect(native.dnsLookup).toHaveBeenCalledTimes(1);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    transport.dispose();
+  });
+
+  it.each(['invalid-return', 'throw-after-callback'])(
+    'keeps a synchronous redirect behind the construction barrier: %s',
+    (failure) => {
+      const response = new FakeResponse(302, [
+        'Location',
+        'https://release-assets.githubusercontent.com/next',
+      ]);
+      const destroy = vi.spyOn(response, 'destroy');
+      native.dnsLookup.mockImplementation((
+        _hostname: string,
+        _options: unknown,
+        callback: (...args: unknown[]) => void,
+      ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+      native.httpsRequest.mockImplementation((
+        _options: RequestOptions,
+        callback: (value: FakeResponse) => void,
+      ) => {
+        callback(response);
+        if (failure === 'throw-after-callback') {
+          throw new Error('private request construction');
+        }
+        return null;
+      });
+      const handlers = makeHandlers();
+      const transport = createProjectTemplateArtifactPinnedTransport(
+        makeHop(),
+        handlers,
+      );
+
+      expect(() => transport.start()).not.toThrow();
+      expect(native.dnsLookup).toHaveBeenCalledTimes(1);
+      expect(native.httpsRequest).toHaveBeenCalledTimes(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+      expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+      transport.dispose();
+    },
+  );
+
+  it('keeps lookup and callbacks pinned to their immutable attempt identity', () => {
+    const dnsCallbacks: Array<(...args: unknown[]) => void> = [];
+    const options: RequestOptions[] = [];
+    const responseCallbacks: Array<(value: FakeResponse) => void> = [];
+    const requests: FakeRequest[] = [];
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => {
+      dnsCallbacks.push(callback);
+    });
+    native.httpsRequest.mockImplementation((
+      value: RequestOptions,
+      callback: (response: FakeResponse) => void,
+    ) => {
+      options.push(value);
+      responseCallbacks.push(callback);
+      const request = new FakeRequest();
+      requests.push(request);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    transport.start();
+    dnsCallbacks[0]!(null, [
+      { address: '93.184.216.34', family: 4 },
+    ]);
+    const oldLookup = options[0]!.lookup!;
+    responseCallbacks[0]!(new FakeResponse(302, [
+      'Location',
+      'https://release-assets.githubusercontent.com/next',
+    ]));
+
+    expect(dnsCallbacks).toHaveLength(2);
+    dnsCallbacks[0]!(null, [
+      { address: '8.8.8.8', family: 4 },
+    ]);
+    expect(native.httpsRequest).toHaveBeenCalledTimes(1);
+    const staleLookup = vi.fn();
+    oldLookup(
+      'objects.githubusercontent.com',
+      { all: false, family: 4 },
+      staleLookup,
+    );
+    expect(staleLookup.mock.calls[0]![0]).toBeInstanceOf(Error);
+
+    dnsCallbacks[1]!(null, [
+      { address: '8.8.8.8', family: 4 },
+    ]);
+    expect(native.httpsRequest).toHaveBeenCalledTimes(2);
+    const currentLookup = vi.fn();
+    options[1]!.lookup!(
+      'release-assets.githubusercontent.com',
+      { all: false, family: 4 },
+      currentLookup,
+    );
+    expect(currentLookup).toHaveBeenCalledWith(null, '8.8.8.8', 4);
+    const late = new FakeResponse(302, [
+      'Location',
+      'https://objects.githubusercontent.com/late',
+    ]);
+    const lateDestroy = vi.spyOn(late, 'destroy');
+    responseCallbacks[0]!(late);
+    expect(lateDestroy).toHaveBeenCalledTimes(1);
+    expect(native.dnsLookup).toHaveBeenCalledTimes(2);
+    expect(requests[0]!.destroy).toHaveBeenCalledTimes(1);
+    transport.dispose();
+  });
+
+  it('contains a duplicate response callback without duplicating the pump', () => {
+    const first = new FakeResponse(302, [
+      'Location',
+      'https://release-assets.githubusercontent.com/next',
+    ]);
+    const duplicate = new FakeResponse(302, [
+      'Location',
+      'https://objects.githubusercontent.com/duplicate',
+    ]);
+    const duplicateDestroy = vi.spyOn(duplicate, 'destroy');
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      const request = new FakeRequest();
+      if (native.httpsRequest.mock.calls.length === 1) {
+        callback(first);
+        callback(duplicate);
+      }
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    transport.start();
+
+    expect(duplicateDestroy).toHaveBeenCalledTimes(1);
+    expect(native.dnsLookup).toHaveBeenCalledTimes(2);
+    expect(native.httpsRequest).toHaveBeenCalledTimes(2);
+    expect(handlers.onInvalidResponse).not.toHaveBeenCalled();
+    transport.dispose();
+  });
+
+  it('does not pump after redirect cleanup throws or disposes reentrantly', () => {
+    const cases = ['response-throw', 'request-throw', 'dispose'] as const;
+    for (const cleanupCase of cases) {
+      native.dnsLookup.mockReset();
+      native.httpsRequest.mockReset();
+      const request = new FakeRequest();
+      const response = new FakeResponse(302, [
+        'Location',
+        'https://release-assets.githubusercontent.com/next',
+      ]);
+      native.dnsLookup.mockImplementation((
+        _hostname: string,
+        _options: unknown,
+        callback: (...args: unknown[]) => void,
+      ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+      let transport!: ReturnType<
+        typeof createProjectTemplateArtifactPinnedTransport
+      >;
+      if (cleanupCase === 'response-throw') {
+        vi.spyOn(response, 'destroy').mockImplementation(() => {
+          throw new Error('private response cleanup');
+        });
+      } else if (cleanupCase === 'request-throw') {
+        request.destroy.mockImplementation(() => {
+          throw new Error('private request cleanup');
+        });
+      } else {
+        vi.spyOn(response, 'destroy').mockImplementation(() => {
+          transport.dispose();
+          return response;
+        });
+      }
+      native.httpsRequest.mockImplementation((
+        _options: RequestOptions,
+        callback: (value: FakeResponse) => void,
+      ) => {
+        callback(response);
+        return request;
+      });
+      const handlers = makeHandlers();
+      transport = createProjectTemplateArtifactPinnedTransport(
+        makeHop(),
+        handlers,
+      );
+
+      expect(() => transport.start()).not.toThrow();
+      expect(native.dnsLookup).toHaveBeenCalledTimes(1);
+      expect(native.httpsRequest).toHaveBeenCalledTimes(1);
+      if (cleanupCase === 'dispose') {
+        expect(handlers.onInvalidResponse).not.toHaveBeenCalled();
+      } else {
+        expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+      }
+      transport.dispose();
+    }
   });
 });

@@ -10,6 +10,8 @@ import { types } from 'node:util';
 
 const MAX_LOCATION_LENGTH = 8_192;
 const MAX_DNS_ANSWERS = 64;
+const MAX_PINNED_RAW_HEADER_ENTRIES = 256;
+const MAX_PINNED_RAW_HEADER_CHARACTERS = 64 * 1024;
 const MAX_IPV4_ADDRESS_LENGTH = 15;
 const MAX_IPV6_ADDRESS_LENGTH = 45;
 const MAX_REDIRECTS = 3;
@@ -879,18 +881,50 @@ export interface ProjectTemplateArtifactPinnedTransport {
   dispose(): void;
 }
 
-interface PinnedTransportAuthority {
-  state?: DisposableProjectTemplateArtifactRedirectState;
-  targetUrl?: URL;
-  dnsSnapshot?: readonly ProjectTemplateArtifactDnsAnswerSnapshot[];
+interface PinnedTransportAttempt {
+  readonly generation: number;
+  readonly targetUrl: URL;
   request?: ClientRequest;
   requestDestroy?: (...args: unknown[]) => unknown;
   requestEnd?: (...args: unknown[]) => unknown;
   requestListeners: ReadonlyArray<
     readonly [event: string, listener: (...args: unknown[]) => void]
   >;
-  started: boolean;
   dnsSettled: boolean;
+  responseDelivered: boolean;
+  responseSeen: boolean;
+  requestTerminalDelivered: boolean;
+}
+
+type PinnedTransportPumpEvent =
+  | {
+    readonly kind: 'begin';
+    readonly targetUrl: URL;
+  }
+  | {
+    readonly kind: 'dns';
+    readonly attempt: PinnedTransportAttempt;
+    readonly snapshot:
+      readonly ProjectTemplateArtifactDnsAnswerSnapshot[] | undefined;
+  }
+  | {
+    readonly kind: 'response';
+    readonly attempt: PinnedTransportAttempt;
+    readonly response: unknown;
+  }
+  | {
+    readonly kind: 'request-terminal';
+    readonly attempt: PinnedTransportAttempt;
+    readonly notification: 'onRequestError' | 'onRequestClose';
+  };
+
+interface PinnedTransportAuthority {
+  state?: DisposableProjectTemplateArtifactRedirectState;
+  activeAttempt?: PinnedTransportAttempt;
+  pumpQueue: PinnedTransportPumpEvent[];
+  generation: number;
+  draining: boolean;
+  started: boolean;
   terminal: boolean;
   disposed: boolean;
   release: () => void;
@@ -976,7 +1010,9 @@ function findPinnedMethod(
       if (types.isProxy(current)) return undefined;
       const descriptor = Object.getOwnPropertyDescriptor(current, name);
       if (descriptor !== undefined) {
-        return 'value' in descriptor && typeof descriptor.value === 'function'
+        return 'value' in descriptor
+          && typeof descriptor.value === 'function'
+          && !types.isProxy(descriptor.value)
           ? descriptor.value as (...args: unknown[]) => unknown
           : undefined;
       }
@@ -986,6 +1022,86 @@ function findPinnedMethod(
     // Hostile prototypes and monkey-patched reflection must remain contained.
   }
   return undefined;
+}
+
+function findPinnedData(value: unknown, name: string): unknown {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || types.isProxy(value)
+  ) {
+    return undefined;
+  }
+  try {
+    let current: object | null = value;
+    for (let depth = 0; current !== null && depth < 8; depth += 1) {
+      if (types.isProxy(current)) return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(current, name);
+      if (descriptor !== undefined) {
+        return 'value' in descriptor ? descriptor.value : undefined;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+  } catch {
+    // Native response reflection is an untrusted runtime boundary.
+  }
+  return undefined;
+}
+
+function snapshotPinnedRedirectLocation(response: unknown): string | undefined {
+  const rawHeaders = findPinnedData(response, 'rawHeaders');
+  try {
+    if (
+      !Array.isArray(rawHeaders)
+      || types.isProxy(rawHeaders)
+      || Object.getPrototypeOf(rawHeaders) !== Array.prototype
+      || rawHeaders.length === 0
+      || rawHeaders.length > MAX_PINNED_RAW_HEADER_ENTRIES
+      || rawHeaders.length % 2 !== 0
+    ) {
+      return undefined;
+    }
+    const keys = Reflect.ownKeys(rawHeaders);
+    if (
+      keys.length !== rawHeaders.length + 1
+      || keys[keys.length - 1] !== 'length'
+    ) {
+      return undefined;
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(rawHeaders);
+    let characters = 0;
+    let location: string | undefined;
+    for (let index = 0; index < rawHeaders.length; index += 2) {
+      const nameDescriptor = descriptors[String(index)];
+      const valueDescriptor = descriptors[String(index + 1)];
+      if (
+        nameDescriptor === undefined
+        || valueDescriptor === undefined
+        || !('value' in nameDescriptor)
+        || !('value' in valueDescriptor)
+        || typeof nameDescriptor.value !== 'string'
+        || typeof valueDescriptor.value !== 'string'
+      ) {
+        return undefined;
+      }
+      const name = nameDescriptor.value;
+      const value = valueDescriptor.value;
+      characters += name.length + value.length;
+      if (characters > MAX_PINNED_RAW_HEADER_CHARACTERS) return undefined;
+      if (name.toLowerCase() !== 'location') continue;
+      if (
+        location !== undefined
+        || value.length < 1
+        || value.length > MAX_LOCATION_LENGTH
+      ) {
+        return undefined;
+      }
+      location = value;
+    }
+    return location;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1021,7 +1137,7 @@ export function createProjectTemplateArtifactPinnedTransport(
   // Move all authority before constructing the facade. A copied method,
   // forged object, or second factory call can no longer recover this hop.
   const state = hopAuthority.state;
-  const targetUrl = hopAuthority.targetUrl;
+  const initialTargetUrl = hopAuthority.targetUrl;
   hopAuthority.owner.children?.delete(initialHop);
   hopAuthority.state = undefined;
   hopAuthority.owner = undefined;
@@ -1042,9 +1158,10 @@ export function createProjectTemplateArtifactPinnedTransport(
   };
   const removeRequestListeners = (
     request: ClientRequest | undefined,
-    listeners: PinnedTransportAuthority['requestListeners'],
-  ): void => {
-    if (request === undefined) return;
+    listeners: PinnedTransportAttempt['requestListeners'],
+  ): boolean => {
+    if (request === undefined) return true;
+    let succeeded = true;
     for (const [event, listener] of listeners) {
       try {
         EventEmitter.prototype.removeListener.call(
@@ -1053,68 +1170,22 @@ export function createProjectTemplateArtifactPinnedTransport(
           listener,
         );
       } catch {
-        // Detached terminal ownership remains authoritative.
+        succeeded = false;
       }
     }
+    return succeeded;
   };
   const destroyRequest = (
     request: ClientRequest | undefined,
     destroy: ((...args: unknown[]) => unknown) | undefined,
-  ): void => {
-    if (request === undefined || destroy === undefined) return;
+  ): boolean => {
+    if (request === undefined) return true;
+    if (destroy === undefined) return false;
     try {
       Reflect.apply(destroy, request, []);
+      return true;
     } catch {
-      // Public handlers receive no transport cause.
-    }
-  };
-  const detachResources = (
-    authority: PinnedTransportAuthority,
-  ): Readonly<{
-    state: DisposableProjectTemplateArtifactRedirectState | undefined;
-    request: ClientRequest | undefined;
-    requestDestroy: ((...args: unknown[]) => unknown) | undefined;
-    listeners: PinnedTransportAuthority['requestListeners'];
-  }> => {
-    // Snapshot and clear every capability before invoking disposal, destroy,
-    // or user handlers: all three can synchronously re-enter this transport.
-    const detached = Object.freeze({
-      state: authority.state,
-      request: authority.request,
-      requestDestroy: authority.requestDestroy,
-      listeners: Object.freeze([...authority.requestListeners]),
-    });
-    authority.state = undefined;
-    authority.targetUrl = undefined;
-    authority.dnsSnapshot = undefined;
-    authority.request = undefined;
-    authority.requestDestroy = undefined;
-    authority.requestEnd = undefined;
-    authority.requestListeners = [];
-    return detached;
-  };
-  const cleanDetachedResources = (
-    detached: ReturnType<typeof detachResources>,
-  ): void => {
-    removeRequestListeners(detached.request, detached.listeners);
-    try {
-      detached.state?.dispose();
-    } catch {
-      // Detached capability deletion remains authoritative.
-    }
-    destroyRequest(detached.request, detached.requestDestroy);
-  };
-  const terminate = (
-    authority: PinnedTransportAuthority,
-    notification?: keyof ProjectTemplateArtifactPinnedTransportHandlers,
-  ): void => {
-    if (authority.terminal || authority.disposed) return;
-    authority.terminal = true;
-    authority.release();
-    const detached = detachResources(authority);
-    cleanDetachedResources(detached);
-    if (notification !== undefined && !authority.disposed) {
-      invoke(notification);
+      return false;
     }
   };
   const containedResponses = new WeakSet<object>();
@@ -1144,7 +1215,7 @@ export function createProjectTemplateArtifactPinnedTransport(
         try {
           Reflect.apply(destroy, candidate, []);
         } catch {
-          // Invalid response details never reach a handler or error.
+          // Late response details never reach a handler or error.
         }
       }
     } finally {
@@ -1152,12 +1223,103 @@ export function createProjectTemplateArtifactPinnedTransport(
       drainingResponses = false;
     }
   };
+  const destroyCurrentResponse = (response: unknown): boolean => {
+    if (
+      typeof response !== 'object'
+      || response === null
+      || types.isProxy(response)
+      || containedResponses.has(response)
+    ) {
+      return false;
+    }
+    containedResponses.add(response);
+    const destroy = findPinnedMethod(response, 'destroy');
+    if (destroy === undefined) return false;
+    try {
+      Reflect.apply(destroy, response, []);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const detachAttempt = (
+    authority: PinnedTransportAuthority,
+    expected?: PinnedTransportAttempt,
+  ): Readonly<{
+    request: ClientRequest | undefined;
+    requestDestroy: ((...args: unknown[]) => unknown) | undefined;
+    listeners: PinnedTransportAttempt['requestListeners'];
+  }> | undefined => {
+    const attempt = authority.activeAttempt;
+    if (
+      attempt === undefined
+      || (expected !== undefined && attempt !== expected)
+    ) {
+      return undefined;
+    }
+    const detached = Object.freeze({
+      request: attempt.request,
+      requestDestroy: attempt.requestDestroy,
+      listeners: Object.freeze([...attempt.requestListeners]),
+    });
+    authority.activeAttempt = undefined;
+    attempt.request = undefined;
+    attempt.requestDestroy = undefined;
+    attempt.requestEnd = undefined;
+    attempt.requestListeners = [];
+    return detached;
+  };
+  const cleanDetachedAttempt = (
+    detached: NonNullable<ReturnType<typeof detachAttempt>>,
+    response?: unknown,
+  ): boolean => {
+    const listenersRemoved = removeRequestListeners(
+      detached.request,
+      detached.listeners,
+    );
+    const responseDestroyed = response === undefined
+      ? true
+      : destroyCurrentResponse(response);
+    const requestDestroyed = destroyRequest(
+      detached.request,
+      detached.requestDestroy,
+    );
+    return listenersRemoved && responseDestroyed && requestDestroyed;
+  };
+  const terminate = (
+    authority: PinnedTransportAuthority,
+    notification?: keyof ProjectTemplateArtifactPinnedTransportHandlers,
+    response?: unknown,
+  ): void => {
+    if (authority.terminal || authority.disposed) {
+      if (response !== undefined) containResponse(response);
+      return;
+    }
+    authority.terminal = true;
+    authority.release();
+    const detached = detachAttempt(authority);
+    const ownedState = authority.state;
+    authority.state = undefined;
+    if (detached !== undefined) {
+      cleanDetachedAttempt(detached, response);
+    } else if (response !== undefined) {
+      containResponse(response);
+    }
+    try {
+      ownedState?.dispose();
+    } catch {
+      // Terminal capability deletion remains authoritative.
+    }
+    if (notification !== undefined && !authority.disposed) {
+      invoke(notification);
+    }
+  };
   const authority: PinnedTransportAuthority = {
     state,
-    targetUrl,
-    requestListeners: [],
+    pumpQueue: [],
+    generation: 0,
+    draining: false,
     started: false,
-    dnsSettled: false,
     terminal: false,
     disposed: false,
     release: () => {
@@ -1166,18 +1328,137 @@ export function createProjectTemplateArtifactPinnedTransport(
   };
   holder.current = authority;
 
-  const startRequest = (
+  const moveNextHop = (
     current: PinnedTransportAuthority,
+    statusCode: number,
+    location: string,
+  ): URL | undefined => {
+    const ownedState = current.state;
+    if (ownedState === undefined) return undefined;
+    let grant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
+    let hop: DisposableProjectTemplateArtifactRedirectHop | undefined;
+    try {
+      grant = ownedState.resolve(statusCode, location);
+      hop = grant.consume();
+      grant = undefined;
+      const nextAuthority = hopAuthorities.get(hop);
+      if (
+        nextAuthority === undefined
+        || nextAuthority.state !== ownedState
+        || nextAuthority.owner === undefined
+        || nextAuthority.targetUrl === undefined
+        || !stateAuthorities.has(ownedState)
+      ) {
+        throw invalidArgument();
+      }
+      const nextTargetUrl = nextAuthority.targetUrl;
+      nextAuthority.owner.children?.delete(hop);
+      nextAuthority.state = undefined;
+      nextAuthority.owner = undefined;
+      nextAuthority.targetUrl = undefined;
+      hopAuthorities.delete(hop);
+      hop = undefined;
+      return nextTargetUrl;
+    } catch {
+      try {
+        grant?.dispose();
+      } catch {
+        // State disposal on terminal failure remains authoritative.
+      }
+      try {
+        hop?.dispose();
+      } catch {
+        // State disposal on terminal failure remains authoritative.
+      }
+      return undefined;
+    }
+  };
+
+  let drainPump = (): void => {};
+  const enqueue = (event: PinnedTransportPumpEvent): void => {
+    if (authority.terminal || authority.disposed) {
+      if (event.kind === 'response') containResponse(event.response);
+      return;
+    }
+    authority.pumpQueue.push(event);
+    drainPump();
+  };
+
+  const beginAttempt = (
+    current: PinnedTransportAuthority,
+    url: URL,
   ): void => {
-    const url = current.targetUrl;
-    if (url === undefined || current.terminal || current.disposed) return;
+    if (
+      current.activeAttempt !== undefined
+      || current.terminal
+      || current.disposed
+      || holder.current !== current
+    ) {
+      terminate(current, 'onInvalidResponse');
+      return;
+    }
+    const attempt: PinnedTransportAttempt = {
+      generation: current.generation + 1,
+      targetUrl: url,
+      requestListeners: [],
+      dnsSettled: false,
+      responseDelivered: false,
+      responseSeen: false,
+      requestTerminalDelivered: false,
+    };
+    current.generation = attempt.generation;
+    current.activeAttempt = attempt;
+    let callbackDelivered = false;
+    try {
+      dnsLookup(
+        url.hostname,
+        { all: true, verbatim: true },
+        (error, answers) => {
+          if (callbackDelivered) return;
+          callbackDelivered = true;
+          let snapshot:
+            readonly ProjectTemplateArtifactDnsAnswerSnapshot[] | undefined;
+          if (
+            current.activeAttempt === attempt
+            && !current.terminal
+            && !current.disposed
+            && error === null
+          ) {
+            try {
+              // Snapshot while the resolver still owns the callback frame;
+              // adapters may mutate or reuse their answer array on return.
+              snapshot = snapshotPublicDnsAnswers(answers);
+            } catch {
+              snapshot = undefined;
+            }
+          }
+          enqueue({
+            kind: 'dns',
+            attempt,
+            snapshot,
+          });
+        },
+      );
+    } catch {
+      terminate(current, 'onDnsRejected');
+    }
+  };
+
+  const createAttemptRequest = (
+    current: PinnedTransportAuthority,
+    attempt: PinnedTransportAttempt,
+    snapshot: readonly ProjectTemplateArtifactDnsAnswerSnapshot[],
+  ): void => {
+    const url = attempt.targetUrl;
     const hostname = url.hostname;
+    // Capture immutable generation-local values. A late lookup can neither
+    // observe nor borrow the DNS snapshot from a later redirect attempt.
+    const attemptSnapshot = snapshot;
     const pinnedLookup: NonNullable<RequestOptions['lookup']> = (
       requestedHostname,
       options,
       callback,
     ) => {
-      const snapshot = current.dnsSnapshot;
       const requestedFamily = options.family ?? 0;
       const family = requestedFamily === 'IPv4'
         ? 4
@@ -1188,7 +1469,8 @@ export function createProjectTemplateArtifactPinnedTransport(
       if (
         current.terminal
         || current.disposed
-        || snapshot === undefined
+        || current.activeAttempt !== attempt
+        || holder.current !== current
         || requestedHostname !== hostname
         || (family !== 0 && family !== 4 && family !== 6)
         || typeof all !== 'boolean'
@@ -1196,7 +1478,7 @@ export function createProjectTemplateArtifactPinnedTransport(
         Reflect.apply(callback, undefined, [invalidArgument()]);
         return;
       }
-      const matches = snapshot.filter(
+      const matches = attemptSnapshot.filter(
         (answer) => family === 0 || answer.family === family,
       );
       if (matches.length === 0) {
@@ -1238,16 +1520,14 @@ export function createProjectTemplateArtifactPinnedTransport(
         },
         lookup: pinnedLookup,
       }, (response) => {
-        const active = holder.current;
-        if (active === undefined) {
+        if (attempt.responseDelivered) {
           containResponse(response);
           return;
         }
-        // Claim and detach all authority before response.destroy(), which is
-        // event-capable and may synchronously invoke this callback again.
-        terminate(active);
-        containResponse(response);
-        if (!active.disposed) invoke('onInvalidResponse');
+        // Only one response may enter the bounded pump. Native or mocked
+        // duplicate callbacks are destroyed by the separate iterative sink.
+        attempt.responseDelivered = true;
+        enqueue({ kind: 'response', attempt, response });
       });
     } catch {
       terminate(current, 'onInvalidResponse');
@@ -1258,36 +1538,53 @@ export function createProjectTemplateArtifactPinnedTransport(
     if (
       current.terminal
       || current.disposed
+      || current.activeAttempt !== attempt
       || holder.current !== current
       || requestDestroy === undefined
       || requestEnd === undefined
     ) {
       destroyRequest(request, requestDestroy);
-      if (!current.terminal && !current.disposed) {
+      if (
+        !current.terminal
+        && !current.disposed
+        && current.activeAttempt === attempt
+      ) {
         terminate(current, 'onInvalidResponse');
       }
       return;
     }
-    current.request = request;
-    current.requestDestroy = requestDestroy;
-    current.requestEnd = requestEnd;
-    const listeners: PinnedTransportAuthority['requestListeners'] = [
+    attempt.request = request;
+    attempt.requestDestroy = requestDestroy;
+    attempt.requestEnd = requestEnd;
+    const listeners: PinnedTransportAttempt['requestListeners'] = [
       ['error', () => {
-        if (!current.terminal && !current.disposed) {
-          terminate(current, 'onRequestError');
-        }
+        if (attempt.requestTerminalDelivered) return;
+        attempt.requestTerminalDelivered = true;
+        enqueue({
+          kind: 'request-terminal',
+          attempt,
+          notification: 'onRequestError',
+        });
       }],
       ['close', () => {
-        if (!current.terminal && !current.disposed) {
-          terminate(current, 'onRequestClose');
-        }
+        if (attempt.requestTerminalDelivered) return;
+        attempt.requestTerminalDelivered = true;
+        enqueue({
+          kind: 'request-terminal',
+          attempt,
+          notification: 'onRequestClose',
+        });
       }],
     ];
-    current.requestListeners = listeners;
+    attempt.requestListeners = listeners;
     try {
       for (const [event, listener] of listeners) {
         EventEmitter.prototype.on.call(request, event, listener);
-        if (current.terminal || current.disposed) {
+        if (
+          current.terminal
+          || current.disposed
+          || current.activeAttempt !== attempt
+        ) {
           try {
             EventEmitter.prototype.removeListener.call(
               request,
@@ -1307,6 +1604,115 @@ export function createProjectTemplateArtifactPinnedTransport(
     }
   };
 
+  const processResponse = (
+    current: PinnedTransportAuthority,
+    attempt: PinnedTransportAttempt,
+    response: unknown,
+  ): void => {
+    if (
+      current.activeAttempt !== attempt
+      || attempt.responseSeen
+      || current.terminal
+      || current.disposed
+    ) {
+      containResponse(response);
+      return;
+    }
+    attempt.responseSeen = true;
+    const rawStatus = findPinnedData(response, 'statusCode');
+    if (
+      typeof rawStatus !== 'number'
+      || !Number.isSafeInteger(rawStatus)
+      || rawStatus < 100
+      || rawStatus > 599
+      || !REDIRECT_STATUSES.has(rawStatus)
+    ) {
+      terminate(current, 'onInvalidResponse', response);
+      return;
+    }
+    const location = snapshotPinnedRedirectLocation(response);
+    if (location === undefined) {
+      terminate(current, 'onInvalidResponse', response);
+      return;
+    }
+    const nextTargetUrl = moveNextHop(current, rawStatus, location);
+    if (nextTargetUrl === undefined) {
+      terminate(current, 'onInvalidResponse', response);
+      return;
+    }
+    // The next hop is already owned by the transport, but cannot start until
+    // every event-capable resource from this generation is detached and
+    // successfully destroyed.
+    const detached = detachAttempt(current, attempt);
+    if (detached === undefined) {
+      containResponse(response);
+      terminate(current, 'onInvalidResponse');
+      return;
+    }
+    const cleaned = cleanDetachedAttempt(detached, response);
+    if (
+      current.terminal
+      || current.disposed
+      || holder.current !== current
+    ) {
+      return;
+    }
+    if (!cleaned) {
+      terminate(current, 'onInvalidResponse');
+      return;
+    }
+    enqueue({ kind: 'begin', targetUrl: nextTargetUrl });
+  };
+
+  const processPumpEvent = (
+    current: PinnedTransportAuthority,
+    event: PinnedTransportPumpEvent,
+  ): void => {
+    if (current.terminal || current.disposed) {
+      if (event.kind === 'response') containResponse(event.response);
+      return;
+    }
+    if (event.kind === 'begin') {
+      beginAttempt(current, event.targetUrl);
+      return;
+    }
+    if (event.kind === 'dns') {
+      if (
+        current.activeAttempt !== event.attempt
+        || event.attempt.dnsSettled
+      ) {
+        return;
+      }
+      event.attempt.dnsSettled = true;
+      if (event.snapshot === undefined) {
+        terminate(current, 'onDnsRejected');
+        return;
+      }
+      createAttemptRequest(current, event.attempt, event.snapshot);
+      return;
+    }
+    if (event.kind === 'response') {
+      processResponse(current, event.attempt, event.response);
+      return;
+    }
+    if (current.activeAttempt === event.attempt) {
+      terminate(current, event.notification);
+    }
+  };
+
+  drainPump = (): void => {
+    if (authority.draining) return;
+    authority.draining = true;
+    try {
+      while (authority.pumpQueue.length > 0) {
+        const event = authority.pumpQueue.shift();
+        if (event !== undefined) processPumpEvent(authority, event);
+      }
+    } finally {
+      authority.draining = false;
+    }
+  };
+
   const facade = Object.freeze<ProjectTemplateArtifactPinnedTransport>({
     start(this: ProjectTemplateArtifactPinnedTransport): void {
       const current = pinnedTransportAuthorities.get(this);
@@ -1315,44 +1721,7 @@ export function createProjectTemplateArtifactPinnedTransport(
       }
       if (current.started) return;
       current.started = true;
-      const url = current.targetUrl;
-      if (url === undefined) {
-        terminate(current, 'onDnsRejected');
-        return;
-      }
-      try {
-        dnsLookup(
-          url.hostname,
-          { all: true, verbatim: true },
-          (error, answers) => {
-            if (
-              current.dnsSettled
-              || current.terminal
-              || current.disposed
-              || holder.current !== current
-            ) {
-              return;
-            }
-            current.dnsSettled = true;
-            if (error !== null) {
-              terminate(current, 'onDnsRejected');
-              return;
-            }
-            let snapshot:
-              readonly ProjectTemplateArtifactDnsAnswerSnapshot[];
-            try {
-              snapshot = snapshotPublicDnsAnswers(answers);
-            } catch {
-              terminate(current, 'onDnsRejected');
-              return;
-            }
-            current.dnsSnapshot = snapshot;
-            startRequest(current);
-          },
-        );
-      } catch {
-        terminate(current, 'onDnsRejected');
-      }
+      enqueue({ kind: 'begin', targetUrl: initialTargetUrl });
     },
     pause(this: ProjectTemplateArtifactPinnedTransport): void {
       if (!pinnedTransportAuthorities.has(this)) throw invalidArgument();
@@ -1373,9 +1742,20 @@ export function createProjectTemplateArtifactPinnedTransport(
       if (current === undefined || current.disposed) return;
       current.disposed = true;
       current.release();
-      const detached = detachResources(current);
+      const detached = detachAttempt(current);
+      const ownedState = current.state;
+      current.state = undefined;
+      const pendingEvents = current.pumpQueue.splice(0);
       pinnedTransportAuthorities.delete(this);
-      cleanDetachedResources(detached);
+      if (detached !== undefined) cleanDetachedAttempt(detached);
+      for (const event of pendingEvents) {
+        if (event.kind === 'response') containResponse(event.response);
+      }
+      try {
+        ownedState?.dispose();
+      } catch {
+        // Explicit disposal remains authoritative.
+      }
     },
   });
   pinnedTransportFacades.add(facade);
