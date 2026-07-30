@@ -774,6 +774,162 @@ describe('project-template authenticated release asset boundary F2b-B', () => {
     credential.dispose();
   });
 
+  it.each([40, 1_024])(
+    'destroys every response in a finite late burst of %i',
+    async (burstSize) => {
+      const attempt = captureRequest();
+      const credential = await acquireCredential();
+      const handlers = makeHandlers();
+      const facade = createProjectTemplateGithubReleaseAssetRequest(
+        credential,
+        { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+      );
+      const burst = Array.from(
+        { length: burstSize },
+        () => new FakeResponse(500),
+      );
+      const burstDestroys = burst.map(
+        (response) => vi.spyOn(response, 'destroy'),
+      );
+      const root = new FakeResponse(500);
+      const originalRootDestroy = root.destroy;
+      const rootDestroy = vi.spyOn(root, 'destroy')
+        .mockImplementation((error) => {
+          for (const response of burst) attempt.respond(response);
+          return Reflect.apply(originalRootDestroy, root, [error]);
+        });
+      attempt.request.destroy.mockImplementation(() => {
+        attempt.respond(root);
+      });
+
+      expect(() => attempt.respond(new FakeResponse(
+        302,
+        ['X-Private', 'secret'],
+      ))).not.toThrow();
+      expect(rootDestroy).toHaveBeenCalledTimes(1);
+      expect(root.destroyed).toBe(true);
+      for (let index = 0; index < burst.length; index += 1) {
+        const response = burst[index]!;
+        expect(response.destroyed).toBe(true);
+        expect(response.readable).toBe(false);
+        expect(burstDestroys[index]).toHaveBeenCalledTimes(1);
+      }
+      expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+      expect(handlers.onResponseError).not.toHaveBeenCalled();
+      expect(handlers.onResponse).not.toHaveBeenCalled();
+      expect(handlers.onRedirect).not.toHaveBeenCalled();
+      facade.dispose();
+      credential.dispose();
+    },
+  );
+
+  it('destroys the same late response exactly once', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const duplicate = new FakeResponse(500);
+    const duplicateDestroy = vi.spyOn(duplicate, 'destroy');
+    const root = new FakeResponse(500);
+    const originalRootDestroy = root.destroy;
+    vi.spyOn(root, 'destroy').mockImplementation((error) => {
+      for (let index = 0; index < 100; index += 1) {
+        attempt.respond(duplicate);
+      }
+      return Reflect.apply(originalRootDestroy, root, [error]);
+    });
+    attempt.request.destroy.mockImplementation(() => {
+      attempt.respond(root);
+    });
+
+    expect(() => attempt.respond(new FakeResponse(
+      302,
+      ['X-Private', 'secret'],
+    ))).not.toThrow();
+    expect(duplicateDestroy).toHaveBeenCalledTimes(1);
+    expect(duplicate.destroyed).toBe(true);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('continues draining late responses after a destroy throws', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const burst = Array.from(
+      { length: 40 },
+      () => new FakeResponse(500),
+    );
+    const root = new FakeResponse(500);
+    vi.spyOn(root, 'destroy').mockImplementation(() => {
+      for (const response of burst) attempt.respond(response);
+      throw new Error('private late destroy cause');
+    });
+    attempt.request.destroy.mockImplementation(() => {
+      attempt.respond(root);
+    });
+
+    expect(() => attempt.respond(new FakeResponse(
+      302,
+      ['X-Private', 'secret'],
+    ))).not.toThrow();
+    expect(burst.every((response) => response.destroyed)).toBe(true);
+    const afterDrain = new FakeResponse(500);
+    attempt.respond(afterDrain);
+    expect(afterDrain.destroyed).toBe(true);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('drains distinct late responses added by a nested burst', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const nested = Array.from(
+      { length: 40 },
+      () => new FakeResponse(500),
+    );
+    const first = new FakeResponse(500);
+    const originalFirstDestroy = first.destroy;
+    vi.spyOn(first, 'destroy').mockImplementation((error) => {
+      for (const response of nested) attempt.respond(response);
+      return Reflect.apply(originalFirstDestroy, first, [error]);
+    });
+    const root = new FakeResponse(500);
+    const originalRootDestroy = root.destroy;
+    vi.spyOn(root, 'destroy').mockImplementation((error) => {
+      attempt.respond(first);
+      return Reflect.apply(originalRootDestroy, root, [error]);
+    });
+    attempt.request.destroy.mockImplementation(() => {
+      attempt.respond(root);
+    });
+
+    expect(() => attempt.respond(new FakeResponse(
+      302,
+      ['X-Private', 'secret'],
+    ))).not.toThrow();
+    expect(first.destroyed).toBe(true);
+    expect(nested.every((response) => response.destroyed)).toBe(true);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    facade.dispose();
+    credential.dispose();
+  });
+
   it('contains a late response from dispose destroy without callbacks', async () => {
     const attempt = captureRequest();
     const credential = await acquireCredential();

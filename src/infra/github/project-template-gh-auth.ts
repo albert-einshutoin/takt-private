@@ -845,28 +845,26 @@ export function createProjectTemplateGithubReleaseAssetRequest(
     if (
       !isReadableStream(response)
       || containedLateResponses.has(response)
-      || pendingLateResponses.length >= 32
     ) {
       return;
     }
+    containedLateResponses.add(response);
     pendingLateResponses.push(response);
     if (drainingLateResponses) return;
     drainingLateResponses = true;
-    let drained = 0;
+    let cursor = 0;
     try {
-      while (pendingLateResponses.length > 0 && drained < 32) {
-        const candidate = pendingLateResponses.shift();
-        if (
-          candidate === undefined
-          || containedLateResponses.has(candidate)
-        ) {
-          continue;
-        }
-        containedLateResponses.add(candidate);
-        drained += 1;
-        // A hostile destroy may synchronously enqueue this same response or
-        // another late response. The WeakSet and bounded iterative queue keep
-        // that cleanup finite without exposing headers, bodies, or causes.
+      // node:https owns this callback and native IncomingMessage production
+      // delivery is finite. An unbounded iterative FIFO therefore preserves
+      // every response in a finite synchronous burst without recursive stack
+      // growth, overflow drops, or an async task that can outlive the request.
+      while (cursor < pendingLateResponses.length) {
+        const candidate = pendingLateResponses[cursor];
+        cursor += 1;
+        if (candidate === undefined) continue;
+        // A hostile destroy may enqueue this same response or another late
+        // response. Enqueue-time WeakSet ownership makes each object exact-once
+        // while the growing FIFO drains distinct responses in this same pass.
         destroyResponse(candidate);
       }
     } finally {
