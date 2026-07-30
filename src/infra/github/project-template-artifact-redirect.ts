@@ -931,6 +931,8 @@ interface PinnedTransportBodyListenerToken {
 
 interface PinnedTransportBody {
   readonly listenerToken: PinnedTransportBodyListenerToken;
+  dataPending: boolean;
+  flowViolationPending: boolean;
   response?: Readable;
   pause?: (...args: unknown[]) => unknown;
   resume?: (...args: unknown[]) => unknown;
@@ -969,6 +971,10 @@ type PinnedTransportPumpEvent =
     readonly token: PinnedTransportBodyListenerToken;
     readonly event: PinnedTransportBodyEventKind;
     chunk?: unknown;
+  }
+  | {
+    readonly kind: 'body-flow-violation';
+    readonly token: PinnedTransportBodyListenerToken;
   };
 
 interface PinnedTransportAuthority {
@@ -978,6 +984,7 @@ interface PinnedTransportAuthority {
   pumpQueue: PinnedTransportPumpEvent[];
   generation: number;
   draining: boolean;
+  hostCallDepth: number;
   phase: PinnedTransportPhase;
   body?: PinnedTransportBody;
   release: () => void;
@@ -1285,6 +1292,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     pumpQueue: [],
     generation: 0,
     draining: false,
+    hostCallDepth: 0,
     phase: 'idle',
     release: () => {
       holder.current = undefined;
@@ -1484,6 +1492,8 @@ export function createProjectTemplateArtifactPinnedTransport(
     body.request = undefined;
     body.requestDestroy = undefined;
     body.requestListeners = [];
+    body.dataPending = false;
+    body.flowViolationPending = false;
     return detached;
   };
   const cleanDetachedBody = (
@@ -1640,7 +1650,7 @@ export function createProjectTemplateArtifactPinnedTransport(
       return;
     }
     authority.pumpQueue.push(event);
-    drainPump();
+    if (authority.hostCallDepth === 0) drainPump();
   };
 
   const createAttemptDnsCallback = (
@@ -1868,6 +1878,105 @@ export function createProjectTemplateArtifactPinnedTransport(
     invoke('onResponse', [statusCode]);
   };
 
+  const queueBodyFlowViolation = (
+    current: PinnedTransportAuthority,
+    body: PinnedTransportBody,
+  ): void => {
+    if (
+      current.body !== body
+      || isStopped(current)
+      || body.flowViolationPending
+    ) {
+      return;
+    }
+    body.flowViolationPending = true;
+    body.dataPending = false;
+    for (let index = current.pumpQueue.length - 1; index >= 0; index -= 1) {
+      const pending = current.pumpQueue[index];
+      if (
+        pending?.kind === 'body-event'
+        && pending.token === body.listenerToken
+        && pending.event === 'data'
+      ) {
+        pending.chunk = undefined;
+        current.pumpQueue.splice(index, 1);
+      }
+    }
+    enqueue({
+      kind: 'body-flow-violation',
+      token: body.listenerToken,
+    });
+  };
+
+  const dispatchBodyListener = (
+    current: PinnedTransportAuthority,
+    body: PinnedTransportBody,
+    event: PinnedTransportBodyEventKind,
+    value?: unknown,
+  ): void => {
+    current.hostCallDepth += 1;
+    try {
+      if (
+        current.body !== body
+        || !body.listenerToken.active
+        || isStopped(current)
+      ) {
+        return;
+      }
+      if (event !== 'data') {
+        enqueue({
+          kind: 'body-event',
+          token: body.listenerToken,
+          event,
+        });
+        return;
+      }
+      if (
+        current.phase !== 'body-streaming'
+        || body.dataPending
+        || body.flowViolationPending
+      ) {
+        queueBodyFlowViolation(current, body);
+        return;
+      }
+      // Commit paused ownership before crossing the host boundary. A host
+      // that ignores pause can therefore retain at most one queued chunk;
+      // every later chunk is cleared into one constant-size failure latch.
+      body.dataPending = true;
+      current.phase = 'body-paused';
+      const response = body.response;
+      const pause = body.pause;
+      if (response === undefined || pause === undefined) {
+        queueBodyFlowViolation(current, body);
+        return;
+      }
+      try {
+        Reflect.apply(pause, response, []);
+      } catch {
+        queueBodyFlowViolation(current, body);
+        return;
+      }
+      if (
+        current.body !== body
+        || !body.listenerToken.active
+        || body.flowViolationPending
+        || isStopped(current)
+      ) {
+        return;
+      }
+      enqueue({
+        kind: 'body-event',
+        token: body.listenerToken,
+        event: 'data',
+        chunk: value,
+      });
+    } finally {
+      value = undefined;
+      current.hostCallDepth -= 1;
+      if (current.hostCallDepth === 0) drainPump();
+    }
+  };
+
   const acceptPausedBody = (
     current: PinnedTransportAuthority,
     attempt: PinnedTransportAttempt,
@@ -1893,16 +2002,10 @@ export function createProjectTemplateArtifactPinnedTransport(
     const listenerToken: PinnedTransportBodyListenerToken = {
       active: true,
     };
-    listenerToken.dispatch = (event, chunk) => {
-      enqueue({
-        kind: 'body-event',
-        token: listenerToken,
-        event,
-        chunk: event === 'data' ? chunk : undefined,
-      });
-    };
     const body: PinnedTransportBody = {
       listenerToken,
+      dataPending: false,
+      flowViolationPending: false,
       response,
       pause,
       resume,
@@ -1911,6 +2014,9 @@ export function createProjectTemplateArtifactPinnedTransport(
       request: detached.request,
       requestDestroy: detached.requestDestroy,
       requestListeners: detached.listeners,
+    };
+    listenerToken.dispatch = (event, chunk) => {
+      dispatchBodyListener(current, body, event, chunk);
     };
     current.phase = 'accepting-body';
     current.body = body;
@@ -2095,11 +2201,16 @@ export function createProjectTemplateArtifactPinnedTransport(
       return;
     }
     if (event.event === 'data') {
-      if (current.phase !== 'body-streaming') {
+      if (
+        current.phase !== 'body-paused'
+        || !body.dataPending
+        || body.flowViolationPending
+      ) {
         event.chunk = undefined;
-        terminate(current, 'onResponseError');
+        queueBodyFlowViolation(current, body);
         return;
       }
+      body.dataPending = false;
       let chunk = event.chunk;
       event.chunk = undefined;
       const delivered = invoke('onData', [chunk]);
@@ -2154,6 +2265,18 @@ export function createProjectTemplateArtifactPinnedTransport(
       processResponse(current, event.attempt, event.response);
       return;
     }
+    if (event.kind === 'body-flow-violation') {
+      const body = current.body;
+      if (
+        body !== undefined
+        && body.listenerToken === event.token
+        && body.flowViolationPending
+      ) {
+        body.flowViolationPending = false;
+        terminate(current, 'onResponseError');
+      }
+      return;
+    }
     if (event.kind === 'body-event') {
       processBodyEvent(current, event);
       return;
@@ -2164,7 +2287,7 @@ export function createProjectTemplateArtifactPinnedTransport(
   };
 
   drainPump = (): void => {
-    if (authority.draining) return;
+    if (authority.draining || authority.hostCallDepth > 0) return;
     authority.draining = true;
     try {
       while (authority.pumpQueue.length > 0) {
@@ -2209,16 +2332,19 @@ export function createProjectTemplateArtifactPinnedTransport(
       const response = body.response;
       const pause = body.pause;
       current.phase = 'body-paused';
-      if (response === undefined || pause === undefined) {
-        terminate(current, 'onResponseError');
-        throw invalidArgument();
-      }
+      let failed = false;
+      current.hostCallDepth += 1;
       try {
+        if (response === undefined || pause === undefined) throw invalidArgument();
         Reflect.apply(pause, response, []);
       } catch {
-        terminate(current, 'onResponseError');
-        throw invalidArgument();
+        failed = true;
+        queueBodyFlowViolation(current, body);
+      } finally {
+        current.hostCallDepth -= 1;
+        if (current.hostCallDepth === 0) drainPump();
       }
+      if (failed) throw invalidArgument();
     },
     resume(this: ProjectTemplateArtifactPinnedTransport): void {
       const current = pinnedTransportAuthorities.get(this);
@@ -2237,16 +2363,23 @@ export function createProjectTemplateArtifactPinnedTransport(
       const response = body.response;
       const resume = body.resume;
       current.phase = 'body-streaming';
-      if (response === undefined || resume === undefined) {
-        terminate(current, 'onResponseError');
-        throw invalidArgument();
-      }
+      let failed = false;
+      // Prevent a synchronous host from re-entering onData before its resume
+      // frame returns; the outermost host call releases the bounded pump.
+      current.hostCallDepth += 1;
       try {
+        if (response === undefined || resume === undefined) {
+          throw invalidArgument();
+        }
         Reflect.apply(resume, response, []);
       } catch {
-        terminate(current, 'onResponseError');
-        throw invalidArgument();
+        failed = true;
+        queueBodyFlowViolation(current, body);
+      } finally {
+        current.hostCallDepth -= 1;
+        if (current.hostCallDepth === 0) drainPump();
       }
+      if (failed) throw invalidArgument();
     },
     destroy(this: ProjectTemplateArtifactPinnedTransport): void {
       const current = pinnedTransportAuthorities.get(this);
