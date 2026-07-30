@@ -69,6 +69,7 @@ export type GithubTemplateDownloadStoragePhase =
   | 'file-fsynced'
   | 'before-staging-root-parent-fsync'
   | 'before-staging-reinspect'
+  | 'before-staging-verify-close'
   | 'before-cleanup';
 
 export interface GithubTemplateDownloadStorageIoSeam {
@@ -684,12 +685,20 @@ export async function verifyGithubTemplateDownloadStaging(
         'GitHub template staged inspection digest changed',
       );
     }
-    return Object.freeze({
+    const verified = Object.freeze({
       stagingPath: authority.stagingPath,
       bytes: authority.bytes,
       sha256: authority.sha256,
       inspection: deepFreeze(inspection),
     });
+    runIoSeamPhase(
+      authority.ioSeam,
+      'before-staging-verify-close',
+      authority.stagingPath,
+    );
+    closeSync(fd);
+    fd = undefined;
+    return verified;
   } catch (error) {
     if (isInternalStorageError(error)) throw error;
     throw storageError(

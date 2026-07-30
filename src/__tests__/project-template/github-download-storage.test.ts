@@ -811,4 +811,33 @@ describe('GitHub template staged authority verification', () => {
     ).rejects.toMatchObject({ code: 'INSPECTION_FAILED' });
     expect(reinspections).toBe(1);
   });
+
+  it('does not return success when verified descriptor close fails', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    let armed = false;
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        onPhase(phase) {
+          if (armed && phase === 'before-staging-verify-close') {
+            throw new Error('ghp_verify_close_secret');
+          }
+        },
+      },
+    });
+    armed = true;
+
+    const error = await verifyGithubTemplateDownloadStaging(staged).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({ code: 'IO_FAILURE' });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_verify_close_secret',
+    );
+  });
 });
