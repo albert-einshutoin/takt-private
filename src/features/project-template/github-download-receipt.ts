@@ -32,6 +32,8 @@ const SIGNATURE_DOMAIN =
   'takt:github-template-download-receipt:v1:pre-auth-envelope\u0000';
 const RECEIPT_KEY_DOMAIN =
   'takt:github-template-download-receipt:v1:key\u0000';
+const PREPARED_RECEIPT_CLAIM_BRAND: unique symbol =
+  Symbol('prepared-github-template-download-receipt-claim');
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const ASSET_NAME_PATTERN =
@@ -135,6 +137,7 @@ export interface PreparedGithubTemplateDownloadReceipt {
  */
 export interface ClaimedPreparedGithubTemplateDownloadReceipt {
   readonly prepared: PreparedGithubTemplateDownloadReceipt;
+  readonly [PREPARED_RECEIPT_CLAIM_BRAND]: true;
 }
 
 interface AuthenticatorSnapshot {
@@ -630,6 +633,7 @@ function parseReceiptStructure(
       || descriptorPack.sha256 !== archiveReceipt.sha256
       || descriptorPack.assetName !== releaseReceipt.assetName
       || descriptorPack.checksumAssetName !== releaseReceipt.checksumAssetName
+      || releaseReceipt.assetId === releaseReceipt.checksumAssetId
       || releaseReceipt.assetSize !== archiveReceipt.bytes
       || archiveReceipt.source.kind !== 'github'
       || archiveReceipt.source.uri !== sourceReceipt.repositoryUrl
@@ -786,7 +790,10 @@ export function claimPreparedGithubTemplateDownloadReceiptForStorage(
   }
   authority.state = 'consuming';
   const prepared = value as PreparedGithubTemplateDownloadReceipt;
-  const claim = Object.freeze({ prepared });
+  const claim = Object.freeze({
+    prepared,
+    [PREPARED_RECEIPT_CLAIM_BRAND]: true as const,
+  });
   PREPARED_RECEIPT_CLAIMS.set(claim, { prepared, authority });
   return claim;
 }

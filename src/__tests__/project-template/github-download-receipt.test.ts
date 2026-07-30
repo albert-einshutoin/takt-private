@@ -758,6 +758,10 @@ describe('GitHub template authenticated download receipt D1', () => {
     ['checksum id zero', (receipt: MutableReceipt) => {
       receipt.payload.release.checksumAssetId = 0;
     }],
+    ['duplicate asset ids', (receipt: MutableReceipt) => {
+      receipt.payload.release.checksumAssetId =
+        receipt.payload.release.assetId;
+    }],
     ['archive bytes zero', (receipt: MutableReceipt) => {
       receipt.payload.release.assetSize = 0;
       receipt.payload.archive.bytes = 0;
