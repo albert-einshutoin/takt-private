@@ -135,7 +135,10 @@ CredentialAuthority
 interface ApiRequestAuthority {
   readonly request: ClientRequest;
   response?: IncomingMessage;
+  responseDestroy?: (...args: unknown[]) => unknown;
   disposed: boolean;
+  readonly end: (...args: unknown[]) => unknown;
+  readonly destroy: (...args: unknown[]) => unknown;
   readonly requestListeners: ReadonlyArray<
   readonly [event: string, listener: (...args: unknown[]) => void]
   >;
@@ -325,6 +328,7 @@ export function createProjectTemplateGithubApiRequest(
       return;
     }
     current.response = response;
+    current.responseDestroy = findDataFunction(response, 'destroy');
     const listeners: ApiRequestAuthority['responseListeners'] = [
       ['data', (chunk: unknown) => handlers.onData(chunk)],
       ['end', () => handlers.onEnd()],
@@ -334,11 +338,21 @@ export function createProjectTemplateGithubApiRequest(
     ];
     current.responseListeners = listeners;
     const statusCode = ownDataValue(response, 'statusCode');
-    handlers.onResponse(
-      typeof statusCode === 'number' ? statusCode : undefined,
-    );
-    for (const [event, listener] of listeners) {
-      EventEmitter.prototype.on.call(response, event, listener);
+    try {
+      handlers.onResponse(
+        typeof statusCode === 'number' ? statusCode : undefined,
+      );
+      if (current.disposed) return;
+      for (const [event, listener] of listeners) {
+        if (event === 'data') {
+          Readable.prototype.on.call(response, event, listener);
+        } else {
+          EventEmitter.prototype.on.call(response, event, listener);
+        }
+        if (current.disposed) return;
+      }
+    } catch {
+      handlers.onResponseError();
     }
   };
   const request = httpsRequest({
@@ -354,6 +368,24 @@ export function createProjectTemplateGithubApiRequest(
       'X-GitHub-Api-Version': '2022-11-28',
     },
   }, responseCallback);
+  if (
+    typeof request !== 'object'
+    || request === null
+    || types.isProxy(request)
+  ) {
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub API request could not be created',
+    );
+  }
+  const end = findDataFunction(request, 'end');
+  const destroy = findDataFunction(request, 'destroy');
+  if (end === undefined || destroy === undefined) {
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub API request could not be created',
+    );
+  }
   const requestListeners: ApiRequestAuthority['requestListeners'] = [
     ['error', () => handlers.onRequestError()],
     ['close', () => handlers.onRequestClose()],
@@ -361,12 +393,26 @@ export function createProjectTemplateGithubApiRequest(
   const authority: ApiRequestAuthority = {
     request,
     disposed: false,
+    end,
+    destroy,
     requestListeners,
     responseListeners: [],
   };
   authorityHolder.current = authority;
-  for (const [event, listener] of requestListeners) {
-    EventEmitter.prototype.on.call(request, event, listener);
+  try {
+    for (const [event, listener] of requestListeners) {
+      EventEmitter.prototype.on.call(request, event, listener);
+    }
+  } catch {
+    try {
+      Reflect.apply(destroy, request, []);
+    } catch {
+      // The fixed creation error remains authoritative.
+    }
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub API request could not be created',
+    );
   }
   const facade: ProjectTemplateGithubApiRequest = {
     start(): void {
@@ -377,32 +423,57 @@ export function createProjectTemplateGithubApiRequest(
           'GitHub API request is no longer available',
         );
       }
-      current.request.end();
+      Reflect.apply(current.end, current.request, []);
     },
     destroy(): void {
       const current = API_REQUEST_AUTHORITIES.get(this);
       if (current === undefined || current.disposed) return;
-      current.response?.destroy();
-      current.request.destroy();
+      if (
+        current.response !== undefined
+        && current.responseDestroy !== undefined
+      ) {
+        try {
+          Reflect.apply(
+            current.responseDestroy,
+            current.response,
+            [],
+          );
+        } catch {
+          // Request destruction remains authoritative.
+        }
+      }
+      try {
+        Reflect.apply(current.destroy, current.request, []);
+      } catch {
+        // destroy() is best-effort; terminal transport state is authoritative.
+      }
     },
     dispose(): void {
       const current = API_REQUEST_AUTHORITIES.get(this);
       if (current === undefined || current.disposed) return;
       current.disposed = true;
       for (const [event, listener] of current.requestListeners) {
-        EventEmitter.prototype.removeListener.call(
-          current.request,
-          event,
-          listener,
-        );
-      }
-      if (current.response !== undefined) {
-        for (const [event, listener] of current.responseListeners) {
+        try {
           EventEmitter.prototype.removeListener.call(
-            current.response,
+            current.request,
             event,
             listener,
           );
+        } catch {
+          // Listener cleanup remains best-effort on a failed request.
+        }
+      }
+      if (current.response !== undefined) {
+        for (const [event, listener] of current.responseListeners) {
+          try {
+            EventEmitter.prototype.removeListener.call(
+              current.response,
+              event,
+              listener,
+            );
+          } catch {
+            // Listener cleanup remains best-effort on a failed response.
+          }
         }
       }
       current.responseListeners = [];
