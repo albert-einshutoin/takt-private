@@ -337,6 +337,23 @@ describe('project template three-way apply plan', () => {
     expect(prepared.resolvedContents).toEqual([]);
   });
 
+  it('preserves opaque-content review for a large semantic first install', () => {
+    const incoming = `${'# token: sensitive-looking-value\n'.repeat(2_500)}language: en\n`;
+
+    const prepared = prepareProjectTemplateApplyPlan(input({
+      incoming,
+      policy: 'merge',
+    }));
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'add',
+      reasonCode: 'SEMANTIC_MERGED',
+      reviewRequired: true,
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.plan.defaultApplyPossible).toBe(false);
+  });
+
   it('blocks an unsafe devloop policy on a direct add', () => {
     const incoming = 'mode: unsafe\n';
     const planInput = input({});

@@ -1332,7 +1332,11 @@ export function prepareProjectTemplateApplyPlan(
           || mustRedactDiff(entry.path, afterMode, afterSha256, content)
           ? { kind: 'redacted' as const }
           : buildTextDiff(Buffer.from(local.content), content);
-    const reviewRequired = merge.reviewRequired
+    // Review evidence is monotonic: semantic inspection can add reasons but
+    // must never erase an opaque-content or classifier requirement established
+    // at the raw archive boundary.
+    const reviewRequired = entry.reviewRequired
+      || merge.reviewRequired
       || capabilitiesChanged(entry.capabilitiesBefore, entry.capabilitiesAfter)
       || entry.gitTrackingStatus === 'staged'
       || entry.gitTrackingStatus === 'unavailable'
