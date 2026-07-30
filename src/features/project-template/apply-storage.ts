@@ -142,6 +142,7 @@ export interface ProjectTemplateApplyStorage {
   controlRoot: string;
   stagingRoot: string;
   backupsRoot: string;
+  baselinesRoot: string;
   journalPath: string;
   lockPath: string;
   device: number;
@@ -856,9 +857,11 @@ export async function initializeProjectTemplateApplyStorage(options: {
   const controlRoot = join(repoRoot, PROJECT_TEMPLATE_CONTROL_DIRECTORY);
   const stagingRoot = join(controlRoot, 'staging');
   const backupsRoot = join(controlRoot, 'backups');
+  const baselinesRoot = join(controlRoot, 'merge-baselines');
   await ensurePrivateDirectory(io, controlRoot, repoStat.dev, platform);
   await ensurePrivateDirectory(io, stagingRoot, repoStat.dev, platform);
   await ensurePrivateDirectory(io, backupsRoot, repoStat.dev, platform);
+  await ensurePrivateDirectory(io, baselinesRoot, repoStat.dev, platform);
 
   const controlRealPath = await io.realpath(controlRoot);
   if (controlRealPath !== controlRoot) {
@@ -882,6 +885,7 @@ export async function initializeProjectTemplateApplyStorage(options: {
     controlRoot,
     stagingRoot,
     backupsRoot,
+    baselinesRoot,
     journalPath: join(controlRoot, 'journal.json'),
     lockPath: join(controlRoot, 'apply.lock'),
     device: repoStat.dev,
