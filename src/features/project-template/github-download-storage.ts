@@ -1353,7 +1353,11 @@ export async function materializeGithubTemplateCache(
     }
   }
   if (primaryError !== undefined) {
-    if (isInternalStorageError(primaryError) && !cacheAvailable) {
+    if (
+      isInternalStorageError(primaryError)
+      && primaryError.artifactState !== 'cache-published'
+      && !cacheAvailable
+    ) {
       let artifactState: 'none' | 'staging-only' = 'staging-only';
       try {
         lstatSync(authority.stagingPath);

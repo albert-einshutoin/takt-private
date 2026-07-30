@@ -990,7 +990,10 @@ describe('GitHub template existing global cache materialization', () => {
       staged,
       cacheRoot,
     }).catch((caught: unknown) => caught);
-    expect(error).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(error).toMatchObject({
+      code: 'CACHE_INVALID',
+      artifactState: 'cache-published',
+    });
     expect(String((error as Error).message)).not.toContain(
       'ghp_corrupt_cache_secret',
     );
