@@ -10,6 +10,7 @@ const GITHUB_ORIGIN = 'https://github.com';
 const OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 const SOURCE_REF_PATTERN = new RegExp(SOURCE_REF_PATTERN_SOURCE);
+const PORTABLE_REF_PATTERN = /^[A-Za-z0-9._/-]+$/;
 const TAKTPACK_ASSET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\.taktpack$/;
 const MAX_RELEASE_ASSET_NAME_LENGTH = 255;
 
@@ -40,6 +41,10 @@ export type ProjectTemplateGithubSourceSpec =
  * Parses the two portable GitHub source forms accepted by project templates.
  *
  * This parser intentionally accepts only redirect-free, canonical identifiers.
+ * Refs use the shared Git safety rules plus the portable ASCII subset
+ * `[A-Za-z0-9._/-]`. A release tag must additionally be one unescaped URL path
+ * segment: slash and percent escapes are intentionally rejected to prevent URL
+ * parsers and download layers from disagreeing about tag/path boundaries.
  * Network resolution, commit pinning, checksums, and downloads belong to the
  * resolver so parsing remains deterministic and safe to use during validation.
  */
@@ -95,10 +100,11 @@ function parseGithubRefSpec(input: string): ProjectTemplateGithubRefSourceSpec {
 function parseGithubReleaseAssetUrl(
   input: string,
 ): ProjectTemplateGithubReleaseAssetSourceSpec {
-  // Percent escapes can give different URL layers different path boundaries.
-  // Rejecting them keeps security checks and the eventual download target equal.
   if (input.includes('%')) {
-    invalidSource('GitHub release asset URL must not contain percent escapes');
+    invalidSource(
+      'GitHub release tags use one unescaped portable path segment; '
+      + 'percent escapes are rejected to avoid tag/path ambiguity',
+    );
   }
 
   let parsed: URL;
@@ -128,7 +134,10 @@ function parseGithubReleaseAssetUrl(
     || parts[3] !== 'releases'
     || parts[4] !== 'download'
   ) {
-    invalidSource('GitHub release source must use /releases/download/{tag}/{asset}');
+    invalidSource(
+      'GitHub release source must use /releases/download/{tag}/{asset}; '
+      + 'tag slash and percent escapes are rejected to avoid path ambiguity',
+    );
   }
 
   const owner = parts[1]!;
@@ -181,10 +190,14 @@ function assertPortableRef(ref: string, allowSlash = true): void {
     ref.length === 0
     || Array.from(ref).length > MAX_SOURCE_REF_LENGTH
     || !SOURCE_REF_PATTERN.test(ref)
+    || !PORTABLE_REF_PATTERN.test(ref)
     || ref.includes('@')
     || (!allowSlash && ref.includes('/'))
   ) {
-    invalidSource('GitHub ref is not a portable explicit ref');
+    invalidSource(
+      'GitHub ref must satisfy Git ref safety rules and use only '
+      + 'portable ASCII [A-Za-z0-9._/-]',
+    );
   }
 }
 

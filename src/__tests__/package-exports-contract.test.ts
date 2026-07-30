@@ -6,6 +6,9 @@ import type {
   PreparedProjectTemplateApplyPlan,
   ProjectTemplateApplyMergeDiagnostics,
   ProjectTemplateBaseContent,
+  ProjectTemplateGithubRefSourceSpec,
+  ProjectTemplateGithubReleaseAssetSourceSpec,
+  ProjectTemplateGithubSourceSpec,
 } from 'takt';
 
 interface PackageContract {
@@ -44,6 +47,7 @@ describe('package exports contract', () => {
         create: typeof api.createProjectTemplateApplyPlan,
         prepare: typeof api.prepareProjectTemplateApplyPlan,
         apply: typeof api.applyProjectTemplatePlan,
+        parseGithubSource: typeof api.parseProjectTemplateGithubSourceSpec,
       }));
     `);
 
@@ -51,6 +55,7 @@ describe('package exports contract', () => {
       create: 'function',
       prepare: 'function',
       apply: 'function',
+      parseGithubSource: 'function',
     });
     expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
       .toMatchTypeOf<readonly unknown[]>();
@@ -58,8 +63,23 @@ describe('package exports contract', () => {
       .toMatchTypeOf<{ path: string; content: Uint8Array }>();
     expectTypeOf<ProjectTemplateApplyMergeDiagnostics>()
       .toMatchTypeOf<{ status: string }>();
+    expectTypeOf<ProjectTemplateGithubRefSourceSpec>()
+      .toMatchTypeOf<{ kind: 'github-ref'; ref: string }>();
+    expectTypeOf<ProjectTemplateGithubReleaseAssetSourceSpec>()
+      .toMatchTypeOf<{
+        kind: 'github-release-asset';
+        assetName: string;
+      }>();
+    expectTypeOf<ProjectTemplateGithubSourceSpec>()
+      .toMatchTypeOf<
+        ProjectTemplateGithubRefSourceSpec
+        | ProjectTemplateGithubReleaseAssetSourceSpec
+      >();
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');
     expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
+    expect(declarationEntry).toContain('ProjectTemplateGithubRefSourceSpec');
+    expect(declarationEntry).toContain('ProjectTemplateGithubReleaseAssetSourceSpec');
+    expect(declarationEntry).toContain('ProjectTemplateGithubSourceSpec');
   });
 
   it('blocks internal project-template approval deep imports', () => {

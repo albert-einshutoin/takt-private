@@ -58,6 +58,10 @@ describe('parseProjectTemplateGithubSourceSpec', () => {
     'github:owner/repo@main.lock',
     'github:owner/repo@main@{1}',
     'github:owner/repo@feature branch',
+    'github:owner/repo@release+1',
+    'github:owner/repo@リリース',
+    'github:owner/repo@release\u202E1',
+    'github:owner/repo@release\u200B1',
     'GitHub:owner/repo@main',
   ])('rejects an ambiguous or dangerous repository ref: %s', (source) => {
     expectInvalidSource(source);
@@ -65,6 +69,16 @@ describe('parseProjectTemplateGithubSourceSpec', () => {
 
   it('rejects a ref over the portable length limit', () => {
     expectInvalidSource(`github:owner/repo@${'a'.repeat(257)}`);
+  });
+
+  it.each([
+    'https://github.com/owner/repo/releases/download/feature/v1/template.taktpack',
+    'https://github.com/owner/repo/releases/download/v1%2Fv2/template.taktpack',
+    'https://github.com/owner/repo/releases/download/v1%252Fv2/template.taktpack',
+  ])('rejects a release tag that is not one unescaped portable path segment: %s', (source) => {
+    expectInvalidSource(source);
+    expect(() => parseProjectTemplateGithubSourceSpec(source))
+      .toThrow(/path ambiguity/);
   });
 
   it.each([
@@ -82,7 +96,6 @@ describe('parseProjectTemplateGithubSourceSpec', () => {
     'https://GitHub.com/owner/repo/releases/download/v1/template.taktpack',
     'https://github.com/Owner/repo/releases/download/v1/template.taktpack',
     'https://github.com/owner/Repo/releases/download/v1/template.taktpack',
-    'https://github.com/owner/repo/releases/download/v1%2Fv2/template.taktpack',
     'https://github.com/owner/repo/releases/download/v1/template%5Cname.taktpack',
     'https://github.com/owner/repo/releases/download/v1/../template.taktpack',
     'https://objects.githubusercontent.com/owner/repo/releases/download/v1/template.taktpack',
