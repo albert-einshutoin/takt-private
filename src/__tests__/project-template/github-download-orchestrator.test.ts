@@ -9,12 +9,11 @@ import {
   realpathSync,
   rmSync,
   unlinkSync,
-  watch,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   acquireProjectTemplateMutationLease,
 } from '../../features/project-template/apply-lease.js';
@@ -22,6 +21,7 @@ import {
   downloadGithubTemplateSource,
   type GithubTemplateArchiveAssetPort,
 } from '../../features/project-template/github-download-orchestrator.js';
+import * as githubDownloadStorage from '../../features/project-template/github-download-storage.js';
 import {
   createProjectTemplateExportPlan,
   parseProjectTemplateGithubSourceSpec,
@@ -439,21 +439,18 @@ describe('GitHub template download orchestrator O1', () => {
     );
     let signingCalls = 0;
     let removed = false;
-    const shaRoot = join(fixture.cacheRoot, 'sha256');
-    mkdirSync(shaRoot, { mode: 0o700 });
-    const watcher = watch(
-      shaRoot,
-      () => {
-        const materializationStarted = readdirSync(shaRoot).some(
-          (entry) =>
-            entry.startsWith('.tmp.') || entry.endsWith('.taktpack'),
-        );
-        if (!removed && materializationStarted && existsSync(lockPath)) {
-          removed = true;
-          unlinkSync(lockPath);
-        }
-      },
-    );
+    const materialize = githubDownloadStorage.materializeGithubTemplateCache;
+    const materializeSpy = vi.spyOn(
+      githubDownloadStorage,
+      'materializeGithubTemplateCache',
+    ).mockImplementation(async (input) => {
+      const materialized = await materialize(input);
+      if (existsSync(lockPath)) {
+        unlinkSync(lockPath);
+        removed = true;
+      }
+      return materialized;
+    });
     let error: unknown;
     try {
       error = await downloadGithubTemplateSource({
@@ -472,7 +469,7 @@ describe('GitHub template download orchestrator O1', () => {
         verifier: fixture.verifier,
       }).catch((caught: unknown) => caught);
     } finally {
-      watcher.close();
+      materializeSpy.mockRestore();
     }
     expect(removed).toBe(true);
     expect(error).toMatchObject({
