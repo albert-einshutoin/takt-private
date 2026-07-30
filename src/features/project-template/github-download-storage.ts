@@ -105,6 +105,11 @@ export type GithubTemplateDownloadStoragePhase =
   | 'before-staging-root-parent-fsync'
   | 'before-staging-reinspect'
   | 'before-staging-verify-close'
+  | 'before-discard-unlink'
+  | 'after-discard-unlink'
+  | 'before-discard-rmdir'
+  | 'before-discard-parent-fsync'
+  | 'before-discard-close'
   | 'before-cleanup';
 
 export interface GithubTemplateDownloadStorageIoSeam {
@@ -119,6 +124,12 @@ export interface GithubTemplateDownloadStorageIoSeam {
     length: number,
     position: number,
   ): number;
+  discardFsync?(fd: number): void;
+  discardClose?(
+    fd: number,
+    kind: 'file' | 'staging-directory' | 'staging-root' | 'control-root'
+      | 'project-root',
+  ): void;
 }
 
 export interface StageGithubTemplateDownloadOptions {
@@ -135,6 +146,12 @@ export interface StagedGithubTemplateDownload {
   readonly bytes: number;
   readonly sha256: string;
   readonly inspection: DeepReadonly<TaktpackInspectResult>;
+}
+
+export interface DiscardedGithubTemplateDownload {
+  readonly status: 'discarded';
+  readonly artifactState: 'none';
+  readonly directoryDurability: 'synced' | 'unsupported';
 }
 
 export type GithubTemplateCachePhase =
@@ -281,12 +298,28 @@ interface StagedGithubTemplateDownloadAuthority {
   readonly stagingPath: string;
   readonly projectDevice: number;
   readonly projectInode: number;
+  readonly projectUid: number;
+  readonly projectMode: number;
+  readonly controlDevice: number;
+  readonly controlInode: number;
+  readonly controlUid: number;
+  readonly controlMode: number;
+  readonly stagingRootDevice: number;
+  readonly stagingRootInode: number;
+  readonly stagingRootUid: number;
+  readonly stagingRootMode: number;
+  readonly stagingDirectoryDevice: number;
+  readonly stagingDirectoryInode: number;
+  readonly stagingDirectoryUid: number;
+  readonly stagingDirectoryMode: number;
   readonly stagingDevice: number;
   readonly stagingInode: number;
+  readonly stagingUid: number;
+  readonly stagingMode: number;
   readonly bytes: number;
   readonly sha256: string;
   readonly ioSeam?: DownloadStorageIoSnapshot;
-  state: 'active' | 'consuming' | 'consumed';
+  state: 'active' | 'verifying' | 'consuming' | 'consumed';
 }
 
 interface StageGithubTemplateDownloadSnapshot {
@@ -302,6 +335,8 @@ interface DownloadStorageIoSnapshot {
   readonly receiver: GithubTemplateDownloadStorageIoSeam;
   readonly onPhase?: GithubTemplateDownloadStorageIoSeam['onPhase'];
   readonly write?: GithubTemplateDownloadStorageIoSeam['write'];
+  readonly discardFsync?: GithubTemplateDownloadStorageIoSeam['discardFsync'];
+  readonly discardClose?: GithubTemplateDownloadStorageIoSeam['discardClose'];
 }
 
 interface AbortSignalSnapshot {
@@ -454,7 +489,7 @@ function snapshotIoSeam(
     || Object.getPrototypeOf(value) !== Object.prototype
   ) throw new Error();
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  const allowed = ['onPhase', 'write'];
+  const allowed = ['onPhase', 'write', 'discardFsync', 'discardClose'];
   if (
     Reflect.ownKeys(value).some(
       (key) => typeof key !== 'string' || !allowed.includes(key),
@@ -483,6 +518,18 @@ function snapshotIoSeam(
       : {
         write: descriptors['write'].value as
           GithubTemplateDownloadStorageIoSeam['write'],
+      }),
+    ...(descriptors['discardFsync']?.value === undefined
+      ? {}
+      : {
+        discardFsync: descriptors['discardFsync'].value as
+          GithubTemplateDownloadStorageIoSeam['discardFsync'],
+      }),
+    ...(descriptors['discardClose']?.value === undefined
+      ? {}
+      : {
+        discardClose: descriptors['discardClose'].value as
+          GithubTemplateDownloadStorageIoSeam['discardClose'],
       }),
   });
 }
@@ -1042,7 +1089,7 @@ interface OpenVerifiedStaging {
 
 async function openVerifiedStagingAuthority(
   authority: StagedGithubTemplateDownloadAuthority,
-  expectedState: 'active' | 'consuming',
+  expectedState: 'active' | 'verifying' | 'consuming',
 ): Promise<OpenVerifiedStaging> {
   if (authority.state !== expectedState) {
     throw storageError(
@@ -1165,9 +1212,17 @@ export async function verifyGithubTemplateDownloadStaging(
     );
   }
 
-  const opened = await openVerifiedStagingAuthority(authority, 'active');
-  let fd: number | undefined = opened.fd;
+  if (authority.state !== 'active') {
+    throw storageError(
+      'INVALID_AUTHORITY',
+      'GitHub template staged download authority is invalid',
+    );
+  }
+  authority.state = 'verifying';
+  let fd: number | undefined;
   try {
+    const opened = await openVerifiedStagingAuthority(authority, 'verifying');
+    fd = opened.fd;
     runIoSeamPhase(
       authority.ioSeam,
       'before-staging-verify-close',
@@ -1192,7 +1247,461 @@ export async function verifyGithubTemplateDownloadStaging(
         // A close failure must never be reported as successful verification.
       }
     }
+    if (authority.state === 'verifying') authority.state = 'active';
   }
+}
+
+interface DiscardDirectoryAuthority {
+  readonly path: string;
+  readonly fd: number;
+  readonly device: number;
+  readonly inode: number;
+  readonly uid: number;
+  readonly mode: number;
+}
+
+interface OpenDiscardAuthority {
+  readonly project: DiscardDirectoryAuthority;
+  readonly control: DiscardDirectoryAuthority;
+  readonly stagingRoot: DiscardDirectoryAuthority;
+  readonly stagingDirectory: DiscardDirectoryAuthority;
+  readonly fileFd: number;
+}
+
+function claimStagedDownload(
+  value: unknown,
+): StagedGithubTemplateDownloadAuthority {
+  const authority = (
+    typeof value === 'object'
+    && value !== null
+    && !types.isProxy(value)
+  )
+    ? STAGED_DOWNLOAD_AUTHORITIES.get(value)
+    : undefined;
+  if (
+    authority === undefined
+    || authority.result !== value
+    || authority.state !== 'active'
+  ) {
+    throw storageError(
+      'INVALID_AUTHORITY',
+      'GitHub template staged download authority is invalid',
+    );
+  }
+  // This transition deliberately occurs before any await, filesystem access,
+  // or user-controlled hook so concurrent materialize/discard calls have one
+  // deterministic winner.
+  authority.state = 'consuming';
+  return authority;
+}
+
+function openDiscardDirectory(
+  path: string,
+  device: number,
+  inode: number,
+  uid: number,
+  mode: number,
+): DiscardDirectoryAuthority {
+  const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+  const directory = process.platform === 'win32'
+    ? 0
+    : constants.O_DIRECTORY;
+  const fd = openSync(path, constants.O_RDONLY | noFollow | directory);
+  const authority = { path, fd, device, inode, uid, mode };
+  try {
+    const pathStat = lstatSync(path);
+    const fdStat = fstatSync(fd);
+    if (
+      pathStat.isSymbolicLink()
+      || !pathStat.isDirectory()
+      || !fdStat.isDirectory()
+      || realpathSync.native(path) !== path
+      || pathStat.dev !== device
+      || fdStat.dev !== device
+      || pathStat.ino !== inode
+      || fdStat.ino !== inode
+      || pathStat.uid !== uid
+      || fdStat.uid !== uid
+      || pathStat.mode !== mode
+      || fdStat.mode !== mode
+    ) throw new Error();
+    return authority;
+  } catch (error) {
+    try {
+      closeSync(fd);
+    } catch {
+      // The original authority failure is the stable outcome.
+    }
+    throw error;
+  }
+}
+
+function assertDiscardDirectory(
+  authority: DiscardDirectoryAuthority,
+): void {
+  const pathStat = lstatSync(authority.path);
+  const fdStat = fstatSync(authority.fd);
+  if (
+    pathStat.isSymbolicLink()
+    || !pathStat.isDirectory()
+    || !fdStat.isDirectory()
+    || realpathSync.native(authority.path) !== authority.path
+    || pathStat.dev !== authority.device
+    || fdStat.dev !== authority.device
+    || pathStat.ino !== authority.inode
+    || fdStat.ino !== authority.inode
+    || pathStat.uid !== authority.uid
+    || fdStat.uid !== authority.uid
+    || pathStat.mode !== authority.mode
+    || fdStat.mode !== authority.mode
+  ) throw new Error();
+}
+
+function requireAuthoritativeAbsence(path: string): void {
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  throw new Error();
+}
+
+function assertDiscardAuthority(
+  opened: OpenDiscardAuthority,
+  authority: StagedGithubTemplateDownloadAuthority,
+  fileState: 'present' | 'unlinked' | 'closed',
+  directoryState: 'present' | 'removed',
+): void {
+  assertDiscardDirectory(opened.project);
+  assertDiscardDirectory(opened.control);
+  assertDiscardDirectory(opened.stagingRoot);
+  if (directoryState === 'present') {
+    assertDiscardDirectory(opened.stagingDirectory);
+  } else {
+    requireAuthoritativeAbsence(authority.stagingDirectory);
+  }
+  if (fileState !== 'closed') {
+    const fileStat = fstatSync(opened.fileFd);
+    if (
+      !fileStat.isFile()
+      || fileStat.dev !== authority.stagingDevice
+      || fileStat.ino !== authority.stagingInode
+      || fileStat.uid !== authority.stagingUid
+      || fileStat.mode !== authority.stagingMode
+      || fileStat.size !== authority.bytes
+      || fileStat.nlink !== (fileState === 'present' ? 1 : 0)
+    ) throw new Error();
+  }
+  if (fileState === 'present') {
+    requireSealedStagingFile(authority);
+  } else {
+    requireAuthoritativeAbsence(authority.stagingPath);
+  }
+}
+
+function runDiscardPhase(
+  authority: StagedGithubTemplateDownloadAuthority,
+  opened: OpenDiscardAuthority,
+  phase: GithubTemplateDownloadStoragePhase,
+  fileState: 'present' | 'unlinked' | 'closed',
+  directoryState: 'present' | 'removed',
+): void {
+  runIoSeamPhase(authority.ioSeam, phase, authority.stagingPath);
+  assertDiscardAuthority(opened, authority, fileState, directoryState);
+}
+
+function syncDiscardDirectory(
+  fd: number,
+  authority: StagedGithubTemplateDownloadAuthority,
+): void {
+  if (process.platform === 'win32') return;
+  if (authority.ioSeam?.discardFsync === undefined) {
+    fsyncSync(fd);
+  } else {
+    Reflect.apply(
+      authority.ioSeam.discardFsync,
+      authority.ioSeam.receiver,
+      [fd],
+    );
+  }
+}
+
+function closeDiscardDescriptor(
+  fd: number,
+  kind: Parameters<
+    NonNullable<GithubTemplateDownloadStorageIoSeam['discardClose']>
+  >[1],
+  authority: StagedGithubTemplateDownloadAuthority,
+  reassert: () => void,
+): void {
+  if (
+    process.platform !== 'win32'
+    && authority.ioSeam?.discardClose !== undefined
+  ) {
+    Reflect.apply(
+      authority.ioSeam.discardClose,
+      authority.ioSeam.receiver,
+      [fd, kind],
+    );
+    reassert();
+  }
+  closeSync(fd);
+}
+
+/**
+ * Permanently consumes a staged authority and removes only the inode sealed by
+ * this module. All ancestor descriptors stay open across untrusted hooks and
+ * mutations so a path replacement can never redirect cleanup.
+ */
+export function discardStagedGithubTemplateDownload(
+  staged: unknown,
+): DiscardedGithubTemplateDownload {
+  const authority = claimStagedDownload(staged);
+  const controlRoot = dirname(authority.stagingRoot);
+  const openedDirectories: Array<{
+    fd: number;
+    authority: DiscardDirectoryAuthority;
+    kind: Parameters<
+      NonNullable<GithubTemplateDownloadStorageIoSeam['discardClose']>
+    >[1];
+  }> = [];
+  let fileFd: number | undefined;
+  let opened: OpenDiscardAuthority | undefined;
+  let primaryError: unknown;
+  let fileState: 'present' | 'unlinked' | 'closed' = 'present';
+  let directoryState: 'present' | 'removed' = 'present';
+  try {
+    const project = openDiscardDirectory(
+      authority.projectRoot,
+      authority.projectDevice,
+      authority.projectInode,
+      authority.projectUid,
+      authority.projectMode,
+    );
+    openedDirectories.push({
+      fd: project.fd,
+      authority: project,
+      kind: 'project-root',
+    });
+    const control = openDiscardDirectory(
+      controlRoot,
+      authority.controlDevice,
+      authority.controlInode,
+      authority.controlUid,
+      authority.controlMode,
+    );
+    openedDirectories.push({
+      fd: control.fd,
+      authority: control,
+      kind: 'control-root',
+    });
+    const stagingRoot = openDiscardDirectory(
+      authority.stagingRoot,
+      authority.stagingRootDevice,
+      authority.stagingRootInode,
+      authority.stagingRootUid,
+      authority.stagingRootMode,
+    );
+    openedDirectories.push({
+      fd: stagingRoot.fd,
+      authority: stagingRoot,
+      kind: 'staging-root',
+    });
+    const stagingDirectory = openDiscardDirectory(
+      authority.stagingDirectory,
+      authority.stagingDirectoryDevice,
+      authority.stagingDirectoryInode,
+      authority.stagingDirectoryUid,
+      authority.stagingDirectoryMode,
+    );
+    openedDirectories.push({
+      fd: stagingDirectory.fd,
+      authority: stagingDirectory,
+      kind: 'staging-directory',
+    });
+    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+    fileFd = openSync(authority.stagingPath, constants.O_RDONLY | noFollow);
+    opened = { project, control, stagingRoot, stagingDirectory, fileFd };
+    assertDiscardAuthority(opened, authority, 'present', 'present');
+    runDiscardPhase(
+      authority,
+      opened,
+      'before-discard-unlink',
+      'present',
+      'present',
+    );
+    if (process.platform === 'win32') {
+      closeDiscardDescriptor(
+        fileFd,
+        'file',
+        authority,
+        () => {},
+      );
+      fileFd = undefined;
+      fileState = 'closed';
+      closeDiscardDescriptor(
+        stagingDirectory.fd,
+        'staging-directory',
+        authority,
+        () => {},
+      );
+      openedDirectories.pop();
+    }
+    unlinkSync(authority.stagingPath);
+    fileState = 'unlinked';
+    if (process.platform !== 'win32') {
+      runDiscardPhase(
+        authority,
+        opened,
+        'after-discard-unlink',
+        'unlinked',
+        'present',
+      );
+      syncDiscardDirectory(stagingDirectory.fd, authority);
+      assertDiscardAuthority(opened, authority, 'unlinked', 'present');
+      runDiscardPhase(
+        authority,
+        opened,
+        'before-discard-close',
+        'unlinked',
+        'present',
+      );
+      closeDiscardDescriptor(
+        opened.fileFd,
+        'file',
+        authority,
+        () => assertDiscardAuthority(
+          opened!,
+          authority,
+          'unlinked',
+          'present',
+        ),
+      );
+      fileFd = undefined;
+      fileState = 'closed';
+    } else {
+      requireAuthoritativeAbsence(authority.stagingPath);
+    }
+    if (process.platform !== 'win32') {
+      runDiscardPhase(
+        authority,
+        opened,
+        'before-discard-rmdir',
+        'closed',
+        'present',
+      );
+    }
+    rmdirSync(authority.stagingDirectory);
+    directoryState = 'removed';
+    if (process.platform !== 'win32') {
+      runDiscardPhase(
+        authority,
+        opened,
+        'before-discard-parent-fsync',
+        'closed',
+        'removed',
+      );
+    }
+    syncDiscardDirectory(stagingRoot.fd, authority);
+    if (process.platform !== 'win32') {
+      assertDiscardAuthority(opened, authority, 'closed', 'removed');
+    } else {
+      requireAuthoritativeAbsence(authority.stagingPath);
+      requireAuthoritativeAbsence(authority.stagingDirectory);
+    }
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    authority.state = 'consumed';
+    if (
+      opened !== undefined
+      && process.platform !== 'win32'
+      && fileFd !== undefined
+    ) {
+      try {
+        runDiscardPhase(
+          authority,
+          opened,
+          'before-discard-close',
+          fileState,
+          directoryState,
+        );
+      } catch (error) {
+        primaryError ??= error;
+      }
+    }
+    if (fileFd !== undefined) {
+      try {
+        closeDiscardDescriptor(
+          fileFd,
+          'file',
+          authority,
+          () => {
+            if (opened !== undefined) {
+              assertDiscardAuthority(
+                opened,
+                authority,
+                fileState,
+                directoryState,
+              );
+            }
+          },
+        );
+      } catch (error) {
+        primaryError ??= error;
+        try {
+          closeSync(fileFd);
+        } catch {
+          // Every descriptor receives a native close attempt.
+        }
+      }
+    }
+    for (const descriptor of openedDirectories.reverse()) {
+      try {
+        closeDiscardDescriptor(
+          descriptor.fd,
+          descriptor.kind,
+          authority,
+          () => {
+            assertDiscardDirectory(descriptor.authority);
+            if (fileState === 'present') {
+              requireSealedStagingFile(authority);
+            } else {
+              requireAuthoritativeAbsence(authority.stagingPath);
+            }
+            if (directoryState === 'removed') {
+              requireAuthoritativeAbsence(authority.stagingDirectory);
+            }
+          },
+        );
+      } catch (error) {
+        primaryError ??= error;
+        try {
+          closeSync(descriptor.fd);
+        } catch {
+          // Continue closing the remaining retained authorities.
+        }
+      }
+    }
+  }
+  if (primaryError !== undefined) {
+    const authoritativeNone = directoryState === 'removed'
+      && !storageArtifactExists(authority.stagingPath)
+      && !storageArtifactExists(authority.stagingDirectory);
+    throw storageError(
+      'CLEANUP_FAILED',
+      'GitHub template staged download discard failed',
+      authoritativeNone ? 'none' : 'staging-only',
+    );
+  }
+  return Object.freeze({
+    status: 'discarded',
+    artifactState: 'none',
+    directoryDurability: process.platform === 'win32'
+      ? 'unsupported'
+      : 'synced',
+  });
 }
 
 function claimCacheMaterialization(
@@ -3370,6 +3879,37 @@ export async function stageGithubTemplateDownload(
         'GitHub template download file changed during inspection',
       );
     }
+    const finalProjectStat = lstatSync(projectRoot);
+    const finalControlStat = lstatSync(controlRoot);
+    const finalStagingRootStat = lstatSync(stagingRoot);
+    const finalStagingDirectoryStat = lstatSync(stagingDirectory);
+    if (
+      finalProjectStat.dev !== projectStat.dev
+      || finalProjectStat.ino !== projectStat.ino
+      || !finalProjectStat.isDirectory()
+      || finalProjectStat.isSymbolicLink()
+      || !finalControlStat.isDirectory()
+      || finalControlStat.isSymbolicLink()
+      || !isProjectTemplatePrivateDirectoryMode(finalControlStat.mode)
+      || !finalStagingRootStat.isDirectory()
+      || finalStagingRootStat.isSymbolicLink()
+      || !isProjectTemplatePrivateDirectoryMode(finalStagingRootStat.mode)
+      || !finalStagingDirectoryStat.isDirectory()
+      || finalStagingDirectoryStat.isSymbolicLink()
+      || !isProjectTemplatePrivateDirectoryMode(finalStagingDirectoryStat.mode)
+      || finalControlStat.dev !== projectStat.dev
+      || finalStagingRootStat.dev !== projectStat.dev
+      || finalStagingDirectoryStat.dev !== projectStat.dev
+      || realpathSync.native(projectRoot) !== projectRoot
+      || realpathSync.native(controlRoot) !== controlRoot
+      || realpathSync.native(stagingRoot) !== stagingRoot
+      || realpathSync.native(stagingDirectory) !== stagingDirectory
+    ) {
+      throw storageError(
+        'UNSAFE_STAGING',
+        'GitHub template download ancestor authority changed',
+      );
+    }
     const result = Object.freeze({
       stagingPath,
       bytes: received,
@@ -3384,8 +3924,24 @@ export async function stageGithubTemplateDownload(
       stagingPath,
       projectDevice: projectStat.dev,
       projectInode: projectStat.ino,
+      projectUid: finalProjectStat.uid,
+      projectMode: finalProjectStat.mode,
+      controlDevice: finalControlStat.dev,
+      controlInode: finalControlStat.ino,
+      controlUid: finalControlStat.uid,
+      controlMode: finalControlStat.mode,
+      stagingRootDevice: finalStagingRootStat.dev,
+      stagingRootInode: finalStagingRootStat.ino,
+      stagingRootUid: finalStagingRootStat.uid,
+      stagingRootMode: finalStagingRootStat.mode,
+      stagingDirectoryDevice: finalStagingDirectoryStat.dev,
+      stagingDirectoryInode: finalStagingDirectoryStat.ino,
+      stagingDirectoryUid: finalStagingDirectoryStat.uid,
+      stagingDirectoryMode: finalStagingDirectoryStat.mode,
       stagingDevice: finalStat.dev,
       stagingInode: finalStat.ino,
+      stagingUid: finalStat.uid,
+      stagingMode: finalStat.mode,
       bytes: received,
       sha256: actualSha256,
       ioSeam: snapshot.ioSeam,

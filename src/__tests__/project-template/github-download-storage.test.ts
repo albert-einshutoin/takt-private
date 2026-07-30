@@ -18,13 +18,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { basename, dirname, join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createProjectTemplateExportPlan,
   writeTaktpack,
 } from '../../features/project-template/index.js';
 import {
+  discardStagedGithubTemplateDownload,
   GithubTemplateDownloadStorageError,
   materializeGithubTemplateCache,
   reclaimGithubTemplateCacheTemps,
@@ -1218,6 +1219,331 @@ describe('GitHub template staged authority verification', () => {
     expect(String((error as Error).message)).not.toContain(
       'ghp_verify_close_secret',
     );
+  });
+});
+
+describe('GitHub template staged discard', () => {
+  it('synchronously consumes the original authority and durably removes it', async () => {
+    const { staged } = await stagePack(makeRoot('takt-github-discard-'));
+    const stagingDirectory = dirname(staged.stagingPath);
+
+    const result = discardStagedGithubTemplateDownload(staged);
+
+    expect(result).toEqual({
+      status: 'discarded',
+      artifactState: 'none',
+      directoryDurability: process.platform === 'win32'
+        ? 'unsupported'
+        : 'synced',
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(existsSync(staged.stagingPath)).toBe(false);
+    expect(existsSync(stagingDirectory)).toBe(false);
+    expect(() => discardStagedGithubTemplateDownload(staged))
+      .toThrowError(GithubTemplateDownloadStorageError);
+  });
+
+  it('rejects unknown, cloned, forged, and proxy values without consuming original', async () => {
+    const { staged } = await stagePack(makeRoot('takt-github-discard-'));
+    let traps = 0;
+    const proxy = new Proxy(staged, {
+      get() {
+        traps += 1;
+        throw new Error('must not inspect proxy');
+      },
+      getPrototypeOf() {
+        traps += 1;
+        throw new Error('must not inspect proxy');
+      },
+      ownKeys() {
+        traps += 1;
+        throw new Error('must not inspect proxy');
+      },
+    });
+
+    for (const value of [
+      undefined,
+      null,
+      { ...staged },
+      Object.freeze({ ...staged }),
+      proxy,
+    ]) {
+      let error: unknown;
+      try {
+        discardStagedGithubTemplateDownload(value);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toMatchObject({ code: 'INVALID_AUTHORITY' });
+    }
+    expect(traps).toBe(0);
+    expect(discardStagedGithubTemplateDownload(staged).status)
+      .toBe('discarded');
+  });
+
+  it('deletes a same-inode content-corrupt artifact without trusting its bytes', async () => {
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-discard-'),
+    );
+    writeFileSync(staged.stagingPath, Buffer.alloc(content.byteLength));
+
+    expect(discardStagedGithubTemplateDownload(staged))
+      .toMatchObject({ artifactState: 'none' });
+    expect(existsSync(staged.stagingPath)).toBe(false);
+  });
+
+  it.each([
+    ['mode', (path: string) => chmodSync(path, 0o644)],
+    ['hardlink', (path: string) => linkSync(path, `${path}.alias`)],
+  ])('fails closed and consumes authority after %s tampering', async (
+    _label,
+    tamper,
+  ) => {
+    const { staged } = await stagePack(makeRoot('takt-github-discard-'));
+    tamper(staged.stagingPath);
+
+    let error: unknown;
+    try {
+      discardStagedGithubTemplateDownload(staged);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'staging-only',
+    });
+    expect(existsSync(staged.stagingPath)).toBe(true);
+    expect(() => discardStagedGithubTemplateDownload(staged))
+      .toThrowError(GithubTemplateDownloadStorageError);
+  });
+
+  it('never recursively removes an unexpected staging entry', async () => {
+    const { staged } = await stagePack(makeRoot('takt-github-discard-'));
+    const unexpected = join(dirname(staged.stagingPath), 'keep.txt');
+    writeFileSync(unexpected, 'keep', { mode: 0o600 });
+
+    let error: unknown;
+    try {
+      discardStagedGithubTemplateDownload(staged);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'staging-only',
+    });
+    expect(readFileSync(unexpected, 'utf8')).toBe('keep');
+    expect(existsSync(staged.stagingPath)).toBe(false);
+  });
+
+  it('rejects discard and materialize while verification owns the authority', async () => {
+    const projectRoot = makeRoot('takt-github-discard-');
+    const cacheRoot = prepareCacheRoot();
+    const { staged } = await stagePack(projectRoot);
+
+    const pending = verifyGithubTemplateDownloadStaging(staged);
+    expect(() => discardStagedGithubTemplateDownload(staged))
+      .toThrowError(GithubTemplateDownloadStorageError);
+    await expect(materializeGithubTemplateCache({ staged, cacheRoot }))
+      .rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
+    await expect(verifyGithubTemplateDownloadStaging(staged))
+      .rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
+    await expect(pending).resolves.toBe(staged);
+    expect(discardStagedGithubTemplateDownload(staged).status)
+      .toBe('discarded');
+  });
+
+  it('restores authority after failed verification so corrupt bytes can be discarded', async () => {
+    const projectRoot = makeRoot('takt-github-discard-');
+    let armed = false;
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        onPhase(phase, path) {
+          if (armed && phase === 'before-staging-reinspect') {
+            writeFileSync(path, Buffer.alloc(content.byteLength));
+          }
+        },
+      },
+    });
+    armed = true;
+
+    await expect(verifyGithubTemplateDownloadStaging(staged))
+      .rejects.toMatchObject({ code: 'INSPECTION_FAILED' });
+    expect(discardStagedGithubTemplateDownload(staged))
+      .toMatchObject({ artifactState: 'none' });
+  });
+
+  it('allows only one synchronous discard/materialize winner', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { staged } = await stagePack(makeRoot('takt-github-discard-'));
+    const pending = materializeGithubTemplateCache({ staged, cacheRoot });
+
+    expect(() => discardStagedGithubTemplateDownload(staged))
+      .toThrowError(GithubTemplateDownloadStorageError);
+    await expect(pending).resolves.toMatchObject({
+      artifactState: 'cache-published',
+    });
+  });
+
+  it('detects recreation after unlink and never removes the replacement', async () => {
+    const projectRoot = makeRoot('takt-github-discard-');
+    let armed = false;
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        onPhase(phase, path) {
+          if (armed && phase === 'after-discard-unlink') {
+            writeFileSync(path, 'replacement', { mode: 0o600 });
+          }
+        },
+      },
+    });
+    armed = true;
+
+    let error: unknown;
+    try {
+      discardStagedGithubTemplateDownload(staged);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'staging-only',
+    });
+    expect(readFileSync(staged.stagingPath, 'utf8')).toBe('replacement');
+  });
+
+  it('rejects an ancestor swap without deleting the moved sealed artifact', async () => {
+    const projectRoot = makeRoot('takt-github-discard-');
+    let armed = false;
+    let movedRoot = '';
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        onPhase(phase) {
+          if (armed && phase === 'before-discard-unlink') {
+            const stagingRoot = dirname(dirname(staged.stagingPath));
+            movedRoot = `${stagingRoot}.moved`;
+            renameSync(stagingRoot, movedRoot);
+            mkdirSync(stagingRoot, { mode: 0o700 });
+          }
+        },
+      },
+    });
+    armed = true;
+
+    let error: unknown;
+    try {
+      discardStagedGithubTemplateDownload(staged);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'staging-only',
+    });
+    expect(
+      existsSync(join(
+        movedRoot,
+        basename(dirname(staged.stagingPath)),
+        basename(staged.stagingPath),
+      )),
+    ).toBe(true);
+  });
+
+  it('uses the explicit unsupported durability result on Windows', async () => {
+    const projectRoot = makeRoot('takt-github-discard-');
+    let armed = false;
+    let callbacks = 0;
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        discardFsync() {
+          if (armed) callbacks += 1;
+        },
+        discardClose() {
+          if (armed) callbacks += 1;
+        },
+      },
+    });
+    armed = true;
+    const platform = vi.spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    try {
+      expect(discardStagedGithubTemplateDownload(staged)).toMatchObject({
+        artifactState: 'none',
+        directoryDurability: 'unsupported',
+      });
+    } finally {
+      platform.mockRestore();
+    }
+    expect(callbacks).toBe(0);
+  });
+
+  it('attempts every close and preserves the first cleanup failure', async () => {
+    const projectRoot = makeRoot('takt-github-discard-');
+    let armed = false;
+    const closeAttempts: string[] = [];
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        discardFsync() {
+          if (armed) throw new Error('first-secret');
+        },
+        discardClose(_fd, kind) {
+          if (armed) {
+            closeAttempts.push(kind);
+            throw new Error('later-secret');
+          }
+        },
+      },
+    });
+    armed = true;
+
+    let error: unknown;
+    try {
+      discardStagedGithubTemplateDownload(staged);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'staging-only',
+    });
+    expect(String((error as Error).message)).not.toContain('secret');
+    expect(new Set(closeAttempts)).toEqual(new Set([
+      'file',
+      'staging-directory',
+      'staging-root',
+      'control-root',
+      'project-root',
+    ]));
   });
 });
 
