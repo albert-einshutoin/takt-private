@@ -1,5 +1,9 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import type { ClientRequest, IncomingMessage } from 'node:http';
+import {
+  request as httpsRequest,
+} from 'node:https';
 import { performance } from 'node:perf_hooks';
 import { Readable } from 'node:stream';
 import { types } from 'node:util';
@@ -89,6 +93,31 @@ export interface DisposableProjectTemplateGhCredential {
   dispose(): void;
 }
 
+export interface ProjectTemplateGithubApiRequestHandlers {
+  readonly onResponse: (statusCode: number | undefined) => void;
+  readonly onData: (chunk: unknown) => void;
+  readonly onEnd: () => void;
+  readonly onResponseAborted: () => void;
+  readonly onResponseError: () => void;
+  readonly onResponseClose: () => void;
+  readonly onRequestError: () => void;
+  readonly onRequestClose: () => void;
+}
+
+export interface ProjectTemplateGithubApiRequestPlan {
+  readonly path: string;
+  readonly accept:
+    | 'application/vnd.github+json'
+    | 'application/vnd.github.raw+json';
+  readonly handlers: ProjectTemplateGithubApiRequestHandlers;
+}
+
+export interface ProjectTemplateGithubApiRequest {
+  start(): void;
+  destroy(): void;
+  dispose(): void;
+}
+
 interface CredentialAuthority {
   readonly token: Buffer;
   state: 'active' | 'disposed';
@@ -103,6 +132,19 @@ const CREDENTIAL_AUTHORITIES = new WeakMap<
 object,
 CredentialAuthority
 >();
+interface ApiRequestAuthority {
+  readonly request: ClientRequest;
+  response?: IncomingMessage;
+  disposed: boolean;
+  readonly requestListeners: ReadonlyArray<
+  readonly [event: string, listener: (...args: unknown[]) => void]
+  >;
+  responseListeners: ReadonlyArray<
+  readonly [event: string, listener: (...args: unknown[]) => void]
+  >;
+}
+
+const API_REQUEST_AUTHORITIES = new WeakMap<object, ApiRequestAuthority>();
 
 function authError(
   code: ProjectTemplateGhAuthErrorCode,
@@ -135,6 +177,239 @@ function createCredential(
     state: 'active',
   });
   return Object.freeze(credential);
+}
+
+function isSafeGithubApiPath(path: string): boolean {
+  const hasUnsafeRawCharacter = (value: string): boolean => {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code <= 0x20 || code >= 0x7f || code === 0x5c) return true;
+    }
+    return false;
+  };
+  const hasUnsafeDecodedCharacter = (value: string): boolean => {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code < 0x20 || code === 0x7f || code === 0x5c) return true;
+    }
+    return value.includes('/');
+  };
+  if (
+    path.length === 0
+    || path.length > 8_192
+    || !path.startsWith('/')
+    || path.startsWith('//')
+    || path.includes('#')
+    || /%(?![0-9A-F]{2})/.test(path)
+    || hasUnsafeRawCharacter(path)
+  ) {
+    return false;
+  }
+  const [pathname, query, ...rest] = path.split('?');
+  if (rest.length > 0 || pathname === undefined) return false;
+  const encoded = /^(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+$/;
+  const segments = pathname.slice(1).split('/');
+  if (
+    segments.some((segment) => {
+      if (!encoded.test(segment)) return true;
+      try {
+        const decoded = decodeURIComponent(segment);
+        return (
+          decoded === '.'
+          || decoded === '..'
+          || hasUnsafeDecodedCharacter(decoded)
+        );
+      } catch {
+        return true;
+      }
+    })
+  ) {
+    return false;
+  }
+  if (query === undefined) return true;
+  if (query.length === 0) return false;
+  return query.split('&').every((pair) => {
+    const parts = pair.split('=');
+    if (
+      parts.length !== 2
+      || parts[0] === undefined
+      || parts[1] === undefined
+      || !encoded.test(parts[0])
+      || !encoded.test(parts[1])
+    ) {
+      return false;
+    }
+    try {
+      decodeURIComponent(parts[0]);
+      decodeURIComponent(parts[1]);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Internal sealed boundary for fixed GitHub API requests.
+ *
+ * The facade deliberately exposes neither ClientRequest nor IncomingMessage:
+ * both can lead back to the Authorization header. Keep this out of barrels.
+ */
+export function createProjectTemplateGithubApiRequest(
+  credential: DisposableProjectTemplateGhCredential,
+  planValue: ProjectTemplateGithubApiRequestPlan,
+): ProjectTemplateGithubApiRequest {
+  const credentialAuthority = (
+    typeof credential === 'object'
+    && credential !== null
+    && !types.isProxy(credential)
+  )
+    ? CREDENTIAL_AUTHORITIES.get(credential)
+    : undefined;
+  if (
+    credentialAuthority === undefined
+    || credentialAuthority.state !== 'active'
+  ) {
+    throw authError(
+      'CREDENTIAL_DISPOSED',
+      'GitHub credential is no longer available',
+    );
+  }
+  const plan = exactDataRecord(planValue, ['path', 'accept', 'handlers']);
+  const path = plan['path'];
+  const accept = plan['accept'];
+  const handlersRecord = exactDataRecord(
+    plan['handlers'],
+    [
+      'onResponse',
+      'onData',
+      'onEnd',
+      'onResponseAborted',
+      'onResponseError',
+      'onResponseClose',
+      'onRequestError',
+      'onRequestClose',
+    ],
+  );
+  const handlerNames = Object.keys(handlersRecord);
+  if (
+    typeof path !== 'string'
+    || !isSafeGithubApiPath(path)
+    || (
+      accept !== 'application/vnd.github+json'
+      && accept !== 'application/vnd.github.raw+json'
+    )
+    || handlerNames.some(
+      (name) => (
+        typeof handlersRecord[name] !== 'function'
+        || types.isProxy(handlersRecord[name])
+      ),
+    )
+  ) {
+    throw authError(
+      'INVALID_ARGUMENT',
+      'GitHub API request plan is invalid',
+    );
+  }
+  const handlers = handlersRecord as unknown as
+    ProjectTemplateGithubApiRequestHandlers;
+  const authorityHolder: { current?: ApiRequestAuthority } = {};
+  const responseCallback = (response: IncomingMessage): void => {
+    const current = authorityHolder.current;
+    if (
+      current === undefined
+      || current.disposed
+      || !isReadableStream(response)
+    ) {
+      handlers.onResponseError();
+      return;
+    }
+    current.response = response;
+    const listeners: ApiRequestAuthority['responseListeners'] = [
+      ['data', (chunk: unknown) => handlers.onData(chunk)],
+      ['end', () => handlers.onEnd()],
+      ['aborted', () => handlers.onResponseAborted()],
+      ['error', () => handlers.onResponseError()],
+      ['close', () => handlers.onResponseClose()],
+    ];
+    current.responseListeners = listeners;
+    const statusCode = ownDataValue(response, 'statusCode');
+    handlers.onResponse(
+      typeof statusCode === 'number' ? statusCode : undefined,
+    );
+    for (const [event, listener] of listeners) {
+      EventEmitter.prototype.on.call(response, event, listener);
+    }
+  };
+  const request = httpsRequest({
+    protocol: 'https:',
+    hostname: 'api.github.com',
+    port: 443,
+    method: 'GET',
+    path,
+    headers: {
+      Accept: accept as string,
+      Authorization: `Bearer ${credentialAuthority.token.toString('utf8')}`,
+      'User-Agent': 'takt-project-template',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  }, responseCallback);
+  const requestListeners: ApiRequestAuthority['requestListeners'] = [
+    ['error', () => handlers.onRequestError()],
+    ['close', () => handlers.onRequestClose()],
+  ];
+  const authority: ApiRequestAuthority = {
+    request,
+    disposed: false,
+    requestListeners,
+    responseListeners: [],
+  };
+  authorityHolder.current = authority;
+  for (const [event, listener] of requestListeners) {
+    EventEmitter.prototype.on.call(request, event, listener);
+  }
+  const facade: ProjectTemplateGithubApiRequest = {
+    start(): void {
+      const current = API_REQUEST_AUTHORITIES.get(this);
+      if (current === undefined || current.disposed) {
+        throw authError(
+          'PROCESS_FAILED',
+          'GitHub API request is no longer available',
+        );
+      }
+      current.request.end();
+    },
+    destroy(): void {
+      const current = API_REQUEST_AUTHORITIES.get(this);
+      if (current === undefined || current.disposed) return;
+      current.response?.destroy();
+      current.request.destroy();
+    },
+    dispose(): void {
+      const current = API_REQUEST_AUTHORITIES.get(this);
+      if (current === undefined || current.disposed) return;
+      current.disposed = true;
+      for (const [event, listener] of current.requestListeners) {
+        EventEmitter.prototype.removeListener.call(
+          current.request,
+          event,
+          listener,
+        );
+      }
+      if (current.response !== undefined) {
+        for (const [event, listener] of current.responseListeners) {
+          EventEmitter.prototype.removeListener.call(
+            current.response,
+            event,
+            listener,
+          );
+        }
+      }
+      current.responseListeners = [];
+    },
+  };
+  API_REQUEST_AUTHORITIES.set(facade, authority);
+  return Object.freeze(facade);
 }
 
 const DEFAULT_DEPENDENCIES: ProjectTemplateGhAuthDependencies =
