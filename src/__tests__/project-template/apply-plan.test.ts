@@ -287,6 +287,49 @@ describe('project template three-way apply plan', () => {
   });
 
   it.each([
+    ['git hooks', 'allow_git_hooks: true\n', ['allow_git_hooks']],
+    [
+      'provider network access',
+      'provider_options:\n  codex:\n    network_access: true\n',
+      ['provider_options', 'codex', 'network_access'],
+    ],
+  ] as const)(
+    'requires review for a direct config add containing %s',
+    (_label, incoming, path) => {
+      const planInput = input({});
+      planInput.incomingManifest.entries = [
+        manifestEntry('config.yaml', incoming, 'merge'),
+      ];
+      planInput.incomingContents = [{
+        path: 'config.yaml',
+        content: Buffer.from(incoming),
+      }];
+      planInput.missingPathTracking = { 'config.yaml': 'not-repository' };
+
+      const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+      expect(prepared.plan).toMatchObject({
+        reviewRequired: true,
+        defaultApplyPossible: false,
+      });
+      expect(prepared.plan.entries[0]).toMatchObject({
+        path: 'config.yaml',
+        action: 'add',
+        reviewRequired: true,
+        mergeDiagnostics: {
+          status: 'merged',
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({
+              code: 'RULE_REVIEW_REQUIRED',
+              path,
+            }),
+          ]),
+        },
+      });
+    },
+  );
+
+  it.each([
     [
       'unsafe provider',
       'subscription_only: true\nprovider: codex\n',

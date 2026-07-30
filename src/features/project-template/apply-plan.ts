@@ -78,6 +78,7 @@ function mergeSupportedSemanticConfig(options: {
   base: Uint8Array;
   local: Uint8Array;
   incoming: Uint8Array;
+  reviewIncomingDocument?: boolean;
 }): ProjectTemplateConfigYamlMergeResult {
   return options.path === 'config.yaml'
     ? mergeProjectTemplateConfigYaml(options)
@@ -1180,6 +1181,10 @@ export function prepareProjectTemplateApplyPlan(
       base: incoming,
       local: incoming,
       incoming,
+      // A self-merge validates syntax and policy but has no semantic delta to
+      // visit. First installs therefore request an explicit incoming scan so
+      // capability-sensitive and unknown leaves cannot become auto-approved.
+      reviewIncomingDocument: formalBase === undefined && local === undefined,
     });
     if (incomingValidation.status !== 'merged') {
       const unresolved = overrideConflict(entry, 'CONFLICT');

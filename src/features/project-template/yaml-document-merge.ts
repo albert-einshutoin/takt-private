@@ -69,6 +69,7 @@ export interface MergeProjectTemplateYamlDocumentOptions {
   readonly base: Uint8Array;
   readonly local: Uint8Array;
   readonly incoming: Uint8Array;
+  readonly reviewIncomingDocument?: boolean;
 }
 
 const MISSING = Symbol('missing');
@@ -216,6 +217,26 @@ function containsForbiddenPath(
   return resolveProjectTemplateConfigMergeRule(document, path).ownership === 'forbidden';
 }
 
+function incomingReviewDiagnostics(
+  document: ProjectTemplateConfigDocument,
+  value: SemanticValue,
+  path: readonly string[] = [],
+): ProjectTemplateYamlMergeDiagnostic[] {
+  if (isMapping(value)) {
+    return Object.entries(value).flatMap(([key, child]) => (
+      incomingReviewDiagnostics(document, child, [...path, key])
+    ));
+  }
+  const rule = resolveProjectTemplateConfigMergeRule(document, path);
+  return rule.reviewRequired
+    ? [{
+      code: 'RULE_REVIEW_REQUIRED',
+      path,
+      message: 'Incoming rule requires explicit review',
+    }]
+    : [];
+}
+
 function canonicalSequenceIdentity(value: SemanticValue): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonicalSequenceIdentity).join(',')}]`;
@@ -348,7 +369,12 @@ export function mergeProjectTemplateYamlDocument(
     return blocked('FORBIDDEN_PATH', 'incoming');
   }
 
-  const diagnostics = eolDiagnostics(textOf(options.local));
+  const diagnostics = [
+    ...eolDiagnostics(textOf(options.local)),
+    ...(options.reviewIncomingDocument
+      ? incomingReviewDiagnostics(options.document, parsedIncoming.value)
+      : []),
+  ];
   const conflicts: ProjectTemplateYamlMergeConflict[] = [];
   let semanticChanged = false;
   let forbiddenPath = false;
