@@ -451,6 +451,205 @@ describe('project-template authenticated release asset boundary F2b-B', () => {
     },
   );
 
+  it.each(['end', 'error', 'close'])(
+    'terminates listener installation when newListener(%s) triggers a data handler failure',
+    async (targetEvent) => {
+      const attempt = captureRequest();
+      const credential = await acquireCredential();
+      const handlers = makeHandlers({
+        onData(): void {
+          throw new Error('private response body');
+        },
+      });
+      const facade = createProjectTemplateGithubReleaseAssetRequest(
+        credential,
+        { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+      );
+      const response = new FakeResponse(200);
+      const reenter = (event: string): void => {
+        if (event !== targetEvent) return;
+        response.removeListener('newListener', reenter);
+        response.emit('data', Buffer.from('private response body'));
+      };
+      response.on('newListener', reenter);
+      attempt.respond(response);
+
+      expect(handlers.onResponse).not.toHaveBeenCalled();
+      expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+      for (const event of [
+        'data',
+        'end',
+        'aborted',
+        'error',
+        'close',
+      ]) {
+        expect(response.listenerCount(event)).toBe(0);
+      }
+      expect(attempt.request.listenerCount('error')).toBe(0);
+      expect(attempt.request.listenerCount('close')).toBe(0);
+      expect(() => facade.start()).toThrow(expect.objectContaining({
+        code: 'PROCESS_FAILED',
+      }));
+      facade.dispose();
+      credential.dispose();
+    },
+  );
+
+  it('terminally contains malformed redirect cleanup and callback failures', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const onInvalidResponse = vi.fn(() => {
+      throw new Error('private malformed location');
+    });
+    const onResponseError = vi.fn(() => {
+      throw new Error('private secondary failure');
+    });
+    const handlers = makeHandlers({
+      onInvalidResponse,
+      onResponseError,
+    });
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const response = new FakeResponse(302, ['X-Private', 'secret']);
+    vi.spyOn(response, 'destroy').mockImplementation(() => {
+      throw new Error('private response destroy');
+    });
+
+    expect(() => attempt.respond(response)).not.toThrow();
+    expect(onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(onResponseError).toHaveBeenCalledTimes(1);
+    expect(attempt.request.destroy).toHaveBeenCalled();
+    expect(attempt.request.listenerCount('error')).toBe(0);
+    expect(attempt.request.listenerCount('close')).toBe(0);
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it.each(['error', 'close'])(
+    'terminally contains a throwing request %s handler',
+    async (event) => {
+      const attempt = captureRequest();
+      const credential = await acquireCredential();
+      const handlers = makeHandlers({
+        [event === 'error' ? 'onRequestError' : 'onRequestClose'](): void {
+          throw new Error('private request cause');
+        },
+      });
+      const facade = createProjectTemplateGithubReleaseAssetRequest(
+        credential,
+        { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+      );
+
+      expect(() => attempt.request.emit(
+        event,
+        new Error('private request event'),
+      )).not.toThrow();
+      expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+      expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+      expect(attempt.request.listenerCount('error')).toBe(0);
+      expect(attempt.request.listenerCount('close')).toBe(0);
+      facade.dispose();
+      credential.dispose();
+    },
+  );
+
+  it('rolls back request listeners when newListener throws', async () => {
+    const request = new FakeRequest();
+    const reenter = (event: string): void => {
+      if (event === 'close') throw new Error('private newListener cause');
+    };
+    request.on('newListener', reenter);
+    https.request.mockReturnValue(request);
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+
+    let caught: unknown;
+    try {
+      createProjectTemplateGithubReleaseAssetRequest(
+        credential,
+        { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ code: 'PROCESS_FAILED' });
+    expect(String(caught)).not.toContain('private');
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(request.listenerCount('error')).toBe(0);
+    expect(request.listenerCount('close')).toBe(0);
+    credential.dispose();
+  });
+
+  it('reclaims a sync redirect when request listener installation fails', async () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(302, [
+      'Location',
+      'https://objects.githubusercontent.com/private/file',
+    ]);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    const reenter = (event: string): void => {
+      if (event === 'close') throw new Error('private newListener cause');
+    };
+    request.on('newListener', reenter);
+    https.request.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const credential = await acquireCredential();
+    let grant:
+      DisposableProjectTemplateArtifactRedirectGrant | undefined;
+    const handlers = makeHandlers({
+      onRedirect(value): void {
+        grant = value;
+      },
+    });
+
+    expect(() => createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    )).toThrow(expect.objectContaining({ code: 'PROCESS_FAILED' }));
+    expect(responseDestroy).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(request.listenerCount('error')).toBe(0);
+    expect(request.listenerCount('close')).toBe(0);
+    expect(() => grant!.consume()).toThrow(expect.objectContaining({
+      code: 'INVALID_ARGUMENT',
+    }));
+    credential.dispose();
+  });
+
+  it('rolls back the current request listener after synchronous terminal reentry', async () => {
+    const request = new FakeRequest();
+    const reenter = (event: string): void => {
+      if (event !== 'close') return;
+      request.removeListener('newListener', reenter);
+      request.emit('error', new Error('private request event'));
+    };
+    request.on('newListener', reenter);
+    https.request.mockReturnValue(request);
+    const credential = await acquireCredential();
+    const handlers = makeHandlers({
+      onRequestError(): void {
+        throw new Error('private request handler');
+      },
+    });
+
+    expect(() => createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    )).toThrow(expect.objectContaining({ code: 'PROCESS_FAILED' }));
+    expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(request.listenerCount('error')).toBe(0);
+    expect(request.listenerCount('close')).toBe(0);
+    credential.dispose();
+  });
+
   it('reclaims a sync redirect if request creation later fails', async () => {
     const response = new FakeResponse(302, [
       'Location',
