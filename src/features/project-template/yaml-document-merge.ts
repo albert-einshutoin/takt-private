@@ -14,6 +14,7 @@ import {
   resolveProjectTemplateConfigMergeRule,
   type ProjectTemplateConfigDocument,
 } from './config-merge-rules.js';
+import { rawQualityGateDedupeKey } from '../../core/models/quality-gate-identity.js';
 
 export interface ProjectTemplateYamlMergeDiagnostic {
   readonly code:
@@ -230,14 +231,15 @@ function canonicalSequenceIdentity(value: SemanticValue): string {
 function mergeOrderedSequence(
   local: readonly SemanticValue[],
   incoming: readonly SemanticValue[],
+  identity: (value: SemanticValue) => string = canonicalSequenceIdentity,
 ): SemanticValue[] {
   const merged = [...local];
-  const seen = new Set(local.map(canonicalSequenceIdentity));
+  const seen = new Set(local.map(identity));
   for (const item of incoming) {
-    const identity = canonicalSequenceIdentity(item);
-    if (!seen.has(identity)) {
+    const key = identity(item);
+    if (!seen.has(key)) {
       merged.push(item);
-      seen.add(identity);
+      seen.add(key);
     }
   }
   return merged;
@@ -413,7 +415,13 @@ export function mergeProjectTemplateYamlDocument(
         return;
       }
       if (rule.sequencePolicy === 'ordered-keyed') {
-        const merged = mergeOrderedSequence(local, incoming);
+        const identity = rule.sequenceIdentity === 'quality-gate'
+          ? (value: SemanticValue) => (
+              rawQualityGateDedupeKey(value)
+              ?? canonicalSequenceIdentity(value)
+            )
+          : canonicalSequenceIdentity;
+        const merged = mergeOrderedSequence(local, incoming, identity);
         if (!isDeepStrictEqual(local, merged)) {
           setDocumentSequenceValue(parsedLocal.document, path, local, merged);
           semanticChanged = true;

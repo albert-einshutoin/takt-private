@@ -144,6 +144,21 @@ describe('project template YAML document three-way merge', () => {
     expect(output).toContain('npm run e2e');
   });
 
+  it('uses runtime quality-gate identity instead of duplicating defaults', () => {
+    const result = merge(
+      'workflow_overrides:\n  quality_gates: []\n',
+      'workflow_overrides:\n  quality_gates:\n'
+        + '    - { type: command, command: npm test }\n',
+      'workflow_overrides:\n  quality_gates:\n'
+        + '    - { type: command, command: npm test, cwd: ., timeout_ms: 300000 }\n',
+    );
+
+    expect(result).toMatchObject({ status: 'merged', changed: false });
+    const output = result.status === 'merged' ? result.content.toString() : '';
+    expect(output.match(/command: npm test/g)).toHaveLength(1);
+    expect(output).not.toContain('timeout_ms');
+  });
+
   it('keeps global-only local configuration and blocks incoming credentials', () => {
     const globalOnly = merge(
       'logging:\n  level: info\n',

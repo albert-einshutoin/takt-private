@@ -67,6 +67,7 @@ describe('project template config merge rules', () => {
       sequencePolicy: 'atomic',
       known: false,
       reviewRequired: true,
+      sequenceIdentity: 'canonical',
     });
   });
 
@@ -93,6 +94,11 @@ describe('project template config merge rules', () => {
     expect(CONFIG_SEQUENCE_RULES).toContainEqual(expect.objectContaining({
       document: 'config.yaml',
       pattern: ['assistant', 'init_files'],
+    }));
+    expect(CONFIG_SEQUENCE_RULES).toContainEqual(expect.objectContaining({
+      document: 'config.yaml',
+      pattern: ['workflow_overrides', 'quality_gates'],
+      sequenceIdentity: 'quality-gate',
     }));
   });
 

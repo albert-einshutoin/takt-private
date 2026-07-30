@@ -17,6 +17,7 @@ export interface ProjectTemplateConfigMergeRule {
   readonly sequencePolicy: ProjectTemplateConfigSequencePolicy;
   readonly known: boolean;
   readonly reviewRequired: boolean;
+  readonly sequenceIdentity: 'canonical' | 'quality-gate';
 }
 
 export interface RegisteredProjectTemplateConfigMergeRule
@@ -32,6 +33,7 @@ function rule(
   options: {
     sequencePolicy?: ProjectTemplateConfigSequencePolicy;
     reviewRequired?: boolean;
+    sequenceIdentity?: 'canonical' | 'quality-gate';
   } = {},
 ): RegisteredProjectTemplateConfigMergeRule {
   return {
@@ -41,6 +43,7 @@ function rule(
     sequencePolicy: options.sequencePolicy ?? 'atomic',
     known: true,
     reviewRequired: options.reviewRequired ?? false,
+    sequenceIdentity: options.sequenceIdentity ?? 'canonical',
   };
 }
 
@@ -54,12 +57,15 @@ const SEQUENCE_RULES = [
   }),
   rule('config.yaml', 'workflow_overrides.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
+    sequenceIdentity: 'quality-gate',
   }),
   rule('config.yaml', 'workflow_overrides.steps.*.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
+    sequenceIdentity: 'quality-gate',
   }),
   rule('config.yaml', 'workflow_overrides.personas.*.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
+    sequenceIdentity: 'quality-gate',
   }),
   rule('config.yaml', 'assistant.init_files', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
@@ -93,6 +99,7 @@ const SEQUENCE_RULES = [
   }),
   rule('devloopd.yaml', 'policy.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
+    sequenceIdentity: 'quality-gate',
   }),
 ] as const;
 
@@ -237,6 +244,7 @@ export function resolveProjectTemplateConfigMergeRule(
       sequencePolicy: 'atomic',
       known: false,
       reviewRequired: true,
+      sequenceIdentity: 'canonical',
     };
   }
   if (isCredentialPath(path)) {
@@ -245,6 +253,7 @@ export function resolveProjectTemplateConfigMergeRule(
       sequencePolicy: 'atomic',
       known: true,
       reviewRequired: true,
+      sequenceIdentity: 'canonical',
     };
   }
   if (isCliPath(path)) {
@@ -253,6 +262,7 @@ export function resolveProjectTemplateConfigMergeRule(
       sequencePolicy: 'atomic',
       known: true,
       reviewRequired: true,
+      sequenceIdentity: 'canonical',
     };
   }
   const registered = REGISTERED_RULES.find((candidate) => (
@@ -265,6 +275,7 @@ export function resolveProjectTemplateConfigMergeRule(
       sequencePolicy: registered.sequencePolicy,
       known: registered.known,
       reviewRequired: registered.reviewRequired,
+      sequenceIdentity: registered.sequenceIdentity,
     };
   }
   // Unknown project keys remain local and visible. Treating an unknown
@@ -274,5 +285,6 @@ export function resolveProjectTemplateConfigMergeRule(
     sequencePolicy: 'atomic',
     known: false,
     reviewRequired: true,
+    sequenceIdentity: 'canonical',
   };
 }
