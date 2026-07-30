@@ -8,12 +8,23 @@ import { performance } from 'node:perf_hooks';
 import { Readable } from 'node:stream';
 import { types } from 'node:util';
 import { crossSpawn } from '../../shared/utils/spawn.js';
+import {
+  createProjectTemplateArtifactRedirectState,
+  type DisposableProjectTemplateArtifactRedirectGrant,
+  type DisposableProjectTemplateArtifactRedirectState,
+} from './project-template-artifact-redirect.js';
 
 const AUTH_ATTEMPT_TIMEOUT_MS = 30_000;
 const FORCE_KILL_DELAY_MS = 1_000;
 const FINAL_REAP_GRACE_MS = 1_000;
 const MAX_STDOUT_BYTES = 4 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
+const MAX_ASSET_RAW_HEADER_ENTRIES = 256;
+const MAX_ASSET_RAW_HEADER_CHARACTERS = 64 * 1024;
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
+const GITHUB_OWNER_PATTERN =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 const GH_AUTH_ARGS = Object.freeze([
   'auth',
   'token',
@@ -118,6 +129,36 @@ export interface ProjectTemplateGithubApiRequest {
   dispose(): void;
 }
 
+export interface ProjectTemplateGithubReleaseAssetRequestHandlers {
+  readonly onResponse: (statusCode: number) => void;
+  readonly onRedirect: (
+    grant: DisposableProjectTemplateArtifactRedirectGrant,
+  ) => void;
+  readonly onInvalidResponse: () => void;
+  readonly onData: (chunk: unknown) => void;
+  readonly onEnd: () => void;
+  readonly onResponseAborted: () => void;
+  readonly onResponseError: () => void;
+  readonly onResponseClose: () => void;
+  readonly onRequestError: () => void;
+  readonly onRequestClose: () => void;
+}
+
+export interface ProjectTemplateGithubReleaseAssetRequestPlan {
+  readonly owner: string;
+  readonly repo: string;
+  readonly assetId: number;
+  readonly handlers: ProjectTemplateGithubReleaseAssetRequestHandlers;
+}
+
+export interface ProjectTemplateGithubReleaseAssetRequest {
+  start(): void;
+  pause(): void;
+  resume(): void;
+  destroy(): void;
+  dispose(): void;
+}
+
 interface CredentialAuthority {
   readonly token: Buffer;
   state: 'active' | 'disposed';
@@ -149,6 +190,33 @@ interface ApiRequestAuthority {
 }
 
 const API_REQUEST_AUTHORITIES = new WeakMap<object, ApiRequestAuthority>();
+
+interface AssetRequestAuthority {
+  request?: ClientRequest;
+  response?: IncomingMessage;
+  end?: (...args: unknown[]) => unknown;
+  requestDestroy?: (...args: unknown[]) => unknown;
+  responsePause?: (...args: unknown[]) => unknown;
+  responseResume?: (...args: unknown[]) => unknown;
+  responseDestroy?: (...args: unknown[]) => unknown;
+  disposed: boolean;
+  responseSeen: boolean;
+  constructionComplete: boolean;
+  redirectTransferPending: boolean;
+  requestListeners: ReadonlyArray<
+    readonly [event: string, listener: (...args: unknown[]) => void]
+  >;
+  responseListeners: ReadonlyArray<
+    readonly [event: string, listener: (...args: unknown[]) => void]
+  >;
+  ownedRedirectState?: DisposableProjectTemplateArtifactRedirectState;
+  ownedRedirectGrant?: DisposableProjectTemplateArtifactRedirectGrant;
+  release: () => void;
+}
+
+const ASSET_REQUEST_AUTHORITIES =
+  new WeakMap<object, AssetRequestAuthority>();
+const ASSET_REQUEST_FACADES = new WeakSet<object>();
 
 function authError(
   code: ProjectTemplateGhAuthErrorCode,
@@ -561,6 +629,635 @@ export function createProjectTemplateGithubApiRequest(
   };
   API_REQUEST_AUTHORITIES.set(facade, authority);
   return Object.freeze(facade);
+}
+
+function snapshotAssetRedirectLocation(
+  response: IncomingMessage,
+): string | undefined {
+  const rawHeaders = ownDataValue(response, 'rawHeaders');
+  if (
+    !Array.isArray(rawHeaders)
+    || types.isProxy(rawHeaders)
+    || Object.getPrototypeOf(rawHeaders) !== Array.prototype
+    || rawHeaders.length === 0
+    || rawHeaders.length > MAX_ASSET_RAW_HEADER_ENTRIES
+    || rawHeaders.length % 2 !== 0
+  ) {
+    return undefined;
+  }
+  const keys = Reflect.ownKeys(rawHeaders);
+  if (
+    keys.length !== rawHeaders.length + 1
+    || keys[keys.length - 1] !== 'length'
+  ) {
+    return undefined;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(rawHeaders);
+  let location: string | undefined;
+  let characters = 0;
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const nameDescriptor = descriptors[String(index)];
+    const valueDescriptor = descriptors[String(index + 1)];
+    if (
+      nameDescriptor === undefined
+      || valueDescriptor === undefined
+      || !('value' in nameDescriptor)
+      || !('value' in valueDescriptor)
+      || typeof nameDescriptor.value !== 'string'
+      || typeof valueDescriptor.value !== 'string'
+    ) {
+      return undefined;
+    }
+    const name = nameDescriptor.value;
+    const value = valueDescriptor.value;
+    characters += name.length + value.length;
+    if (characters > MAX_ASSET_RAW_HEADER_CHARACTERS) return undefined;
+    if (name.toLowerCase() !== 'location') continue;
+    if (
+      location !== undefined
+      || value.length < 1
+      || value.length > 8_192
+    ) {
+      return undefined;
+    }
+    // Copy only the one security-relevant header. No other raw header can
+    // cross this boundary or remain in request authority.
+    location = value;
+  }
+  return location;
+}
+
+function assetRequestUnavailable(): ProjectTemplateGhAuthError {
+  return authError(
+    'PROCESS_FAILED',
+    'GitHub release asset request is no longer available',
+  );
+}
+
+/**
+ * Internal authenticated entry hop for one GitHub release asset.
+ *
+ * The redirect grant is transferred only after onRedirect returns normally.
+ * Until then this request owns the redirect state, allowing a consumed hop to
+ * be reclaimed when a handler throws or synchronously disposes the request.
+ */
+export function createProjectTemplateGithubReleaseAssetRequest(
+  credential: DisposableProjectTemplateGhCredential,
+  planValue: ProjectTemplateGithubReleaseAssetRequestPlan,
+): ProjectTemplateGithubReleaseAssetRequest {
+  const credentialAuthority = (
+    typeof credential === 'object'
+    && credential !== null
+    && !types.isProxy(credential)
+  )
+    ? CREDENTIAL_AUTHORITIES.get(credential)
+    : undefined;
+  if (
+    credentialAuthority === undefined
+    || credentialAuthority.state !== 'active'
+  ) {
+    throw authError(
+      'CREDENTIAL_DISPOSED',
+      'GitHub credential is no longer available',
+    );
+  }
+
+  const plan = exactDataRecord(
+    planValue,
+    ['owner', 'repo', 'assetId', 'handlers'],
+  );
+  const owner = plan['owner'];
+  const repo = plan['repo'];
+  const assetId = plan['assetId'];
+  const handlerNames = [
+    'onResponse',
+    'onRedirect',
+    'onInvalidResponse',
+    'onData',
+    'onEnd',
+    'onResponseAborted',
+    'onResponseError',
+    'onResponseClose',
+    'onRequestError',
+    'onRequestClose',
+  ] as const;
+  const handlersRecord = exactDataRecord(plan['handlers'], handlerNames);
+  if (
+    typeof owner !== 'string'
+    || !GITHUB_OWNER_PATTERN.test(owner)
+    || owner.includes('--')
+    || typeof repo !== 'string'
+    || !GITHUB_REPOSITORY_PATTERN.test(repo)
+    || repo === '.'
+    || repo === '..'
+    || repo.toLowerCase().endsWith('.git')
+    || typeof assetId !== 'number'
+    || !Number.isSafeInteger(assetId)
+    || assetId <= 0
+    || handlerNames.some(
+      (name) => (
+        typeof handlersRecord[name] !== 'function'
+        || types.isProxy(handlersRecord[name])
+      ),
+    )
+  ) {
+    throw authError(
+      'INVALID_ARGUMENT',
+      'GitHub release asset request plan is invalid',
+    );
+  }
+  const handlersReceiver = plan['handlers'] as
+    ProjectTemplateGithubReleaseAssetRequestHandlers;
+  const path = `/repos/${owner}/${repo}/releases/assets/${assetId}`;
+  const baseUrl = `https://api.github.com${path}`;
+  const holder: { current?: AssetRequestAuthority } = {};
+
+  const invoke = (
+    name: keyof ProjectTemplateGithubReleaseAssetRequestHandlers,
+    args: readonly unknown[] = [],
+  ): boolean => {
+    try {
+      Reflect.apply(
+        handlersRecord[name] as (...values: unknown[]) => unknown,
+        handlersReceiver,
+        args,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const notifyResponseError = (): void => {
+    invoke('onResponseError');
+  };
+  const cleanupResponseListeners = (
+    authority: AssetRequestAuthority,
+  ): void => {
+    const response = authority.response;
+    if (response !== undefined) {
+      for (const [event, listener] of authority.responseListeners) {
+        try {
+          EventEmitter.prototype.removeListener.call(
+            response,
+            event,
+            listener,
+          );
+        } catch {
+          // Terminal cleanup remains authoritative.
+        }
+      }
+    }
+    authority.responseListeners = [];
+  };
+  const destroyResponse = (
+    response: IncomingMessage,
+    destroy?: (...args: unknown[]) => unknown,
+  ): boolean => {
+    const selected = destroy ?? findDataFunction(response, 'destroy');
+    if (selected === undefined) return false;
+    try {
+      Reflect.apply(selected, response, []);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const releaseRedirectAuthority = (
+    authority: AssetRequestAuthority,
+  ): void => {
+    const grant = authority.ownedRedirectGrant;
+    const state = authority.ownedRedirectState;
+    authority.ownedRedirectGrant = undefined;
+    authority.ownedRedirectState = undefined;
+    authority.redirectTransferPending = false;
+    try {
+      grant?.dispose();
+    } catch {
+      // The state remains capable of reclaiming a consumed hop.
+    }
+    try {
+      state?.dispose();
+    } catch {
+      // All public errors remain fixed and terminal.
+    }
+  };
+  const failActiveResponse = (
+    authority: AssetRequestAuthority,
+  ): void => {
+    cleanupResponseListeners(authority);
+    if (
+      authority.response !== undefined
+      && authority.responseDestroy !== undefined
+    ) {
+      destroyResponse(authority.response, authority.responseDestroy);
+    }
+    notifyResponseError();
+  };
+  const invalidResponse = (
+    response: IncomingMessage,
+  ): void => {
+    destroyResponse(response);
+    invoke('onInvalidResponse');
+  };
+  const responseCallback = (response: IncomingMessage): void => {
+    const authority = holder.current;
+    if (
+      authority === undefined
+      || authority.disposed
+      || !isReadableStream(response)
+    ) {
+      if (isReadableStream(response)) destroyResponse(response);
+      invoke('onInvalidResponse');
+      return;
+    }
+    if (authority.responseSeen) {
+      invalidResponse(response);
+      return;
+    }
+    authority.responseSeen = true;
+    const rawStatus = ownDataValue(response, 'statusCode');
+    if (
+      typeof rawStatus !== 'number'
+      || !Number.isSafeInteger(rawStatus)
+      || rawStatus < 100
+      || rawStatus > 599
+    ) {
+      invalidResponse(response);
+      return;
+    }
+
+    if (REDIRECT_STATUS_CODES.has(rawStatus)) {
+      const location = snapshotAssetRedirectLocation(response);
+      if (location === undefined) {
+        invalidResponse(response);
+        return;
+      }
+      let state: DisposableProjectTemplateArtifactRedirectState | undefined;
+      let grant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
+      try {
+        state = createProjectTemplateArtifactRedirectState(baseUrl);
+        grant = state.resolve(rawStatus, location);
+      } catch {
+        try {
+          grant?.dispose();
+        } catch {
+          // The state cleanup below remains authoritative.
+        }
+        try {
+          state?.dispose();
+        } catch {
+          // The invalid response result remains authoritative.
+        }
+        invalidResponse(response);
+        return;
+      }
+      authority.ownedRedirectState = state;
+      authority.ownedRedirectGrant = grant;
+      if (!destroyResponse(response)) {
+        releaseRedirectAuthority(authority);
+        notifyResponseError();
+        return;
+      }
+      const returnedNormally = invoke('onRedirect', [grant]);
+      if (!returnedNormally) {
+        releaseRedirectAuthority(authority);
+        notifyResponseError();
+        return;
+      }
+      if (authority.disposed) return;
+      // Normal return is the sole ownership-transfer point. A consumed grant
+      // has created a hop whose private authority keeps the redirect state
+      // alive; F2b-C can continue within that same module without exposing URL.
+      if (authority.constructionComplete) {
+        authority.ownedRedirectGrant = undefined;
+        authority.ownedRedirectState = undefined;
+      } else {
+        authority.redirectTransferPending = true;
+      }
+      return;
+    }
+
+    if (rawStatus !== 200) {
+      if (!destroyResponse(response)) {
+        notifyResponseError();
+        return;
+      }
+      if (!invoke('onResponse', [rawStatus])) notifyResponseError();
+      return;
+    }
+
+    const pause = findDataFunction(response, 'pause');
+    const resume = findDataFunction(response, 'resume');
+    const destroy = findDataFunction(response, 'destroy');
+    if (pause === undefined || resume === undefined || destroy === undefined) {
+      invalidResponse(response);
+      return;
+    }
+    authority.response = response;
+    authority.responsePause = pause;
+    authority.responseResume = resume;
+    authority.responseDestroy = destroy;
+    try {
+      Reflect.apply(pause, response, []);
+    } catch {
+      failActiveResponse(authority);
+      return;
+    }
+    const eventHandler = (
+      name: keyof ProjectTemplateGithubReleaseAssetRequestHandlers,
+      args: readonly unknown[] = [],
+    ): void => {
+      if (authority.disposed) return;
+      if (!invoke(name, args)) failActiveResponse(authority);
+    };
+    const listeners: AssetRequestAuthority['responseListeners'] = [
+      ['data', (chunk: unknown) => eventHandler('onData', [chunk])],
+      ['end', () => eventHandler('onEnd')],
+      ['aborted', () => eventHandler('onResponseAborted')],
+      ['error', () => eventHandler('onResponseError')],
+      ['close', () => eventHandler('onResponseClose')],
+    ];
+    authority.responseListeners = listeners;
+    try {
+      for (const [event, listener] of listeners) {
+        // EventEmitter registration preserves the explicit paused state.
+        // Readable.on('data') would implicitly resume before the consumer
+        // receives the sealed facade and opts in via resume().
+        EventEmitter.prototype.on.call(response, event, listener);
+        if (authority.disposed) {
+          for (const [candidateEvent, candidate] of listeners) {
+            try {
+              EventEmitter.prototype.removeListener.call(
+                response,
+                candidateEvent,
+                candidate,
+              );
+            } catch {
+              // Synchronous disposal is already authoritative.
+            }
+          }
+          return;
+        }
+      }
+    } catch {
+      failActiveResponse(authority);
+      return;
+    }
+    if (!invoke('onResponse', [200])) {
+      failActiveResponse(authority);
+      return;
+    }
+    if (authority.disposed) cleanupResponseListeners(authority);
+  };
+
+  const authority: AssetRequestAuthority = {
+    disposed: false,
+    responseSeen: false,
+    constructionComplete: false,
+    redirectTransferPending: false,
+    requestListeners: [],
+    responseListeners: [],
+    release: () => {
+      holder.current = undefined;
+    },
+  };
+  holder.current = authority;
+
+  let request: ClientRequest;
+  try {
+    request = httpsRequest({
+      protocol: 'https:',
+      hostname: 'api.github.com',
+      port: 443,
+      method: 'GET',
+      path,
+      headers: {
+        Accept: 'application/octet-stream',
+        'Accept-Encoding': 'identity',
+        Authorization: `Bearer ${credentialAuthority.token.toString('utf8')}`,
+        'User-Agent': 'takt-project-template',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    }, responseCallback);
+  } catch {
+    if (authority.response !== undefined) {
+      destroyResponse(authority.response, authority.responseDestroy);
+    }
+    cleanupResponseListeners(authority);
+    releaseRedirectAuthority(authority);
+    authority.release();
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub release asset request could not be created',
+    );
+  }
+  if (
+    typeof request !== 'object'
+    || request === null
+    || types.isProxy(request)
+  ) {
+    cleanupResponseListeners(authority);
+    if (authority.response !== undefined) {
+      destroyResponse(authority.response, authority.responseDestroy);
+    }
+    releaseRedirectAuthority(authority);
+    authority.release();
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub release asset request could not be created',
+    );
+  }
+  const end = findDataFunction(request, 'end');
+  const requestDestroy = findDataFunction(request, 'destroy');
+  if (end === undefined || requestDestroy === undefined) {
+    cleanupResponseListeners(authority);
+    if (authority.response !== undefined) {
+      destroyResponse(authority.response, authority.responseDestroy);
+    }
+    releaseRedirectAuthority(authority);
+    authority.release();
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub release asset request could not be created',
+    );
+  }
+  authority.request = request;
+  authority.end = end;
+  authority.requestDestroy = requestDestroy;
+  const requestListeners: AssetRequestAuthority['requestListeners'] = [
+    ['error', () => {
+      if (!authority.disposed) invoke('onRequestError');
+    }],
+    ['close', () => {
+      if (!authority.disposed) invoke('onRequestClose');
+    }],
+  ];
+  authority.requestListeners = requestListeners;
+  try {
+    for (const [event, listener] of requestListeners) {
+      EventEmitter.prototype.on.call(request, event, listener);
+      if (authority.disposed) break;
+    }
+  } catch {
+    try {
+      Reflect.apply(requestDestroy, request, []);
+    } catch {
+      // Fixed creation failure remains authoritative.
+    }
+    cleanupResponseListeners(authority);
+    if (authority.response !== undefined) {
+      destroyResponse(authority.response, authority.responseDestroy);
+    }
+    releaseRedirectAuthority(authority);
+    authority.release();
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub release asset request could not be created',
+    );
+  }
+
+  const facade = Object.freeze<ProjectTemplateGithubReleaseAssetRequest>({
+    start(this: ProjectTemplateGithubReleaseAssetRequest): void {
+      const current = ASSET_REQUEST_AUTHORITIES.get(this);
+      if (
+        current === undefined
+        || current.disposed
+        || current.request === undefined
+        || current.end === undefined
+      ) {
+        throw assetRequestUnavailable();
+      }
+      try {
+        Reflect.apply(current.end, current.request, []);
+      } catch {
+        throw assetRequestUnavailable();
+      }
+    },
+    pause(this: ProjectTemplateGithubReleaseAssetRequest): void {
+      const current = ASSET_REQUEST_AUTHORITIES.get(this);
+      if (
+        current === undefined
+        || current.disposed
+        || current.response === undefined
+        || current.responsePause === undefined
+      ) {
+        throw assetRequestUnavailable();
+      }
+      try {
+        Reflect.apply(current.responsePause, current.response, []);
+      } catch {
+        throw assetRequestUnavailable();
+      }
+    },
+    resume(this: ProjectTemplateGithubReleaseAssetRequest): void {
+      const current = ASSET_REQUEST_AUTHORITIES.get(this);
+      if (
+        current === undefined
+        || current.disposed
+        || current.response === undefined
+        || current.responseResume === undefined
+      ) {
+        throw assetRequestUnavailable();
+      }
+      try {
+        Reflect.apply(current.responseResume, current.response, []);
+      } catch {
+        throw assetRequestUnavailable();
+      }
+    },
+    destroy(this: ProjectTemplateGithubReleaseAssetRequest): void {
+      const current = ASSET_REQUEST_AUTHORITIES.get(this);
+      if (
+        current === undefined
+        || current.disposed
+        || current.request === undefined
+      ) {
+        throw assetRequestUnavailable();
+      }
+      let failed = false;
+      if (
+        current.response !== undefined
+        && current.responseDestroy !== undefined
+      ) {
+        failed = !destroyResponse(
+          current.response,
+          current.responseDestroy,
+        );
+      }
+      if (current.requestDestroy !== undefined) {
+        try {
+          Reflect.apply(current.requestDestroy, current.request, []);
+        } catch {
+          failed = true;
+        }
+      }
+      if (failed) throw assetRequestUnavailable();
+    },
+    dispose(this: ProjectTemplateGithubReleaseAssetRequest): void {
+      if (!ASSET_REQUEST_FACADES.has(this)) {
+        throw assetRequestUnavailable();
+      }
+      const current = ASSET_REQUEST_AUTHORITIES.get(this);
+      if (current === undefined || current.disposed) return;
+      current.disposed = true;
+      cleanupResponseListeners(current);
+      for (const [event, listener] of current.requestListeners) {
+        try {
+          EventEmitter.prototype.removeListener.call(
+            current.request,
+            event,
+            listener,
+          );
+        } catch {
+          // Authority deletion remains terminal.
+        }
+      }
+      if (
+        current.response !== undefined
+        && current.responseDestroy !== undefined
+      ) {
+        destroyResponse(current.response, current.responseDestroy);
+      }
+      if (
+        current.request !== undefined
+        && current.requestDestroy !== undefined
+      ) {
+        try {
+          Reflect.apply(
+            current.requestDestroy,
+            current.request,
+            [],
+          );
+        } catch {
+          // Authority deletion remains terminal.
+        }
+      }
+      releaseRedirectAuthority(current);
+      current.requestListeners = [];
+      current.responseListeners = [];
+      current.request = undefined;
+      current.response = undefined;
+      current.end = undefined;
+      current.requestDestroy = undefined;
+      current.responsePause = undefined;
+      current.responseResume = undefined;
+      current.responseDestroy = undefined;
+      current.release();
+      ASSET_REQUEST_AUTHORITIES.delete(this);
+    },
+  });
+  ASSET_REQUEST_FACADES.add(facade);
+  ASSET_REQUEST_AUTHORITIES.set(facade, authority);
+  authority.constructionComplete = true;
+  if (
+    authority.redirectTransferPending
+    && !authority.disposed
+  ) {
+    authority.redirectTransferPending = false;
+    authority.ownedRedirectGrant = undefined;
+    authority.ownedRedirectState = undefined;
+  }
+  return facade;
 }
 
 const DEFAULT_DEPENDENCIES: ProjectTemplateGhAuthDependencies =
