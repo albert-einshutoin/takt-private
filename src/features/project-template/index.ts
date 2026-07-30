@@ -23,6 +23,22 @@ export type {
   ProjectTemplateRepertoireDependencyV1,
   ProjectTemplateSourceDescriptorV1,
 } from './source-descriptor.js';
+export {
+  GithubTemplateSourceResolutionError,
+  resolveGithubTemplateSource,
+} from './github-update-check.js';
+export type {
+  GithubTemplateSourceResolutionErrorCode,
+  GithubTemplateResolveRefInput,
+  GithubTemplateReadFileInput,
+  GithubTemplateGetReleaseInput,
+  GithubTemplateReadReleaseAssetInput,
+  GithubTemplateSourceMetadataPort,
+  GithubTemplateCurrentSourceEvidence,
+  GithubTemplateUpdateState,
+  ResolveGithubTemplateSourceOptions,
+  ResolvedGithubTemplateSource,
+} from './github-update-check.js';
 export { parseTemplateLock, serializeTemplateLock } from './lock.js';
 export {
   calculateProjectTemplateManifestSha256,

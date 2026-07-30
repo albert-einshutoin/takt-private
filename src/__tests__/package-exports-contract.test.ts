@@ -13,6 +13,8 @@ import type {
   ProjectTemplateRepertoireDependencyV1,
   ProjectTemplateSourceDescriptorPackV1,
   ProjectTemplateSourceDescriptorV1,
+  ResolvedGithubTemplateSource,
+  GithubTemplateSourceMetadataPort,
 } from 'takt';
 
 interface PackageContract {
@@ -59,6 +61,8 @@ describe('package exports contract', () => {
         sourceDescriptorPath: api.PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
         sourceDescriptorMaxBytes: api.MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
         sourceDescriptorSchema: typeof api.projectTemplateSourceDescriptorV1JsonSchema,
+        resolveGithubTemplateSource: typeof api.resolveGithubTemplateSource,
+        sourceResolutionError: typeof api.GithubTemplateSourceResolutionError,
       }));
     `);
 
@@ -74,6 +78,8 @@ describe('package exports contract', () => {
       sourceDescriptorPath: '.takt-template-source.json',
       sourceDescriptorMaxBytes: 65536,
       sourceDescriptorSchema: 'object',
+      resolveGithubTemplateSource: 'function',
+      sourceResolutionError: 'function',
     });
     expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
       .toMatchTypeOf<readonly unknown[]>();
@@ -104,6 +110,10 @@ describe('package exports contract', () => {
       .toMatchTypeOf<{ scope: `@${string}/${string}`; version: string }>();
     expectTypeOf<ProjectTemplateRepertoireCapabilityV1>()
       .toEqualTypeOf<'edit'>();
+    expectTypeOf<ResolvedGithubTemplateSource>()
+      .toMatchTypeOf<{ commit: string; downloadAllowed: boolean }>();
+    expectTypeOf<GithubTemplateSourceMetadataPort>()
+      .toHaveProperty('resolveRefToCommit');
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');
     expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
     expect(declarationEntry).toContain('ProjectTemplateGithubRefSourceSpec');
@@ -113,6 +123,8 @@ describe('package exports contract', () => {
     expect(declarationEntry).toContain('ProjectTemplateSourceDescriptorPackV1');
     expect(declarationEntry).toContain('ProjectTemplateRepertoireDependencyV1');
     expect(declarationEntry).toContain('ProjectTemplateRepertoireCapabilityV1');
+    expect(declarationEntry).toContain('ResolvedGithubTemplateSource');
+    expect(declarationEntry).toContain('GithubTemplateSourceMetadataPort');
   });
 
   it('blocks internal project-template approval deep imports', () => {
