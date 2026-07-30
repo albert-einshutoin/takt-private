@@ -933,6 +933,7 @@ interface PinnedTransportBody {
   readonly listenerToken: PinnedTransportBodyListenerToken;
   dataPending: boolean;
   flowViolationPending: boolean;
+  terminalPending: boolean;
   response?: Readable;
   pause?: (...args: unknown[]) => unknown;
   resume?: (...args: unknown[]) => unknown;
@@ -1494,6 +1495,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     body.requestListeners = [];
     body.dataPending = false;
     body.flowViolationPending = false;
+    body.terminalPending = false;
     return detached;
   };
   const cleanDetachedBody = (
@@ -1890,13 +1892,13 @@ export function createProjectTemplateArtifactPinnedTransport(
       return;
     }
     body.flowViolationPending = true;
+    body.terminalPending = true;
     body.dataPending = false;
     for (let index = current.pumpQueue.length - 1; index >= 0; index -= 1) {
       const pending = current.pumpQueue[index];
       if (
         pending?.kind === 'body-event'
         && pending.token === body.listenerToken
-        && pending.event === 'data'
       ) {
         pending.chunk = undefined;
         current.pumpQueue.splice(index, 1);
@@ -1924,6 +1926,8 @@ export function createProjectTemplateArtifactPinnedTransport(
         return;
       }
       if (event !== 'data') {
+        if (body.terminalPending) return;
+        body.terminalPending = true;
         enqueue({
           kind: 'body-event',
           token: body.listenerToken,
@@ -1931,6 +1935,7 @@ export function createProjectTemplateArtifactPinnedTransport(
         });
         return;
       }
+      if (body.terminalPending) return;
       if (
         current.phase !== 'body-streaming'
         || body.dataPending
@@ -1944,6 +1949,12 @@ export function createProjectTemplateArtifactPinnedTransport(
       // every later chunk is cleared into one constant-size failure latch.
       body.dataPending = true;
       current.phase = 'body-paused';
+      enqueue({
+        kind: 'body-event',
+        token: body.listenerToken,
+        event: 'data',
+        chunk: value,
+      });
       const response = body.response;
       const pause = body.pause;
       if (response === undefined || pause === undefined) {
@@ -1956,20 +1967,6 @@ export function createProjectTemplateArtifactPinnedTransport(
         queueBodyFlowViolation(current, body);
         return;
       }
-      if (
-        current.body !== body
-        || !body.listenerToken.active
-        || body.flowViolationPending
-        || isStopped(current)
-      ) {
-        return;
-      }
-      enqueue({
-        kind: 'body-event',
-        token: body.listenerToken,
-        event: 'data',
-        chunk: value,
-      });
     } finally {
       value = undefined;
       current.hostCallDepth -= 1;
@@ -2006,6 +2003,7 @@ export function createProjectTemplateArtifactPinnedTransport(
       listenerToken,
       dataPending: false,
       flowViolationPending: false,
+      terminalPending: false,
       response,
       pause,
       resume,
@@ -2221,6 +2219,11 @@ export function createProjectTemplateArtifactPinnedTransport(
       return;
     }
     event.chunk = undefined;
+    if (!body.terminalPending) {
+      queueBodyFlowViolation(current, body);
+      return;
+    }
+    body.terminalPending = false;
     if (event.event === 'end') {
       settleBody(current, body, 'onEnd', false);
       return;
@@ -2273,6 +2276,7 @@ export function createProjectTemplateArtifactPinnedTransport(
         && body.flowViolationPending
       ) {
         body.flowViolationPending = false;
+        body.terminalPending = false;
         terminate(current, 'onResponseError');
       }
       return;
