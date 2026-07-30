@@ -1369,6 +1369,56 @@ describe('project-template artifact single attempt adversarial ordering', () => 
 });
 
 describe('project-template artifact single attempt capability boundaries', () => {
+  it.each([
+    ['return', 'reenter'],
+    ['return', 'throw'],
+    ['throw', 'reenter'],
+    ['throw', 'throw'],
+  ] as const)(
+    'cleans auth construction grant once across dispose, factory %s, cleanup %s',
+    (factoryOutcome, cleanupOutcome) => {
+      let attempt!: ProjectTemplateArtifactSingleAttempt;
+      let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const transport = fakeTransport();
+      const grant = Object.freeze({
+        consume: vi.fn(),
+        dispose: vi.fn(() => {
+          if (cleanupOutcome === 'throw') {
+            throw new Error('grant cleanup secret');
+          }
+          handlers.onResponse(200);
+          return undefined;
+        }),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const outcomes: Outcome[] = [];
+      attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          handlers = plan.handlers;
+          handlers.onRedirect(grant);
+          attempt.dispose();
+          if (factoryOutcome === 'throw') {
+            throw new Error('factory secret');
+          }
+          return transport as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      expect(() => attempt.pull(settlement(outcomes))).not.toThrow();
+
+      expect(outcomes).toEqual([]);
+      expect(grant.consume).not.toHaveBeenCalled();
+      expect(grant.dispose).toHaveBeenCalledTimes(1);
+      expect(transport.destroy).toHaveBeenCalledTimes(
+        factoryOutcome === 'return' ? 1 : 0,
+      );
+      expect(transport.dispose).toHaveBeenCalledTimes(
+        factoryOutcome === 'return' ? 1 : 0,
+      );
+    },
+  );
+
   it('drains synchronous authenticated redirect and pinned response latches', async () => {
     let pinnedHandlers!: ProjectTemplateArtifactPinnedTransportHandlers;
     const hop = Object.freeze({
@@ -1491,6 +1541,164 @@ describe('project-template artifact single attempt capability boundaries', () =>
       if (candidate.accessor !== undefined) {
         expect(candidate.accessor).not.toHaveBeenCalled();
       }
+    },
+  );
+
+  it.each(['undefined', 'throw'] as const)(
+    'cleans tentative pinned ownership after reentrant dispose and %s',
+    async (factoryOutcome) => {
+      let authHandlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      let attempt!: ProjectTemplateArtifactSingleAttempt;
+      const hopDispose = vi.fn(() => undefined);
+      const hop = Object.freeze({
+        dispose: hopDispose,
+      }) as unknown as DisposableProjectTemplateArtifactRedirectHop;
+      const grant = Object.freeze({
+        consume: vi.fn(() => hop),
+        dispose: vi.fn(() => undefined),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const authenticated = fakeTransport(
+        () => authHandlers.onRedirect(grant),
+      );
+      const outcomes: Outcome[] = [];
+      attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(
+          vi.fn((_credential, plan) => {
+            authHandlers = plan.handlers;
+            return authenticated as ProjectTemplateGithubReleaseAssetRequest;
+          }),
+          vi.fn(() => {
+            attempt.dispose();
+            if (factoryOutcome === 'throw') {
+              throw new Error('pinned factory secret');
+            }
+            return undefined as never;
+          }),
+        ),
+      );
+
+      attempt.pull(settlement(outcomes));
+      await Promise.resolve();
+
+      expect(outcomes).toEqual([]);
+      expect(hopDispose).toHaveBeenCalledTimes(1);
+      expect(grant.dispose).toHaveBeenCalledTimes(1);
+      expect(authenticated.destroy).toHaveBeenCalledTimes(1);
+      expect(authenticated.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    'failure',
+    'data',
+    'redirect',
+    'dispose',
+  ] as const)(
+    'cleans pinned local owners after old auth %s and factory throw',
+    async (oldEvent) => {
+      let authHandlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      let attempt!: ProjectTemplateArtifactSingleAttempt;
+      const hopDispose = vi.fn(() => undefined);
+      const hop = Object.freeze({
+        dispose: hopDispose,
+      }) as unknown as DisposableProjectTemplateArtifactRedirectHop;
+      const grant = Object.freeze({
+        consume: vi.fn(() => hop),
+        dispose: vi.fn(() => undefined),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const extraGrant = Object.freeze({
+        consume: vi.fn(),
+        dispose: vi.fn(() => undefined),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const authenticated = fakeTransport(
+        () => authHandlers.onRedirect(grant),
+      );
+      const outcomes: Outcome[] = [];
+      attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(
+          vi.fn((_credential, plan) => {
+            authHandlers = plan.handlers;
+            return authenticated as ProjectTemplateGithubReleaseAssetRequest;
+          }),
+          vi.fn(() => {
+            if (oldEvent === 'failure') authHandlers.onResponseError();
+            else if (oldEvent === 'data') {
+              authHandlers.onData(Uint8Array.from([9]));
+            } else if (oldEvent === 'redirect') {
+              authHandlers.onRedirect(extraGrant);
+            } else {
+              attempt.dispose();
+            }
+            throw new Error('pinned factory secret');
+          }),
+        ),
+      );
+
+      attempt.pull(settlement(outcomes));
+      await Promise.resolve();
+
+      if (oldEvent === 'dispose') {
+        expect(outcomes).toEqual([]);
+      } else {
+        expectFailure(outcomes, {
+          code: 'INVALID_RESPONSE',
+          retryable: false,
+        });
+      }
+      expect(hopDispose).toHaveBeenCalledTimes(1);
+      expect(grant.dispose).toHaveBeenCalledTimes(1);
+      expect(extraGrant.dispose).toHaveBeenCalledTimes(
+        oldEvent === 'redirect' ? 1 : 0,
+      );
+    },
+  );
+
+  it.each(['same', 'different'] as const)(
+    'disposes %s duplicate redirect grants by identity exactly once',
+    async (identity) => {
+      let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const firstGrant = Object.freeze({
+        consume: vi.fn(),
+        dispose: vi.fn(() => {
+          handlers.onData(Uint8Array.from([9]));
+          return undefined;
+        }),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const secondGrant = identity === 'same'
+        ? firstGrant
+        : Object.freeze({
+          consume: vi.fn(),
+          dispose: vi.fn(() => undefined),
+        }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const authenticated = fakeTransport(() => {
+        handlers.onRedirect(firstGrant);
+        handlers.onRedirect(secondGrant);
+      });
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          handlers = plan.handlers;
+          return authenticated as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      attempt.pull(settlement(outcomes));
+      await Promise.resolve();
+
+      expectFailure(outcomes, {
+        code: 'INVALID_RESPONSE',
+        retryable: false,
+      });
+      expect(firstGrant.dispose).toHaveBeenCalledTimes(1);
+      expect(secondGrant.dispose).toHaveBeenCalledTimes(1);
+      expect(firstGrant.consume).not.toHaveBeenCalled();
+      expect(secondGrant.consume).not.toHaveBeenCalled();
     },
   );
 

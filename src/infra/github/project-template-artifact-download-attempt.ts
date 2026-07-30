@@ -121,6 +121,7 @@ interface AttemptSettlementSnapshot {
 
 interface AttemptConstructionLatch {
   readonly kind: 'authenticated' | 'pinned';
+  readonly token: AttemptCallbackToken;
   event: AttemptEvent | undefined;
   rejectedGrant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
   invalid: boolean;
@@ -164,12 +165,17 @@ AttemptState
 const disposedAttempts = new WeakSet<ProjectTemplateArtifactSingleAttempt>();
 const terminalAttempts = new WeakMap<
 ProjectTemplateArtifactSingleAttempt,
-| { readonly kind: 'done' }
-| {
+  | { readonly kind: 'done' }
+  | {
   readonly kind: 'failed';
   readonly failure: ProjectTemplateArtifactSingleAttemptFailure;
 }
 >();
+// Claim cleanup before invoking untrusted disposers. A disposer may reenter
+// through transport callbacks, so object identity is the only stable way to
+// keep the capability's physical cleanup exactly-once across ownership layers.
+const disposedGrantCapabilities = new WeakSet<object>();
+const disposedHopCapabilities = new WeakSet<object>();
 
 const DEFAULT_DEPENDENCIES =
   Object.freeze<ProjectTemplateArtifactDownloadAttemptDependencies>({
@@ -535,23 +541,41 @@ function takeTransport(state: AttemptState): AttemptTransport | undefined {
 function disposePendingGrant(state: AttemptState): void {
   const grant = state.pendingGrant;
   state.pendingGrant = undefined;
-  if (grant === undefined) return;
-  try {
-    grant.dispose();
-  } catch {
-    // The stable attempt outcome remains private and authoritative.
-  }
+  safelyDisposeGrant(grant);
 }
 
 function safelyDisposeGrant(
   grant: DisposableProjectTemplateArtifactRedirectGrant | undefined,
 ): void {
   if (grant === undefined) return;
+  if (disposedGrantCapabilities.has(grant)) return;
+  disposedGrantCapabilities.add(grant);
   try {
     grant.dispose();
   } catch {
     // Logical callback revocation remains authoritative.
   }
+}
+
+function safelyDisposeHop(
+  hop: DisposableProjectTemplateArtifactRedirectHop | undefined,
+): void {
+  if (hop === undefined) return;
+  if (disposedHopCapabilities.has(hop)) return;
+  disposedHopCapabilities.add(hop);
+  try {
+    hop.dispose();
+  } catch {
+    // Logical callback revocation remains authoritative.
+  }
+}
+
+function revokeConstructionLatch(
+  latch: AttemptConstructionLatch | undefined,
+): void {
+  if (latch === undefined) return;
+  latch.token.active = false;
+  latch.token.dispatch = undefined;
 }
 
 function isAttemptStopped(state: AttemptState): boolean {
@@ -626,13 +650,22 @@ function failAttempt(
     state.phase === 'failed'
     || state.phase === 'done'
     || state.phase === 'disposed'
-  ) return;
+  ) {
+    try {
+      cleanupEventResource?.();
+    } catch {
+      // Resource cleanup cannot replace an already committed outcome.
+    }
+    return;
+  }
   const finalReason = failureAfterDelivery(state, reason);
   state.phase = 'failed';
   state.terminalFailure = finalReason;
   state.credential = undefined;
   state.input = undefined;
+  const construction = state.construction;
   state.construction = undefined;
+  revokeConstructionLatch(construction);
   state.deliveryClaim = undefined;
   state.resumeRequested = false;
   state.token.active = false;
@@ -644,6 +677,7 @@ function failAttempt(
   } catch {
     // The committed redacted failure remains primary.
   }
+  disposeConstructionGrants(construction);
   disposePendingGrant(state);
   safelyStop(takeTransport(state));
   if (pending !== undefined) {
@@ -664,13 +698,16 @@ function finishAttempt(state: AttemptState): void {
   state.phase = 'done';
   state.credential = undefined;
   state.input = undefined;
+  const construction = state.construction;
   state.construction = undefined;
+  revokeConstructionLatch(construction);
   state.deliveryClaim = undefined;
   state.resumeRequested = false;
   state.token.active = false;
   state.token.dispatch = undefined;
   const pending = state.pending;
   state.pending = undefined;
+  disposeConstructionGrants(construction);
   disposePendingGrant(state);
   // Clean EOF relinquishes authority without synthesizing a transport error.
   safelyDispose(takeTransport(state));
@@ -842,12 +879,9 @@ function createPhysicalHandlers(
           return;
         }
         if (dispatch({ kind: 'redirect', grant })) return;
-        try {
-          grant.dispose();
-        } catch {
-          // A revoked callback can transfer no authority, but must still
-          // release a late grant without exposing its target.
-        }
+        // A revoked callback can transfer no authority, but must still
+        // release a late grant without exposing its target.
+        safelyDisposeGrant(grant);
       },
       onInvalidResponse,
       onData,
@@ -880,6 +914,7 @@ function installConstructionCapture(
 ): AttemptConstructionLatch {
   const latch: AttemptConstructionLatch = {
     kind,
+    token,
     event: undefined,
     rejectedGrant: undefined,
     invalid: false,
@@ -925,7 +960,10 @@ function drainConstructionLatch(
   return event !== undefined;
 }
 
-function disposeConstructionGrants(latch: AttemptConstructionLatch): void {
+function disposeConstructionGrants(
+  latch: AttemptConstructionLatch | undefined,
+): void {
+  if (latch === undefined) return;
   const accepted = latch.event?.kind === 'redirect'
     ? latch.event.grant
     : undefined;
@@ -1048,11 +1086,7 @@ function handoffRedirect(
     if (state.phase !== 'constructing-pinned') {
       nextToken.active = false;
       nextToken.dispatch = undefined;
-      try {
-        hop.dispose();
-      } catch {
-        // Reentrant revocation remains authoritative.
-      }
+      safelyDisposeHop(hop);
       return;
     }
     const candidate: unknown = Reflect.apply(
@@ -1067,11 +1101,7 @@ function handoffRedirect(
     nextToken.active = false;
     nextToken.dispatch = undefined;
     failAttempt(state, INTERNAL_FAILURE, () => {
-      try {
-        hop?.dispose();
-      } catch {
-        // The stable attempt failure remains primary.
-      }
+      safelyDisposeHop(hop);
       safelyDisposeGrant(grant);
     });
     return;
@@ -1251,10 +1281,13 @@ function disposeAttempt(state: AttemptState): undefined {
   state.token.dispatch = undefined;
   state.credential = undefined;
   state.input = undefined;
+  const construction = state.construction;
   state.construction = undefined;
+  revokeConstructionLatch(construction);
   state.deliveryClaim = undefined;
   state.resumeRequested = false;
   state.pending = undefined;
+  disposeConstructionGrants(construction);
   disposePendingGrant(state);
   safelyStop(takeTransport(state));
   return undefined;
