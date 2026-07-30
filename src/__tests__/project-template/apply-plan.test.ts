@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   calculateProjectTemplateManifestSha256,
+  canonicalizeTaktpackJson,
   createProjectTemplateApplyPlan,
+  prepareProjectTemplateApplyPlan,
   type ProjectTemplateApplyPlanInput,
   type ProjectTemplateLocalSnapshotEntry,
   type TemplateEntryPolicy,
@@ -143,7 +145,7 @@ describe('project template three-way apply plan', () => {
     },
   );
 
-  it('routes divergent merge-policy changes to semantic merge without mutating the target', () => {
+  it('fails closed before semantic merge when base bytes are unavailable', () => {
     const planInput = input({
       base: 'base',
       local: 'local',
@@ -160,9 +162,102 @@ describe('project template three-way apply plan', () => {
     expect(plan.entries[0]).toMatchObject({
       policy: 'merge',
       action: 'conflict',
-      reasonCode: 'SEMANTIC_MERGE_REQUIRED',
+      reasonCode: 'BASE_UNAVAILABLE',
     });
     expect(planInput.localEntries).toEqual(before);
+  });
+
+  it('seals a successful config semantic merge while keeping incoming provenance', () => {
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = `${base}timezone: Asia/Tokyo\n`;
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+    const resolved = prepared.resolvedContents[0]?.content;
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      policy: 'merge',
+      action: 'update',
+      reasonCode: 'SEMANTIC_MERGED',
+      baseSha256: hash(base),
+      incomingSha256: hash(incoming),
+      afterSha256: hash(Buffer.from(resolved ?? []).toString()),
+      mergeDiagnostics: {
+        status: 'merged',
+      },
+    });
+    expect(Buffer.from(resolved ?? []).toString()).toContain('planner: claude');
+    expect(Buffer.from(resolved ?? []).toString()).toContain('timezone: Asia/Tokyo');
+    expect(prepared.plan.entries[0]?.afterSha256).not.toBe(hash(incoming));
+    expect(Object.isFrozen(prepared.plan.entries[0]?.mergeDiagnostics)).toBe(true);
+
+    const planBody = structuredClone(prepared.plan) as Record<string, unknown>;
+    delete planBody['planId'];
+    expect(hash(canonicalizeTaktpackJson(planBody))).toBe(prepared.plan.planId);
+    const entries = planBody['entries'] as Array<Record<string, unknown>>;
+    const mergeDiagnostics = entries[0]?.['mergeDiagnostics'] as Record<string, unknown>;
+    mergeDiagnostics['diagnostics'] = [{
+      code: 'RULE_REVIEW_REQUIRED',
+      path: ['timezone'],
+      message: 'synthetic diagnostic',
+    }];
+    expect(hash(canonicalizeTaktpackJson(planBody))).not.toBe(prepared.plan.planId);
+  });
+
+  it('seals exact semantic conflicts without exposing resolved bytes', () => {
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = 'provider_routing:\n  personas:\n    planner: cursor\n';
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'CONFLICT',
+      mergeDiagnostics: {
+        status: 'conflict',
+        conflicts: [{
+          path: ['provider_routing', 'personas', 'planner'],
+          reason: 'BOTH_CHANGED',
+        }],
+      },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('fails closed when the base content is missing or does not match the formal lock', () => {
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = `${base}timezone: Asia/Tokyo\n`;
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+
+    const missing = prepareProjectTemplateApplyPlan(planInput);
+    const mismatched = prepareProjectTemplateApplyPlan({
+      ...planInput,
+      baseContents: [{
+        path: 'config.yaml',
+        content: Buffer.from('language: ja\n'),
+      }],
+    });
+
+    for (const prepared of [missing, mismatched]) {
+      expect(prepared.plan.entries[0]).toMatchObject({
+        action: 'conflict',
+        reasonCode: 'BASE_UNAVAILABLE',
+        mergeDiagnostics: { status: 'base-unavailable' },
+      });
+      expect(prepared.plan.entries[0]).not.toHaveProperty('afterSha256');
+    }
   });
 
   it.each([

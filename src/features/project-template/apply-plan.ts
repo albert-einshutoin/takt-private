@@ -8,15 +8,23 @@ import { portablePathKey } from './filesystem-scan.js';
 import { parseTemplateLock } from './lock.js';
 import { parseProjectTemplateManifest } from './manifest.js';
 import { classifyProjectTemplateEntry } from './classifier-core.js';
+import {
+  mergeProjectTemplateConfigYaml,
+  mergeProjectTemplateDevloopPolicyYaml,
+  type ProjectTemplateConfigYamlMergeResult,
+} from './config-yaml-merge.js';
 import type {
   ProjectTemplateApplyAction,
+  ProjectTemplateApplyMergeDiagnostics,
   ProjectTemplateApplyPlan,
   ProjectTemplateApplyPlanEntry,
   ProjectTemplateApplyPlanInput,
   ProjectTemplateApplyReasonCode,
   ProjectTemplateEntryDiff,
+  ProjectTemplateIncomingContent,
   ProjectTemplateLocalSnapshotEntry,
   ProjectTemplateRollbackImpact,
+  PreparedProjectTemplateApplyPlan,
 } from './apply-plan-types.js';
 import type {
   TemplateEntry,
@@ -242,6 +250,59 @@ function parseIncomingContents(
     opaqueReviewRequiredPaths,
     classifierReviewRequiredPaths,
   };
+}
+
+function parseBaseContents(
+  value: unknown,
+  baseByPath: ReadonlyMap<string, TemplateLockEntry>,
+): Map<string, Buffer> {
+  const values = requireArray(
+    value ?? [],
+    'baseContents',
+    MAX_TEMPLATE_ENTRIES,
+    'INVALID_ENTRY',
+  );
+  const contents = new Map<string, Buffer>();
+  const paths = new Set<string>();
+  let totalBytes = 0;
+  for (const [index, raw] of values.entries()) {
+    const field = `baseContents[${index}]`;
+    const item = requireRecord(raw, field);
+    assertAllowedKeys(item, ['path', 'content'], field);
+    const path = parsePortablePath(item['path'], `${field}.path`);
+    if (paths.has(path)) {
+      invalidInput('base content path is duplicated', `${field}.path`);
+    }
+    paths.add(path);
+    const lockEntry = baseByPath.get(path);
+    if (lockEntry === undefined) {
+      invalidInput('base content has no formal lock entry', `${field}.path`);
+    }
+    if (!(item['content'] instanceof Uint8Array)) {
+      invalidInput('base content must be bytes', `${field}.content`);
+    }
+    if (item['content'].byteLength > DEFAULT_TAKTPACK_LIMITS.maxBlobBytes) {
+      throw new ProjectTemplateValidationError(
+        'LIMIT_EXCEEDED',
+        'base content exceeds the blob byte limit',
+        `${field}.content`,
+      );
+    }
+    totalBytes += item['content'].byteLength;
+    if (totalBytes > DEFAULT_TAKTPACK_LIMITS.maxTotalBytes) {
+      throw new ProjectTemplateValidationError(
+        'LIMIT_EXCEEDED',
+        'base contents exceed the total byte limit',
+        'baseContents',
+      );
+    }
+    const content = Buffer.from(item['content']);
+    // A stale or substituted blob is absence of trustworthy merge evidence,
+    // not a replacement baseline. Keeping it out of the map makes the planner
+    // fail closed with BASE_UNAVAILABLE while preserving preview availability.
+    if (sha256(content) === lockEntry.sha256) contents.set(path, content);
+  }
+  return contents;
 }
 
 function parseIncomingInspection(
@@ -726,12 +787,77 @@ function createSummary(entries: readonly ProjectTemplateApplyPlanEntry[]): {
   };
 }
 
+function normalizeMergeDiagnostics(
+  result: ProjectTemplateConfigYamlMergeResult,
+): ProjectTemplateApplyMergeDiagnostics {
+  const diagnostics = result.diagnostics.map((diagnostic) => ({
+    code: diagnostic.code,
+    path: [...diagnostic.path],
+    message: diagnostic.message,
+  }));
+  if (result.status === 'merged') {
+    return { status: 'merged', diagnostics };
+  }
+  if (result.status === 'conflict') {
+    return {
+      status: 'conflict',
+      conflicts: result.conflicts.map((conflict) => ({
+        path: [...conflict.path],
+        reason: conflict.reason,
+      })),
+      diagnostics,
+    };
+  }
+  return {
+    status: 'blocked',
+    code: result.code,
+    document: result.document,
+    ...('path' in result ? { path: [...result.path] } : {}),
+    ...('message' in result ? { message: result.message } : {}),
+    diagnostics,
+  };
+}
+
+function resealProjectTemplateApplyPlan(
+  plan: ProjectTemplateApplyPlan,
+  entries: readonly ProjectTemplateApplyPlanEntry[],
+  reviewRequired: boolean,
+): ProjectTemplateApplyPlan {
+  const summary = createSummary(entries);
+  const body = {
+    schemaVersion: plan.schemaVersion,
+    preconditionToken: plan.preconditionToken,
+    ...(plan.baseLockSha256 === undefined
+      ? {}
+      : { baseLockSha256: plan.baseLockSha256 }),
+    incomingManifestSha256: plan.incomingManifestSha256,
+    ...(plan.incomingArchiveSha256 === undefined
+      ? {}
+      : { incomingArchiveSha256: plan.incomingArchiveSha256 }),
+    incomingCompatibility: plan.incomingCompatibility,
+    capabilitiesBefore: plan.capabilitiesBefore,
+    capabilitiesAfter: plan.capabilitiesAfter,
+    ...(plan.basePackVersion === undefined
+      ? {}
+      : { basePackVersion: plan.basePackVersion }),
+    incomingPackVersion: plan.incomingPackVersion,
+    reviewRequired,
+    defaultApplyPossible: !reviewRequired,
+    entries,
+    summary,
+  };
+  return deepFreeze({
+    ...body,
+    planId: sha256(canonicalizeTaktpackJson(body)),
+  });
+}
+
 /**
  * Produces a read-only decision artifact. All filesystem and Git observation
  * happens before this boundary so preview and apply can share exactly one
  * deterministic resolution table without this function mutating the target.
  */
-export function createProjectTemplateApplyPlan(
+function createUnresolvedProjectTemplateApplyPlan(
   inputValue: ProjectTemplateApplyPlanInput,
 ): ProjectTemplateApplyPlan {
   const input = requireRecord(inputValue, 'applyPlan');
@@ -743,6 +869,7 @@ export function createProjectTemplateApplyPlan(
       'localEntries',
       'targetRootState',
       'missingPathTracking',
+      'baseContents',
       'incomingContents',
       'incomingInspection',
       'baselineStrategy',
@@ -956,4 +1083,175 @@ export function createProjectTemplateApplyPlan(
   };
   const planId = sha256(canonicalizeTaktpackJson(planBody));
   return deepFreeze({ ...planBody, planId });
+}
+
+/**
+ * Resolves supported merge-policy documents before sealing the apply plan.
+ * Resolved bytes intentionally remain beside the plan: the plan commits to
+ * their digest, while transport and execution retain an explicit byte boundary.
+ */
+export function prepareProjectTemplateApplyPlan(
+  inputValue: ProjectTemplateApplyPlanInput,
+): PreparedProjectTemplateApplyPlan {
+  const unresolvedPlan = createUnresolvedProjectTemplateApplyPlan(inputValue);
+  const baseLock = inputValue.baseLock === undefined
+    ? undefined
+    : parseTemplateLock(inputValue.baseLock);
+  const incomingManifest = parseProjectTemplateManifest(inputValue.incomingManifest);
+  const localEntries = parseLocalEntries(inputValue.localEntries);
+  const baseByPath = new Map(baseLock?.entries.map((entry) => [entry.path, entry]) ?? []);
+  const incomingByPath = new Map(
+    incomingManifest.entries.map((entry) => [entry.path, entry]),
+  );
+  const localByPath = new Map(localEntries.map((entry) => [entry.path, entry]));
+  const baseContents = parseBaseContents(inputValue.baseContents, baseByPath);
+  const {
+    contents: incomingContents,
+  } = parseIncomingContents(inputValue.incomingContents, incomingByPath);
+  const resolvedByPath = new Map<string, Buffer>();
+
+  const entries = unresolvedPlan.entries.map((entry): ProjectTemplateApplyPlanEntry => {
+    if (
+      entry.policy !== 'merge'
+      || entry.action !== 'conflict'
+      || (
+        entry.reasonCode !== 'BOTH_CHANGED'
+        && entry.reasonCode !== 'SEMANTIC_MERGE_REQUIRED'
+      )
+      || (entry.path !== 'config.yaml' && entry.path !== 'devloopd.yaml')
+    ) {
+      return entry;
+    }
+    const base = baseContents.get(entry.path);
+    const local = localByPath.get(entry.path);
+    const incoming = incomingContents.get(entry.path);
+    if (
+      base === undefined
+      || local?.content === undefined
+      || incoming === undefined
+    ) {
+      const unresolved = overrideConflict(entry, 'BASE_UNAVAILABLE');
+      return {
+        ...unresolved,
+        reviewRequired: true,
+        mergeDiagnostics: {
+          status: 'base-unavailable',
+          diagnostics: [],
+        },
+      };
+    }
+
+    const merge = entry.path === 'config.yaml'
+      ? mergeProjectTemplateConfigYaml({
+          base,
+          local: local.content,
+          incoming,
+        })
+      : mergeProjectTemplateDevloopPolicyYaml({
+          base,
+          local: local.content,
+          incoming,
+        });
+    const mergeDiagnostics = normalizeMergeDiagnostics(merge);
+    if (merge.status !== 'merged') {
+      const unresolved = overrideConflict(entry, 'CONFLICT');
+      return {
+        ...unresolved,
+        reviewRequired: true,
+        mergeDiagnostics,
+      };
+    }
+
+    const content = Buffer.from(merge.content);
+    const afterSha256 = sha256(content);
+    const afterMode = entry.incomingMode!;
+    const action: 'keep' | 'update' =
+      afterSha256 === local.sha256 && afterMode === local.mode
+        ? 'keep'
+        : 'update';
+    if (action === 'update' && afterSha256 !== entry.incomingSha256) {
+      resolvedByPath.set(entry.path, content);
+    }
+    const diff = afterSha256 === local.sha256
+      ? undefined
+      : mustRedactDiff(entry.path, local.mode, local.sha256, Buffer.from(local.content))
+          || mustRedactDiff(entry.path, afterMode, afterSha256, content)
+        ? { kind: 'redacted' as const }
+        : buildTextDiff(Buffer.from(local.content), content);
+    const reviewRequired = merge.reviewRequired
+      || capabilitiesChanged(entry.capabilitiesBefore, entry.capabilitiesAfter)
+      || entry.gitTrackingStatus === 'staged'
+      || entry.gitTrackingStatus === 'unavailable'
+      || entry.gitTrackingStatus === 'unmerged';
+    const resolved = { ...entry } as Record<string, unknown>;
+    delete resolved['diff'];
+    return {
+      ...resolved,
+      action,
+      reasonCode: 'SEMANTIC_MERGED',
+      afterSha256,
+      afterMode,
+      rollbackImpact: rollbackFor(action),
+      reviewRequired,
+      ...(diff === undefined ? {} : { diff }),
+      mergeDiagnostics,
+    } as ProjectTemplateApplyPlanEntry;
+  });
+
+  const paths = [...new Set([...baseByPath.keys(), ...incomingByPath.keys()])]
+    .sort(compareAscii);
+  const missingPathTracking = parseMissingPathTracking(
+    inputValue.missingPathTracking,
+    new Set(paths),
+  );
+  const localPortableKeys = new Set(localEntries.map((entry) => portablePathKey(entry.path)));
+  const targetEvidenceComplete = inputValue.targetRootState !== undefined
+    && paths.every((path) => (
+      localByPath.has(path)
+      || Object.hasOwn(missingPathTracking, path)
+      || localPortableKeys.has(portablePathKey(path))
+    ));
+  const incomingEvidenceComplete = incomingManifest.entries.every(
+    (entry) => entry.policy === 'excluded' || incomingContents.has(entry.path),
+  );
+  const incomingInspection = parseIncomingInspection(
+    inputValue.incomingInspection,
+    calculateProjectTemplateManifestSha256(incomingManifest),
+    incomingManifest.takt,
+  );
+  const reviewRequired =
+    capabilitiesChanged(
+      [...(baseLock?.capabilities ?? [])],
+      [...(incomingManifest.capabilities ?? [])],
+    )
+    || !targetEvidenceComplete
+    || !incomingEvidenceComplete
+    || !incomingInspection.trusted
+    || Object.values(missingPathTracking).some(
+      (status) => status === 'tracked-clean'
+        || status === 'staged'
+        || status === 'tracked-modified'
+        || status === 'unmerged'
+        || status === 'unavailable',
+    )
+    || entries.some(
+      (entry) => entry.action === 'conflict' || entry.reviewRequired,
+    );
+  const plan = resealProjectTemplateApplyPlan(
+    unresolvedPlan,
+    entries,
+    reviewRequired,
+  );
+  const resolvedContents: ProjectTemplateIncomingContent[] =
+    [...resolvedByPath.entries()]
+      .sort(([left], [right]) => compareAscii(left, right))
+      .map(([path, content]) => ({ path, content }));
+  return deepFreeze({ plan, resolvedContents });
+}
+
+/** Compatibility wrapper for callers that only consume the sealed plan. */
+export function createProjectTemplateApplyPlan(
+  inputValue: ProjectTemplateApplyPlanInput,
+): ProjectTemplateApplyPlan {
+  return prepareProjectTemplateApplyPlan(inputValue).plan;
 }

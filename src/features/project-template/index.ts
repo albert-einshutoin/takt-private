@@ -56,7 +56,10 @@ export type {
   CapturedProjectTemplateTargetEntry,
   ProjectTemplateTargetSnapshot,
 } from './target-snapshot.js';
-export { createProjectTemplateApplyPlan } from './apply-plan.js';
+export {
+  createProjectTemplateApplyPlan,
+  prepareProjectTemplateApplyPlan,
+} from './apply-plan.js';
 export {
   inspectProjectTemplateApplyGuard,
 } from './apply-guard.js';
@@ -90,6 +93,7 @@ export type {
 } from './apply-approval.js';
 export type {
   ProjectTemplateLocalSnapshotEntry,
+  ProjectTemplateBaseContent,
   ProjectTemplateIncomingContent,
   ProjectTemplateIncomingInspectionEvidence,
   ProjectTemplateApplyPlanInput,
@@ -97,6 +101,7 @@ export type {
   ProjectTemplateApplyReasonCode,
   ProjectTemplateRollbackImpact,
   ProjectTemplateEntryDiff,
+  ProjectTemplateApplyMergeDiagnostics,
   ManagedProjectTemplateApplyPlanEntry,
   MergeProjectTemplateApplyPlanEntry,
   ScaffoldProjectTemplateApplyPlanEntry,
@@ -104,6 +109,7 @@ export type {
   ProjectTemplateApplyPlanEntry,
   ProjectTemplateApplyPlanSummary,
   ProjectTemplateApplyPlan,
+  PreparedProjectTemplateApplyPlan,
   ProjectTemplatePolicyActionMap,
 } from './apply-plan-types.js';
 export type {
