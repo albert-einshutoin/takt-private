@@ -74,6 +74,33 @@ describe('project template YAML document three-way merge', () => {
     }));
   });
 
+  it('preserves an unchanged project-owned scalar against an incoming change', () => {
+    const result = merge(
+      'subscription_only: true\nlanguage: en\n',
+      'subscription_only: true\nlanguage: en\n',
+      'subscription_only: false\nlanguage: ja\n',
+    );
+
+    expect(result).toMatchObject({ status: 'merged', changed: true });
+    const output = result.status === 'merged' ? result.content.toString() : '';
+    expect(output).toContain('subscription_only: true');
+    expect(output).toContain('language: ja');
+    expect(output).not.toContain('subscription_only: false');
+  });
+
+  it('does not introduce a missing project-owned scalar from the template', () => {
+    const result = merge(
+      'language: en\n',
+      'language: en\n',
+      'language: ja\nbase_branch: release\n',
+    );
+
+    expect(result).toMatchObject({ status: 'merged', changed: true });
+    const output = result.status === 'merged' ? result.content.toString() : '';
+    expect(output).toContain('language: ja');
+    expect(output).not.toContain('base_branch');
+  });
+
   it('treats an unregistered sequence atomically', () => {
     const result = merge(
       'future_values: [base]\n',

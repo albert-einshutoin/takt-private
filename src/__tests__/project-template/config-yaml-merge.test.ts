@@ -41,25 +41,31 @@ describe('project template config YAML merge adapters', () => {
 
   it('rejects a merged config that fails the runtime project schema', () => {
     const result = mergeProjectTemplateConfigYaml({
-      base: bytes('concurrency: 2\n'),
-      local: bytes('concurrency: 2\n'),
-      incoming: bytes('concurrency: 999\n'),
+      base: bytes('task_poll_interval_ms: 100\n'),
+      local: bytes('task_poll_interval_ms: 100\n'),
+      incoming: bytes('task_poll_interval_ms: 99\n'),
     });
 
     expect(result).toMatchObject({
       status: 'blocked',
       code: 'MERGED_CONFIG_INVALID',
-      path: ['concurrency'],
+      path: ['task_poll_interval_ms'],
     });
   });
 
   it('runs subscription-only policy validation on merged output', () => {
     const result = mergeProjectTemplateConfigYaml({
-      base: bytes('subscription_only: true\n'),
-      local: bytes('subscription_only: true\n'),
+      base: bytes(
+        'subscription_only: true\n'
+        + 'allowed_providers: [codex-cli]\n',
+      ),
+      local: bytes(
+        'subscription_only: true\n'
+        + 'allowed_providers: [codex-cli]\n',
+      ),
       incoming: bytes(
         'subscription_only: true\n'
-        + 'allowed_providers: [openai]\n',
+        + 'allowed_providers: [codex-cli, codex]\n',
       ),
     });
 
@@ -69,7 +75,7 @@ describe('project template config YAML merge adapters', () => {
     });
   });
 
-  it('rejects an incoming API provider introduced into an otherwise safe effective policy', () => {
+  it('preserves a project-owned provider against an incoming-only change', () => {
     const safe = 'subscription_only: true\nprovider: codex-cli\n';
     const result = mergeProjectTemplateConfigYaml({
       base: bytes(safe),
@@ -77,12 +83,9 @@ describe('project template config YAML merge adapters', () => {
       incoming: bytes('subscription_only: true\nprovider: codex\n'),
     });
 
-    expect(result).toMatchObject({
-      status: 'blocked',
-      code: 'MERGED_CONFIG_INVALID',
-    });
-    expect(result.status === 'blocked' ? result.message : '')
-      .toMatch(/provider.*codex/i);
+    expect(result).toMatchObject({ status: 'merged', changed: false });
+    expect(result.status === 'merged' ? result.content.toString() : '')
+      .toContain('provider: codex-cli');
   });
 
   it('preserves unknown keys but routes them to a validator error', () => {
@@ -99,16 +102,16 @@ describe('project template config YAML merge adapters', () => {
     });
   });
 
-  it('requires subscription_only mode in devloop policy', () => {
-    expect(mergeProjectTemplateDevloopPolicyYaml({
+  it('preserves the project-owned subscription-only devloop mode', () => {
+    const result = mergeProjectTemplateDevloopPolicyYaml({
       base: bytes('mode: subscription_only\n'),
       local: bytes('mode: subscription_only\n'),
       incoming: bytes('mode: unsafe\n'),
-    })).toMatchObject({
-      status: 'blocked',
-      code: 'MERGED_DEVLOOP_POLICY_INVALID',
-      path: ['mode'],
     });
+
+    expect(result).toMatchObject({ status: 'merged', changed: false });
+    expect(result.status === 'merged' ? result.content.toString() : '')
+      .toContain('mode: subscription_only');
   });
 
   it('preserves valid devloop project policy extensions', () => {

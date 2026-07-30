@@ -402,6 +402,21 @@ export function mergeProjectTemplateYamlDocument(
       });
       return;
     }
+    const hasExplicitCollectionMerge = Array.isArray(local)
+      && Array.isArray(incoming)
+      && rule.sequencePolicy !== 'atomic';
+    if (
+      rule.ownership === 'project-owned'
+      && equal(local, base)
+      && !hasExplicitCollectionMerge
+    ) {
+      // Project-owned scalar and atomic values remain authoritative even when
+      // they still equal the previous template. Otherwise an upstream-only
+      // change could silently convert a local safety or routing decision into
+      // a template-managed value. Explicit collection policies below are the
+      // only opt-in path for safe additive/set merging.
+      return;
+    }
     if (Array.isArray(local) && Array.isArray(incoming)) {
       if (rule.sequencePolicy === 'monotonic-set') {
         const merged = mergeOrderedSequence(
