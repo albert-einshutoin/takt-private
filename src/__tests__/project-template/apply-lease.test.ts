@@ -14,7 +14,7 @@ import {
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   acquireProjectTemplateApplyLease,
   clearProjectTemplateRecoveryRequiredMarker,
@@ -39,6 +39,66 @@ import {
 import { createRunMetaStorageIo } from '../../features/tasks/execute/runMetaStorage.js';
 import { writePersonalDaemonState } from '../../devloopd/personalLifecycle.js';
 
+const coordinationFault = vi.hoisted(() => ({
+  namespaceFailure: undefined as 'unlink' | 'fsync' | undefined,
+  targetMainPath: undefined as string | undefined,
+  failMainCleanup: false,
+  namespaceFailureInjected: false,
+  mainCleanupFailureInjected: false,
+  failNextDirectoryFsync: false,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    unlinkSync(path: Parameters<typeof actual.unlinkSync>[0]) {
+      const value = String(path);
+      if (
+        value.endsWith('.reclaim')
+        && !coordinationFault.namespaceFailureInjected
+        && coordinationFault.namespaceFailure === 'unlink'
+      ) {
+        coordinationFault.namespaceFailureInjected = true;
+        throw Object.assign(new Error('injected reclaim namespace unlink failure'), {
+          code: 'EIO',
+        });
+      }
+      if (
+        value.endsWith('.reclaim')
+        && !coordinationFault.namespaceFailureInjected
+        && coordinationFault.namespaceFailure === 'fsync'
+      ) {
+        actual.unlinkSync(path);
+        coordinationFault.failNextDirectoryFsync = true;
+        return;
+      }
+      if (
+        coordinationFault.namespaceFailureInjected
+        && coordinationFault.failMainCleanup
+        && !coordinationFault.mainCleanupFailureInjected
+        && value === coordinationFault.targetMainPath
+      ) {
+        coordinationFault.mainCleanupFailureInjected = true;
+        throw Object.assign(new Error('injected main cleanup failure'), {
+          code: 'EIO',
+        });
+      }
+      actual.unlinkSync(path);
+    },
+    fsyncSync(fd: number) {
+      if (coordinationFault.failNextDirectoryFsync) {
+        coordinationFault.failNextDirectoryFsync = false;
+        coordinationFault.namespaceFailureInjected = true;
+        throw Object.assign(new Error('injected reclaim namespace fsync failure'), {
+          code: 'EIO',
+        });
+      }
+      actual.fsyncSync(fd);
+    },
+  };
+});
+
 const roots: string[] = [];
 
 function makeRoot(): string {
@@ -48,6 +108,12 @@ function makeRoot(): string {
 }
 
 afterEach(() => {
+  coordinationFault.namespaceFailure = undefined;
+  coordinationFault.targetMainPath = undefined;
+  coordinationFault.failMainCleanup = false;
+  coordinationFault.namespaceFailureInjected = false;
+  coordinationFault.mainCleanupFailureInjected = false;
+  coordinationFault.failNextDirectoryFsync = false;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -490,9 +556,74 @@ describe('project template apply/run-start coordination', () => {
 
     const lease = acquireProjectTemplateApplyLease(root);
     expect(lease.pid).toBe(process.pid);
+    expect(existsSync(`${mutexPath}.reclaim`)).toBe(false);
     lease.release();
     expect(existsSync(mutexPath)).toBe(false);
   });
+
+  it('fails closed without unlinking a mutex inode already claimed by another reclaimer', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(mutexPath, JSON.stringify({
+      version: 1,
+      token: 'crashed-mutex-owner',
+      pid: 99_999,
+    }));
+    linkSync(mutexPath, `${mutexPath}.reclaim`);
+    const claimedInode = lstatSync(mutexPath).ino;
+
+    expect(() => acquireProjectTemplateApplyLease(root))
+      .toThrow(ProjectTemplateCoordinationError);
+    expect(lstatSync(mutexPath).ino).toBe(claimedInode);
+    expect(lstatSync(`${mutexPath}.reclaim`).ino).toBe(claimedInode);
+    expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(false);
+  });
+
+  it('does not acquire through the crash window after main unlink but before claim cleanup', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const reclaimPath = `${mutexPath}.reclaim`;
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 1,
+      token: 'reclaimer-crashed-after-main-unlink',
+      pid: 99_999,
+    }));
+
+    expect(() => acquireProjectTemplateApplyLease(root))
+      .toThrow(ProjectTemplateCoordinationError);
+    expect(existsSync(mutexPath)).toBe(false);
+    expect(readFileSync(reclaimPath, 'utf8')).toContain(
+      'reclaimer-crashed-after-main-unlink',
+    );
+    expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(false);
+  });
+
+  it.each([
+    ['unlink', false],
+    ['unlink', true],
+    ['fsync', false],
+    ['fsync', true],
+  ] as const)(
+    'does not retry after reclaim namespace %s failure when main cleanup failure is %s',
+    (namespaceFailure, failMainCleanup) => {
+      const root = makeRoot();
+      const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+      coordinationFault.namespaceFailure = namespaceFailure;
+      coordinationFault.targetMainPath = mutexPath;
+      coordinationFault.failMainCleanup = failMainCleanup;
+
+      expect(() => acquireProjectTemplateApplyLease(root))
+        .toThrow(ProjectTemplateCoordinationError);
+
+      expect(coordinationFault.namespaceFailureInjected).toBe(true);
+      expect(coordinationFault.mainCleanupFailureInjected).toBe(failMainCleanup);
+      expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(false);
+      expect(existsSync(mutexPath)).toBe(failMainCleanup);
+      expect(existsSync(`${mutexPath}.reclaim`)).toBe(false);
+    },
+  );
 
   it('guards both direct run and personal daemon running-state publication', () => {
     const root = makeRoot();

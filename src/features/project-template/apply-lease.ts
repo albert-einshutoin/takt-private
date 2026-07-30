@@ -4,6 +4,7 @@ import {
   constants,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -33,6 +34,13 @@ export class ProjectTemplateCoordinationError extends Error {
   constructor() {
     super('project template coordination state is busy or cannot be proven safe');
     this.name = 'ProjectTemplateCoordinationError';
+  }
+}
+
+class RetryableCoordinationMainExistsError extends Error {
+  constructor() {
+    super('coordination main path already exists');
+    this.name = 'RetryableCoordinationMainExistsError';
   }
 }
 
@@ -240,6 +248,51 @@ function createCoordinationFile(path: string, token: string): void {
   createDurableJsonFile(path, { version: 1, token, pid: process.pid });
 }
 
+function createClaimSafeCoordinationFile(path: string, token: string): void {
+  const reclaimPath = `${path}.reclaim`;
+  const namespaceToken = randomUUID();
+  try {
+    // Reserving the same fixed namespace used by stale reclaim proves that no
+    // prior claimant remains after unlinking the old main path. Without this
+    // handshake, a crash between old-path unlink and claim cleanup could let a
+    // new owner report acquisition while the reclaim claim is still durable.
+    createCoordinationFile(reclaimPath, namespaceToken);
+  } catch {
+    throw new ProjectTemplateCoordinationError();
+  }
+  try {
+    createCoordinationFile(path, token);
+  } catch (error) {
+    try {
+      removeOwnedCoordinationFile(reclaimPath, namespaceToken);
+    } catch {
+      // Even a pre-main collision becomes terminal if namespace cleanup cannot
+      // be proven durable.
+      throw new ProjectTemplateCoordinationError();
+    }
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new RetryableCoordinationMainExistsError();
+    }
+    throw new ProjectTemplateCoordinationError();
+  }
+  try {
+    removeOwnedCoordinationFile(reclaimPath, namespaceToken);
+  } catch {
+    try {
+      removeOwnedCoordinationFile(path, token);
+    } catch {
+      // Leaving an ambiguous owned main path is safer than retrying publication
+      // after namespace durability became uncertain.
+    }
+    try {
+      removeOwnedCoordinationFile(reclaimPath, namespaceToken);
+    } catch {
+      // A durable reservation is safer than guessing about its ownership.
+    }
+    throw new ProjectTemplateCoordinationError();
+  }
+}
+
 function removeOwnedCoordinationFile(path: string, token: string): void {
   const read = readProjectTemplateJsonStrict(path);
   if (read.kind !== 'value') {
@@ -324,6 +377,13 @@ export function clearProjectTemplateRecoveryRequiredMarker(
 }
 
 function reclaimDeadCoordinationFile(path: string): boolean {
+  let observed: ReturnType<typeof lstatSync>;
+  try {
+    observed = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    throw new ProjectTemplateCoordinationError();
+  }
   const read = readProjectTemplateJsonStrict(path);
   if (read.kind === 'missing') return true;
   if (
@@ -349,8 +409,50 @@ function reclaimDeadCoordinationFile(path: string): boolean {
   } catch {
     throw new ProjectTemplateCoordinationError();
   }
-  removeOwnedCoordinationFile(path, value['token']);
-  return true;
+  const reclaimPath = `${path}.reclaim`;
+  let claimCreated = false;
+  try {
+    // The hard link is an exclusive claim on this exact inode. A second
+    // reclaimer cannot pass this boundary and later unlink a replacement lock
+    // published by the first reclaimer.
+    linkSync(path, reclaimPath);
+    claimCreated = true;
+    const claimed = lstatSync(reclaimPath);
+    const current = lstatSync(path);
+    if (
+      !observed.isFile()
+      || observed.isSymbolicLink()
+      || observed.nlink !== 1
+      || claimed.dev !== observed.dev
+      || claimed.ino !== observed.ino
+      || current.dev !== claimed.dev
+      || current.ino !== claimed.ino
+      || claimed.nlink !== 2
+      || current.nlink !== 2
+    ) {
+      throw new ProjectTemplateCoordinationError();
+    }
+    unlinkSync(path);
+    syncDirectory(dirname(path));
+    unlinkSync(reclaimPath);
+    syncDirectory(dirname(path));
+    return true;
+  } catch {
+    if (claimCreated) {
+      try {
+        // This pathname was published by this invocation with O_EXCL-like link
+        // semantics, so removing it cannot touch another claimant or owner.
+        unlinkSync(reclaimPath);
+        syncDirectory(dirname(path));
+      } catch {
+        // Cleanup uncertainty remains fail-closed.
+      }
+    }
+    // A leftover or concurrent claim is intentionally not stolen: availability
+    // can be repaired by an operator, whereas guessing could delete a new
+    // owner's coordination file.
+    throw new ProjectTemplateCoordinationError();
+  }
 }
 
 function acquireCoordinationFile(path: string): {
@@ -360,13 +462,16 @@ function acquireCoordinationFile(path: string): {
 } {
   const token = randomUUID();
   try {
-    createCoordinationFile(path, token);
-  } catch {
+    createClaimSafeCoordinationFile(path, token);
+  } catch (error) {
+    if (!(error instanceof RetryableCoordinationMainExistsError)) {
+      throw new ProjectTemplateCoordinationError();
+    }
     if (!reclaimDeadCoordinationFile(path)) {
       throw new ProjectTemplateCoordinationError();
     }
     try {
-      createCoordinationFile(path, token);
+      createClaimSafeCoordinationFile(path, token);
     } catch {
       throw new ProjectTemplateCoordinationError();
     }
