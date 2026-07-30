@@ -844,13 +844,20 @@ export async function applyProjectTemplatePlan(options: {
     try {
       for (const entry of baseLockVerification.baseLock?.entries ?? []) {
         if (!usesSemanticMergeBaseline(entry)) continue;
-        baseContents.push({
-          path: entry.path,
-          content: await readProjectTemplateMergeBaseline({
-            storage,
-            expectedSha256: entry.sha256,
-          }),
-        });
+        try {
+          baseContents.push({
+            path: entry.path,
+            content: await readProjectTemplateMergeBaseline({
+              storage,
+              expectedSha256: entry.sha256,
+            }),
+          });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          // Locks written before baseline persistence have no blob to load.
+          // Re-derivation below decides whether this specific plan can proceed
+          // without a three-way base; any semantic edit still fails closed.
+        }
       }
     } catch {
       return notStarted(

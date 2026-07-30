@@ -391,6 +391,44 @@ describe('project template atomic apply executor', () => {
     },
   );
 
+  it.each([
+    ['unchanged', true],
+    ['locally deleted', false],
+  ] as const)(
+    'bootstraps a missing legacy baseline when semantic config is %s',
+    async (_state, localPresent) => {
+      const root = makeRoot();
+      const config = 'language: en\n';
+      if (localPresent) writeTakt(root, 'config.yaml', config);
+      const baseManifest = manifest({ 'config.yaml': config });
+      baseManifest.entries[0]!.policy = 'merge';
+      const baseLock = baseLockFor(baseManifest);
+      writeFileSync(
+        join(root, PROJECT_TEMPLATE_LOCK_PATH),
+        `${JSON.stringify(baseLock)}\n`,
+      );
+      const incomingManifest = manifest({ 'config.yaml': config });
+      incomingManifest.entries[0]!.policy = 'merge';
+      const blobs = incomingContents({ 'config.yaml': config });
+      const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+
+      const applied = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: blobs,
+      });
+
+      expect(applied.status).toBe('committed');
+      expect(existsSync(join(root, '.takt', 'config.yaml'))).toBe(localPresent);
+      const storage = await initializeProjectTemplateApplyStorage({ repoPath: root });
+      await expect(readProjectTemplateMergeBaseline({
+        storage,
+        expectedSha256: hash(config),
+      })).resolves.toEqual(Buffer.from(config));
+    },
+  );
+
   it('does not require or persist semantic baselines for non-config merge entries', async () => {
     const root = makeRoot();
     writeTakt(root, 'notes.txt', 'old\n');
