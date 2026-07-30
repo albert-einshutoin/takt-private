@@ -30,6 +30,7 @@ import { TaskPrefixWriter } from '../../../shared/ui/TaskPrefixWriter.js';
 import { createLogger, generateReportDir, getDebugPromptsLogFile, isValidReportDirName, preventSleep } from '../../../shared/utils/index.js';
 import { createProviderEventLogger, isProviderEventsEnabled } from '../../../shared/utils/providerEventLogger.js';
 import { sanitizeTerminalText } from '../../../shared/utils/text.js';
+import { getErrorMessage } from '../../../shared/utils/error.js';
 import { createUsageEventLogger, isUsageEventsEnabled } from '../../../shared/utils/usageEventLogger.js';
 import { initializeOtelFoundation, type OtelFoundationHandle } from '../../../infra/observability/otelFoundation.js';
 import { PHASE_USAGE_EVENTS_LOG_FILE_SUFFIX } from '../../../core/logging/contracts.js';
@@ -89,6 +90,33 @@ export interface WorkflowExecutionBootstrap {
   savedSessions: Record<string, string>;
   sessionUpdateHandler: (persona: string, sessionId: string) => void;
   writeTraceReportOnce: ReturnType<typeof createTraceReportWriter>;
+}
+
+function rethrowBootstrapFailureAfterTerminalization(
+  runMetaManager: RunMetaManager,
+  error: unknown,
+  allowSensitiveData: boolean,
+): never {
+  const reason = `workflow bootstrap failed: ${sanitizeTextForStorage(
+    getErrorMessage(error),
+    allowSensitiveData,
+  )}`;
+  try {
+    if (!runMetaManager.isFinalized) {
+      // Running evidence is already visible at this boundary. Publish a
+      // terminal reason before rethrowing so template apply cannot remain
+      // blocked by a constructor failure that never reached execution cleanup.
+      runMetaManager.finalize('aborted', 0, reason);
+    }
+  } catch (terminalizationError) {
+    // Preserve running/unknown evidence when terminal publication itself is
+    // uncertain, and retain both failures for operator diagnosis.
+    throw new AggregateError(
+      [error, terminalizationError],
+      'Workflow bootstrap and run terminalization both failed',
+    );
+  }
+  throw error;
 }
 
 export async function createWorkflowExecutionBootstrap(
@@ -192,7 +220,15 @@ export async function createWorkflowExecutionBootstrap(
           : {}),
       },
     );
-    options.onRunningEvidencePublished?.();
+    try {
+      options.onRunningEvidencePublished?.();
+    } catch (error) {
+      rethrowBootstrapFailureAfterTerminalization(
+        runMetaManager,
+        error,
+        allowSensitiveData,
+      );
+    }
     return {
       globalConfig,
       runSlug,
@@ -221,6 +257,7 @@ export async function createWorkflowExecutionBootstrap(
     traceDiscovery,
     runMetaManager,
   } = preparedRunStart;
+  try {
   const workflowSessionId = generateSessionId();
   const ndjsonLogPath = initNdjsonLog(
     workflowSessionId,
@@ -385,6 +422,13 @@ export async function createWorkflowExecutionBootstrap(
     sessionUpdateHandler,
     writeTraceReportOnce,
   };
+  } catch (error) {
+    rethrowBootstrapFailureAfterTerminalization(
+      runMetaManager,
+      error,
+      allowSensitiveData,
+    );
+  }
 }
 
 function mapConfigSourceToResolutionSource(source: ConfigValueSource): ProviderResolutionSource {
