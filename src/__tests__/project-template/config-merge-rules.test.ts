@@ -29,6 +29,11 @@ describe('project template config merge rules', () => {
     'aws_secret_access_key',
     'provider_options.codex.apiKey',
     'provider_options.codex.refreshToken',
+    'provider_options.codex.api.key',
+    'provider_options.codex.access.key',
+    'provider_options.codex.private.key',
+    'provider_options.codex.client.secret',
+    'provider_options.codex.refresh.token',
   ])('forbids credential-bearing path %s', (path) => {
     expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
       .toMatchObject({ ownership: 'forbidden', known: true });

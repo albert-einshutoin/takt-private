@@ -38,7 +38,8 @@ export type ProjectTemplateYamlMergeBlockedCode =
   | 'MERGE_KEY'
   | 'CUSTOM_TAG'
   | 'NON_STRING_KEY'
-  | 'FORBIDDEN_PATH';
+  | 'FORBIDDEN_PATH'
+  | 'MIXED_EOL_UNSUPPORTED';
 
 export type ProjectTemplateYamlMergeResult =
   | {
@@ -208,6 +209,9 @@ function containsForbiddenPath(
       containsForbiddenPath(document, child, [...path, key])
     ));
   }
+  if (Array.isArray(value)) {
+    return value.some((child) => containsForbiddenPath(document, child, path));
+  }
   return resolveProjectTemplateConfigMergeRule(document, path).ownership === 'forbidden';
 }
 
@@ -276,6 +280,32 @@ function setDocumentValue(
   const replacement = document.createNode(value);
   copyLocalNodePresentation(previous, replacement);
   document.setIn(path, replacement);
+}
+
+function setDocumentSequenceValue(
+  document: Document,
+  path: readonly string[],
+  local: readonly SemanticValue[],
+  merged: readonly SemanticValue[],
+): void {
+  const previous = document.getIn(path, true);
+  if (!isSeq(previous)) {
+    setDocumentValue(document, path, [...merged]);
+    return;
+  }
+  const used = new Set<number>();
+  previous.items = merged.map((value) => {
+    const localIndex = local.findIndex(
+      (candidate, index) => !used.has(index) && isDeepStrictEqual(candidate, value),
+    );
+    if (localIndex >= 0) {
+      used.add(localIndex);
+      // Reusing the existing node retains item comments, scalar style, and
+      // blank-line presentation for every local value that survives the merge.
+      return previous.items[localIndex]!;
+    }
+    return document.createNode(value);
+  });
 }
 
 function eolDiagnostics(text: string): ProjectTemplateYamlMergeDiagnostic[] {
@@ -377,7 +407,7 @@ export function mergeProjectTemplateYamlDocument(
           [...(Array.isArray(base) ? base : []), ...incoming],
         );
         if (!isDeepStrictEqual(local, merged)) {
-          setDocumentValue(parsedLocal.document, path, merged);
+          setDocumentSequenceValue(parsedLocal.document, path, local, merged);
           semanticChanged = true;
         }
         return;
@@ -385,7 +415,7 @@ export function mergeProjectTemplateYamlDocument(
       if (rule.sequencePolicy === 'ordered-keyed') {
         const merged = mergeOrderedSequence(local, incoming);
         if (!isDeepStrictEqual(local, merged)) {
-          setDocumentValue(parsedLocal.document, path, merged);
+          setDocumentSequenceValue(parsedLocal.document, path, local, merged);
           semanticChanged = true;
         }
         return;
@@ -405,14 +435,18 @@ export function mergeProjectTemplateYamlDocument(
           }
         }
         if (!isDeepStrictEqual(local, merged)) {
-          setDocumentValue(parsedLocal.document, path, merged);
+          setDocumentSequenceValue(parsedLocal.document, path, local, merged);
           semanticChanged = true;
         }
         return;
       }
     }
     if (equal(local, base)) {
-      setDocumentValue(parsedLocal.document, path, incoming);
+      if (Array.isArray(local) && Array.isArray(incoming)) {
+        setDocumentSequenceValue(parsedLocal.document, path, local, incoming);
+      } else {
+        setDocumentValue(parsedLocal.document, path, incoming);
+      }
       semanticChanged = true;
       return;
     }
@@ -447,6 +481,9 @@ export function mergeProjectTemplateYamlDocument(
       reviewRequired: diagnostics.length > 0,
       diagnostics,
     };
+  }
+  if (diagnostics.some((diagnostic) => diagnostic.code === 'MIXED_EOL')) {
+    return blocked('MIXED_EOL_UNSUPPORTED', 'local', diagnostics);
   }
   const rendered = restoreLocalTextEnvelope(
     textOf(options.local),

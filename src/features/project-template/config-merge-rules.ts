@@ -202,30 +202,25 @@ function matchesPattern(
   return pattern.length === path.length;
 }
 
+function canonicalCredentialSegment(rawSegment: string): string {
+  return rawSegment
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 function isCredentialPath(path: readonly string[]): boolean {
-  return path.some((rawSegment) => {
-    const segment = rawSegment
-      .trim()
-      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_');
-    return segment === 'api_key'
-      || segment.endsWith('_api_key')
-      || segment === 'access_key'
-      || segment.endsWith('_access_key')
-      || segment === 'private_key'
-      || segment.endsWith('_private_key')
-      || segment === 'client_secret'
-      || segment.endsWith('_client_secret')
-      || segment === 'secret'
-      || segment.endsWith('_secret')
-      || segment === 'token'
-      || segment.endsWith('_token')
-      || segment === 'password'
-      || segment.endsWith('_password')
-      || segment === 'credential'
-      || segment === 'credentials';
-  });
+  const segments = path.map(canonicalCredentialSegment).filter(Boolean);
+  // Inspect both individual keys and their joined path. YAML permits a secret
+  // label to be split across mappings (`api: { key: ... }`), which must not
+  // bypass the same deny rule as `api_key`.
+  const candidates = [...segments, segments.join('_')];
+  return candidates.some((candidate) => (
+    /(?:^|_)(?:api_key|access_key|private_key|client_secret|refresh_token|secret|token|password|credentials?)(?:$|_)/u
+      .test(candidate)
+  ));
 }
 
 function isCliPath(path: readonly string[]): boolean {

@@ -130,6 +130,20 @@ describe('project template YAML document three-way merge', () => {
     expect(output).toContain('npm run e2e');
   });
 
+  it('preserves local sequence item presentation while appending a gate', () => {
+    const result = merge(
+      'workflow_overrides:\n  quality_gates:\n    - npm test\n',
+      'workflow_overrides:\n  quality_gates:\n    # project contract\n    - "npm test" # keep local style\n',
+      'workflow_overrides:\n  quality_gates:\n    - npm test\n    - npm run e2e\n',
+    );
+
+    expect(result).toMatchObject({ status: 'merged', changed: true });
+    const output = result.status === 'merged' ? result.content.toString() : '';
+    expect(output).toContain('# project contract');
+    expect(output).toContain('"npm test" # keep local style');
+    expect(output).toContain('npm run e2e');
+  });
+
   it('keeps global-only local configuration and blocks incoming credentials', () => {
     const globalOnly = merge(
       'logging:\n  level: info\n',
@@ -158,6 +172,16 @@ describe('project template YAML document three-way merge', () => {
       'openai_api_key: unsafe\n',
       'language: ja\n',
       'openai_api_key: unsafe\n',
+    )).toMatchObject({
+      status: 'blocked',
+      code: 'FORBIDDEN_PATH',
+      document: 'incoming',
+    });
+
+    expect(merge(
+      'provider_options: {}\n',
+      'provider_options: {}\n',
+      'provider_options:\n  codex:\n    credentials:\n      - api:\n          key: unsafe\n',
     )).toMatchObject({
       status: 'blocked',
       code: 'FORBIDDEN_PATH',
@@ -208,7 +232,7 @@ describe('project template YAML document three-way merge', () => {
       .toBe(true);
   });
 
-  it('marks mixed local line endings for review without normalizing them silently', () => {
+  it('blocks an edit with mixed local line endings instead of normalizing it', () => {
     const result = mergeProjectTemplateYamlDocument({
       document: 'config.yaml',
       base: bytes('language: en\n'),
@@ -217,7 +241,9 @@ describe('project template YAML document three-way merge', () => {
     });
 
     expect(result).toMatchObject({
-      status: 'merged',
+      status: 'blocked',
+      code: 'MIXED_EOL_UNSUPPORTED',
+      document: 'local',
       reviewRequired: true,
       diagnostics: expect.arrayContaining([
         expect.objectContaining({ code: 'MIXED_EOL' }),
