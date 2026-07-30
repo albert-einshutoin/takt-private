@@ -2,7 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import type { PreparedProjectTemplateApplyPlan } from 'takt';
+import type {
+  PreparedProjectTemplateApplyPlan,
+  ProjectTemplateApplyMergeDiagnostics,
+  ProjectTemplateBaseContent,
+} from 'takt';
 
 interface PackageContract {
   exports?: unknown;
@@ -29,6 +33,10 @@ describe('package exports contract', () => {
   it('exposes the documented root API through package self-reference', () => {
     expect(existsSync(join(packageRoot, 'dist', 'index.js'))).toBe(true);
     expect(existsSync(join(packageRoot, 'dist', 'index.d.ts'))).toBe(true);
+    const declarationEntry = readFileSync(
+      join(packageRoot, 'dist', 'index.d.ts'),
+      'utf8',
+    );
 
     const result = runSelfReferenceImport(`
       const api = await import('takt');
@@ -46,6 +54,12 @@ describe('package exports contract', () => {
     });
     expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
       .toMatchTypeOf<readonly unknown[]>();
+    expectTypeOf<ProjectTemplateBaseContent>()
+      .toMatchTypeOf<{ path: string; content: Uint8Array }>();
+    expectTypeOf<ProjectTemplateApplyMergeDiagnostics>()
+      .toMatchTypeOf<{ kind: string }>();
+    expect(declarationEntry).toContain('ProjectTemplateBaseContent');
+    expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
   });
 
   it('blocks internal project-template approval deep imports', () => {
