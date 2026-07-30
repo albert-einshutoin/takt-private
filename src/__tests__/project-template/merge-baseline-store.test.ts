@@ -24,6 +24,7 @@ import {
   readProjectTemplateMergeBaseline,
   writeProjectTemplateMergeBaseline,
 } from '../../features/project-template/merge-baseline-store.js';
+import { DEFAULT_TAKTPACK_LIMITS } from '../../features/project-template/archive-types.js';
 
 const roots: string[] = [];
 
@@ -67,6 +68,26 @@ describe('project template merge baseline store', () => {
     })).resolves.toEqual(content);
     expect(statSync(join(storage.baselinesRoot, expectedSha256)).mode & 0o777)
       .toBe(0o600);
+  });
+
+  it('retains every semantic config size accepted by the archive contract', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: makeRoot(),
+    });
+    const content = Buffer.alloc(DEFAULT_TAKTPACK_LIMITS.maxBlobBytes, 0x61);
+    const expectedSha256 = digest(content);
+
+    expect(MAX_PROJECT_TEMPLATE_MERGE_BASELINE_BYTES)
+      .toBe(DEFAULT_TAKTPACK_LIMITS.maxBlobBytes);
+    await expect(writeProjectTemplateMergeBaseline({
+      storage,
+      expectedSha256,
+      content,
+    })).resolves.toBe('stored');
+    await expect(readProjectTemplateMergeBaseline({
+      storage,
+      expectedSha256,
+    })).resolves.toEqual(content);
   });
 
   it('rejects invalid digests, mismatched content, and oversized YAML', async () => {
