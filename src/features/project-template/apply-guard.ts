@@ -257,11 +257,12 @@ export function resolveProjectTemplateRecoveryRequiredPath(repoPath: string): st
   return join(resolve(repoPath), '.takt-template-state', 'recovery-required.json');
 }
 
-function parseLeaseIdentity(
+export function parseProjectTemplateMutationLeaseIdentity(
   value: unknown,
 ): Pick<ProjectTemplateApplyLeaseIdentity, 'token' | 'pid'> | undefined {
   if (
     !isRecord(value)
+    || Reflect.ownKeys(value).length !== 3
     || value['version'] !== 1
     || typeof value['token'] !== 'string'
     || value['token'].trim().length === 0
@@ -382,7 +383,7 @@ function inspectApplyLease(
       path: lockPath,
     }];
   }
-  const identity = parseLeaseIdentity(read.value);
+  const identity = parseProjectTemplateMutationLeaseIdentity(read.value);
   if (identity === undefined) {
     return [{
       code: 'APPLY_LEASE_UNKNOWN',

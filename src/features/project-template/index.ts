@@ -100,22 +100,12 @@ export {
 export {
   inspectProjectTemplateApplyGuard,
 } from './apply-guard.js';
-export {
-  acquireProjectTemplateMutationLease,
-  assertProjectTemplateMutationLeaseOwned,
-  acquireProjectTemplateApplyLease,
-} from './apply-lease.js';
 export type {
   ProjectTemplateApplyGuardBlockCode,
   ProjectTemplateApplyGuardBlock,
   ProjectTemplateApplyGuardReport,
   InspectProjectTemplateApplyGuardOptions,
 } from './apply-guard.js';
-export type {
-  ProjectTemplateMutationOperation,
-  ProjectTemplateMutationLease,
-  ProjectTemplateApplyLease,
-} from './apply-lease.js';
 export {
   runProjectTemplateDoctor,
 } from './apply-doctor.js';

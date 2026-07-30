@@ -50,6 +50,9 @@ const coordinationFault = vi.hoisted(() => ({
   namespaceFailureInjected: false,
   mainCleanupFailureInjected: false,
   failNextDirectoryFsync: false,
+  leaseReleaseFailure: undefined as 'pre-unlink' | 'post-unlink-fsync' | undefined,
+  leaseReleaseFailureInjected: false,
+  failNextLeaseDirectoryFsync: false,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -58,6 +61,26 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     unlinkSync(path: Parameters<typeof actual.unlinkSync>[0]) {
       const value = String(path);
+      if (
+        value.endsWith('/apply.lock')
+        && !coordinationFault.leaseReleaseFailureInjected
+        && coordinationFault.leaseReleaseFailure === 'pre-unlink'
+      ) {
+        coordinationFault.leaseReleaseFailureInjected = true;
+        throw Object.assign(new Error('injected lease pre-unlink failure'), {
+          code: 'EIO',
+        });
+      }
+      if (
+        value.endsWith('/apply.lock')
+        && !coordinationFault.leaseReleaseFailureInjected
+        && coordinationFault.leaseReleaseFailure === 'post-unlink-fsync'
+      ) {
+        coordinationFault.leaseReleaseFailureInjected = true;
+        actual.unlinkSync(path);
+        coordinationFault.failNextLeaseDirectoryFsync = true;
+        return;
+      }
       if (
         value.endsWith('.reclaim')
         && !coordinationFault.namespaceFailureInjected
@@ -91,6 +114,12 @@ vi.mock('node:fs', async (importOriginal) => {
       actual.unlinkSync(path);
     },
     fsyncSync(fd: number) {
+      if (coordinationFault.failNextLeaseDirectoryFsync) {
+        coordinationFault.failNextLeaseDirectoryFsync = false;
+        throw Object.assign(new Error('injected lease directory fsync failure'), {
+          code: 'EIO',
+        });
+      }
       if (coordinationFault.failNextDirectoryFsync) {
         coordinationFault.failNextDirectoryFsync = false;
         coordinationFault.namespaceFailureInjected = true;
@@ -118,6 +147,9 @@ afterEach(() => {
   coordinationFault.namespaceFailureInjected = false;
   coordinationFault.mainCleanupFailureInjected = false;
   coordinationFault.failNextDirectoryFsync = false;
+  coordinationFault.leaseReleaseFailure = undefined;
+  coordinationFault.leaseReleaseFailureInjected = false;
+  coordinationFault.failNextLeaseDirectoryFsync = false;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -245,11 +277,43 @@ describe('project template apply/run-start coordination', () => {
       root,
       forged as ProjectTemplateMutationLease,
     )).toThrow(ProjectTemplateCoordinationError);
+    expect(() => copy.release()).toThrow(ProjectTemplateCoordinationError);
+    expect(() => forged.release()).toThrow(ProjectTemplateCoordinationError);
+    const detachedRelease = lease.release;
+    expect(() => detachedRelease()).toThrow(ProjectTemplateCoordinationError);
+    expect(() => lease.release.call(copy)).toThrow(
+      ProjectTemplateCoordinationError,
+    );
+    expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(true);
+    assertProjectTemplateMutationLeaseOwned(root, lease);
 
     lease.release();
     expect(() => assertProjectTemplateMutationLeaseOwned(root, lease))
       .toThrow(ProjectTemplateCoordinationError);
   });
+
+  it.each([
+    ['pre-unlink', true],
+    ['post-unlink-fsync', false],
+  ] as const)(
+    'irreversibly revokes authority when %s release cleanup fails',
+    (failure, lockRemains) => {
+      const root = makeRoot();
+      const lease = acquireProjectTemplateMutationLease(root, 'download');
+      const lockPath = resolveProjectTemplateApplyLeasePath(root);
+      coordinationFault.leaseReleaseFailure = failure;
+
+      expect(() => lease.release()).toThrow();
+      expect(existsSync(lockPath)).toBe(lockRemains);
+      expect(() => assertProjectTemplateMutationLeaseOwned(root, lease))
+        .toThrow(ProjectTemplateCoordinationError);
+
+      expect(() => lease.release()).not.toThrow();
+      expect(existsSync(lockPath)).toBe(false);
+      expect(() => assertProjectTemplateMutationLeaseOwned(root, lease))
+        .toThrow(ProjectTemplateCoordinationError);
+    },
+  );
 
   it('serializes download, apply, another download, and run startup', () => {
     const root = makeRoot();
@@ -272,6 +336,36 @@ describe('project template apply/run-start coordination', () => {
       expect(() => acquireProjectTemplateMutationLease(root, 'download'))
         .toThrow(ProjectTemplateCoordinationError);
     });
+  });
+
+  it('requires an owned guard recheck before download side effects', () => {
+    const root = makeRoot();
+    withProjectTemplateRunStartPermit(root, (permit) => {
+      new RunMetaManager(
+        buildRunPaths(root, 'active-before-download'),
+        'active download guard task',
+        'default',
+        undefined,
+        {
+          projectTemplateRunStartPermit: permit,
+          projectTemplateCoordinationRoot: root,
+        },
+      );
+    });
+
+    const lease = acquireProjectTemplateMutationLease(root, 'download');
+    let sideEffectCalled = false;
+    const guard = inspectProjectTemplateApplyGuard({
+      repoPath: root,
+      ownedLease: lease,
+    });
+    if (guard.passed) sideEffectCalled = true;
+
+    expect(guard.blocks).toContainEqual(
+      expect.objectContaining({ code: 'ACTIVE_RUN' }),
+    );
+    expect(sideEffectCalled).toBe(false);
+    lease.release();
   });
 
   it('reclaims a dead shared mutation owner without changing legacy semantics', () => {
@@ -317,6 +411,33 @@ describe('project template apply/run-start coordination', () => {
     }],
     ['malformed payload', (lockPath: string) => {
       writeFileSync(lockPath, '{broken');
+      return undefined;
+    }],
+    ['extra payload key', (lockPath: string) => {
+      writeFileSync(lockPath, JSON.stringify({
+        version: 1,
+        token: 'extra-key-owner',
+        pid: 77_777,
+        operation: 'download',
+      }));
+      return vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('dead'), { code: 'ESRCH' });
+      });
+    }],
+    ['wrong payload token type', (lockPath: string) => {
+      writeFileSync(lockPath, JSON.stringify({
+        version: 1,
+        token: 123,
+        pid: process.pid,
+      }));
+      return undefined;
+    }],
+    ['wrong payload version', (lockPath: string) => {
+      writeFileSync(lockPath, JSON.stringify({
+        version: 2,
+        token: 'wrong-version-owner',
+        pid: process.pid,
+      }));
       return undefined;
     }],
     ['symlink', (lockPath: string, root: string) => {

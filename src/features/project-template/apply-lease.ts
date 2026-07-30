@@ -18,6 +18,7 @@ import {
 import { basename, dirname, join, resolve } from 'node:path';
 import {
   assertProjectTemplateApplyLeaseAvailable,
+  parseProjectTemplateMutationLeaseIdentity,
   readProjectTemplateJsonStrict,
   resolveProjectTemplateApplyLeasePath,
   resolveProjectTemplateRecoveryRequiredPath,
@@ -70,7 +71,8 @@ interface ActiveProjectTemplateMutationLease {
   readonly token: string;
   readonly pid: number;
   readonly operation: ProjectTemplateMutationOperation;
-  released: boolean;
+  readonly releaseCoordination: () => void;
+  state: 'active' | 'releasing' | 'released';
 }
 
 const activeMutationLeases =
@@ -371,26 +373,9 @@ function readCoordinationOwner(
   path: string,
 ): { token: string; pid: number } | undefined {
   const read = readProjectTemplateJsonStrict(path);
-  if (
-    read.kind !== 'value'
-    || typeof read.value !== 'object'
-    || read.value === null
-    || Array.isArray(read.value)
-  ) {
-    return undefined;
-  }
-  const value = read.value as Record<string, unknown>;
-  if (
-    value['version'] !== 1
-    || typeof value['token'] !== 'string'
-    || value['token'].trim().length === 0
-    || value['token'].length > 512
-    || !Number.isSafeInteger(value['pid'])
-    || (value['pid'] as number) <= 0
-  ) {
-    return undefined;
-  }
-  return { token: value['token'], pid: value['pid'] as number };
+  return read.kind === 'value'
+    ? parseProjectTemplateMutationLeaseIdentity(read.value)
+    : undefined;
 }
 
 interface CoordinationRecoveryRecord {
@@ -1204,14 +1189,22 @@ function acquireCoordinationFile(path: string): {
       throw new ProjectTemplateCoordinationError();
     }
   }
-  let released = false;
+  let releasePhase: 'linked' | 'unlinked' | 'released' = 'linked';
   return {
     token,
     pid: process.pid,
     release() {
-      if (released) return;
-      removeOwnedCoordinationFile(path, token);
-      released = true;
+      if (releasePhase === 'released') return;
+      if (releasePhase === 'linked') {
+        const owner = readCoordinationOwner(path);
+        if (owner?.token !== token || owner.pid !== process.pid) {
+          throw new ProjectTemplateCoordinationError();
+        }
+        unlinkSync(path);
+        releasePhase = 'unlinked';
+      }
+      syncDirectory(dirname(path));
+      releasePhase = 'released';
     },
   };
 }
@@ -1290,6 +1283,11 @@ export function assertProjectTemplateRunStartPermitOwned(
   }
 }
 
+/**
+ * Serializes mutation startup only. Before any side effect, the caller must
+ * immediately re-run inspectProjectTemplateApplyGuard with this lease as
+ * ownedLease; acquiring the lease alone does not prove active runs are absent.
+ */
 export function acquireProjectTemplateMutationLease(
   repoPathValue: string,
   operation: ProjectTemplateMutationOperation,
@@ -1316,17 +1314,16 @@ export function acquireProjectTemplateMutationLease(
       token: coordinationLease.token,
       pid: coordinationLease.pid,
       operation,
-      released: false,
+      releaseCoordination: coordinationLease.release,
+      state: 'active',
     };
     const lease = Object.freeze({
       operation,
       lockPath,
       token: coordinationLease.token,
       pid: coordinationLease.pid,
-      release() {
-        if (active.released) return;
-        coordinationLease.release();
-        active.released = true;
+      release(this: ProjectTemplateMutationLease) {
+        releaseProjectTemplateMutationLease(this);
       },
     }) satisfies ProjectTemplateMutationLease;
     activeMutationLeases.set(lease, active);
@@ -1338,6 +1335,23 @@ export function acquireProjectTemplateMutationLease(
   }
 }
 
+function releaseProjectTemplateMutationLease(lease: unknown): void {
+  if (
+    (typeof lease !== 'object' || lease === null)
+    && typeof lease !== 'function'
+  ) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  const active = activeMutationLeases.get(
+    lease as ProjectTemplateMutationLease,
+  );
+  if (active === undefined) throw new ProjectTemplateCoordinationError();
+  if (active.state === 'released') return;
+  active.state = 'releasing';
+  active.releaseCoordination();
+  active.state = 'released';
+}
+
 export function assertProjectTemplateMutationLeaseOwned(
   repoPathValue: string,
   lease: ProjectTemplateMutationLease,
@@ -1347,7 +1361,7 @@ export function assertProjectTemplateMutationLeaseOwned(
   const lockPath = resolveProjectTemplateApplyLeasePath(repoPath);
   if (
     active === undefined
-    || active.released
+    || active.state !== 'active'
     || active.repoPath !== repoPath
     || active.lockPath !== lockPath
     || active.lockPath !== lease.lockPath
@@ -1359,20 +1373,13 @@ export function assertProjectTemplateMutationLeaseOwned(
     throw new ProjectTemplateCoordinationError();
   }
   const read = readProjectTemplateJsonStrict(lockPath);
+  const identity = read.kind === 'value'
+    ? parseProjectTemplateMutationLeaseIdentity(read.value)
+    : undefined;
   if (
-    read.kind !== 'value'
-    || typeof read.value !== 'object'
-    || read.value === null
-    || Array.isArray(read.value)
-  ) {
-    throw new ProjectTemplateCoordinationError();
-  }
-  const payload = read.value as Record<string, unknown>;
-  if (
-    Reflect.ownKeys(payload).length !== 3
-    || payload['version'] !== 1
-    || payload['token'] !== active.token
-    || payload['pid'] !== active.pid
+    identity === undefined
+    || identity.token !== active.token
+    || identity.pid !== active.pid
   ) {
     throw new ProjectTemplateCoordinationError();
   }
