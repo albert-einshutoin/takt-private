@@ -124,6 +124,7 @@ interface IoSnapshot {
   readonly close?: GithubTemplateDownloadReceiptReclaimIo['close'];
   readonly closeDirectoryStream?:
     GithubTemplateDownloadReceiptReclaimIo['closeDirectoryStream'];
+  readonly sealAfterCallback?: () => void;
 }
 
 interface DirectoryAuthority {
@@ -157,6 +158,11 @@ interface ReclaimedFinalEvidence {
   readonly bytes: number;
   readonly receiptKey: string;
   readonly serialized: string;
+}
+
+interface ReclaimedCandidateEvidence {
+  readonly temporaryPath: string;
+  readonly final?: ReclaimedFinalEvidence;
 }
 
 function reclaimError(
@@ -252,6 +258,48 @@ function snapshotIo(value: unknown): IoSnapshot | undefined {
       >
     >(io, 'closeDirectoryStream'),
   });
+}
+
+function invokeCallbackThenSealAll<T>(
+  callback: () => T,
+  seal: () => void,
+): T {
+  let result: T | undefined;
+  let callbackFailure: unknown;
+  let callbackThrew = false;
+  try {
+    result = callback();
+  } catch (error) {
+    callbackFailure = error;
+    callbackThrew = true;
+  }
+  // A callback boundary is the last observable point before another callback
+  // could erase a replacement or restore altered receipt bytes.
+  seal();
+  if (callbackThrew) throw callbackFailure;
+  return result as T;
+}
+
+async function invokeAsyncCallbackThenSealAll<T>(
+  callback: () => Promise<T>,
+  seal: () => void,
+): Promise<T> {
+  let result: T | undefined;
+  let callbackFailure: unknown;
+  let callbackThrew = false;
+  try {
+    result = await callback();
+  } catch (error) {
+    callbackFailure = error;
+    callbackThrew = true;
+  }
+  seal();
+  if (callbackThrew) throw callbackFailure;
+  return result as T;
+}
+
+function sealAfterIoCallback(io: IoSnapshot): void {
+  io.sealAfterCallback?.();
 }
 
 function snapshotOptions(
@@ -527,14 +575,20 @@ function readExact(
           authority.bytes - position,
           position,
         )
-        : Reflect.apply(io.read, io.receiver, [
-          authority.fd,
-          result,
-          position,
-          authority.bytes - position,
-          position,
-        ]);
-    } catch {
+        : invokeCallbackThenSealAll(
+          () => Reflect.apply(io.read!, io.receiver, [
+            authority.fd,
+            result,
+            position,
+            authority.bytes - position,
+            position,
+          ]),
+          () => sealAfterIoCallback(io),
+        );
+    } catch (error) {
+      if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
+        throw error;
+      }
       throw reclaimError(
         'IO_FAILURE',
         'GitHub template receipt reclaim read failed',
@@ -557,14 +611,20 @@ function readExact(
     const extra = Buffer.allocUnsafe(1);
     eof = io?.read === undefined
       ? readSync(authority.fd, extra, 0, 1, authority.bytes)
-      : Reflect.apply(io.read, io.receiver, [
-        authority.fd,
-        extra,
-        0,
-        1,
-        authority.bytes,
-      ]);
-  } catch {
+      : invokeCallbackThenSealAll(
+        () => Reflect.apply(io.read!, io.receiver, [
+          authority.fd,
+          extra,
+          0,
+          1,
+          authority.bytes,
+        ]),
+        () => sealAfterIoCallback(io),
+      );
+  } catch (error) {
+    if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
+      throw error;
+    }
     throw reclaimError(
       'IO_FAILURE',
       'GitHub template receipt reclaim EOF check failed',
@@ -585,6 +645,7 @@ async function authenticatedLinkedCandidate(
   receiptKey: string,
   verifier: VerifierSnapshot,
   io: IoSnapshot | undefined,
+  seal: () => void,
 ): Promise<Pick<CandidateAuthority, 'serialized' | 'receipt'> | undefined> {
   if (
     temporary.bytes === 0
@@ -609,12 +670,18 @@ async function authenticatedLinkedCandidate(
     });
     let result: unknown;
     try {
-      result = await Reflect.apply(
-        verifier.verify,
-        verifier.receiver,
-        [request],
+      result = await invokeAsyncCallbackThenSealAll(
+        () => Reflect.apply(
+          verifier.verify,
+          verifier.receiver,
+          [request],
+        ),
+        seal,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
+        throw error;
+      }
       return undefined;
     }
     if (result !== 'valid') return undefined;
@@ -634,7 +701,10 @@ function ownerState(
   if (pid === process.pid) return 'alive';
   if (io?.processProbe !== undefined) {
     try {
-      const result = Reflect.apply(io.processProbe, io.receiver, [pid]);
+      const result = invokeCallbackThenSealAll(
+        () => Reflect.apply(io.processProbe!, io.receiver, [pid]),
+        () => sealAfterIoCallback(io),
+      );
       return (
         result === 'alive'
         || result === 'missing'
@@ -642,7 +712,10 @@ function ownerState(
       )
         ? result
         : 'inaccessible';
-    } catch {
+    } catch (error) {
+      if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
+        throw error;
+      }
       return 'inaccessible';
     }
   }
@@ -663,9 +736,15 @@ function runPhase(
 ): void {
   try {
     if (io?.onPhase !== undefined) {
-      Reflect.apply(io.onPhase, io.receiver, [phase, path]);
+      invokeCallbackThenSealAll(
+        () => Reflect.apply(io.onPhase!, io.receiver, [phase, path]),
+        () => sealAfterIoCallback(io),
+      );
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
+      throw error;
+    }
     throw reclaimError(
       'IO_FAILURE',
       'GitHub template receipt reclaim phase failed',
@@ -690,9 +769,15 @@ function runDescriptorCloseHook(
 ): GithubTemplateDownloadReceiptReclaimError | undefined {
   try {
     if (io?.close !== undefined) {
-      Reflect.apply(io.close, io.receiver, [authority.fd, kind]);
+      invokeCallbackThenSealAll(
+        () => Reflect.apply(io.close!, io.receiver, [authority.fd, kind]),
+        () => sealAfterIoCallback(io),
+      );
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
+      return error;
+    }
     return reclaimError(
       'IO_FAILURE',
       'GitHub template receipt reclaim descriptor close failed',
@@ -720,9 +805,15 @@ function runStreamCloseHook(
 ): GithubTemplateDownloadReceiptReclaimError | undefined {
   try {
     if (io?.closeDirectoryStream !== undefined) {
-      Reflect.apply(io.closeDirectoryStream, io.receiver, []);
+      invokeCallbackThenSealAll(
+        () => Reflect.apply(io.closeDirectoryStream!, io.receiver, []),
+        () => sealAfterIoCallback(io),
+      );
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
+      return error;
+    }
     return reclaimError(
       'IO_FAILURE',
       'GitHub template receipt reclaim stream close failed',
@@ -880,6 +971,17 @@ function assertReclaimedPathAbsent(path: string): void {
   );
 }
 
+function validateReclaimedEvidence(
+  evidence: readonly ReclaimedCandidateEvidence[],
+): void {
+  for (const candidate of evidence) {
+    assertReclaimedPathAbsent(candidate.temporaryPath);
+    if (candidate.final !== undefined) {
+      validateReclaimedFinalEvidence(candidate.final);
+    }
+  }
+}
+
 function candidateStableBeforeUnlink(
   candidate: CandidateAuthority,
   serialized: string | undefined,
@@ -909,11 +1011,11 @@ async function reclaimCandidate(
   shard: DirectoryAuthority,
   verifier: VerifierSnapshot,
   io: IoSnapshot | undefined,
+  reclaimedEvidence: ReclaimedCandidateEvidence[],
+  seal: () => void,
 ): Promise<{
   readonly outcome: 'reclaimed' | 'skipped' | 'unsafe';
-  readonly reclaimedPath?: string;
   readonly sealedSerialized?: string;
-  readonly finalEvidence?: ReclaimedFinalEvidence;
 }> {
   let authenticated = candidate;
   if (candidate.final !== undefined) {
@@ -923,6 +1025,7 @@ async function reclaimCandidate(
       candidate.receiptKey,
       verifier,
       io,
+      seal,
     );
     if (evidence === undefined) return { outcome: 'unsafe' };
     authenticated = { ...candidate, ...evidence };
@@ -935,9 +1038,12 @@ async function reclaimCandidate(
       candidate,
       authenticated.serialized,
     )) return { outcome: 'unsafe' };
-    if (io?.unlink !== undefined) {
-      Reflect.apply(io.unlink, io.receiver, [candidate.temporary.path]);
-    }
+    if (io?.unlink !== undefined) invokeCallbackThenSealAll(
+      () => Reflect.apply(io.unlink!, io.receiver, [
+        candidate.temporary.path,
+      ]),
+      () => sealAfterIoCallback(io),
+    );
     // The unlink seam is a notification/fault hook, never path authority.
     assertAllDirectories(root, ancestors, shard);
     if (!candidateStableBeforeUnlink(
@@ -945,6 +1051,21 @@ async function reclaimCandidate(
       authenticated.serialized,
     )) return { outcome: 'unsafe' };
     unlinkSync(candidate.temporary.path);
+    reclaimedEvidence.push(Object.freeze({
+      temporaryPath: candidate.temporary.path,
+      ...(candidate.final === undefined
+        ? {}
+        : {
+          final: Object.freeze({
+            path: candidate.final.path,
+            device: candidate.final.device,
+            inode: candidate.final.inode,
+            bytes: candidate.final.bytes,
+            receiptKey: candidate.receiptKey,
+            serialized: authenticated.serialized!,
+          }),
+        }),
+    }));
     assertAllDirectories(root, ancestors, shard);
     if (candidate.final !== undefined) {
       assertAuthenticatedLinkedAuthority(
@@ -973,7 +1094,10 @@ async function reclaimCandidate(
         );
       } else assertOpenedFile(candidate.temporary, 0);
       if (io?.fsync === undefined) fsyncSync(shard.fd);
-      else Reflect.apply(io.fsync, io.receiver, [shard.fd]);
+      else invokeCallbackThenSealAll(
+        () => Reflect.apply(io.fsync!, io.receiver, [shard.fd]),
+        () => sealAfterIoCallback(io),
+      );
     }
     assertAllDirectories(root, ancestors, shard);
     if (candidate.final !== undefined) {
@@ -985,19 +1109,10 @@ async function reclaimCandidate(
     } else assertOpenedFile(candidate.temporary, 0);
     return {
       outcome: 'reclaimed',
-      reclaimedPath: candidate.temporary.path,
       ...(candidate.final === undefined
         ? {}
         : {
           sealedSerialized: authenticated.serialized,
-          finalEvidence: Object.freeze({
-            path: candidate.final.path,
-            device: candidate.final.device,
-            inode: candidate.final.inode,
-            bytes: candidate.final.bytes,
-            receiptKey: candidate.receiptKey,
-            serialized: authenticated.serialized!,
-          }),
         }),
     };
   } catch (error) {
@@ -1039,8 +1154,14 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
   let truncated = false;
   let status: ReclaimedGithubTemplateDownloadReceiptTemps['status'] =
     'complete';
-  const reclaimedPaths: string[] = [];
-  const reclaimedFinals: ReclaimedFinalEvidence[] = [];
+  const reclaimedEvidence: ReclaimedCandidateEvidence[] = [];
+  const seal = () => validateReclaimedEvidence(reclaimedEvidence);
+  const io = options.io === undefined
+    ? undefined
+    : Object.freeze({
+      ...options.io,
+      sealAfterCallback: seal,
+    });
   try {
     let parent = root;
     let hierarchyMissing = false;
@@ -1048,7 +1169,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
       const child = openChildDirectory(
         parent,
         join(parent.path, name),
-        options.io,
+        io,
       );
       if (child === undefined) {
         hierarchyMissing = true;
@@ -1063,7 +1184,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
       const shard = openChildDirectory(
         algorithm,
         join(algorithm.path, shardName),
-        options.io,
+        io,
       );
       if (shard === undefined) continue;
       let directory: Dir | undefined;
@@ -1083,7 +1204,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
             continue;
           }
           matched += 1;
-          const firstState = ownerState(parsed.pid, options.io);
+          const firstState = ownerState(parsed.pid, io);
           if (firstState !== 'missing') {
             skipped += 1;
             continue;
@@ -1109,7 +1230,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
             temporaryPath,
             parsed.receiptKey,
             locator.receiptPath,
-            options.io,
+            io,
           );
           if (candidate === undefined) {
             skipped += 1;
@@ -1129,7 +1250,9 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
               openedAncestors,
               shard,
               options.verifier,
-              options.io,
+              io,
+              reclaimedEvidence,
+              seal,
             );
           } catch (error) {
             candidateFailure = (
@@ -1147,13 +1270,13 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
               closeHookFailure = runDescriptorCloseHook(
                 candidate.final,
                 'final',
-                options.io,
+                io,
               );
             }
             const temporaryHook = runDescriptorCloseHook(
               candidate.temporary,
               'temporary',
-              options.io,
+              io,
             );
             closeHookFailure ??= temporaryHook;
             candidateFailure ??= closeHookFailure;
@@ -1201,10 +1324,6 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
           if (candidateFailure !== undefined) throw candidateFailure;
           if (candidateResult?.outcome === 'reclaimed') {
             reclaimed += 1;
-            reclaimedPaths.push(candidateResult.reclaimedPath!);
-            if (candidateResult.finalEvidence !== undefined) {
-              reclaimedFinals.push(candidateResult.finalEvidence);
-            }
           }
           else {
             skipped += 1;
@@ -1222,7 +1341,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
         );
       } finally {
         if (directory !== undefined) {
-          const streamHookFailure = runStreamCloseHook(options.io);
+          const streamHookFailure = runStreamCloseHook(io);
           shardFailure ??= streamHookFailure;
           const streamCloseFailure = closeNativeStream(directory);
           shardFailure ??= streamCloseFailure;
@@ -1242,7 +1361,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
         const shardHookFailure = runDescriptorCloseHook(
           shard,
           'directory',
-          options.io,
+          io,
         );
         shardFailure ??= shardHookFailure;
         try {
@@ -1287,25 +1406,20 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
     const hookFailure = runDescriptorCloseHook(
       authority,
       'directory',
-      options.io,
+      io,
     );
     primary ??= hookFailure;
   }
   const rootHookFailure = runDescriptorCloseHook(
     root,
     'directory',
-    options.io,
+    io,
   );
   primary ??= rootHookFailure;
   try {
     assertDirectory(root);
     for (const authority of openedAncestors) assertDirectory(authority);
-    // An unlinked descriptor only proves the old inode stayed detached. The
-    // pathname itself must remain absent after every mutation-capable callback.
-    for (const path of reclaimedPaths) assertReclaimedPathAbsent(path);
-    for (const evidence of reclaimedFinals) {
-      validateReclaimedFinalEvidence(evidence);
-    }
+    validateReclaimedEvidence(reclaimedEvidence);
   } catch (error) {
     primary ??= (
       error instanceof GithubTemplateDownloadReceiptReclaimError

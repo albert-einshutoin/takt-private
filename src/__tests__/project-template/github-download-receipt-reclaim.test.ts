@@ -1068,4 +1068,63 @@ describe('GitHub template receipt orphan reclaim D2b', () => {
     expect(error).toMatchObject({ code: 'CACHE_INVALID' });
     expect(existsSync(temporary)).toBe(true);
   });
+
+  it('does not let a later fsync hook erase an after-unlink violation', async () => {
+    const root = makeRoot();
+    const shard = prepareShard(root);
+    const temporary = tempPath(shard, 920018);
+    writeFileSync(temporary, 'orphan', { mode: 0o600 });
+    const result = await reclaimGithubTemplateDownloadReceiptTemps({
+      cacheRoot: root,
+      verifier: verifier(),
+      io: {
+        processProbe: () => 'missing',
+        onPhase(phase) {
+          if (phase === 'after-reclaim-unlink') {
+            writeFileSync(temporary, 'replacement', { mode: 0o600 });
+          }
+          if (
+            phase === 'before-reclaim-fsync'
+            && existsSync(temporary)
+          ) {
+            rmSync(temporary);
+          }
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(result).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(existsSync(temporary)).toBe(true);
+  });
+
+  it('does not let a later candidate callback erase prior evidence', async () => {
+    const root = makeRoot();
+    const firstShard = prepareShard(root);
+    const first = tempPath(firstShard, 920019);
+    const secondKey = `ab${'b'.repeat(62)}`;
+    const secondShard = prepareShard(root, 'ab');
+    const second = tempPath(secondShard, 920020, secondKey);
+    writeFileSync(first, 'first', { mode: 0o600 });
+    writeFileSync(second, 'second', { mode: 0o600 });
+    const result = await reclaimGithubTemplateDownloadReceiptTemps({
+      cacheRoot: root,
+      verifier: verifier(),
+      io: {
+        processProbe(pid) {
+          if (pid === 920020 && existsSync(first)) rmSync(first);
+          return 'missing';
+        },
+        onPhase(phase, path) {
+          if (
+            phase === 'after-reclaim-unlink'
+            && path === first
+          ) {
+            writeFileSync(first, 'replacement', { mode: 0o600 });
+          }
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(result).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(existsSync(first)).toBe(true);
+    expect(existsSync(second)).toBe(true);
+  });
 });
