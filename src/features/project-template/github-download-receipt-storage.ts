@@ -474,6 +474,7 @@ function openFile(
   path: string,
   expectedDevice: number,
   expectedBytes: number,
+  writable = false,
 ): FileAuthority {
   let fd: number | undefined;
   try {
@@ -483,7 +484,13 @@ function openFile(
       || realpathSync.native(path) !== path
     ) throw new Error();
     requireFileStat(pathStat, expectedDevice, expectedBytes, 1);
-    fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
+    // Artifact authorities remain read-only. An EEXIST receipt winner needs a
+    // writable descriptor because FlushFileBuffers on a Windows read-only
+    // handle fails with access denied.
+    fd = openSync(
+      path,
+      (writable ? constants.O_RDWR : constants.O_RDONLY) | NO_FOLLOW,
+    );
     const opened = fstatSync(fd);
     requireFileStat(opened, expectedDevice, expectedBytes, 1);
     if (
@@ -623,6 +630,16 @@ function hashFile(
 ): string {
   return createHash('sha256')
     .update(readExact(authority.fd, authority.bytes, io))
+    .digest('hex');
+}
+
+function readExactNative(fd: number, bytes: number): Buffer {
+  return readExact(fd, bytes, undefined);
+}
+
+function hashFileNative(authority: FileAuthority): string {
+  return createHash('sha256')
+    .update(readExactNative(authority.fd, authority.bytes))
     .digest('hex');
 }
 
@@ -1030,6 +1047,7 @@ async function publishReceipt(
       finalPath,
       parent.device,
       Buffer.byteLength(serialized, 'utf8'),
+      !linked,
     );
   } catch {
     throw storageError(
@@ -1053,8 +1071,19 @@ async function publishReceipt(
     true,
   );
   assertFile(final, 1);
-  syncDescriptor(final.fd, 'file', io);
-  assertFile(final, 1);
+  if (linked) {
+    // The newly-linked inode is the already-fsynced writable temporary
+    // authority. Do not reopen or flush the read-only final handle on Windows.
+    requireFileStat(
+      fstatSync(temporary.fd),
+      temporary.device,
+      temporary.bytes,
+      1,
+    );
+  } else {
+    syncDescriptor(final.fd, 'file', io);
+    assertFile(final, 1);
+  }
   assertDirectory(parent);
   syncDescriptor(parent.fd, 'directory', io);
   context.artifacts.publicationSynced = true;
@@ -1183,15 +1212,23 @@ async function verifyJointSuccessBoundary(
     );
     // The verifier is asynchronous. Recheck every retained path/FD and exact
     // byte string after it returns, with no seam before native close.
+    const finalArtifactSha256 = hashFileNative(context.artifact);
+    const finalReceiptBytes = readExactNative(
+      context.final.fd,
+      context.final.bytes,
+    );
+    const finalSerialized = finalReceiptBytes.toString('utf8');
+    if (
+      finalArtifactSha256 !== receipt.payload.archive.sha256
+      || finalSerialized !== serialized
+      || calculateGithubTemplateDownloadReceiptKey(finalSerialized)
+        !== receiptKey
+    ) throw new Error();
+    // Native reads are followed by synchronous path↔FD checks. From here to
+    // native close there is no caller callback and no await boundary.
     for (const directory of context.directories) assertDirectory(directory);
     assertFile(context.artifact, 1);
     assertFile(context.final, 1);
-    if (
-      hashFile(context.artifact, io) !== receipt.payload.archive.sha256
-      || readExact(context.final.fd, context.final.bytes, io)
-        .toString('utf8') !== serialized
-      || calculateGithubTemplateDownloadReceiptKey(serialized) !== receiptKey
-    ) throw new Error();
   } catch {
     throw storageError(
       'CACHE_INVALID',

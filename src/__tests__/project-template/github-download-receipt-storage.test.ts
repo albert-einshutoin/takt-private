@@ -2,6 +2,8 @@ import { createHash, createHmac } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  fstatSync,
+  ftruncateSync,
   fsyncSync,
   linkSync,
   mkdirSync,
@@ -664,6 +666,13 @@ describe('GitHub template authenticated receipt durable store D2a', () => {
       ioSeam: {
         fsync(fd, kind) {
           fsyncKinds.push(kind);
+          if (
+            kind === 'file'
+            && fsyncKinds.filter((value) => value === 'file').length === 2
+          ) {
+            // Same-size truncate is non-mutating but requires a writable FD.
+            ftruncateSync(fd, fstatSync(fd).size);
+          }
           // Exercise the real syscall while observing its type.
           if (process.platform !== 'win32' || kind === 'file') fsyncSync(fd);
         },
@@ -672,6 +681,119 @@ describe('GitHub template authenticated receipt durable store D2a', () => {
     expect(fsyncKinds.filter((kind) => kind === 'file')).toHaveLength(2);
     expect(fsyncKinds).toContain('directory');
   });
+
+  it('reuses the fsynced writable temporary authority for a new link', async () => {
+    const fixture = await createFixture();
+    let fileSyncs = 0;
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+      ioSeam: {
+        fsync(fd, kind) {
+          if (kind === 'file') fileSyncs += 1;
+          fsyncSync(fd);
+        },
+      },
+    });
+    expect(fileSyncs).toBe(1);
+  });
+
+  it('uses only native reads after the final verifier callback', async () => {
+    const fixture = await createFixture();
+    let verifications = 0;
+    let callerReadsAfterFinalVerifier = 0;
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: {
+        async verify(request) {
+          verifications += 1;
+          return verifier().verify(request);
+        },
+      },
+      ioSeam: {
+        read(fd, buffer, offset, length, position) {
+          if (verifications >= 4) callerReadsAfterFinalVerifier += 1;
+          return readSync(fd, buffer, offset, length, position);
+        },
+      },
+    });
+    expect(verifications).toBe(4);
+    expect(callerReadsAfterFinalVerifier).toBe(0);
+  });
+
+  it.each(['artifact', 'receipt'] as const)(
+    'detects %s path replacement from the pre-final read callback',
+    async (target) => {
+      const fixture = await createFixture();
+      let armed = false;
+      let firstReadFd: number | undefined;
+      let mutated = false;
+      await expect(storeGithubTemplateDownloadReceipt({
+        prepared: fixture.prepared,
+        cacheRoot: fixture.cacheRoot,
+        verifier: verifier(),
+        ioSeam: {
+          close() {
+            armed = true;
+          },
+          read(fd, buffer, offset, length, position) {
+            if (armed && !mutated) {
+              firstReadFd ??= fd;
+              if (target === 'artifact' || fd !== firstReadFd) {
+                mutated = true;
+                const path = target === 'artifact'
+                  ? fixture.materialized.cachePath
+                  : fixture.receiptPath;
+                const content = target === 'artifact'
+                  ? fixture.content
+                  : fixture.prepared.serialized;
+                renameSync(path, `${path}.read-callback`);
+                writeFileSync(path, content, { mode: 0o600 });
+              }
+            }
+            return readSync(fd, buffer, offset, length, position);
+          },
+        },
+      })).rejects.toMatchObject({
+        code: 'CACHE_INVALID',
+        receiptState: 'receipt-published',
+      });
+      expect(mutated).toBe(true);
+    },
+  );
+
+  it.each(['artifact', 'receipt'] as const)(
+    'rejects %s replacement after the final verifier callback',
+    async (target) => {
+      const fixture = await createFixture();
+      let verifications = 0;
+      await expect(storeGithubTemplateDownloadReceipt({
+        prepared: fixture.prepared,
+        cacheRoot: fixture.cacheRoot,
+        verifier: {
+          async verify(request) {
+            verifications += 1;
+            if (verifications === 4) {
+              const path = target === 'artifact'
+                ? fixture.materialized.cachePath
+                : fixture.receiptPath;
+              const content = target === 'artifact'
+                ? fixture.content
+                : fixture.prepared.serialized;
+              renameSync(path, `${path}.last-seam`);
+              writeFileSync(path, content, { mode: 0o600 });
+            }
+            return verifier().verify(request);
+          },
+        },
+      })).rejects.toMatchObject({
+        code: 'CACHE_INVALID',
+        receiptState: 'receipt-published',
+      });
+    },
+  );
 
   it('preserves the primary failure when a close hook also fails', async () => {
     const fixture = await createFixture();
