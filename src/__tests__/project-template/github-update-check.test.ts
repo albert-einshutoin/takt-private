@@ -612,7 +612,7 @@ describe('resolveGithubTemplateSource', () => {
     },
   );
 
-  it('freezes an escaped internal error before mutation and reinjection', async () => {
+  it('normalizes a reinjected immutable internal error to its new stage', async () => {
     let captured: GithubTemplateSourceResolutionError | undefined;
     const invalidSource = {
       ...parseProjectTemplateGithubSourceSpec(
@@ -646,7 +646,7 @@ describe('resolveGithubTemplateSource', () => {
         },
       }).port,
     });
-    await expectResolutionCode(promise, 'INVALID_SOURCE_SPEC');
+    await expectResolutionCode(promise, 'INVALID_REF_METADATA');
     await expectRedacted(promise, 'ghp_mutated_internal_secret');
   });
 
