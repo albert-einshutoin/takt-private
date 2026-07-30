@@ -1121,7 +1121,11 @@ async function verifyExistingCacheFinal(
   expectedDevice: number,
   authority: StagedGithubTemplateDownloadAuthority,
   ioSeam: GithubTemplateCacheIoSeam | undefined,
-): Promise<TaktpackInspectResult> {
+): Promise<{
+  readonly fd: number;
+  readonly inode: number;
+  readonly inspection: TaktpackInspectResult;
+}> {
   let fd: number | undefined;
   try {
     const pathStat = lstatSync(path);
@@ -1183,9 +1187,13 @@ async function verifyExistingCacheFinal(
         'cache-published',
       );
     }
-    closeSync(fd);
+    const retainedFd = fd;
     fd = undefined;
-    return inspection;
+    return {
+      fd: retainedFd,
+      inode: opened.ino,
+      inspection,
+    };
   } catch (error) {
     if (isInternalStorageError(error)) throw error;
     throw storageError(
@@ -1201,6 +1209,36 @@ async function verifyExistingCacheFinal(
         // Cache verification has already failed closed.
       }
     }
+  }
+}
+
+function assertCacheFinalAuthority(
+  path: string,
+  fd: number,
+  expectedDevice: number,
+  expectedInode: number,
+  authority: StagedGithubTemplateDownloadAuthority,
+): void {
+  try {
+    const pathStat = lstatSync(path);
+    const opened = fstatSync(fd);
+    if (
+      pathStat.isSymbolicLink()
+      || realpathSync.native(path) !== path
+    ) throw new Error();
+    requireCacheFileIdentity(pathStat, expectedDevice, authority.bytes);
+    requireCacheFileIdentity(opened, expectedDevice, authority.bytes);
+    if (
+      pathStat.ino !== expectedInode
+      || opened.ino !== expectedInode
+      || hashCacheDescriptor(fd, authority.bytes) !== authority.sha256
+    ) throw new Error();
+  } catch {
+    throw storageError(
+      'CACHE_INVALID',
+      'GitHub template cache file authority changed',
+      'cache-published',
+    );
   }
 }
 
@@ -1240,11 +1278,20 @@ export async function materializeGithubTemplateCache(
   let primaryError: unknown;
   let cacheAvailable = false;
   let cacheDirectoryFd: number | undefined;
+  let cacheDirectoryPath: string | undefined;
+  let cacheDirectoryDevice: number | undefined;
+  let cacheDirectoryInode: number | undefined;
+  let cacheFinalFd: number | undefined;
+  let cacheFinalPath: string | undefined;
+  let cacheFinalInode: number | undefined;
   try {
     const opened = await openVerifiedStagingAuthority(authority, 'consuming');
     stagingFd = opened.fd;
     const cache = prepareCacheDirectories(claim.cacheRoot, claim.ioSeam);
     cacheDirectoryFd = cache.shaRootFd;
+    cacheDirectoryPath = cache.shaRoot;
+    cacheDirectoryDevice = cache.device;
+    cacheDirectoryInode = cache.shaRootInode;
     const cachePath = join(
       cache.shaRoot,
       `${authority.sha256}.taktpack`,
@@ -1265,12 +1312,15 @@ export async function materializeGithubTemplateCache(
         'cache-published',
       );
     }
-    const inspection = await verifyExistingCacheFinal(
+    const verified = await verifyExistingCacheFinal(
       cachePath,
       cache.device,
       authority,
       claim.ioSeam,
     );
+    cacheFinalFd = verified.fd;
+    cacheFinalPath = cachePath;
+    cacheFinalInode = verified.inode;
     cacheAvailable = true;
     runCachePhase(
       claim.ioSeam,
@@ -1293,6 +1343,13 @@ export async function materializeGithubTemplateCache(
         cache.device,
         cache.shaRootInode,
       );
+      assertCacheFinalAuthority(
+        cachePath,
+        verified.fd,
+        cache.device,
+        verified.inode,
+        authority,
+      );
     } catch {
       throw storageError(
         'CACHE_INVALID',
@@ -1308,7 +1365,7 @@ export async function materializeGithubTemplateCache(
       sha256: authority.sha256,
       status: 'cache-hit',
       artifactState: 'cache-published',
-      inspection: deepFreeze(inspection),
+      inspection: deepFreeze(verified.inspection),
     });
   } catch (error) {
     primaryError = isInternalStorageError(error)
@@ -1319,19 +1376,6 @@ export async function materializeGithubTemplateCache(
         cacheAvailable ? 'cache-published' : 'staging-only',
       );
   } finally {
-    if (cacheDirectoryFd !== undefined) {
-      try {
-        closeSync(cacheDirectoryFd);
-      } catch {
-        if (primaryError === undefined) {
-          primaryError = storageError(
-            'IO_FAILURE',
-            'GitHub template cache directory close failed',
-            cacheAvailable ? 'cache-published' : 'staging-only',
-          );
-        }
-      }
-    }
     if (stagingFd !== undefined) {
       try {
         closeSync(stagingFd);
@@ -1349,6 +1393,67 @@ export async function materializeGithubTemplateCache(
           'GitHub template staging cleanup failed',
           cacheAvailable ? 'cache-published' : 'staging-only',
         );
+      }
+    }
+    if (
+      primaryError === undefined
+      && result !== undefined
+      && cacheDirectoryFd !== undefined
+      && cacheDirectoryPath !== undefined
+      && cacheDirectoryDevice !== undefined
+      && cacheDirectoryInode !== undefined
+      && cacheFinalFd !== undefined
+      && cacheFinalPath !== undefined
+      && cacheFinalInode !== undefined
+    ) {
+      try {
+        // Cleanup hooks are still untrusted code. Revalidate both retained
+        // authorities immediately before publishing the sealed result.
+        assertCacheDirectoryAuthority(
+          cacheDirectoryPath,
+          cacheDirectoryFd,
+          cacheDirectoryDevice,
+          cacheDirectoryInode,
+        );
+        assertCacheFinalAuthority(
+          cacheFinalPath,
+          cacheFinalFd,
+          cacheDirectoryDevice,
+          cacheFinalInode,
+          authority,
+        );
+      } catch {
+        primaryError = storageError(
+          'CACHE_INVALID',
+          'GitHub template cache authority changed',
+          'cache-published',
+        );
+      }
+    }
+    if (cacheFinalFd !== undefined) {
+      try {
+        closeSync(cacheFinalFd);
+      } catch {
+        if (primaryError === undefined) {
+          primaryError = storageError(
+            'IO_FAILURE',
+            'GitHub template cache file close failed',
+            'cache-published',
+          );
+        }
+      }
+    }
+    if (cacheDirectoryFd !== undefined) {
+      try {
+        closeSync(cacheDirectoryFd);
+      } catch {
+        if (primaryError === undefined) {
+          primaryError = storageError(
+            'IO_FAILURE',
+            'GitHub template cache directory close failed',
+            cacheAvailable ? 'cache-published' : 'staging-only',
+          );
+        }
       }
     }
   }

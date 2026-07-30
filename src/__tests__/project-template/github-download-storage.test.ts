@@ -1104,6 +1104,68 @@ describe('GitHub template existing global cache materialization', () => {
     );
   });
 
+  it.each(['symlink-replacement', 'same-inode-mutation'] as const)(
+    'rejects final cache tampering before durability sync: %s',
+    async (tamper) => {
+      const cacheRoot = prepareCacheRoot();
+      const outside = prepareCacheRoot();
+      const { content, staged } = await stagePack(
+        makeRoot('takt-github-download-'),
+      );
+      const cachePath = writeExistingCache(cacheRoot, content);
+      const outsidePath = writeExistingCache(outside, content);
+
+      await expect(materializeGithubTemplateCache({
+        staged,
+        cacheRoot,
+        ioSeam: {
+          onCachePhase(phase) {
+            if (phase !== 'before-cache-hit-parent-fsync') return;
+            if (tamper === 'symlink-replacement') {
+              unlinkSync(cachePath);
+              symlinkSync(outsidePath, cachePath);
+              return;
+            }
+            const mutated = Buffer.from(content);
+            mutated[mutated.byteLength - 1] ^= 0xff;
+            writeFileSync(cachePath, mutated, { mode: 0o600 });
+          },
+        },
+      })).rejects.toMatchObject({
+        code: 'CACHE_INVALID',
+        artifactState: 'cache-published',
+      });
+    },
+  );
+
+  it('rejects a sha directory replaced during staging cleanup', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const outside = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    writeExistingCache(cacheRoot, content);
+    writeExistingCache(outside, content);
+    const shaRoot = join(cacheRoot, 'sha256');
+    const displaced = join(cacheRoot, 'sha256.displaced');
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase) {
+          if (phase === 'before-staging-cleanup') {
+            renameSync(shaRoot, displaced);
+            symlinkSync(join(outside, 'sha256'), shaRoot);
+          }
+        },
+      },
+    })).rejects.toMatchObject({
+      code: 'CACHE_INVALID',
+      artifactState: 'cache-published',
+    });
+  });
+
   it('preserves a verified cache when staging cleanup fails', async () => {
     const cacheRoot = prepareCacheRoot();
     const { content, staged } = await stagePack(
