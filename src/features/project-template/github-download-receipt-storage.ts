@@ -22,6 +22,10 @@ import {
   isProjectTemplatePrivateFileMode,
 } from './control-root-contract.js';
 import {
+  requireGithubTemplateDownloadReceiptArtifactBinding,
+  snapshotGithubTemplateDownloadReceiptInspection,
+} from './github-download-receipt-artifact-binding.js';
+import {
   createGithubTemplateDownloadReceiptTempName,
   deriveGithubTemplateDownloadArtifactPaths,
   deriveGithubTemplateDownloadReceiptLocatorPaths,
@@ -768,30 +772,6 @@ async function verifyAuthentication(
   }
 }
 
-function requireArtifactBinding(
-  receipt: GithubTemplateDownloadReceiptV1,
-  inspection: Awaited<ReturnType<typeof inspectTaktpack>>,
-): void {
-  const archive = receipt.payload.archive;
-  const source = receipt.payload.source;
-  if (
-    inspection.archiveSha256 !== archive.sha256
-    || inspection.manifestSha256 !== archive.manifestSha256
-    || inspection.manifest.packVersion !== archive.version
-    || inspection.manifest.source.kind !== 'github'
-    || inspection.manifest.source.uri !== source.repositoryUrl
-    || inspection.manifest.source.commit !== source.commit
-    || inspection.manifest.source.ref !== source.releaseTag
-    || inspection.manifest.takt.minVersion !== archive.takt.minVersion
-    || inspection.manifest.takt.maxVersion !== archive.takt.maxVersion
-  ) {
-    throw storageError(
-      'CACHE_INVALID',
-      'GitHub template receipt artifact binding is invalid',
-    );
-  }
-}
-
 async function openAndVerifyArtifact(
   cacheRoot: DirectoryAuthority,
   receipt: GithubTemplateDownloadReceiptV1,
@@ -817,18 +797,31 @@ async function openAndVerifyArtifact(
     runPhase(io, 'before-artifact-inspect', artifactPath);
     let inspection: Awaited<ReturnType<typeof inspectTaktpack>>;
     try {
-      inspection = await inspectTaktpack(artifactPath, {
-        limits: {
-          maxArchiveBytes: DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes,
-        },
-      });
+      inspection = snapshotGithubTemplateDownloadReceiptInspection(
+        await inspectTaktpack(artifactPath, {
+          limits: {
+            maxArchiveBytes: DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes,
+          },
+        }),
+      ) as Awaited<ReturnType<typeof inspectTaktpack>>;
     } catch {
       throw storageError(
         'CACHE_INVALID',
         'GitHub template receipt artifact inspection failed',
       );
     }
-    requireArtifactBinding(receipt, inspection);
+    try {
+      requireGithubTemplateDownloadReceiptArtifactBinding(
+        receipt,
+        inspection,
+        artifact.bytes,
+      );
+    } catch {
+      throw storageError(
+        'CACHE_INVALID',
+        'GitHub template receipt artifact binding is invalid',
+      );
+    }
     assertDirectory(cacheRoot);
     assertDirectory(shaRoot);
     assertFile(artifact, 1);
