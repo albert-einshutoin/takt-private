@@ -24,6 +24,19 @@ describe('parseProjectTemplateGithubSourceSpec', () => {
     });
   });
 
+  it('accepts literal plus in portable refs and release tags', () => {
+    expect(parseProjectTemplateGithubSourceSpec(
+      'github:owner/repo@v1.2.3+build.1',
+    )).toMatchObject({ ref: 'v1.2.3+build.1' });
+
+    const assetUrl =
+      'https://github.com/owner/repo/releases/download/v1.2.3+build.1/template.taktpack';
+    expect(parseProjectTemplateGithubSourceSpec(assetUrl)).toMatchObject({
+      ref: 'v1.2.3+build.1',
+      assetUrl,
+    });
+  });
+
   it('accepts legitimate repeated dots in repository and asset names', () => {
     expect(parseProjectTemplateGithubSourceSpec(
       'github:owner/repo..template@v1.0.0',
@@ -71,7 +84,6 @@ describe('parseProjectTemplateGithubSourceSpec', () => {
     'github:owner/repo@main.lock',
     'github:owner/repo@main@{1}',
     'github:owner/repo@feature branch',
-    'github:owner/repo@release+1',
     'github:owner/repo@リリース',
     'github:owner/repo@release\u202E1',
     'github:owner/repo@release\u200B1',

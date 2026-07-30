@@ -26,7 +26,7 @@ const MAX_DEPENDENCY_CAPABILITIES = 128;
 const MAX_RELEASE_ASSET_NAME_LENGTH = 255;
 const MAX_CHECKSUM_ASSET_NAME_LENGTH =
   MAX_RELEASE_ASSET_NAME_LENGTH + '.sha256'.length;
-const RELEASE_TAG_PATTERN = /^[A-Za-z0-9._-]+$/;
+const RELEASE_TAG_PATTERN = /^[A-Za-z0-9._+-]+$/;
 const SOURCE_REF_PATTERN = new RegExp(SOURCE_REF_PATTERN_SOURCE);
 const TAKTPACK_ASSET_PATTERN =
   /^[A-Za-z0-9][A-Za-z0-9._-]*\.taktpack$/;
@@ -215,7 +215,12 @@ export function parseProjectTemplateSourceDescriptorJson(
   } else if (input instanceof Uint8Array) {
     assertDescriptorByteLimit(input.byteLength);
     try {
-      json = new TextDecoder('utf-8', { fatal: true }).decode(input);
+      json = new TextDecoder('utf-8', {
+        fatal: true,
+        // Preserve a BOM in decoded text so canonical equality rejects bytes
+        // that would hash differently from the sole UTF-8 representation.
+        ignoreBOM: true,
+      }).decode(input);
     } catch {
       invalidDescriptor(
         'sourceDescriptor',
@@ -238,7 +243,17 @@ export function parseProjectTemplateSourceDescriptorJson(
       'source descriptor must contain valid JSON',
     );
   }
-  return parseProjectTemplateSourceDescriptor(value);
+  const parsed = parseProjectTemplateSourceDescriptor(value);
+  // The fetched bytes are the reviewed and hashed artifact. Requiring exact
+  // equality with the sole serializer rejects whitespace, key-order, duplicate
+  // key, and trailing-data aliases before any digest can describe another form.
+  if (serializeProjectTemplateSourceDescriptor(parsed) !== json) {
+    invalidDescriptor(
+      'sourceDescriptor',
+      'source descriptor JSON must use the canonical serialized representation',
+    );
+  }
+  return parsed;
 }
 
 /**
@@ -401,8 +416,10 @@ function parseReleaseTag(value: unknown, field: string): string {
     'INVALID_SOURCE',
     MAX_SOURCE_REF_LENGTH,
   );
-  // A release tag is one literal URL segment. Restricting it beyond the shared
-  // Git ref rules prevents encoded or raw separators from changing URL meaning.
+  // Literal `+` retains SemVer build metadata in a URL path without the
+  // query-string space conversion. Resolvers consume the parsed fields and
+  // must pass argument arrays, never interpolate the tag into a shell command.
+  // Slash remains excluded so the tag is exactly one literal URL segment.
   if (!SOURCE_REF_PATTERN.test(tag) || !RELEASE_TAG_PATTERN.test(tag)) {
     invalidSource(
       field,

@@ -10,7 +10,7 @@ const GITHUB_ORIGIN = 'https://github.com';
 const OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 const SOURCE_REF_PATTERN = new RegExp(SOURCE_REF_PATTERN_SOURCE);
-const PORTABLE_REF_PATTERN = /^[A-Za-z0-9._/-]+$/;
+const PORTABLE_REF_PATTERN = /^[A-Za-z0-9._/+-]+$/;
 const TAKTPACK_ASSET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\.taktpack$/;
 const MAX_RELEASE_ASSET_NAME_LENGTH = 255;
 
@@ -42,9 +42,11 @@ export type ProjectTemplateGithubSourceSpec =
  *
  * This parser intentionally accepts only redirect-free, canonical identifiers.
  * Refs use the shared Git safety rules plus the portable ASCII subset
- * `[A-Za-z0-9._/-]`. A release tag must additionally be one unescaped URL path
- * segment: slash and percent escapes are intentionally rejected to prevent URL
- * parsers and download layers from disagreeing about tag/path boundaries.
+ * `[A-Za-z0-9._/+-]`. Literal `+` preserves SemVer build metadata: URL paths
+ * treat it as data, and downstream GitHub resolution must pass these structured
+ * fields as argument arrays without shell interpolation. A release tag must
+ * additionally be one unescaped URL path segment: slash and percent escapes are
+ * rejected to prevent layers from disagreeing about tag/path boundaries.
  * Network resolution, commit pinning, checksums, and downloads belong to the
  * resolver so parsing remains deterministic and safe to use during validation.
  */
@@ -195,7 +197,7 @@ function assertPortableRef(ref: string, allowSlash = true): void {
   ) {
     invalidSource(
       'GitHub ref must satisfy Git ref safety rules and use only '
-      + 'portable ASCII [A-Za-z0-9._/-]',
+      + 'portable ASCII [A-Za-z0-9._/+-]',
     );
   }
 }

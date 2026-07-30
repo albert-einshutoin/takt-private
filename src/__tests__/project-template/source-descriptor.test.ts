@@ -120,13 +120,32 @@ describe('project template source descriptor', () => {
 
   it('rejects a portable release tag that does not match pack.version', () => {
     const value = validDescriptor();
-    packOf(value)['releaseTag'] = 'v1.2.4';
-    expectDescriptorError(value, 'INVALID_SOURCE');
+    for (const releaseTag of ['v1.2.4', 'release+1']) {
+      packOf(value)['releaseTag'] = releaseTag;
+      expect(() => parseProjectTemplateSourceDescriptor(value)).toThrow(
+        expect.objectContaining({
+          code: 'INVALID_SOURCE',
+          message: expect.stringContaining('must equal pack.version'),
+        }),
+      );
+    }
   });
+
+  it.each(['1.2.3+build.1', 'v1.2.3+build.1'])(
+    'represents pack build metadata with releaseTag %s',
+    (releaseTag) => {
+      const value = validDescriptor();
+      packOf(value)['version'] = '1.2.3+build.1';
+      packOf(value)['releaseTag'] = releaseTag;
+      expect(parseProjectTemplateSourceDescriptor(value).pack).toMatchObject({
+        version: '1.2.3+build.1',
+        releaseTag,
+      });
+    },
+  );
 
   it.each([
     'release/v1',
-    'release+1',
     'リリース',
     'release\u202E1',
     'release%2Fv1',
@@ -184,6 +203,22 @@ describe('project template source descriptor', () => {
       .repertoireDependencies[0]!.source).toBe(
       `github:acme/alpha@${ref}`,
     );
+  });
+
+  it.each([
+    '2.0.0+build.1',
+    'v2.0.0+build.1',
+    'refs/tags/2.0.0+build.1',
+    'refs/tags/v2.0.0+build.1',
+  ])('represents dependency build metadata in tag %s', (ref) => {
+    const value = validDescriptor();
+    dependencyAt(value, 0)['version'] = '2.0.0+build.1';
+    dependencyAt(value, 0)['source'] = `github:acme/alpha@${ref}`;
+    expect(parseProjectTemplateSourceDescriptor(value)
+      .repertoireDependencies[0]).toMatchObject({
+      version: '2.0.0+build.1',
+      source: `github:acme/alpha@${ref}`,
+    });
   });
 
   it.each([
@@ -271,6 +306,35 @@ describe('project template source descriptor', () => {
     expect(parseProjectTemplateSourceDescriptorJson(
       new TextEncoder().encode(json),
     )).toEqual(validDescriptor());
+    expect(calculateProjectTemplateSourceDescriptorSha256(validDescriptor()))
+      .toBe(createHash('sha256').update(json, 'utf8').digest('hex'));
+  });
+
+  it.each([
+    ['minified whitespace', () => JSON.stringify(validDescriptor())],
+    ['key order', () => {
+      const value = validDescriptor();
+      return JSON.stringify({
+        pack: value['pack'],
+        schemaVersion: value['schemaVersion'],
+        repertoireDependencies: value['repertoireDependencies'],
+      }, null, 2);
+    }],
+    ['duplicate key', () => serializeProjectTemplateSourceDescriptor(
+      validDescriptor(),
+    ).replace(
+      '"schemaVersion": "1.0"',
+      '"schemaVersion": "1.0",\n  "schemaVersion": "1.0"',
+    )],
+    ['trailing newline', () => (
+      `${serializeProjectTemplateSourceDescriptor(validDescriptor())}\n`
+    )],
+  ])('rejects non-canonical raw JSON with %s', (_label, createJson) => {
+    expect(() => parseProjectTemplateSourceDescriptorJson(createJson()))
+      .toThrow(expect.objectContaining({
+        code: 'INVALID_SOURCE_DESCRIPTOR',
+        message: expect.stringContaining('canonical'),
+      }));
   });
 
   it('enforces 64 KiB before decoding or parsing raw descriptor input', () => {
@@ -300,6 +364,14 @@ describe('project template source descriptor', () => {
       .toThrow(expect.objectContaining({
         code: 'INVALID_SOURCE_DESCRIPTOR',
       }));
+    const canonical = new TextEncoder().encode(
+      serializeProjectTemplateSourceDescriptor(validDescriptor()),
+    );
+    expect(() => parseProjectTemplateSourceDescriptorJson(
+      Uint8Array.from([0xef, 0xbb, 0xbf, ...canonical]),
+    )).toThrow(expect.objectContaining({
+      code: 'INVALID_SOURCE_DESCRIPTOR',
+    }));
   });
 
   it('publishes a draft-07 schema with parser parity for structural rules', () => {
@@ -307,6 +379,7 @@ describe('project template source descriptor', () => {
       .compile(projectTemplateSourceDescriptorV1JsonSchema);
     const cases: unknown[] = [
       validDescriptor(),
+      descriptorWithBuildMetadata(),
       { ...validDescriptor(), unexpected: true },
       {
         ...validDescriptor(),
@@ -383,6 +456,16 @@ function createDependencies(count: number): Array<Record<string, unknown>> {
       source: `github:acme/${repo}@v2.0.0`,
     };
   });
+}
+
+function descriptorWithBuildMetadata(): Record<string, unknown> {
+  const value = validDescriptor();
+  packOf(value)['version'] = '1.2.3+build.1';
+  packOf(value)['releaseTag'] = 'v1.2.3+build.1';
+  dependencyAt(value, 0)['version'] = '2.0.0+build.1';
+  dependencyAt(value, 0)['source'] =
+    'github:acme/alpha@refs/tags/v2.0.0+build.1';
+  return value;
 }
 
 function validManifest(): Record<string, unknown> {
