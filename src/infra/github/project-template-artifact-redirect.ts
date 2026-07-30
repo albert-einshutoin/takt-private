@@ -11,6 +11,9 @@ import type { ClientRequest } from 'node:http';
 import { isIP } from 'node:net';
 import { Readable } from 'node:stream';
 import { types } from 'node:util';
+import {
+  isCanonicalGithubRepositoryCoordinates,
+} from '../../features/project-template/github-repository-coordinates.js';
 
 const MAX_LOCATION_LENGTH = 8_192;
 const MAX_DNS_ANSWERS = 64;
@@ -29,9 +32,6 @@ const REDIRECT_HOSTS = new Set([
 ]);
 const ASSET_API_PATH =
   /^\/repos\/([^/]+)\/([^/]+)\/releases\/assets\/([1-9][0-9]*)$/;
-const OWNER_PATTERN =
-  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-const REPOSITORY_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 
 export type ProjectTemplateArtifactRedirectErrorCode =
   | 'INVALID_ARGUMENT'
@@ -295,12 +295,7 @@ function parseCanonicalAssetApiUrl(value: unknown): URL {
   // Keep this transport boundary aligned with github-source-spec grammar so a
   // URL cannot bypass the portable repository-coordinate contract.
   if (
-    !OWNER_PATTERN.test(owner)
-    || owner.includes('--')
-    || !REPOSITORY_PATTERN.test(repo)
-    || repo === '.'
-    || repo === '..'
-    || repo.toLowerCase().endsWith('.git')
+    !isCanonicalGithubRepositoryCoordinates(owner, repo)
   ) {
     throw invalidArgument();
   }

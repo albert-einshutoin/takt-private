@@ -3,10 +3,12 @@ import type {
   GithubTemplateArchiveAssetInput,
   GithubTemplateArchiveAssetPort,
 } from '../../features/project-template/github-download-orchestrator.js';
+import {
+  isCanonicalGithubRepositoryCoordinates,
+} from '../../features/project-template/github-repository-coordinates.js';
 
-const GITHUB_OWNER_PATTERN =
-  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const NativePromise = Promise;
 const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype) as object,
   'byteLength',
@@ -32,20 +34,29 @@ export class ProjectTemplateArtifactDownloadError extends Error {
 }
 
 export interface ProjectTemplateArtifactDownloadContext {
-  /**
-   * Absolute deadline in the monotonic time domain supplied by `now`.
-   * Binding it at factory creation prevents retries from resetting the budget.
-   */
+  /** Absolute deadline in the monotonic time domain supplied by `now`. */
   readonly deadlineMs: number;
 }
 
+declare const projectTemplateArtifactDownloadBridgeBrand: unique symbol;
+
+/** Opaque capability created only by the factory below. */
 export interface ProjectTemplateArtifactDownloadBridge {
-  next(): Promise<IteratorResult<Uint8Array>>;
-  /**
-   * Must revoke synchronously and return exactly `undefined`.
-   * Implementations own containment of any asynchronous cleanup internally.
-   */
-  dispose(): undefined;
+  readonly [projectTemplateArtifactDownloadBridgeBrand]: true;
+}
+
+export interface ProjectTemplateArtifactDownloadSettlement {
+  chunk(value: unknown): undefined;
+  done(): undefined;
+  fail(): undefined;
+}
+
+export interface ProjectTemplateArtifactDownloadBridgeHandlers<State> {
+  readonly pull: (
+    state: State,
+    settlement: ProjectTemplateArtifactDownloadSettlement,
+  ) => undefined;
+  readonly dispose: (state: State) => undefined;
 }
 
 export interface ProjectTemplateArtifactDownloadDependencies {
@@ -82,18 +93,56 @@ interface PendingNext {
   readonly reject: (error: ProjectTemplateArtifactDownloadError) => void;
 }
 
+type SettlementEvent =
+  | { readonly kind: 'chunk'; readonly value: Uint8Array }
+  | { readonly kind: 'done' }
+  | { readonly kind: 'fail' };
+
+interface DownloadCallbackToken {
+  active: boolean;
+  dispatch?: () => void;
+}
+
+interface DownloadTimerRegistration {
+  readonly token: DownloadCallbackToken;
+  readonly listener: () => void;
+  readonly finalArm: boolean;
+}
+
+interface DownloadSettlementToken {
+  active: boolean;
+  pulling: boolean;
+  queued: SettlementEvent | undefined;
+  dispatch?: (event: SettlementEvent) => void;
+}
+
+interface DownloadBridgeAuthority {
+  state: unknown;
+  receiver: ProjectTemplateArtifactDownloadBridgeHandlers<unknown> | undefined;
+  pull:
+    | ProjectTemplateArtifactDownloadBridgeHandlers<unknown>['pull']
+    | undefined;
+  dispose:
+    | ProjectTemplateArtifactDownloadBridgeHandlers<unknown>['dispose']
+    | undefined;
+  disposed: boolean;
+}
+
 interface DownloadIteratorAuthority {
   phase: 'idle' | 'active' | 'closed';
   snapshot: Readonly<GithubTemplateArchiveAssetInput> | undefined;
   readonly port: DownloadPortAuthority;
   bridge: ProjectTemplateArtifactDownloadBridge | undefined;
-  bridgeReceiver: ProjectTemplateArtifactDownloadBridge | undefined;
-  bridgeNext: ProjectTemplateArtifactDownloadBridge['next'] | undefined;
-  bridgeDispose: ProjectTemplateArtifactDownloadBridge['dispose'] | undefined;
   pending: PendingNext | undefined;
   timer: unknown;
   hasTimer: boolean;
   abortListener: (() => void) | undefined;
+  timerRegistration: DownloadTimerRegistration | undefined;
+  callbackToken: DownloadCallbackToken;
+  settlementToken: DownloadSettlementToken | undefined;
+  armingTimer: boolean;
+  timerFiredDuringArm: boolean;
+  lastNow: number;
 }
 
 const portAuthorities = new WeakMap<
@@ -108,11 +157,41 @@ const iteratorAuthorities = new WeakMap<
 AsyncIterator<Uint8Array>,
 DownloadIteratorAuthority
 >();
+const bridgeAuthorities = new WeakMap<
+ProjectTemplateArtifactDownloadBridge,
+DownloadBridgeAuthority
+>();
+const settlementTokens = new WeakMap<
+ProjectTemplateArtifactDownloadSettlement,
+DownloadSettlementToken
+>();
 
-const DONE_RESULT = Object.freeze<IteratorResult<Uint8Array>>({
-  value: undefined,
-  done: true,
-});
+function exactResult<T>(
+  value: T,
+  done: boolean,
+): IteratorResult<T> {
+  const result = Object.create(null) as Record<string, unknown>;
+  Object.defineProperties(result, {
+    value: {
+      configurable: false,
+      enumerable: true,
+      value,
+      writable: false,
+    },
+    done: {
+      configurable: false,
+      enumerable: true,
+      value: done,
+      writable: false,
+    },
+  });
+  return Object.freeze(result) as unknown as IteratorResult<T>;
+}
+
+const DONE_RESULT = exactResult<Uint8Array | undefined>(
+  undefined,
+  true,
+) as IteratorResult<Uint8Array>;
 
 function downloadError(
   code: ProjectTemplateArtifactDownloadErrorCode,
@@ -144,9 +223,7 @@ function exactDataRecord(
   const ownKeys = Reflect.ownKeys(value);
   if (
     ownKeys.length !== keys.length
-    || ownKeys.some(
-      (key) => typeof key !== 'string' || !keys.includes(key),
-    )
+    || ownKeys.some((key) => typeof key !== 'string' || !keys.includes(key))
   ) {
     throw invalidArgument();
   }
@@ -160,6 +237,47 @@ function exactDataRecord(
     snapshot[key] = descriptor.value;
   }
   return snapshot;
+}
+
+export function createProjectTemplateArtifactDownloadBridge<State>(
+  state: State,
+  handlersValue: ProjectTemplateArtifactDownloadBridgeHandlers<State>,
+): ProjectTemplateArtifactDownloadBridge {
+  const handlers = exactDataRecord(handlersValue, ['pull', 'dispose']);
+  if (
+    typeof handlers['pull'] !== 'function'
+    || typeof handlers['dispose'] !== 'function'
+    || types.isProxy(handlers['pull'])
+    || types.isProxy(handlers['dispose'])
+  ) {
+    throw invalidArgument();
+  }
+  const bridge = Object.freeze(
+    {},
+  ) as unknown as ProjectTemplateArtifactDownloadBridge;
+  bridgeAuthorities.set(bridge, {
+    state,
+    receiver:
+      handlersValue as ProjectTemplateArtifactDownloadBridgeHandlers<unknown>,
+    pull: handlers['pull'] as
+      ProjectTemplateArtifactDownloadBridgeHandlers<unknown>['pull'],
+    dispose: handlers['dispose'] as
+      ProjectTemplateArtifactDownloadBridgeHandlers<unknown>['dispose'],
+    disposed: false,
+  });
+  return bridge;
+}
+
+function resolvedResult(
+  result: IteratorResult<Uint8Array>,
+): Promise<IteratorResult<Uint8Array>> {
+  return new NativePromise((resolve) => resolve(result));
+}
+
+function rejected(
+  error: ProjectTemplateArtifactDownloadError,
+): Promise<IteratorResult<Uint8Array>> {
+  return new NativePromise((_resolve, reject) => reject(error));
 }
 
 function snapshotSignal(value: unknown): AbortSignal | undefined {
@@ -195,10 +313,7 @@ function snapshotInput(
   const assetId = candidate['assetId'];
   const maxBytes = candidate['maxBytes'];
   if (
-    typeof owner !== 'string'
-    || !GITHUB_OWNER_PATTERN.test(owner)
-    || typeof repo !== 'string'
-    || !GITHUB_REPOSITORY_PATTERN.test(repo)
+    !isCanonicalGithubRepositoryCoordinates(owner, repo)
     || typeof releaseId !== 'number'
     || !Number.isSafeInteger(releaseId)
     || releaseId <= 0
@@ -213,8 +328,8 @@ function snapshotInput(
   }
   const signal = snapshotSignal(candidate['signal']);
   return Object.freeze({
-    owner,
-    repo,
+    owner: owner as string,
+    repo: repo as string,
     releaseId,
     assetId,
     maxBytes,
@@ -273,47 +388,70 @@ function signalAborted(signal: AbortSignal): boolean {
   return Reflect.apply(descriptor.get, signal, []) as boolean;
 }
 
-function containReturnedPromiseRejection(value: unknown): void {
-  if (
-    typeof value !== 'object'
-    || value === null
-    || types.isProxy(value)
-    || Reflect.ownKeys(value).length !== 0
-  ) {
-    return;
-  }
-  try {
-    // The intrinsic rejects ordinary thenables before property lookup, while
-    // safely attaching to native Promise subclasses and cross-realm Promises.
-    // A proxy or own-property-modified Promise cannot be assimilated without
-    // executing caller code; bridge implementations must contain those before
-    // returning them across this internal seam.
-    Promise.prototype.then.call(value, undefined, () => undefined);
-  } catch {
-    // Non-Promise objects and hostile species are outside the bridge contract.
-  }
-}
-
-function disposeBridge(authority: DownloadIteratorAuthority): void {
-  const receiver = authority.bridgeReceiver;
-  const dispose = authority.bridgeDispose;
-  authority.bridge = undefined;
-  authority.bridgeReceiver = undefined;
-  authority.bridgeNext = undefined;
-  authority.bridgeDispose = undefined;
+function disposeRegisteredBridge(
+  bridge: ProjectTemplateArtifactDownloadBridge,
+): void {
+  const bridgeAuthority = bridgeAuthorities.get(bridge);
+  if (bridgeAuthority === undefined || bridgeAuthority.disposed) return;
+  bridgeAuthority.disposed = true;
+  const state = bridgeAuthority.state;
+  const receiver = bridgeAuthority.receiver;
+  const dispose = bridgeAuthority.dispose;
+  bridgeAuthority.state = undefined;
+  bridgeAuthority.receiver = undefined;
+  bridgeAuthority.pull = undefined;
+  bridgeAuthority.dispose = undefined;
   if (receiver === undefined || dispose === undefined) return;
   try {
-    // Teardown authority is revoked before this synchronous bridge contract.
-    const result = Reflect.apply(dispose, receiver, []);
-    // This is resilience for a contract-violating internal bridge, not
-    // permission to return asynchronous cleanup from `dispose`.
-    containReturnedPromiseRejection(result);
+    Reflect.apply(
+      dispose,
+      receiver,
+      [state],
+    );
   } catch {
     // Cleanup causes are private bridge details.
   }
 }
 
+function disposeBridge(authority: DownloadIteratorAuthority): void {
+  const bridge = authority.bridge;
+  authority.bridge = undefined;
+  if (bridge !== undefined) disposeRegisteredBridge(bridge);
+}
+
+function snapshotBridge(
+  value: ProjectTemplateArtifactDownloadBridge,
+  authority: DownloadIteratorAuthority,
+): void {
+  const bridgeAuthority = (
+    typeof value === 'object'
+    && value !== null
+    && !types.isProxy(value)
+  )
+    ? bridgeAuthorities.get(value)
+    : undefined;
+  if (bridgeAuthority === undefined || bridgeAuthority.disposed) {
+    throw invalidArgument();
+  }
+  authority.bridge = value;
+}
+
+function revokeSettlement(authority: DownloadIteratorAuthority): void {
+  const token = authority.settlementToken;
+  authority.settlementToken = undefined;
+  if (token === undefined) return;
+  token.active = false;
+  token.dispatch = undefined;
+  token.queued = undefined;
+}
+
 function clearDeadline(authority: DownloadIteratorAuthority): void {
+  const registration = authority.timerRegistration;
+  authority.timerRegistration = undefined;
+  if (registration !== undefined) {
+    registration.token.active = false;
+    registration.token.dispatch = undefined;
+  }
   if (!authority.hasTimer) return;
   const timer = authority.timer;
   authority.timer = undefined;
@@ -325,7 +463,7 @@ function clearDeadline(authority: DownloadIteratorAuthority): void {
       [timer],
     );
   } catch {
-    // Token revocation remains authoritative when timer cleanup is hostile.
+    // The callback token was revoked before physical cleanup.
   }
 }
 
@@ -335,13 +473,9 @@ function removeAbortListener(authority: DownloadIteratorAuthority): void {
   authority.abortListener = undefined;
   if (listener === undefined || signal === undefined) return;
   try {
-    EventTarget.prototype.removeEventListener.call(
-      signal,
-      'abort',
-      listener,
-    );
+    EventTarget.prototype.removeEventListener.call(signal, 'abort', listener);
   } catch {
-    // The listener only captures a cleared authority after revocation.
+    // The callback token was revoked before physical cleanup.
   }
 }
 
@@ -358,6 +492,11 @@ function closeIterator(
   authority.phase = 'closed';
   const pending = authority.pending;
   authority.pending = undefined;
+
+  // Logical authority is always revoked before caller-controlled cleanup hooks.
+  authority.callbackToken.active = false;
+  authority.callbackToken.dispatch = undefined;
+  revokeSettlement(authority);
   removeAbortListener(authority);
   clearDeadline(authority);
   disposeBridge(authority);
@@ -367,123 +506,327 @@ function closeIterator(
   else pending.reject(outcome.error);
 }
 
-function snapshotBridge(
-  value: ProjectTemplateArtifactDownloadBridge,
-  authority: DownloadIteratorAuthority,
-): void {
-  if (
-    typeof value !== 'object'
-    || value === null
-    || Array.isArray(value)
-    || types.isProxy(value)
-    || Object.getPrototypeOf(value) !== Object.prototype
-  ) {
-    throw invalidArgument();
-  }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const disposeDescriptor = descriptors['dispose'];
-  // Retain a safely snapshotted cleanup capability before validating the
-  // remaining bridge shape. A malformed bridge returned by `start` may
-  // already own resources and must still be disposed fail-closed.
-  if (
-    disposeDescriptor !== undefined
-    && 'value' in disposeDescriptor
-    && typeof disposeDescriptor.value === 'function'
-  ) {
-    authority.bridgeReceiver = value;
-    authority.bridgeDispose = disposeDescriptor.value as
-      ProjectTemplateArtifactDownloadBridge['dispose'];
-  }
-  const keys = Reflect.ownKeys(value);
-  const nextDescriptor = descriptors['next'];
-  if (
-    keys.length !== 2
-    || !keys.includes('next')
-    || !keys.includes('dispose')
-    || nextDescriptor === undefined
-    || !('value' in nextDescriptor)
-    || typeof nextDescriptor.value !== 'function'
-    || authority.bridgeDispose === undefined
-  ) {
-    throw invalidArgument();
-  }
-  authority.bridge = value;
-  authority.bridgeNext =
-    nextDescriptor.value as ProjectTemplateArtifactDownloadBridge['next'];
-}
-
-function snapshotBridgeResult(value: unknown): IteratorResult<Uint8Array> {
-  let candidate: Record<string, unknown>;
-  try {
-    candidate = exactDataRecord(value, ['value', 'done']);
-  } catch {
-    throw downloadError(
+function bridgeFailure(authority: DownloadIteratorAuthority): void {
+  closeIterator(authority, {
+    kind: 'error',
+    error: downloadError(
       'BRIDGE_FAILURE',
-      'GitHub template artifact bridge returned an invalid result',
-    );
-  }
-  if (candidate['done'] === true && candidate['value'] === undefined) {
-    return DONE_RESULT;
-  }
-  const chunk = candidate['value'];
-  if (
-    candidate['done'] !== false
-    || typeof chunk !== 'object'
-    || chunk === null
-    || types.isProxy(chunk)
-    || !(chunk instanceof Uint8Array)
-    || Object.getPrototypeOf(chunk) !== Uint8Array.prototype
-    || TYPED_ARRAY_BYTE_LENGTH_GETTER === undefined
-  ) {
-    throw downloadError(
-      'BRIDGE_FAILURE',
-      'GitHub template artifact bridge returned an invalid result',
-    );
-  }
-  let byteLength: number;
-  try {
-    byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, chunk, []);
-  } catch {
-    throw downloadError(
-      'BRIDGE_FAILURE',
-      'GitHub template artifact bridge returned an invalid result',
-    );
-  }
-  if (byteLength === 0) {
-    throw downloadError(
-      'BRIDGE_FAILURE',
-      'GitHub template artifact bridge returned an invalid result',
-    );
-  }
-  return Object.freeze({
-    value: new Uint8Array(chunk),
-    done: false,
+      'GitHub template artifact bridge failed',
+    ),
   });
 }
 
-function rejected(
-  error: ProjectTemplateArtifactDownloadError,
-): Promise<IteratorResult<Uint8Array>> {
-  return Promise.reject(error);
+function readRemainingDeadline(
+  authority: DownloadIteratorAuthority,
+): number | undefined {
+  if (authority.phase === 'closed') return undefined;
+  let now: unknown;
+  try {
+    now = Reflect.apply(
+      authority.port.dependencies.now,
+      authority.port.dependencies.receiver,
+      [],
+    );
+  } catch {
+    bridgeFailure(authority);
+    return undefined;
+  }
+  if (
+    typeof now !== 'number'
+    || !Number.isFinite(now)
+    || now < 0
+    || now < authority.lastNow
+  ) {
+    bridgeFailure(authority);
+    return undefined;
+  }
+  authority.lastNow = now;
+  const remaining = authority.port.deadlineMs - now;
+  if (remaining <= 0) {
+    closeIterator(authority, {
+      kind: 'error',
+      error: downloadError('TIMEOUT', 'Artifact download timed out'),
+    });
+    return undefined;
+  }
+  return remaining;
+}
+
+function armDeadline(
+  authority: DownloadIteratorAuthority,
+  remaining: number,
+): boolean {
+  if (authority.phase === 'closed') return false;
+  const previous = authority.timerRegistration;
+  if (previous !== undefined) {
+    previous.token.active = false;
+    previous.token.dispatch = undefined;
+  }
+  const token: DownloadCallbackToken = { active: true };
+  const listener = createPhysicalCallback(token);
+  const registration: DownloadTimerRegistration = {
+    token,
+    listener,
+    finalArm: remaining <= MAX_TIMER_DELAY_MS,
+  };
+  token.dispatch = (): void => {
+    if (
+      token.active
+      && authority.timerRegistration === registration
+      && authority.phase !== 'closed'
+    ) {
+      handleTimer(authority, registration);
+    }
+  };
+  authority.timerRegistration = registration;
+  authority.armingTimer = true;
+  authority.timerFiredDuringArm = false;
+  let timer: unknown;
+  try {
+    timer = Reflect.apply(
+      authority.port.dependencies.setTimer,
+      authority.port.dependencies.receiver,
+      [listener, Math.min(remaining, MAX_TIMER_DELAY_MS)],
+    );
+  } catch {
+    authority.armingTimer = false;
+    token.active = false;
+    token.dispatch = undefined;
+    if (authority.timerRegistration === registration) {
+      authority.timerRegistration = undefined;
+    }
+    bridgeFailure(authority);
+    return false;
+  }
+  authority.armingTimer = false;
+  if (authority.timerFiredDuringArm || isClosed(authority)) {
+    token.active = false;
+    token.dispatch = undefined;
+    if (authority.timerRegistration === registration) {
+      authority.timerRegistration = undefined;
+    }
+    try {
+      Reflect.apply(
+        authority.port.dependencies.clearTimer,
+        authority.port.dependencies.receiver,
+        [timer],
+      );
+    } catch {
+      // The callback token is already revoked or the sync fire is contained.
+    }
+    if (!isClosed(authority)) {
+      if (registration.finalArm) {
+        closeIterator(authority, {
+          kind: 'error',
+          error: downloadError('TIMEOUT', 'Artifact download timed out'),
+        });
+      } else {
+        bridgeFailure(authority);
+      }
+    }
+    return false;
+  }
+  authority.timer = timer;
+  authority.hasTimer = true;
+  return true;
+}
+
+function handleTimer(
+  authority: DownloadIteratorAuthority,
+  registration: DownloadTimerRegistration,
+): void {
+  if (authority.timerRegistration !== registration) return;
+  if (authority.armingTimer) {
+    authority.timerFiredDuringArm = true;
+    return;
+  }
+  registration.token.active = false;
+  registration.token.dispatch = undefined;
+  authority.timerRegistration = undefined;
+  authority.timer = undefined;
+  authority.hasTimer = false;
+  if (registration.finalArm) {
+    closeIterator(authority, {
+      kind: 'error',
+      error: downloadError('TIMEOUT', 'Artifact download timed out'),
+    });
+    return;
+  }
+  const remaining = readRemainingDeadline(authority);
+  if (remaining !== undefined) armDeadline(authority, remaining);
+}
+
+function createPhysicalCallback(
+  token: DownloadCallbackToken,
+): () => void {
+  // Physical hooks retain only a revocable token, never iterator authority.
+  return (): void => {
+    if (token.active) token.dispatch?.();
+  };
+}
+
+function isClosed(authority: DownloadIteratorAuthority): boolean {
+  return authority.phase === 'closed';
+}
+
+function snapshotChunk(value: unknown): Uint8Array {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || types.isProxy(value)
+    || !(value instanceof Uint8Array)
+    || Object.getPrototypeOf(value) !== Uint8Array.prototype
+    || TYPED_ARRAY_BYTE_LENGTH_GETTER === undefined
+  ) {
+    throw new Error();
+  }
+  let byteLength: number;
+  try {
+    byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []);
+  } catch {
+    throw new Error();
+  }
+  if (byteLength === 0) throw new Error();
+  return new Uint8Array(value);
+}
+
+function processSettlement(
+  authority: DownloadIteratorAuthority,
+  pending: PendingNext,
+  event: SettlementEvent,
+): void {
+  if (authority.phase === 'closed' || authority.pending !== pending) return;
+  authority.settlementToken = undefined;
+  if (event.kind === 'done') {
+    closeIterator(authority, { kind: 'done' });
+    return;
+  }
+  if (event.kind === 'fail') {
+    bridgeFailure(authority);
+    return;
+  }
+  authority.pending = undefined;
+  pending.resolve(exactResult(event.value, false));
+}
+
+function createSettlement(
+  authority: DownloadIteratorAuthority,
+  pending: PendingNext,
+): ProjectTemplateArtifactDownloadSettlement {
+  const token: DownloadSettlementToken = {
+    active: true,
+    pulling: true,
+    queued: undefined,
+  };
+  token.dispatch = (event): void => {
+    if (!token.active) return;
+    token.active = false;
+    token.dispatch = undefined;
+    if (token.pulling) {
+      token.queued = event;
+      return;
+    }
+    processSettlement(authority, pending, event);
+  };
+  const settlement = Object.freeze<ProjectTemplateArtifactDownloadSettlement>({
+    chunk(this: ProjectTemplateArtifactDownloadSettlement, value: unknown) {
+      const token = settlementTokens.get(this);
+      if (token === undefined || !token.active) return undefined;
+      try {
+        token.dispatch?.({ kind: 'chunk', value: snapshotChunk(value) });
+      } catch {
+        token.dispatch?.({ kind: 'fail' });
+      }
+      return undefined;
+    },
+    done(this: ProjectTemplateArtifactDownloadSettlement) {
+      settlementTokens.get(this)?.dispatch?.({ kind: 'done' });
+      return undefined;
+    },
+    fail(this: ProjectTemplateArtifactDownloadSettlement) {
+      settlementTokens.get(this)?.dispatch?.({ kind: 'fail' });
+      return undefined;
+    },
+  });
+  settlementTokens.set(settlement, token);
+  authority.settlementToken = token;
+  return settlement;
+}
+
+function pullBridge(
+  authority: DownloadIteratorAuthority,
+  pending: PendingNext,
+): void {
+  const bridge = authority.bridge;
+  const bridgeAuthority = bridge === undefined
+    ? undefined
+    : bridgeAuthorities.get(bridge);
+  if (
+    bridgeAuthority === undefined
+    || bridgeAuthority.disposed
+    || bridgeAuthority.receiver === undefined
+    || bridgeAuthority.pull === undefined
+  ) {
+    bridgeFailure(authority);
+    return;
+  }
+  const settlement = createSettlement(authority, pending);
+  const token = authority.settlementToken;
+  if (token === undefined) {
+    bridgeFailure(authority);
+    return;
+  }
+  let returned: unknown;
+  try {
+    returned = Reflect.apply(
+      bridgeAuthority.pull,
+      bridgeAuthority.receiver,
+      [bridgeAuthority.state, settlement],
+    );
+  } catch {
+    token.pulling = false;
+    bridgeFailure(authority);
+    return;
+  }
+  token.pulling = false;
+  if (returned !== undefined) {
+    bridgeFailure(authority);
+    return;
+  }
+  const queued = token.queued;
+  token.queued = undefined;
+  if (queued !== undefined) processSettlement(authority, pending, queued);
 }
 
 function createIterator(
   iterableAuthority: DownloadIterableAuthority,
 ): AsyncIterator<Uint8Array> & AsyncIterable<Uint8Array> {
+  const callbackToken: DownloadCallbackToken = { active: true };
   const authority: DownloadIteratorAuthority = {
     phase: 'idle',
     snapshot: iterableAuthority.snapshot,
     port: iterableAuthority.port,
     bridge: undefined,
-    bridgeReceiver: undefined,
-    bridgeNext: undefined,
-    bridgeDispose: undefined,
     pending: undefined,
     timer: undefined,
     hasTimer: false,
     abortListener: undefined,
+    timerRegistration: undefined,
+    callbackToken,
+    settlementToken: undefined,
+    armingTimer: false,
+    timerFiredDuringArm: false,
+    lastNow: -1,
+  };
+  callbackToken.dispatch = (): void => {
+    if (!callbackToken.active || authority.phase === 'closed') return;
+    closeIterator(authority, {
+      kind: 'error',
+      error: downloadError('ABORTED', 'Artifact download was aborted'),
+    });
   };
   iterableAuthority.snapshot = undefined;
+
   const iterator = Object.freeze<
   AsyncIterator<Uint8Array> & AsyncIterable<Uint8Array>
   >({
@@ -492,7 +835,7 @@ function createIterator(
       if (current === undefined || types.isProxy(this)) {
         return rejected(invalidArgument());
       }
-      if (current.phase === 'closed') return Promise.resolve(DONE_RESULT);
+      if (current.phase === 'closed') return resolvedResult(DONE_RESULT);
       if (current.pending !== undefined) {
         const error = downloadError(
           'CONCURRENT_NEXT',
@@ -505,7 +848,7 @@ function createIterator(
       let rejectPending!: (
         error: ProjectTemplateArtifactDownloadError,
       ) => void;
-      const pendingPromise = new Promise<IteratorResult<Uint8Array>>(
+      const pendingPromise = new NativePromise<IteratorResult<Uint8Array>>(
         (resolve, reject) => {
           resolvePending = resolve;
           rejectPending = reject;
@@ -524,6 +867,7 @@ function createIterator(
         });
         return pendingPromise;
       }
+
       try {
         if (snapshot.signal !== undefined && signalAborted(snapshot.signal)) {
           closeIterator(current, {
@@ -532,36 +876,15 @@ function createIterator(
           });
           return pendingPromise;
         }
-        const now = Reflect.apply(
-          current.port.dependencies.now,
-          current.port.dependencies.receiver,
-          [],
-        );
-        if (typeof now !== 'number' || !Number.isFinite(now) || now < 0) {
-          throw new Error();
-        }
-        if (current.pending !== pending) {
-          return pendingPromise;
-        }
-        const remainingMs = current.port.deadlineMs - now;
-        if (remainingMs <= 0) {
-          closeIterator(current, {
-            kind: 'error',
-            error: downloadError('TIMEOUT', 'Artifact download timed out'),
-          });
+        let remaining = readRemainingDeadline(current);
+        if (remaining === undefined || current.pending !== pending) {
           return pendingPromise;
         }
         if (current.phase === 'idle') {
           if (snapshot.signal !== undefined) {
-            const abortListener = (): void => {
-              closeIterator(current, {
-                kind: 'error',
-                error: downloadError(
-                  'ABORTED',
-                  'Artifact download was aborted',
-                ),
-              });
-            };
+            const abortListener = createPhysicalCallback(
+              current.callbackToken,
+            );
             current.abortListener = abortListener;
             EventTarget.prototype.addEventListener.call(
               snapshot.signal,
@@ -570,47 +893,18 @@ function createIterator(
               { once: true },
             );
             if (signalAborted(snapshot.signal)) {
-              abortListener();
+              current.callbackToken.dispatch?.();
               return pendingPromise;
             }
-            if (current.pending !== pending) {
-              try {
-                EventTarget.prototype.removeEventListener.call(
-                  snapshot.signal,
-                  'abort',
-                  abortListener,
-                );
-              } catch {
-                // The listener only captures the already revoked authority.
-              }
-              return pendingPromise;
-            }
+            if (current.pending !== pending) return pendingPromise;
           }
-          const timeout = (): void => {
-            closeIterator(current, {
-              kind: 'error',
-              error: downloadError('TIMEOUT', 'Artifact download timed out'),
-            });
-          };
-          const timer = Reflect.apply(
-            current.port.dependencies.setTimer,
-            current.port.dependencies.receiver,
-            [timeout, remainingMs],
-          );
-          if (current.pending !== pending) {
-            try {
-              Reflect.apply(
-                current.port.dependencies.clearTimer,
-                current.port.dependencies.receiver,
-                [timer],
-              );
-            } catch {
-              // The token was revoked before the timer handle was returned.
-            }
+          if (!armDeadline(current, remaining)) return pendingPromise;
+
+          // Listener/timer installation are external hooks and can consume time.
+          remaining = readRemainingDeadline(current);
+          if (remaining === undefined || current.pending !== pending) {
             return pendingPromise;
           }
-          current.timer = timer;
-          current.hasTimer = true;
           const bridge = Reflect.apply(
             current.port.dependencies.start,
             current.port.dependencies.receiver,
@@ -621,83 +915,18 @@ function createIterator(
             disposeBridge(current);
             return pendingPromise;
           }
+
+          // Start is also external; an expired bridge is disposed before pull.
+          remaining = readRemainingDeadline(current);
+          if (remaining === undefined || current.pending !== pending) {
+            disposeBridge(current);
+            return pendingPromise;
+          }
           current.phase = 'active';
         }
-        const receiver = current.bridgeReceiver;
-        const bridgeNext = current.bridgeNext;
-        if (receiver === undefined || bridgeNext === undefined) {
-          throw new Error();
-        }
-        let bridgePending: Promise<IteratorResult<Uint8Array>>;
-        try {
-          bridgePending = Reflect.apply(bridgeNext, receiver, []);
-        } catch {
-          throw new Error();
-        }
-        if (
-          typeof bridgePending !== 'object'
-          || bridgePending === null
-          || types.isProxy(bridgePending)
-          || Object.getPrototypeOf(bridgePending) !== Promise.prototype
-          || Reflect.ownKeys(bridgePending).length !== 0
-        ) {
-          containReturnedPromiseRejection(bridgePending);
-          throw new Error();
-        }
-        // Call the intrinsic directly after exact native-Promise validation;
-        // no caller-controlled thenable lookup crosses this boundary.
-        Promise.prototype.then.call(
-          bridgePending,
-          (value) => {
-            if (
-              current.phase === 'closed'
-              || current.pending !== pending
-            ) {
-              return;
-            }
-            let result: IteratorResult<Uint8Array>;
-            try {
-              result = snapshotBridgeResult(value);
-            } catch {
-              closeIterator(current, {
-                kind: 'error',
-                error: downloadError(
-                  'BRIDGE_FAILURE',
-                  'GitHub template artifact bridge failed',
-                ),
-              });
-              return;
-            }
-            if (result.done === true) {
-              closeIterator(current, { kind: 'done' });
-              return;
-            }
-            current.pending = undefined;
-            pending.resolve(result);
-          },
-          () => {
-            if (
-              current.phase !== 'closed'
-              && current.pending === pending
-            ) {
-              closeIterator(current, {
-                kind: 'error',
-                error: downloadError(
-                  'BRIDGE_FAILURE',
-                  'GitHub template artifact bridge failed',
-                ),
-              });
-            }
-          },
-        );
+        pullBridge(current, pending);
       } catch {
-        closeIterator(current, {
-          kind: 'error',
-          error: downloadError(
-            'BRIDGE_FAILURE',
-            'GitHub template artifact bridge failed',
-          ),
-        });
+        bridgeFailure(current);
       }
       return pendingPromise;
     },
@@ -709,7 +938,7 @@ function createIterator(
         return rejected(invalidArgument());
       }
       closeIterator(current, { kind: 'done' });
-      return Promise.resolve(DONE_RESULT);
+      return resolvedResult(DONE_RESULT);
     },
     throw(
       this: AsyncIterator<Uint8Array>,
@@ -740,8 +969,7 @@ function createIterator(
  * Creates the internal cold archive port skeleton.
  *
  * `openReleaseAsset` only validates and snapshots. Authentication, HTTP, DNS,
- * timers, signal listeners, and the bridge all remain untouched until the
- * consumer proves demand with its first `next()`.
+ * timers, signal listeners, and the bridge all remain untouched until demand.
  */
 export function createProjectTemplateArtifactDownloadPort(
   context: ProjectTemplateArtifactDownloadContext,

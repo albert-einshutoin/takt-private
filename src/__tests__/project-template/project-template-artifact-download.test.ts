@@ -1,11 +1,11 @@
 import { inspect, types } from 'node:util';
-import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   GithubTemplateArchiveAssetInput,
   GithubTemplateArchiveAssetPort,
 } from '../../features/project-template/github-download-orchestrator.js';
 import {
+  createProjectTemplateArtifactDownloadBridge,
   createProjectTemplateArtifactDownloadPort,
   type ProjectTemplateArtifactDownloadBridge,
   type ProjectTemplateArtifactDownloadDependencies,
@@ -20,15 +20,80 @@ const VALID_INPUT = Object.freeze({
   maxBytes: 1024,
 } satisfies GithubTemplateArchiveAssetInput);
 
+type TestBridgeNext = () => Promise<IteratorResult<Uint8Array>>;
+
+interface TestBridgeControl {
+  readonly next: TestBridgeNext;
+  readonly dispose: ReturnType<typeof vi.fn>;
+}
+
+const testBridgeControls = new WeakMap<
+ProjectTemplateArtifactDownloadBridge,
+TestBridgeControl
+>();
+
 function makeBridge(
-  next: ProjectTemplateArtifactDownloadBridge['next'] = vi.fn(
+  next: TestBridgeNext = vi.fn(
     () => Promise.resolve({ value: undefined, done: true }),
   ),
 ): ProjectTemplateArtifactDownloadBridge {
-  return Object.freeze({
+  const dispose = vi.fn(() => undefined);
+  const state = Object.freeze({ next });
+  const bridge = createProjectTemplateArtifactDownloadBridge(
+    state,
+    Object.freeze({
+      pull(
+        owned: typeof state,
+        settlement: {
+          chunk(value: unknown): undefined;
+          done(): undefined;
+          fail(): undefined;
+        },
+      ): undefined {
+        let pending: Promise<IteratorResult<Uint8Array>>;
+        try {
+          pending = owned.next();
+        } catch {
+          settlement.fail();
+          return undefined;
+        }
+        Promise.prototype.then.call(
+          pending,
+          (result) => {
+            try {
+              if (result.done === true) settlement.done();
+              else settlement.chunk(result.value);
+            } catch {
+              settlement.fail();
+            }
+          },
+          () => settlement.fail(),
+        );
+        return undefined;
+      },
+      dispose(): undefined {
+        dispose();
+        return undefined;
+      },
+    }),
+  );
+  testBridgeControls.set(bridge, Object.freeze({
     next,
-    dispose: vi.fn(() => undefined),
-  });
+    dispose,
+  }));
+  return bridge;
+}
+
+function bridgeNext(
+  bridge: ProjectTemplateArtifactDownloadBridge,
+): TestBridgeNext {
+  return testBridgeControls.get(bridge)!.next;
+}
+
+function bridgeDispose(
+  bridge: ProjectTemplateArtifactDownloadBridge,
+): ReturnType<typeof vi.fn> {
+  return testBridgeControls.get(bridge)!.dispose;
 }
 
 function makeDependencies(
@@ -86,7 +151,7 @@ describe('project-template artifact download D1 cold iterator', () => {
     expect(dependencies.now).not.toHaveBeenCalled();
     expect(dependencies.setTimer).not.toHaveBeenCalled();
     expect(dependencies.start).not.toHaveBeenCalled();
-    expect(bridge.next).not.toHaveBeenCalled();
+    expect(bridgeNext(bridge)).not.toHaveBeenCalled();
     expect(aborted).not.toHaveBeenCalled();
     expect(addEventListener).not.toHaveBeenCalled();
     expect(inspect(iterable)).not.toContain('before-snapshot');
@@ -97,7 +162,13 @@ describe('project-template artifact download D1 cold iterator', () => {
     { ...VALID_INPUT, extra: true },
     { ...VALID_INPUT, owner: '' },
     { ...VALID_INPUT, owner: '-octo' },
+    { ...VALID_INPUT, owner: 'a--b' },
+    { ...VALID_INPUT, owner: 'Octo' },
     { ...VALID_INPUT, repo: '' },
+    { ...VALID_INPUT, repo: '.' },
+    { ...VALID_INPUT, repo: '..' },
+    { ...VALID_INPUT, repo: 'demo.GIT' },
+    { ...VALID_INPUT, repo: 'Demo' },
     { ...VALID_INPUT, releaseId: 0 },
     { ...VALID_INPUT, assetId: Number.MAX_SAFE_INTEGER + 1 },
     { ...VALID_INPUT, maxBytes: 0 },
@@ -237,8 +308,8 @@ describe('project-template artifact download D1 cold iterator', () => {
     expect(Reflect.ownKeys(done)).toEqual(['value', 'done']);
     expect(Object.isFrozen(done)).toBe(true);
     expect(dependencies.start).toHaveBeenCalledTimes(1);
-    expect(bridge.next).toHaveBeenCalledTimes(2);
-    expect(bridge.dispose).toHaveBeenCalledTimes(1);
+    expect(bridgeNext(bridge)).toHaveBeenCalledTimes(2);
+    expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
     expect(dependencies.clearTimer).toHaveBeenCalledTimes(1);
   });
 
@@ -280,6 +351,8 @@ describe('project-template artifact download D1 cold iterator', () => {
     const dependencies = makeDependencies(bridge, {
       now: vi.fn()
         .mockReturnValueOnce(100)
+        .mockReturnValueOnce(100)
+        .mockReturnValueOnce(100)
         .mockReturnValueOnce(1_001),
     });
     const iterator = createProjectTemplateArtifactDownloadPort(
@@ -293,9 +366,9 @@ describe('project-template artifact download D1 cold iterator', () => {
     });
     await expectCode(iterator.next(), 'TIMEOUT');
 
-    expect(dependencies.now).toHaveBeenCalledTimes(2);
-    expect(bridge.next).toHaveBeenCalledTimes(1);
-    expect(bridge.dispose).toHaveBeenCalledTimes(1);
+    expect(dependencies.now).toHaveBeenCalledTimes(4);
+    expect(bridgeNext(bridge)).toHaveBeenCalledTimes(1);
+    expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
   });
 
   it('fails closed when next is concurrent and ignores the late bridge result', async () => {
@@ -315,7 +388,7 @@ describe('project-template artifact download D1 cold iterator', () => {
     const firstOutcome = expectCode(first, 'CONCURRENT_NEXT');
     const secondOutcome = expectCode(second, 'CONCURRENT_NEXT');
 
-    expect(bridge.dispose).toHaveBeenCalledTimes(1);
+    expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
     expect(dependencies.clearTimer).toHaveBeenCalledTimes(1);
     resolveBridge({ value: Uint8Array.from([7]), done: false });
     await Promise.all([firstOutcome, secondOutcome]);
@@ -329,10 +402,7 @@ describe('project-template artifact download D1 cold iterator', () => {
     'revokes pending work synchronously through iterator.%s',
     async (operation) => {
       const never = new Promise<IteratorResult<Uint8Array>>(() => {});
-      const bridge = Object.freeze({
-        next: vi.fn(() => never),
-        dispose: vi.fn(() => new Promise<void>(() => {})),
-      }) as unknown as ProjectTemplateArtifactDownloadBridge;
+      const bridge = makeBridge(vi.fn(() => never));
       const dependencies = makeDependencies(bridge);
       const controller = new AbortController();
       const removeEventListener = vi.spyOn(
@@ -354,113 +424,22 @@ describe('project-template artifact download D1 cold iterator', () => {
       const terminal = operation === 'return'
         ? iterator.return!()
         : iterator.throw!(new Error('private caller cause'));
-
-      expect(Object.getPrototypeOf(terminal)).toBe(Promise.prototype);
-      expect(bridge.dispose).toHaveBeenCalledTimes(1);
-      expect(dependencies.clearTimer).toHaveBeenCalledTimes(1);
-      expect(removeEventListener).toHaveBeenCalledTimes(1);
-      if (operation === 'return') {
-        await expect(terminal).resolves.toEqual({
+      const terminalOutcome = operation === 'return'
+        ? expect(terminal).resolves.toEqual({
           value: undefined,
           done: true,
-        });
-      } else {
-        await expectCode(terminal, 'CLOSED');
-      }
+        })
+        : expectCode(terminal, 'CLOSED');
+
+      expect(Object.getPrototypeOf(terminal)).toBe(Promise.prototype);
+      expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
+      expect(dependencies.clearTimer).toHaveBeenCalledTimes(1);
+      expect(removeEventListener).toHaveBeenCalledTimes(1);
+      await terminalOutcome;
       await pendingOutcome;
       expect(inspect(iterator)).not.toContain('private caller cause');
     },
   );
-
-  it('contains a rejected native cleanup Promise without awaiting it', async () => {
-    const bridge = Object.freeze({
-      next: vi.fn(() => new Promise<IteratorResult<Uint8Array>>(() => {})),
-      dispose: vi.fn(() => Promise.reject(
-        new Error('private cleanup rejection'),
-      )),
-    }) as unknown as ProjectTemplateArtifactDownloadBridge;
-    const iterator = createProjectTemplateArtifactDownloadPort(
-      Object.freeze({ deadlineMs: 1_000 }),
-      makeDependencies(bridge),
-    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
-    const pending = iterator.next();
-    const pendingDone = expect(pending).resolves.toEqual({
-      value: undefined,
-      done: true,
-    });
-
-    const returned = iterator.return!();
-
-    expect(bridge.dispose).toHaveBeenCalledTimes(1);
-    await expect(returned).resolves.toEqual({
-      value: undefined,
-      done: true,
-    });
-    await pendingDone;
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(inspect(iterator)).not.toContain('private cleanup rejection');
-  });
-
-  it('does not inspect or assimilate a non-exact cleanup Promise', async () => {
-    const constructorGetter = vi.fn(() => Promise);
-    const foreignCleanup = new Promise<void>(() => {});
-    Object.defineProperty(foreignCleanup, 'constructor', {
-      configurable: true,
-      get: constructorGetter,
-    });
-    const bridge = Object.freeze({
-      next: vi.fn(() => new Promise<IteratorResult<Uint8Array>>(() => {})),
-      dispose: () => foreignCleanup,
-    }) as unknown as ProjectTemplateArtifactDownloadBridge;
-    const iterator = createProjectTemplateArtifactDownloadPort(
-      Object.freeze({ deadlineMs: 1_000 }),
-      makeDependencies(bridge),
-    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
-    const pending = iterator.next();
-    const pendingDone = expect(pending).resolves.toEqual({
-      value: undefined,
-      done: true,
-    });
-
-    await iterator.return!();
-
-    await pendingDone;
-    expect(constructorGetter).not.toHaveBeenCalled();
-  });
-
-  it('contains rejected subclass and cross-realm cleanup Promises', async () => {
-    class PromiseSubclass<T> extends Promise<T> {}
-    const cleanupFactories: Array<() => Promise<void>> = [
-      () => new PromiseSubclass<void>(
-        (_resolve, reject) => reject(new Error('private subclass cleanup')),
-      ),
-      () => runInNewContext(
-        'Promise.reject(new Error("private cross-realm cleanup"))',
-      ) as Promise<void>,
-    ];
-    for (const createCleanup of cleanupFactories) {
-      const bridge = Object.freeze({
-        next: vi.fn(() => new Promise<IteratorResult<Uint8Array>>(() => {})),
-        dispose: vi.fn(() => createCleanup()),
-      }) as unknown as ProjectTemplateArtifactDownloadBridge;
-      const iterator = createProjectTemplateArtifactDownloadPort(
-        Object.freeze({ deadlineMs: 1_000 }),
-        makeDependencies(bridge),
-      ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
-      const pending = iterator.next();
-      const pendingDone = expect(pending).resolves.toEqual({
-        value: undefined,
-        done: true,
-      });
-
-      await iterator.return!();
-
-      await pendingDone;
-      await Promise.resolve();
-      await Promise.resolve();
-    }
-  });
 
   it('revokes listener, timer, waiter, and bridge on abort or deadline', async () => {
     for (const terminal of ['abort', 'deadline'] as const) {
@@ -491,8 +470,10 @@ describe('project-template artifact download D1 cold iterator', () => {
       else callbacks[0]!();
 
       await outcome;
-      expect(bridge.dispose).toHaveBeenCalledTimes(1);
-      expect(dependencies.clearTimer).toHaveBeenCalledTimes(1);
+      expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
+      expect(dependencies.clearTimer).toHaveBeenCalledTimes(
+        terminal === 'abort' ? 1 : 0,
+      );
       expect(dependencies.start).toHaveBeenCalledTimes(1);
     }
   });
@@ -528,7 +509,7 @@ describe('project-template artifact download D1 cold iterator', () => {
   });
 
   it('redacts bridge failures and rejects malformed bridge results', async () => {
-    for (const next of [
+    for (const [index, next] of [
       vi.fn(() => {
         throw new Error('private bridge cause');
       }),
@@ -538,11 +519,7 @@ describe('project-template artifact download D1 cold iterator', () => {
         done: false,
         value: new Uint8Array(),
       })),
-      vi.fn(() => Promise.resolve(new Proxy({
-        done: true,
-        value: undefined,
-      }, {}))),
-    ]) {
+    ].entries()) {
       const iterator = createProjectTemplateArtifactDownloadPort(
         Object.freeze({ deadlineMs: 1_000 }),
         makeDependencies(makeBridge(next)),
@@ -554,9 +531,11 @@ describe('project-template artifact download D1 cold iterator', () => {
       } catch (error) {
         thrown = error;
       }
-      expect(thrown).toEqual(expect.objectContaining({
+      expect(thrown, `malformed bridge case ${index}`).toEqual(
+        expect.objectContaining({
         code: 'BRIDGE_FAILURE',
-      }));
+        }),
+      );
       expect(String(thrown)).not.toContain('private');
     }
   });
@@ -599,51 +578,7 @@ describe('project-template artifact download D1 cold iterator', () => {
     expect(getPrototypeOf).not.toHaveBeenCalled();
   });
 
-  it('rejects non-exact bridge Promises without reading own then', async () => {
-    class PromiseSubclass<T> extends Promise<T> {}
-    const nativeWithOwnThen = Promise.resolve({
-      value: Uint8Array.from([1]),
-      done: false as const,
-    });
-    const ownThen = vi.fn();
-    Object.defineProperty(nativeWithOwnThen, 'then', {
-      configurable: true,
-      get: ownThen,
-    });
-    const foreignPromiseFactories: Array<() => unknown> = [
-      () => ({ then: vi.fn() }),
-      () => ({ value: undefined, done: true }),
-      () => new PromiseSubclass<IteratorResult<Uint8Array>>(
-        (_resolve, reject) => reject(new Error('private subclass rejection')),
-      ),
-      () => runInNewContext(
-        'Promise.reject(new Error("private cross-realm rejection"))',
-      ),
-      () => new Proxy(Promise.resolve<IteratorResult<Uint8Array>>({
-        value: undefined,
-        done: true,
-      }), {}),
-      () => nativeWithOwnThen,
-    ];
-    for (const createCandidate of foreignPromiseFactories) {
-      const candidate = createCandidate();
-      const dispose = vi.fn();
-      const bridge = Object.freeze({
-        next: () => candidate,
-        dispose,
-      }) as unknown as ProjectTemplateArtifactDownloadBridge;
-      const iterator = createProjectTemplateArtifactDownloadPort(
-        Object.freeze({ deadlineMs: 1_000 }),
-        makeDependencies(bridge),
-      ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
-
-      await expectCode(iterator.next(), 'BRIDGE_FAILURE');
-      expect(dispose).toHaveBeenCalledTimes(1);
-    }
-    expect(ownThen).not.toHaveBeenCalled();
-  });
-
-  it('disposes a started bridge when its remaining shape is malformed', async () => {
+  it('rejects a forged bridge without invoking its cleanup hook', async () => {
     const dispose = vi.fn();
     const malformed = Object.freeze({
       next: vi.fn(() => Promise.resolve({
@@ -663,7 +598,7 @@ describe('project-template artifact download D1 cold iterator', () => {
 
     await expectCode(iterator.next(), 'BRIDGE_FAILURE');
     expect(dependencies.start).toHaveBeenCalledTimes(1);
-    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(dispose).not.toHaveBeenCalled();
     expect(dependencies.clearTimer).toHaveBeenCalledTimes(1);
   });
 
@@ -704,12 +639,12 @@ describe('project-template artifact download D1 cold iterator', () => {
       }
       if (boundary === 'start') {
         expect(dependencies.start).toHaveBeenCalledTimes(1);
-        expect(bridge.dispose).toHaveBeenCalledTimes(1);
+        expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
       } else {
         expect(dependencies.start).not.toHaveBeenCalled();
-        expect(bridge.dispose).not.toHaveBeenCalled();
+        expect(bridgeDispose(bridge)).not.toHaveBeenCalled();
       }
-      expect(bridge.next).not.toHaveBeenCalled();
+      expect(bridgeNext(bridge)).not.toHaveBeenCalled();
       expect(clearTimer).toHaveBeenCalledTimes(boundary === 'now' ? 0 : 1);
       await expect(iterator.next()).resolves.toEqual({
         value: undefined,
@@ -773,7 +708,7 @@ describe('project-template artifact download D1 cold iterator', () => {
         await expectCode(pending, 'BRIDGE_FAILURE');
       }
       expect(removeEventListener).toHaveBeenCalledTimes(
-        fault === 'reenter' ? 2 : 1,
+        1,
       );
       expect(dependencies.setTimer).not.toHaveBeenCalled();
       expect(dependencies.start).not.toHaveBeenCalled();
@@ -784,4 +719,338 @@ describe('project-template artifact download D1 cold iterator', () => {
       });
     },
   );
+
+  it('accepts only nominal bridges created by the internal bridge factory', async () => {
+    const bridge = makeBridge();
+    expect(Object.isFrozen(bridge)).toBe(true);
+    expect(Reflect.ownKeys(bridge)).toEqual([]);
+
+    const dispose = vi.fn(() => undefined);
+    const disposeGetter = vi.fn(() => dispose);
+    class StructuralBridge {
+      get dispose(): () => undefined {
+        return disposeGetter();
+      }
+    }
+    const dependencies = makeDependencies(
+      new StructuralBridge() as unknown as
+        ProjectTemplateArtifactDownloadBridge,
+    );
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+
+    await expectCode(iterator.next(), 'BRIDGE_FAILURE');
+    expect(disposeGetter).not.toHaveBeenCalled();
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it.each(['return', 'throw', 'abort'] as const)(
+    'transactionally disposes a valid returned bridge after synchronous %s',
+    async (terminal) => {
+      let iterator!: AsyncIterator<Uint8Array>;
+      const controller = new AbortController();
+      const returnedBridge = makeBridge();
+      const dependencies = makeDependencies(makeBridge(), {
+        start: vi.fn(() => {
+          if (terminal === 'return') void iterator.return!();
+          else if (terminal === 'throw') {
+            void iterator.throw!(new Error('private terminal')).catch(
+              () => undefined,
+            );
+          } else {
+            controller.abort('private abort');
+          }
+          return returnedBridge;
+        }),
+      });
+      iterator = createProjectTemplateArtifactDownloadPort(
+        Object.freeze({ deadlineMs: 1_000 }),
+        dependencies,
+      ).openReleaseAsset({
+        ...VALID_INPUT,
+        signal: controller.signal,
+      })[Symbol.asyncIterator]();
+
+      const pending = iterator.next();
+
+      if (terminal === 'return') {
+        await expect(pending).resolves.toEqual({
+          value: undefined,
+          done: true,
+        });
+      } else {
+        await expectCode(
+          pending,
+          terminal === 'abort' ? 'ABORTED' : 'CLOSED',
+        );
+      }
+      expect(bridgeDispose(returnedBridge)).toHaveBeenCalledTimes(1);
+      await expect(iterator.next()).resolves.toEqual({
+        value: undefined,
+        done: true,
+      });
+    },
+  );
+
+  it('revokes an add-after-throw listener even when physical removal throws', async () => {
+    const controller = new AbortController();
+    const nativeAdd = EventTarget.prototype.addEventListener;
+    let retained: EventListenerOrEventListenerObject | null = null;
+    vi.spyOn(
+      EventTarget.prototype,
+      'addEventListener',
+    ).mockImplementation(function addThenThrow(
+      this: EventTarget,
+      type: string,
+      callback: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ) {
+      if (this !== controller.signal) {
+        return Reflect.apply(nativeAdd, this, [type, callback, options]);
+      }
+      retained = callback;
+      Reflect.apply(nativeAdd, this, [type, callback, options]);
+      throw new Error('private add after registration');
+    });
+    vi.spyOn(
+      EventTarget.prototype,
+      'removeEventListener',
+    ).mockImplementation(() => {
+      throw new Error('private physical removal');
+    });
+    const dependencies = makeDependencies();
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      dependencies,
+    ).openReleaseAsset({
+      ...VALID_INPUT,
+      signal: controller.signal,
+    })[Symbol.asyncIterator]();
+
+    await expectCode(iterator.next(), 'BRIDGE_FAILURE');
+    expect(retained).not.toBeNull();
+    expect(String(retained)).not.toContain('current');
+    expect(String(retained)).not.toContain('closeIterator');
+    controller.abort('private late abort');
+    expect(dependencies.start).not.toHaveBeenCalled();
+    await expect(iterator.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('revokes a retained timer callback when clearTimer throws', async () => {
+    let retainedTimer!: () => void;
+    const bridge = makeBridge(
+      vi.fn(() => new Promise<IteratorResult<Uint8Array>>(() => {})),
+    );
+    const dependencies = makeDependencies(bridge, {
+      setTimer: vi.fn((callback: () => void) => {
+        retainedTimer = callback;
+        return Object.freeze({ timer: true });
+      }),
+      clearTimer: vi.fn(() => {
+        throw new Error('private clear timer');
+      }),
+    });
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    const pendingDone = expect(pending).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+
+    await iterator.return!();
+    retainedTimer();
+
+    await pendingDone;
+    expect(String(retainedTimer)).not.toContain('current');
+    expect(String(retainedTimer)).not.toContain('closeIterator');
+    expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
+    await expect(iterator.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('does not invoke mutable Promise species or methods', async () => {
+    const dispose = vi.fn(() => undefined);
+    const bridge = createProjectTemplateArtifactDownloadBridge(
+      undefined,
+      Object.freeze({
+        pull(_state, settlement): undefined {
+          settlement.chunk(Uint8Array.from([1]));
+          return undefined;
+        },
+        dispose(): undefined {
+          dispose();
+          return undefined;
+        },
+      }),
+    );
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      makeDependencies(bridge),
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+    const speciesDescriptor = Object.getOwnPropertyDescriptor(
+      Promise,
+      Symbol.species,
+    )!;
+    const thenDescriptor = Object.getOwnPropertyDescriptor(
+      Promise.prototype,
+      'then',
+    )!;
+    const species = vi.fn(() => Promise);
+    const hostileThen = vi.fn(() => {
+      throw new Error('private mutable then');
+    });
+    Object.defineProperty(Promise, Symbol.species, {
+      configurable: true,
+      get: species,
+    });
+    Object.defineProperty(Promise.prototype, 'then', {
+      configurable: true,
+      value: hostileThen,
+    });
+
+    const pending = iterator.next();
+    Object.defineProperty(Promise, Symbol.species, speciesDescriptor);
+    Object.defineProperty(Promise.prototype, 'then', thenDescriptor);
+
+    await expect(pending).resolves.toEqual({
+      value: Uint8Array.from([1]),
+      done: false,
+    });
+    expect(Object.getPrototypeOf(pending)).toBe(Promise.prototype);
+    expect(species).not.toHaveBeenCalled();
+    expect(hostileThen).not.toHaveBeenCalled();
+    await iterator.return!();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('copies a chunk at settlement ingress before pull can mutate it', async () => {
+    const chunk = Uint8Array.from([1, 2, 3]);
+    const bridge = createProjectTemplateArtifactDownloadBridge(
+      undefined,
+      Object.freeze({
+        pull(_state, settlement): undefined {
+          settlement.chunk(chunk);
+          chunk[0] = 9;
+          return undefined;
+        },
+        dispose(): undefined {
+          return undefined;
+        },
+      }),
+    );
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      makeDependencies(bridge),
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toEqual({
+      value: Uint8Array.from([1, 2, 3]),
+      done: false,
+    });
+  });
+
+  it('bounds and rearms a huge absolute deadline without immediate timeout', async () => {
+    const timers: Array<{
+      callback: () => void;
+      delay: number;
+    }> = [];
+    const bridge = makeBridge(
+      vi.fn(() => new Promise<IteratorResult<Uint8Array>>(() => {})),
+    );
+    const dependencies = makeDependencies(bridge, {
+      now: vi.fn()
+        .mockReturnValueOnce(100)
+        .mockReturnValueOnce(100)
+        .mockReturnValueOnce(2_147_483_747)
+        .mockReturnValue(2_147_483_747),
+      setTimer: vi.fn((callback: () => void, delay: number) => {
+        timers.push({ callback, delay });
+        return Object.freeze({ index: timers.length });
+      }),
+    });
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: Number.MAX_VALUE }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    const pendingDone = expect(pending).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+
+    expect(timers[0]!.delay).toBe(2_147_483_647);
+    timers[0]!.callback();
+    expect(timers).toHaveLength(2);
+    expect(timers[1]!.delay).toBe(2_147_483_647);
+    expect(bridgeDispose(bridge)).not.toHaveBeenCalled();
+    await iterator.return!();
+    await pendingDone;
+  });
+
+  it('ignores a late callback from an earlier bounded timer generation', async () => {
+    const timers: Array<() => void> = [];
+    const bridge = makeBridge(
+      vi.fn(() => new Promise<IteratorResult<Uint8Array>>(() => {})),
+    );
+    const clearTimer = vi.fn();
+    const dependencies = makeDependencies(bridge, {
+      now: vi.fn(() => 100),
+      setTimer: vi.fn((callback: () => void) => {
+        timers.push(callback);
+        return Object.freeze({ generation: timers.length });
+      }),
+      clearTimer,
+    });
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: Number.MAX_VALUE }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    const pendingDone = expect(pending).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+
+    timers[0]!();
+    expect(timers).toHaveLength(2);
+    const clearCount = clearTimer.mock.calls.length;
+    timers[0]!();
+    timers[0]!();
+    expect(timers).toHaveLength(2);
+    expect(clearTimer).toHaveBeenCalledTimes(clearCount);
+    expect(bridgeDispose(bridge)).not.toHaveBeenCalled();
+
+    await iterator.return!();
+    await pendingDone;
+  });
+
+  it('rechecks the absolute deadline after start before pulling', async () => {
+    const bridge = makeBridge();
+    const dependencies = makeDependencies(bridge, {
+      now: vi.fn()
+        .mockReturnValueOnce(100)
+        .mockReturnValueOnce(100)
+        .mockReturnValueOnce(1_001),
+    });
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+
+    await expectCode(iterator.next(), 'TIMEOUT');
+
+    expect(dependencies.start).toHaveBeenCalledTimes(1);
+    expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
+    expect(bridgeNext(bridge)).not.toHaveBeenCalled();
+  });
 });

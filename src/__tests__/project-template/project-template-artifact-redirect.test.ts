@@ -148,6 +148,8 @@ describe('project-template artifact redirect state F2b-A', () => {
       'https://api.github.com/repos/octo/demo/releases/assets/123?secret=1',
       'https://release-assets.githubusercontent.com/x',
       'https://api.github.com/repos/owner--name/demo/releases/assets/123',
+      'https://api.github.com/repos/Owner/demo/releases/assets/123',
+      'https://api.github.com/repos/octo/Demo/releases/assets/123',
       'https://api.github.com/repos/owner-/demo/releases/assets/123',
       'https://api.github.com/repos/octo/./releases/assets/123',
       'https://api.github.com/repos/octo/../releases/assets/123',
@@ -161,7 +163,7 @@ describe('project-template artifact redirect state F2b-A', () => {
     }
 
     const maximum = createProjectTemplateArtifactRedirectState(
-      'https://api.github.com/repos/Owner/repo..template/releases/assets/9007199254740991',
+      'https://api.github.com/repos/owner/repo..template/releases/assets/9007199254740991',
     );
     maximum.dispose();
   });

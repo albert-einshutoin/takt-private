@@ -4,11 +4,13 @@ import {
   MAX_SOURCE_URI_LENGTH,
   SOURCE_REF_PATTERN_SOURCE,
 } from './validation.js';
+import {
+  isCanonicalGithubOwner,
+  isCanonicalGithubRepository,
+} from './github-repository-coordinates.js';
 
 const GITHUB_REF_PREFIX = 'github:';
 const GITHUB_ORIGIN = 'https://github.com';
-const OWNER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-const REPOSITORY_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 const SOURCE_REF_PATTERN = new RegExp(SOURCE_REF_PATTERN_SOURCE);
 const PORTABLE_REF_PATTERN = /^[A-Za-z0-9._/+-]+$/;
 const TAKTPACK_ASSET_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\.taktpack$/;
@@ -173,15 +175,12 @@ function parseGithubReleaseAssetUrl(
 }
 
 function assertRepositoryCoordinates(owner: string, repo: string): void {
-  if (!OWNER_PATTERN.test(owner) || owner.includes('--')) {
+  if (
+    !isCanonicalGithubOwner(owner)
+  ) {
     invalidSource('GitHub owner is not a portable canonical name');
   }
-  if (
-    !REPOSITORY_PATTERN.test(repo)
-    || repo === '.'
-    || repo === '..'
-    || repo.toLowerCase().endsWith('.git')
-  ) {
+  if (!isCanonicalGithubRepository(repo)) {
     invalidSource('GitHub repository is not a portable canonical name');
   }
 }
