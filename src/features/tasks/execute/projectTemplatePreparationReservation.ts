@@ -30,8 +30,11 @@ export function abortProjectTemplatePreparationAfterError(
   try {
     reservation.abort();
   } catch (terminalizationError) {
+    const terminalizationErrors = terminalizationError instanceof AggregateError
+      ? terminalizationError.errors
+      : [terminalizationError];
     throw new AggregateError(
-      [primaryError, terminalizationError],
+      [primaryError, ...terminalizationErrors],
       'Project template preparation and abort publication both failed',
     );
   }
@@ -39,8 +42,27 @@ export function abortProjectTemplatePreparationAfterError(
 
 class RunMetaPreparationReservation implements ProjectTemplatePreparationReservation {
   private terminalizationStarted = false;
+  private readonly heartbeat: ReturnType<typeof setInterval>;
+  private heartbeatError: unknown;
 
-  constructor(private readonly manager: RunMetaManager) {}
+  constructor(
+    private readonly manager: RunMetaManager,
+    heartbeatIntervalMs: number,
+  ) {
+    this.heartbeat = setInterval(() => {
+      if (this.terminalizationStarted) return;
+      try {
+        this.manager.refresh();
+      } catch (error) {
+        // A timer exception must not crash the owner process. Stop refreshing
+        // and retain the failure so the protected operation cannot later
+        // report a clean completion.
+        this.heartbeatError = error;
+        clearInterval(this.heartbeat);
+      }
+    }, heartbeatIntervalMs);
+    this.heartbeat.unref();
+  }
 
   complete(): void {
     this.finalize('completed');
@@ -56,7 +78,24 @@ class RunMetaPreparationReservation implements ProjectTemplatePreparationReserva
     // different terminal status could replace fail-closed running evidence
     // and hide an uncertain transition.
     this.terminalizationStarted = true;
-    this.manager.finalize(status);
+    clearInterval(this.heartbeat);
+    let terminalizationError: unknown;
+    try {
+      this.manager.finalize(status);
+    } catch (error) {
+      terminalizationError = error;
+    }
+    const failures = [
+      ...(this.heartbeatError === undefined ? [] : [this.heartbeatError]),
+      ...(terminalizationError === undefined ? [] : [terminalizationError]),
+    ];
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(
+        failures,
+        'Project template preparation heartbeat and terminalization failed',
+      );
+    }
   }
 }
 
@@ -78,6 +117,8 @@ export function beginProjectTemplatePreparation(
     ),
     options.task,
     options.workflow,
+    undefined,
+    { ownerPid: process.pid },
   );
-  return new RunMetaPreparationReservation(manager);
+  return new RunMetaPreparationReservation(manager, 60_000);
 }

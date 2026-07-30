@@ -34,6 +34,7 @@ export interface RunMetaManagerOptions {
   readonly projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit;
   readonly projectTemplateCoordinationRoot?: string;
   readonly runMetaStorageIo?: RunMetaStorageIo;
+  readonly ownerPid?: number;
 }
 
 type PersistedRunMeta = Omit<RunMeta, 'resumePoint' | 'sourceRunSlug' | 'resumeMode'> & {
@@ -110,6 +111,7 @@ export class RunMetaManager {
       logsDirectory: runPaths.logsRel,
       status: 'running',
       startTime: new Date().toISOString(),
+      ...(options?.ownerPid === undefined ? {} : { ownerPid: options.ownerPid }),
       ...(directResume ? {
         sourceRunSlug: directResume.sourceRunSlug,
         resumeMode: directResume.resumeMode,
@@ -162,12 +164,21 @@ export class RunMetaManager {
     this.writeRunMeta(this.runMeta);
   }
 
-  finalize(status: 'completed' | 'aborted', iterations?: number): void {
+  refresh(): void {
+    this.writeRunMeta(this.runMeta);
+  }
+
+  finalize(
+    status: 'completed' | 'aborted',
+    iterations?: number,
+    failureReason?: string,
+  ): void {
     this.writeRunMeta({
       ...this.runMeta,
       status,
       endTime: new Date().toISOString(),
       ...(iterations != null ? { iterations } : {}),
+      ...(failureReason === undefined ? {} : { failureReason }),
     } satisfies RunMeta);
     this.finalized = true;
   }

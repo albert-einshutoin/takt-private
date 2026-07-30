@@ -26,6 +26,9 @@ export interface RunMeta {
   currentIteration?: number;
   phase?: 1 | 2 | 3;
   updatedAt?: string;
+  /** Process that owns long-lived coordination evidence, when applicable. */
+  ownerPid?: number;
+  failureReason?: string;
   observability?: RunMetaObservability;
   resumePoint?: WorkflowResumePoint;
   sourceRunSlug?: string;

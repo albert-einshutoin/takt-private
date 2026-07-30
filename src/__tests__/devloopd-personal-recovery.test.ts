@@ -15,6 +15,7 @@ import {
   runPersonalRecovery,
 } from '../devloopd/personalRecovery.js';
 import { resolvePersonalLifecyclePaths } from '../devloopd/personalLifecycle.js';
+import { inspectProjectTemplateApplyGuard } from '../features/project-template/apply-guard.js';
 
 const cleanupDirs = new Set<string>();
 
@@ -106,6 +107,73 @@ describe('devloopd personal recovery', () => {
     expect(meta.status).toBe('aborted');
     expect(meta.endTime).toBe('2026-07-06T03:00:00.000Z');
     expect(meta.recoveryReason).toBe('stale active run recovered by devloopd recover-stale');
+  });
+
+  it.each([
+    ['alive', 'skipped', 'running'],
+    ['dead', 'changed', 'aborted'],
+    ['unknown', 'fail', 'running'],
+  ] as const)(
+    'recovers stale owned preparation only when PID state is verifiably %s',
+    (processState, actionStatus, finalStatus) => {
+      const repoPath = makeTempRepo();
+      const metaPath = writeRunMeta(repoPath, 'owned-preparation', {
+        workflow: 'task-preparation',
+        ownerPid: 42_424,
+      });
+
+      const report = runPersonalRecovery({
+        repoPath,
+        apply: true,
+        staleAfterMinutes: 60,
+        now: new Date('2026-07-06T03:00:00.000Z'),
+        probeRunProcess: () => processState,
+      });
+
+      expect(report.actions).toContainEqual(expect.objectContaining({
+        status: actionStatus,
+      }));
+      expect(JSON.parse(readFileSync(metaPath, 'utf8'))).toMatchObject({
+        status: finalStatus,
+        ownerPid: 42_424,
+      });
+      expect(inspectProjectTemplateApplyGuard({
+        repoPath,
+        now: new Date('2026-07-06T03:00:00.000Z'),
+      }).passed).toBe(finalStatus === 'aborted');
+    },
+  );
+
+  it('does not abort when a heartbeat wins the stale-recovery race', () => {
+    const repoPath = makeTempRepo();
+    const metaPath = writeRunMeta(repoPath, 'heartbeat-race', {
+      workflow: 'watch-preparation',
+      ownerPid: 42_425,
+    });
+    let probes = 0;
+
+    const report = runPersonalRecovery({
+      repoPath,
+      apply: true,
+      staleAfterMinutes: 60,
+      now: new Date('2026-07-06T03:00:00.000Z'),
+      probeRunProcess: () => {
+        probes += 1;
+        const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Record<string, unknown>;
+        writeFileSync(metaPath, JSON.stringify({
+          ...meta,
+          updatedAt: '2026-07-06T02:59:59.000Z',
+        }));
+        return 'dead';
+      },
+    });
+
+    expect(probes).toBe(1);
+    expect(report.actions).toContainEqual(expect.objectContaining({
+      status: 'skipped',
+      message: 'run metadata changed during stale recovery',
+    }));
+    expect(JSON.parse(readFileSync(metaPath, 'utf8')).status).toBe('running');
   });
 
   it('removes stale lock files but preserves recent locks', () => {

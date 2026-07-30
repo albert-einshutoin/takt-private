@@ -38,6 +38,7 @@ export interface RunPersonalRecoveryOptions {
   worktreeStaleMinutes?: number;
   ledgerPath?: string;
   now?: Date;
+  probeRunProcess?: (pid: number) => 'alive' | 'dead' | 'unknown';
 }
 
 const DEFAULT_STALE_AFTER_MINUTES = 180;
@@ -83,10 +84,31 @@ function recoverStaleRun(options: {
   run: ActiveRunRecord;
   apply: boolean;
   now: Date;
+  probeProcess: (pid: number) => 'alive' | 'dead' | 'unknown';
 }): PersonalRecoveryAction {
   const metaPath = join(options.repoPath, '.takt', 'runs', options.run.slug, 'meta.json');
   if (!options.run.stale) {
     return makeAction('skipped', `active run ${options.run.slug}`, 'active run is not stale', { path: metaPath });
+  }
+  if (options.run.ownerPid !== undefined) {
+    let processState: 'alive' | 'dead' | 'unknown';
+    try {
+      processState = options.probeProcess(options.run.ownerPid);
+    } catch {
+      processState = 'unknown';
+    }
+    if (processState === 'alive') {
+      return makeAction('skipped', `active run ${options.run.slug}`, 'stale metadata owner process is still alive', {
+        path: metaPath,
+        detail: `pid ${options.run.ownerPid}`,
+      });
+    }
+    if (processState === 'unknown') {
+      return makeAction('fail', `stale run ${options.run.slug}`, 'run owner process identity cannot be proven dead', {
+        path: metaPath,
+        detail: `pid ${options.run.ownerPid}`,
+      });
+    }
   }
   if (!options.apply) {
     return makeAction('would_change', `stale run ${options.run.slug}`, 'would mark stale running metadata as aborted', {
@@ -98,6 +120,33 @@ function recoverStaleRun(options: {
   const meta = readJsonRecord(metaPath);
   if (meta === undefined) {
     return makeAction('fail', `stale run ${options.run.slug}`, 'run metadata is unreadable', { path: metaPath });
+  }
+  if (
+    meta['status'] !== 'running'
+    || meta['updatedAt'] !== options.run.updatedAt
+    || meta['ownerPid'] !== options.run.ownerPid
+  ) {
+    return makeAction('skipped', `active run ${options.run.slug}`, 'run metadata changed during stale recovery', {
+      path: metaPath,
+    });
+  }
+  if (options.run.ownerPid !== undefined) {
+    let processState: 'alive' | 'dead' | 'unknown';
+    try {
+      processState = options.probeProcess(options.run.ownerPid);
+    } catch {
+      processState = 'unknown';
+    }
+    if (processState !== 'dead') {
+      return makeAction(
+        processState === 'unknown' ? 'fail' : 'skipped',
+        `active run ${options.run.slug}`,
+        processState === 'unknown'
+          ? 'run owner process identity became unknown during recovery'
+          : 'run owner process became live during recovery',
+        { path: metaPath, detail: `pid ${options.run.ownerPid}` },
+      );
+    }
   }
   const updated = {
     ...meta,
@@ -211,6 +260,19 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function probeRunProcess(pid: number): 'alive' | 'dead' | 'unknown' {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return 'unknown';
+  try {
+    process.kill(pid, 0);
+    // Portable Node APIs cannot prove OS process start identity. PID reuse is
+    // therefore treated as alive and requires manual recovery; this trades
+    // availability for never aborting a potentially live preparation owner.
+    return 'alive';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'dead' : 'unknown';
+  }
+}
+
 function recoverDaemonMetadata(options: {
   repoPath: string;
   apply: boolean;
@@ -304,12 +366,19 @@ export function runPersonalRecovery(options: RunPersonalRecoveryOptions = {}): P
   const lockStaleMinutes = parsePositiveInteger(options.lockStaleMinutes, DEFAULT_LOCK_STALE_MINUTES);
   const worktreeStaleMinutes = parsePositiveInteger(options.worktreeStaleMinutes, DEFAULT_WORKTREE_STALE_MINUTES);
   const activeRuns = inspectActiveRuns({ repoPath, staleAfterMinutes, now });
+  const runProcessProbe = options.probeRunProcess ?? probeRunProcess;
   const actions: PersonalRecoveryAction[] = [];
 
   if (!activeRuns.passed) {
     actions.push(makeAction('fail', 'active runs', activeRuns.message));
   } else {
-    actions.push(...activeRuns.activeRuns.map((run) => recoverStaleRun({ repoPath, run, apply, now })));
+    actions.push(...activeRuns.activeRuns.map((run) => recoverStaleRun({
+      repoPath,
+      run,
+      apply,
+      now,
+      probeProcess: runProcessProbe,
+    })));
   }
   actions.push(
     ...recoverLockFiles({ repoPath, apply, lockStaleMinutes, now }),

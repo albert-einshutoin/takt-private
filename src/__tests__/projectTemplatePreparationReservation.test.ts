@@ -1,7 +1,14 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { inspectProjectTemplateApplyGuard } from '../features/project-template/apply-guard.js';
 import {
   abortProjectTemplatePreparationAfterError,
@@ -16,6 +23,15 @@ function readOnlyRunMeta(projectRoot: string): { status: string; workflow: strin
     workflow: string;
   };
 }
+
+function reservationMetaPath(projectRoot: string): string {
+  const [slug] = readdirSync(join(projectRoot, '.takt', 'runs'));
+  return join(projectRoot, '.takt', 'runs', slug!, 'meta.json');
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('project template preparation reservation', () => {
   it('publishes active evidence synchronously and completes once', () => {
@@ -75,5 +91,82 @@ describe('project template preparation reservation', () => {
     }, primary)).toThrow(expect.objectContaining({
       errors: [primary, terminalization],
     }));
+  });
+
+  it('heartbeats long-lived preparation evidence while the owner is live', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-30T00:00:00.000Z'));
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-preparation-heartbeat-'));
+    const reservation = beginProjectTemplatePreparation({
+      projectRoot,
+      task: 'watch for queued work',
+      workflow: 'watch-preparation',
+    });
+    const before = readOnlyRunMeta(projectRoot) as {
+      status: string;
+      workflow: string;
+      updatedAt: string;
+      ownerPid: number;
+    };
+
+    vi.setSystemTime(new Date('2026-07-30T00:01:00.000Z'));
+    vi.advanceTimersByTime(60_000);
+    const after = readOnlyRunMeta(projectRoot) as typeof before;
+
+    expect(after.ownerPid).toBe(process.pid);
+    expect(after.updatedAt).not.toBe(before.updatedAt);
+    expect(after.status).toBe('running');
+    reservation.complete();
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('captures heartbeat publication failure without throwing from the timer', () => {
+    vi.useFakeTimers();
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-preparation-heartbeat-fault-'));
+    const reservation = beginProjectTemplatePreparation({
+      projectRoot,
+      task: 'long pipeline',
+      workflow: 'pipeline-preparation',
+    });
+    const metaPath = reservationMetaPath(projectRoot);
+    const original = readFileSync(metaPath);
+    rmSync(metaPath);
+    mkdirSync(metaPath);
+
+    expect(() => vi.advanceTimersByTime(60_000)).not.toThrow();
+
+    rmSync(metaPath, { recursive: true });
+    writeFileSync(metaPath, original);
+    expect(() => reservation.complete()).toThrow();
+    expect(readOnlyRunMeta(projectRoot).status).toBe('completed');
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed).toBe(true);
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('aggregates primary, heartbeat, and terminalization failures fail-closed', () => {
+    vi.useFakeTimers();
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-preparation-all-faults-'));
+    const reservation = beginProjectTemplatePreparation({
+      projectRoot,
+      task: 'watch pipeline',
+      workflow: 'watch-preparation',
+    });
+    const metaPath = reservationMetaPath(projectRoot);
+    rmSync(metaPath);
+    mkdirSync(metaPath);
+    expect(() => vi.advanceTimersByTime(60_000)).not.toThrow();
+    const primary = new Error('pipeline failed');
+
+    let caught: unknown;
+    try {
+      abortProjectTemplatePreparationAfterError(reservation, primary);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError).errors).toHaveLength(3);
+    expect((caught as AggregateError).errors).toContain(primary);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed).toBe(false);
+    rmSync(projectRoot, { recursive: true, force: true });
   });
 });
