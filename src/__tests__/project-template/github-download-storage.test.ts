@@ -718,6 +718,7 @@ describe('GitHub template staged authority verification', () => {
 
     const verified = await verifyGithubTemplateDownloadStaging(staged);
 
+    expect(verified).toBe(staged);
     expect(verified).toMatchObject({
       stagingPath: staged.stagingPath,
       bytes: staged.bytes,
@@ -726,13 +727,13 @@ describe('GitHub template staged authority verification', () => {
     expect(Object.isFrozen(verified)).toBe(true);
     expect(Object.isFrozen(verified.inspection)).toBe(true);
     await expect(verifyGithubTemplateDownloadStaging({
-      ...staged,
+      ...verified,
     })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
     await expect(verifyGithubTemplateDownloadStaging(Object.freeze({
-      stagingPath: staged.stagingPath,
-      bytes: staged.bytes,
-      sha256: staged.sha256,
-      inspection: staged.inspection,
+      stagingPath: verified.stagingPath,
+      bytes: verified.bytes,
+      sha256: verified.sha256,
+      inspection: verified.inspection,
     }))).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
   });
 

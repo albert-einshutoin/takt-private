@@ -102,9 +102,6 @@ export interface StagedGithubTemplateDownload {
   readonly inspection: DeepReadonly<TaktpackInspectResult>;
 }
 
-export type VerifiedStagedGithubTemplateDownload =
-  StagedGithubTemplateDownload;
-
 interface StagedGithubTemplateDownloadAuthority {
   readonly result: StagedGithubTemplateDownload;
   readonly projectRoot: string;
@@ -118,7 +115,7 @@ interface StagedGithubTemplateDownloadAuthority {
   readonly bytes: number;
   readonly sha256: string;
   readonly ioSeam?: GithubTemplateDownloadStorageIoSeam;
-  state: 'active' | 'consumed';
+  state: 'active' | 'consuming' | 'consumed';
 }
 
 interface StageGithubTemplateDownloadSnapshot {
@@ -585,7 +582,7 @@ function hashStagedDescriptor(
  */
 export async function verifyGithubTemplateDownloadStaging(
   staged: StagedGithubTemplateDownload,
-): Promise<VerifiedStagedGithubTemplateDownload> {
+): Promise<StagedGithubTemplateDownload> {
   const authority = (
     (typeof staged === 'object' && staged !== null)
       ? STAGED_DOWNLOAD_AUTHORITIES.get(staged)
@@ -685,12 +682,6 @@ export async function verifyGithubTemplateDownloadStaging(
         'GitHub template staged inspection digest changed',
       );
     }
-    const verified = Object.freeze({
-      stagingPath: authority.stagingPath,
-      bytes: authority.bytes,
-      sha256: authority.sha256,
-      inspection: deepFreeze(inspection),
-    });
     runIoSeamPhase(
       authority.ioSeam,
       'before-staging-verify-close',
@@ -698,7 +689,10 @@ export async function verifyGithubTemplateDownloadStaging(
     );
     closeSync(fd);
     fd = undefined;
-    return verified;
+    // B1b must atomically claim active -> consuming -> consumed before its own
+    // verification, then retain that verified FD through cache copy. Returning
+    // only the registered object here prevents a fresh look-alike authority.
+    return authority.result;
   } catch (error) {
     if (isInternalStorageError(error)) throw error;
     throw storageError(
