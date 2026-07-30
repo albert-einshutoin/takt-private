@@ -229,6 +229,24 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
     expect(meta.resume_mode).toBe('retry');
   });
 
+  it('rejects blank direct or CLI task text before publishing run metadata', async () => {
+    const projectDir = createTempProject();
+
+    await expect(createWorkflowExecutionBootstrap(
+      workflowConfig,
+      ' \n\t ',
+      projectDir,
+      {
+        projectCwd: projectDir,
+        provider: 'mock',
+        reportDirName: 'blank-task',
+      },
+    )).rejects.toThrow('Run metadata task must contain non-whitespace text');
+    expect(mockWriteFileAtomic.mock.calls.some(
+      (call) => String(call[0]).endsWith('/meta.json'),
+    )).toBe(false);
+  });
+
   it('Given timezone is configured, When bootstrap creates a generated run slug, Then timezone is passed to report dir generation', async () => {
     const projectDir = createTempProject();
     mockResolveWorkflowConfigValues.mockReturnValueOnce({

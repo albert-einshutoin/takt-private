@@ -60,6 +60,9 @@ export class RunMetaManager {
     directResume?: DirectResumeMetadata,
     options?: RunMetaManagerOptions,
   ) {
+    if (task.trim().length === 0) {
+      throw new Error('Run metadata task must contain non-whitespace text');
+    }
     if (isDebugLoggerRunSlug(runPaths.slug)) {
       throw new Error('run metadata slug is reserved for DebugLogger');
     }

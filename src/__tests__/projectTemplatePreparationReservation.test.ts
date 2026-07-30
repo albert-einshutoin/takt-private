@@ -1,6 +1,7 @@
 import {
   mkdirSync,
   mkdtempSync,
+  existsSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -76,6 +77,18 @@ describe('project template preparation reservation', () => {
       workflow: 'direct-resume-preparation',
     });
     expect(inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).passed).toBe(true);
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('rejects a blank preparation task before publishing run metadata', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'takt-preparation-blank-'));
+
+    expect(() => beginProjectTemplatePreparation({
+      projectRoot,
+      task: ' \n\t ',
+      workflow: 'task-preparation',
+    })).toThrow('Run metadata task must contain non-whitespace text');
+    expect(existsSync(join(projectRoot, '.takt', 'runs'))).toBe(false);
     rmSync(projectRoot, { recursive: true, force: true });
   });
 

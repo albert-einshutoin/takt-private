@@ -53,6 +53,12 @@ describe('RunMetaManager', () => {
     expect(mockWriteRunMeta).not.toHaveBeenCalled();
   });
 
+  it('rejects whitespace-only task text before any metadata publication', () => {
+    expect(() => new RunMetaManager(createRunPaths(), ' \n\t ', 'default'))
+      .toThrow('Run metadata task must contain non-whitespace text');
+    expect(mockWriteRunMeta).not.toHaveBeenCalled();
+  });
+
   it('should persist currentStep and currentIteration on updateStep', () => {
     const manager = new RunMetaManager(createRunPaths(), 'Force fail task', 'default');
 
