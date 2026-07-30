@@ -57,7 +57,7 @@ describe('package exports contract', () => {
     expectTypeOf<ProjectTemplateBaseContent>()
       .toMatchTypeOf<{ path: string; content: Uint8Array }>();
     expectTypeOf<ProjectTemplateApplyMergeDiagnostics>()
-      .toMatchTypeOf<{ kind: string }>();
+      .toMatchTypeOf<{ status: string }>();
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');
     expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
   });
