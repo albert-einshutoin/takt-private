@@ -81,6 +81,7 @@ const SEQUENCE_RULES = [
   }),
   rule('config.yaml', 'runtime.prepare', 'project-owned', {
     sequencePolicy: 'atomic',
+    reviewRequired: true,
   }),
   rule('config.yaml', 'provider_options.opencode.allowed_tools', 'project-owned', {
     sequencePolicy: 'unordered-set',
@@ -121,6 +122,9 @@ readonly RegisteredProjectTemplateConfigMergeRule[] = [
   rule('config.yaml', 'takt_providers.**', 'project-owned'),
   rule('config.yaml', 'takt_providers', 'project-owned'),
   rule('config.yaml', 'provider_options.codex.network_access', 'project-owned', {
+    reviewRequired: true,
+  }),
+  rule('config.yaml', 'provider_options.opencode.network_access', 'project-owned', {
     reviewRequired: true,
   }),
   rule(

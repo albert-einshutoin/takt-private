@@ -342,19 +342,36 @@ describe('project template three-way apply plan', () => {
   });
 
   it.each([
-    ['git hooks', 'allow_git_hooks: true\n', ['allow_git_hooks']],
+    ['git hooks', 'allow_git_hooks: true\n', ['allow_git_hooks'], []],
     [
       'provider network access',
       'provider_options:\n  codex:\n    network_access: true\n',
       ['provider_options', 'codex', 'network_access'],
+      [],
+    ],
+    [
+      'OpenCode network access',
+      'provider_options:\n  opencode:\n    network_access: true\n',
+      ['provider_options', 'opencode', 'network_access'],
+      [],
+    ],
+    [
+      'runtime prepare scripts',
+      'runtime:\n  prepare:\n    - .takt/automation/prepare.sh\n',
+      ['runtime', 'prepare'],
+      ['external-command'],
     ],
   ] as const)(
     'requires review for a direct config add containing %s',
-    (_label, incoming, path) => {
+    (_label, incoming, path, capabilities) => {
       const planInput = input({});
       planInput.incomingManifest.entries = [
-        manifestEntry('config.yaml', incoming, 'merge'),
+        {
+          ...manifestEntry('config.yaml', incoming, 'merge'),
+          capabilities: [...capabilities],
+        },
       ];
+      planInput.incomingManifest.capabilities = [...capabilities];
       planInput.incomingContents = [{
         path: 'config.yaml',
         content: Buffer.from(incoming),

@@ -110,7 +110,9 @@ describe('project template config merge rules', () => {
     'workflow_arpeggio.custom_merge_files',
     'workflow_arpeggio.custom_data_source_modules',
     'sync_conflict_resolver.auto_approve_tools',
+    'runtime.prepare',
     'provider_options.codex.network_access',
+    'provider_options.opencode.network_access',
     'provider_options.claude.sandbox.allow_unsandboxed_commands',
   ])('requires review for execution capability %s', (path) => {
     expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
