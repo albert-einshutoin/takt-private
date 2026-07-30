@@ -15,6 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 import { inspectTaktpack } from './archive-inspector.js';
 import {
   DEFAULT_TAKTPACK_LIMITS,
+  type DeepReadonly,
   type TaktpackInspectResult,
 } from './archive-types.js';
 import {
@@ -24,6 +25,10 @@ import {
 } from './control-root-contract.js';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  'byteLength',
+)!.get!;
 
 export type GithubTemplateDownloadStorageErrorCode =
   | 'INVALID_ARGUMENT'
@@ -46,6 +51,8 @@ export class GithubTemplateDownloadStorageError extends Error {
     this.name = 'GithubTemplateDownloadStorageError';
   }
 }
+
+const INTERNAL_STORAGE_ERRORS = new WeakSet<object>();
 
 export type GithubTemplateDownloadStoragePhase =
   | 'ingress-created'
@@ -80,7 +87,7 @@ export interface StagedGithubTemplateDownload {
   readonly stagingPath: string;
   readonly bytes: number;
   readonly sha256: string;
-  readonly inspection: TaktpackInspectResult;
+  readonly inspection: DeepReadonly<TaktpackInspectResult>;
 }
 
 interface StageGithubTemplateDownloadSnapshot {
@@ -96,7 +103,41 @@ function storageError(
   code: GithubTemplateDownloadStorageErrorCode,
   message: string,
 ): GithubTemplateDownloadStorageError {
-  return new GithubTemplateDownloadStorageError(code, message);
+  const error = new GithubTemplateDownloadStorageError(code, message);
+  Object.freeze(error);
+  INTERNAL_STORAGE_ERRORS.add(error);
+  return error;
+}
+
+function isInternalStorageError(
+  error: unknown,
+): error is GithubTemplateDownloadStorageError {
+  return typeof error === 'object'
+    && error !== null
+    && INTERNAL_STORAGE_ERRORS.has(error);
+}
+
+function runIoSeamPhase(
+  ioSeam: GithubTemplateDownloadStorageIoSeam | undefined,
+  phase: GithubTemplateDownloadStoragePhase,
+  path: string,
+): void {
+  try {
+    ioSeam?.onPhase?.(phase, path);
+  } catch {
+    throw storageError(
+      'IO_FAILURE',
+      'GitHub template download storage hook failed',
+    );
+  }
+}
+
+function deepFreeze<Value>(value: Value): DeepReadonly<Value> {
+  if (typeof value !== 'object' || value === null) {
+    return value as DeepReadonly<Value>;
+  }
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return Object.freeze(value) as DeepReadonly<Value>;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -163,7 +204,11 @@ function ensurePrivateDirectory(
   }
   // Re-sync on EEXIST too: a prior process may have stopped after mkdir but
   // before the parent entry became durable.
-  ioSeam?.onPhase?.('before-staging-root-parent-fsync', parentPath);
+  runIoSeamPhase(
+    ioSeam,
+    'before-staging-root-parent-fsync',
+    parentPath,
+  );
   syncDirectory(parentPath);
   requirePrivateDirectory(path, expectedDevice);
 }
@@ -263,20 +308,140 @@ function getDownloadIterator(
 
 async function readDownloadChunk(
   iterator: AsyncIterator<unknown>,
+  signal: AbortSignal | undefined,
 ): Promise<{ done: boolean; value: unknown }> {
-  try {
-    const result = await iterator.next();
-    if (typeof result !== 'object' || result === null) throw new Error();
-    return {
-      done: result.done === true,
-      value: result.value,
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (
+      action: () => void,
+    ): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        signal?.removeEventListener('abort', onAbort);
+      } catch {
+        // Listener cleanup cannot change the already selected outcome.
+      }
+      action();
     };
+    const onAbort = (): void => {
+      finish(() => reject(storageError(
+        'ABORTED',
+        'GitHub template download was cancelled',
+      )));
+    };
+    try {
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (settled) return;
+      Promise.resolve(iterator.next()).then(
+        (result) => {
+          if (settled) return;
+          try {
+            if (typeof result !== 'object' || result === null) {
+              throw new Error();
+            }
+            const done = result.done === true;
+            // A completed iterator's value is intentionally never observed.
+            const value = done ? undefined : result.value;
+            finish(() => resolve({ done, value }));
+          } catch {
+            finish(() => reject(storageError(
+              'STREAM_FAILED',
+              'GitHub template download stream failed',
+            )));
+          }
+        },
+        () => finish(() => reject(storageError(
+          'STREAM_FAILED',
+          'GitHub template download stream failed',
+        ))),
+      );
+    } catch {
+      finish(() => reject(storageError(
+        'STREAM_FAILED',
+        'GitHub template download stream failed',
+      )));
+    }
+  });
+}
+
+function closeDownloadIterator(
+  iterator: AsyncIterator<unknown>,
+): void {
+  try {
+    const close = iterator.return;
+    if (typeof close === 'function') {
+      void Promise.resolve(close.call(iterator)).catch(() => undefined);
+    }
+  } catch {
+    // Iterator cleanup is best effort and never replaces the primary error.
+  }
+}
+
+function snapshotDownloadChunk(value: unknown): Uint8Array {
+  try {
+    if (typeof value !== 'object' || value === null) throw new Error();
+    const prototype = Object.getPrototypeOf(value);
+    if (
+      prototype !== Uint8Array.prototype
+      && prototype !== Buffer.prototype
+    ) {
+      throw new Error();
+    }
+    const byteLength = Reflect.apply(
+      TYPED_ARRAY_BYTE_LENGTH_GETTER,
+      value,
+      [],
+    ) as number;
+    const snapshot = new Uint8Array(byteLength);
+    Uint8Array.prototype.set.call(snapshot, value as Uint8Array);
+    return snapshot;
   } catch {
     throw storageError(
-      'STREAM_FAILED',
-      'GitHub template download stream failed',
+      'INVALID_CHUNK',
+      'GitHub template download yielded an invalid chunk',
     );
   }
+}
+
+function writeDownloadChunk(
+  fd: number,
+  chunk: Uint8Array,
+  offset: number,
+  length: number,
+  position: number,
+  ioSeam: GithubTemplateDownloadStorageIoSeam | undefined,
+): number {
+  let written: number;
+  try {
+    written = ioSeam?.write?.(
+      fd,
+      chunk,
+      offset,
+      length,
+      position,
+    ) ?? writeSync(fd, chunk, offset, length, position);
+  } catch {
+    throw storageError(
+      'IO_FAILURE',
+      'GitHub template download write failed',
+    );
+  }
+  if (
+    !Number.isSafeInteger(written)
+    || written <= 0
+    || written > length
+  ) {
+    throw storageError(
+      'IO_FAILURE',
+      'GitHub template download write made invalid progress',
+    );
+  }
+  return written;
 }
 
 function cleanupOwnedStaging(
@@ -285,7 +450,7 @@ function cleanupOwnedStaging(
   expectedDevice: number,
   ioSeam: GithubTemplateDownloadStorageIoSeam | undefined,
 ): void {
-  ioSeam?.onPhase?.('before-cleanup', stagingPath);
+  runIoSeamPhase(ioSeam, 'before-cleanup', stagingPath);
   try {
     const stat = lstatSync(stagingPath);
     if (
@@ -353,7 +518,7 @@ export async function stageGithubTemplateDownload(
       snapshot.ioSeam,
     );
   } catch (error) {
-    if (error instanceof GithubTemplateDownloadStorageError) throw error;
+    if (isInternalStorageError(error)) throw error;
     throw storageError(
       'UNSAFE_STAGING',
       'GitHub template download staging is unavailable',
@@ -379,58 +544,50 @@ export async function stageGithubTemplateDownload(
         | noFollow,
       0o600,
     );
-    snapshot.ioSeam?.onPhase?.('ingress-created', stagingPath);
+    runIoSeamPhase(snapshot.ioSeam, 'ingress-created', stagingPath);
 
     const digest = createHash('sha256');
     let received = 0;
     const iterator = getDownloadIterator(snapshot.chunks);
-    while (true) {
-      throwIfAborted(snapshot.signal);
-      const next = await readDownloadChunk(iterator);
-      if (next.done) break;
-      const chunk = next.value;
-      if (!(chunk instanceof Uint8Array)) {
-        throw storageError(
-          'INVALID_CHUNK',
-          'GitHub template download yielded an invalid chunk',
-        );
-      }
-      if (chunk.byteLength === 0) continue;
-      if (
-        chunk.byteLength > snapshot.expectedBytes - received
-        || received + chunk.byteLength
-          > DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes
-      ) {
-        throw storageError(
-          'LIMIT_EXCEEDED',
-          'GitHub template download exceeded its byte limit',
-        );
-      }
-      let offset = 0;
-      while (offset < chunk.byteLength) {
-        const bytesWritten = snapshot.ioSeam?.write?.(
-          fd,
-          chunk,
-          offset,
-          chunk.byteLength - offset,
-          received + offset,
-        ) ?? writeSync(
-          fd,
-          chunk,
-          offset,
-          chunk.byteLength - offset,
-          received + offset,
-        );
-        if (bytesWritten <= 0) {
+    let iteratorDone = false;
+    try {
+      while (true) {
+        throwIfAborted(snapshot.signal);
+        const next = await readDownloadChunk(iterator, snapshot.signal);
+        if (next.done) {
+          iteratorDone = true;
+          break;
+        }
+        throwIfAborted(snapshot.signal);
+        const chunk = snapshotDownloadChunk(next.value);
+        if (chunk.byteLength === 0) continue;
+        if (
+          chunk.byteLength > snapshot.expectedBytes - received
+          || received + chunk.byteLength
+            > DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes
+        ) {
           throw storageError(
-            'IO_FAILURE',
-            'GitHub template download write made no progress',
+            'LIMIT_EXCEEDED',
+            'GitHub template download exceeded its byte limit',
           );
         }
-        offset += bytesWritten;
+        let offset = 0;
+        while (offset < chunk.byteLength) {
+          offset += writeDownloadChunk(
+            fd,
+            chunk,
+            offset,
+            chunk.byteLength - offset,
+            received + offset,
+            snapshot.ioSeam,
+          );
+        }
+        digest.update(chunk);
+        received += chunk.byteLength;
       }
-      digest.update(chunk);
-      received += chunk.byteLength;
+    } catch (error) {
+      if (!iteratorDone) closeDownloadIterator(iterator);
+      throw error;
     }
     throwIfAborted(snapshot.signal);
     if (received !== snapshot.expectedBytes) {
@@ -447,7 +604,7 @@ export async function stageGithubTemplateDownload(
       );
     }
     fsyncSync(fd);
-    snapshot.ioSeam?.onPhase?.('file-fsynced', stagingPath);
+    runIoSeamPhase(snapshot.ioSeam, 'file-fsynced', stagingPath);
     closeSync(fd);
     fd = undefined;
     syncDirectory(stagingDirectory);
@@ -490,11 +647,11 @@ export async function stageGithubTemplateDownload(
       stagingPath,
       bytes: received,
       sha256: actualSha256,
-      inspection,
+      inspection: deepFreeze(inspection),
     });
   } catch (error) {
     primaryError = error;
-    if (error instanceof GithubTemplateDownloadStorageError) throw error;
+    if (isInternalStorageError(error)) throw error;
     throw storageError('IO_FAILURE', 'GitHub template download storage failed');
   } finally {
     if (fd !== undefined) {

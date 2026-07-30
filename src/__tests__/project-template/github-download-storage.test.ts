@@ -9,6 +9,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  writeSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -99,6 +100,10 @@ describe('GitHub template download staging', () => {
     expect(lstatSync(dirname(result.stagingPath)).mode & 0o777).toBe(0o700);
     expect(result.inspection.archiveSha256).toBe(sha256(content));
     expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.inspection)).toBe(true);
+    expect(Object.isFrozen(result.inspection.manifest)).toBe(true);
+    expect(Object.isFrozen(result.inspection.manifest.entries)).toBe(true);
+    expect(Object.isFrozen(result.inspection.manifest.entries[0])).toBe(true);
   });
 
   it.each([
@@ -372,7 +377,7 @@ describe('GitHub template download staging', () => {
           }
         },
       },
-    })).rejects.toMatchObject({ code: 'UNSAFE_STAGING' });
+    })).rejects.toMatchObject({ code: 'IO_FAILURE' });
 
     await expect(stageGithubTemplateDownload({
       projectRoot,
@@ -380,5 +385,313 @@ describe('GitHub template download staging', () => {
       expectedSha256: sha256(content),
       chunks: chunks(content),
     })).resolves.toMatchObject({ sha256: sha256(content) });
+  });
+
+  it('snapshots real typed-array chunks and redacts Proxy chunk traps', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    const original = new Uint8Array([1]);
+    let observedSnapshot: Uint8Array | undefined;
+    const staged = stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: sha256(original),
+      chunks: chunks(original),
+      ioSeam: {
+        write(fd, snapshot, offset, length, position) {
+          observedSnapshot = snapshot;
+          original[0] = 2;
+          return writeSync(fd, snapshot, offset, length, position);
+        },
+      },
+    });
+    await expect(staged).rejects.toMatchObject({ code: 'INSPECTION_FAILED' });
+    expect(observedSnapshot).not.toBe(original);
+    expect(observedSnapshot).toEqual(new Uint8Array([1]));
+
+    if (typeof SharedArrayBuffer !== 'undefined') {
+      const shared = new Uint8Array(new SharedArrayBuffer(1));
+      shared[0] = 3;
+      let observedSharedSnapshot: Uint8Array | undefined;
+      await expect(stageGithubTemplateDownload({
+        projectRoot,
+        expectedBytes: 1,
+        expectedSha256: sha256(shared),
+        chunks: chunks(shared),
+        ioSeam: {
+          write(fd, snapshot, offset, length, position) {
+            observedSharedSnapshot = snapshot;
+            shared[0] = 4;
+            return writeSync(fd, snapshot, offset, length, position);
+          },
+        },
+      })).rejects.toMatchObject({ code: 'INSPECTION_FAILED' });
+      expect(observedSharedSnapshot?.buffer).not.toBe(shared.buffer);
+      expect(observedSharedSnapshot).toEqual(new Uint8Array([3]));
+    }
+
+    const forged = new GithubTemplateDownloadStorageError(
+      'HASH_MISMATCH',
+      'ghp_chunk_proxy_secret',
+    );
+    const proxy = new Proxy(new Uint8Array([1]), {
+      get() {
+        throw forged;
+      },
+    });
+    const proxyChunks = {
+      [Symbol.asyncIterator]() {
+        let delivered = false;
+        return {
+          async next() {
+            if (delivered) return { done: true as const, value: undefined };
+            delivered = true;
+            return { done: false as const, value: proxy };
+          },
+        };
+      },
+    };
+    const proxyError = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: proxyChunks,
+    }).catch((error: unknown) => error);
+    expect(proxyError).toMatchObject({ code: 'INVALID_CHUNK' });
+    expect(String((proxyError as Error).message)).not.toContain(
+      'ghp_chunk_proxy_secret',
+    );
+  });
+
+  it('best-effort closes an unfinished iterator without replacing primary errors', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let returns = 0;
+    const iterable = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            return { done: false, value: 'invalid chunk' };
+          },
+          async return() {
+            returns += 1;
+            throw new GithubTemplateDownloadStorageError(
+              'HASH_MISMATCH',
+              'ghp_iterator_return_secret',
+            );
+          },
+        };
+      },
+    };
+    const error = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: iterable as AsyncIterable<Uint8Array>,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'INVALID_CHUNK' });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_iterator_return_secret',
+    );
+    expect(returns).toBe(1);
+  });
+
+  it('aborts a pending next without waiting for a pending iterator return', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    const controller = new AbortController();
+    let returns = 0;
+    const iterable = {
+      [Symbol.asyncIterator]() {
+        return {
+          next() {
+            return new Promise<IteratorResult<Uint8Array>>(() => undefined);
+          },
+          return() {
+            returns += 1;
+            return new Promise<IteratorResult<Uint8Array>>(() => undefined);
+          },
+        };
+      },
+    };
+    const staged = stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: iterable,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 0);
+
+    await expect(Promise.race([
+      staged,
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('abort timeout')), 500);
+      }),
+    ])).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(returns).toBe(1);
+  });
+
+  it('does not observe IteratorResult.value after done is true', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    const iterable = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            return new Proxy({ done: true }, {
+              get(target, property, receiver) {
+                if (property === 'value') {
+                  throw new Error('ghp_done_value_secret');
+                }
+                return Reflect.get(target, property, receiver);
+              },
+            });
+          },
+        };
+      },
+    };
+    const error = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: iterable as AsyncIterable<Uint8Array>,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'SIZE_MISMATCH' });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_done_value_secret',
+    );
+  });
+
+  it('removes the abort listener after next settles', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let added = 0;
+    let removed = 0;
+    const signal = {
+      aborted: false,
+      addEventListener() {
+        added += 1;
+      },
+      removeEventListener() {
+        removed += 1;
+      },
+    } as unknown as AbortSignal;
+    await expect(stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: chunks(),
+      signal,
+    })).rejects.toMatchObject({ code: 'SIZE_MISMATCH' });
+    expect({ added, removed }).toEqual({ added: 1, removed: 1 });
+  });
+
+  it('does not start iterator work when abort fires during listener setup', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let nextCalls = 0;
+    let returnCalls = 0;
+    const iterable = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            nextCalls += 1;
+            return { done: true as const, value: undefined };
+          },
+          async return() {
+            returnCalls += 1;
+            return { done: true as const, value: undefined };
+          },
+        };
+      },
+    };
+    const signal = {
+      aborted: false,
+      addEventListener(_type: string, listener: EventListenerOrEventListenerObject) {
+        if (typeof listener === 'function') {
+          listener(new Event('abort'));
+        } else {
+          listener.handleEvent(new Event('abort'));
+        }
+      },
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+
+    await expect(stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: iterable,
+      signal,
+    })).rejects.toMatchObject({ code: 'ABORTED' });
+    expect({ nextCalls, returnCalls }).toEqual({ nextCalls: 0, returnCalls: 1 });
+  });
+
+  it.each([0.5, 2, Number.NaN])(
+    'rejects invalid write progress %s',
+    async (written) => {
+      const projectRoot = makeRoot('takt-github-download-');
+      prepareControlRoot(projectRoot);
+      await expect(stageGithubTemplateDownload({
+        projectRoot,
+        expectedBytes: 1,
+        expectedSha256: 'a'.repeat(64),
+        chunks: chunks(new Uint8Array([1])),
+        ioSeam: {
+          write() {
+            return written;
+          },
+        },
+      })).rejects.toMatchObject({ code: 'IO_FAILURE' });
+    },
+  );
+
+  it('normalizes forged io seam errors', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    const error = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: chunks(new Uint8Array([1])),
+      ioSeam: {
+        onPhase(phase) {
+          if (phase === 'ingress-created') {
+            throw new GithubTemplateDownloadStorageError(
+              'HASH_MISMATCH',
+              'ghp_io_seam_secret',
+            );
+          }
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'IO_FAILURE' });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_io_seam_secret',
+    );
+
+    const authentic = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 0,
+      expectedSha256: 'a'.repeat(64),
+      chunks: chunks(new Uint8Array()),
+    }).catch((caught: unknown) => caught) as GithubTemplateDownloadStorageError;
+    expect(Object.isFrozen(authentic)).toBe(true);
+    expect(() => Object.defineProperty(authentic, 'code', {
+      value: 'HASH_MISMATCH',
+    })).toThrow();
+    const reinjected = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: chunks(new Uint8Array([1])),
+      ioSeam: {
+        onPhase(phase) {
+          if (phase === 'ingress-created') throw authentic;
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(reinjected).toMatchObject({ code: 'IO_FAILURE' });
   });
 });
