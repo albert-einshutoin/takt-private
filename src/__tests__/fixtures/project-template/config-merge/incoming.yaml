@@ -1,0 +1,19 @@
+subscription_only: true
+provider: codex-cli
+allowed_providers:
+  - codex-cli
+  - cursor-cli
+  - opencode-cli
+  - agy-cli
+forbidden_providers:
+  - codex
+provider_routing:
+  personas:
+    planner:
+      provider: codex-cli
+      model: baseline
+workflow_overrides:
+  quality_gates:
+    - npm test
+minimal_output: true
+timezone: Asia/Tokyo
