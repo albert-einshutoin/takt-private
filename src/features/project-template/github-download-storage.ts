@@ -2,16 +2,19 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readSync,
   realpathSync,
   rmdirSync,
   unlinkSync,
   writeSync,
+  type Stats,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { inspectTaktpack } from './archive-inspector.js';
 import {
   DEFAULT_TAKTPACK_LIMITS,
@@ -32,6 +35,7 @@ const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
 
 export type GithubTemplateDownloadStorageErrorCode =
   | 'INVALID_ARGUMENT'
+  | 'INVALID_AUTHORITY'
   | 'UNSAFE_STAGING'
   | 'ABORTED'
   | 'INVALID_CHUNK'
@@ -53,11 +57,18 @@ export class GithubTemplateDownloadStorageError extends Error {
 }
 
 const INTERNAL_STORAGE_ERRORS = new WeakSet<object>();
+const STAGED_DOWNLOAD_AUTHORITIES = new WeakMap<
+  object,
+  StagedGithubTemplateDownloadAuthority
+>();
+const STAGING_DIRECTORY_NAME_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export type GithubTemplateDownloadStoragePhase =
   | 'ingress-created'
   | 'file-fsynced'
   | 'before-staging-root-parent-fsync'
+  | 'before-staging-reinspect'
   | 'before-cleanup';
 
 export interface GithubTemplateDownloadStorageIoSeam {
@@ -88,6 +99,25 @@ export interface StagedGithubTemplateDownload {
   readonly bytes: number;
   readonly sha256: string;
   readonly inspection: DeepReadonly<TaktpackInspectResult>;
+}
+
+export type VerifiedStagedGithubTemplateDownload =
+  StagedGithubTemplateDownload;
+
+interface StagedGithubTemplateDownloadAuthority {
+  readonly result: StagedGithubTemplateDownload;
+  readonly projectRoot: string;
+  readonly stagingRoot: string;
+  readonly stagingDirectory: string;
+  readonly stagingPath: string;
+  readonly projectDevice: number;
+  readonly projectInode: number;
+  readonly stagingDevice: number;
+  readonly stagingInode: number;
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly ioSeam?: GithubTemplateDownloadStorageIoSeam;
+  state: 'active' | 'consumed';
 }
 
 interface StageGithubTemplateDownloadSnapshot {
@@ -476,6 +506,207 @@ function cleanupOwnedStaging(
   }
 }
 
+function requireSealedStagingFile(
+  authority: StagedGithubTemplateDownloadAuthority,
+): Stats {
+  const stat = lstatSync(authority.stagingPath);
+  const canonicalPath = realpathSync.native(authority.stagingPath);
+  if (
+    stat.isSymbolicLink()
+    || !stat.isFile()
+    || stat.dev !== authority.stagingDevice
+    || stat.ino !== authority.stagingInode
+    || stat.nlink !== 1
+    || stat.size !== authority.bytes
+    || !isProjectTemplatePrivateFileMode(stat.mode)
+    || canonicalPath !== authority.stagingPath
+  ) {
+    throw storageError(
+      'UNSAFE_STAGING',
+      'GitHub template staged download authority changed',
+    );
+  }
+  return stat;
+}
+
+function requireSealedDescriptor(
+  stat: Stats,
+  authority: StagedGithubTemplateDownloadAuthority,
+): void {
+  if (
+    !stat.isFile()
+    || stat.dev !== authority.stagingDevice
+    || stat.ino !== authority.stagingInode
+    || stat.nlink !== 1
+    || stat.size !== authority.bytes
+    || !isProjectTemplatePrivateFileMode(stat.mode)
+  ) {
+    throw storageError(
+      'UNSAFE_STAGING',
+      'GitHub template staged download descriptor changed',
+    );
+  }
+}
+
+function hashStagedDescriptor(
+  fd: number,
+  expectedBytes: number,
+): string {
+  const digest = createHash('sha256');
+  let position = 0;
+  while (position < expectedBytes) {
+    const length = Math.min(64 * 1024, expectedBytes - position);
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = readSync(fd, buffer, 0, length, position);
+    if (!Number.isSafeInteger(bytesRead) || bytesRead <= 0) {
+      throw storageError(
+        'UNSAFE_STAGING',
+        'GitHub template staged download read was incomplete',
+      );
+    }
+    digest.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
+  }
+  const extra = Buffer.allocUnsafe(1);
+  if (readSync(fd, extra, 0, 1, position) !== 0) {
+    throw storageError(
+      'UNSAFE_STAGING',
+      'GitHub template staged download size changed',
+    );
+  }
+  return digest.digest('hex');
+}
+
+/**
+ * Reopens and fully verifies a staged download using authority held only by
+ * this process. A frozen structural clone is insufficient because it cannot
+ * prove which inode was originally inspected.
+ */
+export async function verifyGithubTemplateDownloadStaging(
+  staged: StagedGithubTemplateDownload,
+): Promise<VerifiedStagedGithubTemplateDownload> {
+  const authority = (
+    (typeof staged === 'object' && staged !== null)
+      ? STAGED_DOWNLOAD_AUTHORITIES.get(staged)
+      : undefined
+  );
+  if (
+    authority === undefined
+    || authority.result !== staged
+    || authority.state !== 'active'
+  ) {
+    throw storageError(
+      'INVALID_AUTHORITY',
+      'GitHub template staged download authority is invalid',
+    );
+  }
+
+  let fd: number | undefined;
+  try {
+    const projectStat = lstatSync(authority.projectRoot);
+    if (
+      projectStat.isSymbolicLink()
+      || !projectStat.isDirectory()
+      || projectStat.dev !== authority.projectDevice
+      || projectStat.ino !== authority.projectInode
+      || realpathSync.native(authority.projectRoot) !== authority.projectRoot
+    ) {
+      throw storageError(
+        'UNSAFE_STAGING',
+        'GitHub template staged download project root changed',
+      );
+    }
+    const expectedStagingRoot = join(
+      authority.projectRoot,
+      PROJECT_TEMPLATE_CONTROL_DIRECTORY,
+      'download-staging',
+    );
+    const stagingDirectoryName = basename(authority.stagingDirectory);
+    if (
+      authority.stagingRoot !== expectedStagingRoot
+      || !STAGING_DIRECTORY_NAME_PATTERN.test(stagingDirectoryName)
+      || authority.stagingDirectory
+        !== join(expectedStagingRoot, stagingDirectoryName)
+      || authority.stagingPath
+        !== join(authority.stagingDirectory, 'asset.partial')
+    ) {
+      throw storageError(
+        'UNSAFE_STAGING',
+        'GitHub template staged download path escaped containment',
+      );
+    }
+    requirePrivateDirectory(
+      authority.stagingRoot,
+      authority.stagingDevice,
+    );
+    requirePrivateDirectory(
+      authority.stagingDirectory,
+      authority.stagingDevice,
+    );
+    requireSealedStagingFile(authority);
+
+    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+    fd = openSync(authority.stagingPath, constants.O_RDONLY | noFollow);
+    requireSealedDescriptor(fstatSync(fd), authority);
+    const actualSha256 = hashStagedDescriptor(fd, authority.bytes);
+    requireSealedDescriptor(fstatSync(fd), authority);
+    requireSealedStagingFile(authority);
+    if (actualSha256 !== authority.sha256) {
+      throw storageError(
+        'HASH_MISMATCH',
+        'GitHub template staged download digest changed',
+      );
+    }
+
+    runIoSeamPhase(
+      authority.ioSeam,
+      'before-staging-reinspect',
+      authority.stagingPath,
+    );
+    let inspection: TaktpackInspectResult;
+    try {
+      inspection = await inspectTaktpack(authority.stagingPath, {
+        limits: {
+          maxArchiveBytes: DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes,
+        },
+      });
+    } catch {
+      throw storageError(
+        'INSPECTION_FAILED',
+        'GitHub template staged download inspection failed',
+      );
+    }
+    requireSealedDescriptor(fstatSync(fd), authority);
+    requireSealedStagingFile(authority);
+    if (inspection.archiveSha256 !== authority.sha256) {
+      throw storageError(
+        'HASH_MISMATCH',
+        'GitHub template staged inspection digest changed',
+      );
+    }
+    return Object.freeze({
+      stagingPath: authority.stagingPath,
+      bytes: authority.bytes,
+      sha256: authority.sha256,
+      inspection: deepFreeze(inspection),
+    });
+  } catch (error) {
+    if (isInternalStorageError(error)) throw error;
+    throw storageError(
+      'UNSAFE_STAGING',
+      'GitHub template staged download verification failed',
+    );
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Verification has already selected its stable outcome.
+      }
+    }
+  }
+}
+
 /**
  * Stages untrusted online bytes only. The caller must already hold the shared
  * download mutation lease and have passed the owned apply guard. This function
@@ -643,12 +874,43 @@ export async function stageGithubTemplateDownload(
         'GitHub template inspected digest did not match',
       );
     }
-    return Object.freeze({
+    const finalStat = lstatSync(stagingPath);
+    if (
+      finalStat.isSymbolicLink()
+      || !finalStat.isFile()
+      || finalStat.dev !== stagedStat.dev
+      || finalStat.ino !== stagedStat.ino
+      || finalStat.nlink !== 1
+      || finalStat.size !== snapshot.expectedBytes
+      || !isProjectTemplatePrivateFileMode(finalStat.mode)
+    ) {
+      throw storageError(
+        'UNSAFE_STAGING',
+        'GitHub template download file changed during inspection',
+      );
+    }
+    const result = Object.freeze({
       stagingPath,
       bytes: received,
       sha256: actualSha256,
       inspection: deepFreeze(inspection),
     });
+    STAGED_DOWNLOAD_AUTHORITIES.set(result, {
+      result,
+      projectRoot,
+      stagingRoot,
+      stagingDirectory,
+      stagingPath,
+      projectDevice: projectStat.dev,
+      projectInode: projectStat.ino,
+      stagingDevice: finalStat.dev,
+      stagingInode: finalStat.ino,
+      bytes: received,
+      sha256: actualSha256,
+      ioSeam: snapshot.ioSeam,
+      state: 'active',
+    });
+    return result;
   } catch (error) {
     primaryError = error;
     if (isInternalStorageError(error)) throw error;

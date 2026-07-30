@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -9,6 +10,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeSync,
   writeFileSync,
 } from 'node:fs';
@@ -22,6 +24,7 @@ import {
 import {
   GithubTemplateDownloadStorageError,
   stageGithubTemplateDownload,
+  verifyGithubTemplateDownloadStaging,
 } from '../../features/project-template/github-download-storage.js';
 
 const roots: string[] = [];
@@ -63,6 +66,18 @@ function sha256(content: Uint8Array): string {
 
 async function* chunks(...values: unknown[]): AsyncGenerator<Uint8Array> {
   for (const value of values) yield value as Uint8Array;
+}
+
+async function stagePack(projectRoot: string) {
+  prepareControlRoot(projectRoot);
+  const content = await makePack(projectRoot);
+  const staged = await stageGithubTemplateDownload({
+    projectRoot,
+    expectedBytes: content.byteLength,
+    expectedSha256: sha256(content),
+    chunks: chunks(content),
+  });
+  return { content, staged };
 }
 
 afterEach(() => {
@@ -693,5 +708,107 @@ describe('GitHub template download staging', () => {
       },
     }).catch((caught: unknown) => caught);
     expect(reinjected).toMatchObject({ code: 'IO_FAILURE' });
+  });
+});
+
+describe('GitHub template staged authority verification', () => {
+  it('accepts only the original module-sealed result and deeply freezes verification', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    const { staged } = await stagePack(projectRoot);
+
+    const verified = await verifyGithubTemplateDownloadStaging(staged);
+
+    expect(verified).toMatchObject({
+      stagingPath: staged.stagingPath,
+      bytes: staged.bytes,
+      sha256: staged.sha256,
+    });
+    expect(Object.isFrozen(verified)).toBe(true);
+    expect(Object.isFrozen(verified.inspection)).toBe(true);
+    await expect(verifyGithubTemplateDownloadStaging({
+      ...staged,
+    })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
+    await expect(verifyGithubTemplateDownloadStaging(Object.freeze({
+      stagingPath: staged.stagingPath,
+      bytes: staged.bytes,
+      sha256: staged.sha256,
+      inspection: staged.inspection,
+    }))).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
+  });
+
+  it.each([
+    ['mode', (path: string) => chmodSync(path, 0o644)],
+    ['size', (path: string) => writeFileSync(path, 'tampered')],
+    ['hardlink', (path: string) => linkSync(path, `${path}.alias`)],
+  ])('rejects staged file %s tampering', async (_label, tamper) => {
+    const projectRoot = makeRoot('takt-github-download-');
+    const { staged } = await stagePack(projectRoot);
+    tamper(staged.stagingPath);
+
+    await expect(
+      verifyGithubTemplateDownloadStaging(staged),
+    ).rejects.toMatchObject({ code: 'UNSAFE_STAGING' });
+  });
+
+  it('rehashes the full staged file and redacts tampered content', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    const { content, staged } = await stagePack(projectRoot);
+    const tampered = Buffer.from(content);
+    tampered[tampered.byteLength - 1] ^= 1;
+    writeFileSync(staged.stagingPath, tampered);
+
+    const error = await verifyGithubTemplateDownloadStaging(staged).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({ code: 'HASH_MISMATCH' });
+    expect(String((error as Error).message)).not.toContain(
+      tampered.subarray(-16).toString('hex'),
+    );
+  });
+
+  it('does not follow a staged path replaced after sealing', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    const { staged } = await stagePack(projectRoot);
+    const external = join(makeRoot('takt-external-'), 'secret');
+    writeFileSync(external, 'ghp_staging_symlink_secret');
+    unlinkSync(staged.stagingPath);
+    symlinkSync(external, staged.stagingPath);
+
+    const error = await verifyGithubTemplateDownloadStaging(staged).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toMatchObject({ code: 'UNSAFE_STAGING' });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_staging_symlink_secret',
+    );
+    expect(lstatSync(staged.stagingPath).isSymbolicLink()).toBe(true);
+  });
+
+  it('re-inspects after hashing and detects same-inode TOCTOU tampering', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    let armed = false;
+    let reinspections = 0;
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        onPhase(phase, path) {
+          if (armed && phase === 'before-staging-reinspect') {
+            reinspections += 1;
+            writeFileSync(path, Buffer.alloc(content.byteLength));
+          }
+        },
+      },
+    });
+    armed = true;
+
+    await expect(
+      verifyGithubTemplateDownloadStaging(staged),
+    ).rejects.toMatchObject({ code: 'INSPECTION_FAILED' });
+    expect(reinspections).toBe(1);
   });
 });
