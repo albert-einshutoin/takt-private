@@ -1,10 +1,13 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { performance } from 'node:perf_hooks';
+import { Readable } from 'node:stream';
 import { types } from 'node:util';
 import { crossSpawn } from '../../shared/utils/spawn.js';
 
 const AUTH_ATTEMPT_TIMEOUT_MS = 30_000;
 const FORCE_KILL_DELAY_MS = 1_000;
+const FINAL_REAP_GRACE_MS = 1_000;
 const MAX_STDOUT_BYTES = 4 * 1024;
 const MAX_STDERR_BYTES = 16 * 1024;
 const GH_AUTH_ARGS = Object.freeze([
@@ -52,8 +55,7 @@ export type ProjectTemplateGhAuthErrorCode =
   | 'OUTPUT_LIMIT'
   | 'INVALID_TOKEN'
   | 'PROCESS_FAILED'
-  | 'CREDENTIAL_DISPOSED'
-  | 'ASYNC_TOKEN_USE';
+  | 'CREDENTIAL_DISPOSED';
 
 export class ProjectTemplateGhAuthError extends Error {
   constructor(
@@ -71,6 +73,7 @@ export interface ProjectTemplateGhAuthDependencies {
     args: readonly string[],
     options: SpawnOptions,
   ) => ChildProcess;
+  readonly now: () => number;
 }
 
 export interface AcquireProjectTemplateGhCredentialOptions {
@@ -83,7 +86,6 @@ export interface AcquireProjectTemplateGhCredentialOptions {
 }
 
 export interface DisposableProjectTemplateGhCredential {
-  withToken<T>(callback: (token: string) => T): T;
   dispose(): void;
 }
 
@@ -109,53 +111,12 @@ function authError(
   return Object.freeze(new ProjectTemplateGhAuthError(code, message));
 }
 
-function isThenableWithoutExecuting(value: unknown): boolean {
-  if (
-    (typeof value !== 'object' || value === null)
-    && typeof value !== 'function'
-  ) return false;
-  let current: object | null = value as object;
-  while (current !== null) {
-    if (types.isProxy(current)) return true;
-    const descriptor = Object.getOwnPropertyDescriptor(current, 'then');
-    if (descriptor !== undefined) {
-      return !('value' in descriptor)
-        || typeof descriptor.value === 'function';
-    }
-    current = Object.getPrototypeOf(current) as object | null;
-  }
-  return false;
-}
-
 function createCredential(
   token: Buffer,
 ): DisposableProjectTemplateGhCredential {
   // The frozen facade carries no token state. WeakMap authority makes copied
   // methods and forged receivers fail closed while still permitting zero-fill.
   const credential: DisposableProjectTemplateGhCredential = {
-    withToken<T>(callback: (tokenValue: string) => T): T {
-      const authority = CREDENTIAL_AUTHORITIES.get(this);
-      if (authority === undefined || authority.state !== 'active') {
-        throw authError(
-          'CREDENTIAL_DISPOSED',
-          'GitHub credential is no longer available',
-        );
-      }
-      if (typeof callback !== 'function' || types.isProxy(callback)) {
-        throw authError(
-          'INVALID_ARGUMENT',
-          'GitHub credential callback is invalid',
-        );
-      }
-      const result = callback(authority.token.toString('ascii'));
-      if (isThenableWithoutExecuting(result)) {
-        throw authError(
-          'ASYNC_TOKEN_USE',
-          'GitHub credential callback must complete synchronously',
-        );
-      }
-      return result;
-    },
     dispose(): void {
       const authority = CREDENTIAL_AUTHORITIES.get(this);
       if (authority === undefined) {
@@ -179,6 +140,7 @@ function createCredential(
 const DEFAULT_DEPENDENCIES: ProjectTemplateGhAuthDependencies =
   Object.freeze({
     spawn: crossSpawn,
+    now: () => performance.now(),
   });
 
 function exactDataRecord(
@@ -237,6 +199,21 @@ function snapshotSignal(value: unknown): AbortSignal | undefined {
       'GitHub credential abort signal is invalid',
     );
   }
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      AbortSignal.prototype,
+      'aborted',
+    );
+    const aborted = descriptor?.get?.call(value) as unknown;
+    if (typeof aborted !== 'boolean') {
+      throw new Error();
+    }
+  } catch {
+    throw authError(
+      'INVALID_ARGUMENT',
+      'GitHub credential abort signal is invalid',
+    );
+  }
   return value as AbortSignal;
 }
 
@@ -277,12 +254,18 @@ function snapshotOptions(
 
 function snapshotDependencies(
   value: ProjectTemplateGhAuthDependencies | undefined,
-): ProjectTemplateGhAuthDependencies {
-  if (value === undefined) return DEFAULT_DEPENDENCIES;
-  const dependencies = exactDataRecord(value, ['spawn']);
+): {
+  readonly receiver: ProjectTemplateGhAuthDependencies;
+  readonly spawn: ProjectTemplateGhAuthDependencies['spawn'];
+  readonly now: ProjectTemplateGhAuthDependencies['now'];
+} {
+  const receiver = value ?? DEFAULT_DEPENDENCIES;
+  const dependencies = exactDataRecord(receiver, ['spawn', 'now']);
   if (
     typeof dependencies['spawn'] !== 'function'
     || types.isProxy(dependencies['spawn'])
+    || typeof dependencies['now'] !== 'function'
+    || types.isProxy(dependencies['now'])
   ) {
     throw authError(
       'INVALID_ARGUMENT',
@@ -290,8 +273,11 @@ function snapshotDependencies(
     );
   }
   return Object.freeze({
+    receiver,
     spawn: dependencies['spawn'] as
       ProjectTemplateGhAuthDependencies['spawn'],
+    now: dependencies['now'] as
+      ProjectTemplateGhAuthDependencies['now'],
   });
 }
 
@@ -383,12 +369,18 @@ function parseToken(stdout: Buffer): Buffer {
 }
 
 function mapProcessError(error: unknown): ProjectTemplateGhAuthError {
+  let code: unknown;
   if (
     typeof error === 'object'
     && error !== null
-    && 'code' in error
-    && error.code === 'ENOENT'
+    && !types.isProxy(error)
   ) {
+    const descriptor = Object.getOwnPropertyDescriptor(error, 'code');
+    if (descriptor !== undefined && 'value' in descriptor) {
+      code = descriptor.value;
+    }
+  }
+  if (code === 'ENOENT') {
     return authError(
       'GH_UNAVAILABLE',
       'GitHub CLI is unavailable',
@@ -421,12 +413,67 @@ function pendingFailureError(
   );
 }
 
+interface SnapshottedAuthDependencies {
+  readonly receiver: ProjectTemplateGhAuthDependencies;
+  readonly spawn: ProjectTemplateGhAuthDependencies['spawn'];
+  readonly now: ProjectTemplateGhAuthDependencies['now'];
+}
+
+function readMonotonicNow(
+  dependencies: SnapshottedAuthDependencies,
+): number {
+  const value = Reflect.apply(
+    dependencies.now,
+    dependencies.receiver,
+    [],
+  ) as unknown;
+  if (
+    typeof value !== 'number'
+    || !Number.isFinite(value)
+    || value < 0
+  ) {
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub credential bootstrap failed',
+    );
+  }
+  return value;
+}
+
+function findDataFunction(
+  value: object,
+  key: string,
+): ((...args: unknown[]) => unknown) | undefined {
+  let current: object | null = value;
+  while (current !== null) {
+    if (types.isProxy(current)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(current, key);
+    if (descriptor !== undefined) {
+      return 'value' in descriptor
+        && typeof descriptor.value === 'function'
+        && !types.isProxy(descriptor.value)
+        ? descriptor.value as (...args: unknown[]) => unknown
+        : undefined;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return undefined;
+}
+
+function ownDataValue(value: object, key: string): unknown {
+  if (types.isProxy(value)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor !== undefined && 'value' in descriptor
+    ? descriptor.value
+    : undefined;
+}
+
 export async function acquireProjectTemplateGhCredential(
   optionsValue: AcquireProjectTemplateGhCredentialOptions,
   dependenciesValue?: ProjectTemplateGhAuthDependencies,
 ): Promise<DisposableProjectTemplateGhCredential> {
   let options: ReturnType<typeof snapshotOptions>;
-  let dependencies: ProjectTemplateGhAuthDependencies;
+  let dependencies: SnapshottedAuthDependencies;
   try {
     options = snapshotOptions(optionsValue);
     dependencies = snapshotDependencies(dependenciesValue);
@@ -442,32 +489,45 @@ export async function acquireProjectTemplateGhCredential(
       'GitHub credential bootstrap was cancelled',
     );
   }
-  const remainingMs = options.deadlineMs - performance.now();
-  if (remainingMs <= 0) {
+
+  let attemptStart: number;
+  try {
+    attemptStart = readMonotonicNow(dependencies);
+  } catch {
+    throw authError(
+      'PROCESS_FAILED',
+      'GitHub credential bootstrap failed',
+    );
+  }
+  if (options.deadlineMs - attemptStart <= 0) {
     throw authError(
       'TIMEOUT',
       'GitHub credential bootstrap timed out',
     );
   }
-  const effectiveTimeoutMs = Math.min(
-    AUTH_ATTEMPT_TIMEOUT_MS,
-    remainingMs,
-  );
 
   return new Promise<DisposableProjectTemplateGhCredential>(
     (resolve, reject) => {
       let child: ChildProcess;
       try {
-        child = dependencies.spawn('gh', GH_AUTH_ARGS, {
-          shell: false,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: buildGhEnvironment(),
-        });
+        child = Reflect.apply(
+          dependencies.spawn,
+          dependencies.receiver,
+          ['gh', GH_AUTH_ARGS, {
+            shell: false,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: buildGhEnvironment(),
+          }],
+        ) as ChildProcess;
       } catch (error) {
         reject(mapProcessError(error));
         return;
       }
-      if (child.stdout === null || child.stderr === null) {
+      if (
+        typeof child !== 'object'
+        || child === null
+        || types.isProxy(child)
+      ) {
         reject(authError(
           'PROCESS_FAILED',
           'GitHub credential bootstrap failed',
@@ -475,95 +535,48 @@ export async function acquireProjectTemplateGhCredential(
         return;
       }
 
+      const kill = findDataFunction(child, 'kill');
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let stdoutBytes = 0;
       let stderrBytes = 0;
       let settled = false;
-      let pendingFailure: PendingFailureCode | undefined;
+      let pendingError: ProjectTemplateGhAuthError | undefined;
+      const streams: {
+        stdout?: Readable;
+        stderr?: Readable;
+      } = {};
+      let stdoutListening = false;
+      let stderrListening = false;
+      let childListening = false;
       const timers: {
         timeout?: ReturnType<typeof setTimeout>;
         forceKill?: ReturnType<typeof setTimeout>;
+        reap?: ReturnType<typeof setTimeout>;
       } = {};
 
-      const abortHandler = (): void => {
-        terminate('ABORTED');
-      };
-
-      const cleanup = (): void => {
-        if (timers.timeout !== undefined) clearTimeout(timers.timeout);
-        if (timers.forceKill !== undefined) {
-          clearTimeout(timers.forceKill);
-        }
-        if (options.signal !== undefined) {
-          removeAbortListener(options.signal, abortHandler);
+      const safeKill = (signal: NodeJS.Signals): void => {
+        if (kill === undefined) return;
+        try {
+          Reflect.apply(kill, child, [signal]);
+        } catch {
+          // Reap timers remain authoritative even if the platform kill fails.
         }
       };
 
-      const rejectOnce = (error: ProjectTemplateGhAuthError): void => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        wipeBuffers(stdoutChunks);
-        wipeBuffers(stderrChunks);
-        reject(error);
-      };
-
-      const terminate = (code: PendingFailureCode): void => {
-        if (settled || pendingFailure !== undefined) return;
-        pendingFailure = code;
-        child.kill('SIGTERM');
-        // Rejection is deliberately deferred to "close": callers must never
-        // continue while a credential-producing child may still be alive.
-        timers.forceKill = setTimeout(() => {
-          if (!settled) child.kill('SIGKILL');
-        }, FORCE_KILL_DELAY_MS);
-        timers.forceKill.unref?.();
-      };
-
-      const append = (
-        target: 'stdout' | 'stderr',
-        chunk: Buffer | string,
-      ): void => {
-        if (settled || pendingFailure !== undefined) return;
-        const byteLength = Buffer.isBuffer(chunk)
-          ? chunk.length
-          : Buffer.byteLength(chunk, 'utf8');
-        if (target === 'stdout') {
-          // Check before copying so even one hostile chunk cannot make our
-          // retained credential buffer exceed the documented bound.
-          if (stdoutBytes + byteLength > MAX_STDOUT_BYTES) {
-            terminate('OUTPUT_LIMIT');
-            return;
-          }
-          const buffer = Buffer.from(chunk);
-          stdoutChunks.push(buffer);
-          stdoutBytes += byteLength;
-          return;
-        }
-        if (stderrBytes + byteLength > MAX_STDERR_BYTES) {
-          terminate('OUTPUT_LIMIT');
-          return;
-        }
-        const buffer = Buffer.from(chunk);
-        stderrChunks.push(buffer);
-        stderrBytes += byteLength;
-      };
-
-      child.stdout.on('data', (chunk: Buffer | string) => {
+      const stdoutDataHandler = (chunk: Buffer | string): void => {
         append('stdout', chunk);
-      });
-      child.stderr.on('data', (chunk: Buffer | string) => {
+      };
+      const stderrDataHandler = (chunk: Buffer | string): void => {
         append('stderr', chunk);
-      });
-      child.on('error', (error: unknown) => {
-        if (pendingFailure !== undefined) return;
-        rejectOnce(mapProcessError(error));
-      });
-      child.on('close', (exitCode: number | null) => {
+      };
+      const childErrorHandler = (error: unknown): void => {
+        terminate(mapProcessError(error));
+      };
+      const childCloseHandler = (exitCode: number | null): void => {
         if (settled) return;
-        if (pendingFailure !== undefined) {
-          rejectOnce(pendingFailureError(pendingFailure));
+        if (pendingError !== undefined) {
+          rejectOnce(pendingError);
           return;
         }
         if (exitCode === 4) {
@@ -580,35 +593,242 @@ export async function acquireProjectTemplateGhCredential(
           ));
           return;
         }
-        let stdout: Buffer | undefined;
+        resolveCredential();
+      };
+      const abortHandler = (): void => {
+        terminate(authError(
+          'ABORTED',
+          'GitHub credential bootstrap was cancelled',
+        ));
+      };
+
+      const cleanup = (): void => {
+        if (timers.timeout !== undefined) clearTimeout(timers.timeout);
+        if (timers.forceKill !== undefined) clearTimeout(timers.forceKill);
+        if (timers.reap !== undefined) clearTimeout(timers.reap);
+        if (options.signal !== undefined) {
+          try {
+            removeAbortListener(options.signal, abortHandler);
+          } catch {
+            // Cleanup remains best-effort after the validated signal changed.
+          }
+        }
+        if (stdoutListening && streams.stdout !== undefined) {
+          try {
+            EventEmitter.prototype.removeListener.call(
+              streams.stdout,
+              'data',
+              stdoutDataHandler,
+            );
+          } catch {
+            // Never let a malformed injected stream suppress terminal cleanup.
+          }
+          stdoutListening = false;
+        }
+        if (stderrListening && streams.stderr !== undefined) {
+          try {
+            EventEmitter.prototype.removeListener.call(
+              streams.stderr,
+              'data',
+              stderrDataHandler,
+            );
+          } catch {
+            // Never let a malformed injected stream suppress terminal cleanup.
+          }
+          stderrListening = false;
+        }
+        if (childListening) {
+          try {
+            EventEmitter.prototype.removeListener.call(
+              child,
+              'error',
+              childErrorHandler,
+            );
+            EventEmitter.prototype.removeListener.call(
+              child,
+              'close',
+              childCloseHandler,
+            );
+          } catch {
+            // The bounded reap result is still authoritative.
+          }
+          childListening = false;
+        }
+      };
+
+      const rejectOnce = (error: ProjectTemplateGhAuthError): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        wipeBuffers(stdoutChunks);
+        wipeBuffers(stderrChunks);
+        reject(error);
+      };
+
+      const terminate = (error: ProjectTemplateGhAuthError): void => {
+        if (settled || pendingError !== undefined) return;
+        pendingError = error;
+        safeKill('SIGTERM');
+        // Rejection is deliberately deferred to "close": callers must never
+        // continue while a credential-producing child may still be alive.
+        timers.forceKill = setTimeout(() => {
+          if (settled) return;
+          safeKill('SIGKILL');
+          timers.reap = setTimeout(() => {
+            rejectOnce(authError(
+              'PROCESS_FAILED',
+              'GitHub credential process could not be reaped',
+            ));
+          }, FINAL_REAP_GRACE_MS);
+          timers.reap.unref?.();
+        }, FORCE_KILL_DELAY_MS);
+        timers.forceKill.unref?.();
+      };
+
+      const append = (
+        target: 'stdout' | 'stderr',
+        chunk: Buffer | string,
+      ): void => {
+        if (settled || pendingError !== undefined) return;
+        const byteLength = Buffer.isBuffer(chunk)
+          ? chunk.length
+          : Buffer.byteLength(chunk, 'utf8');
+        if (target === 'stdout') {
+          // Check before copying so even one hostile chunk cannot make our
+          // retained credential buffer exceed the documented bound.
+          if (stdoutBytes + byteLength > MAX_STDOUT_BYTES) {
+            terminate(pendingFailureError('OUTPUT_LIMIT'));
+            return;
+          }
+          stdoutChunks.push(Buffer.from(chunk));
+          stdoutBytes += byteLength;
+          return;
+        }
+        if (stderrBytes + byteLength > MAX_STDERR_BYTES) {
+          terminate(pendingFailureError('OUTPUT_LIMIT'));
+          return;
+        }
+        stderrChunks.push(Buffer.from(chunk));
+        stderrBytes += byteLength;
+      };
+
+      const resolveCredential = (): void => {
+        let combined: Buffer | undefined;
         let token: Buffer | undefined;
         try {
-          stdout = Buffer.concat(stdoutChunks, stdoutBytes);
-          token = parseToken(stdout);
+          combined = Buffer.concat(stdoutChunks, stdoutBytes);
+          token = parseToken(combined);
           const credential = createCredential(token);
           token = undefined;
           settled = true;
           cleanup();
           wipeBuffers(stdoutChunks);
           wipeBuffers(stderrChunks);
-          stdout.fill(0);
+          combined.fill(0);
           resolve(credential);
         } catch {
           if (token !== undefined) token.fill(0);
-          if (stdout !== undefined) stdout.fill(0);
+          if (combined !== undefined) combined.fill(0);
           rejectOnce(authError(
             'INVALID_TOKEN',
             'GitHub CLI returned an invalid credential',
           ));
         }
-      });
+      };
+
+      try {
+        EventEmitter.prototype.on.call(
+          child,
+          'error',
+          childErrorHandler,
+        );
+        childListening = true;
+        EventEmitter.prototype.on.call(
+          child,
+          'close',
+          childCloseHandler,
+        );
+      } catch {
+        terminate(authError(
+          'PROCESS_FAILED',
+          'GitHub credential bootstrap failed',
+        ));
+        return;
+      }
+
+      let afterSpawn: number;
+      try {
+        afterSpawn = readMonotonicNow(dependencies);
+      } catch {
+        terminate(authError(
+          'PROCESS_FAILED',
+          'GitHub credential bootstrap failed',
+        ));
+        return;
+      }
+      if (afterSpawn < attemptStart) {
+        terminate(authError(
+          'PROCESS_FAILED',
+          'GitHub credential bootstrap failed',
+        ));
+        return;
+      }
+      const effectiveTimeoutMs = Math.min(
+        options.deadlineMs - afterSpawn,
+        AUTH_ATTEMPT_TIMEOUT_MS - (afterSpawn - attemptStart),
+      );
+      if (effectiveTimeoutMs <= 0) {
+        terminate(pendingFailureError('TIMEOUT'));
+        return;
+      }
 
       if (options.signal !== undefined) {
         addAbortListener(options.signal, abortHandler);
-        if (isSignalAborted(options.signal)) abortHandler();
+        if (isSignalAborted(options.signal)) {
+          abortHandler();
+          return;
+        }
       }
+
+      const stdoutValue = ownDataValue(child, 'stdout');
+      const stderrValue = ownDataValue(child, 'stderr');
+      if (
+        !(stdoutValue instanceof Readable)
+        || types.isProxy(stdoutValue)
+        || !(stderrValue instanceof Readable)
+        || types.isProxy(stderrValue)
+      ) {
+        terminate(authError(
+          'PROCESS_FAILED',
+          'GitHub credential bootstrap failed',
+        ));
+        return;
+      }
+      streams.stdout = stdoutValue;
+      streams.stderr = stderrValue;
+      try {
+        Readable.prototype.on.call(
+          streams.stdout,
+          'data',
+          stdoutDataHandler,
+        );
+        stdoutListening = true;
+        Readable.prototype.on.call(
+          streams.stderr,
+          'data',
+          stderrDataHandler,
+        );
+        stderrListening = true;
+      } catch {
+        terminate(authError(
+          'PROCESS_FAILED',
+          'GitHub credential bootstrap failed',
+        ));
+        return;
+      }
+
       timers.timeout = setTimeout(() => {
-        terminate('TIMEOUT');
+        terminate(pendingFailureError('TIMEOUT'));
       }, effectiveTimeoutMs);
       timers.timeout.unref?.();
     },
