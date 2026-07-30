@@ -104,6 +104,32 @@ describe('project template YAML document three-way merge', () => {
     expect(output).toContain('copilot');
   });
 
+  it('does not remove a forbidden provider through an incoming update', () => {
+    const result = merge(
+      'forbidden_providers: [openai]\n',
+      'forbidden_providers: [openai]\n',
+      'forbidden_providers: []\n',
+    );
+
+    expect(result).toMatchObject({ status: 'merged', changed: false });
+    expect(result.status === 'merged' && result.content.toString())
+      .toContain('openai');
+  });
+
+  it('preserves ordered project gates while appending incoming gates', () => {
+    const result = merge(
+      'workflow_overrides:\n  quality_gates:\n    - npm test\n',
+      'workflow_overrides:\n  quality_gates:\n    - npm test\n    - npm run lint\n',
+      'workflow_overrides:\n  quality_gates:\n    - npm run e2e\n',
+    );
+
+    expect(result).toMatchObject({ status: 'merged', changed: true });
+    const output = result.status === 'merged' ? result.content.toString() : '';
+    expect(output).toContain('npm test');
+    expect(output).toContain('npm run lint');
+    expect(output).toContain('npm run e2e');
+  });
+
   it('keeps global-only local configuration and blocks incoming credentials', () => {
     const globalOnly = merge(
       'logging:\n  level: info\n',
@@ -122,6 +148,16 @@ describe('project template YAML document three-way merge', () => {
       'language: en\n',
       'language: en\n',
       'language: en\nopenai_api_key: unsafe\n',
+    )).toMatchObject({
+      status: 'blocked',
+      code: 'FORBIDDEN_PATH',
+      document: 'incoming',
+    });
+
+    expect(merge(
+      'openai_api_key: unsafe\n',
+      'language: ja\n',
+      'openai_api_key: unsafe\n',
     )).toMatchObject({
       status: 'blocked',
       code: 'FORBIDDEN_PATH',

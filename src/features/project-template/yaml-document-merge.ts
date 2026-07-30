@@ -198,6 +198,47 @@ function valueAt(value: MaybeValue, key: string): MaybeValue {
   return isMapping(value) && Object.hasOwn(value, key) ? value[key]! : MISSING;
 }
 
+function containsForbiddenPath(
+  document: ProjectTemplateConfigDocument,
+  value: SemanticValue,
+  path: readonly string[] = [],
+): boolean {
+  if (isMapping(value)) {
+    return Object.entries(value).some(([key, child]) => (
+      containsForbiddenPath(document, child, [...path, key])
+    ));
+  }
+  return resolveProjectTemplateConfigMergeRule(document, path).ownership === 'forbidden';
+}
+
+function canonicalSequenceIdentity(value: SemanticValue): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalSequenceIdentity).join(',')}]`;
+  }
+  if (isMapping(value)) {
+    return `{${Object.keys(value).sort().map((key) => (
+      `${JSON.stringify(key)}:${canonicalSequenceIdentity(value[key]!)}`
+    )).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function mergeOrderedSequence(
+  local: readonly SemanticValue[],
+  incoming: readonly SemanticValue[],
+): SemanticValue[] {
+  const merged = [...local];
+  const seen = new Set(local.map(canonicalSequenceIdentity));
+  for (const item of incoming) {
+    const identity = canonicalSequenceIdentity(item);
+    if (!seen.has(identity)) {
+      merged.push(item);
+      seen.add(identity);
+    }
+  }
+  return merged;
+}
+
 function copyLocalNodePresentation(previous: unknown, replacement: unknown): void {
   if (
     previous === null
@@ -271,6 +312,9 @@ export function mergeProjectTemplateYamlDocument(
   if ('status' in parsedLocal) return parsedLocal;
   const parsedIncoming = parseSafeDocument(options.incoming, 'incoming');
   if ('status' in parsedIncoming) return parsedIncoming;
+  if (containsForbiddenPath(options.document, parsedIncoming.value)) {
+    return blocked('FORBIDDEN_PATH', 'incoming');
+  }
 
   const diagnostics = eolDiagnostics(textOf(options.local));
   const conflicts: ProjectTemplateYamlMergeConflict[] = [];
@@ -326,19 +370,20 @@ export function mergeProjectTemplateYamlDocument(
       });
       return;
     }
-    if (equal(local, base)) {
-      setDocumentValue(parsedLocal.document, path, incoming);
-      semanticChanged = true;
-      return;
-    }
     if (Array.isArray(local) && Array.isArray(incoming)) {
       if (rule.sequencePolicy === 'monotonic-set') {
-        const merged = [...(Array.isArray(base) ? base : []), ...local];
-        for (const item of incoming) {
-          if (!merged.some((candidate) => isDeepStrictEqual(candidate, item))) {
-            merged.push(item);
-          }
+        const merged = mergeOrderedSequence(
+          local,
+          [...(Array.isArray(base) ? base : []), ...incoming],
+        );
+        if (!isDeepStrictEqual(local, merged)) {
+          setDocumentValue(parsedLocal.document, path, merged);
+          semanticChanged = true;
         }
+        return;
+      }
+      if (rule.sequencePolicy === 'ordered-keyed') {
+        const merged = mergeOrderedSequence(local, incoming);
         if (!isDeepStrictEqual(local, merged)) {
           setDocumentValue(parsedLocal.document, path, merged);
           semanticChanged = true;
@@ -365,6 +410,11 @@ export function mergeProjectTemplateYamlDocument(
         }
         return;
       }
+    }
+    if (equal(local, base)) {
+      setDocumentValue(parsedLocal.document, path, incoming);
+      semanticChanged = true;
+      return;
     }
     if (
       (Array.isArray(base) || Array.isArray(local) || Array.isArray(incoming))
