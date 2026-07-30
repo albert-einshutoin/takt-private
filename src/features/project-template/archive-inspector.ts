@@ -591,7 +591,8 @@ async function inspectTaktpackWithExpectedLinks(
     validateReportAgainstManifest(report, manifest);
     const finalStat = await runIo('final-stat', 'archive.finalStat', () => handle.stat());
     if (
-      finalStat.dev !== stat.dev
+      finalStat.nlink !== expectedLinks
+      || finalStat.dev !== stat.dev
       || finalStat.ino !== stat.ino
       || finalStat.size !== stat.size
       || finalStat.mtimeMs !== stat.mtimeMs

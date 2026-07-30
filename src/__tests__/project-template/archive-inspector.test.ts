@@ -1,6 +1,7 @@
 import {
   appendFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -336,6 +337,21 @@ describe('taktpack streaming inspector', () => {
     expect(phases).toContain('close');
     expect(error).toMatchObject({ code: 'ARCHIVE_READ_FAILED', field: 'archive.read' });
     expect(String(error)).not.toContain(root);
+  });
+
+  it('rejects a link-count change observed by the final descriptor stat', async () => {
+    const root = makeRoot();
+    const pack = await makePack(root);
+    const alias = join(root, 'inspection-race-alias.taktpack');
+
+    const error = await inspectTaktpackWithIoSeam(pack, {}, {
+      onPhase(phase) {
+        if (phase === 'final-stat') linkSync(pack, alias);
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'SOURCE_CHANGED', field: 'archive' });
+    expect(existsSync(alias)).toBe(true);
   });
 
   it('rejects trailing bytes after the two USTAR end blocks', async () => {

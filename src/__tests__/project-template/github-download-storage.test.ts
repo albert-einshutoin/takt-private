@@ -1964,7 +1964,9 @@ describe('GitHub template cache orphan reclaim', () => {
     ).toBe(false);
   });
 
-  it('durably syncs prior deletions when a later candidate fails', async () => {
+  it.skipIf(process.platform === 'win32')(
+    'durably syncs prior deletions when a later candidate fails',
+    async () => {
     const cacheRoot = prepareCacheRoot();
     const shaRoot = join(cacheRoot, 'sha256');
     mkdirSync(shaRoot, { mode: 0o700 });
@@ -1999,9 +2001,12 @@ describe('GitHub template cache orphan reclaim', () => {
     expect(unlinks).toBe(2);
     expect(directorySyncs).toBe(1);
     expect(readdirSync(shaRoot)).toHaveLength(1);
-  });
+    },
+  );
 
-  it('revalidates a retained nlink2 final after unlink and directory fsync', async () => {
+  it.skipIf(process.platform === 'win32')(
+    'revalidates a retained nlink2 final after unlink and directory fsync',
+    async () => {
     const cacheRoot = prepareCacheRoot();
     const content = await makePack(makeRoot('takt-reclaim-post-fsync-'));
     const sha = sha256(content);
@@ -2033,6 +2038,85 @@ describe('GitHub template cache orphan reclaim', () => {
     expect(existsSync(temp)).toBe(false);
     expect(lstatSync(final).nlink).toBe(1);
     expect(finalCloses).toBe(1);
+    },
+  );
+
+  it('revalidates nlink2 final immediately after unlink on every platform', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const content = await makePack(makeRoot('takt-reclaim-post-unlink-'));
+    const sha = sha256(content);
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const temp = cacheTempPath(cacheRoot, 917015, sha);
+    const final = join(shaRoot, `${sha}.taktpack`);
+    writeFileSync(temp, content, { mode: 0o600 });
+    linkSync(temp, final);
+
+    const error = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: {
+        cacheProcessProbe: deadProcessProbe,
+        onCachePhase(phase) {
+          if ((phase as string) === 'after-cache-reclaim-unlink') {
+            writeFileSync(final, Buffer.alloc(content.byteLength));
+          }
+        },
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(existsSync(temp)).toBe(false);
+    expect(lstatSync(final).nlink).toBe(1);
+  });
+
+  it('fails closed when unsafe candidate descriptor close fails', async () => {
+    for (const scenario of ['path', 'hash', 'inspection'] as const) {
+      const cacheRoot = prepareCacheRoot();
+      const shaRoot = join(cacheRoot, 'sha256');
+      mkdirSync(shaRoot, { mode: 0o700 });
+      const invalidContent = Buffer.from('invalid archive');
+      const sha = scenario === 'inspection'
+        ? sha256(invalidContent)
+        : '7'.repeat(64);
+      const closeKind = scenario === 'path' ? 'temporary' : 'final';
+      const temp = cacheTempPath(
+        cacheRoot,
+        917017,
+        sha,
+        scenario === 'path'
+          ? '823e4567-e89b-42d3-a456-426614174000'
+          : scenario === 'hash'
+            ? '923e4567-e89b-42d3-a456-426614174000'
+            : 'a23e4567-e89b-42d3-a456-426614174000',
+      );
+      writeFileSync(temp, invalidContent, { mode: 0o600 });
+      if (scenario === 'path') {
+        writeFileSync(join(shaRoot, `${sha}.taktpack`), '', { mode: 0o600 });
+      } else {
+        linkSync(temp, join(shaRoot, `${sha}.taktpack`));
+      }
+      let closeCalls = 0;
+
+      const error = await reclaimGithubTemplateCacheTemps({
+        cacheRoot,
+        ioSeam: {
+          cacheProcessProbe: deadProcessProbe,
+          cacheClose(_fd, currentKind) {
+            if (currentKind === closeKind) {
+              closeCalls += 1;
+              throw new Error('ghp_unsafe_candidate_close_secret');
+            }
+          },
+        },
+      }).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code: 'IO_FAILURE' });
+      expect(String((error as Error).message)).not.toContain(
+        'ghp_unsafe_candidate_close_secret',
+      );
+      expect(closeCalls).toBe(1);
+      expect(existsSync(temp)).toBe(true);
+    }
   });
 
   it('retains nlink2 when its final alias disappears before unlink', async () => {
