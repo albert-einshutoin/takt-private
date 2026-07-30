@@ -1228,9 +1228,9 @@ export function prepareProjectTemplateApplyPlan(
       return entry;
     }
 
-    // Large target snapshots intentionally omit file bodies. When their digest
-    // still matches the formal lock, the already verified immutable baseline is
-    // the same local content and can safely complete the three-way input.
+    // Large target snapshots intentionally omit file bodies. A digest match
+    // against either the formal lock or inspected incoming manifest identifies
+    // verified bytes that can safely complete the three-way input.
     const localContent = local?.content
       ?? (
         local !== undefined
@@ -1238,7 +1238,9 @@ export function prepareProjectTemplateApplyPlan(
         && base !== undefined
         && local.sha256 === formalBase.sha256
           ? base
-          : undefined
+          : local !== undefined && local.sha256 === entry.incomingSha256
+            ? incoming
+            : undefined
       );
     const hasCompleteExistingMerge =
       formalBase !== undefined

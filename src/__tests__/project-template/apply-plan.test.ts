@@ -307,6 +307,36 @@ describe('project template three-way apply plan', () => {
     expect(prepared.resolvedContents).toEqual([]);
   });
 
+  it('reuses verified incoming bytes for a large current config with a local-only mode', () => {
+    const base = `${'# padding\n'.repeat(8_000)}language: en\n`;
+    const incoming = `${base}timezone: UTC\n`;
+    const planInput = input({
+      base,
+      local: incoming,
+      incoming,
+      policy: 'merge',
+    });
+    planInput.localEntries[0]!.mode = '0600';
+    delete planInput.localEntries[0]!.content;
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'keep',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeSha256: hash(incoming),
+      afterSha256: hash(incoming),
+      beforeMode: '0600',
+      afterMode: '0600',
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
   it('blocks an unsafe devloop policy on a direct add', () => {
     const incoming = 'mode: unsafe\n';
     const planInput = input({});
