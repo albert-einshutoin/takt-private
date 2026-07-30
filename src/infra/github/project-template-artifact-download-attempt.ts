@@ -122,6 +122,7 @@ interface AttemptSettlementSnapshot {
 interface AttemptConstructionLatch {
   readonly kind: 'authenticated' | 'pinned';
   event: AttemptEvent | undefined;
+  rejectedGrant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
   invalid: boolean;
 }
 
@@ -138,7 +139,7 @@ interface AttemptState {
   // Borrowed: the retry coordinator owns exact credential disposal.
   credential: DisposableProjectTemplateGhCredential | undefined;
   input: AttemptIdentity | undefined;
-  readonly dependencies: AttemptDependenciesSnapshot;
+  dependencies: AttemptDependenciesSnapshot | undefined;
   transport: AttemptTransport | undefined;
   transportKind: 'authenticated' | 'pinned' | undefined;
   pendingGrant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
@@ -153,6 +154,7 @@ interface AttemptState {
   deliveryGeneration: number;
   deliveryClaim: number | undefined;
   token: AttemptCallbackToken;
+  facade: ProjectTemplateArtifactSingleAttempt | undefined;
 }
 
 const attemptAuthorities = new WeakMap<
@@ -160,6 +162,14 @@ ProjectTemplateArtifactSingleAttempt,
 AttemptState
 >();
 const disposedAttempts = new WeakSet<ProjectTemplateArtifactSingleAttempt>();
+const terminalAttempts = new WeakMap<
+ProjectTemplateArtifactSingleAttempt,
+| { readonly kind: 'done' }
+| {
+  readonly kind: 'failed';
+  readonly failure: ProjectTemplateArtifactSingleAttemptFailure;
+}
+>();
 
 const DEFAULT_DEPENDENCIES =
   Object.freeze<ProjectTemplateArtifactDownloadAttemptDependencies>({
@@ -183,42 +193,90 @@ const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
 )?.get;
 const TYPED_ARRAY_SET = Uint8Array.prototype.set;
 
-function failure(
-  code: ProjectTemplateArtifactSingleAttemptFailureCode,
-  retryable: boolean,
-  statusCode?: number,
-): ProjectTemplateArtifactSingleAttemptFailure {
-  const value = Object.create(null) as Record<string, unknown>;
-  Object.defineProperties(value, {
-    code: { enumerable: true, value: code },
-    retryable: { enumerable: true, value: retryable },
-    replaySafe: { enumerable: true, value: retryable },
-    ...(statusCode === undefined
-      ? {}
-      : { statusCode: { enumerable: true, value: statusCode } }),
-  });
-  return Object.freeze(value) as unknown as
-    ProjectTemplateArtifactSingleAttemptFailure;
+type TerminalFailure = Extract<
+ProjectTemplateArtifactSingleAttemptFailure,
+{ readonly retryable: false; readonly code:
+  | 'DNS_REJECTED'
+  | 'INVALID_RESPONSE'
+  | 'OUTPUT_LIMIT'
+  | 'INTERNAL' }
+>;
+type NetworkFailure = Extract<
+ProjectTemplateArtifactSingleAttemptFailure,
+{ readonly code: 'NETWORK' }
+>;
+type HttpFailure = Extract<
+ProjectTemplateArtifactSingleAttemptFailure,
+{ readonly code: 'HTTP_STATUS' }
+>;
+
+function terminalFailure(code: TerminalFailure['code']): TerminalFailure {
+  const value: TerminalFailure = Object.assign(
+    Object.create(null) as object,
+    { code, retryable: false as const, replaySafe: false as const },
+  );
+  return Object.freeze(value);
 }
 
-const INTERNAL_FAILURE = failure('INTERNAL', false);
-const NETWORK_FAILURE = failure('NETWORK', true);
-const DNS_FAILURE = failure('DNS_REJECTED', false);
-const INVALID_RESPONSE_FAILURE = failure('INVALID_RESPONSE', false);
-const OUTPUT_LIMIT_FAILURE = failure('OUTPUT_LIMIT', false);
+function networkFailure(replaySafe: boolean): NetworkFailure {
+  if (replaySafe) {
+    const value: Extract<NetworkFailure, { readonly retryable: true }> =
+      Object.assign(Object.create(null) as object, {
+        code: 'NETWORK' as const,
+        retryable: true as const,
+        replaySafe: true as const,
+      });
+    return Object.freeze(value);
+  }
+  const value: Extract<NetworkFailure, { readonly retryable: false }> =
+    Object.assign(Object.create(null) as object, {
+      code: 'NETWORK' as const,
+      retryable: false as const,
+      replaySafe: false as const,
+    });
+  return Object.freeze(value);
+}
 
-function statusFailure(
+function httpFailure(
   statusCode: number,
-): ProjectTemplateArtifactSingleAttemptFailure {
-  const retryable = (
+  replaySafe: boolean,
+): HttpFailure {
+  if (replaySafe) {
+    const value: Extract<HttpFailure, { readonly retryable: true }> =
+      Object.assign(Object.create(null) as object, {
+        code: 'HTTP_STATUS' as const,
+        retryable: true as const,
+        replaySafe: true as const,
+        statusCode,
+      });
+    return Object.freeze(value);
+  }
+  const value: Extract<HttpFailure, { readonly retryable: false }> =
+    Object.assign(Object.create(null) as object, {
+      code: 'HTTP_STATUS' as const,
+      retryable: false as const,
+      replaySafe: false as const,
+      statusCode,
+    });
+  return Object.freeze(value);
+}
+
+const INTERNAL_FAILURE = terminalFailure('INTERNAL');
+const NETWORK_FAILURE = networkFailure(true);
+const DNS_FAILURE = terminalFailure('DNS_REJECTED');
+const INVALID_RESPONSE_FAILURE = terminalFailure('INVALID_RESPONSE');
+const OUTPUT_LIMIT_FAILURE = terminalFailure('OUTPUT_LIMIT');
+
+function statusFailure(statusCode: number): HttpFailure {
+  return httpFailure(
+    statusCode,
     statusCode === 408
-    || statusCode === 429
-    || statusCode === 500
-    || statusCode === 502
-    || statusCode === 503
-    || statusCode === 504
+      || statusCode === 429
+      || statusCode === 500
+      || statusCode === 502
+      || statusCode === 503
+      || statusCode === 504,
   );
-  return failure('HTTP_STATUS', retryable, statusCode);
 }
 
 function invalidArgument(): TypeError {
@@ -485,6 +543,17 @@ function disposePendingGrant(state: AttemptState): void {
   }
 }
 
+function safelyDisposeGrant(
+  grant: DisposableProjectTemplateArtifactRedirectGrant | undefined,
+): void {
+  if (grant === undefined) return;
+  try {
+    grant.dispose();
+  } catch {
+    // Logical callback revocation remains authoritative.
+  }
+}
+
 function isAttemptStopped(state: AttemptState): boolean {
   return (
     state.phase === 'disposed'
@@ -498,11 +567,9 @@ function failureAfterDelivery(
   reason: ProjectTemplateArtifactSingleAttemptFailure,
 ): ProjectTemplateArtifactSingleAttemptFailure {
   if (!state.deliveredAny || !reason.retryable) return reason;
-  return failure(
-    reason.code,
-    false,
-    reason.code === 'HTTP_STATUS' ? reason.statusCode : undefined,
-  );
+  return reason.code === 'HTTP_STATUS'
+    ? httpFailure(reason.statusCode, false)
+    : networkFailure(false);
 }
 
 function invokeTerminalSettlement(
@@ -520,9 +587,40 @@ function invokeTerminalSettlement(
   }
 }
 
+function minimizeTerminalAuthority(
+  state: AttemptState,
+  terminal:
+    | { readonly kind: 'done' }
+    | {
+      readonly kind: 'failed';
+      readonly failure: ProjectTemplateArtifactSingleAttemptFailure;
+    },
+): void {
+  const facade = state.facade;
+  state.facade = undefined;
+  state.credential = undefined;
+  state.input = undefined;
+  state.dependencies = undefined;
+  state.transport = undefined;
+  state.transportKind = undefined;
+  state.pendingGrant = undefined;
+  state.pending = undefined;
+  state.terminalFailure = terminal.kind === 'failed'
+    ? terminal.failure
+    : undefined;
+  state.construction = undefined;
+  state.token.dispatch = undefined;
+  if (facade === undefined) return;
+  attemptAuthorities.delete(facade);
+  if (!disposedAttempts.has(facade)) {
+    terminalAttempts.set(facade, Object.freeze(terminal));
+  }
+}
+
 function failAttempt(
   state: AttemptState,
   reason: ProjectTemplateArtifactSingleAttemptFailure = INTERNAL_FAILURE,
+  cleanupEventResource?: () => void,
 ): void {
   if (
     state.phase === 'failed'
@@ -541,11 +639,20 @@ function failAttempt(
   state.token.dispatch = undefined;
   const pending = state.pending;
   state.pending = undefined;
+  try {
+    cleanupEventResource?.();
+  } catch {
+    // The committed redacted failure remains primary.
+  }
   disposePendingGrant(state);
   safelyStop(takeTransport(state));
   if (pending !== undefined) {
     invokeTerminalSettlement(pending, 'fail', finalReason);
   }
+  minimizeTerminalAuthority(state, {
+    kind: 'failed',
+    failure: finalReason,
+  });
 }
 
 function finishAttempt(state: AttemptState): void {
@@ -570,6 +677,7 @@ function finishAttempt(state: AttemptState): void {
   if (pending !== undefined) {
     invokeTerminalSettlement(pending, 'done');
   }
+  minimizeTerminalAuthority(state, { kind: 'done' });
 }
 
 function resumeDemand(state: AttemptState): void {
@@ -773,6 +881,7 @@ function installConstructionCapture(
   const latch: AttemptConstructionLatch = {
     kind,
     event: undefined,
+    rejectedGrant: undefined,
     invalid: false,
   };
   state.construction = latch;
@@ -782,10 +891,10 @@ function installConstructionCapture(
       : event.kind === 'response';
     if (!allowed || latch.event !== undefined) {
       if (event.kind === 'redirect') {
-        try {
-          event.grant.dispose();
-        } catch {
-          // The bounded latch never owns a rejected extra grant.
+        if (latch.rejectedGrant === undefined) {
+          latch.rejectedGrant = event.grant;
+        } else if (latch.rejectedGrant !== event.grant) {
+          safelyDisposeGrant(event.grant);
         }
       }
       latch.invalid = true;
@@ -804,14 +913,11 @@ function drainConstructionLatch(
   state.construction = undefined;
   installDispatch(state, token);
   if (latch.invalid) {
-    if (latch.event?.kind === 'redirect') {
-      try {
-        latch.event.grant.dispose();
-      } catch {
-        // Invalid construction never transfers the retained grant.
-      }
-    }
-    failAttempt(state, INVALID_RESPONSE_FAILURE);
+    failAttempt(
+      state,
+      INVALID_RESPONSE_FAILURE,
+      () => disposeConstructionGrants(latch),
+    );
     return false;
   }
   const event = latch.event;
@@ -819,12 +925,13 @@ function drainConstructionLatch(
   return event !== undefined;
 }
 
-function disposeLatchedRedirect(latch: AttemptConstructionLatch): void {
-  if (latch.event?.kind !== 'redirect') return;
-  try {
-    latch.event.grant.dispose();
-  } catch {
-    // A throwing constructor cannot transfer a latched grant.
+function disposeConstructionGrants(latch: AttemptConstructionLatch): void {
+  const accepted = latch.event?.kind === 'redirect'
+    ? latch.event.grant
+    : undefined;
+  safelyDisposeGrant(accepted);
+  if (latch.rejectedGrant !== accepted) {
+    safelyDisposeGrant(latch.rejectedGrant);
   }
 }
 
@@ -850,14 +957,13 @@ function installDispatch(
           )
         )
       ) {
-        if (event.kind === 'redirect') {
-          try {
-            event.grant.dispose();
-          } catch {
-            // A second grant cannot supersede the pending ownership transfer.
-          }
-        }
-        failAttempt(state, INVALID_RESPONSE_FAILURE);
+        failAttempt(
+          state,
+          INVALID_RESPONSE_FAILURE,
+          event.kind === 'redirect'
+            ? () => safelyDisposeGrant(event.grant)
+            : undefined,
+        );
       } else if (event.kind === 'failure') {
         failAttempt(state, event.failure);
       } else if (event.kind === 'authenticated-request-failure') {
@@ -912,15 +1018,27 @@ function handoffRedirect(
     state.phase !== 'handoff-pending'
     || state.transportKind !== 'authenticated'
   ) {
-    try {
-      grant.dispose();
-    } catch {
-      // A late grant owns no active attempt authority.
+    if (isAttemptStopped(state)) safelyDisposeGrant(grant);
+    else {
+      failAttempt(
+        state,
+        INVALID_RESPONSE_FAILURE,
+        () => safelyDisposeGrant(grant),
+      );
     }
     return;
   }
   let hop: DisposableProjectTemplateArtifactRedirectHop | undefined;
   let pinned: ProjectTemplateArtifactPinnedTransport | undefined;
+  const dependencies = state.dependencies;
+  if (dependencies === undefined) {
+    failAttempt(
+      state,
+      INTERNAL_FAILURE,
+      () => safelyDisposeGrant(grant),
+    );
+    return;
+  }
   const nextToken: AttemptCallbackToken = { active: true };
   const pinnedHandlers = createPhysicalHandlers(nextToken).pinned;
   state.phase = 'constructing-pinned';
@@ -938,8 +1056,8 @@ function handoffRedirect(
       return;
     }
     const candidate: unknown = Reflect.apply(
-      state.dependencies.createPinnedTransport,
-      state.dependencies.receiver,
+      dependencies.createPinnedTransport,
+      dependencies.receiver,
       [hop, pinnedHandlers],
     );
     if (!isTransportCapability(candidate)) throw invalidArgument();
@@ -948,17 +1066,14 @@ function handoffRedirect(
   } catch {
     nextToken.active = false;
     nextToken.dispatch = undefined;
-    try {
-      hop?.dispose();
-    } catch {
-      // The stable attempt failure remains primary.
-    }
-    try {
-      grant.dispose();
-    } catch {
-      // The stable attempt failure remains primary.
-    }
-    failAttempt(state);
+    failAttempt(state, INTERNAL_FAILURE, () => {
+      try {
+        hop?.dispose();
+      } catch {
+        // The stable attempt failure remains primary.
+      }
+      safelyDisposeGrant(grant);
+    });
     return;
   }
   if (state.phase !== 'constructing-pinned') {
@@ -1000,18 +1115,20 @@ function scheduleRedirectHandoff(
     || state.bodyReady
     || state.deliveredAny
   ) {
-    if (grantIsValid) {
-      try {
-        grant.dispose();
-      } catch {
-        // A duplicate or late grant receives no attempt authority.
-      }
-    }
-    failAttempt(state, INVALID_RESPONSE_FAILURE);
+    failAttempt(
+      state,
+      INVALID_RESPONSE_FAILURE,
+      grantIsValid ? () => safelyDisposeGrant(grant) : undefined,
+    );
     return;
   }
   state.pendingGrant = grant;
   state.phase = 'handoff-pending';
+  const dependencies = state.dependencies;
+  if (dependencies === undefined) {
+    failAttempt(state);
+    return;
+  }
   let scheduling = true;
   let firedSynchronously = false;
   const callback = (): void => {
@@ -1023,8 +1140,8 @@ function scheduleRedirectHandoff(
   };
   try {
     Reflect.apply(
-      state.dependencies.scheduleHandoff,
-      state.dependencies.receiver,
+      dependencies.scheduleHandoff,
+      dependencies.receiver,
       [callback],
     );
     scheduling = false;
@@ -1032,12 +1149,10 @@ function scheduleRedirectHandoff(
       // Grant consumption inside onRedirect would race the authenticated
       // request's post-callback ownership transfer. Fail closed without
       // consuming when an injected scheduler violates the deferred contract.
-      disposePendingGrant(state);
       failAttempt(state);
     }
   } catch {
     scheduling = false;
-    disposePendingGrant(state);
     failAttempt(state);
   }
 }
@@ -1045,7 +1160,12 @@ function scheduleRedirectHandoff(
 function startAttempt(state: AttemptState): void {
   const credential = state.credential;
   const input = state.input;
-  if (credential === undefined || input === undefined) {
+  const dependencies = state.dependencies;
+  if (
+    credential === undefined
+    || input === undefined
+    || dependencies === undefined
+  ) {
     failAttempt(state);
     return;
   }
@@ -1059,8 +1179,8 @@ function startAttempt(state: AttemptState): void {
   let request: ProjectTemplateGithubReleaseAssetRequest;
   try {
     const candidate: unknown = Reflect.apply(
-      state.dependencies.createAuthenticatedRequest,
-      state.dependencies.receiver,
+      dependencies.createAuthenticatedRequest,
+      dependencies.receiver,
       [credential, Object.freeze({
         owner: input.owner,
         repo: input.repo,
@@ -1072,8 +1192,11 @@ function startAttempt(state: AttemptState): void {
     request = candidate;
   } catch {
     state.construction = undefined;
-    disposeLatchedRedirect(latch);
-    failAttempt(state);
+    failAttempt(
+      state,
+      INTERNAL_FAILURE,
+      () => disposeConstructionGrants(latch),
+    );
     return;
   }
   state.credential = undefined;
@@ -1175,6 +1298,7 @@ export function createProjectTemplateArtifactSingleAttempt(
     deliveryGeneration: 0,
     deliveryClaim: undefined,
     token,
+    facade: undefined,
   };
   const attempt = Object.freeze({
     pull(
@@ -1188,6 +1312,16 @@ export function createProjectTemplateArtifactSingleAttempt(
           invokeTerminalSettlement(snapshot, 'fail', INTERNAL_FAILURE);
           return undefined;
         }
+        const terminal = terminalAttempts.get(this);
+        if (terminal !== undefined) {
+          const snapshot = snapshotSettlement(settlement);
+          if (terminal.kind === 'done') {
+            invokeTerminalSettlement(snapshot, 'done');
+          } else {
+            invokeTerminalSettlement(snapshot, 'fail', terminal.failure);
+          }
+          return undefined;
+        }
         throw invalidArgument();
       }
       return pullAttempt(current, settlement);
@@ -1196,6 +1330,11 @@ export function createProjectTemplateArtifactSingleAttempt(
       const current = attemptAuthorities.get(this);
       if (current === undefined || types.isProxy(this)) {
         if (disposedAttempts.has(this)) return undefined;
+        if (terminalAttempts.has(this)) {
+          terminalAttempts.delete(this);
+          disposedAttempts.add(this);
+          return undefined;
+        }
         throw invalidArgument();
       }
       const result = disposeAttempt(current);
@@ -1204,6 +1343,7 @@ export function createProjectTemplateArtifactSingleAttempt(
       return result;
     },
   }) as unknown as ProjectTemplateArtifactSingleAttempt;
+  state.facade = attempt;
   attemptAuthorities.set(attempt, state);
   return attempt;
 }

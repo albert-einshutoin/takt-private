@@ -36,3 +36,28 @@ ProjectTemplateArtifactSingleAttemptFailure,
 >;
 // @ts-expect-error statusCode is available only for HTTP_STATUS.
 void network.statusCode;
+
+// @ts-expect-error Terminal DNS failures cannot be retryable.
+const retryableDns: ProjectTemplateArtifactSingleAttemptFailure = {
+  code: 'DNS_REJECTED',
+  retryable: true,
+  replaySafe: true,
+};
+void retryableDns;
+
+// @ts-expect-error Retryability and replay safety cannot disagree.
+const mismatchedNetwork: ProjectTemplateArtifactSingleAttemptFailure = {
+  code: 'NETWORK',
+  retryable: true,
+  replaySafe: false,
+};
+void mismatchedNetwork;
+
+const terminalWithStatus: ProjectTemplateArtifactSingleAttemptFailure = {
+  code: 'INTERNAL',
+  retryable: false,
+  replaySafe: false,
+  // @ts-expect-error statusCode exists only on HTTP_STATUS.
+  statusCode: 500,
+};
+void terminalWithStatus;

@@ -885,6 +885,43 @@ describe('project-template artifact single attempt adversarial ordering', () => 
     });
   });
 
+  it('commits invalid construction before disposing its latched grant', () => {
+    let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+    const transport = fakeTransport(
+      () => undefined,
+      [() => handlers.onData(Uint8Array.from([9]))],
+    );
+    const grant = Object.freeze({
+      consume: vi.fn(),
+      dispose: vi.fn(() => {
+        handlers.onResponse(200);
+        return undefined;
+      }),
+    }) as DisposableProjectTemplateArtifactRedirectGrant;
+    const outcomes: Outcome[] = [];
+    const attempt = createProjectTemplateArtifactSingleAttempt(
+      credential(),
+      INPUT,
+      dependencies(vi.fn((_credential, plan) => {
+        handlers = plan.handlers;
+        handlers.onRedirect(grant);
+        handlers.onResponse(200);
+        return transport as ProjectTemplateGithubReleaseAssetRequest;
+      })),
+    );
+
+    attempt.pull(settlement(outcomes));
+
+    expectFailure(outcomes, {
+      code: 'INVALID_RESPONSE',
+      retryable: false,
+    });
+    expect(grant.dispose).toHaveBeenCalledTimes(1);
+    expect(transport.resume).not.toHaveBeenCalled();
+    expect(transport.destroy).toHaveBeenCalledTimes(1);
+    expect(transport.dispose).toHaveBeenCalledTimes(1);
+  });
+
   it('copies ingress before authenticated pause can mutate its source', () => {
     let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
     const source = Uint8Array.from([1]);
@@ -982,6 +1019,80 @@ describe('project-template artifact single attempt adversarial ordering', () => 
       });
       expect(grant.consume).not.toHaveBeenCalled();
       expect(grant.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    'data',
+    'end',
+    'redirect',
+    'pull',
+    'dispose',
+    'throw',
+  ] as const)(
+    'commits redirect rejection before grant cleanup reenters with %s',
+    (reentry) => {
+      let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      let attempt!: ProjectTemplateArtifactSingleAttempt;
+      const outcomes: Outcome[] = [];
+      const reentrantOutcomes: Outcome[] = [];
+      const nestedGrant = Object.freeze({
+        consume: vi.fn(),
+        dispose: vi.fn(() => undefined),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const grant = Object.freeze({
+        consume: vi.fn(),
+        dispose: vi.fn(() => {
+          if (reentry === 'data') handlers.onData(Uint8Array.from([9]));
+          else if (reentry === 'end') handlers.onEnd();
+          else if (reentry === 'redirect') {
+            handlers.onRedirect(nestedGrant);
+          } else if (reentry === 'pull') {
+            attempt.pull(settlement(reentrantOutcomes));
+          } else if (reentry === 'dispose') {
+            attempt.dispose();
+          } else {
+            throw new Error('grant cleanup secret');
+          }
+          return undefined;
+        }),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const transport = fakeTransport(
+        () => handlers.onResponse(200),
+        [() => undefined],
+      );
+      attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          handlers = plan.handlers;
+          return transport as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      attempt.pull(settlement(outcomes));
+      handlers.onRedirect(grant);
+
+      expectFailure(outcomes, {
+        code: 'INVALID_RESPONSE',
+        retryable: false,
+      });
+      if (reentry === 'pull') {
+        expectFailure(reentrantOutcomes, {
+          code: 'INVALID_RESPONSE',
+          retryable: false,
+        });
+      } else {
+        expect(reentrantOutcomes).toEqual([]);
+      }
+      expect(grant.consume).not.toHaveBeenCalled();
+      expect(grant.dispose).toHaveBeenCalledTimes(1);
+      expect(nestedGrant.consume).not.toHaveBeenCalled();
+      expect(nestedGrant.dispose).toHaveBeenCalledTimes(
+        reentry === 'redirect' ? 1 : 0,
+      );
+      expect(transport.destroy).toHaveBeenCalledTimes(1);
+      expect(transport.dispose).toHaveBeenCalledTimes(1);
     },
   );
 
