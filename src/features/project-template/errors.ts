@@ -7,6 +7,7 @@ export type ProjectTemplateValidationErrorCode =
   | 'INVALID_LOCK'
   | 'INVALID_SEMVER'
   | 'INVALID_SOURCE'
+  | 'INVALID_SOURCE_DESCRIPTOR'
   | 'MISSING_HASH'
   | 'INVALID_HASH'
   | 'INVALID_PATH'

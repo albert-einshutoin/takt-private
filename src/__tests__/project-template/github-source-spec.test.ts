@@ -24,6 +24,19 @@ describe('parseProjectTemplateGithubSourceSpec', () => {
     });
   });
 
+  it('accepts legitimate repeated dots in repository and asset names', () => {
+    expect(parseProjectTemplateGithubSourceSpec(
+      'github:owner/repo..template@v1.0.0',
+    )).toMatchObject({ repo: 'repo..template' });
+
+    const assetUrl =
+      'https://github.com/owner/repo..template/releases/download/v1.0.0/template..pack.taktpack';
+    expect(parseProjectTemplateGithubSourceSpec(assetUrl)).toMatchObject({
+      repo: 'repo..template',
+      assetName: 'template..pack.taktpack',
+    });
+  });
+
   it('accepts only the canonical GitHub release asset form', () => {
     const assetUrl =
       'https://github.com/owner/repo/releases/download/v1.2.3/project-template.taktpack';

@@ -178,7 +178,6 @@ function assertRepositoryCoordinates(owner: string, repo: string): void {
     !REPOSITORY_PATTERN.test(repo)
     || repo === '.'
     || repo === '..'
-    || repo.includes('..')
     || repo.toLowerCase().endsWith('.git')
   ) {
     invalidSource('GitHub repository is not a portable canonical name');
@@ -205,7 +204,6 @@ function assertTaktpackAssetName(assetName: string): void {
   if (
     assetName.length > MAX_RELEASE_ASSET_NAME_LENGTH
     || !TAKTPACK_ASSET_PATTERN.test(assetName)
-    || assetName.includes('..')
   ) {
     invalidSource('GitHub release asset must be a portable .taktpack filename');
   }

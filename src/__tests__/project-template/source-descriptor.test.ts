@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
+import Ajv from 'ajv';
 import { describe, expect, it } from 'vitest';
 import { ProjectTemplateValidationError } from '../../features/project-template/errors.js';
 import { parseProjectTemplateManifest } from '../../features/project-template/manifest.js';
 import {
   calculateProjectTemplateSourceDescriptorSha256,
+  MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
   parseProjectTemplateSourceDescriptor,
+  parseProjectTemplateSourceDescriptorJson,
   PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
+  projectTemplateSourceDescriptorV1JsonSchema,
   serializeProjectTemplateSourceDescriptor,
 } from '../../features/project-template/source-descriptor.js';
 
@@ -104,6 +108,22 @@ describe('project template source descriptor', () => {
     expectDescriptorError(value, 'INVALID_SEMVER');
   });
 
+  it.each(['1.2.3', 'v1.2.3'])(
+    'binds pack.releaseTag %s to pack.version',
+    (releaseTag) => {
+      const value = validDescriptor();
+      packOf(value)['releaseTag'] = releaseTag;
+      expect(parseProjectTemplateSourceDescriptor(value).pack.releaseTag)
+        .toBe(releaseTag);
+    },
+  );
+
+  it('rejects a portable release tag that does not match pack.version', () => {
+    const value = validDescriptor();
+    packOf(value)['releaseTag'] = 'v1.2.4';
+    expectDescriptorError(value, 'INVALID_SOURCE');
+  });
+
   it.each([
     'release/v1',
     'release+1',
@@ -118,7 +138,6 @@ describe('project template source descriptor', () => {
 
   it.each([
     ['assetName', 'template.zip'],
-    ['assetName', 'template..v1.taktpack'],
     ['checksumAssetName', 'other.taktpack.sha256'],
     ['sha256', 'A'.repeat(64)],
   ])('rejects an invalid pack %s', (field, invalidValue) => {
@@ -130,18 +149,41 @@ describe('project template source descriptor', () => {
     );
   });
 
+  it('accepts legitimate repeated dots in pack asset names', () => {
+    const value = validDescriptor();
+    packOf(value)['assetName'] = 'project..template.taktpack';
+    packOf(value)['checksumAssetName'] =
+      'project..template.taktpack.sha256';
+    expect(parseProjectTemplateSourceDescriptor(value).pack.assetName)
+      .toBe('project..template.taktpack');
+  });
+
+  it('accepts exactly 128 repertoire dependencies', () => {
+    const value = validDescriptor();
+    value['repertoireDependencies'] = createDependencies(128);
+    expect(
+      parseProjectTemplateSourceDescriptor(value).repertoireDependencies,
+    ).toHaveLength(128);
+  });
+
   it('limits repertoire dependencies to 128 entries', () => {
     const value = validDescriptor();
-    const dependency = dependencyAt(value, 0);
-    value['repertoireDependencies'] = Array.from(
-      { length: 129 },
-      (_, index) => ({
-        ...dependency,
-        scope: `@acme/repo-${String(index).padStart(3, '0')}`,
-        source: `github:acme/repo-${String(index).padStart(3, '0')}@v2.0.0`,
-      }),
-    );
+    value['repertoireDependencies'] = createDependencies(129);
     expectDescriptorError(value, 'LIMIT_EXCEEDED');
+  });
+
+  it.each([
+    '2.0.0',
+    'v2.0.0',
+    'refs/tags/2.0.0',
+    'refs/tags/v2.0.0',
+  ])('binds dependency source tag %s to dependency.version', (ref) => {
+    const value = validDescriptor();
+    dependencyAt(value, 0)['source'] = `github:acme/alpha@${ref}`;
+    expect(parseProjectTemplateSourceDescriptor(value)
+      .repertoireDependencies[0]!.source).toBe(
+      `github:acme/alpha@${ref}`,
+    );
   });
 
   it.each([
@@ -153,6 +195,12 @@ describe('project template source descriptor', () => {
     }],
     ['source coordinate mismatch', (value: Record<string, unknown>) => {
       dependencyAt(value, 0)['source'] = 'github:acme/other@v2.0.0';
+    }],
+    ['non-tag source ref', (value: Record<string, unknown>) => {
+      dependencyAt(value, 0)['source'] = 'github:acme/alpha@main';
+    }],
+    ['mismatched source tag', (value: Record<string, unknown>) => {
+      dependencyAt(value, 0)['source'] = 'github:acme/alpha@v2.0.1';
     }],
     ['uppercase commit', (value: Record<string, unknown>) => {
       dependencyAt(value, 0)['commit'] = COMMIT.toUpperCase();
@@ -166,6 +214,16 @@ describe('project template source descriptor', () => {
   ])('rejects a dependency with %s', (_label, mutate) => {
     const value = validDescriptor();
     mutate(value);
+    expectDescriptorError(value, 'INVALID_SOURCE');
+  });
+
+  it.each([
+    '0123456789abcdef0123456789abcdef0123456',
+    '0123456789abcdef0123456789abcdef012345678',
+    'g123456789abcdef0123456789abcdef01234567',
+  ])('rejects a dependency commit that is not lowercase hex40: %s', (commit) => {
+    const value = validDescriptor();
+    dependencyAt(value, 0)['commit'] = commit;
     expectDescriptorError(value, 'INVALID_SOURCE');
   });
 
@@ -190,6 +248,100 @@ describe('project template source descriptor', () => {
     futureManifest['schemaVersion'] = '1.1';
     expectManifestError(futureManifest, 'UNSUPPORTED_SCHEMA_VERSION');
   });
+
+  it.each([
+    [undefined],
+    [1],
+    ['1.1'],
+    ['invalid'],
+  ])('uses descriptor taxonomy for schemaVersion %j', (schemaVersion) => {
+    const value = validDescriptor();
+    if (schemaVersion === undefined) {
+      delete value['schemaVersion'];
+    } else {
+      value['schemaVersion'] = schemaVersion;
+    }
+    expectDescriptorError(value, 'INVALID_SOURCE_DESCRIPTOR');
+  });
+
+  it('parses bounded UTF-8 bytes and strings through the strict JSON boundary', () => {
+    const json = serializeProjectTemplateSourceDescriptor(validDescriptor());
+    expect(parseProjectTemplateSourceDescriptorJson(json))
+      .toEqual(validDescriptor());
+    expect(parseProjectTemplateSourceDescriptorJson(
+      new TextEncoder().encode(json),
+    )).toEqual(validDescriptor());
+  });
+
+  it('enforces 64 KiB before decoding or parsing raw descriptor input', () => {
+    expect(MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES).toBe(64 * 1024);
+
+    expect(() => parseProjectTemplateSourceDescriptorJson(
+      ' '.repeat(MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES),
+    )).toThrow(expect.objectContaining({
+      code: 'INVALID_SOURCE_DESCRIPTOR',
+      message: expect.not.stringContaining('exceeds'),
+    }));
+    expect(() => parseProjectTemplateSourceDescriptorJson(
+      ' '.repeat(MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES + 1),
+    )).toThrow(expect.objectContaining({
+      code: 'INVALID_SOURCE_DESCRIPTOR',
+      message: expect.stringContaining('exceeds'),
+    }));
+  });
+
+  it('rejects invalid UTF-8 and invalid JSON before strict parsing', () => {
+    expect(() => parseProjectTemplateSourceDescriptorJson(
+      Uint8Array.from([0x7b, 0x22, 0xff, 0x22, 0x7d]),
+    )).toThrow(expect.objectContaining({
+      code: 'INVALID_SOURCE_DESCRIPTOR',
+    }));
+    expect(() => parseProjectTemplateSourceDescriptorJson('{"schemaVersion":'))
+      .toThrow(expect.objectContaining({
+        code: 'INVALID_SOURCE_DESCRIPTOR',
+      }));
+  });
+
+  it('publishes a draft-07 schema with parser parity for structural rules', () => {
+    const validate = new Ajv({ allErrors: true })
+      .compile(projectTemplateSourceDescriptorV1JsonSchema);
+    const cases: unknown[] = [
+      validDescriptor(),
+      { ...validDescriptor(), unexpected: true },
+      {
+        ...validDescriptor(),
+        pack: { ...packOf(validDescriptor()), sha256: 'A'.repeat(64) },
+      },
+      {
+        ...validDescriptor(),
+        repertoireDependencies: createDependencies(129),
+      },
+      {
+        ...validDescriptor(),
+        repertoireDependencies: [{
+          ...dependencyAt(validDescriptor(), 0),
+          commit: 'g'.repeat(40),
+        }],
+      },
+    ];
+
+    expect(projectTemplateSourceDescriptorV1JsonSchema.$schema)
+      .toBe('http://json-schema.org/draft-07/schema#');
+    for (const value of cases) {
+      const parserAccepts = descriptorAccepts(value);
+      expect(validate(value), JSON.stringify(validate.errors))
+        .toBe(parserAccepts);
+    }
+  });
+
+  it('binds the descriptor hash to every canonical field', () => {
+    const original = validDescriptor();
+    const changed = validDescriptor();
+    dependencyAt(changed, 0)['commit'] =
+      '1123456789abcdef0123456789abcdef01234567';
+    expect(calculateProjectTemplateSourceDescriptorSha256(changed))
+      .not.toBe(calculateProjectTemplateSourceDescriptorSha256(original));
+  });
 });
 
 function packOf(value: Record<string, unknown>): Record<string, unknown> {
@@ -210,6 +362,27 @@ function expectDescriptorError(value: unknown, code: string): void {
       code,
     }),
   );
+}
+
+function descriptorAccepts(value: unknown): boolean {
+  try {
+    parseProjectTemplateSourceDescriptor(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function createDependencies(count: number): Array<Record<string, unknown>> {
+  const dependency = dependencyAt(validDescriptor(), 0);
+  return Array.from({ length: count }, (_, index) => {
+    const repo = `repo-${String(index).padStart(3, '0')}`;
+    return {
+      ...dependency,
+      scope: `@acme/${repo}`,
+      source: `github:acme/${repo}@v2.0.0`,
+    };
+  });
 }
 
 function validManifest(): Record<string, unknown> {

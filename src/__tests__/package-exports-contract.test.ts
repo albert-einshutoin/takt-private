@@ -9,6 +9,9 @@ import type {
   ProjectTemplateGithubRefSourceSpec,
   ProjectTemplateGithubReleaseAssetSourceSpec,
   ProjectTemplateGithubSourceSpec,
+  ProjectTemplateRepertoireCapabilityV1,
+  ProjectTemplateRepertoireDependencyV1,
+  ProjectTemplateSourceDescriptorPackV1,
   ProjectTemplateSourceDescriptorV1,
 } from 'takt';
 
@@ -52,7 +55,10 @@ describe('package exports contract', () => {
         parseSourceDescriptor: typeof api.parseProjectTemplateSourceDescriptor,
         serializeSourceDescriptor: typeof api.serializeProjectTemplateSourceDescriptor,
         hashSourceDescriptor: typeof api.calculateProjectTemplateSourceDescriptorSha256,
+        parseSourceDescriptorJson: typeof api.parseProjectTemplateSourceDescriptorJson,
         sourceDescriptorPath: api.PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
+        sourceDescriptorMaxBytes: api.MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
+        sourceDescriptorSchema: typeof api.projectTemplateSourceDescriptorV1JsonSchema,
       }));
     `);
 
@@ -64,7 +70,10 @@ describe('package exports contract', () => {
       parseSourceDescriptor: 'function',
       serializeSourceDescriptor: 'function',
       hashSourceDescriptor: 'function',
+      parseSourceDescriptorJson: 'function',
       sourceDescriptorPath: '.takt-template-source.json',
+      sourceDescriptorMaxBytes: 65536,
+      sourceDescriptorSchema: 'object',
     });
     expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
       .toMatchTypeOf<readonly unknown[]>();
@@ -89,12 +98,21 @@ describe('package exports contract', () => {
         schemaVersion: '1.0';
         repertoireDependencies: readonly unknown[];
       }>();
+    expectTypeOf<ProjectTemplateSourceDescriptorPackV1>()
+      .toMatchTypeOf<{ version: string; sha256: string }>();
+    expectTypeOf<ProjectTemplateRepertoireDependencyV1>()
+      .toMatchTypeOf<{ scope: `@${string}/${string}`; version: string }>();
+    expectTypeOf<ProjectTemplateRepertoireCapabilityV1>()
+      .toEqualTypeOf<'edit'>();
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');
     expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
     expect(declarationEntry).toContain('ProjectTemplateGithubRefSourceSpec');
     expect(declarationEntry).toContain('ProjectTemplateGithubReleaseAssetSourceSpec');
     expect(declarationEntry).toContain('ProjectTemplateGithubSourceSpec');
     expect(declarationEntry).toContain('ProjectTemplateSourceDescriptorV1');
+    expect(declarationEntry).toContain('ProjectTemplateSourceDescriptorPackV1');
+    expect(declarationEntry).toContain('ProjectTemplateRepertoireDependencyV1');
+    expect(declarationEntry).toContain('ProjectTemplateRepertoireCapabilityV1');
   });
 
   it('blocks internal project-template approval deep imports', () => {

@@ -10,7 +10,10 @@ export type {
 } from './github-source-spec.js';
 export {
   PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
+  MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
+  projectTemplateSourceDescriptorV1JsonSchema,
   parseProjectTemplateSourceDescriptor,
+  parseProjectTemplateSourceDescriptorJson,
   serializeProjectTemplateSourceDescriptor,
   calculateProjectTemplateSourceDescriptorSha256,
 } from './source-descriptor.js';
