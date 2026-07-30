@@ -367,6 +367,119 @@ function readCoordinationOwner(
   return { token: value['token'], pid: value['pid'] as number };
 }
 
+interface CoordinationRecoveryRecord {
+  readonly version: 3;
+  readonly token: string;
+  readonly pid: number;
+  readonly operation: 'namespace-recovery';
+  readonly namespaceToken: string;
+}
+
+export interface ProjectTemplateCoordinationRecoveryReport {
+  readonly status: 'none' | 'recoverable' | 'recovered' | 'blocked';
+  readonly paths: readonly string[];
+}
+
+export interface ProjectTemplateCoordinationRecoveryOptions {
+  readonly apply: boolean;
+  readonly probeProcess?: (pid: number) => 'alive' | 'dead' | 'unknown';
+}
+
+function readCoordinationRecovery(
+  path: string,
+): CoordinationRecoveryRecord | undefined {
+  const read = readProjectTemplateJsonStrict(path);
+  if (
+    read.kind !== 'value'
+    || typeof read.value !== 'object'
+    || read.value === null
+    || Array.isArray(read.value)
+  ) {
+    return undefined;
+  }
+  const value = read.value as Record<string, unknown>;
+  if (
+    value['version'] !== 3
+    || typeof value['token'] !== 'string'
+    || value['token'].trim().length === 0
+    || value['token'].length > 512
+    || !Number.isSafeInteger(value['pid'])
+    || (value['pid'] as number) <= 0
+    || value['operation'] !== 'namespace-recovery'
+    || typeof value['namespaceToken'] !== 'string'
+    || value['namespaceToken'].trim().length === 0
+    || value['namespaceToken'].length > 512
+  ) {
+    return undefined;
+  }
+  return {
+    version: 3,
+    token: value['token'],
+    pid: value['pid'] as number,
+    operation: 'namespace-recovery',
+    namespaceToken: value['namespaceToken'],
+  };
+}
+
+function probeCoordinationProcess(pid: number): 'alive' | 'dead' | 'unknown' {
+  try {
+    return isProcessAlive(pid) ? 'alive' : 'dead';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function completeCoordinationNamespaceRecovery(
+  mainPath: string,
+  reclaimPath: string,
+  namespace: CoordinationNamespaceRecord,
+  recoveryPath: string,
+  recovery: CoordinationRecoveryRecord,
+): void {
+  const confirmedRecovery = readCoordinationRecovery(recoveryPath);
+  const confirmedNamespace = readCoordinationNamespace(reclaimPath);
+  if (
+    confirmedRecovery === undefined
+    || JSON.stringify(confirmedRecovery) !== JSON.stringify(recovery)
+    || confirmedNamespace === undefined
+    || JSON.stringify(confirmedNamespace) !== JSON.stringify(namespace)
+    || recovery.namespaceToken !== namespace.token
+  ) {
+    throw new ProjectTemplateCoordinationError();
+  }
+
+  let mainStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    mainStat = lstatSync(mainPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new ProjectTemplateCoordinationError();
+    }
+  }
+  if (mainStat !== undefined) {
+    const owner = readCoordinationOwner(mainPath);
+    const matches = namespace.operation === 'publish'
+      ? owner?.token === namespace.mainToken && owner?.pid === namespace.pid
+      : namespace.target !== undefined
+        && owner?.token === namespace.target.token
+        && owner?.pid === namespace.target.pid
+        && String(mainStat.dev) === namespace.target.device
+        && String(mainStat.ino) === namespace.target.inode;
+    if (
+      !matches
+      || !mainStat.isFile()
+      || mainStat.isSymbolicLink()
+      || mainStat.nlink !== 1
+    ) {
+      throw new ProjectTemplateCoordinationError();
+    }
+    unlinkSync(mainPath);
+    syncDirectory(dirname(mainPath));
+  }
+  removeOwnedCoordinationFile(reclaimPath, namespace.token, 2);
+  removeOwnedCoordinationFile(recoveryPath, recovery.token, 3);
+}
+
 function recoverDeadCoordinationNamespace(
   mainPath: string,
   reclaimPath: string,
@@ -401,7 +514,6 @@ function recoverDeadCoordinationNamespace(
     throw new ProjectTemplateCoordinationError();
   }
 
-  let mutationStarted = false;
   try {
     const confirmedNamespace = readCoordinationNamespace(reclaimPath);
     if (
@@ -419,49 +531,117 @@ function recoverDeadCoordinationNamespace(
       throw new ProjectTemplateCoordinationError();
     }
 
-    let mainStat: ReturnType<typeof lstatSync> | undefined;
-    try {
-      mainStat = lstatSync(mainPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw new ProjectTemplateCoordinationError();
-      }
-    }
-    if (mainStat !== undefined) {
-      const owner = readCoordinationOwner(mainPath);
-      const matches = namespace.operation === 'publish'
-        ? owner?.token === namespace.mainToken && owner?.pid === namespace.pid
-        : namespace.target !== undefined
-          && owner?.token === namespace.target.token
-          && owner?.pid === namespace.target.pid
-          && String(mainStat.dev) === namespace.target.device
-          && String(mainStat.ino) === namespace.target.inode;
-      if (
-        !matches
-        || !mainStat.isFile()
-        || mainStat.isSymbolicLink()
-        || mainStat.nlink !== 1
-      ) {
-        throw new ProjectTemplateCoordinationError();
-      }
-      mutationStarted = true;
-      unlinkSync(mainPath);
-      syncDirectory(dirname(mainPath));
-    }
-    mutationStarted = true;
-    removeOwnedCoordinationFile(reclaimPath, namespace.token, 2);
-    removeOwnedCoordinationFile(recoveryPath, recoveryToken, 3);
+    completeCoordinationNamespaceRecovery(
+      mainPath,
+      reclaimPath,
+      namespace,
+      recoveryPath,
+      {
+        version: 3,
+        token: recoveryToken,
+        pid: process.pid,
+        operation: 'namespace-recovery',
+        namespaceToken: namespace.token,
+      },
+    );
     return true;
   } catch {
-    if (!mutationStarted) {
-      try {
-        removeOwnedCoordinationFile(recoveryPath, recoveryToken, 3);
-      } catch {
-        // An ambiguous recovery owner must remain fail-closed.
-      }
-    }
+    // The v3 owner is intentionally retained on every uncertain failure. The
+    // explicit recovery flow below can resume it after proving this PID dead.
     throw new ProjectTemplateCoordinationError();
   }
+}
+
+export function recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(
+  repoPathValue: string,
+  options: ProjectTemplateCoordinationRecoveryOptions,
+): ProjectTemplateCoordinationRecoveryReport {
+  const repoPath = resolve(repoPathValue);
+  const probeProcess = options.probeProcess ?? probeCoordinationProcess;
+  const candidates = [
+    resolveProjectTemplateRunStartMutexPath(repoPath),
+    resolveProjectTemplateApplyLeasePath(repoPath),
+  ].map((mainPath) => ({
+    mainPath,
+    reclaimPath: `${mainPath}.reclaim`,
+    recoveryPath: `${mainPath}.reclaim.recovery`,
+  }));
+  const present = candidates.filter(({ recoveryPath }) => existsSync(recoveryPath));
+  if (present.length === 0) return { status: 'none', paths: [] };
+
+  const inspected = present.map((candidate) => {
+    const recovery = readCoordinationRecovery(candidate.recoveryPath);
+    let processState: 'alive' | 'dead' | 'unknown' = 'unknown';
+    if (recovery !== undefined) {
+      try {
+        processState = probeProcess(recovery.pid);
+      } catch {
+        processState = 'unknown';
+      }
+    }
+    const namespace = readCoordinationNamespace(candidate.reclaimPath);
+    const namespaceMatches = namespace === undefined
+      ? !existsSync(candidate.reclaimPath) && !existsSync(candidate.mainPath)
+      : recovery?.namespaceToken === namespace.token;
+    return {
+      ...candidate,
+      recovery,
+      namespace,
+      recoverable: recovery !== undefined
+        && processState === 'dead'
+        && namespaceMatches,
+    };
+  });
+  if (inspected.some((entry) => !entry.recoverable)) {
+    return {
+      status: 'blocked',
+      paths: inspected.map((entry) => entry.recoveryPath),
+    };
+  }
+  if (!options.apply) {
+    return {
+      status: 'recoverable',
+      paths: inspected.map((entry) => entry.recoveryPath),
+    };
+  }
+
+  for (const entry of inspected) {
+    const recovery = readCoordinationRecovery(entry.recoveryPath);
+    if (
+      recovery === undefined
+      || JSON.stringify(recovery) !== JSON.stringify(entry.recovery)
+    ) {
+      throw new ProjectTemplateCoordinationError();
+    }
+    let processState: 'alive' | 'dead' | 'unknown';
+    try {
+      processState = probeProcess(recovery.pid);
+    } catch {
+      processState = 'unknown';
+    }
+    if (processState !== 'dead') {
+      throw new ProjectTemplateCoordinationError();
+    }
+    const namespace = readCoordinationNamespace(entry.reclaimPath);
+    if (namespace === undefined) {
+      if (existsSync(entry.reclaimPath) || existsSync(entry.mainPath)) {
+        throw new ProjectTemplateCoordinationError();
+      }
+      removeOwnedCoordinationFile(entry.recoveryPath, recovery.token, 3);
+      continue;
+    }
+    completeCoordinationNamespaceRecovery(
+      entry.mainPath,
+      entry.reclaimPath,
+      namespace,
+      entry.recoveryPath,
+      recovery,
+    );
+  }
+  return {
+    status: 'recovered',
+    paths: inspected.map((entry) => entry.recoveryPath),
+  };
 }
 
 function createClaimSafeCoordinationFile(path: string, token: string): void {

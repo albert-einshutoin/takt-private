@@ -20,6 +20,7 @@ import {
   clearProjectTemplateRecoveryRequiredMarker,
   isSafeProjectTemplateControlIgnore,
   ProjectTemplateCoordinationError,
+  recoverAbandonedProjectTemplateCoordinationClaimsForRecovery,
   syncProjectTemplateCoordinationDirectory,
   withProjectTemplateRunStartPermit,
   writeProjectTemplateRecoveryRequiredMarker,
@@ -699,6 +700,107 @@ describe('project template apply/run-start coordination', () => {
     expect(existsSync(reclaimPath)).toBe(true);
     expect(existsSync(`${reclaimPath}.recovery`)).toBe(true);
     expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(false);
+  });
+
+  it('explicitly resumes an abandoned dead recovery owner after a dry run', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const reclaimPath = `${mutexPath}.reclaim`;
+    const recoveryPath = `${reclaimPath}.recovery`;
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(mutexPath, JSON.stringify({
+      version: 1,
+      token: 'dead-main-owner',
+      pid: 99_999,
+    }));
+    const target = lstatSync(mutexPath);
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 2,
+      token: 'dead-reclaimer',
+      pid: 99_998,
+      operation: 'reclaim',
+      target: {
+        device: String(target.dev),
+        inode: String(target.ino),
+        token: 'dead-main-owner',
+        pid: 99_999,
+      },
+    }));
+    writeFileSync(recoveryPath, JSON.stringify({
+      version: 3,
+      token: 'dead-recovery-owner',
+      pid: 99_997,
+      operation: 'namespace-recovery',
+      namespaceToken: 'dead-reclaimer',
+    }));
+
+    expect(recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(root, {
+      apply: false,
+      probeProcess: () => 'dead',
+    })).toMatchObject({ status: 'recoverable', paths: [recoveryPath] });
+    expect(existsSync(mutexPath)).toBe(true);
+    expect(existsSync(reclaimPath)).toBe(true);
+    expect(existsSync(recoveryPath)).toBe(true);
+
+    expect(recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(root, {
+      apply: true,
+      probeProcess: () => 'dead',
+    })).toMatchObject({ status: 'recovered', paths: [recoveryPath] });
+    expect(existsSync(mutexPath)).toBe(false);
+    expect(existsSync(reclaimPath)).toBe(false);
+    expect(existsSync(recoveryPath)).toBe(false);
+  });
+
+  it.each(['alive', 'unknown'] as const)(
+    'keeps an abandoned recovery owner %s state fail-closed',
+    (processState) => {
+      const root = makeRoot();
+      const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+      const reclaimPath = `${mutexPath}.reclaim`;
+      const recoveryPath = `${reclaimPath}.recovery`;
+      mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+      writeFileSync(reclaimPath, JSON.stringify({
+        version: 2,
+        token: 'blocked-namespace',
+        pid: 99_999,
+        operation: 'publish',
+        mainToken: 'blocked-main',
+      }));
+      writeFileSync(recoveryPath, JSON.stringify({
+        version: 3,
+        token: 'blocked-recovery',
+        pid: 99_998,
+        operation: 'namespace-recovery',
+        namespaceToken: 'blocked-namespace',
+      }));
+
+      expect(recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(root, {
+        apply: true,
+        probeProcess: () => processState,
+      })).toMatchObject({ status: 'blocked', paths: [recoveryPath] });
+      expect(existsSync(reclaimPath)).toBe(true);
+      expect(existsSync(recoveryPath)).toBe(true);
+    },
+  );
+
+  it('removes only the final abandoned recovery record after prior cleanup completed', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const recoveryPath = `${mutexPath}.reclaim.recovery`;
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(recoveryPath, JSON.stringify({
+      version: 3,
+      token: 'cleanup-complete-recovery',
+      pid: 99_999,
+      operation: 'namespace-recovery',
+      namespaceToken: 'already-removed-namespace',
+    }));
+
+    expect(recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(root, {
+      apply: true,
+      probeProcess: () => 'dead',
+    }).status).toBe('recovered');
+    expect(existsSync(recoveryPath)).toBe(false);
   });
 
   it.each([
