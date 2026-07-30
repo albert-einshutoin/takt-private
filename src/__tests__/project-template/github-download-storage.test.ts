@@ -395,6 +395,152 @@ describe('GitHub template download staging', () => {
     );
   });
 
+  it.each([
+    'options',
+    'chunks',
+    'ioSeam',
+    'signal',
+    'iterator',
+  ] as const)('rejects a hostile %s Proxy before invoking traps', async (
+    boundary,
+  ) => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let traps = 0;
+    const hostile = new Proxy({}, {
+      getPrototypeOf() {
+        traps += 1;
+        return Object.prototype;
+      },
+      ownKeys() {
+        traps += 1;
+        return [];
+      },
+      get() {
+        traps += 1;
+        throw new Error('ghp_proxy_trap_secret');
+      },
+    });
+    let request: unknown;
+    if (boundary === 'options') {
+      request = hostile;
+    } else {
+      const iterable = boundary === 'iterator'
+        ? {
+          [Symbol.asyncIterator]() {
+            return hostile;
+          },
+        }
+        : chunks(new Uint8Array([1]));
+      request = {
+        projectRoot,
+        expectedBytes: 1,
+        expectedSha256: 'a'.repeat(64),
+        chunks: boundary === 'chunks' ? hostile : iterable,
+        ...(boundary === 'ioSeam' ? { ioSeam: hostile } : {}),
+        ...(boundary === 'signal' ? { signal: hostile } : {}),
+      };
+    }
+    const error = await stageGithubTemplateDownload(
+      request as never,
+    ).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: boundary === 'options'
+        || boundary === 'chunks'
+        || boundary === 'ioSeam'
+        || boundary === 'signal'
+        ? 'INVALID_ARGUMENT'
+        : 'STREAM_FAILED',
+    });
+    expect(traps).toBe(0);
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_proxy_trap_secret',
+    );
+  });
+
+  it('bounds empty and total chunk counts', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let emptyCalls = 0;
+    const emptyFlood = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            emptyCalls += 1;
+            return {
+              done: false as const,
+              value: new Uint8Array(),
+            };
+          },
+        };
+      },
+    };
+    await expect(stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: emptyFlood,
+    })).rejects.toMatchObject({ code: 'LIMIT_EXCEEDED' });
+    expect(emptyCalls).toBeLessThanOrEqual(1_025);
+
+    let chunkCalls = 0;
+    const chunkFlood = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            chunkCalls += 1;
+            return {
+              done: false as const,
+              value: new Uint8Array([1]),
+            };
+          },
+        };
+      },
+    };
+    await expect(stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 8_193,
+      expectedSha256: 'a'.repeat(64),
+      chunks: chunkFlood,
+    })).rejects.toMatchObject({ code: 'LIMIT_EXCEEDED' });
+    expect(chunkCalls).toBeLessThanOrEqual(8_193);
+  });
+
+  it('rejects oversized and detached chunks before write or copy authority', async () => {
+    const projectRoot = makeRoot('takt-github-download-');
+    prepareControlRoot(projectRoot);
+    let writes = 0;
+    await expect(stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1024 * 1024 + 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: chunks(new Uint8Array(1024 * 1024 + 1)),
+      ioSeam: {
+        write() {
+          writes += 1;
+          return 1;
+        },
+      },
+    })).rejects.toMatchObject({ code: 'LIMIT_EXCEEDED' });
+    expect(writes).toBe(0);
+
+    const detached = new Uint8Array([1]);
+    structuredClone(detached.buffer, { transfer: [detached.buffer] });
+    await expect(stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: 1,
+      expectedSha256: 'a'.repeat(64),
+      chunks: chunks(detached),
+      ioSeam: {
+        write() {
+          writes += 1;
+          return 1;
+        },
+      },
+    })).rejects.toMatchObject({ code: 'INVALID_CHUNK' });
+    expect(writes).toBe(0);
+  });
+
   it('fails boundedly when a write makes no progress', async () => {
     const projectRoot = makeRoot('takt-github-download-');
     prepareControlRoot(projectRoot);
@@ -584,7 +730,7 @@ describe('GitHub template download staging', () => {
     expect(returns).toBe(1);
   });
 
-  it('does not observe IteratorResult.value after done is true', async () => {
+  it('rejects a Proxy IteratorResult without observing its value', async () => {
     const projectRoot = makeRoot('takt-github-download-');
     prepareControlRoot(projectRoot);
     const iterable = {
@@ -609,7 +755,7 @@ describe('GitHub template download staging', () => {
       expectedSha256: 'a'.repeat(64),
       chunks: iterable as AsyncIterable<Uint8Array>,
     }).catch((caught: unknown) => caught);
-    expect(error).toMatchObject({ code: 'SIZE_MISMATCH' });
+    expect(error).toMatchObject({ code: 'STREAM_FAILED' });
     expect(String((error as Error).message)).not.toContain(
       'ghp_done_value_secret',
     );

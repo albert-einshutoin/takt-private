@@ -17,6 +17,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { types } from 'node:util';
 import { getGlobalConfigDir } from '../../infra/config/paths.js';
 import {
   inspectTaktpack,
@@ -34,6 +35,11 @@ import {
 } from './control-root-contract.js';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const MAX_DOWNLOAD_CHUNK_BYTES = 1024 * 1024;
+// This bounds Promise/callback churn while still allowing an average chunk
+// size of only 5 KiB at the 40 MiB archive ceiling.
+const MAX_DOWNLOAD_CHUNKS = 8_192;
+const MAX_EMPTY_DOWNLOAD_CHUNKS = 1_024;
 const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype) as object,
   'byteLength',
@@ -277,7 +283,7 @@ interface StagedGithubTemplateDownloadAuthority {
   readonly stagingInode: number;
   readonly bytes: number;
   readonly sha256: string;
-  readonly ioSeam?: GithubTemplateDownloadStorageIoSeam;
+  readonly ioSeam?: DownloadStorageIoSnapshot;
   state: 'active' | 'consuming' | 'consumed';
 }
 
@@ -286,8 +292,26 @@ interface StageGithubTemplateDownloadSnapshot {
   readonly expectedBytes: number;
   readonly expectedSha256: string;
   readonly chunks: AsyncIterable<Uint8Array>;
-  readonly signal?: AbortSignal;
-  readonly ioSeam?: GithubTemplateDownloadStorageIoSeam;
+  readonly signal?: AbortSignalSnapshot;
+  readonly ioSeam?: DownloadStorageIoSnapshot;
+}
+
+interface DownloadStorageIoSnapshot {
+  readonly receiver: GithubTemplateDownloadStorageIoSeam;
+  readonly onPhase?: GithubTemplateDownloadStorageIoSeam['onPhase'];
+  readonly write?: GithubTemplateDownloadStorageIoSeam['write'];
+}
+
+interface AbortSignalSnapshot {
+  readonly aborted: () => boolean;
+  readonly addAbortListener: (listener: () => void) => void;
+  readonly removeAbortListener: (listener: () => void) => void;
+}
+
+interface DownloadIteratorSnapshot {
+  readonly receiver: AsyncIterator<unknown>;
+  readonly next: AsyncIterator<unknown>['next'];
+  readonly close?: AsyncIterator<unknown>['return'];
 }
 
 function storageError(
@@ -314,12 +338,14 @@ function isInternalStorageError(
 }
 
 function runIoSeamPhase(
-  ioSeam: GithubTemplateDownloadStorageIoSeam | undefined,
+  ioSeam: DownloadStorageIoSnapshot | undefined,
   phase: GithubTemplateDownloadStoragePhase,
   path: string,
 ): void {
   try {
-    ioSeam?.onPhase?.(phase, path);
+    if (ioSeam?.onPhase !== undefined) {
+      Reflect.apply(ioSeam.onPhase, ioSeam.receiver, [phase, path]);
+    }
   } catch {
     throw storageError(
       'IO_FAILURE',
@@ -336,10 +362,10 @@ function deepFreeze<Value>(value: Value): DeepReadonly<Value> {
   return Object.freeze(value) as DeepReadonly<Value>;
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
+function throwIfAborted(signal: AbortSignalSnapshot | undefined): void {
   let aborted = false;
   try {
-    aborted = signal?.aborted === true;
+    aborted = signal?.aborted() === true;
   } catch {
     aborted = true;
   }
@@ -391,7 +417,7 @@ function ensurePrivateDirectory(
   path: string,
   expectedDevice: number,
   parentPath: string,
-  ioSeam?: GithubTemplateDownloadStorageIoSeam,
+  ioSeam?: DownloadStorageIoSnapshot,
 ): void {
   try {
     mkdirSync(path, { mode: 0o700 });
@@ -409,6 +435,113 @@ function ensurePrivateDirectory(
   requirePrivateDirectory(path, expectedDevice);
 }
 
+function snapshotIoSeam(
+  value: unknown,
+): DownloadStorageIoSnapshot | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'object'
+    || value === null
+    || types.isProxy(value)
+    || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) throw new Error();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const allowed = ['onPhase', 'write'];
+  if (
+    Reflect.ownKeys(value).some(
+      (key) => typeof key !== 'string' || !allowed.includes(key),
+    )
+    || Object.entries(descriptors).some(
+      ([key, descriptor]) => (
+        !('value' in descriptor)
+        || typeof descriptor.value !== 'function'
+        || !allowed.includes(key)
+      ),
+    )
+  ) throw new Error();
+  return Object.freeze({
+    receiver: value,
+    ...(descriptors['onPhase'] === undefined
+      ? {}
+      : {
+        onPhase: descriptors['onPhase'].value as
+          GithubTemplateDownloadStorageIoSeam['onPhase'],
+      }),
+    ...(descriptors['write'] === undefined
+      ? {}
+      : {
+        write: descriptors['write'].value as
+          GithubTemplateDownloadStorageIoSeam['write'],
+      }),
+  });
+}
+
+function snapshotAbortSignal(
+  value: unknown,
+): AbortSignalSnapshot | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'object' || value === null || types.isProxy(value)) {
+    throw new Error();
+  }
+  const abortedGetter = Object.getOwnPropertyDescriptor(
+    AbortSignal.prototype,
+    'aborted',
+  )?.get;
+  if (abortedGetter !== undefined) {
+    try {
+      Reflect.apply(abortedGetter, value, []);
+      return Object.freeze({
+        aborted: () => Reflect.apply(abortedGetter, value, []) as boolean,
+        addAbortListener: (listener: () => void) => {
+          Reflect.apply(EventTarget.prototype.addEventListener, value, [
+            'abort',
+            listener,
+            { once: true },
+          ]);
+        },
+        removeAbortListener: (listener: () => void) => {
+          Reflect.apply(EventTarget.prototype.removeEventListener, value, [
+            'abort',
+            listener,
+          ]);
+        },
+      });
+    } catch {
+      // Test doubles are accepted only as exact plain data records below.
+    }
+  }
+  if (
+    Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) throw new Error();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (
+    Reflect.ownKeys(value).length !== 3
+    || !('value' in descriptors['aborted']!)
+    || typeof descriptors['aborted']!.value !== 'boolean'
+    || !('value' in descriptors['addEventListener']!)
+    || typeof descriptors['addEventListener']!.value !== 'function'
+    || !('value' in descriptors['removeEventListener']!)
+    || typeof descriptors['removeEventListener']!.value !== 'function'
+  ) throw new Error();
+  const receiver = value as AbortSignal;
+  const aborted = descriptors['aborted']!.value as boolean;
+  const add = descriptors['addEventListener']!.value as
+    AbortSignal['addEventListener'];
+  const remove = descriptors['removeEventListener']!.value as
+    AbortSignal['removeEventListener'];
+  return Object.freeze({
+    aborted: () => aborted,
+    addAbortListener: (listener: () => void) => {
+      Reflect.apply(add, receiver, ['abort', listener, { once: true }]);
+    },
+    removeAbortListener: (listener: () => void) => {
+      Reflect.apply(remove, receiver, ['abort', listener]);
+    },
+  });
+}
+
 function snapshotOptions(
   value: StageGithubTemplateDownloadOptions,
 ): StageGithubTemplateDownloadSnapshot {
@@ -416,6 +549,7 @@ function snapshotOptions(
     if (
       typeof value !== 'object'
       || value === null
+      || types.isProxy(value)
       || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype
     ) {
@@ -458,18 +592,19 @@ function snapshotOptions(
         (typeof chunks !== 'object' || chunks === null)
         && typeof chunks !== 'function'
       )
+      || types.isProxy(chunks)
     ) {
       throw new Error();
     }
+    const signalSnapshot = snapshotAbortSignal(signal);
+    const ioSnapshot = snapshotIoSeam(ioSeam);
     return {
       projectRoot,
       expectedBytes,
       expectedSha256,
       chunks: chunks as AsyncIterable<Uint8Array>,
-      ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
-      ...(ioSeam === undefined
-        ? {}
-        : { ioSeam: ioSeam as GithubTemplateDownloadStorageIoSeam }),
+      ...(signalSnapshot === undefined ? {} : { signal: signalSnapshot }),
+      ...(ioSnapshot === undefined ? {} : { ioSeam: ioSnapshot }),
     };
   } catch {
     throw storageError(
@@ -481,8 +616,9 @@ function snapshotOptions(
 
 function getDownloadIterator(
   chunks: AsyncIterable<Uint8Array>,
-): AsyncIterator<unknown> {
+): DownloadIteratorSnapshot {
   try {
+    if (types.isProxy(chunks)) throw new Error();
     const createIterator = chunks[Symbol.asyncIterator];
     if (typeof createIterator !== 'function') throw new Error();
     const iterator = createIterator.call(chunks) as AsyncIterator<unknown>;
@@ -492,8 +628,18 @@ function getDownloadIterator(
     ) {
       throw new Error();
     }
-    if (typeof iterator.next !== 'function') throw new Error();
-    return iterator;
+    if (types.isProxy(iterator)) throw new Error();
+    const next = iterator.next;
+    const close = iterator.return;
+    if (
+      typeof next !== 'function'
+      || (close !== undefined && typeof close !== 'function')
+    ) throw new Error();
+    return Object.freeze({
+      receiver: iterator,
+      next,
+      ...(close === undefined ? {} : { close }),
+    });
   } catch {
     throw storageError(
       'STREAM_FAILED',
@@ -503,8 +649,8 @@ function getDownloadIterator(
 }
 
 async function readDownloadChunk(
-  iterator: AsyncIterator<unknown>,
-  signal: AbortSignal | undefined,
+  iterator: DownloadIteratorSnapshot,
+  signal: AbortSignalSnapshot | undefined,
 ): Promise<{ done: boolean; value: unknown }> {
   return await new Promise((resolve, reject) => {
     let settled = false;
@@ -514,7 +660,7 @@ async function readDownloadChunk(
       if (settled) return;
       settled = true;
       try {
-        signal?.removeEventListener('abort', onAbort);
+        signal?.removeAbortListener(onAbort);
       } catch {
         // Listener cleanup cannot change the already selected outcome.
       }
@@ -527,22 +673,61 @@ async function readDownloadChunk(
       )));
     };
     try {
-      if (signal?.aborted) {
+      if (signal?.aborted()) {
         onAbort();
         return;
       }
-      signal?.addEventListener('abort', onAbort, { once: true });
+      signal?.addAbortListener(onAbort);
       if (settled) return;
-      Promise.resolve(iterator.next()).then(
+      const pending = Reflect.apply(
+        iterator.next,
+        iterator.receiver,
+        [],
+      );
+      if (
+        (typeof pending === 'object' && pending !== null)
+        || typeof pending === 'function'
+      ) {
+        if (types.isProxy(pending)) throw new Error();
+      }
+      Promise.resolve(pending).then(
         (result) => {
           if (settled) return;
           try {
-            if (typeof result !== 'object' || result === null) {
+            if (
+              typeof result !== 'object'
+              || result === null
+              || types.isProxy(result)
+              || Object.getPrototypeOf(result) !== Object.prototype
+            ) {
               throw new Error();
             }
-            const done = result.done === true;
+            const descriptors = Object.getOwnPropertyDescriptors(result);
+            if (
+              Reflect.ownKeys(result).some(
+                (key) => key !== 'done' && key !== 'value',
+              )
+              || Object.values(descriptors).some(
+                (descriptor) => !('value' in descriptor),
+              )
+            ) throw new Error();
+            const doneDescriptor = descriptors['done'];
+            if (
+              doneDescriptor === undefined
+              || !('value' in doneDescriptor)
+              || typeof doneDescriptor.value !== 'boolean'
+            ) throw new Error();
+            const done = doneDescriptor.value;
             // A completed iterator's value is intentionally never observed.
-            const value = done ? undefined : result.value;
+            const valueDescriptor = descriptors['value'];
+            if (
+              !done
+              && (
+                valueDescriptor === undefined
+                || !('value' in valueDescriptor)
+              )
+            ) throw new Error();
+            const value = done ? undefined : valueDescriptor!.value;
             finish(() => resolve({ done, value }));
           } catch {
             finish(() => reject(storageError(
@@ -566,21 +751,32 @@ async function readDownloadChunk(
 }
 
 function closeDownloadIterator(
-  iterator: AsyncIterator<unknown>,
+  iterator: DownloadIteratorSnapshot,
 ): void {
   try {
-    const close = iterator.return;
+    const close = iterator.close;
     if (typeof close === 'function') {
-      void Promise.resolve(close.call(iterator)).catch(() => undefined);
+      void Promise.resolve(Reflect.apply(
+        close,
+        iterator.receiver,
+        [],
+      )).catch(() => undefined);
     }
   } catch {
     // Iterator cleanup is best effort and never replaces the primary error.
   }
 }
 
-function snapshotDownloadChunk(value: unknown): Uint8Array {
+function snapshotDownloadChunk(
+  value: unknown,
+  remaining: number,
+): Uint8Array {
   try {
-    if (typeof value !== 'object' || value === null) throw new Error();
+    if (
+      typeof value !== 'object'
+      || value === null
+      || types.isProxy(value)
+    ) throw new Error();
     const prototype = Object.getPrototypeOf(value);
     if (
       prototype !== Uint8Array.prototype
@@ -593,10 +789,31 @@ function snapshotDownloadChunk(value: unknown): Uint8Array {
       value,
       [],
     ) as number;
+    if (
+      !Number.isSafeInteger(byteLength)
+      || byteLength < 0
+    ) throw new Error();
+    if (
+      byteLength > MAX_DOWNLOAD_CHUNK_BYTES
+      || byteLength > remaining
+    ) {
+      throw storageError(
+        'LIMIT_EXCEEDED',
+        'GitHub template download exceeded its byte limit',
+      );
+    }
     const snapshot = new Uint8Array(byteLength);
     Uint8Array.prototype.set.call(snapshot, value as Uint8Array);
+    if (
+      Reflect.apply(
+        TYPED_ARRAY_BYTE_LENGTH_GETTER,
+        value,
+        [],
+      ) !== byteLength
+    ) throw new Error();
     return snapshot;
-  } catch {
+  } catch (error) {
+    if (isInternalStorageError(error)) throw error;
     throw storageError(
       'INVALID_CHUNK',
       'GitHub template download yielded an invalid chunk',
@@ -610,17 +827,19 @@ function writeDownloadChunk(
   offset: number,
   length: number,
   position: number,
-  ioSeam: GithubTemplateDownloadStorageIoSeam | undefined,
+  ioSeam: DownloadStorageIoSnapshot | undefined,
 ): number {
   let written: number;
   try {
-    written = ioSeam?.write?.(
-      fd,
-      chunk,
-      offset,
-      length,
-      position,
-    ) ?? writeSync(fd, chunk, offset, length, position);
+    written = ioSeam?.write === undefined
+      ? writeSync(fd, chunk, offset, length, position)
+      : Reflect.apply(ioSeam.write, ioSeam.receiver, [
+        fd,
+        chunk,
+        offset,
+        length,
+        position,
+      ]);
   } catch {
     throw storageError(
       'IO_FAILURE',
@@ -644,7 +863,7 @@ function cleanupOwnedStaging(
   stagingDirectory: string,
   stagingPath: string,
   expectedDevice: number,
-  ioSeam: GithubTemplateDownloadStorageIoSeam | undefined,
+  ioSeam: DownloadStorageIoSnapshot | undefined,
 ): void {
   runIoSeamPhase(ioSeam, 'before-cleanup', stagingPath);
   try {
@@ -2962,6 +3181,8 @@ export async function stageGithubTemplateDownload(
 
     const digest = createHash('sha256');
     let received = 0;
+    let chunkCount = 0;
+    let emptyChunkCount = 0;
     const iterator = getDownloadIterator(snapshot.chunks);
     let iteratorDone = false;
     try {
@@ -2973,17 +3194,26 @@ export async function stageGithubTemplateDownload(
           break;
         }
         throwIfAborted(snapshot.signal);
-        const chunk = snapshotDownloadChunk(next.value);
-        if (chunk.byteLength === 0) continue;
-        if (
-          chunk.byteLength > snapshot.expectedBytes - received
-          || received + chunk.byteLength
-            > DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes
-        ) {
+        chunkCount += 1;
+        if (chunkCount > MAX_DOWNLOAD_CHUNKS) {
           throw storageError(
             'LIMIT_EXCEEDED',
-            'GitHub template download exceeded its byte limit',
+            'GitHub template download exceeded its chunk limit',
           );
+        }
+        const chunk = snapshotDownloadChunk(
+          next.value,
+          snapshot.expectedBytes - received,
+        );
+        if (chunk.byteLength === 0) {
+          emptyChunkCount += 1;
+          if (emptyChunkCount > MAX_EMPTY_DOWNLOAD_CHUNKS) {
+            throw storageError(
+              'LIMIT_EXCEEDED',
+              'GitHub template download exceeded its empty chunk limit',
+            );
+          }
+          continue;
         }
         let offset = 0;
         while (offset < chunk.byteLength) {
