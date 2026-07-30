@@ -1,8 +1,10 @@
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   readdirSync,
   rmSync,
+  rmdirSync,
   statSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -10,6 +12,8 @@ import { inspectActiveRuns, type ActiveRunRecord } from './activeRuns.js';
 import { readRawDevloopLedgerEvents, resolveDevloopLedgerPath } from './ledger.js';
 import { inspectPersonalLifecycle } from './personalLifecycle.js';
 import { writeFileAtomic } from './stateStore.js';
+import { isDebugLoggerRunSlug } from '../shared/utils/debug.js';
+import { isValidReportDirName } from '../shared/utils/index.js';
 
 export type PersonalRecoveryActionStatus = 'would_change' | 'changed' | 'skipped' | 'exists' | 'warn' | 'fail';
 
@@ -39,6 +43,8 @@ export interface RunPersonalRecoveryOptions {
   ledgerPath?: string;
   now?: Date;
   probeRunProcess?: (pid: number) => 'alive' | 'dead' | 'unknown';
+  /** Internal race hook used by deterministic recovery fault tests. */
+  beforeMissingRunRemoval?: (runPath: string) => void;
 }
 
 const DEFAULT_STALE_AFTER_MINUTES = 180;
@@ -158,6 +164,105 @@ function recoverStaleRun(options: {
   writeFileAtomic(metaPath, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 });
   return makeAction('changed', `stale run ${options.run.slug}`, 'marked stale running metadata as aborted', {
     path: metaPath,
+  });
+}
+
+function collectEmptyRunDirectories(path: string): string[] | undefined {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return undefined;
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
+  const directories: string[] = [];
+  const entries = readdirSync(path, { withFileTypes: true });
+  for (const entry of entries) {
+    const child = join(path, entry.name);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) return undefined;
+    const nested = collectEmptyRunDirectories(child);
+    if (nested === undefined) return undefined;
+    directories.push(...nested);
+  }
+  directories.push(path);
+  return directories;
+}
+
+function recoverMissingRunMetadata(options: {
+  repoPath: string;
+  apply: boolean;
+  beforeRemoval?: (runPath: string) => void;
+}): PersonalRecoveryAction[] {
+  const runsRoot = join(options.repoPath, '.takt', 'runs');
+  if (!existsSync(runsRoot)) return [];
+  return readdirSync(runsRoot, { withFileTypes: true }).flatMap((entry) => {
+    const runPath = join(runsRoot, entry.name);
+    if (entry.isSymbolicLink()) {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run entry is a symlink and requires manual recovery',
+        { path: runPath },
+      )];
+    }
+    if (
+      !entry.isDirectory()
+      || !isValidReportDirName(entry.name)
+      || isDebugLoggerRunSlug(entry.name)
+    ) {
+      return [];
+    }
+    const metaPath = join(runPath, 'meta.json');
+    if (existsSync(metaPath)) return [];
+    const directories = collectEmptyRunDirectories(runPath);
+    if (directories === undefined) {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run directory contains non-empty or unsafe artifacts and requires manual recovery',
+        { path: runPath },
+      )];
+    }
+    if (!options.apply) {
+      return [makeAction(
+        'would_change',
+        `missing run metadata ${entry.name}`,
+        'would remove empty crash-left run scaffolding',
+        { path: runPath },
+      )];
+    }
+    options.beforeRemoval?.(runPath);
+    const revalidated = collectEmptyRunDirectories(runPath);
+    if (
+      revalidated === undefined
+      || revalidated.length !== directories.length
+      || revalidated.some((directory, index) => directory !== directories[index])
+    ) {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run directory changed during recovery and was left fail-closed',
+        { path: runPath },
+      )];
+    }
+    try {
+      // Remove only directories proven empty, leaf-first. Concurrent metadata
+      // or context publication makes rmdir fail instead of deleting live data.
+      for (const directory of directories) rmdirSync(directory);
+      return [makeAction(
+        'changed',
+        `missing run metadata ${entry.name}`,
+        'removed empty crash-left run scaffolding',
+        { path: runPath },
+      )];
+    } catch {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run directory changed during recovery and was left fail-closed',
+        { path: runPath },
+      )];
+    }
   });
 }
 
@@ -380,6 +485,13 @@ export function runPersonalRecovery(options: RunPersonalRecoveryOptions = {}): P
       probeProcess: runProcessProbe,
     })));
   }
+  actions.push(...recoverMissingRunMetadata({
+    repoPath,
+    apply,
+    ...(options.beforeMissingRunRemoval === undefined
+      ? {}
+      : { beforeRemoval: options.beforeMissingRunRemoval }),
+  }));
   actions.push(
     ...recoverLockFiles({ repoPath, apply, lockStaleMinutes, now }),
     ...recoverRetryWindows({ repoPath, ledgerPath: options.ledgerPath, now }),

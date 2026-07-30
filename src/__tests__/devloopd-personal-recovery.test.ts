@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -174,6 +175,74 @@ describe('devloopd personal recovery', () => {
       message: 'run metadata changed during stale recovery',
     }));
     expect(JSON.parse(readFileSync(metaPath, 'utf8')).status).toBe('running');
+  });
+
+  it('explicitly removes only empty crash-left run scaffolding with missing metadata', () => {
+    const repoPath = makeTempRepo();
+    const runPath = join(repoPath, '.takt', 'runs', 'crash-left-run');
+    mkdirSync(join(runPath, 'context', 'task'), { recursive: true });
+    expect(inspectProjectTemplateApplyGuard({ repoPath }).blocks)
+      .toContainEqual(expect.objectContaining({ code: 'RUN_METADATA_MISSING' }));
+
+    const report = runPersonalRecovery({ repoPath, apply: true });
+
+    expect(report.actions).toContainEqual(expect.objectContaining({
+      status: 'changed',
+      name: 'missing run metadata crash-left-run',
+    }));
+    expect(existsSync(runPath)).toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath }).passed).toBe(true);
+  });
+
+  it.each(['non-empty', 'symlink'] as const)(
+    'leaves %s missing-metadata run evidence fail-closed',
+    (scenario) => {
+      const repoPath = makeTempRepo();
+      const runsRoot = join(repoPath, '.takt', 'runs');
+      mkdirSync(runsRoot, { recursive: true });
+      const runPath = join(runsRoot, `unsafe-${scenario}`);
+      if (scenario === 'non-empty') {
+        mkdirSync(join(runPath, 'context'), { recursive: true });
+        writeFileSync(join(runPath, 'context', 'evidence.txt'), 'keep');
+      } else {
+        const external = join(repoPath, 'external-run');
+        mkdirSync(external);
+        symlinkSync(external, runPath);
+      }
+
+      const report = runPersonalRecovery({ repoPath, apply: true });
+
+      expect(report.actions).toContainEqual(expect.objectContaining({
+        status: 'fail',
+        name: `missing run metadata unsafe-${scenario}`,
+      }));
+      expect(existsSync(runPath)).toBe(true);
+      expect(inspectProjectTemplateApplyGuard({ repoPath }).passed).toBe(false);
+    },
+  );
+
+  it('does not remove scaffolding when active metadata appears during recovery', () => {
+    const repoPath = makeTempRepo();
+    const runPath = join(repoPath, '.takt', 'runs', 'active-race');
+    mkdirSync(join(runPath, 'context'), { recursive: true });
+
+    const report = runPersonalRecovery({
+      repoPath,
+      apply: true,
+      beforeMissingRunRemoval() {
+        writeRunMeta(repoPath, 'active-race', {
+          updatedAt: new Date().toISOString(),
+        });
+      },
+    });
+
+    expect(report.actions).toContainEqual(expect.objectContaining({
+      status: 'fail',
+      name: 'missing run metadata active-race',
+    }));
+    expect(existsSync(join(runPath, 'context'))).toBe(true);
+    expect(existsSync(join(runPath, 'meta.json'))).toBe(true);
+    expect(inspectProjectTemplateApplyGuard({ repoPath }).passed).toBe(false);
   });
 
   it('removes stale lock files but preserves recent locks', () => {
