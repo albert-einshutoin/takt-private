@@ -103,6 +103,17 @@ describe('project template config merge rules', () => {
     }));
   });
 
+  it('allows only the monotonic provider denylist to tighten without review', () => {
+    expect(resolveProjectTemplateConfigMergeRule(
+      'config.yaml',
+      ['forbidden_providers'],
+    )).toMatchObject({
+      ownership: 'project-owned',
+      sequencePolicy: 'monotonic-set',
+      reviewRequired: false,
+    });
+  });
+
   it.each([
     'workflow_runtime_prepare.custom_scripts',
     'workflow_command_gates.custom_scripts',
@@ -111,9 +122,24 @@ describe('project template config merge rules', () => {
     'workflow_arpeggio.custom_data_source_modules',
     'sync_conflict_resolver.auto_approve_tools',
     'runtime.prepare',
+    'assistant.init_files',
+    'rate_limit_fallback.switch_chain',
+    'submodules',
+    'with_submodules',
+    'subscription_only',
+    'provider',
+    'auto_pr',
+    'vcs_provider',
+    'sync_project_local_takt_on_retry',
+    'provider_options.claude.sandbox.excluded_commands',
+    'provider_options.codex.skills.repo',
     'provider_options.codex.network_access',
     'provider_options.opencode.network_access',
     'provider_options.claude.sandbox.allow_unsandboxed_commands',
+    'provider_routing.personas.planner.provider',
+    'provider_routing.steps.review.provider_options.codex.network_access',
+    'persona_providers.planner.provider',
+    'takt_providers.assistant.provider',
   ])('requires review for execution capability %s', (path) => {
     expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
       .toMatchObject({
@@ -142,6 +168,16 @@ describe('project template config merge rules', () => {
     )).toMatchObject({
       ownership: 'forbidden',
       known: true,
+      reviewRequired: true,
+    });
+  });
+
+  it('requires review for future devloop settings by default', () => {
+    expect(resolveProjectTemplateConfigMergeRule(
+      'devloopd.yaml',
+      ['future_runtime_policy'],
+    )).toMatchObject({
+      ownership: 'project-owned',
       reviewRequired: true,
     });
   });

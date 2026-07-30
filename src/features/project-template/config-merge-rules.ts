@@ -42,7 +42,10 @@ function rule(
     ownership,
     sequencePolicy: options.sequencePolicy ?? 'atomic',
     known: true,
-    reviewRequired: options.reviewRequired ?? false,
+    // Project-owned values can change execution, credentials usage, or
+    // external side effects as the config schema evolves. Default them to an
+    // approval boundary; only explicitly monotonic restrictions opt out.
+    reviewRequired: options.reviewRequired ?? ownership === 'project-owned',
     sequenceIdentity: options.sequenceIdentity ?? 'canonical',
   };
 }
@@ -54,6 +57,7 @@ const SEQUENCE_RULES = [
   }),
   rule('config.yaml', 'forbidden_providers', 'project-owned', {
     sequencePolicy: 'monotonic-set',
+    reviewRequired: false,
   }),
   rule('config.yaml', 'workflow_overrides.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
@@ -188,7 +192,7 @@ readonly RegisteredProjectTemplateConfigMergeRule[] = [
   rule('config.yaml', 'minimal_output', 'template-managed'),
   rule('config.yaml', 'task_poll_interval_ms', 'template-managed'),
   rule('config.yaml', 'interactive_preview_steps', 'template-managed'),
-  rule('config.yaml', 'sync_project_local_takt_on_retry', 'template-managed'),
+  rule('config.yaml', 'sync_project_local_takt_on_retry', 'project-owned'),
   rule('config.yaml', 'logging.**', 'global-only'),
   rule('config.yaml', 'logging', 'global-only'),
   rule('config.yaml', 'worktree_dir', 'global-only'),

@@ -361,6 +361,24 @@ describe('project template three-way apply plan', () => {
       ['runtime', 'prepare'],
       ['external-command'],
     ],
+    [
+      'subscription boundary changes',
+      'subscription_only: false\n',
+      ['subscription_only'],
+      [],
+    ],
+    [
+      'submodule fetching',
+      'with_submodules: true\n',
+      ['with_submodules'],
+      [],
+    ],
+    [
+      'automatic pull request creation',
+      'auto_pr: true\n',
+      ['auto_pr'],
+      [],
+    ],
   ] as const)(
     'requires review for a direct config add containing %s',
     (_label, incoming, path, capabilities) => {
