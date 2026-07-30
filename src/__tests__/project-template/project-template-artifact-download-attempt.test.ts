@@ -103,6 +103,24 @@ function invalidGrantCandidate(
   return { value: Object.freeze(value), accessor };
 }
 
+function invalidHopCandidate(
+  kind: 'undefined' | 'null' | 'empty' | 'proxy' | 'accessor',
+): { readonly value: unknown; readonly accessor?: ReturnType<typeof vi.fn> } {
+  if (kind === 'undefined') return { value: undefined };
+  if (kind === 'null') return { value: null };
+  if (kind === 'empty') return { value: Object.freeze({}) };
+  if (kind === 'proxy') return { value: new Proxy({}, {}) };
+  const accessor = vi.fn(() => {
+    throw new Error('hop getter secret');
+  });
+  const value = Object.create(Object.prototype) as Record<string, unknown>;
+  Object.defineProperty(value, 'dispose', {
+    enumerable: true,
+    get: accessor,
+  });
+  return { value: Object.freeze(value), accessor };
+}
+
 function credential(): DisposableProjectTemplateGhCredential {
   return Object.freeze({
     dispose: vi.fn(() => undefined),
@@ -1734,6 +1752,117 @@ describe('project-template artifact single attempt capability boundaries', () =>
       }
       expect(transport.destroy).toHaveBeenCalledTimes(1);
       expect(transport.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    'undefined',
+    'null',
+    'empty',
+    'proxy',
+    'accessor',
+  ] as const)(
+    'rejects malformed redirect %s hop before pinned construction',
+    async (kind) => {
+      let authHandlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const candidate = invalidHopCandidate(kind);
+      const grant = Object.freeze({
+        consume: vi.fn(() => candidate.value as never),
+        dispose: vi.fn(() => undefined),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const authenticated = fakeTransport(
+        () => authHandlers.onRedirect(grant),
+      );
+      const createPinned = vi.fn();
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(
+          vi.fn((_credential, plan) => {
+            authHandlers = plan.handlers;
+            return authenticated as ProjectTemplateGithubReleaseAssetRequest;
+          }),
+          createPinned,
+        ),
+      );
+
+      attempt.pull(settlement(outcomes));
+      await Promise.resolve();
+
+      expectFailure(outcomes, {
+        code: 'INTERNAL',
+        retryable: false,
+      });
+      expect(createPinned).not.toHaveBeenCalled();
+      expect(grant.dispose).toHaveBeenCalledTimes(1);
+      expect(authenticated.destroy).toHaveBeenCalledTimes(1);
+      expect(authenticated.dispose).toHaveBeenCalledTimes(1);
+      if (candidate.accessor !== undefined) {
+        expect(candidate.accessor).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([
+    ['throw', 'return'],
+    ['reenter', 'return'],
+    ['throw', 'throw'],
+    ['reenter', 'reenter'],
+  ] as const)(
+    'continues pinned cleanup after hop %s and grant %s disposers',
+    async (hopCleanup, grantCleanup) => {
+      let authHandlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const outcomes: Outcome[] = [];
+      const hopDispose = vi.fn(() => {
+        if (hopCleanup === 'throw') {
+          throw new Error('hop cleanup secret');
+        }
+        authHandlers.onResponseError();
+        return undefined;
+      });
+      const hop = Object.freeze({
+        dispose: hopDispose,
+      }) as unknown as DisposableProjectTemplateArtifactRedirectHop;
+      const grantDispose = vi.fn(() => {
+        if (grantCleanup === 'throw') {
+          throw new Error('grant cleanup secret');
+        }
+        if (grantCleanup === 'reenter') authHandlers.onResponseError();
+        return undefined;
+      });
+      const grant = Object.freeze({
+        consume: vi.fn(() => hop),
+        dispose: grantDispose,
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const authenticated = fakeTransport(
+        () => authHandlers.onRedirect(grant),
+      );
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(
+          vi.fn((_credential, plan) => {
+            authHandlers = plan.handlers;
+            return authenticated as ProjectTemplateGithubReleaseAssetRequest;
+          }),
+          vi.fn(() => {
+            throw new Error('pinned factory secret');
+          }),
+        ),
+      );
+
+      attempt.pull(settlement(outcomes));
+      await Promise.resolve();
+
+      expectFailure(outcomes, {
+        code: 'INTERNAL',
+        retryable: false,
+      });
+      expect(hopDispose).toHaveBeenCalledTimes(1);
+      expect(grantDispose).toHaveBeenCalledTimes(1);
+      expect(authenticated.destroy).toHaveBeenCalledTimes(1);
+      expect(authenticated.dispose).toHaveBeenCalledTimes(1);
     },
   );
 

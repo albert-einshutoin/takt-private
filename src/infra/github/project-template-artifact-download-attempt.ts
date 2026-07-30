@@ -507,6 +507,26 @@ function isRedirectGrantCapability(
   );
 }
 
+function isRedirectHopCapability(
+  value: unknown,
+): value is DisposableProjectTemplateArtifactRedirectHop {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const dispose = descriptors['dispose'];
+  return (
+    Reflect.ownKeys(value).length === 1
+    && dispose !== undefined
+    && 'value' in dispose
+    && typeof dispose.value === 'function'
+    && !types.isProxy(dispose.value)
+  );
+}
+
 function safelyStop(transport: AttemptTransport | undefined): void {
   if (transport === undefined) return;
   try {
@@ -545,26 +565,34 @@ function disposePendingGrant(state: AttemptState): void {
 }
 
 function safelyDisposeGrant(
-  grant: DisposableProjectTemplateArtifactRedirectGrant | undefined,
+  grant: unknown,
 ): void {
-  if (grant === undefined) return;
-  if (disposedGrantCapabilities.has(grant)) return;
-  disposedGrantCapabilities.add(grant);
   try {
-    grant.dispose();
+    if (!isRedirectGrantCapability(grant)) return;
+    if (disposedGrantCapabilities.has(grant)) return;
+    // Claim before invoking external code because dispose may synchronously
+    // reenter this attempt through a retained transport callback.
+    disposedGrantCapabilities.add(grant);
+    const descriptor = Object.getOwnPropertyDescriptor(grant, 'dispose');
+    if (descriptor === undefined || !('value' in descriptor)) return;
+    Reflect.apply(descriptor.value, grant, []);
   } catch {
     // Logical callback revocation remains authoritative.
   }
 }
 
 function safelyDisposeHop(
-  hop: DisposableProjectTemplateArtifactRedirectHop | undefined,
+  hop: unknown,
 ): void {
-  if (hop === undefined) return;
-  if (disposedHopCapabilities.has(hop)) return;
-  disposedHopCapabilities.add(hop);
   try {
-    hop.dispose();
+    if (!isRedirectHopCapability(hop)) return;
+    if (disposedHopCapabilities.has(hop)) return;
+    // Keep validation, identity claim, and untrusted cleanup within this
+    // resource's boundary so malformed input cannot skip sibling cleanup.
+    disposedHopCapabilities.add(hop);
+    const descriptor = Object.getOwnPropertyDescriptor(hop, 'dispose');
+    if (descriptor === undefined || !('value' in descriptor)) return;
+    Reflect.apply(descriptor.value, hop, []);
   } catch {
     // Logical callback revocation remains authoritative.
   }
@@ -1066,7 +1094,7 @@ function handoffRedirect(
     }
     return;
   }
-  let hop: DisposableProjectTemplateArtifactRedirectHop | undefined;
+  let hop: unknown;
   let pinned: ProjectTemplateArtifactPinnedTransport | undefined;
   const dependencies = state.dependencies;
   if (dependencies === undefined) {
@@ -1083,6 +1111,7 @@ function handoffRedirect(
   const latch = installConstructionCapture(state, nextToken, 'pinned');
   try {
     hop = grant.consume();
+    if (!isRedirectHopCapability(hop)) throw invalidArgument();
     if (state.phase !== 'constructing-pinned') {
       nextToken.active = false;
       nextToken.dispatch = undefined;
