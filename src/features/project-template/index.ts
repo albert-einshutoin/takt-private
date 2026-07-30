@@ -47,13 +47,47 @@ export { canonicalizeTaktpackJson } from './canonical-json.js';
 export { createProjectTemplateExportPlan } from './export-plan.js';
 export { writeTaktpack } from './archive-writer.js';
 export { inspectTaktpack } from './archive-inspector.js';
-export { captureProjectTemplateTargetSnapshot } from './target-snapshot.js';
+export {
+  calculateProjectTemplateTargetPreconditionToken,
+  captureProjectTemplateTargetSnapshot,
+} from './target-snapshot.js';
 export type {
   ProjectTemplateGitTrackingStatus,
   CapturedProjectTemplateTargetEntry,
   ProjectTemplateTargetSnapshot,
 } from './target-snapshot.js';
 export { createProjectTemplateApplyPlan } from './apply-plan.js';
+export {
+  inspectProjectTemplateApplyGuard,
+} from './apply-guard.js';
+export type {
+  ProjectTemplateApplyGuardBlockCode,
+  ProjectTemplateApplyGuardBlock,
+  ProjectTemplateApplyGuardReport,
+  InspectProjectTemplateApplyGuardOptions,
+} from './apply-guard.js';
+export {
+  runProjectTemplateDoctor,
+} from './apply-doctor.js';
+export type {
+  ProjectTemplateDoctorCheck,
+  ProjectTemplateDoctorCheckKind,
+  ProjectTemplateDoctorReport,
+} from './apply-doctor.js';
+export {
+  PROJECT_TEMPLATE_LOCK_PATH,
+  applyProjectTemplatePlan,
+  recoverProjectTemplateApply,
+  rollbackProjectTemplateApply,
+} from './apply-executor.js';
+export type {
+  ProjectTemplateApplyResult,
+  ProjectTemplateRecoveryResult,
+  ProjectTemplateRollbackResult,
+} from './apply-executor.js';
+export type {
+  ProjectTemplateApplyApprovalEvidence,
+} from './apply-approval.js';
 export type {
   ProjectTemplateLocalSnapshotEntry,
   ProjectTemplateIncomingContent,

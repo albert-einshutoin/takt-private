@@ -101,6 +101,13 @@ Validation errors are `ProjectTemplateValidationError` values with a stable
 `code` and `field`; callers should branch on the code rather than matching error
 text.
 
+Package consumers must import these documented APIs from the `takt` package
+root. Internal `dist/**` modules are intentionally not exported because a deep
+import can bypass review and storage trust boundaries. The `exports` boundary
+does not change the `takt`, `takt-dev`, `takt-cli`, or `devloopd` commands, but
+it is intentionally semver-visible for consumers that relied on unsupported
+deep imports.
+
 The schemas cover structural and single-field constraints. Rules that compare
 multiple values remain runtime-only: minimum/maximum TAKT ordering, duplicate,
 case and Unicode-normalization path collisions, executable/top-level capability
@@ -241,6 +248,98 @@ absolute-path, binary, and capability classification. Omitting
 compatibility. Inspection returns a structurally distinct
 `{ kind: "project-template-lock-seed", ... }` value, not an approved
 `TemplateLockV1`; approval and formal lock creation remain a later apply step.
+
+## Atomic apply and rollback boundary
+
+Only a sealed, conflict-free apply plan may enter the mutation boundary.
+The plan seal is an integrity checksum for preview transport, not an authority
+to mutate. Before apply, the executor re-derives the complete canonical plan
+from an independent archive-inspection receipt, the parsed current formal lock,
+a fresh target snapshot, the incoming manifest, its verified contents, and an
+independent baseline-adoption decision.
+Re-sealing a modified action, digest, mode, capability, entry set, or global
+decision therefore fails before target mutation.
+Before downloading or writing content, apply inspects active and stale runs,
+malformed run evidence, personal daemon state, stop requests, and persistent
+automation. Unknown evidence blocks the operation. Run and daemon startup use
+the same short coordination mutex as apply, so a new runner cannot start in
+the gap between preflight and lease acquisition. A task run holds that mutex
+while it reads project-owned workflow, provider, and runtime configuration and
+until its `running` metadata is durably published. Worktree runs publish the
+normal metadata in the worktree and a collision-resistant coordination mirror
+under the main project root. The mirror remains fail-closed if either initial
+or terminal publication fails, so apply cannot miss an active worktree run or
+race a run that loaded an older template generation.
+
+Every template-dependent execution entry point publishes a durable preparation
+record before it reads project configuration or mutates runtime task state.
+This includes queued and resumed tasks, direct selection, pipelines, run-all
+dispatch, and the watch lifecycle. The record blocks apply while TAKT resolves
+retry state, creates or copies a workspace, stages attachments, claims another
+task, or waits for watched work. Consequently, an active watch intentionally
+blocks template apply even while it is idle; stop the watcher before applying
+a pack.
+
+The record is written through an owner-only same-directory temporary file,
+file-fsynced, renamed, and followed by parent-directory fsync on POSIX. After
+the canonical run metadata and any coordination mirror are durable, TAKT
+terminalizes the preparation record, so there is no unprotected hand-off gap.
+Terminal preparation records remain in ordinary run history for audit and use
+the same retention policy as other runs. If preparation stops unexpectedly,
+its running record becomes stale and requires the existing explicit recovery
+flow; TAKT does not expire it by time alone or guess that a long copy is
+abandoned.
+
+Apply stages and validates every output before changing `.takt/`. The formal
+lock is stored at `.takt-template-lock.json`. Private staging, journal, and
+bounded backup generations live under `.takt-template-state/`, which must be
+ignored by Git and is created with owner-only permissions. Every control root
+contains a private `*` `.gitignore`, preventing backup data from entering
+`git add -A` in arbitrary target repositories. The ignore file is durably
+created and verified before any run-start mutex, apply lease, or recovery
+marker is published. Newly created private staging, backup, and blob
+directories are followed by parent-directory fsync on POSIX before their
+contents are trusted. Backups contain only affected template entries and the
+formal lock; runtime state and excluded content are never collected. The
+backup manifest records each original hash,
+mode, and timestamp for audit. It also records target parent directories that
+were absent before the transaction. Compensation, recovery, and operator
+rollback remove those parents deepest-first only while they remain empty;
+pre-existing or subsequently populated directories are preserved. Because
+replacement necessarily changes the filesystem timestamp, restore conformance
+is defined by hash, mode, absence, and the doctor result.
+
+The filesystem cannot atomically rename multiple independent files. The v1
+contract therefore uses a durable journal, deterministic per-file replacement,
+and compensation rollback under one exclusive lease. Every write, chmod,
+rename, file fsync, and directory fsync failure is treated as a transaction
+failure. Post-apply config/workflow doctor failure also restores the original
+tree. The doctor gates only adoption of the new template. Compensation,
+operator rollback, and recovery complete when the recorded historical
+hash/mode/absence witnesses are restored; a historical snapshot is not
+required to pass the current validator. Operator rollback first verifies every
+expected post-apply hash, mode,
+and absence marker; any drift stops rollback before its first mutation.
+If the process stops before it can publish an explicit recovery marker, a
+non-terminal durable journal still blocks later downloads, writes, and run
+startup. `recoverProjectTemplateApply` converges the journal and backup
+manifest to either committed or rolled-back state, and clears an
+identity-owned recovery marker only after verification succeeds.
+Preparation failures remove their owned staging and incomplete backup roots.
+If cleanup itself is interrupted, the next exclusive apply lease performs a
+bounded orphan sweep before any target mutation; generations with a valid
+manifest are preserved and malformed evidence fails closed.
+Coordination files left by a crash are reclaimed only when their recorded
+owner PID is definitely dead; live, malformed, or indeterminate ownership
+remains blocked. The v1 threat boundary covers cooperating TAKT/devloopd
+writers that honor the shared lease. Node does not expose directory-fd-relative
+rename, so a hostile process under the same OS user racing a parent-directory
+replacement between the final witness and rename is outside that boundary.
+Windows does not provide directory fsync, so directory durability after
+file-level fsync is best-effort on that platform. Node exposes only a subset of
+POSIX chmod semantics on Windows; apply therefore uses content and byte length
+as its transaction witness there and treats the manifest mode as advisory.
+POSIX platforms continue to require exact mode restoration.
 
 Entry-kind ceilings are independent and callers may only tighten them:
 `pack.json` and `manifest.json` are at most 4 MiB, `export-report.json` and each

@@ -70,6 +70,12 @@ entry はさらに `executable` の宣言が必須です。利用できる名前
 安定した `code` と `field` を持つ `ProjectTemplateValidationError` なので、
 呼び出し側は文言ではなく code を判定に使用してください。
 
+package 利用側は、documented API を `takt` package root から import してください。
+内部の `dist/**` module は review・storage の trust boundary を迂回し得るため、
+意図的に export しません。この `exports` 境界は `takt`、`takt-dev`、`takt-cli`、
+`devloopd` command を変更しませんが、未サポートの deep import に依存していた
+consumer に対しては semver-visible な変更です。
+
 lock は manifest と同じ `schemaVersion`、`packVersion`、`source`、トップレベル
 capability と、path/policy/mode/digest/capability の entry 一覧を記録します。
 さらに canonical manifest の `manifestSha256` を保持するため、意味が変わった別の
@@ -200,6 +206,80 @@ manifest/lock seed照合とclassifierによるsecret・absolute path・binary・
 `status: "unknown"`です。inspect結果は正式な`TemplateLockV1`ではなく、構造的に
 異なる`{ kind: "project-template-lock-seed", ... }`を返します。承認と正式lock作成は
 後続のapply段階の責務です。
+
+## atomic applyとrollbackの境界
+
+変更境界へ進めるのは、seal検証済みで競合のないapply planだけです。ただしplan sealは
+previewを運ぶためのintegrity checksumであり、変更権限ではありません。apply前に、
+独立したarchive inspection receipt、現在の正式lock、fresh target snapshot、incoming
+manifest、検証済みcontents、独立したbaseline採用判断からcanonical plan全体を
+再導出します。そのためaction、
+digest、mode、capability、entry集合、global decisionを改ざんしてsealを再計算しても、
+target変更前に拒否されます。downloadやwriteより前に、active/stale run、壊れたrun
+evidence、personal daemon、stop-request、
+persistent automationをread-only検査し、不明な証拠もfail-closedで拒否します。
+run/daemon開始とapplyは同じ短期coordination mutexを使うため、preflightとlease取得の
+間へ新しいrunnerが滑り込むこともありません。task runはproject所有のworkflow、
+provider、runtime configを読み込み、`running` metadataをdurableに公開し終えるまで
+同じmutexを保持します。worktree実行は通常のmetadataをworktree側へ保存すると同時に、
+衝突しないcoordination mirrorを本体project rootにも公開します。初回または終了時の
+mirror書き込みが失敗してもfail-closedな証拠を残すため、applyがactive worktree runを
+見落としたり、古いtemplate世代を読み込んだrunと競合したりすることはありません。
+
+templateに依存するすべての実行入口は、project configを読む、またはruntime task stateを
+変更する前にdurableなpreparation recordを公開します。対象はqueue、direct resume、
+direct selection、pipeline、run-all dispatch、watch lifecycleです。このrecordはretry
+stateの解決、workspaceの作成・copy、attachment staging、次taskのclaim、watch待機中の
+applyを拒否します。そのため、activeなwatchはidle中も意図的にtemplate applyを拒否し、
+packを適用するときは先にwatchを停止する必要があります。
+
+recordはowner-onlyの同一directory temp fileへ書き、file fsync、rename、POSIXでの
+parent-directory fsyncを終えてから公開済みと扱います。canonical run metadataと必要な
+coordination mirrorをdurableに公開した後でpreparation recordをterminal化するため、
+引継ぎの瞬間にも保護の切れ目はありません。terminalなpreparation recordは監査用に
+通常のrun historyへ残り、他のrunと同じretention policyに従います。準備processが
+予期せず停止した場合、running recordはstaleとなり、既存の明示的なrecovery flowを
+必要とします。長時間のcopyを放棄と推測して時間だけで自動解除することはありません。
+
+applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を変更します。正式lock
+は`.takt-template-lock.json`、privateなstaging・journal・世代数を制限したbackupは
+`.takt-template-state/`へ保存します。後者はGit ignore対象かつowner-only permission
+です。各control root自身にも`*`のprivate `.gitignore`を生成するため、任意の適用先で
+backupが`git add -A`へ混入しません。このignore fileをdurableに作成・検証してからだけ
+run-start mutex、apply lease、recovery markerを公開します。新しく作ったprivateな
+staging、backup、blob directoryは、その内容を信頼する前にPOSIXでparent-directory
+fsyncも完了させます。backup対象は変更するtemplate entryと正式lockだけで、runtime stateやexcluded
+contentを新しく収集しません。backup manifestは元のhash、mode、timestampを監査用に
+記録し、transaction前には存在しなかった適用先の親directoryも証拠として保持します。
+補償、recovery、operator rollbackは、それらが空のままである場合だけ深い順に削除し、
+既存directoryや後から内容が追加されたdirectoryは保持します。復元の一致判定は、
+replaceでtimestamp自体が更新されるためhash、mode、absenceとdoctor結果を正式な
+contractにします。
+
+複数の独立fileをfilesystemのrenameだけで同時切替することはできません。そのためv1は
+単一exclusive leaseの下でdurable journal、決定的なfile単位replace、補償rollbackを
+組み合わせます。write、chmod、rename、file fsync、directory fsyncのどの失敗も
+transaction failureとして扱い、適用後のconfig/workflow doctor失敗も元treeへ戻します。
+doctorは新templateを採用するときだけgateにします。補償、operator rollback、recoveryは
+記録済みのhistorical hash・mode・absence witnessへ復元できれば完了し、過去snapshotへ
+現在のvalidator通過を要求しません。operator rollbackは、適用後に期待する全pathの
+hash・mode・absenceを最初に一括検証し、
+driftが1件でもあれば最初の変更前に停止します。
+processが明示markerを書けない時点で停止しても、non-terminal durable journalが次の
+download/writeとrun開始をfail-closedで止めます。`recoverProjectTemplateApply`は
+journalとbackup manifestからcommittedまたはrolled-backへ収束し、検証成功後だけ
+recovery markerを所有identity付きで解除します。
+準備中の失敗では、そのtransactionが所有するstagingと未完成backupを削除します。
+cleanup自体が中断された場合は、次のexclusive apply leaseがtarget変更前にboundedな
+orphan回収を行い、valid manifestのある世代は保持し、壊れた証拠はfail-closedにします。
+crashで残ったcoordination fileはowner PIDが確実に停止している場合だけ回収し、live、
+malformed、判定不能なownerは拒否します。v1の脅威境界は共通leaseに従うTAKT/devloopd
+writerです。Node標準APIにはdirectory fd相対のrenameがないため、同じOS userの敵対的
+processが直前witnessとrenameの間で親directoryを差し替える競合は対象外です。
+Windowsはdirectory fsyncを提供しないため、file fsync後のdirectory durabilityだけを
+best-effortとして扱います。NodeがWindowsで公開するchmod semanticsはPOSIXの一部だけ
+なので、Windowsではcontentとbyte lengthをtransaction witnessとし、manifest modeは
+advisoryとして扱います。POSIX platformでは引き続きmodeの完全一致を要求します。
 
 entry種別ごとのceilingは独立し、callerは縮小だけできます。`pack.json`と
 `manifest.json`は各4 MiB、`export-report.json`と各blobは各1 MiBで、entry count、

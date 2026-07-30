@@ -1,15 +1,23 @@
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
+  rmdirSync,
   statSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { inspectActiveRuns, type ActiveRunRecord } from './activeRuns.js';
 import { readRawDevloopLedgerEvents, resolveDevloopLedgerPath } from './ledger.js';
 import { inspectPersonalLifecycle } from './personalLifecycle.js';
 import { writeFileAtomic } from './stateStore.js';
+import { isDebugLoggerRunSlug } from '../shared/utils/debug.js';
+import { isValidReportDirName } from '../shared/utils/index.js';
+import {
+  recoverAbandonedProjectTemplateCoordinationClaimsForRecovery,
+} from '../features/project-template/apply-lease.js';
 
 export type PersonalRecoveryActionStatus = 'would_change' | 'changed' | 'skipped' | 'exists' | 'warn' | 'fail';
 
@@ -38,6 +46,9 @@ export interface RunPersonalRecoveryOptions {
   worktreeStaleMinutes?: number;
   ledgerPath?: string;
   now?: Date;
+  probeRunProcess?: (pid: number) => 'alive' | 'dead' | 'unknown';
+  /** Internal race hook used by deterministic recovery fault tests. */
+  beforeMissingRunRemoval?: (runPath: string) => void;
 }
 
 const DEFAULT_STALE_AFTER_MINUTES = 180;
@@ -83,10 +94,31 @@ function recoverStaleRun(options: {
   run: ActiveRunRecord;
   apply: boolean;
   now: Date;
+  probeProcess: (pid: number) => 'alive' | 'dead' | 'unknown';
 }): PersonalRecoveryAction {
   const metaPath = join(options.repoPath, '.takt', 'runs', options.run.slug, 'meta.json');
   if (!options.run.stale) {
     return makeAction('skipped', `active run ${options.run.slug}`, 'active run is not stale', { path: metaPath });
+  }
+  if (options.run.ownerPid !== undefined) {
+    let processState: 'alive' | 'dead' | 'unknown';
+    try {
+      processState = options.probeProcess(options.run.ownerPid);
+    } catch {
+      processState = 'unknown';
+    }
+    if (processState === 'alive') {
+      return makeAction('skipped', `active run ${options.run.slug}`, 'stale metadata owner process is still alive', {
+        path: metaPath,
+        detail: `pid ${options.run.ownerPid}`,
+      });
+    }
+    if (processState === 'unknown') {
+      return makeAction('fail', `stale run ${options.run.slug}`, 'run owner process identity cannot be proven dead', {
+        path: metaPath,
+        detail: `pid ${options.run.ownerPid}`,
+      });
+    }
   }
   if (!options.apply) {
     return makeAction('would_change', `stale run ${options.run.slug}`, 'would mark stale running metadata as aborted', {
@@ -99,6 +131,33 @@ function recoverStaleRun(options: {
   if (meta === undefined) {
     return makeAction('fail', `stale run ${options.run.slug}`, 'run metadata is unreadable', { path: metaPath });
   }
+  if (
+    meta['status'] !== 'running'
+    || meta['updatedAt'] !== options.run.updatedAt
+    || meta['ownerPid'] !== options.run.ownerPid
+  ) {
+    return makeAction('skipped', `active run ${options.run.slug}`, 'run metadata changed during stale recovery', {
+      path: metaPath,
+    });
+  }
+  if (options.run.ownerPid !== undefined) {
+    let processState: 'alive' | 'dead' | 'unknown';
+    try {
+      processState = options.probeProcess(options.run.ownerPid);
+    } catch {
+      processState = 'unknown';
+    }
+    if (processState !== 'dead') {
+      return makeAction(
+        processState === 'unknown' ? 'fail' : 'skipped',
+        `active run ${options.run.slug}`,
+        processState === 'unknown'
+          ? 'run owner process identity became unknown during recovery'
+          : 'run owner process became live during recovery',
+        { path: metaPath, detail: `pid ${options.run.ownerPid}` },
+      );
+    }
+  }
   const updated = {
     ...meta,
     status: 'aborted',
@@ -109,6 +168,233 @@ function recoverStaleRun(options: {
   writeFileAtomic(metaPath, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 });
   return makeAction('changed', `stale run ${options.run.slug}`, 'marked stale running metadata as aborted', {
     path: metaPath,
+  });
+}
+
+function collectEmptyRunDirectories(path: string): string[] | undefined {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return undefined;
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
+  const directories: string[] = [];
+  const entries = readdirSync(path, { withFileTypes: true });
+  for (const entry of entries) {
+    const child = join(path, entry.name);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) return undefined;
+    const nested = collectEmptyRunDirectories(child);
+    if (nested === undefined) return undefined;
+    directories.push(...nested);
+  }
+  directories.push(path);
+  return directories;
+}
+
+interface RunsRootIdentity {
+  readonly repoDevice: number;
+  readonly repoInode: number;
+  readonly taktDevice: number;
+  readonly taktInode: number;
+  readonly runsDevice?: number;
+  readonly runsInode?: number;
+}
+
+type RunsRootInspection =
+  | { kind: 'missing'; identity?: RunsRootIdentity }
+  | { kind: 'safe'; runsRoot: string; identity: RunsRootIdentity }
+  | { kind: 'unsafe'; path: string };
+
+function isCanonicalDescendant(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return path !== '..'
+    && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)
+    && !isAbsolute(path);
+}
+
+function inspectRunsRoot(repoPath: string): RunsRootInspection {
+  const taktPath = join(repoPath, '.takt');
+  const runsRoot = join(taktPath, 'runs');
+  try {
+    const repoBefore = lstatSync(repoPath);
+    if (!repoBefore.isDirectory() || repoBefore.isSymbolicLink()) {
+      return { kind: 'unsafe', path: repoPath };
+    }
+    let taktBefore;
+    try {
+      taktBefore = lstatSync(taktPath);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? { kind: 'missing' }
+        : { kind: 'unsafe', path: taktPath };
+    }
+    if (!taktBefore.isDirectory() || taktBefore.isSymbolicLink()) {
+      return { kind: 'unsafe', path: taktPath };
+    }
+    const repoCanonical = realpathSync.native(repoPath);
+    const taktCanonical = realpathSync.native(taktPath);
+    const repoAfter = lstatSync(repoPath);
+    const taktAfter = lstatSync(taktPath);
+    if (
+      !isCanonicalDescendant(repoCanonical, taktCanonical)
+      || repoBefore.dev !== repoAfter.dev
+      || repoBefore.ino !== repoAfter.ino
+      || taktBefore.dev !== taktAfter.dev
+      || taktBefore.ino !== taktAfter.ino
+      || taktAfter.isSymbolicLink()
+    ) {
+      return { kind: 'unsafe', path: taktPath };
+    }
+    const baseIdentity = {
+      repoDevice: repoAfter.dev,
+      repoInode: repoAfter.ino,
+      taktDevice: taktAfter.dev,
+      taktInode: taktAfter.ino,
+    };
+    let runsBefore;
+    try {
+      runsBefore = lstatSync(runsRoot);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? { kind: 'missing', identity: baseIdentity }
+        : { kind: 'unsafe', path: runsRoot };
+    }
+    if (!runsBefore.isDirectory() || runsBefore.isSymbolicLink()) {
+      return { kind: 'unsafe', path: runsRoot };
+    }
+    const runsCanonical = realpathSync.native(runsRoot);
+    const runsAfter = lstatSync(runsRoot);
+    if (
+      !isCanonicalDescendant(taktCanonical, runsCanonical)
+      || runsBefore.dev !== runsAfter.dev
+      || runsBefore.ino !== runsAfter.ino
+      || runsAfter.isSymbolicLink()
+    ) {
+      return { kind: 'unsafe', path: runsRoot };
+    }
+    return {
+      kind: 'safe',
+      runsRoot,
+      identity: {
+        ...baseIdentity,
+        runsDevice: runsAfter.dev,
+        runsInode: runsAfter.ino,
+      },
+    };
+  } catch {
+    return { kind: 'unsafe', path: runsRoot };
+  }
+}
+
+function sameRunsRootIdentity(
+  left: RunsRootIdentity,
+  right: RunsRootIdentity,
+): boolean {
+  return left.repoDevice === right.repoDevice
+    && left.repoInode === right.repoInode
+    && left.taktDevice === right.taktDevice
+    && left.taktInode === right.taktInode
+    && left.runsDevice === right.runsDevice
+    && left.runsInode === right.runsInode;
+}
+
+function recoverMissingRunMetadata(options: {
+  repoPath: string;
+  apply: boolean;
+  beforeRemoval?: (runPath: string) => void;
+}): PersonalRecoveryAction[] {
+  const inspectedRoot = inspectRunsRoot(options.repoPath);
+  if (inspectedRoot.kind === 'missing') return [];
+  if (inspectedRoot.kind === 'unsafe') {
+    return [makeAction(
+      'fail',
+      'unsafe run recovery root',
+      'repository .takt/runs ancestry is not a canonical directory and was not traversed',
+      { path: inspectedRoot.path },
+    )];
+  }
+  const { runsRoot } = inspectedRoot;
+  return readdirSync(runsRoot, { withFileTypes: true }).flatMap((entry) => {
+    const runPath = join(runsRoot, entry.name);
+    if (entry.isSymbolicLink()) {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run entry is a symlink and requires manual recovery',
+        { path: runPath },
+      )];
+    }
+    if (
+      !entry.isDirectory()
+      || !isValidReportDirName(entry.name)
+      || isDebugLoggerRunSlug(entry.name)
+    ) {
+      return [];
+    }
+    const metaPath = join(runPath, 'meta.json');
+    if (existsSync(metaPath)) return [];
+    const directories = collectEmptyRunDirectories(runPath);
+    if (directories === undefined) {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run directory contains non-empty or unsafe artifacts and requires manual recovery',
+        { path: runPath },
+      )];
+    }
+    if (!options.apply) {
+      return [makeAction(
+        'would_change',
+        `missing run metadata ${entry.name}`,
+        'would remove empty crash-left run scaffolding',
+        { path: runPath },
+      )];
+    }
+    options.beforeRemoval?.(runPath);
+    const confirmedRoot = inspectRunsRoot(options.repoPath);
+    if (
+      confirmedRoot.kind !== 'safe'
+      || !sameRunsRootIdentity(inspectedRoot.identity, confirmedRoot.identity)
+    ) {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run ancestry changed during recovery and was left fail-closed',
+        { path: runPath },
+      )];
+    }
+    const revalidated = collectEmptyRunDirectories(runPath);
+    if (
+      revalidated === undefined
+      || revalidated.length !== directories.length
+      || revalidated.some((directory, index) => directory !== directories[index])
+    ) {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run directory changed during recovery and was left fail-closed',
+        { path: runPath },
+      )];
+    }
+    try {
+      // Remove only directories proven empty, leaf-first. Concurrent metadata
+      // or context publication makes rmdir fail instead of deleting live data.
+      for (const directory of directories) rmdirSync(directory);
+      return [makeAction(
+        'changed',
+        `missing run metadata ${entry.name}`,
+        'removed empty crash-left run scaffolding',
+        { path: runPath },
+      )];
+    } catch {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run directory changed during recovery and was left fail-closed',
+        { path: runPath },
+      )];
+    }
   });
 }
 
@@ -211,6 +497,19 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function probeRunProcess(pid: number): 'alive' | 'dead' | 'unknown' {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return 'unknown';
+  try {
+    process.kill(pid, 0);
+    // Portable Node APIs cannot prove OS process start identity. PID reuse is
+    // therefore treated as alive and requires manual recovery; this trades
+    // availability for never aborting a potentially live preparation owner.
+    return 'alive';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'dead' : 'unknown';
+  }
+}
+
 function recoverDaemonMetadata(options: {
   repoPath: string;
   apply: boolean;
@@ -279,6 +578,57 @@ function recoverWorktreeDirectories(options: {
     });
 }
 
+function recoverAbandonedCoordinationClaims(options: {
+  repoPath: string;
+  apply: boolean;
+  probeProcess?: (pid: number) => 'alive' | 'dead' | 'unknown';
+}): PersonalRecoveryAction[] {
+  let report;
+  try {
+    report = recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(
+      options.repoPath,
+      {
+        apply: options.apply,
+        ...(options.probeProcess === undefined
+          ? {}
+          : { probeProcess: options.probeProcess }),
+      },
+    );
+  } catch {
+    return [makeAction(
+      'fail',
+      'abandoned project template coordination recovery',
+      'coordination recovery changed during explicit recovery and remains fail-closed',
+    )];
+  }
+  const detail = report.paths.join(', ');
+  switch (report.status) {
+    case 'none':
+      return [];
+    case 'recoverable':
+      return [makeAction(
+        'would_change',
+        'abandoned project template coordination recovery',
+        'would resume coordination recovery owned by a dead process',
+        { detail },
+      )];
+    case 'recovered':
+      return [makeAction(
+        'changed',
+        'abandoned project template coordination recovery',
+        'resumed and completed coordination recovery owned by a dead process',
+        { detail },
+      )];
+    case 'blocked':
+      return [makeAction(
+        'fail',
+        'abandoned project template coordination recovery',
+        'coordination recovery owner is live, unknown, or unsafe; manual recovery is required',
+        { detail },
+      )];
+  }
+}
+
 function buildNextActions(actions: readonly PersonalRecoveryAction[]): string[] {
   const next = new Set<string>();
   if (actions.some((action) => action.status === 'would_change')) {
@@ -303,15 +653,53 @@ export function runPersonalRecovery(options: RunPersonalRecoveryOptions = {}): P
   const staleAfterMinutes = parsePositiveInteger(options.staleAfterMinutes, DEFAULT_STALE_AFTER_MINUTES);
   const lockStaleMinutes = parsePositiveInteger(options.lockStaleMinutes, DEFAULT_LOCK_STALE_MINUTES);
   const worktreeStaleMinutes = parsePositiveInteger(options.worktreeStaleMinutes, DEFAULT_WORKTREE_STALE_MINUTES);
+  const initialRunsRoot = inspectRunsRoot(repoPath);
+  if (initialRunsRoot.kind === 'unsafe') {
+    const actions = [makeAction(
+      'fail',
+      'unsafe run recovery root',
+      'repository .takt/runs ancestry is not a canonical directory and was not traversed',
+      { path: initialRunsRoot.path },
+    )];
+    return {
+      passed: false,
+      changed: false,
+      apply,
+      repoPath,
+      actions,
+      nextActions: buildNextActions(actions),
+    };
+  }
   const activeRuns = inspectActiveRuns({ repoPath, staleAfterMinutes, now });
+  const runProcessProbe = options.probeRunProcess ?? probeRunProcess;
   const actions: PersonalRecoveryAction[] = [];
 
   if (!activeRuns.passed) {
     actions.push(makeAction('fail', 'active runs', activeRuns.message));
   } else {
-    actions.push(...activeRuns.activeRuns.map((run) => recoverStaleRun({ repoPath, run, apply, now })));
+    actions.push(...activeRuns.activeRuns.map((run) => recoverStaleRun({
+      repoPath,
+      run,
+      apply,
+      now,
+      probeProcess: runProcessProbe,
+    })));
   }
+  actions.push(...recoverMissingRunMetadata({
+    repoPath,
+    apply,
+    ...(options.beforeMissingRunRemoval === undefined
+      ? {}
+      : { beforeRemoval: options.beforeMissingRunRemoval }),
+  }));
   actions.push(
+    ...recoverAbandonedCoordinationClaims({
+      repoPath,
+      apply,
+      ...(options.probeRunProcess === undefined
+        ? {}
+        : { probeProcess: options.probeRunProcess }),
+    }),
     ...recoverLockFiles({ repoPath, apply, lockStaleMinutes, now }),
     ...recoverRetryWindows({ repoPath, ledgerPath: options.ledgerPath, now }),
     ...recoverDaemonMetadata({ repoPath, apply }),

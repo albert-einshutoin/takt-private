@@ -10,6 +10,10 @@ const {
   mockFailTask,
   mockExecuteTask,
   mockResolveWorkflowConfigValue,
+  mockBeginProjectTemplatePreparation,
+  mockCompleteProjectTemplatePreparation,
+  mockAbortProjectTemplatePreparation,
+  mockInvalidateResolvedConfigCache,
 } = vi.hoisted(() => ({
   mockAddTask: vi.fn(() => ({
     name: 'test-task',
@@ -23,14 +27,28 @@ const {
   mockFailTask: vi.fn(),
   mockExecuteTask: vi.fn(),
   mockResolveWorkflowConfigValue: vi.fn((_: string, key: string) => (key === 'autoPr' ? undefined : 'default')),
+  mockBeginProjectTemplatePreparation: vi.fn(),
+  mockCompleteProjectTemplatePreparation: vi.fn(),
+  mockAbortProjectTemplatePreparation: vi.fn(),
+  mockInvalidateResolvedConfigCache: vi.fn(),
 }));
 
 vi.mock('../infra/config/index.js', () => ({
   resolveWorkflowConfigValue: (...args: unknown[]) => mockResolveWorkflowConfigValue(...args),
   listWorkflows: vi.fn(() => ['default']),
   listWorkflowEntries: vi.fn(() => []),
-  loadWorkflowByIdentifier: vi.fn((identifier: string) => (identifier === 'default' ? { name: 'default' } : null)),
+  loadWorkflowByIdentifier: vi.fn((identifier: string) => (
+    identifier === 'default'
+      ? { name: 'default', sourcePath: '/project/.takt/workflows/default.yaml' }
+      : null
+  )),
   isWorkflowPath: vi.fn(() => false),
+  invalidateResolvedConfigCache: (...args: unknown[]) =>
+    mockInvalidateResolvedConfigCache(...args),
+}));
+
+vi.mock('../infra/config/loaders/workflowSourceMetadata.js', () => ({
+  getWorkflowSourcePath: (workflow: { sourcePath?: string }) => workflow.sourcePath,
 }));
 
 vi.mock('../infra/task/index.js', () => ({
@@ -74,6 +92,19 @@ vi.mock('../features/tasks/execute/taskExecution.js', () => ({
   executeTask: (...args: unknown[]) => mockExecuteTask(...args),
 }));
 
+vi.mock('../features/tasks/execute/projectTemplatePreparationReservation.js', () => ({
+  abortProjectTemplatePreparationAfterError: (
+    reservation: { abort(): void },
+  ) => reservation.abort(),
+  beginProjectTemplatePreparation: (...args: unknown[]) => {
+    mockBeginProjectTemplatePreparation(...args);
+    return {
+      complete: mockCompleteProjectTemplatePreparation,
+      abort: mockAbortProjectTemplatePreparation,
+    };
+  },
+}));
+
 vi.mock('../features/workflowSelection/index.js', () => ({
   warnMissingWorkflows: vi.fn(),
   selectWorkflowFromCategorizedWorkflows: vi.fn(),
@@ -94,6 +125,11 @@ const mockError = vi.mocked(error);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockLoadWorkflowByIdentifier.mockImplementation((identifier: string) => (
+    identifier === 'default'
+      ? { name: 'default', sourcePath: '/project/.takt/workflows/default.yaml' }
+      : null
+  ) as never);
   mockExecuteTask.mockResolvedValue(true);
 });
 
@@ -108,6 +144,131 @@ describe('selectAndExecuteTask (execute path)', () => {
     expect(mockExecuteTask).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: '/project', projectCwd: '/project' }),
     );
+    expect(mockBeginProjectTemplatePreparation.mock.invocationCallOrder[0])
+      .toBeLessThan(mockExecuteTask.mock.invocationCallOrder[0]!);
+    expect(mockCompleteProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+    expect(mockAbortProjectTemplatePreparation).not.toHaveBeenCalled();
+    expect(mockBeginProjectTemplatePreparation.mock.invocationCallOrder[0])
+      .toBeLessThan(mockInvalidateResolvedConfigCache.mock.invocationCallOrder[0]!);
+    expect(mockInvalidateResolvedConfigCache.mock.invocationCallOrder[0])
+      .toBeLessThan(mockExecuteTask.mock.invocationCallOrder[0]!);
+  });
+
+  it('aborts before mutation when the selected workflow resolves differently after reservation', async () => {
+    let reservationPublished = false;
+    mockBeginProjectTemplatePreparation.mockImplementationOnce(() => {
+      reservationPublished = true;
+    });
+    mockLoadWorkflowByIdentifier.mockImplementation((identifier: string) => ({
+      name: identifier,
+      sourcePath: reservationPublished
+        ? '/project/.takt/workflows/replaced.yaml'
+        : '/project/.takt/workflows/default.yaml',
+    } as never));
+
+    await expect(selectAndExecuteTask('/project', 'test task', {
+      workflow: 'default',
+    })).rejects.toThrow('workflow selection changed during preparation');
+
+    expect(mockInvalidateResolvedConfigCache).toHaveBeenCalledWith('/project');
+    expect(mockAddTask).not.toHaveBeenCalled();
+    expect(mockExecuteTask).not.toHaveBeenCalled();
+    expect(mockAbortProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts before mutation when the selected workflow disappears after reservation', async () => {
+    let reservationPublished = false;
+    mockBeginProjectTemplatePreparation.mockImplementationOnce(() => {
+      reservationPublished = true;
+    });
+    mockLoadWorkflowByIdentifier.mockImplementation((identifier: string) => (
+      reservationPublished
+        ? null
+        : {
+            name: identifier,
+            sourcePath: '/project/.takt/workflows/default.yaml',
+          }
+    ) as never);
+
+    await expect(selectAndExecuteTask('/project', 'test task', {
+      workflow: 'default',
+    })).rejects.toThrow('workflow selection changed during preparation');
+
+    expect(mockInvalidateResolvedConfigCache).toHaveBeenCalledWith('/project');
+    expect(mockAddTask).not.toHaveBeenCalled();
+    expect(mockExecuteTask).not.toHaveBeenCalled();
+    expect(mockAbortProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves audited execution when a fallback workflow is unresolved before and after reservation', async () => {
+    mockSelectWorkflow.mockResolvedValue('default');
+    mockLoadWorkflowByIdentifier.mockReturnValue(null);
+    mockExecuteTask.mockResolvedValue(false);
+
+    await expect(selectAndExecuteTask('/project', 'test task', {
+      exitOnFailure: false,
+    })).resolves.toBe(false);
+
+    expect(mockBeginProjectTemplatePreparation).toHaveBeenCalledWith({
+      projectRoot: '/project',
+      task: 'test task',
+      workflow: 'direct-task-preparation',
+    });
+    expect(mockInvalidateResolvedConfigCache).toHaveBeenCalledWith('/project');
+    expect(mockExecuteTask).toHaveBeenCalledTimes(1);
+    expect(mockCompleteProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+    expect(mockAbortProjectTemplatePreparation).not.toHaveBeenCalled();
+  });
+
+  it('publishes an aborted reservation when pre-reservation workflow parsing throws', async () => {
+    mockSelectWorkflow.mockResolvedValue('default');
+    mockLoadWorkflowByIdentifier
+      .mockImplementationOnce(() => {
+        throw new Error('broken workflow yaml');
+      })
+      .mockReturnValue({
+        name: 'default',
+        sourcePath: '/project/.takt/workflows/default.yaml',
+      } as never);
+
+    await expect(selectAndExecuteTask('/project', 'test task'))
+      .rejects.toThrow('broken workflow yaml');
+
+    expect(mockBeginProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+    expect(mockInvalidateResolvedConfigCache).toHaveBeenCalledWith('/project');
+    expect(mockAddTask).not.toHaveBeenCalled();
+    expect(mockExecuteTask).not.toHaveBeenCalled();
+    expect(mockAbortProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts before mutation when an unresolved workflow becomes resolved after reservation', async () => {
+    mockSelectWorkflow.mockResolvedValue('default');
+    mockLoadWorkflowByIdentifier
+      .mockReturnValueOnce(null)
+      .mockReturnValue({
+        name: 'default',
+        sourcePath: '/project/.takt/workflows/default.yaml',
+      } as never);
+
+    await expect(selectAndExecuteTask('/project', 'test task'))
+      .rejects.toThrow('workflow selection changed during preparation');
+
+    expect(mockBeginProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+    expect(mockInvalidateResolvedConfigCache).toHaveBeenCalledWith('/project');
+    expect(mockAddTask).not.toHaveBeenCalled();
+    expect(mockExecuteTask).not.toHaveBeenCalled();
+    expect(mockAbortProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reserve or invalidate config when workflow selection is cancelled', async () => {
+    mockSelectWorkflow.mockResolvedValue(null);
+
+    await expect(selectAndExecuteTask('/project', 'test task'))
+      .resolves.toBe(false);
+
+    expect(mockBeginProjectTemplatePreparation).not.toHaveBeenCalled();
+    expect(mockInvalidateResolvedConfigCache).not.toHaveBeenCalled();
+    expect(mockExecuteTask).not.toHaveBeenCalled();
   });
 
   it('should call selectWorkflow when no override is provided', async () => {
@@ -183,6 +344,8 @@ describe('selectAndExecuteTask (execute path)', () => {
     expect(mockAddTask).toHaveBeenCalledWith('test task', { workflow: 'default' });
     expect(mockFailTask).toHaveBeenCalledTimes(1);
     expect(mockCompleteTask).not.toHaveBeenCalled();
+    expect(mockCompleteProjectTemplatePreparation.mock.invocationCallOrder[0])
+      .toBeLessThan(processExitSpy.mock.invocationCallOrder[0]!);
     processExitSpy.mockRestore();
   });
 });

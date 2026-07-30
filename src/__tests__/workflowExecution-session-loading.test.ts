@@ -21,6 +21,7 @@ const {
   mockStepResponse,
   mockInitializeOtelFoundation,
   mockObservabilityShutdown,
+  mockWriteRunMeta,
 } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { EventEmitter: EE } = require('node:events') as typeof import('node:events');
@@ -129,6 +130,7 @@ const {
     mockStepResponse,
     mockInitializeOtelFoundation,
     mockObservabilityShutdown,
+    mockWriteRunMeta: vi.fn(),
   };
 });
 
@@ -167,7 +169,11 @@ vi.mock('../infra/config/index.js', () => ({
   }),
   saveSessionState: vi.fn(),
   ensureDir: vi.fn(),
-  writeFileAtomic: vi.fn(),
+  writeFileAtomic: mockWriteRunMeta,
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteRunMeta,
 }));
 
 vi.mock('../shared/context.js', () => ({
@@ -550,9 +556,8 @@ describe('executeWorkflow session loading', () => {
       },
     });
 
-    const metaWrites = vi.mocked(writeFileAtomic).mock.calls.filter(([path]) => (
-      path === '/tmp/project/.takt/runs/trace-discovery-run/meta.json'
-    ));
+    const metaWrites = vi.mocked(writeFileAtomic).mock.calls.filter(([path]) =>
+      String(path).endsWith('/project/.takt/runs/trace-discovery-run/meta.json'));
     expect(metaWrites.length).toBeGreaterThan(0);
     const finalMetaWrite = metaWrites.at(-1);
     if (!finalMetaWrite) {
@@ -603,9 +608,8 @@ describe('executeWorkflow session loading', () => {
       },
     });
 
-    const metaWrites = vi.mocked(writeFileAtomic).mock.calls.filter(([path]) => (
-      path === '/tmp/project/.takt/runs/trace-discovery-disabled-run/meta.json'
-    ));
+    const metaWrites = vi.mocked(writeFileAtomic).mock.calls.filter(([path]) =>
+      String(path).endsWith('/project/.takt/runs/trace-discovery-disabled-run/meta.json'));
     expect(metaWrites.length).toBeGreaterThan(0);
     const finalMetaWrite = metaWrites.at(-1);
     if (!finalMetaWrite) {
@@ -654,9 +658,8 @@ describe('executeWorkflow session loading', () => {
     expect(result.success).toBe(false);
     expect(result.reason).toBe('step_failed');
 
-    const metaWrites = vi.mocked(writeFileAtomic).mock.calls.filter(([path]) => (
-      path === '/tmp/project/.takt/runs/trace-discovery-abort-run/meta.json'
-    ));
+    const metaWrites = vi.mocked(writeFileAtomic).mock.calls.filter(([path]) =>
+      String(path).endsWith('/project/.takt/runs/trace-discovery-abort-run/meta.json'));
     expect(metaWrites.length).toBeGreaterThan(0);
     const finalMetaWrite = metaWrites.at(-1);
     if (!finalMetaWrite) {
@@ -713,9 +716,8 @@ describe('executeWorkflow session loading', () => {
       }),
     ).rejects.toThrow('workflow engine failed');
 
-    const metaWrites = vi.mocked(writeFileAtomic).mock.calls.filter(([path]) => (
-      path === '/tmp/project/.takt/runs/trace-discovery-error-run/meta.json'
-    ));
+    const metaWrites = vi.mocked(writeFileAtomic).mock.calls.filter(([path]) =>
+      String(path).endsWith('/project/.takt/runs/trace-discovery-error-run/meta.json'));
     expect(metaWrites.length).toBeGreaterThan(0);
     const finalMetaWrite = metaWrites.at(-1);
     if (!finalMetaWrite) {

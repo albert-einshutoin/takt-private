@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { CapabilityAwareStructuredCaller } from '../../../agents/structured-caller.js';
 import type { WorkflowConfig } from '../../../core/models/index.js';
@@ -29,6 +30,7 @@ import { TaskPrefixWriter } from '../../../shared/ui/TaskPrefixWriter.js';
 import { createLogger, generateReportDir, getDebugPromptsLogFile, isValidReportDirName, preventSleep } from '../../../shared/utils/index.js';
 import { createProviderEventLogger, isProviderEventsEnabled } from '../../../shared/utils/providerEventLogger.js';
 import { sanitizeTerminalText } from '../../../shared/utils/text.js';
+import { getErrorMessage } from '../../../shared/utils/error.js';
 import { createUsageEventLogger, isUsageEventsEnabled } from '../../../shared/utils/usageEventLogger.js';
 import { initializeOtelFoundation, type OtelFoundationHandle } from '../../../infra/observability/otelFoundation.js';
 import { PHASE_USAGE_EVENTS_LOG_FILE_SUFFIX } from '../../../core/logging/contracts.js';
@@ -42,6 +44,10 @@ import { createTraceReportWriter } from './traceReportWriter.js';
 import { sanitizeTextForStorage } from './traceReportRedaction.js';
 import type { WorkflowExecutionOptions } from './types.js';
 import { assertTaskPrefixPair, detectStepType } from './workflowExecutionUtils.js';
+import {
+  withProjectTemplateRunStartPermit,
+  type ProjectTemplateRunStartPermit,
+} from '../../project-template/apply-lease.js';
 
 const log = createLogger('workflow');
 
@@ -86,6 +92,33 @@ export interface WorkflowExecutionBootstrap {
   writeTraceReportOnce: ReturnType<typeof createTraceReportWriter>;
 }
 
+function rethrowBootstrapFailureAfterTerminalization(
+  runMetaManager: RunMetaManager,
+  error: unknown,
+  allowSensitiveData: boolean,
+): never {
+  const reason = `workflow bootstrap failed: ${sanitizeTextForStorage(
+    getErrorMessage(error),
+    allowSensitiveData,
+  )}`;
+  try {
+    if (!runMetaManager.isFinalized) {
+      // Running evidence is already visible at this boundary. Publish a
+      // terminal reason before rethrowing so template apply cannot remain
+      // blocked by a constructor failure that never reached execution cleanup.
+      runMetaManager.finalize('aborted', 0, reason);
+    }
+  } catch (terminalizationError) {
+    // Preserve running/unknown evidence when terminal publication itself is
+    // uncertain, and retain both failures for operator diagnosis.
+    throw new AggregateError(
+      [error, terminalizationError],
+      'Workflow bootstrap and run terminalization both failed',
+    );
+  }
+  throw error;
+}
+
 export async function createWorkflowExecutionBootstrap(
   workflowConfig: WorkflowConfig,
   task: string,
@@ -126,53 +159,105 @@ export async function createWorkflowExecutionBootstrap(
   const isWorktree = cwd !== projectCwd;
   log.debug('Session mode', { isRetry, isWorktree });
 
-  const globalConfig = resolveWorkflowConfigValues(projectCwd, [
-    'notificationSound',
-    'notificationSoundEvents',
-    'subscriptionOnly',
-    'allowedProviders',
-    'forbiddenProviders',
-    'provider',
-    'rateLimitFallback',
-    'runtime',
-    'preventSleep',
-    'model',
-    'logging',
-    'analytics',
-    'observability',
-    'timezone',
-  ]);
-  const runSlug = options.reportDirName ?? generateReportDir(task, { timezone: globalConfig.timezone });
-  if (!isValidReportDirName(runSlug)) {
-    throw new Error(`Invalid reportDirName: ${runSlug}`);
-  }
-  if (isWorktree) {
-    ensureWorktreeTaktGitignore(cwd);
-  }
+  const prepareRunStart = (
+    projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit,
+  ) => {
+    const globalConfig = resolveWorkflowConfigValues(projectCwd, [
+      'notificationSound',
+      'notificationSoundEvents',
+      'subscriptionOnly',
+      'allowedProviders',
+      'forbiddenProviders',
+      'provider',
+      'rateLimitFallback',
+      'runtime',
+      'preventSleep',
+      'model',
+      'logging',
+      'analytics',
+      'observability',
+      'timezone',
+    ]);
+    const runSlug = options.reportDirName ?? generateReportDir(task, { timezone: globalConfig.timezone });
+    if (!isValidReportDirName(runSlug)) {
+      throw new Error(`Invalid reportDirName: ${runSlug}`);
+    }
+    if (isWorktree) {
+      ensureWorktreeTaktGitignore(cwd);
+    }
 
-  const runPaths = buildRunPaths(cwd, runSlug);
-  const sessionLog = createSessionLog(task, projectCwd, workflowConfig.name);
-  const traceReportMode = globalConfig.logging?.trace === true ? 'full' : 'redacted';
-  const allowSensitiveData = traceReportMode === 'full';
-  const sanitizeObservabilityText = (text: string): string => sanitizeTextForStorage(text, allowSensitiveData);
-  const traceDiscovery = globalConfig.observability.enabled === true
-    ? buildTraceDiscovery({
-        runId: runSlug,
-        workflowName: workflowConfig.name,
-        traceTaskMetadata: {
-          ...options.traceTaskMetadata,
-          runDir: runPaths.runRootAbs,
-        },
-        sanitizeText: sanitizeObservabilityText,
-      })
-    : undefined;
-  const runMetaManager = new RunMetaManager(
+    const runPaths = buildRunPaths(cwd, runSlug);
+    const sessionLog = createSessionLog(task, projectCwd, workflowConfig.name);
+    const traceReportMode = globalConfig.logging?.trace === true
+      ? 'full' as const
+      : 'redacted' as const;
+    const allowSensitiveData = traceReportMode === 'full';
+    const sanitizeObservabilityText = (text: string): string =>
+      sanitizeTextForStorage(text, allowSensitiveData);
+    const traceDiscovery = globalConfig.observability.enabled === true
+      ? buildTraceDiscovery({
+          runId: runSlug,
+          workflowName: workflowConfig.name,
+          traceTaskMetadata: {
+            ...options.traceTaskMetadata,
+            runDir: runPaths.runRootAbs,
+          },
+          sanitizeText: sanitizeObservabilityText,
+        })
+      : undefined;
+    const runMetaManager = new RunMetaManager(
+      runPaths,
+      task,
+      workflowConfig.name,
+      options.directResume,
+      {
+        ...(traceDiscovery ? { traceDiscovery } : {}),
+        ...(projectTemplateRunStartPermit
+          ? {
+              projectTemplateRunStartPermit,
+              projectTemplateCoordinationRoot: projectCwd,
+            }
+          : {}),
+      },
+    );
+    try {
+      options.onRunningEvidencePublished?.();
+    } catch (error) {
+      rethrowBootstrapFailureAfterTerminalization(
+        runMetaManager,
+        error,
+        allowSensitiveData,
+      );
+    }
+    return {
+      globalConfig,
+      runSlug,
+      runPaths,
+      sessionLog,
+      traceReportMode,
+      allowSensitiveData,
+      sanitizeObservabilityText,
+      traceDiscovery,
+      runMetaManager,
+    };
+  };
+  const preparedRunStart = (
+    options.projectTemplateRunStartPermit !== undefined || !existsSync(projectCwd)
+  )
+    ? prepareRunStart(options.projectTemplateRunStartPermit)
+    : withProjectTemplateRunStartPermit(projectCwd, prepareRunStart);
+  const {
+    globalConfig,
+    runSlug,
     runPaths,
-    task,
-    workflowConfig.name,
-    options.directResume,
-    traceDiscovery ? { traceDiscovery } : undefined,
-  );
+    sessionLog,
+    traceReportMode,
+    allowSensitiveData,
+    sanitizeObservabilityText,
+    traceDiscovery,
+    runMetaManager,
+  } = preparedRunStart;
+  try {
   const workflowSessionId = generateSessionId();
   const ndjsonLogPath = initNdjsonLog(
     workflowSessionId,
@@ -337,6 +422,13 @@ export async function createWorkflowExecutionBootstrap(
     sessionUpdateHandler,
     writeTraceReportOnce,
   };
+  } catch (error) {
+    rethrowBootstrapFailureAfterTerminalization(
+      runMetaManager,
+      error,
+      allowSensitiveData,
+    );
+  }
 }
 
 function mapConfigSourceToResolutionSource(source: ConfigValueSource): ProviderResolutionSource {

@@ -14,6 +14,8 @@ const {
   mockFormatRunSessionForPrompt,
   mockRunDirectRetryMode,
   mockRunDirectInstructMode,
+  mockEnsureDir,
+  mockWriteFileAtomic,
 } = vi.hoisted(() => ({
   mockFindLatestResumableDirectRun: vi.fn(),
   mockSelectOption: vi.fn(),
@@ -27,6 +29,8 @@ const {
   mockFormatRunSessionForPrompt: vi.fn(),
   mockRunDirectRetryMode: vi.fn(),
   mockRunDirectInstructMode: vi.fn(),
+  mockEnsureDir: vi.fn(),
+  mockWriteFileAtomic: vi.fn(),
 }));
 
 vi.mock('../features/tasks/resume/directRunFinder.js', () => ({
@@ -49,6 +53,8 @@ vi.mock('../features/tasks/execute/taskExecution.js', () => ({
 }));
 
 vi.mock('../infra/config/index.js', () => ({
+  ensureDir: mockEnsureDir,
+  writeFileAtomic: mockWriteFileAtomic,
   loadWorkflowByIdentifier: mockLoadWorkflowByIdentifier,
   getWorkflowDescription: vi.fn(() => ({
     name: 'default',
@@ -57,6 +63,10 @@ vi.mock('../infra/config/index.js', () => ({
     stepPreviews: [],
   })),
   resolveWorkflowConfigValue: vi.fn(() => 3),
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteFileAtomic,
 }));
 
 vi.mock('../core/workflow/run/order-content.js', () => ({
@@ -219,6 +229,11 @@ describe('resumeDirectRun', () => {
         taskSource: 'manual',
       },
     }));
+    const reservationStates = mockWriteFileAtomic.mock.calls.map((call) =>
+      (JSON.parse(String(call[1])) as { status: string }).status);
+    expect(reservationStates).toEqual(['running', 'completed']);
+    expect(mockWriteFileAtomic.mock.invocationCallOrder[0])
+      .toBeLessThan(mockLoadWorkflowByIdentifier.mock.invocationCallOrder[0]!);
   });
 
   it('Given Requeue is selected without a valid resume point, When currentStep exists in the workflow, Then currentStep is used as startStep', async () => {
@@ -350,6 +365,37 @@ describe('resumeDirectRun', () => {
         previousOrderContent: null,
       }),
     );
+  });
+
+  it('Given Retry waits for interaction, Then preparation evidence remains active until cancellation', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun());
+    mockSelectOption.mockResolvedValueOnce('retry');
+    mockRunDirectRetryMode.mockImplementationOnce(async () => {
+      const current = JSON.parse(String(mockWriteFileAtomic.mock.calls.at(-1)?.[1])) as {
+        status: string;
+      };
+      expect(current.status).toBe('running');
+      return { action: 'cancel', task: '' };
+    });
+
+    await resumeDirectRun('/project');
+
+    const reservationStates = mockWriteFileAtomic.mock.calls.map((call) =>
+      (JSON.parse(String(call[1])) as { status: string }).status);
+    expect(reservationStates).toEqual(['running', 'aborted']);
+    expect(mockExecuteTaskWithResult).not.toHaveBeenCalled();
+  });
+
+  it('Given context loading fails after reservation, Then the reservation is aborted', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun());
+    mockSelectOption.mockResolvedValueOnce('requeue');
+    mockLoadWorkflowByIdentifier.mockReturnValue(undefined);
+
+    await expect(resumeDirectRun('/project')).rejects.toThrow('not found for direct run');
+
+    const reservationStates = mockWriteFileAtomic.mock.calls.map((call) =>
+      (JSON.parse(String(call[1])) as { status: string }).status);
+    expect(reservationStates).toEqual(['running', 'aborted']);
   });
 
   it('Given Instruct is selected and order.md is absent, When meta.task is used, Then previousOrderContent is null', async () => {

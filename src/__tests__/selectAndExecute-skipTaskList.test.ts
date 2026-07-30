@@ -15,6 +15,10 @@ const {
   mockPersistTaskResult,
   mockPersistTaskError,
   mockBuildBooleanTaskResult,
+  mockBeginProjectTemplatePreparation,
+  mockCompleteProjectTemplatePreparation,
+  mockAbortProjectTemplatePreparation,
+  mockInvalidateResolvedConfigCache,
 } = vi.hoisted(() => ({
   mockAddTask: vi.fn(() => ({
     name: 'test-task',
@@ -28,6 +32,10 @@ const {
   mockPersistTaskResult: vi.fn(),
   mockPersistTaskError: vi.fn(),
   mockBuildBooleanTaskResult: vi.fn(() => ({ task: 'mock-result' })),
+  mockBeginProjectTemplatePreparation: vi.fn(),
+  mockCompleteProjectTemplatePreparation: vi.fn(),
+  mockAbortProjectTemplatePreparation: vi.fn(),
+  mockInvalidateResolvedConfigCache: vi.fn(),
 }));
 
 vi.mock('../shared/prompt/index.js', () => ({
@@ -35,10 +43,19 @@ vi.mock('../shared/prompt/index.js', () => ({
 
 vi.mock('../infra/config/index.js', () => ({
   resolveWorkflowConfigValue: vi.fn(),
-  loadWorkflowByIdentifier: vi.fn(() => ({ name: 'default' })),
+  loadWorkflowByIdentifier: vi.fn(() => ({
+    name: 'default',
+    sourcePath: '/project/.takt/workflows/default.yaml',
+  })),
+  invalidateResolvedConfigCache: (...args: unknown[]) =>
+    mockInvalidateResolvedConfigCache(...args),
   listWorkflows: vi.fn(() => ['default']),
   listWorkflowEntries: vi.fn(() => []),
   isWorkflowPath: vi.fn(() => false),
+}));
+
+vi.mock('../infra/config/loaders/workflowSourceMetadata.js', () => ({
+  getWorkflowSourcePath: (workflow: { sourcePath?: string }) => workflow.sourcePath,
 }));
 
 vi.mock('../infra/task/index.js', () => ({
@@ -79,6 +96,19 @@ vi.mock('../infra/github/index.js', () => ({
 
 vi.mock('../features/tasks/execute/taskExecution.js', () => ({
   executeTask: (...args: unknown[]) => mockExecuteTask(...args),
+}));
+
+vi.mock('../features/tasks/execute/projectTemplatePreparationReservation.js', () => ({
+  abortProjectTemplatePreparationAfterError: (
+    reservation: { abort(): void },
+  ) => reservation.abort(),
+  beginProjectTemplatePreparation: (...args: unknown[]) => {
+    mockBeginProjectTemplatePreparation(...args);
+    return {
+      complete: mockCompleteProjectTemplatePreparation,
+      abort: mockAbortProjectTemplatePreparation,
+    };
+  },
 }));
 
 vi.mock('../features/tasks/execute/taskResultHandler.js', () => ({

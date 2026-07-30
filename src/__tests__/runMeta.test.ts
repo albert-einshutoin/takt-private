@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunPaths } from '../core/workflow/run/run-paths.js';
 
-vi.mock('../infra/config/index.js', () => ({
-  ensureDir: vi.fn(),
-  writeFileAtomic: vi.fn(),
+const { mockWriteRunMeta } = vi.hoisted(() => ({
+  mockWriteRunMeta: vi.fn(),
 }));
 
-import { ensureDir, writeFileAtomic } from '../infra/config/index.js';
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: (...args: unknown[]) => mockWriteRunMeta(...args),
+}));
+
 import { RunMetaManager } from '../features/tasks/execute/runMeta.js';
 
 function createRunPaths(): RunPaths {
@@ -40,21 +42,37 @@ describe('RunMetaManager', () => {
     vi.clearAllMocks();
   });
 
+  it('rejects DebugLogger-reserved slugs for actual run metadata', () => {
+    const paths = {
+      ...createRunPaths(),
+      slug: 'debug-2026-07-30T11-22-33',
+    };
+
+    expect(() => new RunMetaManager(paths, 'Reserved debug task', 'default'))
+      .toThrow('reserved for DebugLogger');
+    expect(mockWriteRunMeta).not.toHaveBeenCalled();
+  });
+
+  it('rejects whitespace-only task text before any metadata publication', () => {
+    expect(() => new RunMetaManager(createRunPaths(), ' \n\t ', 'default'))
+      .toThrow('Run metadata task must contain non-whitespace text');
+    expect(mockWriteRunMeta).not.toHaveBeenCalled();
+  });
+
   it('should persist currentStep and currentIteration on updateStep', () => {
     const manager = new RunMetaManager(createRunPaths(), 'Force fail task', 'default');
 
     manager.updateStep('implement', 2);
 
-    expect(vi.mocked(ensureDir)).toHaveBeenCalledWith('/tmp/project/.takt/runs/20260409-force-fail-test');
-    expect(vi.mocked(writeFileAtomic)).toHaveBeenCalledTimes(2);
+    expect(mockWriteRunMeta).toHaveBeenCalledTimes(2);
 
-    const initialMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[0]![1])) as {
+    const initialMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[0]![1])) as {
       status: string;
       updatedAt?: string;
       currentStep?: string;
       currentIteration?: number;
     };
-    const updatedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[1]![1])) as {
+    const updatedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[1]![1])) as {
       status: string;
       updatedAt?: string;
       currentStep?: string;
@@ -81,7 +99,7 @@ describe('RunMetaManager', () => {
       }
     ).updatePhase('review', 3, 2);
 
-    const phasedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[2]![1])) as {
+    const phasedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[2]![1])) as {
       status: string;
       updatedAt?: string;
       currentStep?: string;
@@ -102,9 +120,9 @@ describe('RunMetaManager', () => {
 
     manager.finalize('completed', 3);
 
-    expect(vi.mocked(writeFileAtomic)).toHaveBeenCalledTimes(3);
+    expect(mockWriteRunMeta).toHaveBeenCalledTimes(3);
 
-    const finalizedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[2]![1])) as {
+    const finalizedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[2]![1])) as {
       status: string;
       updatedAt?: string;
       currentStep?: string;
@@ -141,10 +159,10 @@ describe('RunMetaManager', () => {
 
     manager.finalize('aborted', 7);
 
-    const updatedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[1]![1])) as {
+    const updatedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[1]![1])) as {
       resume_point?: typeof resumePoint;
     };
-    const finalizedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[2]![1])) as {
+    const finalizedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[2]![1])) as {
       resume_point?: typeof resumePoint;
     };
 
@@ -178,12 +196,12 @@ describe('RunMetaManager', () => {
     manager.updateResumePoint(refreshedResumePoint);
     manager.finalize('aborted', 7);
 
-    const refreshedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[2]![1])) as {
+    const refreshedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[2]![1])) as {
       currentStep?: string;
       currentIteration?: number;
       resume_point?: typeof refreshedResumePoint;
     };
-    const finalizedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[3]![1])) as {
+    const finalizedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[3]![1])) as {
       currentStep?: string;
       currentIteration?: number;
       resume_point?: typeof refreshedResumePoint;
@@ -228,13 +246,13 @@ describe('RunMetaManager', () => {
     manager.updateStep('review', 3);
     manager.finalize('completed', 3);
 
-    const initialMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[0]![1])) as {
+    const initialMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[0]![1])) as {
       observability?: { traceDiscovery?: typeof traceDiscovery };
     };
-    const updatedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[1]![1])) as {
+    const updatedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[1]![1])) as {
       observability?: { traceDiscovery?: typeof traceDiscovery };
     };
-    const finalizedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[2]![1])) as {
+    const finalizedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[2]![1])) as {
       observability?: { traceDiscovery?: typeof traceDiscovery };
     };
 
@@ -257,15 +275,15 @@ describe('RunMetaManager', () => {
     manager.updateStep('review', 3);
     manager.finalize('completed', 3);
 
-    const initialMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[0]![1])) as {
+    const initialMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[0]![1])) as {
       source_run_slug?: string;
       resume_mode?: string;
     } & Record<string, unknown>;
-    const updatedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[1]![1])) as {
+    const updatedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[1]![1])) as {
       source_run_slug?: string;
       resume_mode?: string;
     } & Record<string, unknown>;
-    const finalizedMeta = JSON.parse(String(vi.mocked(writeFileAtomic).mock.calls[2]![1])) as {
+    const finalizedMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[2]![1])) as {
       source_run_slug?: string;
       resume_mode?: string;
     } & Record<string, unknown>;

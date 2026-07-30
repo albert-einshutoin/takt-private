@@ -36,6 +36,7 @@ e2e/results/
 
 # TAKT runtime data (facets/pieces/config are managed by .takt/.gitignore)
 .devloop/
+.takt-template-state/
 
 task_planning/
 
