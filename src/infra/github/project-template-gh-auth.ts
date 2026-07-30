@@ -201,6 +201,7 @@ interface AssetRequestAuthority {
   responseDestroy?: (...args: unknown[]) => unknown;
   disposed: boolean;
   terminal: boolean;
+  responseErrorNotified: boolean;
   responseSeen: boolean;
   constructionComplete: boolean;
   redirectTransferPending: boolean;
@@ -858,41 +859,29 @@ export function createProjectTemplateGithubReleaseAssetRequest(
       // All public errors remain fixed and terminal.
     }
   };
-  const terminateWithResponseError = (
+  interface TerminalAssetResources {
+    readonly request?: ClientRequest;
+    readonly response?: IncomingMessage;
+    readonly requestDestroy?: (...args: unknown[]) => unknown;
+    readonly responseDestroy?: (...args: unknown[]) => unknown;
+  }
+  const claimTerminalResources = (
     authority: AssetRequestAuthority,
-    detachedResponse?: IncomingMessage,
-    detachedResponseDestroyAttempted = false,
-    notify = true,
-  ): void => {
-    if (authority.terminal || authority.disposed) return;
-    // `terminal` stops transport callbacks after an internal failure, while
-    // `disposed` records explicit caller revocation of the sealed facade.
-    // Setting terminal first makes cleanup and fallback notification finite
-    // even when EventEmitter or a consumer handler synchronously reenters.
+  ): TerminalAssetResources | undefined => {
+    if (authority.terminal || authority.disposed) return undefined;
+    // Claim terminal ownership and detach the callback entry point before
+    // invoking event-capable stream methods. Their implementations may
+    // synchronously call the response callback or a consumer handler.
     authority.terminal = true;
-    const request = authority.request;
-    const response = authority.response;
-    const requestDestroy = authority.requestDestroy;
-    const responseDestroy = authority.responseDestroy;
+    authority.release();
+    const resources: TerminalAssetResources = {
+      request: authority.request,
+      response: authority.response,
+      requestDestroy: authority.requestDestroy,
+      responseDestroy: authority.responseDestroy,
+    };
     cleanupResponseListeners(authority);
     cleanupRequestListeners(authority);
-    if (response !== undefined && responseDestroy !== undefined) {
-      destroyResponse(response, responseDestroy);
-    }
-    if (
-      detachedResponse !== undefined
-      && detachedResponse !== response
-      && !detachedResponseDestroyAttempted
-    ) {
-      destroyResponse(detachedResponse);
-    }
-    if (request !== undefined && requestDestroy !== undefined) {
-      try {
-        Reflect.apply(requestDestroy, request, []);
-      } catch {
-        // The fixed secondary notification remains authoritative.
-      }
-    }
     releaseRedirectAuthority(authority);
     authority.request = undefined;
     authority.response = undefined;
@@ -901,8 +890,67 @@ export function createProjectTemplateGithubReleaseAssetRequest(
     authority.responsePause = undefined;
     authority.responseResume = undefined;
     authority.responseDestroy = undefined;
-    authority.release();
-    if (notify && !authority.disposed) invoke('onResponseError');
+    return resources;
+  };
+  const destroyTerminalResources = (
+    resources: TerminalAssetResources,
+    detachedResponse?: IncomingMessage,
+    detachedResponseDestroyAttempted = false,
+  ): boolean => {
+    let succeeded = true;
+    if (
+      resources.response !== undefined
+      && resources.responseDestroy !== undefined
+    ) {
+      succeeded = destroyResponse(
+        resources.response,
+        resources.responseDestroy,
+      ) && succeeded;
+    }
+    if (
+      detachedResponse !== undefined
+      && detachedResponse !== resources.response
+      && !detachedResponseDestroyAttempted
+    ) {
+      succeeded = destroyResponse(detachedResponse) && succeeded;
+    }
+    if (
+      resources.request !== undefined
+      && resources.requestDestroy !== undefined
+    ) {
+      try {
+        Reflect.apply(
+          resources.requestDestroy,
+          resources.request,
+          [],
+        );
+      } catch {
+        succeeded = false;
+      }
+    }
+    return succeeded;
+  };
+  const notifyResponseErrorOnce = (
+    authority: AssetRequestAuthority,
+  ): void => {
+    if (authority.responseErrorNotified || authority.disposed) return;
+    authority.responseErrorNotified = true;
+    invoke('onResponseError');
+  };
+  const terminateWithResponseError = (
+    authority: AssetRequestAuthority,
+    detachedResponse?: IncomingMessage,
+    detachedResponseDestroyAttempted = false,
+    notify = true,
+  ): void => {
+    const resources = claimTerminalResources(authority);
+    if (resources === undefined) return;
+    destroyTerminalResources(
+      resources,
+      detachedResponse,
+      detachedResponseDestroyAttempted,
+    );
+    if (notify) notifyResponseErrorOnce(authority);
   };
   const failActiveResponse = (
     authority: AssetRequestAuthority,
@@ -913,17 +961,17 @@ export function createProjectTemplateGithubReleaseAssetRequest(
     authority: AssetRequestAuthority,
     response: IncomingMessage,
   ): void => {
-    const destroyed = destroyResponse(response);
-    if (authority.disposed) return;
-    const notified = invoke('onInvalidResponse');
-    if ((!destroyed || !notified) && !authority.disposed) {
-      terminateWithResponseError(authority, response, true);
-    }
+    const resources = claimTerminalResources(authority);
+    if (resources === undefined) return;
+    const destroyed = destroyTerminalResources(resources, response);
+    const notified = authority.disposed
+      ? true
+      : invoke('onInvalidResponse');
+    if (!destroyed || !notified) notifyResponseErrorOnce(authority);
   };
   const responseCallback = (response: IncomingMessage): void => {
     const authority = holder.current;
     if (authority === undefined || authority.disposed || authority.terminal) {
-      if (isReadableStream(response)) destroyResponse(response);
       return;
     }
     if (!isReadableStream(response)) {
@@ -977,12 +1025,27 @@ export function createProjectTemplateGithubReleaseAssetRequest(
         terminateWithResponseError(authority, response, true);
         return;
       }
+      if (
+        authority.disposed
+        || authority.terminal
+        || holder.current !== authority
+      ) {
+        releaseRedirectAuthority(authority);
+        return;
+      }
       const returnedNormally = invoke('onRedirect', [grant]);
       if (!returnedNormally) {
         terminateWithResponseError(authority, response, true);
         return;
       }
-      if (authority.disposed || authority.terminal) return;
+      if (
+        authority.disposed
+        || authority.terminal
+        || holder.current !== authority
+      ) {
+        releaseRedirectAuthority(authority);
+        return;
+      }
       // Normal return is the sole ownership-transfer point. A consumed grant
       // has created a hop whose private authority keeps the redirect state
       // alive; F2b-C can continue within that same module without exposing URL.
@@ -998,6 +1061,13 @@ export function createProjectTemplateGithubReleaseAssetRequest(
     if (rawStatus !== 200) {
       if (!destroyResponse(response)) {
         terminateWithResponseError(authority, response, true);
+        return;
+      }
+      if (
+        authority.disposed
+        || authority.terminal
+        || holder.current !== authority
+      ) {
         return;
       }
       if (!invoke('onResponse', [rawStatus])) {
@@ -1021,6 +1091,13 @@ export function createProjectTemplateGithubReleaseAssetRequest(
       Reflect.apply(pause, response, []);
     } catch {
       failActiveResponse(authority);
+      return;
+    }
+    if (
+      authority.disposed
+      || authority.terminal
+      || holder.current !== authority
+    ) {
       return;
     }
     const eventHandler = (
@@ -1084,6 +1161,7 @@ export function createProjectTemplateGithubReleaseAssetRequest(
   const authority: AssetRequestAuthority = {
     disposed: false,
     terminal: false,
+    responseErrorNotified: false,
     responseSeen: false,
     constructionComplete: false,
     redirectTransferPending: false,
@@ -1112,12 +1190,10 @@ export function createProjectTemplateGithubReleaseAssetRequest(
       },
     }, responseCallback);
   } catch {
-    if (authority.response !== undefined) {
-      destroyResponse(authority.response, authority.responseDestroy);
+    const resources = claimTerminalResources(authority);
+    if (resources !== undefined) {
+      destroyTerminalResources(resources);
     }
-    cleanupResponseListeners(authority);
-    releaseRedirectAuthority(authority);
-    authority.release();
     throw authError(
       'PROCESS_FAILED',
       'GitHub release asset request could not be created',
@@ -1128,12 +1204,10 @@ export function createProjectTemplateGithubReleaseAssetRequest(
     || request === null
     || types.isProxy(request)
   ) {
-    cleanupResponseListeners(authority);
-    if (authority.response !== undefined) {
-      destroyResponse(authority.response, authority.responseDestroy);
+    const resources = claimTerminalResources(authority);
+    if (resources !== undefined) {
+      destroyTerminalResources(resources);
     }
-    releaseRedirectAuthority(authority);
-    authority.release();
     throw authError(
       'PROCESS_FAILED',
       'GitHub release asset request could not be created',
@@ -1142,12 +1216,10 @@ export function createProjectTemplateGithubReleaseAssetRequest(
   const end = findDataFunction(request, 'end');
   const requestDestroy = findDataFunction(request, 'destroy');
   if (end === undefined || requestDestroy === undefined) {
-    cleanupResponseListeners(authority);
-    if (authority.response !== undefined) {
-      destroyResponse(authority.response, authority.responseDestroy);
+    const resources = claimTerminalResources(authority);
+    if (resources !== undefined) {
+      destroyTerminalResources(resources);
     }
-    releaseRedirectAuthority(authority);
-    authority.release();
     throw authError(
       'PROCESS_FAILED',
       'GitHub release asset request could not be created',
@@ -1204,33 +1276,10 @@ export function createProjectTemplateGithubReleaseAssetRequest(
       }
     }
   } catch {
-    const activeResponse = authority.response;
-    const activeResponseDestroy = authority.responseDestroy;
-    cleanupRequestListeners(authority);
-    cleanupResponseListeners(authority);
-    if (!authority.terminal && !authority.disposed) {
-      authority.terminal = true;
-      if (
-        activeResponse !== undefined
-        && activeResponseDestroy !== undefined
-      ) {
-        destroyResponse(activeResponse, activeResponseDestroy);
-      }
-      try {
-        Reflect.apply(requestDestroy, request, []);
-      } catch {
-        // Fixed creation failure remains authoritative.
-      }
+    const resources = claimTerminalResources(authority);
+    if (resources !== undefined) {
+      destroyTerminalResources(resources);
     }
-    releaseRedirectAuthority(authority);
-    authority.request = undefined;
-    authority.response = undefined;
-    authority.end = undefined;
-    authority.requestDestroy = undefined;
-    authority.responsePause = undefined;
-    authority.responseResume = undefined;
-    authority.responseDestroy = undefined;
-    authority.release();
     throw authError(
       'PROCESS_FAILED',
       'GitHub release asset request could not be created',
@@ -1325,41 +1374,14 @@ export function createProjectTemplateGithubReleaseAssetRequest(
       const current = ASSET_REQUEST_AUTHORITIES.get(this);
       if (current === undefined || current.disposed) return;
       current.disposed = true;
+      current.release();
+      const request = current.request;
+      const response = current.response;
+      const requestDestroy = current.requestDestroy;
+      const responseDestroy = current.responseDestroy;
       cleanupResponseListeners(current);
-      for (const [event, listener] of current.requestListeners) {
-        try {
-          EventEmitter.prototype.removeListener.call(
-            current.request,
-            event,
-            listener,
-          );
-        } catch {
-          // Authority deletion remains terminal.
-        }
-      }
-      if (
-        current.response !== undefined
-        && current.responseDestroy !== undefined
-      ) {
-        destroyResponse(current.response, current.responseDestroy);
-      }
-      if (
-        current.request !== undefined
-        && current.requestDestroy !== undefined
-      ) {
-        try {
-          Reflect.apply(
-            current.requestDestroy,
-            current.request,
-            [],
-          );
-        } catch {
-          // Authority deletion remains terminal.
-        }
-      }
+      cleanupRequestListeners(current);
       releaseRedirectAuthority(current);
-      current.requestListeners = [];
-      current.responseListeners = [];
       current.request = undefined;
       current.response = undefined;
       current.end = undefined;
@@ -1367,8 +1389,21 @@ export function createProjectTemplateGithubReleaseAssetRequest(
       current.responsePause = undefined;
       current.responseResume = undefined;
       current.responseDestroy = undefined;
-      current.release();
       ASSET_REQUEST_AUTHORITIES.delete(this);
+      if (response !== undefined && responseDestroy !== undefined) {
+        destroyResponse(response, responseDestroy);
+      }
+      if (request !== undefined && requestDestroy !== undefined) {
+        try {
+          Reflect.apply(
+            requestDestroy,
+            request,
+            [],
+          );
+        } catch {
+          // Authority deletion remains terminal.
+        }
+      }
     },
   });
   ASSET_REQUEST_FACADES.add(facade);

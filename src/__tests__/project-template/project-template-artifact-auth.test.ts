@@ -527,6 +527,119 @@ describe('project-template authenticated release asset boundary F2b-B', () => {
     credential.dispose();
   });
 
+  it.each([false, true])(
+    'cancels a redirect when response destroy reenters a second response (dispose=%s)',
+    async (disposeFromInvalid) => {
+      const attempt = captureRequest();
+      const credential = await acquireCredential();
+      let facade!: ReturnType<
+        typeof createProjectTemplateGithubReleaseAssetRequest
+      >;
+      const onInvalidResponse = vi.fn(() => {
+        if (disposeFromInvalid) facade.dispose();
+      });
+      const handlers = makeHandlers({ onInvalidResponse });
+      facade = createProjectTemplateGithubReleaseAssetRequest(
+        credential,
+        { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+      );
+      const second = new FakeResponse(500);
+      const response = new FakeResponse(302, [
+        'Location',
+        'https://objects.githubusercontent.com/private/file',
+      ]);
+      const deletes = vi.spyOn(WeakMap.prototype, 'delete');
+      vi.spyOn(response, 'destroy').mockImplementation(() => {
+        attempt.respond(second);
+        return response;
+      });
+
+      expect(() => attempt.respond(response)).not.toThrow();
+      expect(handlers.onRedirect).not.toHaveBeenCalled();
+      expect(onInvalidResponse).toHaveBeenCalledTimes(1);
+      expect(handlers.onResponseError).not.toHaveBeenCalled();
+      expect(deletes).toHaveBeenCalled();
+      expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+      expect(attempt.request.listenerCount('error')).toBe(0);
+      expect(attempt.request.listenerCount('close')).toBe(0);
+      facade.dispose();
+      credential.dispose();
+    },
+  );
+
+  it('cancels a nonredirect response when destroy reenters a second response', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const response = new FakeResponse(404);
+    vi.spyOn(response, 'destroy').mockImplementation(() => {
+      attempt.respond(new FakeResponse(500));
+      return response;
+    });
+
+    expect(() => attempt.respond(response)).not.toThrow();
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('latches invalid response ownership before destroy reentry', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const response = new FakeResponse(302, ['X-Private', 'secret']);
+    vi.spyOn(response, 'destroy').mockImplementation(() => {
+      attempt.respond(new FakeResponse(500));
+      return response;
+    });
+
+    expect(() => attempt.respond(response)).not.toThrow();
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    expect(handlers.onRedirect).not.toHaveBeenCalled();
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('cancels 200 listener installation when pause reenters a second response', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const response = new FakeResponse(200);
+    vi.spyOn(response, 'pause').mockImplementation(() => {
+      attempt.respond(new FakeResponse(500));
+      return response;
+    });
+
+    expect(() => attempt.respond(response)).not.toThrow();
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    for (const event of ['data', 'end', 'aborted', 'error', 'close']) {
+      expect(response.listenerCount(event)).toBe(0);
+    }
+    expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+    facade.dispose();
+    credential.dispose();
+  });
+
   it.each(['error', 'close'])(
     'terminally contains a throwing request %s handler',
     async (event) => {
