@@ -113,6 +113,15 @@ function classifyPath(relativePath: string): {
       suggestedPolicy: 'merge',
     };
   }
+  if (lower === 'readme.md') {
+    return {
+      classification: 'project-owned',
+      reasonCode: 'PROJECT_CONFIG',
+      // Scaffold is create-if-missing: importing a template must never replace
+      // the target project's existing top-level TAKT documentation.
+      suggestedPolicy: 'scaffold',
+    };
+  }
   if (
     segments[0] === 'workflows'
     && segments.length > 1
@@ -150,7 +159,13 @@ function classifyPath(relativePath: string): {
     };
   }
   if (segments[0] === 'quality-gates' && segments.length > 1) {
-    return { classification: 'project-owned', reasonCode: 'PROJECT_QUALITY_GATE' };
+    return {
+      classification: 'project-owned',
+      reasonCode: 'PROJECT_QUALITY_GATE',
+      // Quality gates are project-specific starting points. Preserve existing
+      // local gates and generate only paths absent from the target.
+      suggestedPolicy: 'scaffold',
+    };
   }
   // Unknown paths never become portable merely because their contents look
   // harmless; a later explicit manifest/review may opt them in.
