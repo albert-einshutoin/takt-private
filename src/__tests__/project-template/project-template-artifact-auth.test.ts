@@ -495,6 +495,127 @@ describe('project-template authenticated release asset boundary F2b-B', () => {
     },
   );
 
+  it('detaches response resources before removeListener reenters dispose', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers({
+      onData(): void {
+        throw new Error('private response body');
+      },
+    });
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const response = new FakeResponse(200);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    const originalRemove = EventEmitter.prototype.removeListener;
+    let reentered = false;
+    vi.spyOn(EventEmitter.prototype, 'removeListener')
+      .mockImplementation(function removeWithReentry(
+        event: string | symbol,
+        listener: (...args: unknown[]) => void,
+      ): EventEmitter {
+        const result = originalRemove.call(this, event, listener);
+        if (this === response && !reentered) {
+          reentered = true;
+          facade.dispose();
+        }
+        return result;
+      });
+    attempt.respond(response);
+
+    expect(() => response.emit(
+      'data',
+      Buffer.from('private response body'),
+    )).not.toThrow();
+    expect(responseDestroy).toHaveBeenCalledTimes(1);
+    expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+    expect(reentered).toBe(true);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    for (const event of ['data', 'end', 'aborted', 'error', 'close']) {
+      expect(response.listenerCount(event)).toBe(0);
+    }
+    expect(attempt.request.listenerCount('error')).toBe(0);
+    expect(attempt.request.listenerCount('close')).toBe(0);
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('detaches request resources before removeListener reenters dispose', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers({
+      onRequestError(): void {
+        throw new Error('private request cause');
+      },
+    });
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const reenter = (): void => {
+      attempt.request.removeListener('removeListener', reenter);
+      facade.dispose();
+    };
+    attempt.request.on('removeListener', reenter);
+
+    expect(() => attempt.request.emit(
+      'error',
+      new Error('private request event'),
+    )).not.toThrow();
+    expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    expect(attempt.request.listenerCount('error')).toBe(0);
+    expect(attempt.request.listenerCount('close')).toBe(0);
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('detaches redirect authority before hop disposal reenters dispose', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    let facade!: ReturnType<
+      typeof createProjectTemplateGithubReleaseAssetRequest
+    >;
+    let hop: DisposableProjectTemplateArtifactRedirectHop | undefined;
+    const handlers = makeHandlers({
+      onRedirect(grant): void {
+        hop = grant.consume();
+        throw new Error('private redirect handler');
+      },
+    });
+    facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const originalDelete = WeakMap.prototype.delete;
+    let reentered = false;
+    const deletes = vi.spyOn(WeakMap.prototype, 'delete')
+      .mockImplementation(function deleteWithReentry(key: object): boolean {
+        if (key === hop && !reentered) {
+          reentered = true;
+          facade.dispose();
+        }
+        return originalDelete.call(this, key);
+      });
+
+    expect(() => attempt.respond(new FakeResponse(302, [
+      'Location',
+      'https://objects.githubusercontent.com/private/file',
+    ]))).not.toThrow();
+    expect(reentered).toBe(true);
+    expect(deletes.mock.calls.filter(([key]) => key === hop)).toHaveLength(1);
+    expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    expect(attempt.request.listenerCount('error')).toBe(0);
+    expect(attempt.request.listenerCount('close')).toBe(0);
+    hop!.dispose();
+    expect(deletes.mock.calls.filter(([key]) => key === hop)).toHaveLength(1);
+    facade.dispose();
+    credential.dispose();
+  });
+
   it('terminally contains malformed redirect cleanup and callback failures', async () => {
     const attempt = captureRequest();
     const credential = await acquireCredential();
@@ -609,6 +730,137 @@ describe('project-template authenticated release asset boundary F2b-B', () => {
     expect(handlers.onResponseError).not.toHaveBeenCalled();
     expect(handlers.onRedirect).not.toHaveBeenCalled();
     expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('contains same and distinct late responses from terminal request destroy', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const lateSecond = new FakeResponse(500);
+    const lateFirst = new FakeResponse(500);
+    const originalLateDestroy = lateFirst.destroy;
+    const lateDestroy = vi.spyOn(lateFirst, 'destroy')
+      .mockImplementation((error) => {
+        attempt.respond(lateFirst);
+        attempt.respond(lateSecond);
+        return Reflect.apply(originalLateDestroy, lateFirst, [error]);
+      });
+    attempt.request.destroy.mockImplementation(() => {
+      attempt.respond(lateFirst);
+      attempt.respond(Object.freeze({}) as FakeResponse);
+    });
+
+    expect(() => attempt.respond(new FakeResponse(
+      302,
+      ['X-Private', 'secret'],
+    ))).not.toThrow();
+    expect(lateDestroy).toHaveBeenCalledTimes(1);
+    expect(lateFirst.destroyed).toBe(true);
+    expect(lateSecond.destroyed).toBe(true);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(handlers.onRedirect).not.toHaveBeenCalled();
+    expect(lateFirst.listenerCount('data')).toBe(0);
+    expect(lateSecond.listenerCount('data')).toBe(0);
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('contains a late response from dispose destroy without callbacks', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const response = new FakeResponse(200);
+    const late = new FakeResponse(500);
+    const originalDestroy = response.destroy;
+    vi.spyOn(response, 'destroy').mockImplementation((error) => {
+      attempt.respond(late);
+      return Reflect.apply(originalDestroy, response, [error]);
+    });
+    attempt.respond(response);
+
+    expect(() => facade.dispose()).not.toThrow();
+    expect(late.destroyed).toBe(true);
+    expect(late.listenerCount('data')).toBe(0);
+    expect(handlers.onResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onInvalidResponse).not.toHaveBeenCalled();
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('contains late destroy throws and non-readable callbacks without causes', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    const handlers = makeHandlers();
+    const facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const late = new FakeResponse(500);
+    const lateDestroy = vi.spyOn(late, 'destroy')
+      .mockImplementation(() => {
+        attempt.respond(Object.freeze({}) as FakeResponse);
+        throw new Error('private late destroy cause');
+      });
+    attempt.request.destroy.mockImplementation(() => {
+      attempt.respond(late);
+    });
+
+    expect(() => attempt.respond(new FakeResponse(
+      302,
+      ['X-Private', 'secret'],
+    ))).not.toThrow();
+    expect(lateDestroy).toHaveBeenCalledTimes(1);
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(handlers.onRedirect).not.toHaveBeenCalled();
+    facade.dispose();
+    credential.dispose();
+  });
+
+  it('marks secondary notification before its handler reenters dispose', async () => {
+    const attempt = captureRequest();
+    const credential = await acquireCredential();
+    let facade!: ReturnType<
+      typeof createProjectTemplateGithubReleaseAssetRequest
+    >;
+    const onResponseError = vi.fn(() => {
+      facade.dispose();
+    });
+    const handlers = makeHandlers({
+      onData(): void {
+        throw new Error('private response body');
+      },
+      onResponseError,
+    });
+    facade = createProjectTemplateGithubReleaseAssetRequest(
+      credential,
+      { owner: 'octo', repo: 'demo', assetId: 123, handlers },
+    );
+    const response = new FakeResponse(200);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    attempt.respond(response);
+
+    expect(() => response.emit(
+      'data',
+      Buffer.from('private response body'),
+    )).not.toThrow();
+    expect(onResponseError).toHaveBeenCalledTimes(1);
+    expect(responseDestroy).toHaveBeenCalledTimes(1);
     expect(attempt.request.destroy).toHaveBeenCalledTimes(1);
     facade.dispose();
     credential.dispose();
