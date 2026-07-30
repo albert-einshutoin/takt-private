@@ -15,6 +15,9 @@ import type {
   ProjectTemplateSourceDescriptorV1,
   ResolvedGithubTemplateSource,
   GithubTemplateSourceMetadataPort,
+  ProjectTemplateApplyLease,
+  ProjectTemplateMutationLease,
+  ProjectTemplateMutationOperation,
 } from 'takt';
 
 interface PackageContract {
@@ -63,6 +66,9 @@ describe('package exports contract', () => {
         sourceDescriptorSchema: typeof api.projectTemplateSourceDescriptorV1JsonSchema,
         resolveGithubTemplateSource: typeof api.resolveGithubTemplateSource,
         sourceResolutionError: typeof api.GithubTemplateSourceResolutionError,
+        acquireMutationLease: typeof api.acquireProjectTemplateMutationLease,
+        assertMutationLease: typeof api.assertProjectTemplateMutationLeaseOwned,
+        acquireApplyLease: typeof api.acquireProjectTemplateApplyLease,
       }));
     `);
 
@@ -80,6 +86,9 @@ describe('package exports contract', () => {
       sourceDescriptorSchema: 'object',
       resolveGithubTemplateSource: 'function',
       sourceResolutionError: 'function',
+      acquireMutationLease: 'function',
+      assertMutationLease: 'function',
+      acquireApplyLease: 'function',
     });
     expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
       .toMatchTypeOf<readonly unknown[]>();
@@ -118,6 +127,20 @@ describe('package exports contract', () => {
       }>();
     expectTypeOf<GithubTemplateSourceMetadataPort>()
       .toHaveProperty('resolveRefToCommit');
+    expectTypeOf<ProjectTemplateMutationOperation>()
+      .toMatchTypeOf<'apply' | 'download'>();
+    expectTypeOf<ProjectTemplateMutationLease>()
+      .toMatchTypeOf<{
+        operation: ProjectTemplateMutationOperation;
+        release(): void;
+      }>();
+    expectTypeOf<ProjectTemplateApplyLease>()
+      .toMatchTypeOf<{
+        lockPath: string;
+        token: string;
+        pid: number;
+        release(): void;
+      }>();
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');
     expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
     expect(declarationEntry).toContain('ProjectTemplateGithubRefSourceSpec');
@@ -129,6 +152,8 @@ describe('package exports contract', () => {
     expect(declarationEntry).toContain('ProjectTemplateRepertoireCapabilityV1');
     expect(declarationEntry).toContain('ResolvedGithubTemplateSource');
     expect(declarationEntry).toContain('GithubTemplateSourceMetadataPort');
+    expect(declarationEntry).toContain('ProjectTemplateMutationLease');
+    expect(declarationEntry).toContain('ProjectTemplateMutationOperation');
   });
 
   it('blocks internal project-template approval deep imports', () => {

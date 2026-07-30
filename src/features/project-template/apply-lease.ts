@@ -52,6 +52,30 @@ export interface ProjectTemplateApplyLease
   release(): void;
 }
 
+export type ProjectTemplateMutationOperation = 'apply' | 'download';
+
+/**
+ * Process-local sealed capability for the shared project-template mutation
+ * lease. Always prove ownership with assertProjectTemplateMutationLeaseOwned
+ * immediately before the protected mutation.
+ */
+export interface ProjectTemplateMutationLease
+  extends ProjectTemplateApplyLease {
+  readonly operation: ProjectTemplateMutationOperation;
+}
+
+interface ActiveProjectTemplateMutationLease {
+  readonly repoPath: string;
+  readonly lockPath: string;
+  readonly token: string;
+  readonly pid: number;
+  readonly operation: ProjectTemplateMutationOperation;
+  released: boolean;
+}
+
+const activeMutationLeases =
+  new WeakMap<ProjectTemplateMutationLease, ActiveProjectTemplateMutationLease>();
+
 export interface ProjectTemplateRunStartPermit {
   readonly repoPath: string;
   readonly lockPath: string;
@@ -1266,28 +1290,98 @@ export function assertProjectTemplateRunStartPermitOwned(
   }
 }
 
-export function acquireProjectTemplateApplyLease(
+export function acquireProjectTemplateMutationLease(
   repoPathValue: string,
-): ProjectTemplateApplyLease {
+  operation: ProjectTemplateMutationOperation,
+): ProjectTemplateMutationLease {
+  if (operation !== 'apply' && operation !== 'download') {
+    throw new ProjectTemplateCoordinationError();
+  }
   const repoPath = resolve(repoPathValue);
   const controlRoot = ensureControlRoot(repoPath);
   const mutexPath = resolveProjectTemplateRunStartMutexPath(repoPath);
+  // Keep using the legacy physical apply.lock and v1 payload so new download
+  // mutations remain mutually exclusive with apply operations from old TAKT
+  // versions. The operation is intentionally a process-local capability field.
   const lockPath = resolveProjectTemplateApplyLeasePath(repoPath);
   if (dirname(mutexPath) !== controlRoot || dirname(lockPath) !== controlRoot) {
     throw new ProjectTemplateCoordinationError();
   }
   const mutex = acquireCoordinationFile(mutexPath);
   try {
-    const lease = acquireCoordinationFile(lockPath);
-    return {
+    const coordinationLease = acquireCoordinationFile(lockPath);
+    const active: ActiveProjectTemplateMutationLease = {
+      repoPath,
       lockPath,
-      token: lease.token,
-      pid: lease.pid,
-      release: lease.release,
+      token: coordinationLease.token,
+      pid: coordinationLease.pid,
+      operation,
+      released: false,
     };
+    const lease = Object.freeze({
+      operation,
+      lockPath,
+      token: coordinationLease.token,
+      pid: coordinationLease.pid,
+      release() {
+        if (active.released) return;
+        coordinationLease.release();
+        active.released = true;
+      },
+    }) satisfies ProjectTemplateMutationLease;
+    activeMutationLeases.set(lease, active);
+    return lease;
   } finally {
+    // The shared lease is durably published before the run-start mutex leaves
+    // this critical section, closing download/apply/run check-start races.
     mutex.release();
   }
+}
+
+export function assertProjectTemplateMutationLeaseOwned(
+  repoPathValue: string,
+  lease: ProjectTemplateMutationLease,
+): void {
+  const active = activeMutationLeases.get(lease);
+  const repoPath = resolve(repoPathValue);
+  const lockPath = resolveProjectTemplateApplyLeasePath(repoPath);
+  if (
+    active === undefined
+    || active.released
+    || active.repoPath !== repoPath
+    || active.lockPath !== lockPath
+    || active.lockPath !== lease.lockPath
+    || active.token !== lease.token
+    || active.pid !== process.pid
+    || active.pid !== lease.pid
+    || active.operation !== lease.operation
+  ) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  const read = readProjectTemplateJsonStrict(lockPath);
+  if (
+    read.kind !== 'value'
+    || typeof read.value !== 'object'
+    || read.value === null
+    || Array.isArray(read.value)
+  ) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  const payload = read.value as Record<string, unknown>;
+  if (
+    Reflect.ownKeys(payload).length !== 3
+    || payload['version'] !== 1
+    || payload['token'] !== active.token
+    || payload['pid'] !== active.pid
+  ) {
+    throw new ProjectTemplateCoordinationError();
+  }
+}
+
+export function acquireProjectTemplateApplyLease(
+  repoPathValue: string,
+): ProjectTemplateApplyLease {
+  return acquireProjectTemplateMutationLease(repoPathValue, 'apply');
 }
 
 /**
