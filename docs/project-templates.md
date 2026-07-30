@@ -185,6 +185,39 @@ bounded syntax tree without expanding aliases. Parse errors, duplicate keys,
 multiple documents, aliases, non-scalar execution values, and inspection
 depth/node overruns remain incomplete and review-required.
 
+`README.md`, `automation/**`, and `quality-gates/**` are project-owned
+`scaffold` candidates: they are created only when missing and never replace a
+local file. `quality-gates/logs/**` remains excluded runtime state. A scaffolded
+shared wrapper must delegate to the project-local gate and must not turn a
+missing or failing gate into success through a weaker fallback.
+
+## Three-way merging config YAML
+
+Merge entries for `config.yaml` and `devloopd.yaml` use the base referenced by
+the formal lock, the current local file, and the incoming template.
+Provider routing, allowed and forbidden providers, the base branch, and
+workflow command gates are project-owned. Safe defaults such as language are
+template-managed, logging and CLI paths are global-only, and credential paths
+such as API keys, tokens, and passwords are forbidden. Splitting a credential
+name across mappings, for example `api.key`, does not bypass that rule.
+
+Mappings merge at leaf granularity. Different local and incoming changes to the
+same leaf produce a conflict with its exact path. Every known sequence declares
+an `atomic`, `unordered-set`, non-removing `monotonic-set`, or `ordered-keyed`
+policy; unknown sequences are never concatenated implicitly. Quality-gate
+identity is shared with runtime deduplication, so omitted default timeouts do
+not create duplicate commands.
+
+The local YAML document is the edit source. Unchanged nodes, mapping order,
+local comments, sequence-item presentation, BOM, a uniform line-ending style,
+and final-newline state are retained. Semantic no-ops return the exact local
+bytes. Aliases, anchors, merge keys, custom tags, multiple documents,
+directives, and edits to mixed-EOL input fail closed. Unknown keys are retained
+rather than silently deleted, then passed through the same project schema
+validator and reported with a path when unsupported. The apply plan seals the
+merged digest and diagnostics; the executor re-derives them from the stored
+base and rejects mismatched resolved bytes.
+
 Directory enumeration uses a bounded `opendir` stream and stops after
 `maxNodes + 1`, so a directory with an attacker-controlled number of children
 cannot be materialized in memory. Reaching that global witness stops all
