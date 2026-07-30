@@ -613,6 +613,7 @@ async function inspectTaktpackWithExpectedLinks(
       lockSeed: metadata.lockSeed,
       report,
       archiveSha256: archiveDigest.digest('hex'),
+      manifestSha256: metadata.manifestSha256,
       compatibility: {
         status: compatible === undefined ? 'unknown' : compatible ? 'compatible' : 'incompatible',
         ...(compatible === undefined ? {} : { compatible }),

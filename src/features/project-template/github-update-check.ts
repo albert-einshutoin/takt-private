@@ -13,6 +13,7 @@ import {
   MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
   parseProjectTemplateSourceDescriptorJson,
   PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
+  serializeProjectTemplateSourceDescriptor,
 } from './source-descriptor.js';
 import type {
   ProjectTemplateRepertoireDependencyV1,
@@ -42,7 +43,8 @@ export type GithubTemplateSourceResolutionErrorCode =
   | 'ASSET_TOO_LARGE'
   | 'INVALID_CHECKSUM'
   | 'CHECKSUM_MISMATCH'
-  | 'INVALID_CURRENT_EVIDENCE';
+  | 'INVALID_CURRENT_EVIDENCE'
+  | 'INVALID_AUTHORITY';
 
 export class GithubTemplateSourceResolutionError extends Error {
   constructor(
@@ -161,6 +163,69 @@ export interface ResolvedGithubTemplateSource {
   readonly updateState: GithubTemplateUpdateState;
   readonly hardBlocked: boolean;
   readonly downloadEligible: boolean;
+}
+
+interface ResolvedGithubTemplateSourceAuthority {
+  readonly result: ResolvedGithubTemplateSource;
+  readonly descriptor: ProjectTemplateSourceDescriptorV1;
+  state: 'active' | 'consuming' | 'consumed';
+}
+
+export interface ClaimedResolvedGithubTemplateSource {
+  readonly resolved: ResolvedGithubTemplateSource;
+  readonly descriptor: ProjectTemplateSourceDescriptorV1;
+}
+
+const RESOLVED_SOURCE_AUTHORITIES = new WeakMap<
+  object,
+  ResolvedGithubTemplateSourceAuthority
+>();
+const RESOLVED_SOURCE_CLAIMS = new WeakMap<
+  object,
+  ResolvedGithubTemplateSourceAuthority
+>();
+
+export function claimResolvedGithubTemplateSourceForReceipt(
+  value: unknown,
+): ClaimedResolvedGithubTemplateSource {
+  const authority = (
+    typeof value === 'object' && value !== null
+      ? RESOLVED_SOURCE_AUTHORITIES.get(value)
+      : undefined
+  );
+  if (
+    authority === undefined
+    || authority.result !== value
+    || authority.state !== 'active'
+  ) {
+    resolutionError(
+      'INVALID_AUTHORITY',
+      'resolved GitHub template source authority is invalid',
+      'resolved',
+    );
+  }
+  authority.state = 'consuming';
+  const claim = Object.freeze({
+    resolved: authority.result,
+    descriptor: authority.descriptor,
+  });
+  RESOLVED_SOURCE_CLAIMS.set(claim, authority);
+  return claim;
+}
+
+export function consumeResolvedGithubTemplateSourceReceiptClaim(
+  claim: ClaimedResolvedGithubTemplateSource,
+): void {
+  const authority = RESOLVED_SOURCE_CLAIMS.get(claim);
+  if (authority === undefined || authority.state !== 'consuming') {
+    resolutionError(
+      'INVALID_AUTHORITY',
+      'resolved GitHub template source claim is invalid',
+      'resolved',
+    );
+  }
+  RESOLVED_SOURCE_CLAIMS.delete(claim);
+  authority.state = 'consumed';
 }
 
 interface ParsedReleaseAsset {
@@ -323,7 +388,7 @@ export async function resolveGithubTemplateSource(
     })),
   );
 
-  return Object.freeze({
+  const result: ResolvedGithubTemplateSource = Object.freeze({
     kind: 'resolved-github-template-source',
     owner,
     repo,
@@ -345,6 +410,26 @@ export async function resolveGithubTemplateSource(
     declaredDependencies,
     ...update,
   });
+  const descriptorSnapshot = parseProjectTemplateSourceDescriptorJson(
+    serializeProjectTemplateSourceDescriptor(descriptor),
+  );
+  RESOLVED_SOURCE_AUTHORITIES.set(result, {
+    result,
+    descriptor: Object.freeze({
+      ...descriptorSnapshot,
+      pack: Object.freeze({ ...descriptorSnapshot.pack }),
+      repertoireDependencies: Object.freeze(
+        descriptorSnapshot.repertoireDependencies.map(
+          (dependency) => Object.freeze({
+            ...dependency,
+            capabilities: Object.freeze([...dependency.capabilities]),
+          }),
+        ),
+      ),
+    }),
+    state: 'active',
+  });
+  return result;
 }
 
 function validateParsedSourceSpec(

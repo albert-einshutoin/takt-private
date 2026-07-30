@@ -76,6 +76,11 @@ const STAGED_DOWNLOAD_AUTHORITIES = new WeakMap<
 // Receipt creation will accept only results produced and retained by this
 // process; structural equality cannot prove a cache entry was fully verified.
 const MATERIALIZED_CACHE_RESULTS = new WeakSet<object>();
+const MATERIALIZED_CACHE_RECEIPT_AUTHORITIES = new WeakMap<
+  object,
+  { state: 'active' | 'consuming' | 'consumed' }
+>();
+const MATERIALIZED_CACHE_RECEIPT_CLAIMS = new WeakSet<object>();
 const STAGING_DIRECTORY_NAME_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CACHE_TEMP_NAME_PATTERN =
@@ -180,6 +185,58 @@ export interface MaterializedGithubTemplateCache {
   readonly status: 'cache-hit' | 'cache-published';
   readonly artifactState: 'cache-published';
   readonly inspection: DeepReadonly<TaktpackInspectResult>;
+}
+
+export interface ClaimedMaterializedGithubTemplateCache {
+  readonly materialized: MaterializedGithubTemplateCache;
+}
+
+export function claimMaterializedGithubTemplateCacheForReceipt(
+  value: unknown,
+): ClaimedMaterializedGithubTemplateCache {
+  const authority = (
+    typeof value === 'object' && value !== null
+      ? MATERIALIZED_CACHE_RECEIPT_AUTHORITIES.get(value)
+      : undefined
+  );
+  if (
+    authority === undefined
+    || !MATERIALIZED_CACHE_RESULTS.has(value as object)
+    || authority.state !== 'active'
+  ) {
+    throw storageError(
+      'INVALID_AUTHORITY',
+      'GitHub template materialized cache authority is invalid',
+    );
+  }
+  authority.state = 'consuming';
+  const claim = Object.freeze({
+    materialized: value as MaterializedGithubTemplateCache,
+  });
+  MATERIALIZED_CACHE_RECEIPT_CLAIMS.add(claim);
+  return claim;
+}
+
+export function consumeMaterializedGithubTemplateCacheReceiptClaim(
+  claim: ClaimedMaterializedGithubTemplateCache,
+): void {
+  const isOriginalClaim = (
+    typeof claim === 'object'
+    && claim !== null
+    && MATERIALIZED_CACHE_RECEIPT_CLAIMS.has(claim)
+  );
+  const materialized = isOriginalClaim ? claim.materialized : undefined;
+  const authority = materialized === undefined
+    ? undefined
+    : MATERIALIZED_CACHE_RECEIPT_AUTHORITIES.get(materialized);
+  if (authority === undefined || authority.state !== 'consuming') {
+    throw storageError(
+      'INVALID_AUTHORITY',
+      'GitHub template materialized cache claim is invalid',
+    );
+  }
+  MATERIALIZED_CACHE_RECEIPT_CLAIMS.delete(claim);
+  authority.state = 'consumed';
 }
 
 export interface ReclaimGithubTemplateCacheTempsOptions {
@@ -2829,6 +2886,7 @@ export async function materializeGithubTemplateCache(
     );
   }
   MATERIALIZED_CACHE_RESULTS.add(result);
+  MATERIALIZED_CACHE_RECEIPT_AUTHORITIES.set(result, { state: 'active' });
   return result;
 }
 

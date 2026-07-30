@@ -97,6 +97,7 @@ export interface TaktpackInspectResult {
   lockSeed: TaktpackLockSeedV1;
   report: TaktpackExportReportV1;
   archiveSha256: string;
+  manifestSha256: string;
   compatibility: {
     status: 'unknown' | 'compatible' | 'incompatible';
     compatible?: boolean;
