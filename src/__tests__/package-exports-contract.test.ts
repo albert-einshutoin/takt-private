@@ -3,6 +3,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import type {
+  DownloadedGithubTemplateSource,
+  DownloadGithubTemplateSourceOptions,
+  GithubTemplateArchiveAssetInput,
+  GithubTemplateArchiveAssetPort,
+  GithubTemplateDownloadOrchestratorErrorCode,
   PreparedProjectTemplateApplyPlan,
   ProjectTemplateApplyMergeDiagnostics,
   ProjectTemplateBaseContent,
@@ -63,6 +68,9 @@ describe('package exports contract', () => {
         sourceDescriptorSchema: typeof api.projectTemplateSourceDescriptorV1JsonSchema,
         resolveGithubTemplateSource: typeof api.resolveGithubTemplateSource,
         sourceResolutionError: typeof api.GithubTemplateSourceResolutionError,
+        downloadGithubTemplateSource: typeof api.downloadGithubTemplateSource,
+        downloadOrchestratorError:
+          typeof api.GithubTemplateDownloadOrchestratorError,
       }));
     `);
 
@@ -80,6 +88,8 @@ describe('package exports contract', () => {
       sourceDescriptorSchema: 'object',
       resolveGithubTemplateSource: 'function',
       sourceResolutionError: 'function',
+      downloadGithubTemplateSource: 'function',
+      downloadOrchestratorError: 'function',
     });
     expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
       .toMatchTypeOf<readonly unknown[]>();
@@ -118,6 +128,26 @@ describe('package exports contract', () => {
       }>();
     expectTypeOf<GithubTemplateSourceMetadataPort>()
       .toHaveProperty('resolveRefToCommit');
+    expectTypeOf<DownloadGithubTemplateSourceOptions>()
+      .toHaveProperty('asset');
+    expectTypeOf<DownloadedGithubTemplateSource>()
+      .toMatchTypeOf<{
+        status: 'downloaded';
+        artifactState: 'cache-published';
+        receiptState: 'receipt-published';
+      }>();
+    expectTypeOf<GithubTemplateArchiveAssetInput>()
+      .toMatchTypeOf<{
+        owner: string;
+        repo: string;
+        releaseId: number;
+        assetId: number;
+        maxBytes: number;
+      }>();
+    expectTypeOf<GithubTemplateArchiveAssetPort>()
+      .toHaveProperty('openReleaseAsset');
+    expectTypeOf<GithubTemplateDownloadOrchestratorErrorCode>()
+      .toMatchTypeOf<string>();
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');
     expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
     expect(declarationEntry).toContain('ProjectTemplateGithubRefSourceSpec');
@@ -129,6 +159,43 @@ describe('package exports contract', () => {
     expect(declarationEntry).toContain('ProjectTemplateRepertoireCapabilityV1');
     expect(declarationEntry).toContain('ResolvedGithubTemplateSource');
     expect(declarationEntry).toContain('GithubTemplateSourceMetadataPort');
+    expect(declarationEntry).toContain('DownloadGithubTemplateSourceOptions');
+    expect(declarationEntry).toContain('DownloadedGithubTemplateSource');
+    expect(declarationEntry).toContain('GithubTemplateArchiveAssetInput');
+    expect(declarationEntry).toContain('GithubTemplateArchiveAssetPort');
+    expect(declarationEntry)
+      .toContain('GithubTemplateDownloadOrchestratorErrorCode');
+  });
+
+  it('keeps GitHub template download storage authority out of the root API', () => {
+    const result = runSelfReferenceImport(`
+      const api = await import('takt');
+      process.stdout.write(JSON.stringify({
+        stage: typeof api.stageGithubTemplateDownload,
+        materialize: typeof api.materializeGithubTemplateCache,
+        discard: typeof api.discardStagedGithubTemplateDownload,
+        prepareReceipt: typeof api.prepareGithubTemplateDownloadReceipt,
+        storeReceipt: typeof api.storeGithubTemplateDownloadReceipt,
+        claimReceipt: typeof api.claimPreparedGithubTemplateDownloadReceiptForStorage,
+      }));
+    `);
+    expect(JSON.parse(result)).toEqual({
+      stage: 'undefined',
+      materialize: 'undefined',
+      discard: 'undefined',
+      prepareReceipt: 'undefined',
+      storeReceipt: 'undefined',
+      claimReceipt: 'undefined',
+    });
+
+    const declarationEntry = readFileSync(
+      join(packageRoot, 'dist', 'index.d.ts'),
+      'utf8',
+    );
+    expect(declarationEntry).not.toContain('StagedGithubTemplateDownload');
+    expect(declarationEntry).not.toContain('MaterializedGithubTemplateCache');
+    expect(declarationEntry).not.toContain('PreparedGithubTemplateDownloadReceipt');
+    expect(declarationEntry).not.toContain('StoredGithubTemplateDownloadReceipt');
   });
 
   it('blocks internal project-template approval deep imports', () => {

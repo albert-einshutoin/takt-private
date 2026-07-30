@@ -39,6 +39,17 @@ export type {
   ResolveGithubTemplateSourceOptions,
   ResolvedGithubTemplateSource,
 } from './github-update-check.js';
+export {
+  downloadGithubTemplateSource,
+  GithubTemplateDownloadOrchestratorError,
+} from './github-download-orchestrator.js';
+export type {
+  DownloadGithubTemplateSourceOptions,
+  DownloadedGithubTemplateSource,
+  GithubTemplateArchiveAssetInput,
+  GithubTemplateArchiveAssetPort,
+  GithubTemplateDownloadOrchestratorErrorCode,
+} from './github-download-orchestrator.js';
 export { parseTemplateLock, serializeTemplateLock } from './lock.js';
 export {
   calculateProjectTemplateManifestSha256,
