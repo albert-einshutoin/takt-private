@@ -36,6 +36,10 @@ import {
   stageGithubTemplateDownload,
   verifyGithubTemplateDownloadStaging,
 } from '../../features/project-template/github-download-storage.js';
+import {
+  createProjectTemplateArtifactDownloadBridge,
+  createProjectTemplateArtifactDownloadPort,
+} from '../../infra/github/project-template-artifact-download.js';
 
 const roots: string[] = [];
 
@@ -129,6 +133,52 @@ afterEach(() => {
 });
 
 describe('GitHub template download staging', () => {
+  it('stages null-prototype iterator results from the D1 download port', async () => {
+    const projectRoot = makeRoot('takt-github-download-d1-');
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    class DownloadState {
+      emitted = false;
+    }
+    const bridge = createProjectTemplateArtifactDownloadBridge(
+      new DownloadState(),
+      (state, settlement): undefined => {
+        if (state.emitted) settlement.done();
+        else {
+          state.emitted = true;
+          settlement.chunk(new Uint8Array(content));
+        }
+        return undefined;
+      },
+      (): undefined => undefined,
+    );
+    const port = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      Object.freeze({
+        now: () => 0,
+        setTimer: () => Object.freeze({ timer: true }),
+        clearTimer: () => undefined,
+        start: () => bridge,
+      }),
+    );
+
+    const result = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: port.openReleaseAsset({
+        owner: 'octo',
+        repo: 'demo',
+        releaseId: 1,
+        assetId: 1,
+        maxBytes: content.byteLength,
+      }),
+    });
+
+    expect(readFileSync(result.stagingPath)).toEqual(content);
+    expect(result.bytes).toBe(content.byteLength);
+  });
+
   it('streams, fsyncs, hashes, and semantically validates private ingress', async () => {
     const projectRoot = makeRoot('takt-github-download-');
     prepareControlRoot(projectRoot);

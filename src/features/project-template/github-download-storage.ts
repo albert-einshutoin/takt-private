@@ -754,8 +754,12 @@ function snapshotIteratorResult(
     typeof result !== 'object'
     || result === null
     || types.isProxy(result)
-    || Object.getPrototypeOf(result) !== Object.prototype
   ) throw new Error();
+  const prototype = Object.getPrototypeOf(result) as object | null;
+  // D1 emits null-prototype exact records so mutable Object.prototype state
+  // cannot influence the storage boundary; ordinary exact iterator records
+  // remain supported for interoperable AsyncIterable implementations.
+  if (prototype !== null && prototype !== Object.prototype) throw new Error();
   const descriptors = Object.getOwnPropertyDescriptors(result);
   if (
     Reflect.ownKeys(result).some(

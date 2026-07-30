@@ -9,10 +9,20 @@ import {
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const NativePromise = Promise;
+const NativeUint8Array = Uint8Array;
+const NATIVE_UINT8_ARRAY_PROTOTYPE = Uint8Array.prototype;
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(
+  Uint8Array.prototype,
+) as object;
 const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
-  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  TYPED_ARRAY_PROTOTYPE,
   'byteLength',
 )?.get;
+const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  'buffer',
+)?.get;
+const TYPED_ARRAY_SET = Uint8Array.prototype.set;
 
 export type ProjectTemplateArtifactDownloadErrorCode =
   | 'INVALID_ARGUMENT'
@@ -126,6 +136,8 @@ interface DownloadBridgeAuthority {
     | ProjectTemplateArtifactDownloadBridgeHandlers<unknown>['dispose']
     | undefined;
   disposed: boolean;
+  owner: DownloadIteratorAuthority | undefined;
+  generation: number;
 }
 
 interface DownloadIteratorAuthority {
@@ -133,6 +145,7 @@ interface DownloadIteratorAuthority {
   snapshot: Readonly<GithubTemplateArchiveAssetInput> | undefined;
   readonly port: DownloadPortAuthority;
   bridge: ProjectTemplateArtifactDownloadBridge | undefined;
+  bridgeGeneration: number | undefined;
   pending: PendingNext | undefined;
   timer: unknown;
   hasTimer: boolean;
@@ -160,10 +173,6 @@ DownloadIteratorAuthority
 const bridgeAuthorities = new WeakMap<
 ProjectTemplateArtifactDownloadBridge,
 DownloadBridgeAuthority
->();
-const settlementTokens = new WeakMap<
-ProjectTemplateArtifactDownloadSettlement,
-DownloadSettlementToken
 >();
 
 function exactResult<T>(
@@ -241,29 +250,33 @@ function exactDataRecord(
 
 export function createProjectTemplateArtifactDownloadBridge<State>(
   state: State,
-  handlersValue: ProjectTemplateArtifactDownloadBridgeHandlers<State>,
+  pull: ProjectTemplateArtifactDownloadBridgeHandlers<State>['pull'],
+  dispose: ProjectTemplateArtifactDownloadBridgeHandlers<State>['dispose'],
 ): ProjectTemplateArtifactDownloadBridge {
-  const handlers = exactDataRecord(handlersValue, ['pull', 'dispose']);
   if (
-    typeof handlers['pull'] !== 'function'
-    || typeof handlers['dispose'] !== 'function'
-    || types.isProxy(handlers['pull'])
-    || types.isProxy(handlers['dispose'])
+    typeof pull !== 'function'
+    || typeof dispose !== 'function'
+    || types.isProxy(pull)
+    || types.isProxy(dispose)
   ) {
     throw invalidArgument();
   }
+  const receiver = Object.freeze({
+    pull,
+    dispose,
+  }) as ProjectTemplateArtifactDownloadBridgeHandlers<unknown>;
   const bridge = Object.freeze(
     {},
   ) as unknown as ProjectTemplateArtifactDownloadBridge;
   bridgeAuthorities.set(bridge, {
     state,
-    receiver:
-      handlersValue as ProjectTemplateArtifactDownloadBridgeHandlers<unknown>,
-    pull: handlers['pull'] as
-      ProjectTemplateArtifactDownloadBridgeHandlers<unknown>['pull'],
-    dispose: handlers['dispose'] as
+    receiver,
+    pull: pull as ProjectTemplateArtifactDownloadBridgeHandlers<unknown>['pull'],
+    dispose: dispose as
       ProjectTemplateArtifactDownloadBridgeHandlers<unknown>['dispose'],
     disposed: false,
+    owner: undefined,
+    generation: 0,
   });
   return bridge;
 }
@@ -390,10 +403,17 @@ function signalAborted(signal: AbortSignal): boolean {
 
 function disposeRegisteredBridge(
   bridge: ProjectTemplateArtifactDownloadBridge,
+  owner: DownloadIteratorAuthority,
 ): void {
   const bridgeAuthority = bridgeAuthorities.get(bridge);
-  if (bridgeAuthority === undefined || bridgeAuthority.disposed) return;
+  if (
+    bridgeAuthority === undefined
+    || bridgeAuthority.disposed
+    || bridgeAuthority.owner !== owner
+    || owner.bridgeGeneration !== bridgeAuthority.generation
+  ) return;
   bridgeAuthority.disposed = true;
+  bridgeAuthority.owner = undefined;
   const state = bridgeAuthority.state;
   const receiver = bridgeAuthority.receiver;
   const dispose = bridgeAuthority.dispose;
@@ -416,7 +436,8 @@ function disposeRegisteredBridge(
 function disposeBridge(authority: DownloadIteratorAuthority): void {
   const bridge = authority.bridge;
   authority.bridge = undefined;
-  if (bridge !== undefined) disposeRegisteredBridge(bridge);
+  if (bridge !== undefined) disposeRegisteredBridge(bridge, authority);
+  authority.bridgeGeneration = undefined;
 }
 
 function snapshotBridge(
@@ -433,7 +454,11 @@ function snapshotBridge(
   if (bridgeAuthority === undefined || bridgeAuthority.disposed) {
     throw invalidArgument();
   }
+  if (bridgeAuthority.owner !== undefined) throw invalidArgument();
+  bridgeAuthority.generation += 1;
+  bridgeAuthority.owner = authority;
   authority.bridge = value;
+  authority.bridgeGeneration = bridgeAuthority.generation;
 }
 
 function revokeSettlement(authority: DownloadIteratorAuthority): void {
@@ -674,20 +699,39 @@ function snapshotChunk(value: unknown): Uint8Array {
     typeof value !== 'object'
     || value === null
     || types.isProxy(value)
-    || !(value instanceof Uint8Array)
-    || Object.getPrototypeOf(value) !== Uint8Array.prototype
+    || !types.isUint8Array(value)
+    || Object.getPrototypeOf(value) !== NATIVE_UINT8_ARRAY_PROTOTYPE
     || TYPED_ARRAY_BYTE_LENGTH_GETTER === undefined
+    || TYPED_ARRAY_BUFFER_GETTER === undefined
   ) {
     throw new Error();
   }
   let byteLength: number;
+  let buffer: unknown;
   try {
     byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []);
+    buffer = Reflect.apply(TYPED_ARRAY_BUFFER_GETTER, value, []);
   } catch {
     throw new Error();
   }
-  if (byteLength === 0) throw new Error();
-  return new Uint8Array(value);
+  if (byteLength === 0 || types.isSharedArrayBuffer(buffer)) throw new Error();
+  const copy = new NativeUint8Array(byteLength);
+  Reflect.apply(TYPED_ARRAY_SET, copy, [value]);
+  return copy;
+}
+
+function ownsLiveBridge(authority: DownloadIteratorAuthority): boolean {
+  const bridge = authority.bridge;
+  if (bridge === undefined || authority.bridgeGeneration === undefined) {
+    return false;
+  }
+  const bridgeAuthority = bridgeAuthorities.get(bridge);
+  return (
+    bridgeAuthority !== undefined
+    && !bridgeAuthority.disposed
+    && bridgeAuthority.owner === authority
+    && bridgeAuthority.generation === authority.bridgeGeneration
+  );
 }
 
 function processSettlement(
@@ -695,7 +739,11 @@ function processSettlement(
   pending: PendingNext,
   event: SettlementEvent,
 ): void {
-  if (authority.phase === 'closed' || authority.pending !== pending) return;
+  if (
+    authority.phase === 'closed'
+    || authority.pending !== pending
+    || !ownsLiveBridge(authority)
+  ) return;
   authority.settlementToken = undefined;
   if (event.kind === 'done') {
     closeIterator(authority, { kind: 'done' });
@@ -728,27 +776,28 @@ function createSettlement(
     }
     processSettlement(authority, pending, event);
   };
-  const settlement = Object.freeze<ProjectTemplateArtifactDownloadSettlement>({
-    chunk(this: ProjectTemplateArtifactDownloadSettlement, value: unknown) {
-      const token = settlementTokens.get(this);
-      if (token === undefined || !token.active) return undefined;
-      try {
-        token.dispatch?.({ kind: 'chunk', value: snapshotChunk(value) });
-      } catch {
-        token.dispatch?.({ kind: 'fail' });
-      }
-      return undefined;
-    },
-    done(this: ProjectTemplateArtifactDownloadSettlement) {
-      settlementTokens.get(this)?.dispatch?.({ kind: 'done' });
-      return undefined;
-    },
-    fail(this: ProjectTemplateArtifactDownloadSettlement) {
-      settlementTokens.get(this)?.dispatch?.({ kind: 'fail' });
-      return undefined;
-    },
+  const chunk = Object.freeze((value: unknown): undefined => {
+    if (!token.active) return undefined;
+    try {
+      token.dispatch?.({ kind: 'chunk', value: snapshotChunk(value) });
+    } catch {
+      token.dispatch?.({ kind: 'fail' });
+    }
+    return undefined;
   });
-  settlementTokens.set(settlement, token);
+  const done = Object.freeze((): undefined => {
+    token.dispatch?.({ kind: 'done' });
+    return undefined;
+  });
+  const fail = Object.freeze((): undefined => {
+    token.dispatch?.({ kind: 'fail' });
+    return undefined;
+  });
+  const settlement = Object.freeze<ProjectTemplateArtifactDownloadSettlement>({
+    chunk,
+    done,
+    fail,
+  });
   authority.settlementToken = token;
   return settlement;
 }
@@ -764,6 +813,8 @@ function pullBridge(
   if (
     bridgeAuthority === undefined
     || bridgeAuthority.disposed
+    || bridgeAuthority.owner !== authority
+    || bridgeAuthority.generation !== authority.bridgeGeneration
     || bridgeAuthority.receiver === undefined
     || bridgeAuthority.pull === undefined
   ) {
@@ -807,6 +858,7 @@ function createIterator(
     snapshot: iterableAuthority.snapshot,
     port: iterableAuthority.port,
     bridge: undefined,
+    bridgeGeneration: undefined,
     pending: undefined,
     timer: undefined,
     hasTimer: false,
@@ -896,11 +948,22 @@ function createIterator(
               current.callbackToken.dispatch?.();
               return pendingPromise;
             }
-            if (current.pending !== pending) return pendingPromise;
+            if (current.pending !== pending) {
+              // A reentrant close may have removed before the hostile add hook
+              // performed its native registration, so retry physical cleanup.
+              try {
+                EventTarget.prototype.removeEventListener.call(
+                  snapshot.signal,
+                  'abort',
+                  abortListener,
+                );
+              } catch {
+                // Logical token revocation remains authoritative.
+              }
+              return pendingPromise;
+            }
           }
-          if (!armDeadline(current, remaining)) return pendingPromise;
-
-          // Listener/timer installation are external hooks and can consume time.
+          // Listener installation is external and can consume time.
           remaining = readRemainingDeadline(current);
           if (remaining === undefined || current.pending !== pending) {
             return pendingPromise;
@@ -919,6 +982,10 @@ function createIterator(
           // Start is also external; an expired bridge is disposed before pull.
           remaining = readRemainingDeadline(current);
           if (remaining === undefined || current.pending !== pending) {
+            disposeBridge(current);
+            return pendingPromise;
+          }
+          if (!armDeadline(current, remaining)) {
             disposeBridge(current);
             return pendingPromise;
           }

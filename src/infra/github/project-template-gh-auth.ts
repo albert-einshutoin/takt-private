@@ -9,6 +9,9 @@ import { Readable } from 'node:stream';
 import { types } from 'node:util';
 import { crossSpawn } from '../../shared/utils/spawn.js';
 import {
+  isCanonicalGithubRepositoryCoordinates,
+} from '../../features/project-template/github-repository-coordinates.js';
+import {
   bootstrapProjectTemplateArtifactRedirect,
   createProjectTemplateArtifactRedirectState,
   type DisposableProjectTemplateArtifactRedirectGrant,
@@ -23,9 +26,6 @@ const MAX_STDERR_BYTES = 16 * 1024;
 const MAX_ASSET_RAW_HEADER_ENTRIES = 256;
 const MAX_ASSET_RAW_HEADER_CHARACTERS = 64 * 1024;
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
-const GITHUB_OWNER_PATTERN =
-  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 const GH_AUTH_ARGS = Object.freeze([
   'auth',
   'token',
@@ -746,14 +746,7 @@ export function createProjectTemplateGithubReleaseAssetRequest(
   ] as const;
   const handlersRecord = exactDataRecord(plan['handlers'], handlerNames);
   if (
-    typeof owner !== 'string'
-    || !GITHUB_OWNER_PATTERN.test(owner)
-    || owner.includes('--')
-    || typeof repo !== 'string'
-    || !GITHUB_REPOSITORY_PATTERN.test(repo)
-    || repo === '.'
-    || repo === '..'
-    || repo.toLowerCase().endsWith('.git')
+    !isCanonicalGithubRepositoryCoordinates(owner, repo)
     || typeof assetId !== 'number'
     || !Number.isSafeInteger(assetId)
     || assetId <= 0

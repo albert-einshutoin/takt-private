@@ -1404,8 +1404,10 @@ describe('project-template authenticated release asset boundary F2b-B', () => {
   it.each([
     { owner: 'owner--name' },
     { owner: 'owner-' },
+    { owner: 'Octo' },
     { repo: '..' },
     { repo: 'demo.git' },
+    { repo: 'Demo' },
     { assetId: 0 },
     { assetId: Number.MAX_SAFE_INTEGER + 1 },
     { assetId: 1.5 },
