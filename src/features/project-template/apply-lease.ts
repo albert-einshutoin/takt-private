@@ -548,7 +548,7 @@ function completeCoordinationNamespaceRecovery(
 
 function listCoordinationRecoveryClaims(
   recoveryPath: string,
-): Array<{ path: string; pid: number } | undefined> {
+): Array<{ path: string; pid?: number }> {
   const prefix = `${basename(recoveryPath)}.resume.`;
   let names: string[];
   try {
@@ -571,7 +571,7 @@ function listCoordinationRecoveryClaims(
         || token.length > 512
         || !/^[0-9a-f-]+$/i.test(token)
       ) {
-        return undefined;
+        return { path: join(dirname(recoveryPath), name) };
       }
       return { path: join(dirname(recoveryPath), name), pid };
     });
@@ -596,47 +596,63 @@ function removeDeadCoordinationRecoveryClaims(
   apply: boolean,
 ): 'clear' | 'recoverable' | 'blocked' {
   const claims = listCoordinationRecoveryClaims(recoveryPath);
-  if (claims.some((claim) => claim === undefined)) return 'blocked';
   if (claims.length === 0) return 'clear';
 
   const recoveryStat = lstatSync(recoveryPath);
-  for (const claim of claims as Array<{ path: string; pid: number }>) {
-    let state: 'alive' | 'dead' | 'unknown' = 'unknown';
-    try {
-      state = probeProcess(claim.pid);
-    } catch {
-      state = 'unknown';
-    }
+  const deadClaims: Array<{ path: string; pid: number }> = [];
+  for (const claim of claims) {
     let claimStat: Stats;
     try {
       claimStat = lstatSync(claim.path);
     } catch {
       return 'blocked';
     }
-    if (
-      state !== 'dead'
-      || !sameRegularFile(recoveryStat, claimStat)
-      || readCoordinationRecovery(recoveryPath)?.token !== recovery.token
-    ) {
+    const ownsCurrentRecovery = sameRegularFile(recoveryStat, claimStat);
+    if (claim.pid === undefined) {
+      if (ownsCurrentRecovery) return 'blocked';
+      continue;
+    }
+    let state: 'alive' | 'dead' | 'unknown' = 'unknown';
+    try {
+      state = probeProcess(claim.pid);
+    } catch {
+      state = 'unknown';
+    }
+    if (ownsCurrentRecovery && state !== 'dead') {
       return 'blocked';
     }
+    if (state === 'dead') deadClaims.push({ path: claim.path, pid: claim.pid });
   }
-  if (!apply) return 'recoverable';
+  if (
+    readCoordinationRecovery(recoveryPath)?.token !== recovery.token
+  ) {
+    return 'blocked';
+  }
+  if (!apply) return deadClaims.length === 0 ? 'clear' : 'recoverable';
 
-  for (const claim of claims as Array<{ path: string; pid: number }>) {
+  for (const claim of deadClaims) {
     if (probeProcess(claim.pid) !== 'dead') {
       throw new ProjectTemplateCoordinationError();
     }
     const currentRecovery = lstatSync(recoveryPath);
     const currentClaim = lstatSync(claim.path);
+    if (readCoordinationRecovery(recoveryPath)?.token !== recovery.token) {
+      throw new ProjectTemplateCoordinationError();
+    }
+    // Claim paths include an unguessable token and are never reused. A dead
+    // claim may reference either this v3 or an older v3 inode left after the
+    // final unlink/fsync crash window; unlinking the exact path cannot target
+    // the current recovery owner or a successor.
     if (
-      !sameRegularFile(currentRecovery, currentClaim)
-      || readCoordinationRecovery(recoveryPath)?.token !== recovery.token
+      currentClaim.isSymbolicLink()
+      || !currentClaim.isFile()
+      || (
+        sameRegularFile(currentRecovery, currentClaim)
+        && currentRecovery.nlink < 2
+      )
     ) {
       throw new ProjectTemplateCoordinationError();
     }
-    // Claim paths include an unguessable token and are never reused. Removing
-    // this exact dead hard link cannot target a later recovery owner.
     unlinkSync(claim.path);
     syncDirectory(dirname(claim.path));
   }

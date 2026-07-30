@@ -835,6 +835,39 @@ describe('project template apply/run-start coordination', () => {
     expect(existsSync(deadClaim)).toBe(false);
   });
 
+  it('removes a dead orphan claim from an older v3 inode', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const recoveryPath = `${mutexPath}.reclaim.recovery`;
+    const orphanClaim = `${recoveryPath}.resume.99996.`
+      + '33333333-3333-4333-8333-333333333333';
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(recoveryPath, JSON.stringify({
+      version: 3,
+      token: 'older-recovery-owner',
+      pid: 99_997,
+      operation: 'namespace-recovery',
+      namespaceToken: 'older-namespace',
+    }));
+    linkSync(recoveryPath, orphanClaim);
+    rmSync(recoveryPath);
+    writeFileSync(recoveryPath, JSON.stringify({
+      version: 3,
+      token: 'newer-recovery-owner',
+      pid: 99_995,
+      operation: 'namespace-recovery',
+      namespaceToken: 'newer-namespace',
+    }));
+
+    expect(lstatSync(orphanClaim).ino).not.toBe(lstatSync(recoveryPath).ino);
+    expect(recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(root, {
+      apply: true,
+      probeProcess: () => 'dead',
+    }).status).toBe('recovered');
+    expect(existsSync(orphanClaim)).toBe(false);
+    expect(existsSync(recoveryPath)).toBe(false);
+  });
+
   it.each(['alive', 'unknown'] as const)(
     'keeps an abandoned recovery owner %s state fail-closed',
     (processState) => {
