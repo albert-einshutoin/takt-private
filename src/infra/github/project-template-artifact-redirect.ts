@@ -9,6 +9,7 @@ import {
 } from 'node:https';
 import type { ClientRequest } from 'node:http';
 import { isIP } from 'node:net';
+import { Readable } from 'node:stream';
 import { types } from 'node:util';
 
 const MAX_LOCATION_LENGTH = 8_192;
@@ -904,6 +905,28 @@ interface PinnedTransportAttempt {
   requestTerminalDelivered: boolean;
 }
 
+type PinnedTransportPhase =
+  | 'idle'
+  | 'redirect-attempt'
+  | 'accepting-body'
+  | 'body-paused'
+  | 'body-streaming'
+  | 'terminal'
+  | 'disposed';
+
+interface PinnedTransportBody {
+  readonly response: Readable;
+  readonly pause: (...args: unknown[]) => unknown;
+  readonly resume: (...args: unknown[]) => unknown;
+  readonly destroy: (...args: unknown[]) => unknown;
+  responseListeners: ReadonlyArray<
+    readonly [event: string, listener: (...args: unknown[]) => void]
+  >;
+  request?: ClientRequest;
+  requestDestroy?: (...args: unknown[]) => unknown;
+  requestListeners: PinnedTransportAttempt['requestListeners'];
+}
+
 type PinnedTransportPumpEvent =
   | {
     readonly kind: 'begin';
@@ -924,6 +947,10 @@ type PinnedTransportPumpEvent =
     readonly kind: 'request-terminal';
     readonly attempt: PinnedTransportAttempt;
     readonly notification: 'onRequestError' | 'onRequestClose';
+  }
+  | {
+    readonly kind: 'body-event';
+    readonly body: PinnedTransportBody;
   };
 
 interface PinnedTransportAuthority {
@@ -933,9 +960,8 @@ interface PinnedTransportAuthority {
   pumpQueue: PinnedTransportPumpEvent[];
   generation: number;
   draining: boolean;
-  started: boolean;
-  terminal: boolean;
-  disposed: boolean;
+  phase: PinnedTransportPhase;
+  body?: PinnedTransportBody;
   release: () => void;
 }
 
@@ -1055,6 +1081,27 @@ function findPinnedData(value: unknown, name: string): unknown {
     // Native response reflection is an untrusted runtime boundary.
   }
   return undefined;
+}
+
+function isPinnedReadable(value: unknown): value is Readable {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || types.isProxy(value)
+  ) {
+    return false;
+  }
+  try {
+    let current: object | null = value;
+    while (current !== null) {
+      if (types.isProxy(current)) return false;
+      if (current === Readable.prototype) return true;
+      current = Object.getPrototypeOf(current);
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 function snapshotPinnedRedirectLocation(response: unknown): string | undefined {
@@ -1203,9 +1250,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     pumpQueue: [],
     generation: 0,
     draining: false,
-    started: false,
-    terminal: false,
-    disposed: false,
+    phase: 'idle',
     release: () => {
       holder.current = undefined;
     },
@@ -1228,6 +1273,8 @@ export function createProjectTemplateArtifactPinnedTransport(
       return false;
     }
   };
+  const isStopped = (current: PinnedTransportAuthority): boolean =>
+    current.phase === 'terminal' || current.phase === 'disposed';
   const removeRequestListeners = (
     request: ClientRequest | undefined,
     listeners: PinnedTransportAttempt['requestListeners'],
@@ -1364,24 +1411,72 @@ export function createProjectTemplateArtifactPinnedTransport(
     );
     return listenersRemoved && responseDestroyed && requestDestroyed;
   };
+  const detachBody = (
+    current: PinnedTransportAuthority,
+    expected?: PinnedTransportBody,
+  ): PinnedTransportBody | undefined => {
+    const body = current.body;
+    if (body === undefined || (expected !== undefined && body !== expected)) {
+      return undefined;
+    }
+    current.body = undefined;
+    return body;
+  };
+  const cleanDetachedBody = (body: PinnedTransportBody): boolean => {
+    let succeeded = removeRequestListeners(
+      body.request,
+      body.requestListeners,
+    );
+    for (const [event, listener] of body.responseListeners) {
+      try {
+        EventEmitter.prototype.removeListener.call(
+          body.response,
+          event,
+          listener,
+        );
+      } catch {
+        succeeded = false;
+      }
+    }
+    try {
+      Reflect.apply(body.destroy, body.response, []);
+    } catch {
+      succeeded = false;
+    }
+    if (!destroyRequest(body.request, body.requestDestroy)) succeeded = false;
+    body.responseListeners = [];
+    body.request = undefined;
+    body.requestDestroy = undefined;
+    body.requestListeners = [];
+    return succeeded;
+  };
   const terminate = (
     authority: PinnedTransportAuthority,
     notification?: keyof ProjectTemplateArtifactPinnedTransportHandlers,
     response?: unknown,
   ): void => {
-    if (authority.terminal || authority.disposed) {
+    if (isStopped(authority)) {
       if (response !== undefined) containResponse(response);
       return;
     }
-    authority.terminal = true;
+    authority.phase = 'terminal';
     authority.initialTargetUrl = undefined;
     authority.release();
     const detached = detachAttempt(authority);
+    const detachedBody = detachBody(authority);
     const ownedState = authority.state;
     authority.state = undefined;
     const pendingEvents = authority.pumpQueue.splice(0);
     if (detached !== undefined) {
       cleanDetachedAttempt(detached, response);
+    } else if (detachedBody !== undefined) {
+      cleanDetachedBody(detachedBody);
+      if (
+        response !== undefined
+        && response !== detachedBody.response
+      ) {
+        containResponse(response);
+      }
     } else if (response !== undefined) {
       containResponse(response);
     }
@@ -1393,7 +1488,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     for (const event of pendingEvents) {
       if (event.kind === 'response') containResponse(event.response);
     }
-    if (notification !== undefined && !authority.disposed) {
+    if (notification !== undefined) {
       invoke(notification);
     }
   };
@@ -1445,7 +1540,7 @@ export function createProjectTemplateArtifactPinnedTransport(
 
   let drainPump = (): void => {};
   const enqueue = (event: PinnedTransportPumpEvent): void => {
-    if (authority.terminal || authority.disposed) {
+    if (isStopped(authority)) {
       if (event.kind === 'response') containResponse(event.response);
       return;
     }
@@ -1465,8 +1560,7 @@ export function createProjectTemplateArtifactPinnedTransport(
         readonly ProjectTemplateArtifactDnsAnswerSnapshot[] | undefined;
       if (
         current.activeAttempt === attempt
-        && !current.terminal
-        && !current.disposed
+        && !isStopped(current)
         && error === null
       ) {
         try {
@@ -1491,8 +1585,8 @@ export function createProjectTemplateArtifactPinnedTransport(
   ): void => {
     if (
       current.activeAttempt !== undefined
-      || current.terminal
-      || current.disposed
+      || isStopped(current)
+      || current.phase !== 'redirect-attempt'
       || holder.current !== current
     ) {
       terminate(current, 'onInvalidResponse');
@@ -1602,8 +1696,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     const requestDestroy = findPinnedMethod(request, 'destroy');
     const requestEnd = findPinnedMethod(request, 'end');
     if (
-      current.terminal
-      || current.disposed
+      isStopped(current)
       || current.activeAttempt !== attempt
       || holder.current !== current
       || requestDestroy === undefined
@@ -1611,8 +1704,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     ) {
       destroyRequest(request, requestDestroy);
       if (
-        !current.terminal
-        && !current.disposed
+        !isStopped(current)
         && current.activeAttempt === attempt
       ) {
         terminate(current, 'onInvalidResponse');
@@ -1628,8 +1720,7 @@ export function createProjectTemplateArtifactPinnedTransport(
       for (const [event, listener] of listeners) {
         EventEmitter.prototype.on.call(request, event, listener);
         if (
-          current.terminal
-          || current.disposed
+          isStopped(current)
           || current.activeAttempt !== attempt
         ) {
           try {
@@ -1651,6 +1742,146 @@ export function createProjectTemplateArtifactPinnedTransport(
     }
   };
 
+  const settleNonRedirectResponse = (
+    current: PinnedTransportAuthority,
+    attempt: PinnedTransportAttempt,
+    response: unknown,
+    statusCode: number,
+  ): void => {
+    current.phase = 'terminal';
+    current.initialTargetUrl = undefined;
+    current.release();
+    const detached = detachAttempt(current, attempt);
+    const ownedState = current.state;
+    current.state = undefined;
+    const pendingEvents = current.pumpQueue.splice(0);
+    const cleaned = detached !== undefined
+      && cleanDetachedAttempt(detached, response);
+    try {
+      ownedState?.dispose();
+    } catch {
+      // Capability revocation is complete before disposal can re-enter.
+    }
+    for (const event of pendingEvents) {
+      if (event.kind === 'response') containResponse(event.response);
+    }
+    if (!cleaned) {
+      invoke('onResponseError');
+      return;
+    }
+    // A consumer exception cannot revive transport authority and is not a
+    // second transport event.
+    invoke('onResponse', [statusCode]);
+  };
+
+  const acceptPausedBody = (
+    current: PinnedTransportAuthority,
+    attempt: PinnedTransportAttempt,
+    response: unknown,
+  ): void => {
+    if (!isPinnedReadable(response)) {
+      terminate(current, 'onInvalidResponse', response);
+      return;
+    }
+    const pause = findPinnedMethod(response, 'pause');
+    const resume = findPinnedMethod(response, 'resume');
+    const destroy = findPinnedMethod(response, 'destroy');
+    if (pause === undefined || resume === undefined || destroy === undefined) {
+      terminate(current, 'onInvalidResponse', response);
+      return;
+    }
+    const detached = detachAttempt(current, attempt);
+    if (detached === undefined) {
+      containResponse(response);
+      terminate(current, 'onInvalidResponse');
+      return;
+    }
+    const body: PinnedTransportBody = {
+      response,
+      pause,
+      resume,
+      destroy,
+      responseListeners: [],
+      request: detached.request,
+      requestDestroy: detached.requestDestroy,
+      requestListeners: detached.listeners,
+    };
+    current.phase = 'accepting-body';
+    current.body = body;
+    try {
+      Reflect.apply(pause, response, []);
+    } catch {
+      terminate(current, 'onResponseError');
+      return;
+    }
+    if (
+      current.phase !== 'accepting-body'
+      || current.body !== body
+    ) {
+      return;
+    }
+    const listeners = [
+      'data',
+      'end',
+      'aborted',
+      'error',
+      'close',
+    ].map((event) => [
+      event,
+      () => enqueue({ kind: 'body-event', body }),
+    ] as const);
+    for (const [event, listener] of listeners) {
+      try {
+        EventEmitter.prototype.on.call(response, event, listener);
+      } catch {
+        terminate(current, 'onResponseError');
+        return;
+      }
+      body.responseListeners = Object.freeze([
+        ...body.responseListeners,
+        [event, listener] as const,
+      ]);
+      if (
+        current.phase !== 'accepting-body'
+        || current.body !== body
+      ) {
+        try {
+          EventEmitter.prototype.removeListener.call(
+            response,
+            event,
+            listener,
+          );
+        } catch {
+          // Disposal has already revoked the candidate authority.
+        }
+        return;
+      }
+    }
+    if (!removeRequestListeners(body.request, body.requestListeners)) {
+      terminate(current, 'onResponseError');
+      return;
+    }
+    body.requestListeners = [];
+    const ownedState = current.state;
+    current.state = undefined;
+    try {
+      ownedState?.dispose();
+    } catch {
+      terminate(current, 'onResponseError');
+      return;
+    }
+    if (
+      current.phase !== 'accepting-body'
+      || current.body !== body
+    ) {
+      return;
+    }
+    current.phase = 'body-paused';
+    if (!invoke('onResponse', [200])) {
+      terminate(current, 'onResponseError');
+    }
+  };
+
   const processResponse = (
     current: PinnedTransportAuthority,
     attempt: PinnedTransportAttempt,
@@ -1659,8 +1890,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     if (
       current.activeAttempt !== attempt
       || attempt.responseSeen
-      || current.terminal
-      || current.disposed
+      || isStopped(current)
     ) {
       containResponse(response);
       return;
@@ -1672,9 +1902,16 @@ export function createProjectTemplateArtifactPinnedTransport(
       || !Number.isSafeInteger(rawStatus)
       || rawStatus < 100
       || rawStatus > 599
-      || !REDIRECT_STATUSES.has(rawStatus)
     ) {
       terminate(current, 'onInvalidResponse', response);
+      return;
+    }
+    if (rawStatus === 200) {
+      acceptPausedBody(current, attempt, response);
+      return;
+    }
+    if (!REDIRECT_STATUSES.has(rawStatus)) {
+      settleNonRedirectResponse(current, attempt, response, rawStatus);
       return;
     }
     const location = snapshotPinnedRedirectLocation(response);
@@ -1698,8 +1935,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     }
     const cleaned = cleanDetachedAttempt(detached, response);
     if (
-      current.terminal
-      || current.disposed
+      isStopped(current)
       || holder.current !== current
     ) {
       return;
@@ -1715,7 +1951,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     current: PinnedTransportAuthority,
     event: PinnedTransportPumpEvent,
   ): void => {
-    if (current.terminal || current.disposed) {
+    if (isStopped(current)) {
       if (event.kind === 'response') containResponse(event.response);
       return;
     }
@@ -1742,6 +1978,11 @@ export function createProjectTemplateArtifactPinnedTransport(
       processResponse(current, event.attempt, event.response);
       return;
     }
+    if (event.kind === 'body-event') {
+      // Commit 1 establishes ownership only. The next slice will translate
+      // these bounded tokens into streaming callbacks.
+      return;
+    }
     if (current.activeAttempt === event.attempt) {
       terminate(current, event.notification);
     }
@@ -1763,11 +2004,11 @@ export function createProjectTemplateArtifactPinnedTransport(
   const facade = Object.freeze<ProjectTemplateArtifactPinnedTransport>({
     start(this: ProjectTemplateArtifactPinnedTransport): void {
       const current = pinnedTransportAuthorities.get(this);
-      if (current === undefined || current.disposed || current.terminal) {
+      if (current === undefined || isStopped(current)) {
         throw invalidArgument();
       }
-      if (current.started) return;
-      current.started = true;
+      if (current.phase !== 'idle') return;
+      current.phase = 'redirect-attempt';
       const initialTarget = current.initialTargetUrl;
       current.initialTargetUrl = undefined;
       if (initialTarget === undefined) {
@@ -1777,31 +2018,50 @@ export function createProjectTemplateArtifactPinnedTransport(
       enqueue({ kind: 'begin', targetUrl: initialTarget });
     },
     pause(this: ProjectTemplateArtifactPinnedTransport): void {
-      if (!pinnedTransportAuthorities.has(this)) throw invalidArgument();
-      throw invalidArgument();
+      const current = pinnedTransportAuthorities.get(this);
+      if (
+        current === undefined
+        || current.phase !== 'body-paused'
+        || current.body === undefined
+      ) {
+        throw invalidArgument();
+      }
+      // The body is already paused; retaining the phase keeps this slice from
+      // exposing data before streaming ownership exists.
     },
     resume(this: ProjectTemplateArtifactPinnedTransport): void {
-      if (!pinnedTransportAuthorities.has(this)) throw invalidArgument();
-      throw invalidArgument();
+      const current = pinnedTransportAuthorities.get(this);
+      if (
+        current === undefined
+        || current.phase !== 'body-paused'
+        || current.body === undefined
+      ) {
+        throw invalidArgument();
+      }
+      // Streaming is intentionally activated by the next atomic commit.
     },
     destroy(this: ProjectTemplateArtifactPinnedTransport): void {
       const current = pinnedTransportAuthorities.get(this);
-      if (current === undefined || current.disposed) throw invalidArgument();
+      if (current === undefined || current.phase === 'disposed') {
+        throw invalidArgument();
+      }
       terminate(current);
     },
     dispose(this: ProjectTemplateArtifactPinnedTransport): void {
       if (!pinnedTransportFacades.has(this)) throw invalidArgument();
       const current = pinnedTransportAuthorities.get(this);
-      if (current === undefined || current.disposed) return;
-      current.disposed = true;
+      if (current === undefined || current.phase === 'disposed') return;
+      current.phase = 'disposed';
       current.initialTargetUrl = undefined;
       current.release();
       const detached = detachAttempt(current);
+      const detachedBody = detachBody(current);
       const ownedState = current.state;
       current.state = undefined;
       const pendingEvents = current.pumpQueue.splice(0);
       pinnedTransportAuthorities.delete(this);
       if (detached !== undefined) cleanDetachedAttempt(detached);
+      if (detachedBody !== undefined) cleanDetachedBody(detachedBody);
       for (const event of pendingEvents) {
         if (event.kind === 'response') containResponse(event.response);
       }

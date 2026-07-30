@@ -316,10 +316,110 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     transport.dispose();
   });
 
-  it('contains a synchronous HTTPS response as terminal invalid response', () => {
+  it('accepts a 200 response only after pausing and revoking attempt authority', () => {
     const request = new FakeRequest();
     const response = new FakeResponse(200);
+    const pause = vi.spyOn(response, 'pause');
     const destroy = vi.spyOn(response, 'destroy');
+    let options: RequestOptions | undefined;
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      value: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      options = value;
+      callback(response);
+      return request;
+    });
+    let transport!: ReturnType<
+      typeof createProjectTemplateArtifactPinnedTransport
+    >;
+    const onResponse = vi.fn((statusCode: number) => {
+      expect(statusCode).toBe(200);
+      expect(pause).toHaveBeenCalledTimes(1);
+      expect(response.isPaused()).toBe(true);
+      for (const event of ['data', 'end', 'aborted', 'error', 'close']) {
+        expect(response.listenerCount(event)).toBe(1);
+      }
+      expect(request.listenerCount('error')).toBe(0);
+      expect(request.listenerCount('close')).toBe(0);
+      const revokedLookup = vi.fn();
+      options!.lookup!(
+        'objects.githubusercontent.com',
+        { all: false, family: 4 },
+        revokedLookup,
+      );
+      expect(revokedLookup.mock.calls[0]![0]).toBeInstanceOf(Error);
+      expect(() => transport.pause()).not.toThrow();
+      expect(() => transport.resume()).not.toThrow();
+      expect(response.isPaused()).toBe(true);
+    });
+    const handlers = makeHandlers({ onResponse });
+    transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    expect(() => transport.start()).not.toThrow();
+    expect(onResponse).toHaveBeenCalledTimes(1);
+    expect(destroy).not.toHaveBeenCalled();
+    expect(request.destroy).not.toHaveBeenCalled();
+    expect(handlers.onInvalidResponse).not.toHaveBeenCalled();
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+    transport.dispose();
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([100, 199, 201, 204, 300, 304, 404, 599])(
+    'settles valid nonredirect status %i exactly once without secondary errors',
+    (statusCode) => {
+      const request = new FakeRequest();
+      const response = new FakeResponse(statusCode);
+      const responseDestroy = vi.spyOn(response, 'destroy');
+      native.dnsLookup.mockImplementation((
+        _hostname: string,
+        _options: unknown,
+        callback: (...args: unknown[]) => void,
+      ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+      native.httpsRequest.mockImplementation((
+        _options: RequestOptions,
+        callback: (value: FakeResponse) => void,
+      ) => {
+        callback(response);
+        return request;
+      });
+      const onResponse = vi.fn(() => {
+        throw new Error('private consumer cause');
+      });
+      const handlers = makeHandlers({ onResponse });
+      const transport = createProjectTemplateArtifactPinnedTransport(
+        makeHop(),
+        handlers,
+      );
+
+      expect(() => transport.start()).not.toThrow();
+      expect(responseDestroy).toHaveBeenCalledTimes(1);
+      expect(request.destroy).toHaveBeenCalledTimes(1);
+      expect(onResponse).toHaveBeenCalledTimes(1);
+      expect(onResponse).toHaveBeenCalledWith(statusCode);
+      expect(handlers.onInvalidResponse).not.toHaveBeenCalled();
+      expect(handlers.onResponseError).not.toHaveBeenCalled();
+      transport.dispose();
+    },
+  );
+
+  it('rolls back a 200 response when pausing fails', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    vi.spyOn(response, 'pause').mockImplementation(() => {
+      throw new Error('private pause failure');
+    });
+    const responseDestroy = vi.spyOn(response, 'destroy');
     native.dnsLookup.mockImplementation((
       _hostname: string,
       _options: unknown,
@@ -339,12 +439,189 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     );
 
     expect(() => transport.start()).not.toThrow();
-    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(responseDestroy).toHaveBeenCalledTimes(1);
     expect(request.destroy).toHaveBeenCalledTimes(1);
-    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
     expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(handlers.onInvalidResponse).not.toHaveBeenCalled();
     transport.dispose();
   });
+
+  it('rolls back body ownership when the 200 response handler throws', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers({
+      onResponse: vi.fn(() => {
+        throw new Error('private response handler failure');
+      }),
+    });
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    expect(() => transport.start()).not.toThrow();
+    expect(handlers.onResponse).toHaveBeenCalledWith(200);
+    expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+    expect(responseDestroy).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    for (const event of ['data', 'end', 'aborted', 'error', 'close']) {
+      expect(response.listenerCount(event)).toBe(0);
+    }
+    transport.dispose();
+  });
+
+  it('contains reentrant disposal while pausing a body candidate', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    vi.spyOn(response, 'pause').mockImplementation(() => {
+      transport.dispose();
+      return response;
+    });
+
+    expect(() => transport.start()).not.toThrow();
+    expect(responseDestroy).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+  });
+
+  it('rolls back partial response listener registration after reentrant disposal', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const responseDestroy = vi.spyOn(response, 'destroy');
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    response.once('newListener', (event) => {
+      if (event === 'data') transport.dispose();
+    });
+
+    expect(() => transport.start()).not.toThrow();
+    for (const event of ['data', 'end', 'aborted', 'error', 'close']) {
+      expect(response.listenerCount(event)).toBe(0);
+    }
+    expect(responseDestroy).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(handlers.onResponseError).not.toHaveBeenCalled();
+  });
+
+  it('ignores a queued request close after a 200 response claims ownership', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const originalPause = response.pause;
+    vi.spyOn(response, 'pause').mockImplementation(() => {
+      request.emit('close');
+      return Reflect.apply(originalPause, response, []);
+    });
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    transport.start();
+
+    expect(handlers.onResponse).toHaveBeenCalledWith(200);
+    expect(handlers.onRequestClose).not.toHaveBeenCalled();
+    expect(handlers.onRequestError).not.toHaveBeenCalled();
+    transport.dispose();
+  });
+
+  it.each(['destroy', 'dispose'] as const)(
+    'allows synchronous %s from the accepted-response handler',
+    (action) => {
+      const request = new FakeRequest();
+      const response = new FakeResponse(200);
+      native.dnsLookup.mockImplementation((
+        _hostname: string,
+        _options: unknown,
+        callback: (...args: unknown[]) => void,
+      ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+      native.httpsRequest.mockImplementation((
+        _options: RequestOptions,
+        callback: (value: FakeResponse) => void,
+      ) => {
+        callback(response);
+        return request;
+      });
+      let transport!: ReturnType<
+        typeof createProjectTemplateArtifactPinnedTransport
+      >;
+      const handlers = makeHandlers({
+        onResponse: vi.fn(() => transport[action]()),
+      });
+      transport = createProjectTemplateArtifactPinnedTransport(
+        makeHop(),
+        handlers,
+      );
+
+      expect(() => transport.start()).not.toThrow();
+      expect(handlers.onResponse).toHaveBeenCalledTimes(1);
+      expect(response.destroyed).toBe(true);
+      expect(request.destroy).toHaveBeenCalledTimes(1);
+      expect(handlers.onResponseError).not.toHaveBeenCalled();
+      transport.dispose();
+    },
+  );
 
   it.each(['error', 'close'])(
     'terminally detaches before a reentrant request %s handler',
@@ -562,7 +839,7 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     transport.dispose();
   });
 
-  it('iteratively follows three synchronous redirects before terminal 200', () => {
+  it('iteratively follows three synchronous redirects into a paused 200', () => {
     const responses = [
       new FakeResponse(301, [
         'Location',
@@ -634,18 +911,22 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
         value.hostname,
       );
     }
-    for (const destroy of responseDestroys) {
+    for (const destroy of responseDestroys.slice(0, -1)) {
       expect(destroy).toHaveBeenCalledTimes(1);
     }
-    for (const request of requests) {
+    expect(responseDestroys.at(-1)).not.toHaveBeenCalled();
+    for (const request of requests.slice(0, -1)) {
       expect(request.destroy).toHaveBeenCalledTimes(1);
     }
-    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
-    expect(handlers.onInvalidResponse).toHaveBeenCalledWith();
-    expect(handlers.onResponse).not.toHaveBeenCalled();
+    expect(requests.at(-1)!.destroy).not.toHaveBeenCalled();
+    expect(handlers.onInvalidResponse).not.toHaveBeenCalled();
+    expect(handlers.onResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponse).toHaveBeenCalledWith(200);
     expect(handlers.onData).not.toHaveBeenCalled();
     expect(handlers.onEnd).not.toHaveBeenCalled();
     transport.dispose();
+    expect(responseDestroys.at(-1)).toHaveBeenCalledTimes(1);
+    expect(requests.at(-1)!.destroy).toHaveBeenCalledTimes(1);
   });
 
   it('rejects the fourth redirect without starting another attempt', () => {
