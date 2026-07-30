@@ -1022,4 +1022,87 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
       transport.dispose();
     }
   });
+
+  it('releases an unstarted initial target when disposed', () => {
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(
+        'https://objects.githubusercontent.com/private/unstarted?sig=secret',
+      ),
+      makeHandlers(),
+    );
+
+    transport.dispose();
+
+    expect(native.dnsLookup).not.toHaveBeenCalled();
+    expect(native.httpsRequest).not.toHaveBeenCalled();
+    expect(inspect(transport)).not.toContain('unstarted');
+    expect(inspect(transport)).not.toContain('secret');
+  });
+
+  it('contains a retained DNS callback after pending-attempt disposal', () => {
+    let dnsCallback: ((...args: unknown[]) => void) | undefined;
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => {
+      dnsCallback = callback;
+    });
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(
+        'https://objects.githubusercontent.com/private/pending?sig=secret',
+      ),
+      makeHandlers(),
+    );
+    transport.start();
+
+    transport.dispose();
+    dnsCallback!(null, [{ address: '93.184.216.34', family: 4 }]);
+
+    expect(native.httpsRequest).not.toHaveBeenCalled();
+    expect(inspect(dnsCallback)).not.toContain('pending');
+    expect(inspect(dnsCallback)).not.toContain('93.184.216.34');
+  });
+
+  it('empties retained lookup secrets after a normal invalid response', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    let options: RequestOptions | undefined;
+    let respond: ((value: FakeResponse) => void) | undefined;
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      value: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      options = value;
+      respond = callback;
+      return request;
+    });
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(
+        'https://objects.githubusercontent.com/private/request?sig=secret',
+      ),
+      makeHandlers(),
+    );
+    transport.start();
+    const retainedLookup = options!.lookup!;
+
+    respond!(response);
+    const late = vi.fn();
+    retainedLookup(
+      'objects.githubusercontent.com',
+      { all: false, family: 4 },
+      late,
+    );
+
+    expect(late.mock.calls[0]![0]).toBeInstanceOf(Error);
+    expect(inspect(retainedLookup)).not.toContain('93.184.216.34');
+    expect(inspect(retainedLookup)).not.toContain('sig=secret');
+    expect(inspect(transport)).not.toContain('sig=secret');
+    transport.dispose();
+  });
 });
