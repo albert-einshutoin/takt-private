@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { TextDecoder } from 'node:util';
+import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
 import { calculateProjectTemplateManifestSha256 } from './binding.js';
 import {
   claimMaterializedGithubTemplateCacheForReceipt,
@@ -18,15 +19,29 @@ import {
   type ProjectTemplateSourceDescriptorV1,
 } from './source-descriptor.js';
 import type { TemplateSource } from './types.js';
+import {
+  compareSemVer,
+  MAX_SEMVER_LENGTH,
+  MAX_SOURCE_REF_LENGTH,
+  requireSemVer,
+} from './validation.js';
 
 const RECEIPT_SCHEMA_VERSION = '1.0';
 const RECEIPT_KIND = 'github-template-download-receipt';
 const SIGNATURE_DOMAIN =
-  'takt:github-template-download-receipt:v1:payload\u0000';
+  'takt:github-template-download-receipt:v1:pre-auth-envelope\u0000';
 const RECEIPT_KEY_DOMAIN =
   'takt:github-template-download-receipt:v1:key\u0000';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const KEY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const ASSET_NAME_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._-]*\.taktpack$/;
+const CHECKSUM_NAME_PATTERN =
+  /^[A-Za-z0-9][A-Za-z0-9._-]*\.taktpack\.sha256$/;
+const MAX_ASSET_NAME_LENGTH = 255;
+const MAX_CHECKSUM_NAME_LENGTH =
+  MAX_ASSET_NAME_LENGTH + '.sha256'.length;
+const MAX_CHECKSUM_BYTES = 4 * 1024;
 export const MAX_GITHUB_TEMPLATE_DOWNLOAD_RECEIPT_BYTES = 256 * 1024;
 
 export type GithubTemplateDownloadReceiptErrorCode =
@@ -47,7 +62,11 @@ export class GithubTemplateDownloadReceiptError extends Error {
 }
 
 export interface GithubTemplateDownloadReceiptAuthenticator {
-  currentKeyId(): Promise<unknown>;
+  acquireSigningKey(): Promise<unknown>;
+}
+
+export interface GithubTemplateDownloadReceiptSigningKey {
+  readonly keyId: string;
   sign(input: Uint8Array): Promise<unknown>;
 }
 
@@ -85,10 +104,7 @@ export interface GithubTemplateDownloadReceiptV1 {
       readonly version: string;
       readonly manifestSha256: string;
       readonly source: TemplateSource;
-      readonly compatibility: {
-        readonly status: 'unknown' | 'compatible' | 'incompatible';
-        readonly compatible?: boolean;
-        readonly currentVersion?: string;
+      readonly takt: {
         readonly minVersion: string;
         readonly maxVersion?: string;
       };
@@ -113,9 +129,22 @@ export interface PreparedGithubTemplateDownloadReceipt {
   readonly receiptKey: string;
 }
 
+/**
+ * Opaque, single-use authority handed to the future D2 storage boundary.
+ * Consumers cannot manufacture it by cloning a prepared receipt.
+ */
+export interface ClaimedPreparedGithubTemplateDownloadReceipt {
+  readonly prepared: PreparedGithubTemplateDownloadReceipt;
+}
+
 interface AuthenticatorSnapshot {
   readonly receiver: GithubTemplateDownloadReceiptAuthenticator;
-  readonly currentKeyId: () => Promise<unknown>;
+  readonly acquireSigningKey: () => Promise<unknown>;
+}
+
+interface SigningKeySnapshot {
+  readonly receiver: GithubTemplateDownloadReceiptSigningKey;
+  readonly keyId: string;
   readonly sign: (input: Uint8Array) => Promise<unknown>;
 }
 
@@ -123,7 +152,13 @@ const PREPARED_RECEIPT_AUTHORITIES = new WeakMap<
   object,
   { state: 'active' | 'consuming' | 'consumed' }
 >();
-const PREPARED_RECEIPT_CLAIMS = new WeakSet<object>();
+const PREPARED_RECEIPT_CLAIMS = new WeakMap<
+  object,
+  {
+    readonly prepared: PreparedGithubTemplateDownloadReceipt;
+    readonly authority: { state: 'active' | 'consuming' | 'consumed' };
+  }
+>();
 
 function receiptError(
   code: GithubTemplateDownloadReceiptErrorCode,
@@ -183,26 +218,46 @@ function snapshotPrepareOptions(
     );
     const authenticator = ownDataRecord(
       options['authenticator'],
-      ['currentKeyId', 'sign'],
+      ['acquireSigningKey'],
     );
-    if (
-      typeof authenticator['currentKeyId'] !== 'function'
-      || typeof authenticator['sign'] !== 'function'
-    ) throw new Error();
+    if (typeof authenticator['acquireSigningKey'] !== 'function') {
+      throw new Error();
+    }
     return {
       resolved: options['resolved'],
       materialized: options['materialized'],
       authenticator: {
         receiver:
           options['authenticator'] as GithubTemplateDownloadReceiptAuthenticator,
-        currentKeyId: authenticator['currentKeyId'] as () => Promise<unknown>,
-        sign: authenticator['sign'] as (input: Uint8Array) => Promise<unknown>,
+        acquireSigningKey:
+          authenticator['acquireSigningKey'] as () => Promise<unknown>,
       },
     };
   } catch {
     throw receiptError(
       'INVALID_ARGUMENT',
       'GitHub template download receipt options are invalid',
+    );
+  }
+}
+
+function snapshotSigningKey(value: unknown): SigningKeySnapshot {
+  try {
+    const lease = ownDataRecord(value, ['keyId', 'sign']);
+    if (
+      typeof lease['keyId'] !== 'string'
+      || !KEY_ID_PATTERN.test(lease['keyId'])
+      || typeof lease['sign'] !== 'function'
+    ) throw new Error();
+    return Object.freeze({
+      receiver: value as GithubTemplateDownloadReceiptSigningKey,
+      keyId: lease['keyId'],
+      sign: lease['sign'] as (input: Uint8Array) => Promise<unknown>,
+    });
+  } catch {
+    throw receiptError(
+      'AUTHENTICATION_FAILED',
+      'GitHub template download receipt signing key is invalid',
     );
   }
 }
@@ -238,6 +293,8 @@ function requireCrossBinding(
     || source.commit !== resolved.commit
     || source.ref !== resolved.releaseTag
     || manifest.packVersion !== resolved.version
+    || inspection.compatibility.minVersion !== manifest.takt.minVersion
+    || inspection.compatibility.maxVersion !== manifest.takt.maxVersion
   ) {
     throw receiptError(
       'BINDING_MISMATCH',
@@ -281,41 +338,76 @@ function createPayload(
       version: resolved.version,
       manifestSha256: inspection.manifestSha256,
       source: inspection.manifest.source,
-      compatibility: inspection.compatibility,
+      // Compatibility status depends on the local Takt runtime. Persist only
+      // the canonical manifest range so offline callers can recompute status.
+      takt: inspection.manifest.takt,
     },
   });
 }
 
-function serializePayload(
-  payload: GithubTemplateDownloadReceiptV1['payload'],
-): string {
-  return JSON.stringify(payload, null, 2);
-}
-
 function signatureInput(
   payload: GithubTemplateDownloadReceiptV1['payload'],
+  keyId: string,
 ): Uint8Array {
-  return Buffer.from(`${SIGNATURE_DOMAIN}${serializePayload(payload)}`, 'utf8');
+  const preAuthenticationEnvelope = {
+    schemaVersion: RECEIPT_SCHEMA_VERSION,
+    kind: RECEIPT_KIND,
+    payload,
+    authentication: {
+      algorithm: 'hmac-sha256',
+      keyId,
+    },
+  };
+  return Buffer.from(
+    `${SIGNATURE_DOMAIN}${JSON.stringify(
+      preAuthenticationEnvelope,
+      null,
+      2,
+    )}`,
+    'utf8',
+  );
 }
 
 export function serializeGithubTemplateDownloadReceipt(
   value: GithubTemplateDownloadReceiptV1,
 ): string {
   const receipt = parseReceiptStructure(value);
-  return JSON.stringify(receipt, null, 2);
+  const serialized = JSON.stringify(receipt, null, 2);
+  if (
+    Buffer.byteLength(serialized, 'utf8')
+    > MAX_GITHUB_TEMPLATE_DOWNLOAD_RECEIPT_BYTES
+  ) {
+    throw receiptError(
+      'INVALID_RECEIPT',
+      'GitHub template download receipt exceeds the size limit',
+    );
+  }
+  return serialized;
 }
 
-function requireString(value: unknown, pattern?: RegExp): string {
+function requireString(
+  value: unknown,
+  pattern?: RegExp,
+  maxLength = Number.MAX_SAFE_INTEGER,
+): string {
   if (
     typeof value !== 'string'
     || value.length === 0
+    || value.length > maxLength
     || (pattern !== undefined && !pattern.test(value))
   ) throw new Error();
   return value;
 }
 
-function requireInteger(value: unknown): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error();
+function requirePositiveInteger(
+  value: unknown,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  if (
+    !Number.isSafeInteger(value)
+    || (value as number) <= 0
+    || (value as number) > maximum
+  ) throw new Error();
   return value as number;
 }
 
@@ -362,12 +454,9 @@ function parseReceiptStructure(
       'version',
       'manifestSha256',
       'source',
-      'compatibility',
+      'takt',
     ]);
-    const compatibility = ownDataRecord(archive['compatibility'], [
-      'status',
-      'compatible',
-      'currentVersion',
+    const takt = ownDataRecord(archive['takt'], [
       'minVersion',
       'maxVersion',
     ]);
@@ -388,9 +477,6 @@ function parseReceiptStructure(
       || Object.keys(release).length !== 7
       || Object.keys(archive).length !== 6
       || authentication['algorithm'] !== 'hmac-sha256'
-      || !['unknown', 'compatible', 'incompatible'].includes(
-        compatibility['status'] as string,
-      )
       || archiveSource['kind'] !== 'github'
     ) throw new Error();
     const receipt: GithubTemplateDownloadReceiptV1 = {
@@ -404,9 +490,21 @@ function parseReceiptStructure(
             source['repositoryUrl'],
             /^https:\/\/github\.com\/[^/]+\/[^/]+$/,
           ),
-          canonicalSource: requireString(source['canonicalSource']),
-          requestedRef: requireString(source['requestedRef']),
-          releaseTag: requireString(source['releaseTag']),
+          canonicalSource: requireString(
+            source['canonicalSource'],
+            undefined,
+            2048,
+          ),
+          requestedRef: requireString(
+            source['requestedRef'],
+            undefined,
+            MAX_SOURCE_REF_LENGTH,
+          ),
+          releaseTag: requireString(
+            source['releaseTag'],
+            undefined,
+            MAX_SOURCE_REF_LENGTH,
+          ),
           commit: requireString(source['commit'], /^[a-f0-9]{40}$/),
           descriptorSha256: requireString(
             source['descriptorSha256'],
@@ -415,18 +513,41 @@ function parseReceiptStructure(
           sourceDescriptor: descriptor,
         },
         release: {
-          releaseId: requireInteger(release['releaseId']),
-          assetId: requireInteger(release['assetId']),
-          assetName: requireString(release['assetName']),
-          assetSize: requireInteger(release['assetSize']),
-          checksumAssetId: requireInteger(release['checksumAssetId']),
-          checksumAssetName: requireString(release['checksumAssetName']),
-          checksumAssetSize: requireInteger(release['checksumAssetSize']),
+          releaseId: requirePositiveInteger(release['releaseId']),
+          assetId: requirePositiveInteger(release['assetId']),
+          assetName: requireString(
+            release['assetName'],
+            ASSET_NAME_PATTERN,
+            MAX_ASSET_NAME_LENGTH,
+          ),
+          assetSize: requirePositiveInteger(
+            release['assetSize'],
+            DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes,
+          ),
+          checksumAssetId: requirePositiveInteger(
+            release['checksumAssetId'],
+          ),
+          checksumAssetName: requireString(
+            release['checksumAssetName'],
+            CHECKSUM_NAME_PATTERN,
+            MAX_CHECKSUM_NAME_LENGTH,
+          ),
+          checksumAssetSize: requirePositiveInteger(
+            release['checksumAssetSize'],
+            MAX_CHECKSUM_BYTES,
+          ),
         },
         archive: {
-          bytes: requireInteger(archive['bytes']),
+          bytes: requirePositiveInteger(
+            archive['bytes'],
+            DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes,
+          ),
           sha256: requireString(archive['sha256'], SHA256_PATTERN),
-          version: requireString(archive['version']),
+          version: requireString(
+            archive['version'],
+            undefined,
+            MAX_SEMVER_LENGTH,
+          ),
           manifestSha256: requireString(
             archive['manifestSha256'],
             SHA256_PATTERN,
@@ -434,27 +555,31 @@ function parseReceiptStructure(
           source: {
             kind: 'github' as const,
             uri: requireString(archiveSource['uri']) as `https://github.com/${string}/${string}`,
-            ref: requireString(archiveSource['ref']),
+            ref: requireString(
+              archiveSource['ref'],
+              undefined,
+              MAX_SOURCE_REF_LENGTH,
+            ),
             commit: requireString(
               archiveSource['commit'],
               /^[a-f0-9]{40}$/,
             ),
           },
-          compatibility: {
-            status: compatibility['status'] as
-              | 'unknown'
-              | 'compatible'
-              | 'incompatible',
-            ...(compatibility['compatible'] === undefined
+          takt: {
+            minVersion: requireString(
+              takt['minVersion'],
+              undefined,
+              MAX_SEMVER_LENGTH,
+            ),
+            ...(takt['maxVersion'] === undefined
               ? {}
-              : { compatible: compatibility['compatible'] as boolean }),
-            ...(compatibility['currentVersion'] === undefined
-              ? {}
-              : { currentVersion: requireString(compatibility['currentVersion']) }),
-            minVersion: requireString(compatibility['minVersion']),
-            ...(compatibility['maxVersion'] === undefined
-              ? {}
-              : { maxVersion: requireString(compatibility['maxVersion']) }),
+              : {
+                maxVersion: requireString(
+                  takt['maxVersion'],
+                  undefined,
+                  MAX_SEMVER_LENGTH,
+                ),
+              }),
           },
         },
       },
@@ -464,10 +589,20 @@ function parseReceiptStructure(
         tag: requireString(authentication['tag'], SHA256_PATTERN),
       },
     };
-    if (
-      compatibility['compatible'] !== undefined
-      && typeof compatibility['compatible'] !== 'boolean'
-    ) throw new Error();
+    const minTaktVersion = requireSemVer(
+      receipt.payload.archive.takt.minVersion,
+      'receipt.payload.archive.takt.minVersion',
+    );
+    requireSemVer(
+      receipt.payload.archive.version,
+      'receipt.payload.archive.version',
+    );
+    const maxTaktVersion = receipt.payload.archive.takt.maxVersion === undefined
+      ? undefined
+      : requireSemVer(
+        receipt.payload.archive.takt.maxVersion,
+        'receipt.payload.archive.takt.maxVersion',
+      );
     const parsedCanonicalSource = parseProjectTemplateGithubSourceSpec(
       receipt.payload.source.canonicalSource,
     );
@@ -482,7 +617,10 @@ function parseReceiptStructure(
       || parsedCanonicalSource.ref !== sourceReceipt.requestedRef
       || (
         parsedCanonicalSource.kind === 'github-release-asset'
-        && parsedCanonicalSource.assetName !== releaseReceipt.assetName
+        && (
+          parsedCanonicalSource.ref !== sourceReceipt.releaseTag
+          || parsedCanonicalSource.assetName !== releaseReceipt.assetName
+        )
       )
       || calculateProjectTemplateSourceDescriptorSha256(
         sourceReceipt.sourceDescriptor,
@@ -498,16 +636,8 @@ function parseReceiptStructure(
       || archiveReceipt.source.ref !== sourceReceipt.releaseTag
       || archiveReceipt.source.commit !== sourceReceipt.commit
       || (
-        archiveReceipt.compatibility.status === 'unknown'
-        && archiveReceipt.compatibility.compatible !== undefined
-      )
-      || (
-        archiveReceipt.compatibility.status === 'compatible'
-        && archiveReceipt.compatibility.compatible !== true
-      )
-      || (
-        archiveReceipt.compatibility.status === 'incompatible'
-        && archiveReceipt.compatibility.compatible !== false
+        maxTaktVersion !== undefined
+        && compareSemVer(minTaktVersion, maxTaktVersion) > 0
       )
     ) throw new Error();
     return deepFreeze(receipt);
@@ -589,21 +719,19 @@ export async function prepareGithubTemplateDownloadReceipt(
       resolvedClaim.descriptor,
       materializedClaim.materialized,
     );
-    let keyId: unknown;
+    let signingKey: SigningKeySnapshot;
     let tag: unknown;
     try {
-      keyId = await Reflect.apply(
-        options.authenticator.currentKeyId,
+      const acquired = await Reflect.apply(
+        options.authenticator.acquireSigningKey,
         options.authenticator.receiver,
         [],
       );
-      if (typeof keyId !== 'string' || !KEY_ID_PATTERN.test(keyId)) {
-        throw new Error();
-      }
+      signingKey = snapshotSigningKey(acquired);
       tag = await Reflect.apply(
-        options.authenticator.sign,
-        options.authenticator.receiver,
-        [signatureInput(payload)],
+        signingKey.sign,
+        signingKey.receiver,
+        [signatureInput(payload, signingKey.keyId)],
       );
       if (typeof tag !== 'string' || !SHA256_PATTERN.test(tag)) {
         throw new Error();
@@ -620,7 +748,7 @@ export async function prepareGithubTemplateDownloadReceipt(
       payload,
       authentication: {
         algorithm: 'hmac-sha256' as const,
-        keyId,
+        keyId: signingKey.keyId,
         tag,
       },
     });
@@ -644,7 +772,7 @@ export async function prepareGithubTemplateDownloadReceipt(
 
 export function claimPreparedGithubTemplateDownloadReceiptForStorage(
   value: unknown,
-): PreparedGithubTemplateDownloadReceipt {
+): ClaimedPreparedGithubTemplateDownloadReceipt {
   const authority = (
     typeof value === 'object' && value !== null
       ? PREPARED_RECEIPT_AUTHORITIES.get(value)
@@ -657,27 +785,36 @@ export function claimPreparedGithubTemplateDownloadReceiptForStorage(
     );
   }
   authority.state = 'consuming';
-  PREPARED_RECEIPT_CLAIMS.add(value as object);
-  return value as PreparedGithubTemplateDownloadReceipt;
+  const prepared = value as PreparedGithubTemplateDownloadReceipt;
+  const claim = Object.freeze({ prepared });
+  PREPARED_RECEIPT_CLAIMS.set(claim, { prepared, authority });
+  return claim;
 }
 
 export function consumePreparedGithubTemplateDownloadReceiptStorageClaim(
-  value: PreparedGithubTemplateDownloadReceipt,
+  value: ClaimedPreparedGithubTemplateDownloadReceipt,
 ): void {
-  const authority = PREPARED_RECEIPT_CLAIMS.has(value)
-    ? PREPARED_RECEIPT_AUTHORITIES.get(value)
-    : undefined;
-  if (authority === undefined || authority.state !== 'consuming') {
+  const claim = (
+    typeof value === 'object' && value !== null
+      ? PREPARED_RECEIPT_CLAIMS.get(value)
+      : undefined
+  );
+  if (
+    claim === undefined
+    || claim.authority.state !== 'consuming'
+    || value.prepared !== claim.prepared
+  ) {
     throw receiptError(
       'INVALID_AUTHORITY',
       'prepared GitHub template download receipt claim is invalid',
     );
   }
   PREPARED_RECEIPT_CLAIMS.delete(value);
-  authority.state = 'consumed';
+  claim.authority.state = 'consumed';
 }
 
 /**
- * D1 stops at a process-local sealed, authenticated representation. No receipt
- * path is accepted and no disk, journal, backup, or recovery marker is written.
+ * D1 stops at a process-local sealed representation authenticated only after a
+ * trusted atomic signing-key lease succeeds. No receipt path is accepted and no
+ * disk, journal, backup, or recovery marker is written.
  */

@@ -66,25 +66,38 @@ interface FixtureOptions {
   manifestCommit?: string;
   declaredAssetSize?: number;
   dependencyCommit?: string;
+  directSource?: boolean;
 }
 
 interface MutableReceipt {
   payload: {
     source: {
       descriptorSha256: string;
+      canonicalSource: string;
+      requestedRef: string;
+      releaseTag: string;
       sourceDescriptor: {
         pack: { sha256: string };
       };
     };
-    release: { assetName: string };
+    release: {
+      releaseId: number;
+      assetId: number;
+      assetName: string;
+      assetSize: number;
+      checksumAssetId: number;
+      checksumAssetName: string;
+      checksumAssetSize: number;
+    };
     archive: {
       bytes: number;
+      version: string;
       source: {
         uri: string;
         ref: string;
         commit: string;
       };
-      compatibility: { compatible?: boolean };
+      takt: { minVersion: string; maxVersion?: string };
     };
   };
 }
@@ -159,7 +172,9 @@ async function createFixture(options: FixtureOptions = {}) {
   };
   const resolved = await resolveGithubTemplateSource({
     source: parseProjectTemplateGithubSourceSpec(
-      'github:acme/template@main',
+      options.directSource
+        ? `https://github.com/acme/template/releases/download/v1.2.3/${ASSET_NAME}`
+        : 'github:acme/template@main',
     ),
     metadata,
   });
@@ -182,11 +197,13 @@ async function createFixture(options: FixtureOptions = {}) {
 
 function authenticator(keyId = 'receipt-key-1', secret = 'test-secret') {
   return {
-    async currentKeyId() {
-      return keyId;
-    },
-    async sign(input: Uint8Array) {
-      return createHmac('sha256', secret).update(input).digest('hex');
+    async acquireSigningKey() {
+      return {
+        keyId,
+        async sign(input: Uint8Array) {
+          return createHmac('sha256', secret).update(input).digest('hex');
+        },
+      };
     },
   };
 }
@@ -198,14 +215,16 @@ describe('GitHub template authenticated download receipt D1', () => {
     const prepared = await prepareGithubTemplateDownloadReceipt({
       ...fixture,
       authenticator: {
-        async currentKeyId() {
-          return 'receipt-key-1';
-        },
-        async sign(input) {
-          signedInput = input.slice();
-          return createHmac('sha256', 'test-secret')
-            .update(input)
-            .digest('hex');
+        async acquireSigningKey() {
+          return {
+            keyId: 'receipt-key-1',
+            async sign(input: Uint8Array) {
+              signedInput = input.slice();
+              return createHmac('sha256', 'test-secret')
+                .update(input)
+                .digest('hex');
+            },
+          };
         },
       },
     });
@@ -231,6 +250,7 @@ describe('GitHub template authenticated download receipt D1', () => {
           bytes: fixture.materialized.bytes,
           sha256: fixture.materialized.sha256,
           version: '1.2.3',
+          takt: fixture.materialized.inspection.manifest.takt,
           source: {
             kind: 'github',
             uri: 'https://github.com/acme/template',
@@ -249,9 +269,13 @@ describe('GitHub template authenticated download receipt D1', () => {
       JSON.stringify(prepared.receipt, null, 2),
     );
     expect(prepared.receiptKey).toMatch(/^[a-f0-9]{64}$/);
-    expect(new TextDecoder().decode(signedInput)).toMatch(
-      /^takt:github-template-download-receipt:v1:payload\u0000\{/,
+    const signedText = new TextDecoder().decode(signedInput);
+    expect(signedText).toMatch(
+      /^takt:github-template-download-receipt:v1:pre-auth-envelope\u0000\{/,
     );
+    expect(signedText).toContain('"algorithm": "hmac-sha256"');
+    expect(signedText).toContain('"keyId": "receipt-key-1"');
+    expect(signedText).not.toContain('"tag"');
     expect(Object.isFrozen(prepared)).toBe(true);
     expect(Object.isFrozen(prepared.receipt.payload.source.sourceDescriptor))
       .toBe(true);
@@ -263,6 +287,8 @@ describe('GitHub template authenticated download receipt D1', () => {
       'cachePath',
       'pid',
       'timestamp',
+      'compatibility',
+      'currentVersion',
     ]) {
       expect(prepared.serialized).not.toContain(`"${forbidden}"`);
     }
@@ -296,6 +322,43 @@ describe('GitHub template authenticated download receipt D1', () => {
     expect(firstPrepared.receiptKey).toBe(secondPrepared.receiptKey);
     expect(thirdPrepared.receiptKey).not.toBe(firstPrepared.receiptKey);
     expect(fourthPrepared.receiptKey).not.toBe(firstPrepared.receiptKey);
+  });
+
+  it('uses one stable signing-key lease across key rotation and alias mutation', async () => {
+    const fixture = await createFixture();
+    let activeSecret = 'lease-secret-1';
+    let signedInput: Uint8Array | undefined;
+    let receiverWasLease = false;
+    const lease = {
+      keyId: 'receipt-key-1',
+      async sign(this: unknown, input: Uint8Array) {
+        receiverWasLease = this === lease;
+        signedInput = input.slice();
+        lease.keyId = 'receipt-key-2';
+        activeSecret = 'lease-secret-2';
+        return createHmac('sha256', 'lease-secret-1')
+          .update(input)
+          .digest('hex');
+      },
+    };
+    const prepared = await prepareGithubTemplateDownloadReceipt({
+      ...fixture,
+      authenticator: {
+        async acquireSigningKey() {
+          return lease;
+        },
+      },
+    });
+
+    expect(receiverWasLease).toBe(true);
+    expect(activeSecret).toBe('lease-secret-2');
+    expect(lease.keyId).toBe('receipt-key-2');
+    expect(prepared.receipt.authentication.keyId).toBe('receipt-key-1');
+    expect(prepared.receipt.authentication.tag).toBe(
+      createHmac('sha256', 'lease-secret-1')
+        .update(signedInput!)
+        .digest('hex'),
+    );
   });
 
   it.each([
@@ -352,11 +415,13 @@ describe('GitHub template authenticated download receipt D1', () => {
     const error = await prepareGithubTemplateDownloadReceipt({
       ...failureFixture,
       authenticator: {
-        async currentKeyId() {
-          return 'receipt-key-1';
-        },
-        async sign() {
-          throw new Error('ghp_receipt_signer_secret');
+        async acquireSigningKey() {
+          return {
+            keyId: 'receipt-key-1',
+            async sign() {
+              throw new Error('ghp_receipt_signer_secret');
+            },
+          };
         },
       },
     }).catch((caught: unknown) => caught);
@@ -379,11 +444,14 @@ describe('GitHub template authenticated download receipt D1', () => {
     const first = prepareGithubTemplateDownloadReceipt({
       ...fixture,
       authenticator: {
-        async currentKeyId() {
-          return await keyId;
-        },
-        async sign() {
-          return '0'.repeat(64);
+        async acquireSigningKey() {
+          const acquiredKeyId = await keyId;
+          return {
+            keyId: acquiredKeyId,
+            async sign() {
+              return '0'.repeat(64);
+            },
+          };
         },
       },
     });
@@ -444,11 +512,13 @@ describe('GitHub template authenticated download receipt D1', () => {
   it.each([
     ['invalid key id', authenticator('UPPERCASE')],
     ['invalid tag', {
-      async currentKeyId() {
-        return 'receipt-key-1';
-      },
-      async sign() {
-        return 'A'.repeat(64);
+      async acquireSigningKey() {
+        return {
+          keyId: 'receipt-key-1',
+          async sign() {
+            return 'A'.repeat(64);
+          },
+        };
       },
     }],
   ])('redacts invalid authenticator output and consumes authorities: %s', async (
@@ -462,6 +532,63 @@ describe('GitHub template authenticated download receipt D1', () => {
     }).catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: 'AUTHENTICATION_FAILED' });
     expect(String((error as Error).message)).not.toContain('secret');
+    await expect(prepareGithubTemplateDownloadReceipt({
+      ...fixture,
+      authenticator: authenticator(),
+    })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
+  });
+
+  it.each([
+    ['unknown key', () => ({
+      keyId: 'receipt-key-1',
+      async sign() {
+        return '0'.repeat(64);
+      },
+      secretPath: '/tmp/receipt-key',
+    })],
+    ['symbol', () => ({
+      keyId: 'receipt-key-1',
+      async sign() {
+        return '0'.repeat(64);
+      },
+      [Symbol('secret')]: true,
+    })],
+    ['accessor', () => Object.defineProperty({
+      async sign() {
+        return '0'.repeat(64);
+      },
+    }, 'keyId', {
+      get() {
+        throw new Error('ghp_receipt_lease_secret');
+      },
+    })],
+    ['Proxy', () => new Proxy({
+      keyId: 'receipt-key-1',
+      async sign() {
+        return '0'.repeat(64);
+      },
+    }, {
+      ownKeys() {
+        throw new Error('ghp_receipt_lease_secret');
+      },
+    })],
+  ])('rejects strict signing-key lease boundary: %s', async (
+    _label,
+    createLease,
+  ) => {
+    const fixture = await createFixture();
+    const error = await prepareGithubTemplateDownloadReceipt({
+      ...fixture,
+      authenticator: {
+        async acquireSigningKey() {
+          return createLease();
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'AUTHENTICATION_FAILED' });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_receipt_lease_secret',
+    );
     await expect(prepareGithubTemplateDownloadReceipt({
       ...fixture,
       authenticator: authenticator(),
@@ -488,10 +615,9 @@ describe('GitHub template authenticated download receipt D1', () => {
     const error = await prepareGithubTemplateDownloadReceipt({
       ...fixture,
       authenticator: {
-        async currentKeyId() {
-          return 'receipt-key-1';
+        async acquireSigningKey() {
+          return { keyId: 'receipt-key-1', sign };
         },
-        sign,
       },
     }).catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: 'AUTHENTICATION_FAILED' });
@@ -529,7 +655,7 @@ describe('GitHub template authenticated download receipt D1', () => {
     });
     const parsed = parseGithubTemplateDownloadReceipt(prepared.serialized);
     expect(parsed).toEqual(prepared.receipt);
-    expect(Object.isFrozen(parsed.payload.archive.compatibility)).toBe(true);
+    expect(Object.isFrozen(parsed.payload.archive.takt)).toBe(true);
 
     for (const invalid of [
       `${prepared.serialized}\n`,
@@ -603,8 +729,8 @@ describe('GitHub template authenticated download receipt D1', () => {
     ['archive commit', (receipt: MutableReceipt) => {
       receipt.payload.archive.source.commit = 'f'.repeat(40);
     }],
-    ['compatibility', (receipt: MutableReceipt) => {
-      receipt.payload.archive.compatibility.compatible = true;
+    ['takt range', (receipt: MutableReceipt) => {
+      receipt.payload.archive.takt.maxVersion = '0.1.0';
     }],
   ])('rejects canonical receipt internal mismatch: %s', async (
     _label,
@@ -622,6 +748,77 @@ describe('GitHub template authenticated download receipt D1', () => {
     )).toThrow(expect.objectContaining({ code: 'INVALID_RECEIPT' }));
   });
 
+  it.each([
+    ['release id zero', (receipt: MutableReceipt) => {
+      receipt.payload.release.releaseId = 0;
+    }],
+    ['asset id zero', (receipt: MutableReceipt) => {
+      receipt.payload.release.assetId = 0;
+    }],
+    ['checksum id zero', (receipt: MutableReceipt) => {
+      receipt.payload.release.checksumAssetId = 0;
+    }],
+    ['archive bytes zero', (receipt: MutableReceipt) => {
+      receipt.payload.release.assetSize = 0;
+      receipt.payload.archive.bytes = 0;
+    }],
+    ['archive bytes over limit', (receipt: MutableReceipt) => {
+      receipt.payload.release.assetSize = 40 * 1024 * 1024 + 1;
+      receipt.payload.archive.bytes = 40 * 1024 * 1024 + 1;
+    }],
+    ['checksum bytes zero', (receipt: MutableReceipt) => {
+      receipt.payload.release.checksumAssetSize = 0;
+    }],
+    ['checksum bytes over limit', (receipt: MutableReceipt) => {
+      receipt.payload.release.checksumAssetSize = 4 * 1024 + 1;
+    }],
+    ['asset name', (receipt: MutableReceipt) => {
+      receipt.payload.release.assetName = '../template.taktpack';
+    }],
+    ['checksum name', (receipt: MutableReceipt) => {
+      receipt.payload.release.checksumAssetName = '../checksum';
+    }],
+    ['requested ref bound', (receipt: MutableReceipt) => {
+      receipt.payload.source.requestedRef = 'r'.repeat(513);
+    }],
+    ['archive semver', (receipt: MutableReceipt) => {
+      receipt.payload.archive.version = 'not-semver';
+    }],
+    ['takt semver', (receipt: MutableReceipt) => {
+      receipt.payload.archive.takt.minVersion = 'not-semver';
+    }],
+  ])('rejects producer invariant independently of HMAC: %s', async (
+    _label,
+    mutate,
+  ) => {
+    const fixture = await createFixture();
+    const prepared = await prepareGithubTemplateDownloadReceipt({
+      ...fixture,
+      authenticator: authenticator(),
+    });
+    const receipt = JSON.parse(prepared.serialized) as MutableReceipt;
+    mutate(receipt);
+    expect(() => parseGithubTemplateDownloadReceipt(
+      JSON.stringify(receipt, null, 2),
+    )).toThrow(expect.objectContaining({ code: 'INVALID_RECEIPT' }));
+  });
+
+  it('binds direct release canonical ref and asset name', async () => {
+    const fixture = await createFixture({ directSource: true });
+    const prepared = await prepareGithubTemplateDownloadReceipt({
+      ...fixture,
+      authenticator: authenticator(),
+    });
+    expect(prepared.receipt.payload.source.requestedRef).toBe('v1.2.3');
+
+    const receipt = JSON.parse(prepared.serialized) as MutableReceipt;
+    receipt.payload.source.canonicalSource =
+      'https://github.com/acme/template/releases/download/v1.2.3/other.taktpack';
+    expect(() => parseGithubTemplateDownloadReceipt(
+      JSON.stringify(receipt, null, 2),
+    )).toThrow(expect.objectContaining({ code: 'INVALID_RECEIPT' }));
+  });
+
   it('seals the prepared result for one future D2 storage claim', async () => {
     const fixture = await createFixture();
     const prepared = await prepareGithubTemplateDownloadReceipt({
@@ -634,10 +831,13 @@ describe('GitHub template authenticated download receipt D1', () => {
     const claim = claimPreparedGithubTemplateDownloadReceiptForStorage(
       prepared,
     );
-    expect(claim).toBe(prepared);
+    expect(claim.prepared).toBe(prepared);
     expect(() => claimPreparedGithubTemplateDownloadReceiptForStorage(
       prepared,
     )).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => consumePreparedGithubTemplateDownloadReceiptStorageClaim({
+      ...claim,
+    })).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
     consumePreparedGithubTemplateDownloadReceiptStorageClaim(claim);
     expect(() => consumePreparedGithubTemplateDownloadReceiptStorageClaim(
       claim,
