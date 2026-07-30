@@ -30,6 +30,7 @@ import {
   captureProjectTemplateTargetSnapshot,
   createProjectTemplateApplyPlan,
   inspectProjectTemplateApplyGuard,
+  prepareProjectTemplateApplyPlan,
   type ProjectTemplateManifestV1,
   type ProjectTemplateIncomingContent,
   type ProjectTemplateIncomingInspectionEvidence,
@@ -45,6 +46,10 @@ import {
   readProjectTemplateApprovalRecord,
 } from '../../features/project-template/apply-storage.js';
 import { canonicalizeTaktpackJson } from '../../features/project-template/canonical-json.js';
+import {
+  readProjectTemplateMergeBaseline,
+  writeProjectTemplateMergeBaseline,
+} from '../../features/project-template/merge-baseline-store.js';
 
 const roots: string[] = [];
 const source = {
@@ -188,11 +193,232 @@ async function createPlan(
   });
 }
 
+async function createSemanticConfigPlan(options: {
+  root: string;
+  base: string;
+  incoming: string;
+}) {
+  const baseManifest = manifest({ 'config.yaml': options.base });
+  baseManifest.entries[0]!.policy = 'merge';
+  const baseLock = baseLockFor(baseManifest);
+  const incomingManifest = manifest({ 'config.yaml': options.incoming });
+  incomingManifest.entries[0]!.policy = 'merge';
+  const blobs = incomingContents({ 'config.yaml': options.incoming });
+  const snapshot = await captureProjectTemplateTargetSnapshot(
+    options.root,
+    ['config.yaml'],
+  );
+  const prepared = prepareProjectTemplateApplyPlan({
+    baseLock,
+    baseContents: [{
+      path: 'config.yaml',
+      content: Buffer.from(options.base),
+    }],
+    incomingManifest,
+    localEntries: snapshot.entries,
+    targetRootState: snapshot.rootState,
+    missingPathTracking: snapshot.missingPathTracking,
+    incomingContents: blobs,
+    incomingInspection: incomingInspection(incomingManifest),
+    baselineStrategy: 'conflict',
+  });
+  return { baseLock, incomingManifest, blobs, prepared };
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('project template atomic apply executor', () => {
+  it('applies resolved merge bytes and durably retains incoming baselines across rollback', async () => {
+    const root = makeRoot();
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = `${base}timezone: Asia/Tokyo\n`;
+    writeTakt(root, 'config.yaml', local);
+    const { baseLock, incomingManifest, blobs, prepared } =
+      await createSemanticConfigPlan({ root, base, incoming });
+    writeFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      `${JSON.stringify(baseLock)}\n`,
+    );
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: root });
+    await writeProjectTemplateMergeBaseline({
+      storage,
+      expectedSha256: hash(base),
+      content: Buffer.from(base),
+    });
+
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan: prepared.plan,
+      incomingManifest,
+      incomingContents: blobs,
+      resolvedContents: prepared.resolvedContents,
+    });
+
+    expect(applied.status).toBe('committed');
+    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'))
+      .toContain('planner: claude');
+    expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8'))
+      .toContain('timezone: Asia/Tokyo');
+    await expect(readProjectTemplateMergeBaseline({
+      storage,
+      expectedSha256: hash(incoming),
+    })).resolves.toEqual(Buffer.from(incoming));
+
+    const rolledBack = await rollbackProjectTemplateApply({
+      projectRoot: root,
+      backupId: applied.status === 'committed' ? applied.backupId : '',
+    });
+    expect(rolledBack.status).toBe('rolled_back');
+    await expect(readProjectTemplateMergeBaseline({
+      storage,
+      expectedSha256: hash(incoming),
+    })).resolves.toEqual(Buffer.from(incoming));
+  });
+
+  it('rejects missing, duplicate, unknown, and tampered resolved bytes before the lease boundary', async () => {
+    const root = makeRoot();
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = `${base}timezone: Asia/Tokyo\n`;
+    writeTakt(root, 'config.yaml', local);
+    const { baseLock, incomingManifest, blobs, prepared } =
+      await createSemanticConfigPlan({ root, base, incoming });
+    writeFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      `${JSON.stringify(baseLock)}\n`,
+    );
+    const resolved = prepared.resolvedContents[0]!;
+    const cases: Array<{
+      name: string;
+      resolvedContents: ProjectTemplateIncomingContent[];
+    }> = [
+      { name: 'missing', resolvedContents: [] },
+      { name: 'duplicate', resolvedContents: [resolved, resolved] },
+      {
+        name: 'unknown',
+        resolvedContents: [{ path: 'other.yaml', content: resolved.content }],
+      },
+      {
+        name: 'tampered',
+        resolvedContents: [{
+          path: resolved.path,
+          content: Buffer.from('language: ja\n'),
+        }],
+      },
+    ];
+    const leasePath = join(root, '.takt-template-state', 'apply.lock');
+    mkdirSync(dirname(leasePath), { recursive: true, mode: 0o700 });
+    writeFileSync(leasePath, '{}', { mode: 0o600 });
+
+    for (const testCase of cases) {
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan: prepared.plan,
+        incomingManifest,
+        incomingContents: blobs,
+        resolvedContents: testCase.resolvedContents,
+      });
+      expect(result, testCase.name).toMatchObject({
+        status: 'not_started',
+        code: 'INVALID_APPLY_INPUT',
+      });
+      expect(existsSync(leasePath), testCase.name).toBe(true);
+    }
+
+    writeTakt(root, 'config.yaml', base);
+    const upstreamManifest = manifest({ 'config.yaml': incoming });
+    upstreamManifest.entries[0]!.policy = 'merge';
+    const upstreamBlobs = incomingContents({ 'config.yaml': incoming });
+    const upstreamPlan = await createPlan(
+      root,
+      upstreamManifest,
+      upstreamBlobs,
+      baseLock,
+    );
+    const extraneous = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan: upstreamPlan,
+      incomingManifest: upstreamManifest,
+      incomingContents: upstreamBlobs,
+      resolvedContents: upstreamBlobs,
+    });
+    expect(extraneous).toMatchObject({
+      status: 'not_started',
+      code: 'INVALID_APPLY_INPUT',
+    });
+    expect(existsSync(leasePath)).toBe(true);
+  });
+
+  it.each(['missing', 'corrupt'] as const)(
+    'fails closed after lease acquisition when a formal merge baseline is %s',
+    async (baselineState) => {
+      const root = makeRoot();
+      const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+      const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+      const incoming = `${base}timezone: Asia/Tokyo\n`;
+      writeTakt(root, 'config.yaml', local);
+      const { baseLock, incomingManifest, blobs, prepared } =
+        await createSemanticConfigPlan({ root, base, incoming });
+      writeFileSync(
+        join(root, PROJECT_TEMPLATE_LOCK_PATH),
+        `${JSON.stringify(baseLock)}\n`,
+      );
+      if (baselineState === 'corrupt') {
+        const storage = await initializeProjectTemplateApplyStorage({ repoPath: root });
+        writeFileSync(
+          join(storage.baselinesRoot, hash(base)),
+          'corrupt',
+          { mode: 0o600 },
+        );
+      }
+
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan: prepared.plan,
+        incomingManifest,
+        incomingContents: blobs,
+        resolvedContents: prepared.resolvedContents,
+      });
+
+      expect(result).toMatchObject({
+        status: 'not_started',
+        code: 'INVALID_APPLY_INPUT',
+      });
+      expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8')).toBe(local);
+    },
+  );
+
+  it('does not require or persist semantic baselines for non-config merge entries', async () => {
+    const root = makeRoot();
+    writeTakt(root, 'notes.txt', 'old\n');
+    const baseManifest = manifest({ 'notes.txt': 'old\n' });
+    baseManifest.entries[0]!.policy = 'merge';
+    const baseLock = baseLockFor(baseManifest);
+    writeFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      `${JSON.stringify(baseLock)}\n`,
+    );
+    const incomingManifest = manifest({ 'notes.txt': 'new\n' });
+    incomingManifest.entries[0]!.policy = 'merge';
+    const blobs = incomingContents({ 'notes.txt': 'new\n' });
+    const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+
+    const applied = await applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    });
+
+    expect(applied.status).toBe('committed');
+    expect(readFileSync(join(root, '.takt', 'notes.txt'), 'utf8')).toBe('new\n');
+    expect(readdirSync(join(root, '.takt-template-state', 'merge-baselines')))
+      .toEqual([]);
+  });
+
   it('rejects a re-sealed plan whose update action was changed to keep', async () => {
     const root = makeRoot();
     writeTakt(root, 'config.yaml', 'old\n');
