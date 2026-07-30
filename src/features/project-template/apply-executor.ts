@@ -22,6 +22,7 @@ import type {
 } from './apply-plan-types.js';
 import { prepareProjectTemplateApplyPlan } from './apply-plan.js';
 import { runProjectTemplateDoctor } from './apply-doctor.js';
+import { portablePathKey } from './filesystem-scan.js';
 import {
   captureProjectTemplateBackupFile,
   initializeProjectTemplateApplyStorage,
@@ -182,8 +183,9 @@ function usesSemanticMergeBaseline(entry: {
   policy: string;
   path: string;
 }): boolean {
+  const portablePath = portablePathKey(entry.path);
   return entry.policy === 'merge'
-    && (entry.path === 'config.yaml' || entry.path === 'devloopd.yaml');
+    && (portablePath === 'config.yaml' || portablePath === 'devloopd.yaml');
 }
 
 async function safeLstat(path: string) {

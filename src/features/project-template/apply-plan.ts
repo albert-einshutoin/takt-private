@@ -65,22 +65,24 @@ function sha256(value: string | Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function isSupportedSemanticConfig(
+function semanticConfigDocument(
   path: string,
-  policy: TemplateEntryPolicy,
-): boolean {
-  return policy === 'merge'
-    && (path === 'config.yaml' || path === 'devloopd.yaml');
+): 'config.yaml' | 'devloopd.yaml' | undefined {
+  const portablePath = portablePathKey(path);
+  if (portablePath === 'config.yaml' || portablePath === 'devloopd.yaml') {
+    return portablePath;
+  }
+  return undefined;
 }
 
 function mergeSupportedSemanticConfig(options: {
-  path: 'config.yaml' | 'devloopd.yaml';
+  document: 'config.yaml' | 'devloopd.yaml';
   base: Uint8Array;
   local: Uint8Array;
   incoming: Uint8Array;
   reviewIncomingDocument?: boolean;
 }): ProjectTemplateConfigYamlMergeResult {
-  return options.path === 'config.yaml'
+  return options.document === 'config.yaml'
     ? mergeProjectTemplateConfigYaml(options)
     : mergeProjectTemplateDevloopPolicyYaml(options);
 }
@@ -261,12 +263,12 @@ function parseIncomingContents(
         content,
       });
       if (classification.classification === 'blocked') {
-        const semanticValidation = isSupportedSemanticConfig(
-          path,
-          manifestEntry.policy,
-        )
+        const semanticDocument = manifestEntry.policy === 'merge'
+          ? semanticConfigDocument(path)
+          : undefined;
+        const semanticValidation = semanticDocument !== undefined
           ? mergeSupportedSemanticConfig({
-              path: path as 'config.yaml' | 'devloopd.yaml',
+              document: semanticDocument,
               base: content,
               local: content,
               incoming: content,
@@ -1162,8 +1164,7 @@ export function prepareProjectTemplateApplyPlan(
   const resolvedByPath = new Map<string, Buffer>();
 
   const entries = unresolvedPlan.entries.map((entry): ProjectTemplateApplyPlanEntry => {
-    const supportedPath =
-      entry.path === 'config.yaml' || entry.path === 'devloopd.yaml';
+    const semanticDocument = semanticConfigDocument(entry.path);
     const semanticConflict = entry.action === 'conflict'
       && (
         entry.reasonCode === 'BOTH_CHANGED'
@@ -1171,7 +1172,7 @@ export function prepareProjectTemplateApplyPlan(
       );
     if (
       entry.policy !== 'merge'
-      || !supportedPath
+      || semanticDocument === undefined
       || (
         entry.action !== 'add'
         && entry.action !== 'update'
@@ -1188,7 +1189,7 @@ export function prepareProjectTemplateApplyPlan(
     if (incoming === undefined) return entry;
 
     const incomingValidation = mergeSupportedSemanticConfig({
-      path: entry.path as 'config.yaml' | 'devloopd.yaml',
+      document: semanticDocument,
       base: incoming,
       local: incoming,
       incoming,
@@ -1252,7 +1253,7 @@ export function prepareProjectTemplateApplyPlan(
     // a baseline.
     const merge = hasCompleteExistingMerge
       ? mergeSupportedSemanticConfig({
-          path: entry.path as 'config.yaml' | 'devloopd.yaml',
+          document: semanticDocument,
           base: base!,
           local: local!.content!,
           incoming,

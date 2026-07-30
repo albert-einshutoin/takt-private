@@ -286,6 +286,32 @@ describe('project template three-way apply plan', () => {
     expect(prepared.resolvedContents).toEqual([]);
   });
 
+  it.each([
+    ['Config.yaml', 'subscription_only: true\nprovider: codex\n'],
+    ['DEVLOOPD.YAML', 'mode: unsafe\n'],
+  ])(
+    'applies semantic validation to case-variant direct add %s',
+    (path, incoming) => {
+      const planInput = input({});
+      planInput.incomingManifest.entries = [
+        manifestEntry(path, incoming, 'merge'),
+      ];
+      planInput.incomingContents = [{ path, content: Buffer.from(incoming) }];
+      planInput.missingPathTracking = { [path]: 'not-repository' };
+
+      const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+      expect(prepared.plan.entries[0]).toMatchObject({
+        path,
+        action: 'conflict',
+        reasonCode: 'CONFLICT',
+        reviewRequired: true,
+        mergeDiagnostics: { status: 'blocked' },
+      });
+      expect(prepared.resolvedContents).toEqual([]);
+    },
+  );
+
   it('blocks global-only configuration on a direct add', () => {
     const incoming = 'analytics:\n  events_path: events.ndjson\n';
     const planInput = input({});
