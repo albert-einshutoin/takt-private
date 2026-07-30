@@ -561,7 +561,7 @@ describe('project template apply/run-start coordination', () => {
     expect(existsSync(mutexPath)).toBe(false);
   });
 
-  it('fails closed without unlinking a mutex inode already claimed by another reclaimer', () => {
+  it('recovers a mutex inode claimed by a reclaimer whose process is dead', () => {
     const root = makeRoot();
     const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
     mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
@@ -571,16 +571,15 @@ describe('project template apply/run-start coordination', () => {
       pid: 99_999,
     }));
     linkSync(mutexPath, `${mutexPath}.reclaim`);
-    const claimedInode = lstatSync(mutexPath).ino;
 
-    expect(() => acquireProjectTemplateApplyLease(root))
-      .toThrow(ProjectTemplateCoordinationError);
-    expect(lstatSync(mutexPath).ino).toBe(claimedInode);
-    expect(lstatSync(`${mutexPath}.reclaim`).ino).toBe(claimedInode);
-    expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(false);
+    const lease = acquireProjectTemplateApplyLease(root);
+
+    expect(lease.pid).toBe(process.pid);
+    expect(existsSync(`${mutexPath}.reclaim`)).toBe(false);
+    lease.release();
   });
 
-  it('does not acquire through the crash window after main unlink but before claim cleanup', () => {
+  it('recovers the crash window after main unlink when the reclaimer is dead', () => {
     const root = makeRoot();
     const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
     const reclaimPath = `${mutexPath}.reclaim`;
@@ -591,12 +590,47 @@ describe('project template apply/run-start coordination', () => {
       pid: 99_999,
     }));
 
+    const lease = acquireProjectTemplateApplyLease(root);
+
+    expect(lease.pid).toBe(process.pid);
+    expect(existsSync(reclaimPath)).toBe(false);
+    lease.release();
+  });
+
+  it('recovers a nested dead claim left while cleaning an orphan namespace', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const reclaimPath = `${mutexPath}.reclaim`;
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 1,
+      token: 'orphan-namespace',
+      pid: 99_999,
+    }));
+    linkSync(reclaimPath, `${reclaimPath}.reclaim`);
+
+    const lease = acquireProjectTemplateApplyLease(root);
+
+    expect(lease.pid).toBe(process.pid);
+    expect(existsSync(reclaimPath)).toBe(false);
+    expect(existsSync(`${reclaimPath}.reclaim`)).toBe(false);
+    lease.release();
+  });
+
+  it('keeps a reclaim namespace owned by a live process fail-closed', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const reclaimPath = `${mutexPath}.reclaim`;
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 1,
+      token: 'live-reclaimer',
+      pid: process.pid,
+    }));
+
     expect(() => acquireProjectTemplateApplyLease(root))
       .toThrow(ProjectTemplateCoordinationError);
-    expect(existsSync(mutexPath)).toBe(false);
-    expect(readFileSync(reclaimPath, 'utf8')).toContain(
-      'reclaimer-crashed-after-main-unlink',
-    );
+    expect(readFileSync(reclaimPath, 'utf8')).toContain('live-reclaimer');
     expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(false);
   });
 

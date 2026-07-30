@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   fsyncSync,
   linkSync,
@@ -11,6 +12,7 @@ import {
   readSync,
   unlinkSync,
   writeFileSync,
+  type Stats,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -251,6 +253,14 @@ function createCoordinationFile(path: string, token: string): void {
 function createClaimSafeCoordinationFile(path: string, token: string): void {
   const reclaimPath = `${path}.reclaim`;
   const namespaceToken = randomUUID();
+  if (existsSync(reclaimPath)) {
+    // A process can die after publishing its exclusive reclaim namespace but
+    // before removing it. Recover only a well-formed namespace whose owner is
+    // definitely dead; live or ambiguous ownership remains fail-closed.
+    if (!reclaimDeadCoordinationNamespace(path, reclaimPath, 0)) {
+      throw new ProjectTemplateCoordinationError();
+    }
+  }
   try {
     // Reserving the same fixed namespace used by stale reclaim proves that no
     // prior claimant remains after unlinking the old main path. Without this
@@ -377,7 +387,153 @@ export function clearProjectTemplateRecoveryRequiredMarker(
 }
 
 function reclaimDeadCoordinationFile(path: string): boolean {
-  let observed: ReturnType<typeof lstatSync>;
+  return reclaimDeadCoordinationFileAtDepth(path, 0);
+}
+
+const MAX_RECLAIM_RECOVERY_DEPTH = 16;
+const MAX_COORDINATION_RECORD_BYTES = 4096;
+
+function readClaimedCoordinationRecord(
+  path: string,
+  expected: Stats,
+): Record<string, unknown> | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return undefined;
+  }
+  try {
+    const before = fstatSync(fd);
+    if (
+      !before.isFile()
+      || before.dev !== expected.dev
+      || before.ino !== expected.ino
+      || before.nlink !== expected.nlink
+      || before.size <= 0
+      || before.size > MAX_COORDINATION_RECORD_BYTES
+    ) {
+      return undefined;
+    }
+    const content = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < content.length) {
+      const bytesRead = readSync(fd, content, offset, content.length - offset, offset);
+      if (bytesRead === 0) return undefined;
+      offset += bytesRead;
+    }
+    const extra = Buffer.alloc(1);
+    const extraBytes = readSync(fd, extra, 0, 1, offset);
+    const after = fstatSync(fd);
+    if (
+      extraBytes !== 0
+      || after.dev !== before.dev
+      || after.ino !== before.ino
+      || after.mode !== before.mode
+      || after.nlink !== before.nlink
+      || after.size !== before.size
+      || after.mtimeMs !== before.mtimeMs
+      || after.ctimeMs !== before.ctimeMs
+    ) {
+      return undefined;
+    }
+    const parsed = JSON.parse(content.toString('utf8')) as unknown;
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function reclaimDeadCoordinationNamespace(
+  mainPath: string,
+  reclaimPath: string,
+  depth: number,
+): boolean {
+  if (depth > MAX_RECLAIM_RECOVERY_DEPTH) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  let claimed: Stats;
+  try {
+    claimed = lstatSync(reclaimPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    throw new ProjectTemplateCoordinationError();
+  }
+  const value = readClaimedCoordinationRecord(reclaimPath, claimed);
+  if (value === undefined) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  if (
+    value['version'] !== 1
+    || typeof value['token'] !== 'string'
+    || value['token'].trim().length === 0
+    || value['token'].length > 512
+    || !Number.isSafeInteger(value['pid'])
+    || (value['pid'] as number) <= 0
+  ) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  try {
+    if (isProcessAlive(value['pid'] as number)) return false;
+  } catch {
+    throw new ProjectTemplateCoordinationError();
+  }
+
+  let currentMain: Stats | undefined;
+  try {
+    currentMain = lstatSync(mainPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new ProjectTemplateCoordinationError();
+    }
+  }
+  if (
+    currentMain !== undefined
+    && currentMain.dev === claimed.dev
+    && currentMain.ino === claimed.ino
+  ) {
+    // The main pathname keeps this namespace from being replaced before the
+    // single unlink below. Re-check both links immediately before removal so
+    // a dead reclaimer's exact inode is recovered without touching a successor.
+    const latestMain = lstatSync(mainPath);
+    const latestClaim = lstatSync(reclaimPath);
+    if (
+      !latestMain.isFile()
+      || latestMain.isSymbolicLink()
+      || !latestClaim.isFile()
+      || latestClaim.isSymbolicLink()
+      || latestMain.dev !== claimed.dev
+      || latestMain.ino !== claimed.ino
+      || latestClaim.dev !== claimed.dev
+      || latestClaim.ino !== claimed.ino
+      || latestMain.nlink !== 2
+      || latestClaim.nlink !== 2
+    ) {
+      throw new ProjectTemplateCoordinationError();
+    }
+    unlinkSync(reclaimPath);
+    syncDirectory(dirname(reclaimPath));
+    return true;
+  }
+
+  return reclaimDeadCoordinationFileAtDepth(reclaimPath, depth + 1);
+}
+
+function reclaimDeadCoordinationFileAtDepth(path: string, depth: number): boolean {
+  if (depth > MAX_RECLAIM_RECOVERY_DEPTH) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  const reclaimPath = `${path}.reclaim`;
+  if (existsSync(reclaimPath)) {
+    if (!reclaimDeadCoordinationNamespace(path, reclaimPath, depth + 1)) {
+      return false;
+    }
+  }
+  let observed: Stats;
   try {
     observed = lstatSync(path);
   } catch (error) {
@@ -409,7 +565,6 @@ function reclaimDeadCoordinationFile(path: string): boolean {
   } catch {
     throw new ProjectTemplateCoordinationError();
   }
-  const reclaimPath = `${path}.reclaim`;
   let claimCreated = false;
   try {
     // The hard link is an exclusive claim on this exact inode. A second
