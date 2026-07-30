@@ -261,6 +261,19 @@ describe('project template YAML document three-way merge', () => {
     },
   );
 
+  it('blocks YAML nesting beyond the shared inspection depth', () => {
+    let nested = 'leaf: true';
+    for (let depth = 0; depth < 40; depth += 1) {
+      nested = `level_${depth}: { ${nested} }`;
+    }
+
+    expect(merge('language: en\n', 'language: en\n', `${nested}\n`)).toMatchObject({
+      status: 'blocked',
+      code: 'DEPTH_LIMIT_EXCEEDED',
+      document: 'incoming',
+    });
+  });
+
   it('preserves local BOM, CRLF, and missing final newline', () => {
     const local = '\uFEFFlanguage: en\r\nprovider: codex';
     const result = mergeProjectTemplateYamlDocument({

@@ -14,6 +14,7 @@ import {
   resolveProjectTemplateConfigMergeRule,
   type ProjectTemplateConfigDocument,
 } from './config-merge-rules.js';
+import { MAX_PROJECT_TEMPLATE_YAML_DEPTH } from './yaml-limits.js';
 import { rawQualityGateDedupeKey } from '../../core/models/quality-gate-identity.js';
 
 export interface ProjectTemplateYamlMergeDiagnostic {
@@ -39,6 +40,7 @@ export type ProjectTemplateYamlMergeBlockedCode =
   | 'MERGE_KEY'
   | 'CUSTOM_TAG'
   | 'NON_STRING_KEY'
+  | 'DEPTH_LIMIT_EXCEEDED'
   | 'FORBIDDEN_PATH'
   | 'GLOBAL_ONLY_PATH'
   | 'MIXED_EOL_UNSUPPORTED';
@@ -106,8 +108,12 @@ function blocked(
   };
 }
 
-function unsafeNodeCode(node: Node | null): ProjectTemplateYamlMergeBlockedCode | undefined {
+function unsafeNodeCode(
+  node: Node | null,
+  depth = 0,
+): ProjectTemplateYamlMergeBlockedCode | undefined {
   if (node === null) return undefined;
+  if (depth > MAX_PROJECT_TEMPLATE_YAML_DEPTH) return 'DEPTH_LIMIT_EXCEEDED';
   if (isAlias(node) || ('anchor' in node && typeof node.anchor === 'string')) {
     return 'ALIAS_OR_ANCHOR';
   }
@@ -116,7 +122,7 @@ function unsafeNodeCode(node: Node | null): ProjectTemplateYamlMergeBlockedCode 
   }
   if (isSeq(node)) {
     for (const item of node.items) {
-      const code = unsafeNodeCode(item as Node | null);
+      const code = unsafeNodeCode(item as Node | null, depth + 1);
       if (code !== undefined) return code;
     }
   }
@@ -126,16 +132,17 @@ function unsafeNodeCode(node: Node | null): ProjectTemplateYamlMergeBlockedCode 
         return 'NON_STRING_KEY';
       }
       if (item.key.value === '<<') return 'MERGE_KEY';
-      const keyCode = unsafeNodeCode(item.key);
+      const keyCode = unsafeNodeCode(item.key, depth + 1);
       if (keyCode !== undefined) return keyCode;
-      const valueCode = unsafeNodeCode(item.value);
+      const valueCode = unsafeNodeCode(item.value, depth + 1);
       if (valueCode !== undefined) return valueCode;
     }
   }
   return undefined;
 }
 
-function isSemanticValue(value: unknown): value is SemanticValue {
+function isSemanticValue(value: unknown, depth = 0): value is SemanticValue {
+  if (depth > MAX_PROJECT_TEMPLATE_YAML_DEPTH) return false;
   if (
     value === null
     || typeof value === 'boolean'
@@ -144,11 +151,14 @@ function isSemanticValue(value: unknown): value is SemanticValue {
   ) {
     return true;
   }
-  if (Array.isArray(value)) return value.every(isSemanticValue);
+  if (Array.isArray(value)) {
+    return value.every((item) => isSemanticValue(item, depth + 1));
+  }
   if (typeof value !== 'object') return false;
   const prototype = Object.getPrototypeOf(value);
   return (prototype === Object.prototype || prototype === null)
-    && Object.values(value as Record<string, unknown>).every(isSemanticValue);
+    && Object.values(value as Record<string, unknown>)
+      .every((item) => isSemanticValue(item, depth + 1));
 }
 
 function parseSafeDocument(
@@ -159,17 +169,23 @@ function parseSafeDocument(
   if (/^(?:\uFEFF)?%(?:YAML|TAG)\b/m.test(text)) {
     return blocked('YAML_DIRECTIVE', source);
   }
-  const documents = parseAllDocuments(text, {
-    strict: true,
-    uniqueKeys: true,
-    keepSourceTokens: true,
-  });
+  let documents: ReturnType<typeof parseAllDocuments>;
+  let document: ReturnType<typeof parseDocument>;
+  try {
+    documents = parseAllDocuments(text, {
+      strict: true,
+      uniqueKeys: true,
+      keepSourceTokens: true,
+    });
+    document = parseDocument(text, {
+      strict: true,
+      uniqueKeys: true,
+      keepSourceTokens: true,
+    });
+  } catch {
+    return blocked('INVALID_YAML', source);
+  }
   if (documents.length !== 1) return blocked('MULTI_DOCUMENT', source);
-  const document = parseDocument(text, {
-    strict: true,
-    uniqueKeys: true,
-    keepSourceTokens: true,
-  });
   const unsafe = unsafeNodeCode(document.contents as Node | null);
   if (unsafe !== undefined) return blocked(unsafe, source);
   if (document.errors.length > 0 || document.warnings.length > 0) {
