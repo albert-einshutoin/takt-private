@@ -331,4 +331,220 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     expect(handlers.onResponse).not.toHaveBeenCalled();
     transport.dispose();
   });
+
+  it.each(['error', 'close'])(
+    'terminally detaches before a reentrant request %s handler',
+    (event) => {
+      const request = new FakeRequest();
+      native.dnsLookup.mockImplementation((
+        _hostname: string,
+        _options: unknown,
+        callback: (...args: unknown[]) => void,
+      ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+      native.httpsRequest.mockReturnValue(request);
+      let transport!: ReturnType<
+        typeof createProjectTemplateArtifactPinnedTransport
+      >;
+      const handler = vi.fn(() => {
+        const reentrantActions = [
+          () => request.emit(event, new Error('private reentrant cause')),
+          () => transport.start(),
+          () => transport.destroy(),
+          () => transport.dispose(),
+        ];
+        for (const action of reentrantActions) {
+          try {
+            action();
+          } catch {
+            // Each operation must be attempted even when a prior terminal
+            // operation correctly rejects re-entry.
+          }
+        }
+        throw new Error('private handler cause');
+      });
+      const handlers = makeHandlers({
+        [event === 'error' ? 'onRequestError' : 'onRequestClose']:
+          handler,
+      });
+      transport = createProjectTemplateArtifactPinnedTransport(
+        makeHop(),
+        handlers,
+      );
+      request.destroy.mockImplementation(() => {
+        request.emit('close');
+      });
+      transport.start();
+
+      expect(() => request.emit(
+        event,
+        new Error('private outer cause'),
+      )).not.toThrow();
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler).toHaveBeenCalledWith();
+      expect(request.destroy).toHaveBeenCalledTimes(1);
+      expect(request.listenerCount('error')).toBe(0);
+      expect(request.listenerCount('close')).toBe(0);
+      transport.dispose();
+    },
+  );
+
+  it.each([
+    null,
+    new Proxy({}, {
+      getOwnPropertyDescriptor(): never {
+        throw new Error('private request descriptor');
+      },
+    }),
+    Object.create(null),
+  ])('contains invalid HTTPS request shape %#', (requestValue) => {
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockReturnValue(requestValue);
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    expect(() => transport.start()).not.toThrow();
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onDnsRejected).not.toHaveBeenCalled();
+    transport.dispose();
+  });
+
+  it('contains a request when own-property reflection throws', () => {
+    const request = new FakeRequest();
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockReturnValue(request);
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    const original = Object.getOwnPropertyDescriptor;
+    vi.spyOn(Object, 'getOwnPropertyDescriptor').mockImplementation((
+      value,
+      property,
+    ) => {
+      if (value === request) throw new Error('private descriptor failure');
+      return original(value, property);
+    });
+
+    expect(() => transport.start()).not.toThrow();
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onDnsRejected).not.toHaveBeenCalled();
+    transport.dispose();
+  });
+
+  it.each([
+    null,
+    new Proxy({}, {
+      getPrototypeOf(): never {
+        throw new Error('private response prototype');
+      },
+    }),
+  ])('contains invalid HTTPS response shape %#', (responseValue) => {
+    const request = new FakeRequest();
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: never) => void,
+    ) => {
+      callback(responseValue as never);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    expect(() => transport.start()).not.toThrow();
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    transport.dispose();
+  });
+
+  it('contains a response when prototype reflection throws', () => {
+    const response = {};
+    const request = new FakeRequest();
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: never) => void,
+    ) => {
+      callback(response as never);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+    const original = Object.getPrototypeOf;
+    vi.spyOn(Object, 'getPrototypeOf').mockImplementation((value) => {
+      if (value === response) throw new Error('private prototype failure');
+      return original(value);
+    });
+
+    expect(() => transport.start()).not.toThrow();
+    expect(handlers.onInvalidResponse).toHaveBeenCalledTimes(1);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    transport.dispose();
+  });
+
+  it('supports strict IPv4 and IPv6 string lookup families', () => {
+    const request = new FakeRequest();
+    let options: RequestOptions | undefined;
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _lookupOptions: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ]));
+    native.httpsRequest.mockImplementation((value: RequestOptions) => {
+      options = value;
+      return request;
+    });
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      makeHandlers(),
+    );
+    transport.start();
+
+    const ipv4 = vi.fn();
+    options!.lookup!(
+      'objects.githubusercontent.com',
+      { all: false, family: 'IPv4' },
+      ipv4,
+    );
+    expect(ipv4).toHaveBeenCalledWith(null, '93.184.216.34', 4);
+    const ipv6All = vi.fn();
+    options!.lookup!(
+      'objects.githubusercontent.com',
+      { all: true, family: 'IPv6' },
+      ipv6All,
+    );
+    expect(ipv6All).toHaveBeenCalledWith(null, [
+      { address: '2606:4700:4700::1111', family: 6 },
+    ]);
+    transport.dispose();
+  });
 });
