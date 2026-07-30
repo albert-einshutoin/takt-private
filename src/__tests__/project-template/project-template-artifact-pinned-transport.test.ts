@@ -59,6 +59,22 @@ function makeHandlers(
   });
 }
 
+function expectHandlerCallCounts(
+  handlers: ProjectTemplateArtifactPinnedTransportHandlers,
+  expected: Partial<Readonly<Record<
+    keyof ProjectTemplateArtifactPinnedTransportHandlers,
+    number
+  >>>,
+): void {
+  for (const name of Object.keys(handlers) as Array<
+    keyof ProjectTemplateArtifactPinnedTransportHandlers
+  >) {
+    expect(vi.mocked(handlers[name]).mock.calls).toHaveLength(
+      expected[name] ?? 0,
+    );
+  }
+}
+
 function makeHop(
   target = 'https://objects.githubusercontent.com/private/file?sig=secret',
 ): DisposableProjectTemplateArtifactRedirectHop {
@@ -2643,6 +2659,11 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     expect(finalPause).toHaveBeenCalledTimes(3);
     expect(handlers.onData).toHaveBeenCalledTimes(2);
     expect(handlers.onEnd).toHaveBeenCalledTimes(1);
+    expectHandlerCallCounts(handlers, {
+      onResponse: 1,
+      onData: 2,
+      onEnd: 1,
+    });
     expect(native.dnsLookup).toHaveBeenCalledTimes(4);
     expect(native.httpsRequest).toHaveBeenCalledTimes(4);
     expect(retainedRequestListeners).toHaveLength(requests.length * 2);
@@ -2717,11 +2738,18 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     expect(finalPause).toHaveBeenCalledTimes(3);
     expect(handlers.onData).toHaveBeenCalledTimes(2);
     expect(handlers.onEnd).toHaveBeenCalledTimes(1);
+    expectHandlerCallCounts(handlers, {
+      onResponse: 1,
+      onData: 2,
+      onEnd: 1,
+    });
     expect(() => state.resolve(
       302,
       'https://objects.githubusercontent.com/revoked',
     )).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
     expect(() => state.dispose()).not.toThrow();
+    // This is a representation-leak guard for public/retained facades. A
+    // dedicated authority inspection seam remains intentionally out of scope.
     expect(inspect(transport)).not.toContain('secret');
     expect(inspect(retainedBodyListeners)).not.toContain('private-chunk');
     transport.dispose();
@@ -2756,6 +2784,7 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
         handlers,
       );
       transport.start();
+      expectHandlerCallCounts(handlers, { onResponse: 1 });
       transport.resume();
       const retainedListeners = Object.freeze([
         ...response.listeners('data'),
@@ -2814,19 +2843,15 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
           : outcome === 'close'
             ? 'onResponseClose'
             : undefined;
-      for (const name of [
-        'onEnd',
-        'onResponseAborted',
-        'onResponseError',
-        'onResponseClose',
-      ] as const) {
-        expect(handlers[name]).toHaveBeenCalledTimes(
-          name === expectedHandler ? 1 : 0,
-        );
-        if (name === expectedHandler) {
-          expect(handlers[name]).toHaveBeenCalledWith();
-        }
+      const expectedCounts: Partial<Record<
+        keyof ProjectTemplateArtifactPinnedTransportHandlers,
+        number
+      >> = { onResponse: 1 };
+      if (expectedHandler !== undefined) {
+        expectedCounts[expectedHandler] = 1;
+        expect(handlers[expectedHandler]).toHaveBeenCalledWith();
       }
+      expectHandlerCallCounts(handlers, expectedCounts);
       expect(responseDestroy).toHaveBeenCalledTimes(1);
       expect(request.destroy).toHaveBeenCalledTimes(1);
       for (const event of ['end', 'aborted', 'error', 'close']) {
@@ -3057,6 +3082,7 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     expect(handlers.onResponse).toHaveBeenCalledTimes(1);
     expect(handlers.onResponse).toHaveBeenCalledWith(404);
     expect(handlers.onInvalidResponse).not.toHaveBeenCalled();
+    expectHandlerCallCounts(handlers, { onResponse: 1 });
     for (const destroy of destroys) {
       expect(destroy).toHaveBeenCalledTimes(1);
     }
