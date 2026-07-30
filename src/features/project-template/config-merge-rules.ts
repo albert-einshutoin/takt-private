@@ -58,14 +58,17 @@ const SEQUENCE_RULES = [
   rule('config.yaml', 'workflow_overrides.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
     sequenceIdentity: 'quality-gate',
+    reviewRequired: true,
   }),
   rule('config.yaml', 'workflow_overrides.steps.*.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
     sequenceIdentity: 'quality-gate',
+    reviewRequired: true,
   }),
   rule('config.yaml', 'workflow_overrides.personas.*.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
     sequenceIdentity: 'quality-gate',
+    reviewRequired: true,
   }),
   rule('config.yaml', 'assistant.init_files', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
@@ -100,6 +103,7 @@ const SEQUENCE_RULES = [
   rule('devloopd.yaml', 'policy.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
     sequenceIdentity: 'quality-gate',
+    reviewRequired: true,
   }),
 ] as const;
 

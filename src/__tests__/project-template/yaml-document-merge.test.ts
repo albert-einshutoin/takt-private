@@ -150,7 +150,17 @@ describe('project template YAML document three-way merge', () => {
       'workflow_overrides:\n  quality_gates:\n    - npm run e2e\n',
     );
 
-    expect(result).toMatchObject({ status: 'merged', changed: true });
+    expect(result).toMatchObject({
+      status: 'merged',
+      changed: true,
+      reviewRequired: true,
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'RULE_REVIEW_REQUIRED',
+          path: ['workflow_overrides', 'quality_gates'],
+        }),
+      ]),
+    });
     const output = result.status === 'merged' ? result.content.toString() : '';
     expect(output).toContain('npm test');
     expect(output).toContain('npm run lint');

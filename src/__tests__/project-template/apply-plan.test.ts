@@ -416,6 +416,29 @@ describe('project template three-way apply plan', () => {
     expect(prepared.resolvedContents).toEqual([]);
   });
 
+  it('preserves a locally deleted config when incoming still matches the base', () => {
+    const base = 'subscription_only: true\nprovider: codex-cli\n';
+    const planInput = input({
+      base,
+      incoming: base,
+      policy: 'merge',
+    });
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      path: 'config.yaml',
+      action: 'keep',
+      reasonCode: 'LOCAL_DELETED',
+      reviewRequired: false,
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
   it('preserves a local-only hardened mode during a semantic content update', () => {
     const base = 'language: en\n';
     const local = 'language: en\n';

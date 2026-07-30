@@ -99,6 +99,7 @@ describe('project template config merge rules', () => {
       document: 'config.yaml',
       pattern: ['workflow_overrides', 'quality_gates'],
       sequenceIdentity: 'quality-gate',
+      reviewRequired: true,
     }));
   });
 
@@ -128,6 +129,7 @@ describe('project template config merge rules', () => {
       ownership: 'project-owned',
       sequencePolicy: 'ordered-keyed',
       known: true,
+      reviewRequired: true,
     });
   });
 

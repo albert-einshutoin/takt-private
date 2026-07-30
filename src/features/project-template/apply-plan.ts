@@ -1205,6 +1205,16 @@ export function prepareProjectTemplateApplyPlan(
         mergeDiagnostics: normalizeMergeDiagnostics(incomingValidation),
       };
     }
+    if (
+      formalBase !== undefined
+      && local === undefined
+      && entry.action === 'keep'
+    ) {
+      // A missing local semantic-config file is an intentional project-owned
+      // deletion when upstream still matches the formal baseline. Preserve the
+      // unresolved keep decision instead of treating absence as a first install.
+      return entry;
+    }
 
     const hasCompleteExistingMerge =
       formalBase !== undefined
