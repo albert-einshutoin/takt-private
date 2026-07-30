@@ -105,7 +105,8 @@ export interface ReclaimedGithubTemplateDownloadReceiptTemps {
     | 'complete'
     | 'scan-limit'
     | 'delete-limit'
-    | 'unsafe-retained';
+    | 'unsafe-retained'
+    | 'unsupported';
 }
 
 interface VerifierSnapshot {
@@ -756,7 +757,7 @@ function emptyResult(
     unsafeRetained: 0,
     truncated: false,
     directoryDurability: platform === 'win32' ? 'unsupported' : 'synced',
-    status: 'complete',
+    status: platform === 'win32' ? 'unsupported' : 'complete',
   });
 }
 
@@ -764,12 +765,12 @@ function openLinkedCandidate(
   shard: DirectoryAuthority,
   temporaryPath: string,
   receiptKey: string,
+  finalPath: string,
   io: IoSnapshot | undefined,
 ): CandidateAuthority | undefined {
   const temporary = openCandidateFile(temporaryPath, shard.device);
   if (temporary === undefined) return undefined;
   if (temporary.links === 1) return { temporary, receiptKey };
-  const finalPath = join(shard.path, `${receiptKey}.json`);
   const final = openCandidateFile(finalPath, shard.device);
   if (
     final === undefined
@@ -863,6 +864,22 @@ function validateReclaimedFinalEvidence(
   if (failure !== undefined) throw failure;
 }
 
+function assertReclaimedPathAbsent(path: string): void {
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw reclaimError(
+      'CACHE_INVALID',
+      'GitHub template receipt reclaimed path absence is uncertain',
+    );
+  }
+  throw reclaimError(
+    'CACHE_INVALID',
+    'GitHub template receipt reclaimed path was recreated',
+  );
+}
+
 function candidateStableBeforeUnlink(
   candidate: CandidateAuthority,
   serialized: string | undefined,
@@ -894,6 +911,7 @@ async function reclaimCandidate(
   io: IoSnapshot | undefined,
 ): Promise<{
   readonly outcome: 'reclaimed' | 'skipped' | 'unsafe';
+  readonly reclaimedPath?: string;
   readonly sealedSerialized?: string;
   readonly finalEvidence?: ReclaimedFinalEvidence;
 }> {
@@ -967,6 +985,7 @@ async function reclaimCandidate(
     } else assertOpenedFile(candidate.temporary, 0);
     return {
       outcome: 'reclaimed',
+      reclaimedPath: candidate.temporary.path,
       ...(candidate.final === undefined
         ? {}
         : {
@@ -1020,6 +1039,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
   let truncated = false;
   let status: ReclaimedGithubTemplateDownloadReceiptTemps['status'] =
     'complete';
+  const reclaimedPaths: string[] = [];
   const reclaimedFinals: ReclaimedFinalEvidence[] = [];
   try {
     let parent = root;
@@ -1072,10 +1092,23 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
           assertAllDirectories(root, openedAncestors, shard);
           const temporaryPath = join(shard.path, entry.name);
           if (dirname(temporaryPath) !== shard.path) throw new Error();
+          const locator = deriveGithubTemplateDownloadReceiptLocatorPaths({
+            cacheRoot: root.path,
+            receiptKey: parsed.receiptKey,
+          });
+          if (
+            locator.receiptDirectory !== shard.path
+            || dirname(locator.receiptPath) !== shard.path
+          ) {
+            skipped += 1;
+            unsafeRetained += 1;
+            continue;
+          }
           const candidate = openLinkedCandidate(
             shard,
             temporaryPath,
             parsed.receiptKey,
+            locator.receiptPath,
             options.io,
           );
           if (candidate === undefined) {
@@ -1168,6 +1201,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
           if (candidateFailure !== undefined) throw candidateFailure;
           if (candidateResult?.outcome === 'reclaimed') {
             reclaimed += 1;
+            reclaimedPaths.push(candidateResult.reclaimedPath!);
             if (candidateResult.finalEvidence !== undefined) {
               reclaimedFinals.push(candidateResult.finalEvidence);
             }
@@ -1266,6 +1300,9 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
   try {
     assertDirectory(root);
     for (const authority of openedAncestors) assertDirectory(authority);
+    // An unlinked descriptor only proves the old inode stayed detached. The
+    // pathname itself must remain absent after every mutation-capable callback.
+    for (const path of reclaimedPaths) assertReclaimedPathAbsent(path);
     for (const evidence of reclaimedFinals) {
       validateReclaimedFinalEvidence(evidence);
     }

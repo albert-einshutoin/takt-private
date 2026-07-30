@@ -290,13 +290,13 @@ describe('GitHub template receipt orphan reclaim D2b', () => {
     const shard = prepareShard(root);
     const zero = tempPath(shard, 900001);
     const partial = tempPath(
-      shard,
+      prepareShard(root, 'bb'),
       900002,
       'b'.repeat(64),
       '223e4567-e89b-42d3-a456-426614174000',
     );
     const oversize = tempPath(
-      shard,
+      prepareShard(root, 'cc'),
       900003,
       'c'.repeat(64),
       '323e4567-e89b-42d3-a456-426614174000',
@@ -446,7 +446,7 @@ describe('GitHub template receipt orphan reclaim D2b', () => {
 
   it('deletes at most 32 candidates', async () => {
     const root = makeRoot();
-    const shard = prepareShard(root);
+    const shard = prepareShard(root, '00');
     for (let index = 0; index < 33; index += 1) {
       writeFileSync(tempPath(
         shard,
@@ -525,7 +525,7 @@ describe('GitHub template receipt orphan reclaim D2b', () => {
       unsafeRetained: 0,
       truncated: false,
       directoryDurability: 'unsupported',
-      status: 'complete',
+      status: 'unsupported',
     });
     expect(calls).toBe(0);
   });
@@ -646,6 +646,58 @@ describe('GitHub template receipt orphan reclaim D2b', () => {
     expect(result.reclaimed).toBe(1);
     expect(existsSync(temporary)).toBe(false);
     expect(readFileSync(finalPath, 'utf8')).toBe('different-final');
+  });
+
+  it('retains nlink1 candidates placed in the wrong receipt shard', async () => {
+    const root = makeRoot();
+    const wrongShard = prepareShard(root, 'bb');
+    const temporary = tempPath(wrongShard, 920015, KEY);
+    writeFileSync(temporary, 'orphan', { mode: 0o600 });
+    const result = await reclaimGithubTemplateDownloadReceiptTemps({
+      cacheRoot: root,
+      verifier: verifier(),
+      io: { processProbe: () => 'missing' },
+    });
+    expect(result).toMatchObject({
+      matched: 1,
+      dead: 1,
+      reclaimed: 0,
+      skipped: 1,
+      unsafeRetained: 1,
+      status: 'unsafe-retained',
+    });
+    expect(existsSync(temporary)).toBe(true);
+  });
+
+  it('retains authenticated nlink2 aliases moved to the wrong shard', async () => {
+    const fixture = await createStoredFixture();
+    const canonicalShard = fixture.prepared.receiptKey.slice(0, 2);
+    const wrongShardName = canonicalShard === '00' ? '01' : '00';
+    const wrongShard = prepareShard(fixture.cacheRoot, wrongShardName);
+    const wrongFinal = join(
+      wrongShard,
+      `${fixture.prepared.receiptKey}.json`,
+    );
+    renameSync(fixture.finalPath, wrongFinal);
+    const temporary = tempPath(
+      wrongShard,
+      920016,
+      fixture.prepared.receiptKey,
+    );
+    linkSync(wrongFinal, temporary);
+    const result = await reclaimGithubTemplateDownloadReceiptTemps({
+      cacheRoot: fixture.cacheRoot,
+      verifier: hmacVerifier(),
+      io: { processProbe: () => 'missing' },
+    });
+    expect(result).toMatchObject({
+      reclaimed: 0,
+      skipped: 1,
+      unsafeRetained: 1,
+      status: 'unsafe-retained',
+    });
+    expect(existsSync(temporary)).toBe(true);
+    expect(existsSync(wrongFinal)).toBe(true);
   });
 
   it.each([
@@ -971,5 +1023,49 @@ describe('GitHub template receipt orphan reclaim D2b', () => {
     expect(error).toMatchObject({ code: 'CACHE_INVALID' });
     expect(existsSync(fixture.finalPath)).toBe(true);
     expect(existsSync(temporary)).toBe(false);
+  });
+
+  it.each([
+    'after-unlink',
+    'candidate-close',
+    'shard-close',
+    'root-close',
+  ] as const)('fails when %s recreates a reclaimed nlink1 path', async (
+    kind,
+  ) => {
+    const root = makeRoot();
+    const shard = prepareShard(root);
+    const temporary = tempPath(shard, 920017);
+    writeFileSync(temporary, 'orphan', { mode: 0o600 });
+    let directoryCloses = 0;
+    let recreated = false;
+    const recreate = () => {
+      if (recreated) return;
+      recreated = true;
+      writeFileSync(temporary, 'replacement', { mode: 0o600 });
+    };
+    const error = await reclaimGithubTemplateDownloadReceiptTemps({
+      cacheRoot: root,
+      verifier: verifier(),
+      io: {
+        processProbe: () => 'missing',
+        onPhase(phase) {
+          if (kind === 'after-unlink' && phase === 'after-reclaim-unlink') {
+            recreate();
+          }
+        },
+        close(_fd, descriptorKind) {
+          if (kind === 'candidate-close' && descriptorKind === 'temporary') {
+            recreate();
+          }
+          if (descriptorKind !== 'directory') return;
+          directoryCloses += 1;
+          if (kind === 'shard-close' && directoryCloses === 1) recreate();
+          if (kind === 'root-close' && directoryCloses === 5) recreate();
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(existsSync(temporary)).toBe(true);
   });
 });
