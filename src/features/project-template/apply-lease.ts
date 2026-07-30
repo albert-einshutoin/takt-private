@@ -5,7 +5,6 @@ import {
   existsSync,
   fstatSync,
   fsyncSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -250,23 +249,241 @@ function createCoordinationFile(path: string, token: string): void {
   createDurableJsonFile(path, { version: 1, token, pid: process.pid });
 }
 
+interface CoordinationNamespaceRecord {
+  readonly version: 2;
+  readonly token: string;
+  readonly pid: number;
+  readonly operation: 'publish' | 'reclaim';
+  readonly mainToken?: string;
+  readonly target?: {
+    readonly device: string;
+    readonly inode: string;
+    readonly token: string;
+    readonly pid: number;
+  };
+}
+
+function readCoordinationNamespace(
+  path: string,
+): CoordinationNamespaceRecord | undefined {
+  const read = readProjectTemplateJsonStrict(path);
+  if (
+    read.kind !== 'value'
+    || typeof read.value !== 'object'
+    || read.value === null
+    || Array.isArray(read.value)
+  ) {
+    return undefined;
+  }
+  const value = read.value as Record<string, unknown>;
+  if (
+    value['version'] !== 2
+    || typeof value['token'] !== 'string'
+    || value['token'].trim().length === 0
+    || value['token'].length > 512
+    || !Number.isSafeInteger(value['pid'])
+    || (value['pid'] as number) <= 0
+    || (value['operation'] !== 'publish' && value['operation'] !== 'reclaim')
+  ) {
+    return undefined;
+  }
+  if (value['operation'] === 'publish') {
+    if (
+      typeof value['mainToken'] !== 'string'
+      || value['mainToken'].trim().length === 0
+      || value['mainToken'].length > 512
+      || value['target'] !== undefined
+    ) {
+      return undefined;
+    }
+    return {
+      version: 2,
+      token: value['token'],
+      pid: value['pid'] as number,
+      operation: 'publish',
+      mainToken: value['mainToken'],
+    };
+  }
+  const target = value['target'];
+  if (
+    value['mainToken'] !== undefined
+    || typeof target !== 'object'
+    || target === null
+    || Array.isArray(target)
+  ) {
+    return undefined;
+  }
+  const targetRecord = target as Record<string, unknown>;
+  if (
+    typeof targetRecord['device'] !== 'string'
+    || targetRecord['device'].length === 0
+    || typeof targetRecord['inode'] !== 'string'
+    || targetRecord['inode'].length === 0
+    || typeof targetRecord['token'] !== 'string'
+    || targetRecord['token'].trim().length === 0
+    || targetRecord['token'].length > 512
+    || !Number.isSafeInteger(targetRecord['pid'])
+    || (targetRecord['pid'] as number) <= 0
+  ) {
+    return undefined;
+  }
+  return {
+    version: 2,
+    token: value['token'],
+    pid: value['pid'] as number,
+    operation: 'reclaim',
+    target: {
+      device: targetRecord['device'],
+      inode: targetRecord['inode'],
+      token: targetRecord['token'],
+      pid: targetRecord['pid'] as number,
+    },
+  };
+}
+
+function readCoordinationOwner(
+  path: string,
+): { token: string; pid: number } | undefined {
+  const read = readProjectTemplateJsonStrict(path);
+  if (
+    read.kind !== 'value'
+    || typeof read.value !== 'object'
+    || read.value === null
+    || Array.isArray(read.value)
+  ) {
+    return undefined;
+  }
+  const value = read.value as Record<string, unknown>;
+  if (
+    value['version'] !== 1
+    || typeof value['token'] !== 'string'
+    || value['token'].trim().length === 0
+    || value['token'].length > 512
+    || !Number.isSafeInteger(value['pid'])
+    || (value['pid'] as number) <= 0
+  ) {
+    return undefined;
+  }
+  return { token: value['token'], pid: value['pid'] as number };
+}
+
+function recoverDeadCoordinationNamespace(
+  mainPath: string,
+  reclaimPath: string,
+): boolean {
+  const recoveryPath = `${reclaimPath}.recovery`;
+  if (existsSync(recoveryPath)) {
+    // Recovery ownership is never stolen automatically. This is the terminal
+    // level that prevents crash handling from creating an unbounded chain of
+    // progressively deeper recovery locks.
+    throw new ProjectTemplateCoordinationError();
+  }
+  const namespace = readCoordinationNamespace(reclaimPath);
+  if (namespace === undefined) {
+    throw new ProjectTemplateCoordinationError();
+  }
+  try {
+    if (isProcessAlive(namespace.pid)) return false;
+  } catch {
+    throw new ProjectTemplateCoordinationError();
+  }
+
+  const recoveryToken = randomUUID();
+  try {
+    createDurableJsonFile(recoveryPath, {
+      version: 3,
+      token: recoveryToken,
+      pid: process.pid,
+      operation: 'namespace-recovery',
+      namespaceToken: namespace.token,
+    });
+  } catch {
+    throw new ProjectTemplateCoordinationError();
+  }
+
+  let mutationStarted = false;
+  try {
+    const confirmedNamespace = readCoordinationNamespace(reclaimPath);
+    if (
+      confirmedNamespace === undefined
+      || JSON.stringify(confirmedNamespace) !== JSON.stringify(namespace)
+    ) {
+      throw new ProjectTemplateCoordinationError();
+    }
+    try {
+      if (isProcessAlive(namespace.pid)) {
+        throw new ProjectTemplateCoordinationError();
+      }
+    } catch (error) {
+      if (error instanceof ProjectTemplateCoordinationError) throw error;
+      throw new ProjectTemplateCoordinationError();
+    }
+
+    let mainStat: ReturnType<typeof lstatSync> | undefined;
+    try {
+      mainStat = lstatSync(mainPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new ProjectTemplateCoordinationError();
+      }
+    }
+    if (mainStat !== undefined) {
+      const owner = readCoordinationOwner(mainPath);
+      const matches = namespace.operation === 'publish'
+        ? owner?.token === namespace.mainToken && owner?.pid === namespace.pid
+        : namespace.target !== undefined
+          && owner?.token === namespace.target.token
+          && owner?.pid === namespace.target.pid
+          && String(mainStat.dev) === namespace.target.device
+          && String(mainStat.ino) === namespace.target.inode;
+      if (
+        !matches
+        || !mainStat.isFile()
+        || mainStat.isSymbolicLink()
+        || mainStat.nlink !== 1
+      ) {
+        throw new ProjectTemplateCoordinationError();
+      }
+      mutationStarted = true;
+      unlinkSync(mainPath);
+      syncDirectory(dirname(mainPath));
+    }
+    mutationStarted = true;
+    removeOwnedCoordinationFile(reclaimPath, namespace.token, 2);
+    removeOwnedCoordinationFile(recoveryPath, recoveryToken, 3);
+    return true;
+  } catch {
+    if (!mutationStarted) {
+      try {
+        removeOwnedCoordinationFile(recoveryPath, recoveryToken, 3);
+      } catch {
+        // An ambiguous recovery owner must remain fail-closed.
+      }
+    }
+    throw new ProjectTemplateCoordinationError();
+  }
+}
+
 function createClaimSafeCoordinationFile(path: string, token: string): void {
   const reclaimPath = `${path}.reclaim`;
+  const recoveryPath = `${reclaimPath}.recovery`;
   const namespaceToken = randomUUID();
+  if (existsSync(recoveryPath)) {
+    throw new ProjectTemplateCoordinationError();
+  }
   if (existsSync(reclaimPath)) {
-    // A process can die after publishing its exclusive reclaim namespace but
-    // before removing it. Recover only a well-formed namespace whose owner is
-    // definitely dead; live or ambiguous ownership remains fail-closed.
-    if (!reclaimDeadCoordinationNamespace(path, reclaimPath, 0)) {
+    if (!recoverDeadCoordinationNamespace(path, reclaimPath)) {
       throw new ProjectTemplateCoordinationError();
     }
   }
   try {
-    // Reserving the same fixed namespace used by stale reclaim proves that no
-    // prior claimant remains after unlinking the old main path. Without this
-    // handshake, a crash between old-path unlink and claim cleanup could let a
-    // new owner report acquisition while the reclaim claim is still durable.
-    createCoordinationFile(reclaimPath, namespaceToken);
+    createDurableJsonFile(reclaimPath, {
+      version: 2,
+      token: namespaceToken,
+      pid: process.pid,
+      operation: 'publish',
+      mainToken: token,
+    } satisfies CoordinationNamespaceRecord);
   } catch {
     throw new ProjectTemplateCoordinationError();
   }
@@ -274,7 +491,7 @@ function createClaimSafeCoordinationFile(path: string, token: string): void {
     createCoordinationFile(path, token);
   } catch (error) {
     try {
-      removeOwnedCoordinationFile(reclaimPath, namespaceToken);
+      removeOwnedCoordinationFile(reclaimPath, namespaceToken, 2);
     } catch {
       // Even a pre-main collision becomes terminal if namespace cleanup cannot
       // be proven durable.
@@ -286,7 +503,7 @@ function createClaimSafeCoordinationFile(path: string, token: string): void {
     throw new ProjectTemplateCoordinationError();
   }
   try {
-    removeOwnedCoordinationFile(reclaimPath, namespaceToken);
+    removeOwnedCoordinationFile(reclaimPath, namespaceToken, 2);
   } catch {
     try {
       removeOwnedCoordinationFile(path, token);
@@ -295,7 +512,7 @@ function createClaimSafeCoordinationFile(path: string, token: string): void {
       // after namespace durability became uncertain.
     }
     try {
-      removeOwnedCoordinationFile(reclaimPath, namespaceToken);
+      removeOwnedCoordinationFile(reclaimPath, namespaceToken, 2);
     } catch {
       // A durable reservation is safer than guessing about its ownership.
     }
@@ -303,7 +520,11 @@ function createClaimSafeCoordinationFile(path: string, token: string): void {
   }
 }
 
-function removeOwnedCoordinationFile(path: string, token: string): void {
+function removeOwnedCoordinationFile(
+  path: string,
+  token: string,
+  version = 1,
+): void {
   const read = readProjectTemplateJsonStrict(path);
   if (read.kind !== 'value') {
     throw new ProjectTemplateCoordinationError();
@@ -312,7 +533,7 @@ function removeOwnedCoordinationFile(path: string, token: string): void {
   if (
     typeof value !== 'object'
     || value === null
-    || (value as Record<string, unknown>)['version'] !== 1
+    || (value as Record<string, unknown>)['version'] !== version
     || (value as Record<string, unknown>)['token'] !== token
   ) {
     throw new ProjectTemplateCoordinationError();
@@ -387,151 +608,12 @@ export function clearProjectTemplateRecoveryRequiredMarker(
 }
 
 function reclaimDeadCoordinationFile(path: string): boolean {
-  return reclaimDeadCoordinationFileAtDepth(path, 0);
-}
-
-const MAX_RECLAIM_RECOVERY_DEPTH = 16;
-const MAX_COORDINATION_RECORD_BYTES = 4096;
-
-function readClaimedCoordinationRecord(
-  path: string,
-  expected: Stats,
-): Record<string, unknown> | undefined {
-  let fd: number;
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch {
-    return undefined;
-  }
-  try {
-    const before = fstatSync(fd);
-    if (
-      !before.isFile()
-      || before.dev !== expected.dev
-      || before.ino !== expected.ino
-      || before.nlink !== expected.nlink
-      || before.size <= 0
-      || before.size > MAX_COORDINATION_RECORD_BYTES
-    ) {
-      return undefined;
-    }
-    const content = Buffer.alloc(before.size);
-    let offset = 0;
-    while (offset < content.length) {
-      const bytesRead = readSync(fd, content, offset, content.length - offset, offset);
-      if (bytesRead === 0) return undefined;
-      offset += bytesRead;
-    }
-    const extra = Buffer.alloc(1);
-    const extraBytes = readSync(fd, extra, 0, 1, offset);
-    const after = fstatSync(fd);
-    if (
-      extraBytes !== 0
-      || after.dev !== before.dev
-      || after.ino !== before.ino
-      || after.mode !== before.mode
-      || after.nlink !== before.nlink
-      || after.size !== before.size
-      || after.mtimeMs !== before.mtimeMs
-      || after.ctimeMs !== before.ctimeMs
-    ) {
-      return undefined;
-    }
-    const parsed = JSON.parse(content.toString('utf8')) as unknown;
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : undefined;
-  } catch {
-    return undefined;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function reclaimDeadCoordinationNamespace(
-  mainPath: string,
-  reclaimPath: string,
-  depth: number,
-): boolean {
-  if (depth > MAX_RECLAIM_RECOVERY_DEPTH) {
-    throw new ProjectTemplateCoordinationError();
-  }
-  let claimed: Stats;
-  try {
-    claimed = lstatSync(reclaimPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
-    throw new ProjectTemplateCoordinationError();
-  }
-  const value = readClaimedCoordinationRecord(reclaimPath, claimed);
-  if (value === undefined) {
-    throw new ProjectTemplateCoordinationError();
-  }
-  if (
-    value['version'] !== 1
-    || typeof value['token'] !== 'string'
-    || value['token'].trim().length === 0
-    || value['token'].length > 512
-    || !Number.isSafeInteger(value['pid'])
-    || (value['pid'] as number) <= 0
-  ) {
-    throw new ProjectTemplateCoordinationError();
-  }
-  try {
-    if (isProcessAlive(value['pid'] as number)) return false;
-  } catch {
-    throw new ProjectTemplateCoordinationError();
-  }
-
-  let currentMain: Stats | undefined;
-  try {
-    currentMain = lstatSync(mainPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw new ProjectTemplateCoordinationError();
-    }
-  }
-  if (
-    currentMain !== undefined
-    && currentMain.dev === claimed.dev
-    && currentMain.ino === claimed.ino
-  ) {
-    // The main pathname keeps this namespace from being replaced before the
-    // single unlink below. Re-check both links immediately before removal so
-    // a dead reclaimer's exact inode is recovered without touching a successor.
-    const latestMain = lstatSync(mainPath);
-    const latestClaim = lstatSync(reclaimPath);
-    if (
-      !latestMain.isFile()
-      || latestMain.isSymbolicLink()
-      || !latestClaim.isFile()
-      || latestClaim.isSymbolicLink()
-      || latestMain.dev !== claimed.dev
-      || latestMain.ino !== claimed.ino
-      || latestClaim.dev !== claimed.dev
-      || latestClaim.ino !== claimed.ino
-      || latestMain.nlink !== 2
-      || latestClaim.nlink !== 2
-    ) {
-      throw new ProjectTemplateCoordinationError();
-    }
-    unlinkSync(reclaimPath);
-    syncDirectory(dirname(reclaimPath));
-    return true;
-  }
-
-  return reclaimDeadCoordinationFileAtDepth(reclaimPath, depth + 1);
-}
-
-function reclaimDeadCoordinationFileAtDepth(path: string, depth: number): boolean {
-  if (depth > MAX_RECLAIM_RECOVERY_DEPTH) {
-    throw new ProjectTemplateCoordinationError();
-  }
   const reclaimPath = `${path}.reclaim`;
+  if (existsSync(`${reclaimPath}.recovery`)) {
+    throw new ProjectTemplateCoordinationError();
+  }
   if (existsSync(reclaimPath)) {
-    if (!reclaimDeadCoordinationNamespace(path, reclaimPath, depth + 1)) {
-      return false;
-    }
+    return recoverDeadCoordinationNamespace(path, reclaimPath);
   }
   let observed: Stats;
   try {
@@ -540,72 +622,61 @@ function reclaimDeadCoordinationFileAtDepth(path: string, depth: number): boolea
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
     throw new ProjectTemplateCoordinationError();
   }
-  const read = readProjectTemplateJsonStrict(path);
-  if (read.kind === 'missing') return true;
-  if (
-    read.kind !== 'value'
-    || typeof read.value !== 'object'
-    || read.value === null
-  ) {
-    throw new ProjectTemplateCoordinationError();
-  }
-  const value = read.value as Record<string, unknown>;
-  if (
-    value['version'] !== 1
-    || typeof value['token'] !== 'string'
-    || value['token'].trim().length === 0
-    || value['token'].length > 512
-    || !Number.isSafeInteger(value['pid'])
-    || (value['pid'] as number) <= 0
-  ) {
+  const owner = readCoordinationOwner(path);
+  if (owner === undefined) {
     throw new ProjectTemplateCoordinationError();
   }
   try {
-    if (isProcessAlive(value['pid'] as number)) return false;
+    if (isProcessAlive(owner.pid)) return false;
   } catch {
     throw new ProjectTemplateCoordinationError();
   }
-  let claimCreated = false;
+  const namespaceToken = randomUUID();
   try {
-    // The hard link is an exclusive claim on this exact inode. A second
-    // reclaimer cannot pass this boundary and later unlink a replacement lock
-    // published by the first reclaimer.
-    linkSync(path, reclaimPath);
-    claimCreated = true;
-    const claimed = lstatSync(reclaimPath);
+    createDurableJsonFile(reclaimPath, {
+      version: 2,
+      token: namespaceToken,
+      pid: process.pid,
+      operation: 'reclaim',
+      target: {
+        device: String(observed.dev),
+        inode: String(observed.ino),
+        token: owner.token,
+        pid: owner.pid,
+      },
+    } satisfies CoordinationNamespaceRecord);
+  } catch {
+    throw new ProjectTemplateCoordinationError();
+  }
+  let mainUnlinked = false;
+  try {
     const current = lstatSync(path);
+    const currentOwner = readCoordinationOwner(path);
     if (
       !observed.isFile()
       || observed.isSymbolicLink()
       || observed.nlink !== 1
-      || claimed.dev !== observed.dev
-      || claimed.ino !== observed.ino
-      || current.dev !== claimed.dev
-      || current.ino !== claimed.ino
-      || claimed.nlink !== 2
-      || current.nlink !== 2
+      || current.dev !== observed.dev
+      || current.ino !== observed.ino
+      || current.nlink !== 1
+      || currentOwner?.token !== owner.token
+      || currentOwner?.pid !== owner.pid
     ) {
       throw new ProjectTemplateCoordinationError();
     }
     unlinkSync(path);
+    mainUnlinked = true;
     syncDirectory(dirname(path));
-    unlinkSync(reclaimPath);
-    syncDirectory(dirname(path));
+    removeOwnedCoordinationFile(reclaimPath, namespaceToken, 2);
     return true;
   } catch {
-    if (claimCreated) {
+    if (!mainUnlinked) {
       try {
-        // This pathname was published by this invocation with O_EXCL-like link
-        // semantics, so removing it cannot touch another claimant or owner.
-        unlinkSync(reclaimPath);
-        syncDirectory(dirname(path));
+        removeOwnedCoordinationFile(reclaimPath, namespaceToken, 2);
       } catch {
-        // Cleanup uncertainty remains fail-closed.
+        // A durable namespace is safer than guessing about its ownership.
       }
     }
-    // A leftover or concurrent claim is intentionally not stolen: availability
-    // can be repaired by an operator, whereas guessing could delete a new
-    // owner's coordination file.
     throw new ProjectTemplateCoordinationError();
   }
 }

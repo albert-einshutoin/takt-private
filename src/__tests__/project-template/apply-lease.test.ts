@@ -561,7 +561,7 @@ describe('project template apply/run-start coordination', () => {
     expect(existsSync(mutexPath)).toBe(false);
   });
 
-  it('recovers a mutex inode claimed by a reclaimer whose process is dead', () => {
+  it('recovers a dead reclaimer namespace through a separately owned recovery lock', () => {
     const root = makeRoot();
     const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
     mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
@@ -570,67 +570,134 @@ describe('project template apply/run-start coordination', () => {
       token: 'crashed-mutex-owner',
       pid: 99_999,
     }));
-    linkSync(mutexPath, `${mutexPath}.reclaim`);
+    const target = lstatSync(mutexPath);
+    writeFileSync(`${mutexPath}.reclaim`, JSON.stringify({
+      version: 2,
+      token: 'crashed-reclaimer-claim',
+      pid: 99_998,
+      operation: 'reclaim',
+      target: {
+        device: String(target.dev),
+        inode: String(target.ino),
+        token: 'crashed-mutex-owner',
+        pid: 99_999,
+      },
+    }));
 
     const lease = acquireProjectTemplateApplyLease(root);
 
     expect(lease.pid).toBe(process.pid);
     expect(existsSync(`${mutexPath}.reclaim`)).toBe(false);
+    expect(existsSync(`${mutexPath}.reclaim.recovery`)).toBe(false);
     lease.release();
   });
 
-  it('recovers the crash window after main unlink when the reclaimer is dead', () => {
+  it('recovers the post-main-unlink crash window', () => {
     const root = makeRoot();
     const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
     const reclaimPath = `${mutexPath}.reclaim`;
     mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
     writeFileSync(reclaimPath, JSON.stringify({
-      version: 1,
+      version: 2,
       token: 'reclaimer-crashed-after-main-unlink',
       pid: 99_999,
+      operation: 'reclaim',
+      target: {
+        device: '1',
+        inode: '2',
+        token: 'already-unlinked-owner',
+        pid: 99_998,
+      },
     }));
 
     const lease = acquireProjectTemplateApplyLease(root);
 
     expect(lease.pid).toBe(process.pid);
     expect(existsSync(reclaimPath)).toBe(false);
+    expect(existsSync(`${reclaimPath}.recovery`)).toBe(false);
     lease.release();
   });
 
-  it('recovers a nested dead claim left while cleaning an orphan namespace', () => {
+  it('recovers a dead publication namespace after main creation', () => {
     const root = makeRoot();
     const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
     const reclaimPath = `${mutexPath}.reclaim`;
     mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
-    writeFileSync(reclaimPath, JSON.stringify({
+    writeFileSync(mutexPath, JSON.stringify({
       version: 1,
-      token: 'orphan-namespace',
+      token: 'partially-published-main',
       pid: 99_999,
     }));
-    linkSync(reclaimPath, `${reclaimPath}.reclaim`);
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 2,
+      token: 'crashed-publication-namespace',
+      pid: 99_999,
+      operation: 'publish',
+      mainToken: 'partially-published-main',
+    }));
 
     const lease = acquireProjectTemplateApplyLease(root);
 
     expect(lease.pid).toBe(process.pid);
     expect(existsSync(reclaimPath)).toBe(false);
-    expect(existsSync(`${reclaimPath}.reclaim`)).toBe(false);
+    expect(existsSync(`${reclaimPath}.recovery`)).toBe(false);
     lease.release();
   });
 
-  it('keeps a reclaim namespace owned by a live process fail-closed', () => {
+  it('keeps an active reclaimer fail-closed even when the target owner is dead', () => {
     const root = makeRoot();
     const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
     const reclaimPath = `${mutexPath}.reclaim`;
     mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
-    writeFileSync(reclaimPath, JSON.stringify({
+    writeFileSync(mutexPath, JSON.stringify({
       version: 1,
+      token: 'dead-target-owner',
+      pid: 99_999,
+    }));
+    const target = lstatSync(mutexPath);
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 2,
       token: 'live-reclaimer',
       pid: process.pid,
+      operation: 'reclaim',
+      target: {
+        device: String(target.dev),
+        inode: String(target.ino),
+        token: 'dead-target-owner',
+        pid: 99_999,
+      },
     }));
 
     expect(() => acquireProjectTemplateApplyLease(root))
       .toThrow(ProjectTemplateCoordinationError);
     expect(readFileSync(reclaimPath, 'utf8')).toContain('live-reclaimer');
+    expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(false);
+  });
+
+  it('never steals an abandoned second-level recovery owner automatically', () => {
+    const root = makeRoot();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(root);
+    const reclaimPath = `${mutexPath}.reclaim`;
+    mkdirSync(join(mutexPath, '..'), { recursive: true, mode: 0o700 });
+    writeFileSync(reclaimPath, JSON.stringify({
+      version: 2,
+      token: 'dead-publication',
+      pid: 99_999,
+      operation: 'publish',
+      mainToken: 'unpublished-main',
+    }));
+    writeFileSync(`${reclaimPath}.recovery`, JSON.stringify({
+      version: 3,
+      token: 'abandoned-recovery',
+      pid: 99_998,
+      operation: 'namespace-recovery',
+      namespaceToken: 'dead-publication',
+    }));
+
+    expect(() => acquireProjectTemplateApplyLease(root))
+      .toThrow(ProjectTemplateCoordinationError);
+    expect(existsSync(reclaimPath)).toBe(true);
+    expect(existsSync(`${reclaimPath}.recovery`)).toBe(true);
     expect(existsSync(resolveProjectTemplateApplyLeasePath(root))).toBe(false);
   });
 
