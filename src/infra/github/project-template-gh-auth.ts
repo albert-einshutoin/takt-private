@@ -133,18 +133,19 @@ object,
 CredentialAuthority
 >();
 interface ApiRequestAuthority {
-  readonly request: ClientRequest;
+  request?: ClientRequest;
   response?: IncomingMessage;
   responseDestroy?: (...args: unknown[]) => unknown;
   disposed: boolean;
-  readonly end: (...args: unknown[]) => unknown;
-  readonly destroy: (...args: unknown[]) => unknown;
-  readonly requestListeners: ReadonlyArray<
+  end?: (...args: unknown[]) => unknown;
+  destroy?: (...args: unknown[]) => unknown;
+  requestListeners: ReadonlyArray<
   readonly [event: string, listener: (...args: unknown[]) => void]
   >;
   responseListeners: ReadonlyArray<
   readonly [event: string, listener: (...args: unknown[]) => void]
   >;
+  readonly release: () => void;
 }
 
 const API_REQUEST_AUTHORITIES = new WeakMap<object, ApiRequestAuthority>();
@@ -314,34 +315,60 @@ export function createProjectTemplateGithubApiRequest(
       'GitHub API request plan is invalid',
     );
   }
-  const handlers = handlersRecord as unknown as
+  const handlersReceiver = plan['handlers'] as
     ProjectTemplateGithubApiRequestHandlers;
+  const invokeHandler = (
+    name: keyof ProjectTemplateGithubApiRequestHandlers,
+    args: readonly unknown[] = [],
+  ): void => {
+    Reflect.apply(
+      handlersRecord[name] as (...values: unknown[]) => unknown,
+      handlersReceiver,
+      args,
+    );
+  };
   const authorityHolder: { current?: ApiRequestAuthority } = {};
+  const destroyPreAuthorityResponse = (
+    response: IncomingMessage,
+  ): void => {
+    if (!isReadableStream(response)) return;
+    const destroy = findDataFunction(response, 'destroy');
+    if (destroy === undefined) return;
+    try {
+      Reflect.apply(destroy, response, []);
+    } catch {
+      // The finite request failure remains authoritative.
+    }
+  };
   const responseCallback = (response: IncomingMessage): void => {
     const current = authorityHolder.current;
+    if (current === undefined) {
+      destroyPreAuthorityResponse(response);
+      invokeHandler('onResponseError');
+      return;
+    }
     if (
-      current === undefined
-      || current.disposed
+      current.disposed
       || !isReadableStream(response)
     ) {
-      handlers.onResponseError();
+      invokeHandler('onResponseError');
       return;
     }
     current.response = response;
     current.responseDestroy = findDataFunction(response, 'destroy');
     const listeners: ApiRequestAuthority['responseListeners'] = [
-      ['data', (chunk: unknown) => handlers.onData(chunk)],
-      ['end', () => handlers.onEnd()],
-      ['aborted', () => handlers.onResponseAborted()],
-      ['error', () => handlers.onResponseError()],
-      ['close', () => handlers.onResponseClose()],
+      ['data', (chunk: unknown) => invokeHandler('onData', [chunk])],
+      ['end', () => invokeHandler('onEnd')],
+      ['aborted', () => invokeHandler('onResponseAborted')],
+      ['error', () => invokeHandler('onResponseError')],
+      ['close', () => invokeHandler('onResponseClose')],
     ];
     current.responseListeners = listeners;
     const statusCode = ownDataValue(response, 'statusCode');
     try {
-      handlers.onResponse(
+      invokeHandler('onResponse', [
         typeof statusCode === 'number' ? statusCode : undefined,
-      );
+      ]);
       if (current.disposed) return;
       for (const [event, listener] of listeners) {
         if (event === 'data') {
@@ -349,10 +376,37 @@ export function createProjectTemplateGithubApiRequest(
         } else {
           EventEmitter.prototype.on.call(response, event, listener);
         }
-        if (current.disposed) return;
+        if (current.disposed) {
+          try {
+            EventEmitter.prototype.removeListener.call(
+              response,
+              event,
+              listener,
+            );
+          } catch {
+            // Secure disposal already selected the terminal result.
+          }
+          return;
+        }
       }
     } catch {
-      handlers.onResponseError();
+      try {
+        invokeHandler('onResponseError');
+      } finally {
+        // Registration can fail after an event-capable boundary reenters.
+        // Remove every candidate, including the listener being registered.
+        for (const [event, listener] of listeners) {
+          try {
+            EventEmitter.prototype.removeListener.call(
+              response,
+              event,
+              listener,
+            );
+          } catch {
+            // The response failure remains authoritative.
+          }
+        }
+      }
     }
   };
   const request = httpsRequest({
@@ -387,8 +441,8 @@ export function createProjectTemplateGithubApiRequest(
     );
   }
   const requestListeners: ApiRequestAuthority['requestListeners'] = [
-    ['error', () => handlers.onRequestError()],
-    ['close', () => handlers.onRequestClose()],
+    ['error', () => invokeHandler('onRequestError')],
+    ['close', () => invokeHandler('onRequestClose')],
   ];
   const authority: ApiRequestAuthority = {
     request,
@@ -397,6 +451,9 @@ export function createProjectTemplateGithubApiRequest(
     destroy,
     requestListeners,
     responseListeners: [],
+    release: () => {
+      authorityHolder.current = undefined;
+    },
   };
   authorityHolder.current = authority;
   try {
@@ -417,7 +474,12 @@ export function createProjectTemplateGithubApiRequest(
   const facade: ProjectTemplateGithubApiRequest = {
     start(): void {
       const current = API_REQUEST_AUTHORITIES.get(this);
-      if (current === undefined || current.disposed) {
+      if (
+        current === undefined
+        || current.disposed
+        || current.request === undefined
+        || current.end === undefined
+      ) {
         throw authError(
           'PROCESS_FAILED',
           'GitHub API request is no longer available',
@@ -427,7 +489,13 @@ export function createProjectTemplateGithubApiRequest(
     },
     destroy(): void {
       const current = API_REQUEST_AUTHORITIES.get(this);
-      if (current === undefined || current.disposed) return;
+      if (
+        current === undefined
+        || current.disposed
+        || current.request === undefined
+      ) {
+        return;
+      }
       if (
         current.response !== undefined
         && current.responseDestroy !== undefined
@@ -442,20 +510,24 @@ export function createProjectTemplateGithubApiRequest(
           // Request destruction remains authoritative.
         }
       }
-      try {
-        Reflect.apply(current.destroy, current.request, []);
-      } catch {
-        // destroy() is best-effort; terminal transport state is authoritative.
+      if (current.destroy !== undefined) {
+        try {
+          Reflect.apply(current.destroy, current.request, []);
+        } catch {
+          // destroy() is best-effort; terminal state is authoritative.
+        }
       }
     },
     dispose(): void {
       const current = API_REQUEST_AUTHORITIES.get(this);
       if (current === undefined || current.disposed) return;
       current.disposed = true;
+      const request = current.request;
+      const response = current.response;
       for (const [event, listener] of current.requestListeners) {
         try {
           EventEmitter.prototype.removeListener.call(
-            current.request,
+            request,
             event,
             listener,
           );
@@ -463,11 +535,11 @@ export function createProjectTemplateGithubApiRequest(
           // Listener cleanup remains best-effort on a failed request.
         }
       }
-      if (current.response !== undefined) {
+      if (response !== undefined) {
         for (const [event, listener] of current.responseListeners) {
           try {
             EventEmitter.prototype.removeListener.call(
-              current.response,
+              response,
               event,
               listener,
             );
@@ -476,7 +548,15 @@ export function createProjectTemplateGithubApiRequest(
           }
         }
       }
+      current.requestListeners = [];
       current.responseListeners = [];
+      current.response = undefined;
+      current.responseDestroy = undefined;
+      current.request = undefined;
+      current.end = undefined;
+      current.destroy = undefined;
+      current.release();
+      API_REQUEST_AUTHORITIES.delete(this);
     },
   };
   API_REQUEST_AUTHORITIES.set(facade, authority);

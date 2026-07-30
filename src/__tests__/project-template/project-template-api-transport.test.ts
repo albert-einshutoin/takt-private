@@ -294,6 +294,105 @@ describe('project-template GitHub metadata transport F2a', () => {
     credential.dispose();
   });
 
+  it.each([
+    {
+      eventName: 'data',
+      trigger(
+        response: FakeResponse,
+        controller: AbortController,
+      ): void {
+        controller.abort();
+      },
+      expectedCode: 'ABORTED',
+    },
+    {
+      eventName: 'end',
+      trigger(response: FakeResponse): void {
+        response.emit('data', Object.freeze({
+          secret: 'end listener secret',
+        }));
+      },
+      expectedCode: 'INVALID_RESPONSE',
+    },
+    {
+      eventName: 'error',
+      trigger(response: FakeResponse): void {
+        response.emit('data', Object.freeze({
+          secret: 'error listener secret',
+        }));
+      },
+      expectedCode: 'INVALID_RESPONSE',
+    },
+  ] as const)(
+    'removes auth listeners when $eventName registration settles',
+    async ({ eventName, trigger, expectedCode }) => {
+    vi.useFakeTimers();
+    const attempts = captureRequests();
+    const controller = new AbortController();
+    const credential = await acquireCredential();
+    const pending = requestProjectTemplateGithubApiMetadata({
+      credential,
+      path: '/repos/octo/demo/commits/main',
+      accept: 'application/vnd.github+json',
+      maxBytes: 64,
+      deadlineMs: 10_100,
+      signal: controller.signal,
+    }, Object.freeze({ now: () => 100 }));
+    const response = new FakeResponse(200);
+    const attack = (registering: string | symbol): void => {
+      if (registering !== eventName) return;
+      response.removeListener('newListener', attack);
+      trigger(response, controller);
+    };
+    response.on('newListener', attack);
+    attempts[0]!.respond(response);
+
+    const error = await pending.catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: expectedCode });
+    expect(String(error)).not.toContain('secret');
+    expect(response.listenerCount('data')).toBe(0);
+    expect(response.listenerCount('end')).toBe(0);
+    expect(response.listenerCount('aborted')).toBe(0);
+    expect(response.listenerCount('error')).toBe(0);
+    expect(response.listenerCount('close')).toBe(0);
+    expect(attempts[0]!.request.listenerCount('error')).toBe(0);
+    expect(attempts[0]!.request.listenerCount('close')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    credential.dispose();
+  });
+
+  it('destroys a response delivered before https.request returns authority', async () => {
+    const response = new FakeResponse(200);
+    const request = new FakeRequest();
+    https.request.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const credential = await acquireCredential();
+    const pending = requestProjectTemplateGithubApiMetadata({
+      credential,
+      path: '/repos/octo/demo/commits/main',
+      accept: 'application/vnd.github+json',
+      maxBytes: 64,
+      deadlineMs: 300,
+    }, Object.freeze({ now: () => 100 }));
+
+    await expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
+    expect(response.destroyed).toBe(true);
+    expect(response.listenerCount('data')).toBe(0);
+    expect(response.listenerCount('end')).toBe(0);
+    expect(response.listenerCount('aborted')).toBe(0);
+    expect(response.listenerCount('error')).toBe(0);
+    expect(response.listenerCount('close')).toBe(0);
+    expect(request.destroy).toHaveBeenCalledTimes(1);
+    expect(request.listenerCount('error')).toBe(0);
+    expect(request.listenerCount('close')).toBe(0);
+    credential.dispose();
+  });
+
   it('aborts and destroys both request and response without retrying', async () => {
     const attempts = captureRequests();
     const controller = new AbortController();
@@ -554,6 +653,58 @@ describe('project-template GitHub metadata transport F2a', () => {
 });
 
 describe('project-template authenticated GitHub API boundary F2a', () => {
+  it('preserves the strict handler receiver for every sealed callback', async () => {
+    const request = new FakeRequest();
+    let responseCallback: ((response: FakeResponse) => void) | undefined;
+    https.request.mockImplementation((
+      _options: RequestOptions,
+      callback: (response: FakeResponse) => void,
+    ) => {
+      responseCallback = callback;
+      return request;
+    });
+    const credential = await acquireCredential();
+    const receivers: unknown[] = [];
+    const recordReceiver = function (this: unknown): void {
+      receivers.push(this);
+    };
+    const handlers = Object.freeze({
+      onResponse(this: unknown): void {
+        receivers.push(this);
+      },
+      onData: recordReceiver,
+      onEnd: recordReceiver,
+      onResponseAborted: recordReceiver,
+      onResponseError: recordReceiver,
+      onResponseClose: recordReceiver,
+      onRequestError: recordReceiver,
+      onRequestClose: recordReceiver,
+    });
+    const facade = createProjectTemplateGithubApiRequest(
+      credential,
+      Object.freeze({
+        path: '/repos/octo/demo/commits/main',
+        accept: 'application/vnd.github+json' as const,
+        handlers,
+      }),
+    );
+    const response = new FakeResponse(200);
+    responseCallback?.(response);
+    response.emit('data', Buffer.from('body'));
+    response.emit('end');
+    response.emit('aborted');
+    response.emit('error', new Error('contained'));
+    response.emit('close');
+    request.emit('error', new Error('contained'));
+    request.emit('close');
+
+    expect(receivers).toHaveLength(8);
+    expect(receivers.every((receiver) => receiver === handlers)).toBe(true);
+    facade.destroy();
+    facade.dispose();
+    credential.dispose();
+  });
+
   it('applies auth only inside one fixed API request and returns an opaque facade', async () => {
     const request = new FakeRequest();
     let responseCallback: ((response: FakeResponse) => void) | undefined;
@@ -613,11 +764,16 @@ describe('project-template authenticated GitHub API boundary F2a', () => {
     facade.destroy();
     expect(response.destroyed).toBe(true);
     expect(request.destroy).toHaveBeenCalledTimes(1);
+    const authorityDelete = vi.spyOn(WeakMap.prototype, 'delete');
     facade.dispose();
+    expect(authorityDelete).toHaveBeenCalledWith(facade);
     expect(request.listenerCount('error')).toBe(0);
     expect(request.listenerCount('close')).toBe(0);
     expect(response.listenerCount('data')).toBe(0);
     expect(response.listenerCount('end')).toBe(0);
+    expect(() => facade.start()).toThrow(expect.objectContaining({
+      code: 'PROCESS_FAILED',
+    }));
     credential.dispose();
   });
 
