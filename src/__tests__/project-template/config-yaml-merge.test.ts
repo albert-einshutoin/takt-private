@@ -69,6 +69,20 @@ describe('project template config YAML merge adapters', () => {
     });
   });
 
+  it('runs effective subscription provider validation on merged output', () => {
+    const result = mergeProjectTemplateConfigYaml({
+      base: bytes('subscription_only: true\nprovider: codex-cli\n'),
+      local: bytes('subscription_only: true\nprovider: codex-cli\n'),
+      incoming: bytes('subscription_only: true\nprovider: openai\n'),
+    });
+
+    expect(result).toMatchObject({
+      status: 'blocked',
+      code: 'MERGED_CONFIG_INVALID',
+      document: 'merged',
+    });
+  });
+
   it('preserves unknown keys but routes them to a validator error', () => {
     const result = mergeProjectTemplateConfigYaml({
       base: bytes('language: en\n'),
