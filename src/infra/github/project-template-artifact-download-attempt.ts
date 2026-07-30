@@ -23,18 +23,42 @@ export interface ProjectTemplateArtifactDownloadAttemptDependencies {
   readonly scheduleHandoff?: (callback: () => void) => void;
 }
 
-export type ProjectTemplateArtifactSingleAttemptFailureCode =
-  | 'HTTP_STATUS'
-  | 'NETWORK'
-  | 'DNS_REJECTED'
-  | 'INVALID_RESPONSE'
-  | 'OUTPUT_LIMIT'
-  | 'INTERNAL';
+interface RetryableFailureShape {
+  readonly retryable: true;
+  readonly replaySafe: true;
+}
 
-export interface ProjectTemplateArtifactSingleAttemptFailure {
-  readonly code: ProjectTemplateArtifactSingleAttemptFailureCode;
-  readonly retryable: boolean;
-  readonly statusCode?: number;
+interface NonRetryableFailureShape {
+  readonly retryable: false;
+  readonly replaySafe: false;
+}
+
+export type ProjectTemplateArtifactSingleAttemptFailure =
+  | ({
+    readonly code: 'HTTP_STATUS';
+    readonly statusCode: number;
+  } & (RetryableFailureShape | NonRetryableFailureShape))
+  | ({
+    readonly code: 'NETWORK';
+  } & (RetryableFailureShape | NonRetryableFailureShape))
+  | ({
+    readonly code:
+      | 'DNS_REJECTED'
+      | 'INVALID_RESPONSE'
+      | 'OUTPUT_LIMIT'
+      | 'INTERNAL';
+  } & NonRetryableFailureShape);
+
+export type ProjectTemplateArtifactSingleAttemptFailureCode =
+  ProjectTemplateArtifactSingleAttemptFailure['code'];
+
+interface AttemptDependenciesSnapshot {
+  readonly receiver: ProjectTemplateArtifactDownloadAttemptDependencies;
+  readonly createAuthenticatedRequest:
+    typeof createProjectTemplateGithubReleaseAssetRequest;
+  readonly createPinnedTransport:
+    typeof createProjectTemplateArtifactPinnedTransport;
+  readonly scheduleHandoff: (callback: () => void) => void;
 }
 
 export interface ProjectTemplateArtifactSingleAttemptSettlement {
@@ -86,19 +110,47 @@ interface AttemptCallbackToken {
   dispatch?: (event: AttemptEvent) => void;
 }
 
+interface AttemptSettlementSnapshot {
+  readonly receiver: ProjectTemplateArtifactSingleAttemptSettlement;
+  readonly chunk: (value: Uint8Array) => undefined;
+  readonly done: () => undefined;
+  readonly fail: (
+    failure: ProjectTemplateArtifactSingleAttemptFailure,
+  ) => undefined;
+}
+
+interface AttemptConstructionLatch {
+  readonly kind: 'authenticated' | 'pinned';
+  event: AttemptEvent | undefined;
+  invalid: boolean;
+}
+
 interface AttemptState {
-  phase: 'cold' | 'starting' | 'active' | 'done' | 'failed' | 'disposed';
+  phase:
+    | 'cold'
+    | 'constructing-auth'
+    | 'active'
+    | 'handoff-pending'
+    | 'constructing-pinned'
+    | 'done'
+    | 'failed'
+    | 'disposed';
+  // Borrowed: the retry coordinator owns exact credential disposal.
   credential: DisposableProjectTemplateGhCredential | undefined;
   input: AttemptIdentity | undefined;
-  readonly dependencies: ProjectTemplateArtifactDownloadAttemptDependencies;
+  readonly dependencies: AttemptDependenciesSnapshot;
   transport: AttemptTransport | undefined;
   transportKind: 'authenticated' | 'pinned' | undefined;
   pendingGrant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
-  pending: ProjectTemplateArtifactSingleAttemptSettlement | undefined;
+  pending: AttemptSettlementSnapshot | undefined;
   terminalFailure: ProjectTemplateArtifactSingleAttemptFailure | undefined;
+  construction: AttemptConstructionLatch | undefined;
   bodyReady: boolean;
   resuming: boolean;
   receivedBytes: number;
+  deliveredAny: boolean;
+  deliveryGeneration: number;
+  deliveryClaim: number | undefined;
   token: AttemptCallbackToken;
 }
 
@@ -106,6 +158,7 @@ const attemptAuthorities = new WeakMap<
 ProjectTemplateArtifactSingleAttempt,
 AttemptState
 >();
+const disposedAttempts = new WeakSet<ProjectTemplateArtifactSingleAttempt>();
 
 const DEFAULT_DEPENDENCIES =
   Object.freeze<ProjectTemplateArtifactDownloadAttemptDependencies>({
@@ -138,12 +191,13 @@ function failure(
   Object.defineProperties(value, {
     code: { enumerable: true, value: code },
     retryable: { enumerable: true, value: retryable },
+    replaySafe: { enumerable: true, value: retryable },
     ...(statusCode === undefined
       ? {}
       : { statusCode: { enumerable: true, value: statusCode } }),
   });
-  return Object.freeze(value) as
-    unknown as ProjectTemplateArtifactSingleAttemptFailure;
+  return Object.freeze(value) as unknown as
+    ProjectTemplateArtifactSingleAttemptFailure;
 }
 
 const INTERNAL_FAILURE = failure('INTERNAL', false);
@@ -172,7 +226,7 @@ function invalidArgument(): TypeError {
 
 function snapshotDependencies(
   value: ProjectTemplateArtifactDownloadAttemptDependencies,
-): ProjectTemplateArtifactDownloadAttemptDependencies {
+): AttemptDependenciesSnapshot {
   if (
     typeof value !== 'object'
     || value === null
@@ -215,6 +269,7 @@ function snapshotDependencies(
     )
   ) throw invalidArgument();
   return Object.freeze({
+    receiver: value,
     createAuthenticatedRequest: authenticated.value as
       typeof createProjectTemplateGithubReleaseAssetRequest,
     createPinnedTransport: pinned.value as
@@ -279,7 +334,7 @@ function snapshotInput(
 
 function snapshotSettlement(
   value: ProjectTemplateArtifactSingleAttemptSettlement,
-): ProjectTemplateArtifactSingleAttemptSettlement {
+): AttemptSettlementSnapshot {
   if (
     typeof value !== 'object'
     || value === null
@@ -300,6 +355,7 @@ function snapshotSettlement(
     })
   ) throw invalidArgument();
   return Object.freeze({
+    receiver: value,
     chunk: descriptors['chunk']!.value as (value: Uint8Array) => undefined,
     done: descriptors['done']!.value as () => undefined,
     fail: descriptors['fail']!.value as
@@ -307,7 +363,12 @@ function snapshotSettlement(
   });
 }
 
-function snapshotChunk(value: unknown): Uint8Array {
+interface ChunkIngress {
+  readonly value: Uint8Array;
+  readonly byteLength: number;
+}
+
+function inspectChunk(value: unknown): ChunkIngress {
   if (
     typeof value !== 'object'
     || value === null
@@ -325,8 +386,12 @@ function snapshotChunk(value: unknown): Uint8Array {
   if (byteLength === 0 || types.isSharedArrayBuffer(buffer)) {
     throw invalidArgument();
   }
-  const copy = new NativeUint8Array(byteLength);
-  Reflect.apply(TYPED_ARRAY_SET, copy, [value]);
+  return { value: value as Uint8Array, byteLength };
+}
+
+function copyChunk(ingress: ChunkIngress): Uint8Array {
+  const copy = new NativeUint8Array(ingress.byteLength);
+  Reflect.apply(TYPED_ARRAY_SET, copy, [ingress.value]);
   return copy;
 }
 
@@ -380,6 +445,33 @@ function isAttemptStopped(state: AttemptState): boolean {
   );
 }
 
+function failureAfterDelivery(
+  state: AttemptState,
+  reason: ProjectTemplateArtifactSingleAttemptFailure,
+): ProjectTemplateArtifactSingleAttemptFailure {
+  if (!state.deliveredAny || !reason.retryable) return reason;
+  return failure(
+    reason.code,
+    false,
+    reason.code === 'HTTP_STATUS' ? reason.statusCode : undefined,
+  );
+}
+
+function invokeTerminalSettlement(
+  settlement: AttemptSettlementSnapshot,
+  method: 'done' | 'fail',
+  failureValue?: ProjectTemplateArtifactSingleAttemptFailure,
+): void {
+  try {
+    const result = method === 'done'
+      ? Reflect.apply(settlement.done, settlement.receiver, [])
+      : Reflect.apply(settlement.fail, settlement.receiver, [failureValue!]);
+    if (result !== undefined) throw invalidArgument();
+  } catch {
+    // Terminal state was committed before crossing the untrusted callback.
+  }
+}
+
 function failAttempt(
   state: AttemptState,
   reason: ProjectTemplateArtifactSingleAttemptFailure = INTERNAL_FAILURE,
@@ -389,17 +481,22 @@ function failAttempt(
     || state.phase === 'done'
     || state.phase === 'disposed'
   ) return;
+  const finalReason = failureAfterDelivery(state, reason);
   state.phase = 'failed';
-  state.terminalFailure = reason;
+  state.terminalFailure = finalReason;
   state.credential = undefined;
   state.input = undefined;
+  state.construction = undefined;
+  state.deliveryClaim = undefined;
   state.token.active = false;
   state.token.dispatch = undefined;
   const pending = state.pending;
   state.pending = undefined;
   disposePendingGrant(state);
   safelyStop(takeTransport(state));
-  pending?.fail(reason);
+  if (pending !== undefined) {
+    invokeTerminalSettlement(pending, 'fail', finalReason);
+  }
 }
 
 function finishAttempt(state: AttemptState): void {
@@ -411,6 +508,8 @@ function finishAttempt(state: AttemptState): void {
   state.phase = 'done';
   state.credential = undefined;
   state.input = undefined;
+  state.construction = undefined;
+  state.deliveryClaim = undefined;
   state.token.active = false;
   state.token.dispatch = undefined;
   const pending = state.pending;
@@ -418,7 +517,9 @@ function finishAttempt(state: AttemptState): void {
   disposePendingGrant(state);
   // Clean EOF relinquishes authority without synthesizing a transport error.
   safelyDispose(takeTransport(state));
-  pending?.done();
+  if (pending !== undefined) {
+    invokeTerminalSettlement(pending, 'done');
+  }
 }
 
 function resumeDemand(state: AttemptState): void {
@@ -428,6 +529,7 @@ function resumeDemand(state: AttemptState): void {
     || state.pending === undefined
     || state.transport === undefined
     || state.resuming
+    || state.deliveryClaim !== undefined
   ) return;
   state.resuming = true;
   try {
@@ -444,30 +546,18 @@ function onData(state: AttemptState, chunk: unknown): void {
     state.phase !== 'active'
     || !state.bodyReady
     || state.transport === undefined
-  ) return;
-  const pending = state.pending;
-  if (pending === undefined) {
-    failAttempt(state);
+  ) {
+    failAttempt(state, INVALID_RESPONSE_FAILURE);
     return;
   }
-  if (state.transportKind === 'authenticated') {
-    try {
-      state.transport.pause();
-    } catch {
-      failAttempt(state, NETWORK_FAILURE);
-      return;
-    }
-    // pause() is an untrusted synchronous boundary. A callback may have
-    // disposed or failed the attempt, so data must not cross that revocation.
-    if (
-      state.phase !== 'active'
-      || state.transportKind !== 'authenticated'
-      || state.pending !== pending
-    ) return;
+  const pending = state.pending;
+  if (pending === undefined || state.deliveryClaim !== undefined) {
+    failAttempt(state, INVALID_RESPONSE_FAILURE);
+    return;
   }
-  let copied: Uint8Array;
+  let ingress: ChunkIngress;
   try {
-    copied = snapshotChunk(chunk);
+    ingress = inspectChunk(chunk);
   } catch {
     failAttempt(state, INVALID_RESPONSE_FAILURE);
     return;
@@ -475,16 +565,56 @@ function onData(state: AttemptState, chunk: unknown): void {
   const maxBytes = state.input?.maxBytes;
   if (
     maxBytes === undefined
-    || copied.byteLength > maxBytes - state.receivedBytes
+    || ingress.byteLength > maxBytes - state.receivedBytes
   ) {
     failAttempt(state, OUTPUT_LIMIT_FAILURE);
     return;
   }
+  // The limit comparison intentionally precedes allocation. A hostile large
+  // chunk must not turn a one-byte policy rejection into proportional memory.
+  let copied: Uint8Array;
+  try {
+    copied = copyChunk(ingress);
+  } catch {
+    failAttempt(state, INVALID_RESPONSE_FAILURE);
+    return;
+  }
+  const transport = state.transport;
+  const transportKind = state.transportKind;
+  const claim = state.deliveryGeneration + 1;
+  state.deliveryGeneration = claim;
+  state.deliveryClaim = claim;
+  if (transportKind === 'authenticated') {
+    try {
+      transport.pause();
+    } catch {
+      failAttempt(state, NETWORK_FAILURE);
+      return;
+    }
+    // pause() is an untrusted synchronous boundary. The generation claim
+    // prevents recursive data from overtaking the copied wire-order chunk.
+    if (
+      state.phase !== 'active'
+      || state.transport !== transport
+      || state.transportKind !== 'authenticated'
+      || state.pending !== pending
+      || state.deliveryClaim !== claim
+    ) return;
+  }
   // Subtraction above proves this addition remains a safe integer even when
   // maxBytes is Number.MAX_SAFE_INTEGER.
   state.receivedBytes += copied.byteLength;
+  state.deliveredAny = true;
   state.pending = undefined;
-  pending.chunk(copied);
+  try {
+    const result = Reflect.apply(pending.chunk, pending.receiver, [copied]);
+    if (result !== undefined) throw invalidArgument();
+  } finally {
+    if (state.deliveryClaim === claim) {
+      state.deliveryClaim = undefined;
+      resumeDemand(state);
+    }
+  }
 }
 
 function createPhysicalHandlers(
@@ -493,8 +623,11 @@ function createPhysicalHandlers(
   readonly authenticated: ProjectTemplateGithubReleaseAssetRequestHandlers;
   readonly pinned: ProjectTemplateArtifactPinnedTransportHandlers;
 } {
-  const dispatch = (event: AttemptEvent): void => {
-    if (token.active) token.dispatch?.(event);
+  const dispatch = (event: AttemptEvent): boolean => {
+    const receiver = token.dispatch;
+    if (!token.active || receiver === undefined) return false;
+    receiver(event);
+    return true;
   };
   const onResponse = (statusCode: number): void => {
     dispatch({ kind: 'response', statusCode });
@@ -502,28 +635,35 @@ function createPhysicalHandlers(
   const onData = (chunk: unknown): void => {
     dispatch({ kind: 'data', chunk });
   };
-  const onEnd = (): void => dispatch({ kind: 'end' });
-  const onNetworkFailure = (): void => dispatch({
-    kind: 'failure',
-    failure: NETWORK_FAILURE,
-  });
-  const onAuthenticatedRequestFailure = (): void => dispatch({
-    kind: 'authenticated-request-failure',
-  });
-  const onInvalidResponse = (): void => dispatch({
-    kind: 'failure',
-    failure: INVALID_RESPONSE_FAILURE,
-  });
-  const onDnsRejected = (): void => dispatch({
-    kind: 'failure',
-    failure: DNS_FAILURE,
-  });
+  const onEnd = (): void => {
+    dispatch({ kind: 'end' });
+  };
+  const onNetworkFailure = (): void => {
+    dispatch({ kind: 'failure', failure: NETWORK_FAILURE });
+  };
+  const onAuthenticatedRequestFailure = (): void => {
+    dispatch({ kind: 'authenticated-request-failure' });
+  };
+  const onInvalidResponse = (): void => {
+    dispatch({ kind: 'failure', failure: INVALID_RESPONSE_FAILURE });
+  };
+  const onDnsRejected = (): void => {
+    dispatch({ kind: 'failure', failure: DNS_FAILURE });
+  };
   return Object.freeze({
     authenticated: Object.freeze({
       onResponse,
       onRedirect: (
         grant: DisposableProjectTemplateArtifactRedirectGrant,
-      ): void => dispatch({ kind: 'redirect', grant }),
+      ): void => {
+        if (dispatch({ kind: 'redirect', grant })) return;
+        try {
+          grant.dispose();
+        } catch {
+          // A revoked callback can transfer no authority, but must still
+          // release a late grant without exposing its target.
+        }
+      },
       onInvalidResponse,
       onData,
       onEnd,
@@ -548,13 +688,100 @@ function createPhysicalHandlers(
   });
 }
 
+function installConstructionCapture(
+  state: AttemptState,
+  token: AttemptCallbackToken,
+  kind: AttemptConstructionLatch['kind'],
+): AttemptConstructionLatch {
+  const latch: AttemptConstructionLatch = {
+    kind,
+    event: undefined,
+    invalid: false,
+  };
+  state.construction = latch;
+  token.dispatch = (event): void => {
+    const allowed = kind === 'authenticated'
+      ? event.kind === 'response' || event.kind === 'redirect'
+      : event.kind === 'response';
+    if (!allowed || latch.event !== undefined) {
+      if (event.kind === 'redirect') {
+        try {
+          event.grant.dispose();
+        } catch {
+          // The bounded latch never owns a rejected extra grant.
+        }
+      }
+      latch.invalid = true;
+      return;
+    }
+    latch.event = event;
+  };
+  return latch;
+}
+
+function drainConstructionLatch(
+  state: AttemptState,
+  token: AttemptCallbackToken,
+  latch: AttemptConstructionLatch,
+): boolean {
+  state.construction = undefined;
+  installDispatch(state, token);
+  if (latch.invalid) {
+    if (latch.event?.kind === 'redirect') {
+      try {
+        latch.event.grant.dispose();
+      } catch {
+        // Invalid construction never transfers the retained grant.
+      }
+    }
+    failAttempt(state, INVALID_RESPONSE_FAILURE);
+    return false;
+  }
+  const event = latch.event;
+  if (event !== undefined) token.dispatch?.(event);
+  return event !== undefined;
+}
+
+function disposeLatchedRedirect(latch: AttemptConstructionLatch): void {
+  if (latch.event?.kind !== 'redirect') return;
+  try {
+    latch.event.grant.dispose();
+  } catch {
+    // A throwing constructor cannot transfer a latched grant.
+  }
+}
+
 function installDispatch(
   state: AttemptState,
   token: AttemptCallbackToken,
 ): void {
   token.dispatch = (event): void => {
     try {
-      if (event.kind === 'failure') {
+      if (
+        (
+          state.phase === 'handoff-pending'
+          && event.kind !== 'handoff'
+        )
+        || state.phase === 'constructing-pinned'
+        || (
+          state.deliveryClaim !== undefined
+          && (
+            event.kind === 'response'
+            || event.kind === 'redirect'
+            || event.kind === 'data'
+            || event.kind === 'end'
+          )
+        )
+      ) {
+        if (event.kind === 'redirect') {
+          try {
+            event.grant.dispose();
+          } catch {
+            // A second grant cannot supersede the pending ownership transfer.
+          }
+        }
+        failAttempt(state, INVALID_RESPONSE_FAILURE);
+      } else if (event.kind === 'failure') {
         failAttempt(state, event.failure);
       } else if (event.kind === 'authenticated-request-failure') {
         // Once the direct response body owns delivery, the authenticated
@@ -564,7 +791,11 @@ function installDispatch(
           && !state.bodyReady
         ) failAttempt(state, NETWORK_FAILURE);
       } else if (event.kind === 'end') {
-        finishAttempt(state);
+        if (state.phase !== 'active' || !state.bodyReady) {
+          failAttempt(state, INVALID_RESPONSE_FAILURE);
+        } else {
+          finishAttempt(state);
+        }
       } else if (event.kind === 'data') {
         onData(state, event.chunk);
       } else if (event.kind === 'redirect') {
@@ -579,6 +810,8 @@ function installDispatch(
         failAttempt(state, INVALID_RESPONSE_FAILURE);
       } else if (event.statusCode !== 200) {
         failAttempt(state, statusFailure(event.statusCode));
+      } else if (state.bodyReady) {
+        failAttempt(state, INVALID_RESPONSE_FAILURE);
       } else if (
         state.phase === 'active'
         && state.transport !== undefined
@@ -599,7 +832,7 @@ function handoffRedirect(
   state.pendingGrant = undefined;
   if (grant === undefined) return;
   if (
-    state.phase !== 'active'
+    state.phase !== 'handoff-pending'
     || state.transportKind !== 'authenticated'
   ) {
     try {
@@ -613,9 +846,25 @@ function handoffRedirect(
   let pinned: ProjectTemplateArtifactPinnedTransport | undefined;
   const nextToken: AttemptCallbackToken = { active: true };
   const pinnedHandlers = createPhysicalHandlers(nextToken).pinned;
+  state.phase = 'constructing-pinned';
+  const latch = installConstructionCapture(state, nextToken, 'pinned');
   try {
     hop = grant.consume();
-    pinned = state.dependencies.createPinnedTransport(hop, pinnedHandlers);
+    if (state.phase !== 'constructing-pinned') {
+      nextToken.active = false;
+      nextToken.dispatch = undefined;
+      try {
+        hop.dispose();
+      } catch {
+        // Reentrant revocation remains authoritative.
+      }
+      return;
+    }
+    pinned = Reflect.apply(
+      state.dependencies.createPinnedTransport,
+      state.dependencies.receiver,
+      [hop, pinnedHandlers],
+    );
     hop = undefined;
   } catch {
     nextToken.active = false;
@@ -633,20 +882,24 @@ function handoffRedirect(
     failAttempt(state);
     return;
   }
-  const oldToken = state.token;
-  oldToken.active = false;
-  oldToken.dispatch = undefined;
-  state.token = nextToken;
-  installDispatch(state, nextToken);
-  safelyDispose(takeTransport(state));
-  if (state.phase !== 'active') {
+  if (state.phase !== 'constructing-pinned') {
     nextToken.active = false;
     nextToken.dispatch = undefined;
     safelyStop(pinned);
     return;
   }
+  const oldToken = state.token;
+  oldToken.active = false;
+  oldToken.dispatch = undefined;
+  const authenticated = takeTransport(state);
+  state.token = nextToken;
   state.transport = pinned;
   state.transportKind = 'pinned';
+  state.phase = 'active';
+  safelyDispose(authenticated);
+  if (isAttemptStopped(state)) return;
+  const eventWasLatched = drainConstructionLatch(state, nextToken, latch);
+  if (isAttemptStopped(state) || eventWasLatched) return;
   try {
     pinned.start();
   } catch {
@@ -673,6 +926,7 @@ function scheduleRedirectHandoff(
     return;
   }
   state.pendingGrant = grant;
+  state.phase = 'handoff-pending';
   let scheduling = true;
   let firedSynchronously = false;
   const callback = (): void => {
@@ -683,7 +937,11 @@ function scheduleRedirectHandoff(
     if (token.active) token.dispatch?.({ kind: 'handoff' });
   };
   try {
-    state.dependencies.scheduleHandoff!(callback);
+    Reflect.apply(
+      state.dependencies.scheduleHandoff,
+      state.dependencies.receiver,
+      [callback],
+    );
     scheduling = false;
     if (firedSynchronously) {
       // Grant consumption inside onRedirect would race the authenticated
@@ -706,21 +964,28 @@ function startAttempt(state: AttemptState): void {
     failAttempt(state);
     return;
   }
-  state.phase = 'starting';
+  state.phase = 'constructing-auth';
   const handlers = createPhysicalHandlers(state.token);
-  installDispatch(state, state.token);
+  const latch = installConstructionCapture(
+    state,
+    state.token,
+    'authenticated',
+  );
   let request: ProjectTemplateGithubReleaseAssetRequest;
   try {
-    request = state.dependencies.createAuthenticatedRequest(
-      credential,
-      Object.freeze({
+    request = Reflect.apply(
+      state.dependencies.createAuthenticatedRequest,
+      state.dependencies.receiver,
+      [credential, Object.freeze({
         owner: input.owner,
         repo: input.repo,
         assetId: input.assetId,
         handlers: handlers.authenticated,
-      }),
+      })],
     );
   } catch {
+    state.construction = undefined;
+    disposeLatchedRedirect(latch);
     failAttempt(state);
     return;
   }
@@ -732,6 +997,8 @@ function startAttempt(state: AttemptState): void {
   state.transport = request;
   state.transportKind = 'authenticated';
   state.phase = 'active';
+  const eventWasLatched = drainConstructionLatch(state, state.token, latch);
+  if (isAttemptStopped(state) || eventWasLatched) return;
   try {
     request.start();
   } catch {
@@ -745,16 +1012,20 @@ function pullAttempt(
 ): undefined {
   const settlement = snapshotSettlement(settlementValue);
   if (state.phase === 'done') {
-    settlement.done();
+    invokeTerminalSettlement(settlement, 'done');
     return undefined;
   }
   if (state.phase === 'failed' || state.phase === 'disposed') {
-    settlement.fail(state.terminalFailure ?? INTERNAL_FAILURE);
+    invokeTerminalSettlement(
+      settlement,
+      'fail',
+      state.terminalFailure ?? INTERNAL_FAILURE,
+    );
     return undefined;
   }
   if (state.pending !== undefined) {
     failAttempt(state);
-    settlement.fail(INTERNAL_FAILURE);
+    invokeTerminalSettlement(settlement, 'fail', INTERNAL_FAILURE);
     return undefined;
   }
   state.pending = settlement;
@@ -770,12 +1041,20 @@ function disposeAttempt(state: AttemptState): undefined {
   state.token.dispatch = undefined;
   state.credential = undefined;
   state.input = undefined;
+  state.construction = undefined;
+  state.deliveryClaim = undefined;
   state.pending = undefined;
   disposePendingGrant(state);
   safelyStop(takeTransport(state));
   return undefined;
 }
 
+/**
+ * Creates one download attempt while borrowing `credential`.
+ *
+ * Credential disposal belongs to the retry coordinator so multiple attempts
+ * can share one redacted auth authority and release it exactly once.
+ */
 export function createProjectTemplateArtifactSingleAttempt(
   credential: DisposableProjectTemplateGhCredential,
   input: Readonly<GithubTemplateArchiveAssetInput>,
@@ -799,9 +1078,13 @@ export function createProjectTemplateArtifactSingleAttempt(
     pendingGrant: undefined,
     pending: undefined,
     terminalFailure: undefined,
+    construction: undefined,
     bodyReady: false,
     resuming: false,
     receivedBytes: 0,
+    deliveredAny: false,
+    deliveryGeneration: 0,
+    deliveryClaim: undefined,
     token,
   };
   const attempt = Object.freeze({
@@ -811,6 +1094,11 @@ export function createProjectTemplateArtifactSingleAttempt(
     ): undefined {
       const current = attemptAuthorities.get(this);
       if (current === undefined || types.isProxy(this)) {
+        if (disposedAttempts.has(this)) {
+          const snapshot = snapshotSettlement(settlement);
+          invokeTerminalSettlement(snapshot, 'fail', INTERNAL_FAILURE);
+          return undefined;
+        }
         throw invalidArgument();
       }
       return pullAttempt(current, settlement);
@@ -818,9 +1106,13 @@ export function createProjectTemplateArtifactSingleAttempt(
     dispose(this: ProjectTemplateArtifactSingleAttempt): undefined {
       const current = attemptAuthorities.get(this);
       if (current === undefined || types.isProxy(this)) {
+        if (disposedAttempts.has(this)) return undefined;
         throw invalidArgument();
       }
-      return disposeAttempt(current);
+      const result = disposeAttempt(current);
+      attemptAuthorities.delete(this);
+      disposedAttempts.add(this);
+      return result;
     },
   }) as unknown as ProjectTemplateArtifactSingleAttempt;
   attemptAuthorities.set(attempt, state);
