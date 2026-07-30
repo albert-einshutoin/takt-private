@@ -4,6 +4,7 @@ import {
   chmodSync,
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -1471,6 +1472,144 @@ describe('project template atomic apply executor', () => {
     expect(result).toMatchObject({ status: 'not_started', code: 'TARGET_DRIFT' });
     expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf-8')).toBe('local drift\n');
   });
+
+  it.each(['existing', 'absent'] as const)(
+    'rejects %s formal lock replacement observed during backup capture with zero target mutation',
+    async (baseState) => {
+      const root = makeRoot();
+      const before = 'language: en\n';
+      if (baseState === 'existing') writeTakt(root, 'config.yaml', before);
+      const baseManifest = manifest(
+        baseState === 'existing' ? { 'config.yaml': before } : {},
+      );
+      const baseLock = baseState === 'existing'
+        ? baseLockFor(baseManifest)
+        : undefined;
+      const lockPath = join(root, PROJECT_TEMPLATE_LOCK_PATH);
+      if (baseLock !== undefined) {
+        writeFileSync(lockPath, `${JSON.stringify(baseLock)}\n`);
+      }
+      const contents = { 'config.yaml': 'language: ja\n' };
+      const incomingManifest = manifest(contents);
+      const blobs = incomingContents(contents);
+      const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+      const replacement = baseState === 'existing'
+        ? baseLock!
+        : baseLockFor(manifest({ 'other.yaml': 'replacement\n' }));
+      // Existing-lock replacement deliberately preserves semantic content but
+      // changes its raw witness, proving capture cannot adopt an equivalent
+      // replacement as the historical before-state.
+      const replacementText = baseState === 'existing'
+        ? `${JSON.stringify(replacement, null, 2)}\n`
+        : `${JSON.stringify(replacement)}\n`;
+      let replaced = false;
+      const io = createProjectTemplateApplyStorageIo({
+        before(operation, path) {
+          if (
+            !replaced
+            && operation === 'file-fsync'
+            && path.includes(`${sep}staging${sep}`)
+          ) {
+            replaced = true;
+            writeFileSync(lockPath, replacementText);
+          }
+        },
+      });
+
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: blobs,
+        io,
+      });
+
+      expect(replaced).toBe(true);
+      expect(result).toMatchObject({
+        status: 'not_started',
+        code: 'BASE_LOCK_DRIFT',
+      });
+      expect(readFileSync(lockPath, 'utf8')).toBe(replacementText);
+      if (baseState === 'existing') {
+        expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8')).toBe(before);
+      } else {
+        expect(existsSync(join(root, '.takt', 'config.yaml'))).toBe(false);
+      }
+      expect(existsSync(join(root, '.takt-template-state', 'journal.json'))).toBe(false);
+      expect(readdirSync(join(root, '.takt-template-state', 'staging'))).toEqual([]);
+      expect(readdirSync(join(root, '.takt-template-state', 'backups'))).toEqual([]);
+    },
+  );
+
+  it.each(['unsafe-symlink', 'read-fault'] as const)(
+    'classifies capture-time formal lock %s as BASE_LOCK_DRIFT with zero target mutation',
+    async (scenario) => {
+      const root = makeRoot();
+      const before = 'language: en\n';
+      writeTakt(root, 'config.yaml', before);
+      const baseManifest = manifest({ 'config.yaml': before });
+      const baseLock = baseLockFor(baseManifest);
+      const lockPath = join(root, PROJECT_TEMPLATE_LOCK_PATH);
+      const originalLock = `${JSON.stringify(baseLock)}\n`;
+      writeFileSync(lockPath, originalLock);
+      const incomingManifest = manifest({ 'config.yaml': 'language: ja\n' });
+      const blobs = incomingContents({ 'config.yaml': 'language: ja\n' });
+      const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+      let captureWindow = false;
+      let injected = false;
+      const io = createProjectTemplateApplyStorageIo({
+        before(operation, path) {
+          if (
+            !captureWindow
+            && operation === 'file-fsync'
+            && path.includes(`${sep}staging${sep}`)
+          ) {
+            captureWindow = true;
+            if (scenario === 'unsafe-symlink') {
+              const replacementPath = join(root, 'replacement-lock.json');
+              writeFileSync(replacementPath, originalLock);
+              unlinkSync(lockPath);
+              symlinkSync(replacementPath, lockPath);
+              injected = true;
+            }
+          }
+          if (
+            scenario === 'read-fault'
+            && captureWindow
+            && !injected
+            && operation === 'read'
+            && basename(path) === PROJECT_TEMPLATE_LOCK_PATH
+          ) {
+            injected = true;
+            throw new Error('injected formal lock read fault');
+          }
+        },
+      });
+
+      const result = await applyProjectTemplatePlan({
+        projectRoot: root,
+        plan,
+        incomingManifest,
+        incomingContents: blobs,
+        io,
+      });
+
+      expect(injected).toBe(true);
+      expect(result).toMatchObject({
+        status: 'not_started',
+        code: 'BASE_LOCK_DRIFT',
+      });
+      expect(readFileSync(join(root, '.takt', 'config.yaml'), 'utf8')).toBe(before);
+      if (scenario === 'unsafe-symlink') {
+        expect(lstatSync(lockPath).isSymbolicLink()).toBe(true);
+      } else {
+        expect(readFileSync(lockPath, 'utf8')).toBe(originalLock);
+      }
+      expect(existsSync(join(root, '.takt-template-state', 'journal.json'))).toBe(false);
+      expect(readdirSync(join(root, '.takt-template-state', 'staging'))).toEqual([]);
+      expect(readdirSync(join(root, '.takt-template-state', 'backups'))).toEqual([]);
+    },
+  );
 
   it('removes partial staging artifacts after preparation fails and permits retry', async () => {
     const root = makeRoot();

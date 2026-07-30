@@ -109,6 +109,13 @@ interface ApplyDeleteOperation extends ApplyOperationBase {
 
 type ApplyOperation = ApplyWriteOperation | ApplyDeleteOperation;
 
+class BaseLockPreparationDriftError extends Error {
+  constructor() {
+    super('formal template lock changed during backup preparation');
+    this.name = 'BaseLockPreparationDriftError';
+  }
+}
+
 type ChangedPlanEntry = ProjectTemplateApplyPlanEntry & {
   action: 'add' | 'update' | 'delete';
 };
@@ -431,12 +438,18 @@ async function verifyBaseLock(
   storage: ProjectTemplateApplyStorage,
   plan: ProjectTemplateApplyPlan,
 ): Promise<
-  | { matched: true; baseLock?: TemplateLockV1 }
+  | {
+    matched: true;
+    observed: ProjectTemplateBackupEntryState;
+    baseLock?: TemplateLockV1;
+  }
   | { matched: false }
 > {
   const state = await currentState(storage, { kind: 'lock' }, 4 * 1024 * 1024);
   if (plan.baseLockSha256 === undefined) {
-    return state.kind === 'absent' ? { matched: true } : { matched: false };
+    return state.kind === 'absent'
+      ? { matched: true, observed: state }
+      : { matched: false };
   }
   if (state.kind !== 'file') return { matched: false };
   const content = await storage.io.readFile(storage.lockTargetPath, state.bytes);
@@ -447,8 +460,33 @@ async function verifyBaseLock(
     return { matched: false };
   }
   return hash(canonicalizeTaktpackJson(parsed)) === plan.baseLockSha256
-    ? { matched: true, baseLock: parsed }
+    ? { matched: true, observed: state, baseLock: parsed }
     : { matched: false };
+}
+
+async function observedBaseLockMatchesPlan(
+  storage: ProjectTemplateApplyStorage,
+  plan: ProjectTemplateApplyPlan,
+  observed: ProjectTemplateBackupEntryState,
+): Promise<boolean> {
+  if (plan.baseLockSha256 === undefined) return observed.kind === 'absent';
+  if (observed.kind !== 'file') return false;
+  let content: Buffer;
+  try {
+    content = await storage.io.readFile(storage.lockTargetPath, observed.bytes);
+  } catch {
+    return false;
+  }
+  // Bind the semantic lock check to the exact byte witness that capture will
+  // use; otherwise a replacement between preview verification and backup could
+  // silently become the transaction's historical "before" state.
+  if (hash(content) !== observed.sha256) return false;
+  try {
+    const parsed = parseTemplateLock(JSON.parse(content.toString('utf8')) as unknown);
+    return hash(canonicalizeTaktpackJson(parsed)) === plan.baseLockSha256;
+  } catch {
+    return false;
+  }
 }
 
 async function verifyCompletePlanSemantics(options: {
@@ -825,8 +863,59 @@ export async function applyProjectTemplatePlan(options: {
     const lock = buildLock(validated.manifest);
     const lockContent = Buffer.from(canonicalizeTaktpackJson(lock));
     const lockTarget = { kind: 'lock' as const };
-    const lockBeforeState = await currentState(storage, lockTarget);
-    const capturedLockBefore = await captureBefore(storage, backupId, lockTarget, lockBeforeState);
+    let lockBeforeState: ProjectTemplateBackupEntryState;
+    try {
+      lockBeforeState = await currentState(storage, lockTarget);
+      if (
+        !stateMatches(
+          lockBeforeState,
+          baseLockVerification.observed,
+          storage.platform,
+        )
+        || !await observedBaseLockMatchesPlan(storage, options.plan, lockBeforeState)
+      ) {
+        throw new BaseLockPreparationDriftError();
+      }
+    } catch {
+      // Unsafe inode types, replacement during read, and unreadable bytes all
+      // mean the plan's formal-lock witness cannot be proven at capture time.
+      throw new BaseLockPreparationDriftError();
+    }
+    let capturedLockBefore: ProjectTemplateBackupEntryState;
+    try {
+      capturedLockBefore = await captureBefore(
+        storage,
+        backupId,
+        lockTarget,
+        lockBeforeState,
+      );
+    } catch (error) {
+      let stillMatches = false;
+      try {
+        stillMatches = stateMatches(
+          await currentState(storage, lockTarget),
+          lockBeforeState,
+          storage.platform,
+        );
+      } catch {
+        // An unreadable formal lock cannot prove that the preview still holds.
+      }
+      if (!stillMatches) throw new BaseLockPreparationDriftError();
+      throw error;
+    }
+    try {
+      if (!stateMatches(
+        await currentState(storage, lockTarget),
+        lockBeforeState,
+        storage.platform,
+      )) {
+        throw new BaseLockPreparationDriftError();
+      }
+    } catch {
+      // Absence has no blob to capture. Treat both a changed state and an
+      // unprovable post-capture witness as drift before journal publication.
+      throw new BaseLockPreparationDriftError();
+    }
     const stagedLock = await writeProjectTemplateStagingFile({
       storage,
       transactionId,
@@ -936,7 +1025,7 @@ export async function applyProjectTemplatePlan(options: {
       protectedBackupIds: [backupId],
     });
     return { status: 'committed', backupId, planId: options.plan.planId };
-  } catch {
+  } catch (error) {
     if (
       storage !== undefined
       && !backupManifestPublished
@@ -946,18 +1035,28 @@ export async function applyProjectTemplatePlan(options: {
       try {
         await removeProjectTemplateStagingTransaction({ storage, transactionId });
         await removeProjectTemplateBackupGeneration({ storage, backupId });
-        return notStarted(
-          'APPLY_FAILED_ROLLED_BACK',
-          'apply preparation failed and partial artifacts were removed',
-        );
+        return error instanceof BaseLockPreparationDriftError
+          ? notStarted(
+            'BASE_LOCK_DRIFT',
+            'formal template lock changed during backup preparation',
+          )
+          : notStarted(
+            'APPLY_FAILED_ROLLED_BACK',
+            'apply preparation failed and partial artifacts were removed',
+          );
       } catch {
         // No manifest/journal exists yet, so a recovery marker would be
         // impossible to clear through the recovery protocol. Leave the bounded
         // orphan for the next lease holder's preparation sweep instead.
-        return notStarted(
-          'APPLY_FAILED_ROLLED_BACK',
-          'apply preparation failed; partial artifacts will be reclaimed on retry',
-        );
+        return error instanceof BaseLockPreparationDriftError
+          ? notStarted(
+            'BASE_LOCK_DRIFT',
+            'formal template lock changed during backup preparation',
+          )
+          : notStarted(
+            'APPLY_FAILED_ROLLED_BACK',
+            'apply preparation failed; partial artifacts will be reclaimed on retry',
+          );
       }
     }
     if (storage !== undefined && manifest !== undefined && transactionId !== undefined) {
