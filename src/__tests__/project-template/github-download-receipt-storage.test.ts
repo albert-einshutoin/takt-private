@@ -24,6 +24,8 @@ import {
   writeTaktpack,
 } from '../../features/project-template/index.js';
 import {
+  claimStoredGithubTemplateDownloadReceiptForOfflineRead,
+  consumeStoredGithubTemplateDownloadReceiptOfflineReadClaim,
   githubTemplateReceiptDirectoryDurability,
   GithubTemplateDownloadReceiptStorageError,
   storeGithubTemplateDownloadReceipt,
@@ -222,6 +224,32 @@ describe('GitHub template authenticated receipt durable store D2a', () => {
       .toBe('unsupported');
     expect(githubTemplateReceiptDirectoryDurability('darwin')).toBe('synced');
     expect(githubTemplateReceiptDirectoryDurability('linux')).toBe('synced');
+  });
+
+  it('seals the stored result for one future D2b offline-read claim', async () => {
+    const fixture = await createFixture();
+    const stored = await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    expect(() => claimStoredGithubTemplateDownloadReceiptForOfflineRead({
+      ...stored,
+    })).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    const claim = claimStoredGithubTemplateDownloadReceiptForOfflineRead(
+      stored,
+    );
+    expect(claim.stored).toBe(stored);
+    expect(() => claimStoredGithubTemplateDownloadReceiptForOfflineRead(
+      stored,
+    )).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => consumeStoredGithubTemplateDownloadReceiptOfflineReadClaim({
+      ...claim,
+    })).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    consumeStoredGithubTemplateDownloadReceiptOfflineReadClaim(claim);
+    expect(() => consumeStoredGithubTemplateDownloadReceiptOfflineReadClaim(
+      claim,
+    )).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
   });
 
   it('rejects clone, reuse, and parallel use before verifier progress', async () => {

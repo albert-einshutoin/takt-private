@@ -37,6 +37,8 @@ const RECEIPT_TEMP_PATTERN =
   /^\.tmp\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[a-f0-9]{64}$/;
 const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
 const DIRECTORY_FLAG = process.platform === 'win32' ? 0 : constants.O_DIRECTORY;
+const STORED_RECEIPT_CLAIM_BRAND: unique symbol =
+  Symbol('stored-github-template-download-receipt-claim');
 
 export type GithubTemplateDownloadReceiptState =
   | 'none'
@@ -123,6 +125,11 @@ export interface StoredGithubTemplateDownloadReceipt {
   readonly directoryDurability: 'synced' | 'unsupported';
 }
 
+export interface ClaimedStoredGithubTemplateDownloadReceipt {
+  readonly stored: StoredGithubTemplateDownloadReceipt;
+  readonly [STORED_RECEIPT_CLAIM_BRAND]: true;
+}
+
 interface VerifierSnapshot {
   readonly receiver: object;
   readonly verify: GithubTemplateDownloadReceiptVerifier['verify'];
@@ -166,6 +173,18 @@ interface StoreContext {
   final?: FileAuthority;
   receiptParent?: DirectoryAuthority;
 }
+
+const STORED_RECEIPT_AUTHORITIES = new WeakMap<
+  object,
+  { state: 'active' | 'consuming' | 'consumed' }
+>();
+const STORED_RECEIPT_CLAIMS = new WeakMap<
+  object,
+  {
+    readonly stored: StoredGithubTemplateDownloadReceipt;
+    readonly authority: { state: 'active' | 'consuming' | 'consumed' };
+  }
+>();
 
 function storageError(
   code: GithubTemplateDownloadReceiptStorageErrorCode,
@@ -1385,5 +1404,57 @@ export async function storeGithubTemplateDownloadReceipt(
     }
   }
   if (failure !== undefined) throw withReceiptState(failure, context);
+  STORED_RECEIPT_AUTHORITIES.set(result!, { state: 'active' });
   return result!;
+}
+
+/**
+ * Claims only the process-local handoff into D2b. The seal is not offline
+ * trust: D2b must reopen and revalidate disk paths, artifact identity, exact
+ * canonical bytes, receipt key, and HMAC before using persisted provenance.
+ */
+export function claimStoredGithubTemplateDownloadReceiptForOfflineRead(
+  value: unknown,
+): ClaimedStoredGithubTemplateDownloadReceipt {
+  const authority = (
+    typeof value === 'object' && value !== null
+      ? STORED_RECEIPT_AUTHORITIES.get(value)
+      : undefined
+  );
+  if (authority === undefined || authority.state !== 'active') {
+    throw storageError(
+      'INVALID_AUTHORITY',
+      'stored GitHub template receipt authority is invalid',
+    );
+  }
+  authority.state = 'consuming';
+  const stored = value as StoredGithubTemplateDownloadReceipt;
+  const claim = Object.freeze({
+    stored,
+    [STORED_RECEIPT_CLAIM_BRAND]: true as const,
+  });
+  STORED_RECEIPT_CLAIMS.set(claim, { stored, authority });
+  return claim;
+}
+
+export function consumeStoredGithubTemplateDownloadReceiptOfflineReadClaim(
+  value: ClaimedStoredGithubTemplateDownloadReceipt,
+): void {
+  const claim = (
+    typeof value === 'object' && value !== null
+      ? STORED_RECEIPT_CLAIMS.get(value)
+      : undefined
+  );
+  if (
+    claim === undefined
+    || claim.authority.state !== 'consuming'
+    || value.stored !== claim.stored
+  ) {
+    throw storageError(
+      'INVALID_AUTHORITY',
+      'stored GitHub template receipt claim is invalid',
+    );
+  }
+  STORED_RECEIPT_CLAIMS.delete(value);
+  claim.authority.state = 'consumed';
 }
