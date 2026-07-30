@@ -93,7 +93,8 @@ export type GithubTemplateDownloadOrchestratorErrorCode =
   | 'RECEIPT_FAILED'
   | 'RECEIPT_STORAGE_FAILED'
   | 'CLEANUP_FAILED'
-  | 'LEASE_RELEASE_FAILED';
+  | 'LEASE_RELEASE_FAILED'
+  | 'INTERNAL_FAILURE';
 
 export class GithubTemplateDownloadOrchestratorError extends Error {
   constructor(
@@ -105,6 +106,7 @@ export class GithubTemplateDownloadOrchestratorError extends Error {
       | 'cache-published',
     public readonly receiptState?: GithubTemplateDownloadReceiptState,
     public readonly releaseState?: 'uncertain',
+    public readonly cleanupState?: 'failed',
   ) {
     super(message);
     this.name = 'GithubTemplateDownloadOrchestratorError';
@@ -179,6 +181,7 @@ function orchestratorError(
   artifactState?: 'none' | 'staging-only' | 'cache-published',
   receiptState?: GithubTemplateDownloadReceiptState,
   releaseState?: 'uncertain',
+  cleanupState?: 'failed',
 ): GithubTemplateDownloadOrchestratorError {
   return Object.freeze(
     new GithubTemplateDownloadOrchestratorError(
@@ -187,6 +190,7 @@ function orchestratorError(
       artifactState,
       receiptState,
       releaseState,
+      cleanupState,
     ),
   );
 }
@@ -230,33 +234,85 @@ function snapshotDependency(value: unknown): ResolvedGithubTemplateSource[
     'commit',
     'capabilities',
   ]);
-  const capabilities = dependency['capabilities'];
+  const capabilities = snapshotDenseDataArray(
+    dependency['capabilities'],
+    1,
+  );
   if (
     typeof dependency['scope'] !== 'string'
     || typeof dependency['version'] !== 'string'
     || typeof dependency['source'] !== 'string'
     || typeof dependency['commit'] !== 'string'
     || !COMMIT_PATTERN.test(dependency['commit'])
-    || !Array.isArray(capabilities)
-    || types.isProxy(capabilities)
-    || capabilities.some((capability) => capability !== 'edit')
+    || capabilities.length !== 1
+    || capabilities[0] !== 'edit'
   ) throw new Error();
   return Object.freeze({
     scope: dependency['scope'] as `@${string}/${string}`,
     version: dependency['version'] as string,
     source: dependency['source'] as `github:${string}/${string}@${string}`,
     commit: dependency['commit'] as string,
-    capabilities: Object.freeze([...capabilities]) as readonly ['edit'],
+    capabilities: Object.freeze(['edit'] as const),
   });
+}
+
+function snapshotDenseDataArray(
+  value: unknown,
+  maxLength: number,
+): readonly unknown[] {
+  if (
+    !Array.isArray(value)
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Array.prototype
+  ) throw new Error();
+  const descriptors = Object.getOwnPropertyDescriptors(value) as Record<
+    string,
+    PropertyDescriptor
+  >;
+  const lengthDescriptor = descriptors['length'];
+  const lengthValue = lengthDescriptor?.value;
+  if (
+    lengthDescriptor === undefined
+    || !('value' in lengthDescriptor)
+    || typeof lengthValue !== 'number'
+    || !Number.isSafeInteger(lengthValue)
+    || lengthValue < 0
+    || lengthValue > maxLength
+  ) throw new Error();
+  const length = lengthValue;
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== length + 1
+    || keys.some((key) => (
+      typeof key !== 'string'
+      || (
+        key !== 'length'
+        && (
+          !/^(0|[1-9]\d*)$/.test(key)
+          || Number(key) >= length
+        )
+      )
+    ))
+  ) throw new Error();
+  const copy: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      throw new Error();
+    }
+    copy[index] = descriptor.value;
+  }
+  return Object.freeze(copy);
 }
 
 function snapshotResolved(value: unknown): ResolvedSnapshot {
   const resolved = ownDataRecord(value, RESOLVED_FIELDS);
-  const dependencies = resolved['declaredDependencies'];
+  const dependencies = snapshotDenseDataArray(
+    resolved['declaredDependencies'],
+    256,
+  );
   if (
-    !Array.isArray(dependencies)
-    || types.isProxy(dependencies)
-    || resolved['kind'] !== 'resolved-github-template-source'
+    resolved['kind'] !== 'resolved-github-template-source'
     || [
       'owner',
       'repo',
@@ -288,11 +344,15 @@ function snapshotResolved(value: unknown): ResolvedSnapshot {
     || typeof resolved['downloadEligible'] !== 'boolean'
     || typeof resolved['hardBlocked'] !== 'boolean'
   ) throw new Error();
+  const dependencySnapshots: Array<
+    ResolvedGithubTemplateSource['declaredDependencies'][number]
+  > = [];
+  for (let index = 0; index < dependencies.length; index += 1) {
+    dependencySnapshots[index] = snapshotDependency(dependencies[index]);
+  }
   return Object.freeze({
     ...resolved,
-    declaredDependencies: Object.freeze(
-      dependencies.map(snapshotDependency),
-    ),
+    declaredDependencies: Object.freeze(dependencySnapshots),
   }) as ResolvedSnapshot;
 }
 
@@ -485,36 +545,52 @@ function dependenciesEqual(
   left: ResolvedGithubTemplateSource['declaredDependencies'],
   right: ResolvedGithubTemplateSource['declaredDependencies'],
 ): boolean {
-  return left.length === right.length
-    && left.every((dependency, index) => {
-      const candidate = right[index];
-      return candidate !== undefined
-        && dependency.scope === candidate.scope
-        && dependency.version === candidate.version
-        && dependency.source === candidate.source
-        && dependency.commit === candidate.commit
-        && dependency.capabilities.length === candidate.capabilities.length
-        && dependency.capabilities.every(
-          (capability, capabilityIndex) => (
-            capability === candidate.capabilities[capabilityIndex]
-          ),
-        );
-    });
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const dependency = left[index]!;
+    const candidate = right[index]!;
+    if (
+      dependency.scope !== candidate.scope
+      || dependency.version !== candidate.version
+      || dependency.source !== candidate.source
+      || dependency.commit !== candidate.commit
+      || dependency.capabilities.length !== candidate.capabilities.length
+    ) return false;
+    for (
+      let capabilityIndex = 0;
+      capabilityIndex < dependency.capabilities.length;
+      capabilityIndex += 1
+    ) {
+      if (
+        dependency.capabilities[capabilityIndex]
+          !== candidate.capabilities[capabilityIndex]
+      ) return false;
+    }
+  }
+  return true;
 }
 
 function resolvedExactlyMatches(
   advisory: ResolvedSnapshot,
   fresh: ResolvedGithubTemplateSource,
 ): boolean {
-  return RESOLVED_FIELDS.every((field) => {
+  let freshSnapshot: ResolvedSnapshot;
+  try {
+    freshSnapshot = snapshotResolved(fresh);
+  } catch {
+    return false;
+  }
+  for (const field of RESOLVED_FIELDS) {
     if (field === 'declaredDependencies') {
-      return dependenciesEqual(
+      if (!dependenciesEqual(
         advisory.declaredDependencies,
-        fresh.declaredDependencies,
-      );
+        freshSnapshot.declaredDependencies,
+      )) return false;
+      continue;
     }
-    return advisory[field] === fresh[field];
-  });
+    if (advisory[field] !== freshSnapshot[field]) return false;
+  }
+  return true;
 }
 
 function requireGuardPassed(
@@ -787,6 +863,19 @@ export async function downloadGithubTemplateSource(
         artifactState,
       );
     }
+    try {
+      assertProjectTemplateMutationLeaseOwned(snapshot.projectRoot, lease);
+    } catch {
+      throw orchestratorError(
+        'LEASE_LOST',
+        'GitHub template download lease was lost',
+        'cache-published',
+        'none',
+      );
+    }
+    // Materialization is the commit point: cancellation after this point must
+    // not strand an authenticated cache without its durable receipt. Only
+    // lease ownership can stop the tail before signing.
 
     let prepared: Awaited<ReturnType<
       typeof prepareGithubTemplateDownloadReceipt
@@ -862,6 +951,8 @@ export async function downloadGithubTemplateSource(
             failure.message,
             discarded.artifactState,
             failure.receiptState,
+            failure.releaseState,
+            failure.cleanupState,
           );
         }
       } catch (error) {
@@ -878,6 +969,9 @@ export async function downloadGithubTemplateSource(
             'CLEANUP_FAILED',
             'GitHub template staging cleanup failed',
             artifactState,
+            undefined,
+            undefined,
+            'failed',
           );
         } else if (failure.artifactState !== artifactState) {
           failure = orchestratorError(
@@ -885,6 +979,17 @@ export async function downloadGithubTemplateSource(
             failure.message,
             artifactState,
             failure.receiptState,
+            failure.releaseState,
+            'failed',
+          );
+        } else {
+          failure = orchestratorError(
+            failure.code,
+            failure.message,
+            failure.artifactState,
+            failure.receiptState,
+            failure.releaseState,
+            'failed',
           );
         }
       }
@@ -908,11 +1013,18 @@ export async function downloadGithubTemplateSource(
             failure.artifactState,
             failure.receiptState,
             'uncertain',
+            failure.cleanupState,
           );
         }
       }
     }
   }
   if (failure !== undefined) throw failure;
-  return result!;
+  if (result === undefined) {
+    throw orchestratorError(
+      'INTERNAL_FAILURE',
+      'GitHub template download did not produce a result',
+    );
+  }
+  return result;
 }

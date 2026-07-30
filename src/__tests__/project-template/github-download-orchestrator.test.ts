@@ -9,6 +9,7 @@ import {
   realpathSync,
   rmSync,
   unlinkSync,
+  watch,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -429,6 +430,105 @@ describe('GitHub template download orchestrator O1', () => {
     expect(stagingEntries(fixture.projectRoot)).toEqual([]);
   });
 
+  it('stops before authentication when the lease is lost during materialization', async () => {
+    const fixture = await makeFixture();
+    const lockPath = join(
+      fixture.projectRoot,
+      '.takt-template-state',
+      'apply.lock',
+    );
+    let signingCalls = 0;
+    let removed = false;
+    const shaRoot = join(fixture.cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const watcher = watch(
+      shaRoot,
+      () => {
+        const materializationStarted = readdirSync(shaRoot).some(
+          (entry) =>
+            entry.startsWith('.tmp.') || entry.endsWith('.taktpack'),
+        );
+        if (!removed && materializationStarted && existsSync(lockPath)) {
+          removed = true;
+          unlinkSync(lockPath);
+        }
+      },
+    );
+    let error: unknown;
+    try {
+      error = await downloadGithubTemplateSource({
+        projectRoot: fixture.projectRoot,
+        source: fixture.source,
+        advisory: fixture.advisory,
+        metadata: fixture.metadata,
+        asset: fixture.asset,
+        cacheRoot: fixture.cacheRoot,
+        authenticator: {
+          async acquireSigningKey() {
+            signingCalls += 1;
+            return fixture.authenticator.acquireSigningKey();
+          },
+        },
+        verifier: fixture.verifier,
+      }).catch((caught: unknown) => caught);
+    } finally {
+      watcher.close();
+    }
+    expect(removed).toBe(true);
+    expect(error).toMatchObject({
+      code: 'LEASE_LOST',
+      artifactState: 'cache-published',
+      receiptState: 'none',
+      releaseState: 'uncertain',
+    });
+    expect(signingCalls).toBe(0);
+  });
+
+  it('preserves primary identity across discard and release failures', async () => {
+    const fixture = await makeFixture();
+    const lockPath = join(
+      fixture.projectRoot,
+      '.takt-template-state',
+      'apply.lock',
+    );
+    const asset: GithubTemplateArchiveAssetPort = {
+      openReleaseAsset() {
+        return (async function* () {
+          yield fixture.content;
+          const stagingRoot = join(
+            fixture.projectRoot,
+            '.takt-template-state',
+            'download-staging',
+          );
+          const stagingDirectory = join(
+            stagingRoot,
+            readdirSync(stagingRoot)[0]!,
+          );
+          writeFileSync(join(stagingDirectory, 'unexpected'), 'keep');
+          unlinkSync(lockPath);
+        })();
+      },
+    };
+
+    const error = await downloadGithubTemplateSource({
+      projectRoot: fixture.projectRoot,
+      source: fixture.source,
+      advisory: fixture.advisory,
+      metadata: fixture.metadata,
+      asset,
+      cacheRoot: fixture.cacheRoot,
+      authenticator: fixture.authenticator,
+      verifier: fixture.verifier,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: 'LEASE_LOST',
+      artifactState: 'staging-only',
+      receiptState: undefined,
+      cleanupState: 'failed',
+      releaseState: 'uncertain',
+    });
+  });
+
   it('discards partial staging and maps AbortSignal to a finite error', async () => {
     const fixture = await makeFixture();
     const controller = new AbortController();
@@ -678,6 +778,98 @@ describe('GitHub template download orchestrator O1', () => {
         value as Parameters<typeof downloadGithubTemplateSource>[0],
       )).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
       expect(traps).toBe(0);
+    },
+  );
+
+  it.each([
+    ['dependencies', 'index-getter'],
+    ['dependencies', 'map'],
+    ['dependencies', 'some'],
+    ['dependencies', 'iterator'],
+    ['dependencies', 'hole'],
+    ['dependencies', 'proxy'],
+    ['dependencies', 'extra-symbol'],
+    ['capabilities', 'index-getter'],
+    ['capabilities', 'map'],
+    ['capabilities', 'some'],
+    ['capabilities', 'iterator'],
+    ['capabilities', 'hole'],
+    ['capabilities', 'proxy'],
+    ['capabilities', 'extra-symbol'],
+  ] as const)(
+    'rejects hostile %s array %s without executing it',
+    async (target, attack) => {
+      const fixture = await makeFixture();
+      let executions = 0;
+      const createHostileArray = (entry: unknown): unknown[] => {
+        const array: unknown[] = [];
+        if (attack === 'hole') {
+          array.length = 1;
+          return array;
+        }
+        if (attack === 'proxy') {
+          return new Proxy(array, {
+            get() {
+              executions += 1;
+              throw new Error('must not execute');
+            },
+            ownKeys() {
+              executions += 1;
+              throw new Error('must not execute');
+            },
+          });
+        }
+        if (attack === 'index-getter') {
+          Object.defineProperty(array, '0', {
+            enumerable: true,
+            get() {
+              executions += 1;
+              throw new Error('must not execute');
+            },
+          });
+          return array;
+        }
+        array.push(entry);
+        const key = attack === 'iterator'
+          ? Symbol.iterator
+          : attack === 'extra-symbol'
+            ? Symbol('extra')
+            : attack;
+        Object.defineProperty(array, key, {
+          configurable: true,
+          value() {
+            executions += 1;
+            throw new Error('must not execute');
+          },
+        });
+        return array;
+      };
+      const originalDependency =
+        fixture.advisory.declaredDependencies[0]!;
+      const dependencies = target === 'dependencies'
+        ? createHostileArray(originalDependency)
+        : [Object.freeze({
+          ...originalDependency,
+          capabilities: createHostileArray('edit'),
+        })];
+      const advisory = Object.freeze({
+        ...fixture.advisory,
+        declaredDependencies: dependencies,
+      }) as ResolvedGithubTemplateSource;
+
+      await expect(downloadGithubTemplateSource({
+        projectRoot: fixture.projectRoot,
+        source: fixture.source,
+        advisory,
+        metadata: fixture.metadata,
+        asset: fixture.asset,
+        cacheRoot: fixture.cacheRoot,
+        authenticator: fixture.authenticator,
+        verifier: fixture.verifier,
+      })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+      expect(executions).toBe(0);
+      expect(fixture.calls).toEqual([]);
+      expect(fixture.assetCalls).toEqual([]);
     },
   );
 
