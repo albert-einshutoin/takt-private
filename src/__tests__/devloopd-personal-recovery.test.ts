@@ -9,14 +9,17 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   formatPersonalRecoveryReport,
   runPersonalRecovery,
 } from '../devloopd/personalRecovery.js';
 import { resolvePersonalLifecyclePaths } from '../devloopd/personalLifecycle.js';
-import { inspectProjectTemplateApplyGuard } from '../features/project-template/apply-guard.js';
+import {
+  inspectProjectTemplateApplyGuard,
+  resolveProjectTemplateRunStartMutexPath,
+} from '../features/project-template/apply-guard.js';
 
 const cleanupDirs = new Set<string>();
 
@@ -66,6 +69,72 @@ afterEach(() => {
 });
 
 describe('devloopd personal recovery', () => {
+  it('dry-runs then completes abandoned dead coordination recovery', () => {
+    const repoPath = makeTempRepo();
+    const recoveryPath =
+      `${resolveProjectTemplateRunStartMutexPath(repoPath)}.reclaim.recovery`;
+    mkdirSync(dirname(recoveryPath), { recursive: true, mode: 0o700 });
+    writeFileSync(recoveryPath, JSON.stringify({
+      version: 3,
+      token: 'dead-recovery',
+      pid: 99_999,
+      operation: 'namespace-recovery',
+      namespaceToken: 'already-cleaned',
+    }));
+
+    const dryRun = runPersonalRecovery({
+      repoPath,
+      apply: false,
+      probeRunProcess: () => 'dead',
+    });
+    expect(dryRun.actions).toContainEqual(expect.objectContaining({
+      status: 'would_change',
+      name: 'abandoned project template coordination recovery',
+    }));
+    expect(existsSync(recoveryPath)).toBe(true);
+
+    const applied = runPersonalRecovery({
+      repoPath,
+      apply: true,
+      probeRunProcess: () => 'dead',
+    });
+    expect(applied.actions).toContainEqual(expect.objectContaining({
+      status: 'changed',
+      name: 'abandoned project template coordination recovery',
+    }));
+    expect(existsSync(recoveryPath)).toBe(false);
+  });
+
+  it.each(['alive', 'unknown'] as const)(
+    'keeps %s abandoned coordination recovery fail-closed',
+    (processState) => {
+      const repoPath = makeTempRepo();
+      const recoveryPath =
+        `${resolveProjectTemplateRunStartMutexPath(repoPath)}.reclaim.recovery`;
+      mkdirSync(dirname(recoveryPath), { recursive: true, mode: 0o700 });
+      writeFileSync(recoveryPath, JSON.stringify({
+        version: 3,
+        token: 'blocked-recovery',
+        pid: 99_999,
+        operation: 'namespace-recovery',
+        namespaceToken: 'already-cleaned',
+      }));
+
+      const report = runPersonalRecovery({
+        repoPath,
+        apply: true,
+        probeRunProcess: () => processState,
+      });
+
+      expect(report.passed).toBe(false);
+      expect(report.actions).toContainEqual(expect.objectContaining({
+        status: 'fail',
+        name: 'abandoned project template coordination recovery',
+      }));
+      expect(existsSync(recoveryPath)).toBe(true);
+    },
+  );
+
   it('dry-runs stale runs while preserving active runs', () => {
     const repoPath = makeTempRepo();
     writeRunMeta(repoPath, 'run-stale', { updatedAt: '2026-07-06T00:00:00.000Z' });

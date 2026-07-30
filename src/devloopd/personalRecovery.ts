@@ -14,6 +14,9 @@ import { inspectPersonalLifecycle } from './personalLifecycle.js';
 import { writeFileAtomic } from './stateStore.js';
 import { isDebugLoggerRunSlug } from '../shared/utils/debug.js';
 import { isValidReportDirName } from '../shared/utils/index.js';
+import {
+  recoverAbandonedProjectTemplateCoordinationClaimsForRecovery,
+} from '../features/project-template/apply-lease.js';
 
 export type PersonalRecoveryActionStatus = 'would_change' | 'changed' | 'skipped' | 'exists' | 'warn' | 'fail';
 
@@ -446,6 +449,57 @@ function recoverWorktreeDirectories(options: {
     });
 }
 
+function recoverAbandonedCoordinationClaims(options: {
+  repoPath: string;
+  apply: boolean;
+  probeProcess?: (pid: number) => 'alive' | 'dead' | 'unknown';
+}): PersonalRecoveryAction[] {
+  let report;
+  try {
+    report = recoverAbandonedProjectTemplateCoordinationClaimsForRecovery(
+      options.repoPath,
+      {
+        apply: options.apply,
+        ...(options.probeProcess === undefined
+          ? {}
+          : { probeProcess: options.probeProcess }),
+      },
+    );
+  } catch {
+    return [makeAction(
+      'fail',
+      'abandoned project template coordination recovery',
+      'coordination recovery changed during explicit recovery and remains fail-closed',
+    )];
+  }
+  const detail = report.paths.join(', ');
+  switch (report.status) {
+    case 'none':
+      return [];
+    case 'recoverable':
+      return [makeAction(
+        'would_change',
+        'abandoned project template coordination recovery',
+        'would resume coordination recovery owned by a dead process',
+        { detail },
+      )];
+    case 'recovered':
+      return [makeAction(
+        'changed',
+        'abandoned project template coordination recovery',
+        'resumed and completed coordination recovery owned by a dead process',
+        { detail },
+      )];
+    case 'blocked':
+      return [makeAction(
+        'fail',
+        'abandoned project template coordination recovery',
+        'coordination recovery owner is live, unknown, or unsafe; manual recovery is required',
+        { detail },
+      )];
+  }
+}
+
 function buildNextActions(actions: readonly PersonalRecoveryAction[]): string[] {
   const next = new Set<string>();
   if (actions.some((action) => action.status === 'would_change')) {
@@ -493,6 +547,13 @@ export function runPersonalRecovery(options: RunPersonalRecoveryOptions = {}): P
       : { beforeRemoval: options.beforeMissingRunRemoval }),
   }));
   actions.push(
+    ...recoverAbandonedCoordinationClaims({
+      repoPath,
+      apply,
+      ...(options.probeRunProcess === undefined
+        ? {}
+        : { probeProcess: options.probeRunProcess }),
+    }),
     ...recoverLockFiles({ repoPath, apply, lockStaleMinutes, now }),
     ...recoverRetryWindows({ repoPath, ledgerPath: options.ledgerPath, now }),
     ...recoverDaemonMetadata({ repoPath, apply }),
