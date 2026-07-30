@@ -55,6 +55,10 @@ export class GithubTemplateSourceResolutionError extends Error {
   }
 }
 
+// Public error instances are forgeable. Only objects created through the
+// module-private throw path may retain their detailed internal classification.
+const INTERNAL_RESOLUTION_ERRORS = new WeakSet<object>();
+
 export interface GithubTemplateResolveRefInput {
   readonly owner: string;
   readonly repo: string;
@@ -389,7 +393,7 @@ function validateParsedSourceSpec(
     }
     return parsed;
   } catch (error) {
-    if (error instanceof GithubTemplateSourceResolutionError) throw error;
+    if (isInternalResolutionError(error)) throw error;
     resolutionError(
       'INVALID_SOURCE_SPEC',
       'source spec is not a parsed canonical GitHub source',
@@ -805,7 +809,7 @@ function normalizeValidationBoundary<T>(
   try {
     return validate();
   } catch (error) {
-    if (error instanceof GithubTemplateSourceResolutionError) throw error;
+    if (isInternalResolutionError(error)) throw error;
     resolutionError(code, message);
   }
 }
@@ -953,5 +957,20 @@ function resolutionError(
   message: string,
   field?: string,
 ): never {
-  throw new GithubTemplateSourceResolutionError(code, message, field);
+  const error = new GithubTemplateSourceResolutionError(
+    code,
+    message,
+    field,
+  );
+  INTERNAL_RESOLUTION_ERRORS.add(error);
+  throw error;
+}
+
+function isInternalResolutionError(
+  error: unknown,
+): error is GithubTemplateSourceResolutionError {
+  return (
+    (typeof error === 'object' && error !== null)
+    || typeof error === 'function'
+  ) && INTERNAL_RESOLUTION_ERRORS.has(error);
 }

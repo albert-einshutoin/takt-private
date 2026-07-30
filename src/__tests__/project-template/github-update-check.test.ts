@@ -174,6 +174,25 @@ describe('resolveGithubTemplateSource', () => {
     }
   });
 
+  it('redacts a public resolution error thrown by a source Proxy trap', async () => {
+    const parsed = parseProjectTemplateGithubSourceSpec(
+      'github:acme/template@main',
+    );
+    const source = throwingProxy(
+      parsed,
+      () => new GithubTemplateSourceResolutionError(
+        'CHECKSUM_MISMATCH',
+        'raw stderr ghp_source_proxy_secret',
+      ),
+    );
+    const promise = resolveGithubTemplateSource({
+      source,
+      metadata: createPort().port,
+    });
+    await expectResolutionCode(promise, 'INVALID_SOURCE_SPEC');
+    await expectRedacted(promise, 'ghp_source_proxy_secret');
+  });
+
   it('resolves immutable descriptor, release, assets, and checksum evidence', async () => {
     const { port, calls } = createPort();
     const source = parseProjectTemplateGithubSourceSpec(
@@ -592,6 +611,45 @@ describe('resolveGithubTemplateSource', () => {
       }
     },
   );
+
+  it.each([
+    ['ref metadata', 'INVALID_REF_METADATA', {
+      resolveRefToCommit: async () => throwingResolutionErrorProxy(
+        { commit: COMMIT },
+      ),
+    }],
+    ['descriptor payload', 'INVALID_DESCRIPTOR', {
+      readFileAtCommit: async () => throwingResolutionErrorProxy(
+        new TextEncoder().encode(
+          serializeProjectTemplateSourceDescriptor(descriptor()),
+        ),
+      ),
+    }],
+    ['release metadata', 'INVALID_RELEASE_METADATA', {
+      getReleaseByTag: async () => throwingResolutionErrorProxy(
+        releaseMetadata(),
+      ),
+    }],
+    ['checksum payload', 'INVALID_CHECKSUM', {
+      readReleaseAsset: async () => throwingResolutionErrorProxy(
+        new TextEncoder().encode(CHECKSUM_LINE),
+      ),
+    }],
+  ])(
+    'does not trust public resolution error instances from %s',
+    async (_label, code, overrides) => {
+      const promise = resolveGithubTemplateSource({
+        source: parseProjectTemplateGithubSourceSpec(
+          'github:acme/template@main',
+        ),
+        metadata: createPort(
+          overrides as Partial<GithubTemplateSourceMetadataPort>,
+        ).port,
+      });
+      await expectResolutionCode(promise, code);
+      await expectRedacted(promise, 'ghp_forged_resolution_secret');
+    },
+  );
 });
 
 async function expectResolutionCode(
@@ -606,9 +664,12 @@ async function expectResolutionCode(
   );
 }
 
-function throwingProxy<T extends object>(target: T): T {
+function throwingProxy<T extends object>(
+  target: T,
+  createError: () => Error = () => new Error('raw stderr ghp_proxy_secret'),
+): T {
   const fail = (): never => {
-    throw new Error('raw stderr ghp_proxy_secret');
+    throw createError();
   };
   return new Proxy(target, {
     get(_target, property) {
@@ -619,4 +680,26 @@ function throwingProxy<T extends object>(target: T): T {
     ownKeys: fail,
     getOwnPropertyDescriptor: fail,
   });
+}
+
+function throwingResolutionErrorProxy<T extends object>(target: T): T {
+  return throwingProxy(
+    target,
+    () => new GithubTemplateSourceResolutionError(
+      'CHECKSUM_MISMATCH',
+      'raw stderr ghp_forged_resolution_secret',
+    ),
+  );
+}
+
+async function expectRedacted(
+  promise: Promise<unknown>,
+  secret: string,
+): Promise<void> {
+  try {
+    await promise;
+  } catch (error) {
+    expect((error as Error).message).not.toContain(secret);
+    expect(JSON.stringify(error)).not.toContain(secret);
+  }
 }
