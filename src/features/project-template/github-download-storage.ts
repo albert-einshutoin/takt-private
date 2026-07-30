@@ -948,6 +948,8 @@ function prepareCacheDirectories(
 ): {
   shaRoot: string;
   device: number;
+  shaRootFd: number;
+  shaRootInode: number;
 } {
   let cacheRoot: string;
   let cacheStat: Stats;
@@ -992,8 +994,79 @@ function prepareCacheDirectories(
     );
   }
   const shaRoot = join(cacheRoot, 'sha256');
-  ensurePrivateCacheDirectory(shaRoot, cacheRoot, cacheStat.dev, ioSeam);
-  return { shaRoot, device: cacheStat.dev };
+  const shaRootStat = ensurePrivateCacheDirectory(
+    shaRoot,
+    cacheRoot,
+    cacheStat.dev,
+    ioSeam,
+  );
+  let shaRootFd: number | undefined;
+  try {
+    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+    const directoryOnly = process.platform === 'win32'
+      ? 0
+      : constants.O_DIRECTORY;
+    shaRootFd = openSync(
+      shaRoot,
+      constants.O_RDONLY | noFollow | directoryOnly,
+    );
+    const opened = fstatSync(shaRootFd);
+    if (
+      !opened.isDirectory()
+      || opened.dev !== shaRootStat.dev
+      || opened.ino !== shaRootStat.ino
+      || !isProjectTemplatePrivateDirectoryMode(opened.mode)
+    ) throw new Error();
+    return {
+      shaRoot,
+      device: cacheStat.dev,
+      shaRootFd,
+      shaRootInode: opened.ino,
+    };
+  } catch {
+    if (shaRootFd !== undefined) {
+      try {
+        closeSync(shaRootFd);
+      } catch {
+        // Directory authority was never published to the caller.
+      }
+    }
+    throw storageError(
+      'CACHE_INVALID',
+      'GitHub template cache directory is unsafe',
+      'staging-only',
+    );
+  }
+}
+
+function assertCacheDirectoryAuthority(
+  path: string,
+  fd: number,
+  expectedDevice: number,
+  expectedInode: number,
+): void {
+  try {
+    const pathStat = lstatSync(path);
+    const opened = fstatSync(fd);
+    if (
+      pathStat.isSymbolicLink()
+      || !pathStat.isDirectory()
+      || !opened.isDirectory()
+      || pathStat.dev !== expectedDevice
+      || opened.dev !== expectedDevice
+      || pathStat.ino !== expectedInode
+      || opened.ino !== expectedInode
+      || !isProjectTemplatePrivateDirectoryMode(pathStat.mode)
+      || !isProjectTemplatePrivateDirectoryMode(opened.mode)
+      || realpathSync.native(path) !== path
+    ) throw new Error();
+  } catch {
+    throw storageError(
+      'CACHE_INVALID',
+      'GitHub template cache directory authority changed',
+      'cache-published',
+    );
+  }
 }
 
 function requireCacheFileIdentity(
@@ -1166,10 +1239,12 @@ export async function materializeGithubTemplateCache(
   let result: MaterializedGithubTemplateCache | undefined;
   let primaryError: unknown;
   let cacheAvailable = false;
+  let cacheDirectoryFd: number | undefined;
   try {
     const opened = await openVerifiedStagingAuthority(authority, 'consuming');
     stagingFd = opened.fd;
     const cache = prepareCacheDirectories(claim.cacheRoot, claim.ioSeam);
+    cacheDirectoryFd = cache.shaRootFd;
     const cachePath = join(
       cache.shaRoot,
       `${authority.sha256}.taktpack`,
@@ -1203,11 +1278,25 @@ export async function materializeGithubTemplateCache(
       cache.shaRoot,
     );
     try {
-      syncDirectory(cache.shaRoot);
+      // The retained directory descriptor prevents a path swap from turning
+      // durability repair into authority for a different cache directory.
+      assertCacheDirectoryAuthority(
+        cache.shaRoot,
+        cache.shaRootFd,
+        cache.device,
+        cache.shaRootInode,
+      );
+      if (process.platform !== 'win32') fsyncSync(cache.shaRootFd);
+      assertCacheDirectoryAuthority(
+        cache.shaRoot,
+        cache.shaRootFd,
+        cache.device,
+        cache.shaRootInode,
+      );
     } catch {
       throw storageError(
-        'IO_FAILURE',
-        'GitHub template cache directory sync failed',
+        'CACHE_INVALID',
+        'GitHub template cache directory authority changed',
         'cache-published',
       );
     }
@@ -1230,6 +1319,19 @@ export async function materializeGithubTemplateCache(
         cacheAvailable ? 'cache-published' : 'staging-only',
       );
   } finally {
+    if (cacheDirectoryFd !== undefined) {
+      try {
+        closeSync(cacheDirectoryFd);
+      } catch {
+        if (primaryError === undefined) {
+          primaryError = storageError(
+            'IO_FAILURE',
+            'GitHub template cache directory close failed',
+            cacheAvailable ? 'cache-published' : 'staging-only',
+          );
+        }
+      }
+    }
     if (stagingFd !== undefined) {
       try {
         closeSync(stagingFd);
@@ -1250,7 +1352,26 @@ export async function materializeGithubTemplateCache(
       }
     }
   }
-  if (primaryError !== undefined) throw primaryError;
+  if (primaryError !== undefined) {
+    if (isInternalStorageError(primaryError) && !cacheAvailable) {
+      let artifactState: 'none' | 'staging-only' = 'staging-only';
+      try {
+        lstatSync(authority.stagingPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          artifactState = 'none';
+        }
+      }
+      if (primaryError.artifactState !== artifactState) {
+        primaryError = storageError(
+          primaryError.code,
+          primaryError.message,
+          artifactState,
+        );
+      }
+    }
+    throw primaryError;
+  }
   if (result === undefined) {
     throw storageError(
       'IO_FAILURE',

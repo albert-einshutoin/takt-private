@@ -9,6 +9,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -895,13 +896,16 @@ describe('GitHub template existing global cache materialization', () => {
     const first = materializeGithubTemplateCache({ staged, cacheRoot });
     const second = materializeGithubTemplateCache({ staged, cacheRoot });
     const settled = await Promise.allSettled([first, second]);
-    const codes = settled.map((entry) => (
-      entry.status === 'rejected'
-        ? (entry.reason as GithubTemplateDownloadStorageError).code
-        : 'fulfilled'
-    )).sort();
+    const failures = settled
+      .filter((entry): entry is PromiseRejectedResult => (
+        entry.status === 'rejected'
+      ))
+      .map((entry) => entry.reason as GithubTemplateDownloadStorageError);
+    const codes = failures.map((error) => error.code).sort();
 
     expect(codes).toEqual(['CACHE_MISS', 'INVALID_AUTHORITY']);
+    expect(failures.find((error) => error.code === 'CACHE_MISS'))
+      .toMatchObject({ artifactState: 'none' });
     expect(existsSync(staged.stagingPath)).toBe(false);
   });
 
@@ -1067,6 +1071,34 @@ describe('GitHub template existing global cache materialization', () => {
       },
     })).rejects.toMatchObject({ code: 'IO_FAILURE' });
     expect(existsSync(staged.stagingPath)).toBe(false);
+  });
+
+  it('rejects a sha directory replaced before cache-hit durability sync', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const outside = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    writeExistingCache(cacheRoot, content);
+    writeExistingCache(outside, content);
+    const shaRoot = join(cacheRoot, 'sha256');
+    const displaced = join(cacheRoot, 'sha256.displaced');
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase) {
+          if (phase === 'before-cache-hit-parent-fsync') {
+            renameSync(shaRoot, displaced);
+            symlinkSync(join(outside, 'sha256'), shaRoot);
+          }
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+    expect(realpathSync.native(shaRoot)).toBe(
+      realpathSync.native(join(outside, 'sha256')),
+    );
   });
 
   it('preserves a verified cache when staging cleanup fails', async () => {
