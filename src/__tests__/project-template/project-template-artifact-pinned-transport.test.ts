@@ -1549,6 +1549,137 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     expect(handlers.onResponseError).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['data', 'before-add'],
+    ['end', 'before-add'],
+    ['aborted', 'before-add'],
+    ['error', 'before-add'],
+    ['close', 'before-add'],
+    ['data', 'after-add'],
+    ['end', 'after-add'],
+    ['aborted', 'after-add'],
+    ['error', 'after-add'],
+    ['close', 'after-add'],
+  ] as const)(
+    'rolls back %s listener when EventEmitter.on throws %s',
+    (faultEvent, faultStage) => {
+      const request = new FakeRequest();
+      const response = new FakeResponse(200);
+      const responseDestroy = vi.spyOn(response, 'destroy');
+      let retained: ((...args: unknown[]) => void) | undefined;
+      const nativeOn = EventEmitter.prototype.on;
+      vi.spyOn(EventEmitter.prototype, 'on').mockImplementation(
+        function onWithFault(
+          this: EventEmitter,
+          event: string | symbol,
+          listener: (...args: unknown[]) => void,
+        ) {
+          if (this === response && event === faultEvent) {
+            retained = listener;
+            if (faultStage === 'after-add') {
+              Reflect.apply(nativeOn, this, [event, listener]);
+            }
+            throw new Error(`private ${faultStage} ${faultEvent}`);
+          }
+          return Reflect.apply(nativeOn, this, [event, listener]);
+        },
+      );
+      native.dnsLookup.mockImplementation((
+        _hostname: string,
+        _options: unknown,
+        callback: (...args: unknown[]) => void,
+      ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+      native.httpsRequest.mockImplementation((
+        _options: RequestOptions,
+        callback: (value: FakeResponse) => void,
+      ) => {
+        callback(response);
+        return request;
+      });
+      const handlers = makeHandlers();
+      const transport = createProjectTemplateArtifactPinnedTransport(
+        makeHop(),
+        handlers,
+      );
+
+      expect(() => transport.start()).not.toThrow();
+      expect(retained).toBeTypeOf('function');
+      expect(() => retained!(Buffer.from('private retained'))).not.toThrow();
+
+      for (const event of ['data', 'end', 'aborted', 'error', 'close']) {
+        expect(response.listenerCount(event)).toBe(0);
+      }
+      expect(responseDestroy).toHaveBeenCalledTimes(1);
+      expect(request.destroy).toHaveBeenCalledTimes(1);
+      expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+      expect(handlers.onResponseError).toHaveBeenCalledWith();
+      expect(handlers.onResponse).not.toHaveBeenCalled();
+      expect(handlers.onData).not.toHaveBeenCalled();
+      expect(handlers.onEnd).not.toHaveBeenCalled();
+      transport.dispose();
+    },
+  );
+
+  it('revokes a leaked listener when both registration and removal throw', () => {
+    const request = new FakeRequest();
+    const response = new FakeResponse(200);
+    const nativeOn = EventEmitter.prototype.on;
+    const nativeRemove = EventEmitter.prototype.removeListener;
+    let retained: ((...args: unknown[]) => void) | undefined;
+    vi.spyOn(EventEmitter.prototype, 'on').mockImplementation(
+      function onAfterAddFailure(
+        this: EventEmitter,
+        event: string | symbol,
+        listener: (...args: unknown[]) => void,
+      ) {
+        if (this === response && event === 'data') {
+          retained = listener;
+          Reflect.apply(nativeOn, this, [event, listener]);
+          throw new Error('private add failure');
+        }
+        return Reflect.apply(nativeOn, this, [event, listener]);
+      },
+    );
+    vi.spyOn(EventEmitter.prototype, 'removeListener').mockImplementation(
+      function removeFailure(
+        this: EventEmitter,
+        event: string | symbol,
+        listener: (...args: unknown[]) => void,
+      ) {
+        if (this === response && event === 'data') {
+          throw new Error('private remove failure');
+        }
+        return Reflect.apply(nativeRemove, this, [event, listener]);
+      },
+    );
+    native.dnsLookup.mockImplementation((
+      _hostname: string,
+      _options: unknown,
+      callback: (...args: unknown[]) => void,
+    ) => callback(null, [{ address: '93.184.216.34', family: 4 }]));
+    native.httpsRequest.mockImplementation((
+      _options: RequestOptions,
+      callback: (value: FakeResponse) => void,
+    ) => {
+      callback(response);
+      return request;
+    });
+    const handlers = makeHandlers();
+    const transport = createProjectTemplateArtifactPinnedTransport(
+      makeHop(),
+      handlers,
+    );
+
+    expect(() => transport.start()).not.toThrow();
+    expect(response.listenerCount('data')).toBe(1);
+    expect(() => retained!(Buffer.from('private retained'))).not.toThrow();
+    expect(handlers.onResponseError).toHaveBeenCalledTimes(1);
+    expect(handlers.onResponseError).toHaveBeenCalledWith();
+    expect(handlers.onData).not.toHaveBeenCalled();
+    expect(handlers.onEnd).not.toHaveBeenCalled();
+    transport.dispose();
+  });
+
   it('ignores a queued request close after a 200 response claims ownership', () => {
     const request = new FakeRequest();
     const response = new FakeResponse(200);

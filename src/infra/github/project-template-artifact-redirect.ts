@@ -2042,9 +2042,25 @@ export function createProjectTemplateArtifactPinnedTransport(
       createPinnedBodyListener(listenerToken, event),
     ] as const);
     for (const [event, listener] of listeners) {
+      // `on` can throw after EventEmitter has already retained the listener.
+      // Record cleanup ownership first so every failure path can revoke it.
+      body.responseListeners = Object.freeze([
+        ...body.responseListeners,
+        [event, listener] as const,
+      ]);
       try {
         EventEmitter.prototype.on.call(response, event, listener);
       } catch {
+        try {
+          EventEmitter.prototype.removeListener.call(
+            response,
+            event,
+            listener,
+          );
+        } catch {
+          // The following termination revokes the listener token even when
+          // hostile cleanup leaves the physical listener attached.
+        }
         terminate(current, 'onResponseError');
         return;
       }
@@ -2063,10 +2079,6 @@ export function createProjectTemplateArtifactPinnedTransport(
         }
         return;
       }
-      body.responseListeners = Object.freeze([
-        ...body.responseListeners,
-        [event, listener] as const,
-      ]);
     }
     if (!removeRequestListeners(body.request, body.requestListeners)) {
       terminate(current, 'onResponseError');
