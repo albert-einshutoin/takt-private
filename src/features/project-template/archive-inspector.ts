@@ -362,10 +362,11 @@ function normalizeInspectorIoError(error: unknown, field: string): Error {
   );
 }
 
-export async function inspectTaktpackWithIoSeam(
+async function inspectTaktpackWithExpectedLinks(
   archivePath: string,
   options: InspectTaktpackOptions = {},
   ioSeam: TaktpackInspectorIoSeam = {},
+  expectedLinks: 1 | 2 = 1,
 ): Promise<TaktpackInspectResult> {
   const currentVersion = options.currentTaktVersion === undefined
     ? undefined
@@ -377,8 +378,12 @@ export async function inspectTaktpackWithIoSeam(
   } catch {
     throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input cannot be read safely', 'archive');
   }
-  if (pathSnapshot.isSymbolicLink() || !pathSnapshot.isFile() || pathSnapshot.nlink !== 1) {
-    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input must be a regular single-link file', 'archive');
+  if (
+    pathSnapshot.isSymbolicLink()
+    || !pathSnapshot.isFile()
+    || pathSnapshot.nlink !== expectedLinks
+  ) {
+    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input has unsafe link authority', 'archive');
   }
   let handle: Awaited<ReturnType<typeof open>>;
   try {
@@ -413,7 +418,7 @@ export async function inspectTaktpackWithIoSeam(
     const stat = await runIo('handle-stat', 'archive.stat', () => handle.stat());
     if (
       !stat.isFile()
-      || stat.nlink !== 1
+      || stat.nlink !== expectedLinks
       || stat.dev !== pathSnapshot.dev
       || stat.ino !== pathSnapshot.ino
       || stat.size !== pathSnapshot.size
@@ -643,6 +648,26 @@ export async function inspectTaktpackWithIoSeam(
     throw normalizeInspectorIoError(closeFailure, 'archive.close');
   }
   return result!;
+}
+
+export function inspectTaktpackWithIoSeam(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+  ioSeam: TaktpackInspectorIoSeam = {},
+): Promise<TaktpackInspectResult> {
+  return inspectTaktpackWithExpectedLinks(archivePath, options, ioSeam, 1);
+}
+
+/**
+ * Inspects the canonical side of an atomic cache publication while its
+ * temporary hardlink still exists. The ordinary importer remains single-link
+ * only; this narrow entry point exists so cleanup can validate before unlink.
+ */
+export function inspectTaktpackCachePublicationAlias(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+): Promise<TaktpackInspectResult> {
+  return inspectTaktpackWithExpectedLinks(archivePath, options, {}, 2);
 }
 
 export function inspectTaktpack(

@@ -27,6 +27,7 @@ import {
 import {
   GithubTemplateDownloadStorageError,
   materializeGithubTemplateCache,
+  reclaimGithubTemplateCacheTemps,
   stageGithubTemplateDownload,
   verifyGithubTemplateDownloadStaging,
 } from '../../features/project-template/github-download-storage.js';
@@ -99,6 +100,20 @@ function writeExistingCache(
   const path = join(shaRoot, `${sha256(content)}.taktpack`);
   writeFileSync(path, content, { mode: 0o600 });
   return path;
+}
+
+function cacheTempPath(
+  cacheRoot: string,
+  pid: number,
+  sha: string,
+  uuid = '123e4567-e89b-42d3-a456-426614174000',
+): string {
+  return join(cacheRoot, 'sha256', `.tmp.${pid}.${uuid}.${sha}`);
+}
+
+function deadProcessProbe(pid: number): void {
+  if (pid === process.pid) return;
+  throw Object.assign(new Error('dead process'), { code: 'ESRCH' });
 }
 
 afterEach(() => {
@@ -1591,4 +1606,394 @@ describe('GitHub template cache publication alias safety', () => {
     expect(readdirSync(join(cacheRoot, 'sha256'))).toEqual([]);
   });
 
+});
+
+describe('GitHub template cache orphan reclaim', () => {
+  it('deletes dead nlink1 temps but retains live, current, and EPERM owners', async () => {
+    const cacheRoot = prepareCacheRoot();
+    mkdirSync(join(cacheRoot, 'sha256'), { mode: 0o700 });
+    const sha = 'a'.repeat(64);
+    const dead = cacheTempPath(cacheRoot, 900001, sha);
+    const live = cacheTempPath(
+      cacheRoot,
+      900002,
+      sha,
+      '223e4567-e89b-42d3-a456-426614174000',
+    );
+    const current = cacheTempPath(
+      cacheRoot,
+      process.pid,
+      sha,
+      '323e4567-e89b-42d3-a456-426614174000',
+    );
+    const unknown = cacheTempPath(
+      cacheRoot,
+      900003,
+      sha,
+      '423e4567-e89b-42d3-a456-426614174000',
+    );
+    for (const path of [dead, live, current, unknown]) {
+      writeFileSync(path, '', { mode: 0o600 });
+    }
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: {
+        cacheProcessProbe(pid) {
+          if (pid === 900001) return deadProcessProbe(pid);
+          if (pid === 900003) {
+            throw Object.assign(new Error('permission'), { code: 'EPERM' });
+          }
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      reclaimed: 1,
+      matched: 4,
+      skipped: 3,
+      truncated: false,
+      status: 'complete',
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(existsSync(dead)).toBe(false);
+    expect([live, current, unknown].every(existsSync)).toBe(true);
+  });
+
+  it('removes only the temp alias of a fully verified nlink2 final', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const sourceRoot = makeRoot('takt-reclaim-source-');
+    const content = await makePack(sourceRoot);
+    const sha = sha256(content);
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const temp = cacheTempPath(cacheRoot, 900010, sha);
+    const final = join(shaRoot, `${sha}.taktpack`);
+    writeFileSync(temp, content, { mode: 0o600 });
+    linkSync(temp, final);
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: { cacheProcessProbe: deadProcessProbe },
+    });
+
+    expect(result.reclaimed).toBe(1);
+    expect(existsSync(temp)).toBe(false);
+    expect(readFileSync(final)).toEqual(content);
+    expect(lstatSync(final).nlink).toBe(1);
+  });
+
+  it('retains malformed, unsafe, and invalid nlink2 candidates', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const sha = 'b'.repeat(64);
+    const malformed = join(shaRoot, '.tmp.not-valid');
+    const broad = cacheTempPath(cacheRoot, 900020, sha);
+    const linked = cacheTempPath(
+      cacheRoot,
+      900021,
+      sha,
+      '523e4567-e89b-42d3-a456-426614174000',
+    );
+    writeFileSync(malformed, '', { mode: 0o600 });
+    writeFileSync(broad, '', { mode: 0o644 });
+    writeFileSync(linked, 'invalid archive', { mode: 0o600 });
+    linkSync(linked, join(shaRoot, `${sha}.taktpack`));
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: { cacheProcessProbe: deadProcessProbe },
+    });
+
+    expect(result).toMatchObject({
+      reclaimed: 0,
+      skipped: 2,
+      unsafeRetained: 2,
+      truncated: false,
+      status: 'unsafe-retained',
+    });
+    expect([malformed, broad, linked].every(existsSync)).toBe(true);
+  });
+
+  it('bounds deletion to 32 entries', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    for (let index = 0; index < 33; index += 1) {
+      writeFileSync(cacheTempPath(
+        cacheRoot,
+        910000 + index,
+        index.toString(16).padStart(64, '0'),
+        `${index.toString(16).padStart(8, '0')}-e89b-42d3-a456-426614174000`,
+      ), '', { mode: 0o600 });
+    }
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: { cacheProcessProbe: deadProcessProbe },
+    });
+
+    expect(result).toMatchObject({
+      reclaimed: 32,
+      truncated: true,
+      status: 'delete-limit',
+    });
+  });
+
+  it('bounds directory scanning to 8192 entries', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    for (let index = 0; index < 8192; index += 1) {
+      writeFileSync(
+        join(shaRoot, `unrelated-${index.toString().padStart(4, '0')}`),
+        '',
+        { mode: 0o600 },
+      );
+    }
+
+    const result = await reclaimGithubTemplateCacheTemps({ cacheRoot });
+
+    expect(result).toMatchObject({
+      scanned: 8192,
+      reclaimed: 0,
+      truncated: true,
+      status: 'scan-limit',
+    });
+  });
+
+  it('retains a candidate when the owner PID becomes live before unlink', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const temp = cacheTempPath(cacheRoot, 915000, 'd'.repeat(64));
+    writeFileSync(temp, '', { mode: 0o600 });
+    let probes = 0;
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: {
+        cacheProcessProbe() {
+          probes += 1;
+          if (probes === 1) {
+            throw Object.assign(new Error('dead process'), { code: 'ESRCH' });
+          }
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      reclaimed: 0,
+      skipped: 1,
+      unsafeRetained: 1,
+    });
+    expect(probes).toBe(2);
+    expect(existsSync(temp)).toBe(true);
+  });
+
+  it('retains a sole temp inode when its canonical final path exists', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const sha = 'e'.repeat(64);
+    const temp = cacheTempPath(cacheRoot, 916000, sha);
+    writeFileSync(temp, '', { mode: 0o600 });
+    writeFileSync(join(shaRoot, `${sha}.taktpack`), '', { mode: 0o600 });
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: { cacheProcessProbe: deadProcessProbe },
+    });
+
+    expect(result).toMatchObject({
+      reclaimed: 0,
+      skipped: 1,
+      unsafeRetained: 1,
+    });
+    expect(existsSync(temp)).toBe(true);
+  });
+
+  it('retains symlink and over-linked candidates', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const shaRoot = join(cacheRoot, 'sha256');
+    const externalRoot = makeRoot('takt-reclaim-external-');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const sha = 'f'.repeat(64);
+    const symlink = cacheTempPath(cacheRoot, 916010, sha);
+    const linked = cacheTempPath(
+      cacheRoot,
+      916011,
+      sha,
+      '623e4567-e89b-42d3-a456-426614174000',
+    );
+    const external = join(externalRoot, 'external');
+    writeFileSync(external, '', { mode: 0o600 });
+    symlinkSync(external, symlink);
+    writeFileSync(linked, '', { mode: 0o600 });
+    linkSync(linked, join(externalRoot, 'alias-1'));
+    linkSync(linked, join(externalRoot, 'alias-2'));
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: { cacheProcessProbe: deadProcessProbe },
+    });
+
+    expect(result).toMatchObject({
+      reclaimed: 0,
+      skipped: 2,
+      unsafeRetained: 2,
+    });
+    expect(lstatSync(symlink).isSymbolicLink()).toBe(true);
+    expect(lstatSync(linked).nlink).toBe(3);
+  });
+
+  it('retains the replacement when a candidate path changes before unlink', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const shaRoot = join(cacheRoot, 'sha256');
+    const externalRoot = makeRoot('takt-reclaim-swap-');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const temp = cacheTempPath(cacheRoot, 916020, '1'.repeat(64));
+    const external = join(externalRoot, 'external');
+    writeFileSync(temp, '', { mode: 0o600 });
+    writeFileSync(external, 'do-not-delete', { mode: 0o600 });
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: {
+        cacheProcessProbe: deadProcessProbe,
+        onCachePhase(phase) {
+          if (phase === 'before-cache-reclaim-unlink') {
+            unlinkSync(temp);
+            symlinkSync(external, temp);
+          }
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      reclaimed: 0,
+      skipped: 1,
+      unsafeRetained: 1,
+    });
+    expect(lstatSync(temp).isSymbolicLink()).toBe(true);
+    expect(readFileSync(external, 'utf8')).toBe('do-not-delete');
+  });
+
+  it('retains a linked candidate mutated after semantic inspection', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const sourceRoot = makeRoot('takt-reclaim-mutation-source-');
+    const content = await makePack(sourceRoot);
+    const sha = sha256(content);
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const temp = cacheTempPath(cacheRoot, 916025, sha);
+    const final = join(shaRoot, `${sha}.taktpack`);
+    writeFileSync(temp, content, { mode: 0o600 });
+    linkSync(temp, final);
+
+    const result = await reclaimGithubTemplateCacheTemps({
+      cacheRoot,
+      ioSeam: {
+        cacheProcessProbe: deadProcessProbe,
+        onCachePhase(phase) {
+          if (phase === 'before-cache-reclaim-unlink') {
+            writeFileSync(final, Buffer.alloc(content.byteLength));
+          }
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      reclaimed: 0,
+      skipped: 1,
+      unsafeRetained: 1,
+    });
+    expect(existsSync(temp)).toBe(true);
+    expect(lstatSync(final).nlink).toBe(2);
+  });
+
+  it('reclaims before materialization and blocks publication on reclaim fault', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const shaRoot = join(cacheRoot, 'sha256');
+    mkdirSync(shaRoot, { mode: 0o700 });
+    const orphan = cacheTempPath(cacheRoot, 916030, '2'.repeat(64));
+    writeFileSync(orphan, '', { mode: 0o600 });
+    const first = await stagePack(makeRoot('takt-reclaim-materialize-'));
+
+    await expect(materializeGithubTemplateCache({
+      staged: first.staged,
+      cacheRoot,
+      ioSeam: { cacheProcessProbe: deadProcessProbe },
+    })).resolves.toMatchObject({ status: 'cache-published' });
+    expect(existsSync(orphan)).toBe(false);
+
+    const blockedCacheRoot = prepareCacheRoot();
+    const blockedShaRoot = join(blockedCacheRoot, 'sha256');
+    mkdirSync(blockedShaRoot, { mode: 0o700 });
+    const blockedOrphan = cacheTempPath(
+      blockedCacheRoot,
+      916031,
+      '3'.repeat(64),
+      '723e4567-e89b-42d3-a456-426614174000',
+    );
+    writeFileSync(blockedOrphan, '', { mode: 0o600 });
+    const second = await stagePack(makeRoot('takt-reclaim-blocked-'));
+    const error = await materializeGithubTemplateCache({
+      staged: second.staged,
+      cacheRoot: blockedCacheRoot,
+      ioSeam: {
+        cacheProcessProbe: deadProcessProbe,
+        onCachePhase(phase) {
+          if (phase === 'before-cache-reclaim-unlink') {
+            throw new Error('ghp_reclaim_materialize_secret');
+          }
+        },
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'IO_FAILURE',
+      artifactState: 'none',
+    });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_reclaim_materialize_secret',
+    );
+    expect(existsSync(blockedOrphan)).toBe(true);
+    expect(existsSync(second.staged.stagingPath)).toBe(false);
+    expect(
+      existsSync(join(blockedShaRoot, `${second.staged.sha256}.taktpack`)),
+    ).toBe(false);
+  });
+
+  it('redacts unlink and fsync reclaim faults', async () => {
+    for (const fault of ['unlink', 'fsync'] as const) {
+      const cacheRoot = prepareCacheRoot();
+      const shaRoot = join(cacheRoot, 'sha256');
+      mkdirSync(shaRoot, { mode: 0o700 });
+      writeFileSync(
+        cacheTempPath(cacheRoot, 920000, 'c'.repeat(64)),
+        '',
+        { mode: 0o600 },
+      );
+      const error = await reclaimGithubTemplateCacheTemps({
+        cacheRoot,
+        ioSeam: {
+          cacheProcessProbe: deadProcessProbe,
+          onCachePhase(phase) {
+            if (
+              (fault === 'unlink' && phase === 'before-cache-reclaim-unlink')
+              || (fault === 'fsync' && phase === 'before-cache-reclaim-fsync')
+            ) {
+              throw new Error('ghp_reclaim_fault_secret');
+            }
+          },
+        },
+      }).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: 'IO_FAILURE' });
+      expect(String((error as Error).message)).not.toContain(
+        'ghp_reclaim_fault_secret',
+      );
+    }
+  });
 });
