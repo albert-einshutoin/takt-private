@@ -19,20 +19,21 @@ export interface ProjectTemplateConfigMergeRule {
   readonly reviewRequired: boolean;
 }
 
-interface RegisteredConfigMergeRule extends ProjectTemplateConfigMergeRule {
+export interface RegisteredProjectTemplateConfigMergeRule
+  extends ProjectTemplateConfigMergeRule {
   readonly document: ProjectTemplateConfigDocument | '*';
   readonly pattern: readonly string[];
 }
 
 function rule(
-  document: RegisteredConfigMergeRule['document'],
+  document: RegisteredProjectTemplateConfigMergeRule['document'],
   pattern: string,
   ownership: ProjectTemplateConfigOwnership,
   options: {
     sequencePolicy?: ProjectTemplateConfigSequencePolicy;
     reviewRequired?: boolean;
   } = {},
-): RegisteredConfigMergeRule {
+): RegisteredProjectTemplateConfigMergeRule {
   return {
     document,
     pattern: pattern.split('.'),
@@ -69,18 +70,38 @@ const SEQUENCE_RULES = [
   rule('config.yaml', 'submodules', 'project-owned', {
     sequencePolicy: 'atomic',
   }),
-  rule('config.yaml', 'disabled_builtins', 'project-owned', {
+  rule('config.yaml', 'runtime.prepare', 'project-owned', {
+    sequencePolicy: 'atomic',
+  }),
+  rule('config.yaml', 'provider_options.opencode.allowed_tools', 'project-owned', {
     sequencePolicy: 'unordered-set',
+    reviewRequired: true,
+  }),
+  rule('config.yaml', 'provider_options.claude.allowed_tools', 'project-owned', {
+    sequencePolicy: 'unordered-set',
+    reviewRequired: true,
+  }),
+  rule(
+    'config.yaml',
+    'provider_options.claude.sandbox.excluded_commands',
+    'project-owned',
+    { sequencePolicy: 'monotonic-set' },
+  ),
+  rule('config.yaml', 'provider_options.*.allowed_tools', 'project-owned', {
+    sequencePolicy: 'unordered-set',
+    reviewRequired: true,
   }),
   rule('devloopd.yaml', 'policy.quality_gates', 'project-owned', {
     sequencePolicy: 'ordered-keyed',
   }),
 ] as const;
 
-export const CONFIG_SEQUENCE_RULES: readonly ProjectTemplateConfigMergeRule[] =
+export const CONFIG_SEQUENCE_RULES:
+readonly RegisteredProjectTemplateConfigMergeRule[] =
   SEQUENCE_RULES;
 
-const REGISTERED_RULES: readonly RegisteredConfigMergeRule[] = [
+const REGISTERED_RULES:
+readonly RegisteredProjectTemplateConfigMergeRule[] = [
   ...SEQUENCE_RULES,
   rule('config.yaml', 'provider_routing.**', 'project-owned'),
   rule('config.yaml', 'provider_routing', 'project-owned'),
@@ -88,14 +109,29 @@ const REGISTERED_RULES: readonly RegisteredConfigMergeRule[] = [
   rule('config.yaml', 'persona_providers', 'project-owned'),
   rule('config.yaml', 'takt_providers.**', 'project-owned'),
   rule('config.yaml', 'takt_providers', 'project-owned'),
+  rule('config.yaml', 'provider_options.codex.network_access', 'project-owned', {
+    reviewRequired: true,
+  }),
+  rule(
+    'config.yaml',
+    'provider_options.claude.sandbox.allow_unsandboxed_commands',
+    'project-owned',
+    { reviewRequired: true },
+  ),
   rule('config.yaml', 'provider_options.**', 'project-owned'),
   rule('config.yaml', 'provider_options', 'project-owned'),
   rule('config.yaml', 'base_branch', 'project-owned'),
   rule('config.yaml', 'branch_name_strategy', 'project-owned'),
   rule('config.yaml', 'pipeline.**', 'project-owned'),
   rule('config.yaml', 'pipeline', 'project-owned'),
+  rule('config.yaml', 'workflow_command_gates.custom_scripts', 'project-owned', {
+    reviewRequired: true,
+  }),
   rule('config.yaml', 'workflow_command_gates.**', 'project-owned'),
   rule('config.yaml', 'workflow_command_gates', 'project-owned'),
+  rule('config.yaml', 'workflow_runtime_prepare.custom_scripts', 'project-owned', {
+    reviewRequired: true,
+  }),
   rule('config.yaml', 'workflow_runtime_prepare.**', 'project-owned'),
   rule('config.yaml', 'workflow_runtime_prepare', 'project-owned'),
   rule('config.yaml', 'runtime.**', 'project-owned'),
@@ -106,8 +142,20 @@ const REGISTERED_RULES: readonly RegisteredConfigMergeRule[] = [
   rule('config.yaml', 'workflow_mcp_servers', 'project-owned', {
     reviewRequired: true,
   }),
+  rule('config.yaml', 'workflow_arpeggio.custom_data_source_modules', 'project-owned', {
+    reviewRequired: true,
+  }),
+  rule('config.yaml', 'workflow_arpeggio.custom_merge_inline_js', 'project-owned', {
+    reviewRequired: true,
+  }),
+  rule('config.yaml', 'workflow_arpeggio.custom_merge_files', 'project-owned', {
+    reviewRequired: true,
+  }),
   rule('config.yaml', 'workflow_arpeggio.**', 'project-owned'),
   rule('config.yaml', 'workflow_arpeggio', 'project-owned'),
+  rule('config.yaml', 'sync_conflict_resolver.auto_approve_tools', 'project-owned', {
+    reviewRequired: true,
+  }),
   rule('config.yaml', 'sync_conflict_resolver.**', 'project-owned'),
   rule('config.yaml', 'sync_conflict_resolver', 'project-owned'),
   rule('config.yaml', 'vcs_provider', 'project-owned'),
@@ -120,7 +168,6 @@ const REGISTERED_RULES: readonly RegisteredConfigMergeRule[] = [
   rule('config.yaml', 'model', 'project-owned'),
   rule('config.yaml', 'concurrency', 'project-owned'),
   rule('config.yaml', 'with_submodules', 'project-owned'),
-  rule('config.yaml', 'auto_fetch', 'template-managed'),
   rule('config.yaml', 'language', 'template-managed'),
   rule('config.yaml', 'timezone', 'template-managed'),
   rule('config.yaml', 'minimal_output', 'template-managed'),
@@ -136,6 +183,10 @@ const REGISTERED_RULES: readonly RegisteredConfigMergeRule[] = [
   rule('config.yaml', 'notification_sound_events.**', 'global-only'),
   rule('config.yaml', 'notification_sound_events', 'global-only'),
   rule('config.yaml', 'notification_sound', 'global-only'),
+  rule('config.yaml', 'disabled_builtins', 'global-only'),
+  rule('config.yaml', 'enable_builtin_workflows', 'global-only'),
+  rule('config.yaml', 'prevent_sleep', 'global-only'),
+  rule('config.yaml', 'auto_fetch', 'global-only'),
   rule('devloopd.yaml', '**', 'project-owned'),
 ];
 
@@ -152,14 +203,29 @@ function matchesPattern(
 }
 
 function isCredentialPath(path: readonly string[]): boolean {
-  return path.some((segment) => (
-    segment === 'api_key'
-    || segment.endsWith('_api_key')
-    || segment.endsWith('_token')
-    || segment === 'token'
-    || segment === 'secret'
-    || segment === 'password'
-  ));
+  return path.some((rawSegment) => {
+    const segment = rawSegment
+      .trim()
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_');
+    return segment === 'api_key'
+      || segment.endsWith('_api_key')
+      || segment === 'access_key'
+      || segment.endsWith('_access_key')
+      || segment === 'private_key'
+      || segment.endsWith('_private_key')
+      || segment === 'client_secret'
+      || segment.endsWith('_client_secret')
+      || segment === 'secret'
+      || segment.endsWith('_secret')
+      || segment === 'token'
+      || segment.endsWith('_token')
+      || segment === 'password'
+      || segment.endsWith('_password')
+      || segment === 'credential'
+      || segment === 'credentials';
+  });
 }
 
 function isCliPath(path: readonly string[]): boolean {

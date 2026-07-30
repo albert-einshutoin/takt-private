@@ -24,6 +24,11 @@ describe('project template config merge rules', () => {
     'openai_api_key',
     'copilot_github_token',
     'provider_options.codex.api_key',
+    'provider_options.codex.client_secret',
+    'OpenAI_API_Key',
+    'aws_secret_access_key',
+    'provider_options.codex.apiKey',
+    'provider_options.codex.refreshToken',
   ])('forbids credential-bearing path %s', (path) => {
     expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
       .toMatchObject({ ownership: 'forbidden', known: true });
@@ -39,6 +44,10 @@ describe('project template config merge rules', () => {
     'analytics.events_path',
     'notification_sound',
     'notification_sound_events.workflow_abort',
+    'disabled_builtins',
+    'enable_builtin_workflows',
+    'prevent_sleep',
+    'auto_fetch',
   ])('keeps machine-local path %s global-only', (path) => {
     expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
       .toMatchObject({ ownership: 'global-only', known: true });
@@ -64,6 +73,10 @@ describe('project template config merge rules', () => {
     ['assistant.init_files', 'ordered-keyed'],
     ['rate_limit_fallback.switch_chain', 'atomic'],
     ['submodules', 'atomic'],
+    ['runtime.prepare', 'atomic'],
+    ['provider_options.opencode.allowed_tools', 'unordered-set'],
+    ['provider_options.claude.allowed_tools', 'unordered-set'],
+    ['provider_options.claude.sandbox.excluded_commands', 'monotonic-set'],
   ] as const)('assigns explicit sequence policy %s => %s', (path, policy) => {
     expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
       .toMatchObject({ sequencePolicy: policy, known: true });
@@ -72,6 +85,28 @@ describe('project template config merge rules', () => {
   it('exports only explicit known sequence rules', () => {
     expect(CONFIG_SEQUENCE_RULES.length).toBeGreaterThanOrEqual(7);
     expect(CONFIG_SEQUENCE_RULES.every((rule) => rule.known)).toBe(true);
+    expect(CONFIG_SEQUENCE_RULES).toContainEqual(expect.objectContaining({
+      document: 'config.yaml',
+      pattern: ['assistant', 'init_files'],
+    }));
+  });
+
+  it.each([
+    'workflow_runtime_prepare.custom_scripts',
+    'workflow_command_gates.custom_scripts',
+    'workflow_arpeggio.custom_merge_inline_js',
+    'workflow_arpeggio.custom_merge_files',
+    'workflow_arpeggio.custom_data_source_modules',
+    'sync_conflict_resolver.auto_approve_tools',
+    'provider_options.codex.network_access',
+    'provider_options.claude.sandbox.allow_unsandboxed_commands',
+  ])('requires review for execution capability %s', (path) => {
+    expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
+      .toMatchObject({
+        ownership: 'project-owned',
+        known: true,
+        reviewRequired: true,
+      });
   });
 
   it('keeps devloop policy and gates project-owned', () => {
@@ -82,6 +117,17 @@ describe('project template config merge rules', () => {
       ownership: 'project-owned',
       sequencePolicy: 'ordered-keyed',
       known: true,
+    });
+  });
+
+  it('forbids case and separator variants in devloop policy', () => {
+    expect(resolveProjectTemplateConfigMergeRule(
+      'devloopd.yaml',
+      ['Client-Secret'],
+    )).toMatchObject({
+      ownership: 'forbidden',
+      known: true,
+      reviewRequired: true,
     });
   });
 });
