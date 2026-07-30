@@ -275,7 +275,7 @@ describe('devloopd personal recovery', () => {
         writeFileSync(join(runPath, 'context', 'evidence.txt'), 'keep');
       } else {
         const external = join(repoPath, 'external-run');
-        mkdirSync(external);
+        mkdirSync(join(external, 'context'), { recursive: true });
         symlinkSync(external, runPath);
       }
 
@@ -286,7 +286,38 @@ describe('devloopd personal recovery', () => {
         name: `missing run metadata unsafe-${scenario}`,
       }));
       expect(existsSync(runPath)).toBe(true);
+      if (scenario === 'symlink') {
+        expect(existsSync(join(repoPath, 'external-run', 'context'))).toBe(true);
+      }
       expect(inspectProjectTemplateApplyGuard({ repoPath }).passed).toBe(false);
+    },
+  );
+
+  it.each(['takt', 'runs'] as const)(
+    'does not traverse an external empty victim through a %s ancestor symlink',
+    (ancestor) => {
+      const repoPath = makeTempRepo();
+      const externalRoot = makeTempRepo();
+      const externalRuns = ancestor === 'takt'
+        ? join(externalRoot, 'runs')
+        : externalRoot;
+      const victim = join(externalRuns, 'external-victim', 'context');
+      mkdirSync(victim, { recursive: true });
+      if (ancestor === 'takt') {
+        symlinkSync(externalRoot, join(repoPath, '.takt'));
+      } else {
+        mkdirSync(join(repoPath, '.takt'));
+        symlinkSync(externalRoot, join(repoPath, '.takt', 'runs'));
+      }
+
+      const report = runPersonalRecovery({ repoPath, apply: true });
+
+      expect(report).toMatchObject({ passed: false, changed: false });
+      expect(report.actions).toContainEqual(expect.objectContaining({
+        status: 'fail',
+        name: 'unsafe run recovery root',
+      }));
+      expect(existsSync(victim)).toBe(true);
     },
   );
 
@@ -312,6 +343,30 @@ describe('devloopd personal recovery', () => {
     expect(existsSync(join(runPath, 'context'))).toBe(true);
     expect(existsSync(join(runPath, 'meta.json'))).toBe(true);
     expect(inspectProjectTemplateApplyGuard({ repoPath }).passed).toBe(false);
+  });
+
+  it('revalidates runs ancestry before removal and preserves a raced external victim', () => {
+    const repoPath = makeTempRepo();
+    const externalRuns = makeTempRepo();
+    const victim = join(externalRuns, 'external-victim', 'context');
+    mkdirSync(victim, { recursive: true });
+    const runsRoot = join(repoPath, '.takt', 'runs');
+    mkdirSync(join(runsRoot, 'crash-left', 'context'), { recursive: true });
+
+    const report = runPersonalRecovery({
+      repoPath,
+      apply: true,
+      beforeMissingRunRemoval() {
+        rmSync(runsRoot, { recursive: true });
+        symlinkSync(externalRuns, runsRoot);
+      },
+    });
+
+    expect(report.actions).toContainEqual(expect.objectContaining({
+      status: 'fail',
+      message: 'run ancestry changed during recovery and was left fail-closed',
+    }));
+    expect(existsSync(victim)).toBe(true);
   });
 
   it('removes stale lock files but preserves recent locks', () => {

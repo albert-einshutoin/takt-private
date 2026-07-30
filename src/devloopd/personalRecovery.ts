@@ -3,11 +3,12 @@ import {
   lstatSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   rmdirSync,
   statSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { inspectActiveRuns, type ActiveRunRecord } from './activeRuns.js';
 import { readRawDevloopLedgerEvents, resolveDevloopLedgerPath } from './ledger.js';
 import { inspectPersonalLifecycle } from './personalLifecycle.js';
@@ -191,13 +192,129 @@ function collectEmptyRunDirectories(path: string): string[] | undefined {
   return directories;
 }
 
+interface RunsRootIdentity {
+  readonly repoDevice: number;
+  readonly repoInode: number;
+  readonly taktDevice: number;
+  readonly taktInode: number;
+  readonly runsDevice?: number;
+  readonly runsInode?: number;
+}
+
+type RunsRootInspection =
+  | { kind: 'missing'; identity?: RunsRootIdentity }
+  | { kind: 'safe'; runsRoot: string; identity: RunsRootIdentity }
+  | { kind: 'unsafe'; path: string };
+
+function isCanonicalDescendant(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return path !== '..'
+    && !path.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)
+    && !isAbsolute(path);
+}
+
+function inspectRunsRoot(repoPath: string): RunsRootInspection {
+  const taktPath = join(repoPath, '.takt');
+  const runsRoot = join(taktPath, 'runs');
+  try {
+    const repoBefore = lstatSync(repoPath);
+    if (!repoBefore.isDirectory() || repoBefore.isSymbolicLink()) {
+      return { kind: 'unsafe', path: repoPath };
+    }
+    let taktBefore;
+    try {
+      taktBefore = lstatSync(taktPath);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? { kind: 'missing' }
+        : { kind: 'unsafe', path: taktPath };
+    }
+    if (!taktBefore.isDirectory() || taktBefore.isSymbolicLink()) {
+      return { kind: 'unsafe', path: taktPath };
+    }
+    const repoCanonical = realpathSync.native(repoPath);
+    const taktCanonical = realpathSync.native(taktPath);
+    const repoAfter = lstatSync(repoPath);
+    const taktAfter = lstatSync(taktPath);
+    if (
+      !isCanonicalDescendant(repoCanonical, taktCanonical)
+      || repoBefore.dev !== repoAfter.dev
+      || repoBefore.ino !== repoAfter.ino
+      || taktBefore.dev !== taktAfter.dev
+      || taktBefore.ino !== taktAfter.ino
+      || taktAfter.isSymbolicLink()
+    ) {
+      return { kind: 'unsafe', path: taktPath };
+    }
+    const baseIdentity = {
+      repoDevice: repoAfter.dev,
+      repoInode: repoAfter.ino,
+      taktDevice: taktAfter.dev,
+      taktInode: taktAfter.ino,
+    };
+    let runsBefore;
+    try {
+      runsBefore = lstatSync(runsRoot);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? { kind: 'missing', identity: baseIdentity }
+        : { kind: 'unsafe', path: runsRoot };
+    }
+    if (!runsBefore.isDirectory() || runsBefore.isSymbolicLink()) {
+      return { kind: 'unsafe', path: runsRoot };
+    }
+    const runsCanonical = realpathSync.native(runsRoot);
+    const runsAfter = lstatSync(runsRoot);
+    if (
+      !isCanonicalDescendant(taktCanonical, runsCanonical)
+      || runsBefore.dev !== runsAfter.dev
+      || runsBefore.ino !== runsAfter.ino
+      || runsAfter.isSymbolicLink()
+    ) {
+      return { kind: 'unsafe', path: runsRoot };
+    }
+    return {
+      kind: 'safe',
+      runsRoot,
+      identity: {
+        ...baseIdentity,
+        runsDevice: runsAfter.dev,
+        runsInode: runsAfter.ino,
+      },
+    };
+  } catch {
+    return { kind: 'unsafe', path: runsRoot };
+  }
+}
+
+function sameRunsRootIdentity(
+  left: RunsRootIdentity,
+  right: RunsRootIdentity,
+): boolean {
+  return left.repoDevice === right.repoDevice
+    && left.repoInode === right.repoInode
+    && left.taktDevice === right.taktDevice
+    && left.taktInode === right.taktInode
+    && left.runsDevice === right.runsDevice
+    && left.runsInode === right.runsInode;
+}
+
 function recoverMissingRunMetadata(options: {
   repoPath: string;
   apply: boolean;
   beforeRemoval?: (runPath: string) => void;
 }): PersonalRecoveryAction[] {
-  const runsRoot = join(options.repoPath, '.takt', 'runs');
-  if (!existsSync(runsRoot)) return [];
+  const inspectedRoot = inspectRunsRoot(options.repoPath);
+  if (inspectedRoot.kind === 'missing') return [];
+  if (inspectedRoot.kind === 'unsafe') {
+    return [makeAction(
+      'fail',
+      'unsafe run recovery root',
+      'repository .takt/runs ancestry is not a canonical directory and was not traversed',
+      { path: inspectedRoot.path },
+    )];
+  }
+  const { runsRoot } = inspectedRoot;
   return readdirSync(runsRoot, { withFileTypes: true }).flatMap((entry) => {
     const runPath = join(runsRoot, entry.name);
     if (entry.isSymbolicLink()) {
@@ -235,6 +352,18 @@ function recoverMissingRunMetadata(options: {
       )];
     }
     options.beforeRemoval?.(runPath);
+    const confirmedRoot = inspectRunsRoot(options.repoPath);
+    if (
+      confirmedRoot.kind !== 'safe'
+      || !sameRunsRootIdentity(inspectedRoot.identity, confirmedRoot.identity)
+    ) {
+      return [makeAction(
+        'fail',
+        `missing run metadata ${entry.name}`,
+        'run ancestry changed during recovery and was left fail-closed',
+        { path: runPath },
+      )];
+    }
     const revalidated = collectEmptyRunDirectories(runPath);
     if (
       revalidated === undefined
@@ -524,6 +653,23 @@ export function runPersonalRecovery(options: RunPersonalRecoveryOptions = {}): P
   const staleAfterMinutes = parsePositiveInteger(options.staleAfterMinutes, DEFAULT_STALE_AFTER_MINUTES);
   const lockStaleMinutes = parsePositiveInteger(options.lockStaleMinutes, DEFAULT_LOCK_STALE_MINUTES);
   const worktreeStaleMinutes = parsePositiveInteger(options.worktreeStaleMinutes, DEFAULT_WORKTREE_STALE_MINUTES);
+  const initialRunsRoot = inspectRunsRoot(repoPath);
+  if (initialRunsRoot.kind === 'unsafe') {
+    const actions = [makeAction(
+      'fail',
+      'unsafe run recovery root',
+      'repository .takt/runs ancestry is not a canonical directory and was not traversed',
+      { path: initialRunsRoot.path },
+    )];
+    return {
+      passed: false,
+      changed: false,
+      apply,
+      repoPath,
+      actions,
+      nextActions: buildNextActions(actions),
+    };
+  }
   const activeRuns = inspectActiveRuns({ repoPath, staleAfterMinutes, now });
   const runProcessProbe = options.probeRunProcess ?? probeRunProcess;
   const actions: PersonalRecoveryAction[] = [];
