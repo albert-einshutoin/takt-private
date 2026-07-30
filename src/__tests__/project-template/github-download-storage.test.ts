@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -23,6 +24,7 @@ import {
 } from '../../features/project-template/index.js';
 import {
   GithubTemplateDownloadStorageError,
+  materializeGithubTemplateCache,
   stageGithubTemplateDownload,
   verifyGithubTemplateDownloadStaging,
 } from '../../features/project-template/github-download-storage.js';
@@ -78,6 +80,23 @@ async function stagePack(projectRoot: string) {
     chunks: chunks(content),
   });
   return { content, staged };
+}
+
+function prepareCacheRoot(): string {
+  const cacheRoot = makeRoot('takt-github-cache-');
+  chmodSync(cacheRoot, 0o700);
+  return realpathSync.native(cacheRoot);
+}
+
+function writeExistingCache(
+  cacheRoot: string,
+  content: Uint8Array,
+): string {
+  const shaRoot = join(cacheRoot, 'sha256');
+  mkdirSync(shaRoot, { mode: 0o700 });
+  const path = join(shaRoot, `${sha256(content)}.taktpack`);
+  writeFileSync(path, content, { mode: 0o600 });
+  return path;
 }
 
 afterEach(() => {
@@ -840,5 +859,261 @@ describe('GitHub template staged authority verification', () => {
     expect(String((error as Error).message)).not.toContain(
       'ghp_verify_close_secret',
     );
+  });
+});
+
+describe('GitHub template existing global cache materialization', () => {
+  it('claims, strictly verifies a cache hit, and consumes staging', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    const cachePath = writeExistingCache(cacheRoot, content);
+
+    const cached = await materializeGithubTemplateCache({ staged, cacheRoot });
+
+    expect(cached).toMatchObject({
+      cachePath: realpathSync.native(cachePath),
+      bytes: content.byteLength,
+      sha256: sha256(content),
+      status: 'cache-hit',
+      artifactState: 'cache-published',
+    });
+    expect(Object.isFrozen(cached)).toBe(true);
+    expect(Object.isFrozen(cached.inspection)).toBe(true);
+    expect(existsSync(staged.stagingPath)).toBe(false);
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+    })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
+  });
+
+  it('claims synchronously and reports a stable cache miss', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { staged } = await stagePack(makeRoot('takt-github-download-'));
+
+    const first = materializeGithubTemplateCache({ staged, cacheRoot });
+    const second = materializeGithubTemplateCache({ staged, cacheRoot });
+    const settled = await Promise.allSettled([first, second]);
+    const codes = settled.map((entry) => (
+      entry.status === 'rejected'
+        ? (entry.reason as GithubTemplateDownloadStorageError).code
+        : 'fulfilled'
+    )).sort();
+
+    expect(codes).toEqual(['CACHE_MISS', 'INVALID_AUTHORITY']);
+    expect(existsSync(staged.stagingPath)).toBe(false);
+  });
+
+  it('rejects clone and forge without consuming the original', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    writeExistingCache(cacheRoot, content);
+
+    await expect(materializeGithubTemplateCache({
+      staged: { ...staged },
+      cacheRoot,
+    })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
+    expect(existsSync(staged.stagingPath)).toBe(true);
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+    })).resolves.toMatchObject({ status: 'cache-hit' });
+  });
+
+  it('does not consume authority for invalid optional fields', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    writeExistingCache(cacheRoot, content);
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot: 1 as unknown as string,
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(existsSync(staged.stagingPath)).toBe(true);
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+    })).resolves.toMatchObject({ status: 'cache-hit' });
+  });
+
+  it('re-syncs an EEXIST sha directory after parent sync failure', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const first = await stagePack(makeRoot('takt-github-download-'));
+    let failed = false;
+    await expect(materializeGithubTemplateCache({
+      staged: first.staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase) {
+          if (
+            phase === 'before-cache-directory-parent-fsync'
+            && !failed
+          ) {
+            failed = true;
+            throw new Error('injected parent sync failure');
+          }
+        },
+      },
+    })).rejects.toMatchObject({ code: 'IO_FAILURE' });
+
+    const shaRoot = join(cacheRoot, 'sha256');
+    writeFileSync(
+      join(shaRoot, `${sha256(first.content)}.taktpack`),
+      first.content,
+      { mode: 0o600 },
+    );
+    const second = await stagePack(makeRoot('takt-github-download-'));
+    await expect(materializeGithubTemplateCache({
+      staged: second.staged,
+      cacheRoot,
+    })).resolves.toMatchObject({ status: 'cache-hit' });
+  });
+
+  it('never overwrites or deletes an invalid existing final', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    const cachePath = writeExistingCache(cacheRoot, content);
+    writeFileSync(cachePath, 'ghp_corrupt_cache_secret');
+
+    const error = await materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_corrupt_cache_secret',
+    );
+    expect(readFileSync(cachePath).toString()).toBe(
+      'ghp_corrupt_cache_secret',
+    );
+  });
+
+  it.each(['mode', 'hardlink', 'symlink'] as const)(
+    'rejects unsafe existing final: %s',
+    async (tamper) => {
+      const cacheRoot = prepareCacheRoot();
+      const { content, staged } = await stagePack(
+        makeRoot('takt-github-download-'),
+      );
+      const cachePath = writeExistingCache(cacheRoot, content);
+      if (tamper === 'mode') chmodSync(cachePath, 0o644);
+      if (tamper === 'hardlink') linkSync(cachePath, `${cachePath}.alias`);
+      if (tamper === 'symlink') {
+        const external = join(makeRoot('takt-cache-external-'), 'asset');
+        writeFileSync(external, content);
+        unlinkSync(cachePath);
+        symlinkSync(external, cachePath);
+      }
+
+      await expect(materializeGithubTemplateCache({
+        staged,
+        cacheRoot,
+      })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+    },
+  );
+
+  it('rejects a symlink cache root without following it', async () => {
+    const parent = makeRoot('takt-cache-parent-');
+    const outside = prepareCacheRoot();
+    const cacheRoot = join(parent, 'linked-cache');
+    symlinkSync(outside, cacheRoot);
+    const { staged } = await stagePack(makeRoot('takt-github-download-'));
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it('rejects cache roots reached through a symlink ancestor', async () => {
+    const parent = makeRoot('takt-cache-parent-');
+    const outside = prepareCacheRoot();
+    const linkedParent = join(parent, 'linked-parent');
+    symlinkSync(outside, linkedParent);
+    const cacheRoot = join(linkedParent, 'private-cache');
+    mkdirSync(join(outside, 'private-cache'), { mode: 0o700 });
+    const { staged } = await stagePack(makeRoot('takt-github-download-'));
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
+  it('does not return cache-hit when sha parent fsync fails', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    writeExistingCache(cacheRoot, content);
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase) {
+          if (phase === 'before-cache-hit-parent-fsync') {
+            throw new Error('ghp_cache_fsync_secret');
+          }
+        },
+      },
+    })).rejects.toMatchObject({ code: 'IO_FAILURE' });
+    expect(existsSync(staged.stagingPath)).toBe(false);
+  });
+
+  it('preserves a verified cache when staging cleanup fails', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    const cachePath = writeExistingCache(cacheRoot, content);
+
+    const error = await materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase) {
+          if (phase === 'before-staging-cleanup') {
+            throw new Error('ghp_cleanup_secret');
+          }
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'cache-published',
+    });
+    expect(String((error as Error).message)).not.toContain(
+      'ghp_cleanup_secret',
+    );
+    expect(readFileSync(cachePath)).toEqual(content);
+  });
+
+  it('detects tampering between final hash and inspection', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    const cachePath = writeExistingCache(cacheRoot, content);
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase) {
+          if (phase === 'before-cache-final-inspect') {
+            writeFileSync(cachePath, Buffer.alloc(content.byteLength));
+          }
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
   });
 });
