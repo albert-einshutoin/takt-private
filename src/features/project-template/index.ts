@@ -8,6 +8,18 @@ export type {
   ProjectTemplateGithubReleaseAssetSourceSpec,
   ProjectTemplateGithubSourceSpec,
 } from './github-source-spec.js';
+export {
+  PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
+  parseProjectTemplateSourceDescriptor,
+  serializeProjectTemplateSourceDescriptor,
+  calculateProjectTemplateSourceDescriptorSha256,
+} from './source-descriptor.js';
+export type {
+  ProjectTemplateSourceDescriptorPackV1,
+  ProjectTemplateRepertoireCapabilityV1,
+  ProjectTemplateRepertoireDependencyV1,
+  ProjectTemplateSourceDescriptorV1,
+} from './source-descriptor.js';
 export { parseTemplateLock, serializeTemplateLock } from './lock.js';
 export {
   calculateProjectTemplateManifestSha256,
