@@ -1176,6 +1176,7 @@ export function prepareProjectTemplateApplyPlan(
         entry.action !== 'add'
         && entry.action !== 'update'
         && entry.action !== 'keep'
+        && entry.action !== 'delete'
         && !semanticConflict
       )
     ) {
@@ -1185,7 +1186,22 @@ export function prepareProjectTemplateApplyPlan(
     const storedBase = baseContents.get(entry.path);
     const local = localByPath.get(entry.path);
     const incoming = incomingContents.get(entry.path);
-    if (incoming === undefined) return entry;
+    if (incoming === undefined) {
+      // Removing the whole semantic document would also erase project-owned
+      // leaves. Treat that as an explicit conflict instead of a defaultable
+      // template deletion; an already absent local file remains preserved.
+      if (
+        entry.policy === 'merge'
+        && formalBase !== undefined
+        && local !== undefined
+      ) {
+        return {
+          ...overrideConflict(entry, 'CONFLICT'),
+          reviewRequired: true,
+        };
+      }
+      return entry;
+    }
     if (entry.policy !== 'merge') {
       // A manifest policy must not bypass the security/schema checks attached
       // to the runtime's well-known semantic config destinations.

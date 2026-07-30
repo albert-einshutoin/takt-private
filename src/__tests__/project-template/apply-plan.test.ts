@@ -644,6 +644,23 @@ describe('project template three-way apply plan', () => {
     expect(prepared.resolvedContents).toEqual([]);
   });
 
+  it('blocks deletion of a present merge-owned semantic config', () => {
+    const base = 'language: en\n';
+    const prepared = prepareProjectTemplateApplyPlan(input({
+      base,
+      local: base,
+      incoming: undefined,
+      policy: 'merge',
+    }));
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'CONFLICT',
+      reviewRequired: true,
+    });
+    expect(prepared.plan.defaultApplyPossible).toBe(false);
+  });
+
   it('preserves a local-only hardened mode during a semantic content update', () => {
     const base = 'language: en\n';
     const local = 'language: en\n';
