@@ -47,6 +47,7 @@ import {
 
 const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
 const DIRECTORY_FLAG = process.platform === 'win32' ? 0 : constants.O_DIRECTORY;
+const HASH_BUFFER_BYTES = 64 * 1024;
 const VERIFIED_RECEIPT_APPLY_CLAIM_BRAND: unique symbol =
   Symbol('verified-github-template-download-receipt-apply-claim');
 
@@ -111,6 +112,10 @@ export interface ReadGithubTemplateDownloadReceiptStoredOptions {
   readonly io?: GithubTemplateDownloadReceiptOfflineReadIo;
 }
 
+/**
+ * Deep-frozen verification evidence, not a live file authority, approval, or
+ * lock. The apply bridge trusts only the process-local WeakMap identity.
+ */
 export interface VerifiedGithubTemplateDownloadReceipt {
   readonly receiptKey: string;
   readonly artifactSha256: string;
@@ -311,6 +316,10 @@ function snapshotStoredOptions(value: unknown): {
       typeof options['cacheRoot'] !== 'string'
       || options['cacheRoot'].length === 0
     ) throw new Error();
+    deriveGithubTemplateDownloadReceiptLocatorPaths({
+      cacheRoot: options['cacheRoot'],
+      receiptKey: '0'.repeat(64),
+    });
     return Object.freeze({
       cacheRoot: options['cacheRoot'],
       stored: options['stored'],
@@ -520,6 +529,7 @@ function openChildDirectory(
   parent: DirectoryAuthority,
   path: string,
   missingCode: 'RECEIPT_MISSING' | 'CACHE_MISSING',
+  context: ReadContext,
 ): DirectoryAuthority {
   if (dirname(path) !== parent.path) {
     throw offlineError(
@@ -529,6 +539,9 @@ function openChildDirectory(
   }
   assertDirectory(parent);
   const child = openDirectory(path, parent.device, missingCode);
+  // Register immediately: a failure in the parent recheck must still run the
+  // close hook and native close for the newly acquired child descriptor.
+  context.directories.push(child);
   assertDirectory(parent);
   return child;
 }
@@ -705,9 +718,49 @@ function hashFile(
   authority: FileAuthority,
   io: IoSnapshot | undefined,
 ): string {
-  return createHash('sha256')
-    .update(readExact(authority, io))
-    .digest('hex');
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(
+    Math.min(HASH_BUFFER_BYTES, authority.bytes),
+  );
+  let position = 0;
+  while (position < authority.bytes) {
+    const length = Math.min(buffer.byteLength, authority.bytes - position);
+    const count = readChunk(
+      authority.fd,
+      buffer,
+      0,
+      length,
+      position,
+      io,
+    );
+    hash.update(buffer.subarray(0, count));
+    position += count;
+  }
+  let eof: unknown;
+  try {
+    const extra = Buffer.allocUnsafe(1);
+    eof = io?.read === undefined
+      ? readSync(authority.fd, extra, 0, 1, authority.bytes)
+      : Reflect.apply(io.read, io.receiver, [
+        authority.fd,
+        extra,
+        0,
+        1,
+        authority.bytes,
+      ]);
+  } catch {
+    throw offlineError(
+      'IO_FAILURE',
+      'GitHub template offline artifact EOF check failed',
+    );
+  }
+  if (eof !== 0) {
+    throw offlineError(
+      'IO_FAILURE',
+      'GitHub template offline artifact EOF check failed',
+    );
+  }
+  return hash.digest('hex');
 }
 
 async function verifyAuthentication(
@@ -958,8 +1011,12 @@ async function readOfflineCore(
     context.directories.push(cacheRoot);
     let parent = cacheRoot;
     for (const path of receiptPaths.receiptAncestors) {
-      parent = openChildDirectory(parent, path, 'RECEIPT_MISSING');
-      context.directories.push(parent);
+      parent = openChildDirectory(
+        parent,
+        path,
+        'RECEIPT_MISSING',
+        context,
+      );
     }
     if (dirname(receiptPaths.receiptPath) !== parent.path) throw new Error();
     context.receipt = openFile(
@@ -1009,8 +1066,8 @@ async function readOfflineCore(
       cacheRoot,
       artifactPaths.artifactDirectory,
       'CACHE_MISSING',
+      context,
     );
-    context.directories.push(artifactDirectory);
     if (dirname(artifactPaths.artifactPath) !== artifactDirectory.path) {
       throw new Error();
     }

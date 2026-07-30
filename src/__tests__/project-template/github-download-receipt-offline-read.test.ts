@@ -1,12 +1,16 @@
 import { createHash, createHmac } from 'node:crypto';
 import {
   chmodSync,
+  fstatSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readSync,
   realpathSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -317,6 +321,11 @@ describe('GitHub template authenticated receipt offline reader D2b', () => {
       cacheRoot: fixture.cacheRoot,
       verifier: verifier(),
     });
+    await expect(readGithubTemplateDownloadReceiptStored({
+      cacheRoot: 'relative-cache',
+      stored,
+      verifier: verifier(),
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     await expect(readGithubTemplateDownloadReceiptStored({
       cacheRoot: fixture.cacheRoot,
       stored,
@@ -704,4 +713,405 @@ describe('GitHub template authenticated receipt offline reader D2b', () => {
       },
     })).rejects.toMatchObject({ code: 'IO_FAILURE' });
   });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['over-report', 2],
+  ])('rejects %s progress from the read seam', async (_label, reported) => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+      io: {
+        read(_fd, _buffer, _offset, length) {
+          return reported === 2 ? length + 1 : reported;
+        },
+      },
+    })).rejects.toMatchObject({ code: 'IO_FAILURE' });
+  });
+
+  it('bounds each artifact hashing read to a fixed-size buffer', async () => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    let maximumRequested = 0;
+    await readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+      io: {
+        read(fd, buffer, offset, length, position) {
+          maximumRequested = Math.max(maximumRequested, length);
+          return readSync(fd, buffer, offset, length, position);
+        },
+      },
+    });
+    expect(maximumRequested).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it.each([
+    'receipt',
+    'artifact',
+  ] as const)('rejects a same-content %s path replacement', async (kind) => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    let replaced = false;
+    await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+      io: {
+        onPhase(phase) {
+          if (phase !== 'before-final-preflight' || replaced) return;
+          replaced = true;
+          const path = kind === 'receipt'
+            ? fixture.receiptPath
+            : fixture.artifactPath;
+          const replacement = `${path}.replacement`;
+          writeFileSync(
+            replacement,
+            kind === 'receipt'
+              ? fixture.prepared.serialized
+              : fixture.content,
+            { mode: 0o600 },
+          );
+          renameSync(replacement, path);
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
+  it.each([0, 1, 2, 3])(
+    'rejects receipt ancestor %s replacement after opening',
+    async (ancestorIndex) => {
+      const fixture = await createFixture();
+      await storeGithubTemplateDownloadReceipt({
+        prepared: fixture.prepared,
+        cacheRoot: fixture.cacheRoot,
+        verifier: verifier(),
+      });
+      const ancestors = [
+        join(fixture.cacheRoot, 'receipts'),
+        join(fixture.cacheRoot, 'receipts', 'v1'),
+        join(fixture.cacheRoot, 'receipts', 'v1', 'sha256'),
+        dirname(fixture.receiptPath),
+      ];
+      let replaced = false;
+      await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+        cacheRoot: fixture.cacheRoot,
+        receiptKey: fixture.prepared.receiptKey,
+        verifier: verifier(),
+        io: {
+          onPhase(phase) {
+            if (phase !== 'before-final-preflight' || replaced) return;
+            replaced = true;
+            renameSync(
+              ancestors[ancestorIndex]!,
+              `${ancestors[ancestorIndex]!}.replacement`,
+            );
+            mkdirSync(dirname(fixture.receiptPath), {
+              recursive: true,
+              mode: 0o700,
+            });
+            writeFileSync(
+              fixture.receiptPath,
+              fixture.prepared.serialized,
+              { mode: 0o600 },
+            );
+          },
+        },
+      })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+    },
+  );
+
+  it.each([
+    ['receipt mode', (fixture: Awaited<ReturnType<typeof createFixture>>) => {
+      chmodSync(fixture.receiptPath, 0o644);
+    }],
+    ['artifact mode', (fixture: Awaited<ReturnType<typeof createFixture>>) => {
+      chmodSync(fixture.artifactPath, 0o644);
+    }],
+    ['ancestor mode', (fixture: Awaited<ReturnType<typeof createFixture>>) => {
+      chmodSync(dirname(fixture.receiptPath), 0o755);
+    }],
+    ['receipt nlink', (fixture: Awaited<ReturnType<typeof createFixture>>) => {
+      linkSync(fixture.receiptPath, `${fixture.receiptPath}.hardlink`);
+    }],
+    ['receipt symlink', (fixture: Awaited<ReturnType<typeof createFixture>>) => {
+      const original = `${fixture.receiptPath}.original`;
+      renameSync(fixture.receiptPath, original);
+      symlinkSync(original, fixture.receiptPath);
+    }],
+  ] as const)('rejects unsafe private cache metadata: %s', async (
+    _label,
+    mutate,
+  ) => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    mutate(fixture);
+    await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
+  it('rejects invalid verifier union values and thrown verifier details', async () => {
+    const invalidFixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: invalidFixture.prepared,
+      cacheRoot: invalidFixture.cacheRoot,
+      verifier: verifier(),
+    });
+    await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: invalidFixture.cacheRoot,
+      receiptKey: invalidFixture.prepared.receiptKey,
+      verifier: {
+        async verify() {
+          return 'unexpected' as never;
+        },
+      },
+    })).rejects.toMatchObject({ code: 'AUTHENTICATION_FAILED' });
+
+    const thrownFixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: thrownFixture.prepared,
+      cacheRoot: thrownFixture.cacheRoot,
+      verifier: verifier(),
+    });
+    const error = await readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: thrownFixture.cacheRoot,
+      receiptKey: thrownFixture.prepared.receiptKey,
+      verifier: {
+        async verify() {
+          throw new Error('ghp_offline_key_provider_secret');
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'KEY_UNAVAILABLE' });
+    expect(String((error as Error).message)).not.toContain('secret');
+  });
+
+  it('rejects receipt mutation queued by the final verifier microtask', async () => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    let verifyCalls = 0;
+    await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: {
+        async verify(request) {
+          verifyCalls += 1;
+          const result = await verifier().verify(request);
+          if (verifyCalls === 2) {
+            queueMicrotask(() => {
+              const mutated = Buffer.from(fixture.prepared.serialized);
+              mutated[mutated.byteLength - 2] =
+                mutated[mutated.byteLength - 2]! ^ 1;
+              writeFileSync(fixture.receiptPath, mutated);
+            });
+          }
+          return result;
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+    expect(verifyCalls).toBe(2);
+  });
+
+  it('attempts native closure after close-hook failures', async () => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    const descriptors: number[] = [];
+    await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+      io: {
+        close(fd) {
+          descriptors.push(fd);
+          throw new Error('ghp_offline_close_secret');
+        },
+      },
+    })).rejects.toMatchObject({ code: 'IO_FAILURE' });
+    expect(descriptors).toHaveLength(8);
+    for (const fd of descriptors) {
+      expect(() => fstatSync(fd)).toThrow();
+    }
+  });
+
+  it('does not trust JSON or Proxy clones as apply handoffs', async () => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    const verified = await readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+    });
+    const jsonClone = JSON.parse(JSON.stringify(verified)) as unknown;
+    expect(() => claimVerifiedGithubTemplateDownloadReceiptForApply(jsonClone))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => claimVerifiedGithubTemplateDownloadReceiptForApply(
+      new Proxy(verified, {}),
+    )).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    const claim = claimVerifiedGithubTemplateDownloadReceiptForApply(verified);
+    expect(() => claimVerifiedGithubTemplateDownloadReceiptForApply(verified))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    consumeVerifiedGithubTemplateDownloadReceiptApplyClaim(claim);
+  });
+
+  it('consumes stored authority for every post-claim failure family', async () => {
+    const cases = [
+      {
+        code: 'KEY_UNAVAILABLE',
+        mutate() {},
+        verifier: verifier('unavailable'),
+      },
+      {
+        code: 'RECEIPT_MISSING',
+        mutate(fixture: Awaited<ReturnType<typeof createFixture>>) {
+          unlinkSync(fixture.receiptPath);
+        },
+        verifier: verifier(),
+      },
+      {
+        code: 'RECEIPT_INVALID',
+        mutate(fixture: Awaited<ReturnType<typeof createFixture>>) {
+          const bytes = Buffer.from(fixture.prepared.serialized);
+          bytes[0] = 0x5b;
+          writeFileSync(fixture.receiptPath, bytes);
+        },
+        verifier: verifier(),
+      },
+      {
+        code: 'CACHE_MISSING',
+        mutate(fixture: Awaited<ReturnType<typeof createFixture>>) {
+          unlinkSync(fixture.artifactPath);
+        },
+        verifier: verifier(),
+      },
+      {
+        code: 'CACHE_INVALID',
+        mutate(fixture: Awaited<ReturnType<typeof createFixture>>) {
+          const bytes = Buffer.from(fixture.content);
+          bytes[0] = bytes[0]! ^ 0xff;
+          writeFileSync(fixture.artifactPath, bytes);
+        },
+        verifier: verifier(),
+      },
+      {
+        code: 'LIMIT_EXCEEDED',
+        mutate(fixture: Awaited<ReturnType<typeof createFixture>>) {
+          writeFileSync(fixture.receiptPath, Buffer.alloc(256 * 1024 + 1));
+        },
+        verifier: verifier(),
+      },
+    ] as const;
+    for (const testCase of cases) {
+      const fixture = await createFixture();
+      const stored = await storeGithubTemplateDownloadReceipt({
+        prepared: fixture.prepared,
+        cacheRoot: fixture.cacheRoot,
+        verifier: verifier(),
+      });
+      testCase.mutate(fixture);
+      await expect(readGithubTemplateDownloadReceiptStored({
+        cacheRoot: fixture.cacheRoot,
+        stored,
+        verifier: testCase.verifier,
+      })).rejects.toMatchObject({ code: testCase.code });
+      await expect(readGithubTemplateDownloadReceiptStored({
+        cacheRoot: fixture.cacheRoot,
+        stored,
+        verifier: verifier(),
+      })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
+    }
+  });
+
+  it.each([
+    'cache-root',
+    'artifact-directory',
+  ] as const)('rejects %s replacement after opening', async (kind) => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    let replaced = false;
+    await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+      io: {
+        onPhase(phase) {
+          if (phase !== 'before-final-preflight' || replaced) return;
+          replaced = true;
+          const path = kind === 'cache-root'
+            ? fixture.cacheRoot
+            : dirname(fixture.artifactPath);
+          const replacement = `${path}.replacement`;
+          renameSync(path, replacement);
+          roots.push(replacement);
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
+  it('rejects an ancestor swap queued by the final verifier microtask', async () => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    let verifyCalls = 0;
+    await expect(readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: {
+        async verify(request) {
+          verifyCalls += 1;
+          const result = await verifier().verify(request);
+          if (verifyCalls === 2) {
+            queueMicrotask(() => {
+              const shard = dirname(fixture.receiptPath);
+              renameSync(shard, `${shard}.replacement`);
+            });
+          }
+          return result;
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
 });
