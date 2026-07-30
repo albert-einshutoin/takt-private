@@ -13,6 +13,95 @@ import {
 
 const ASSET_API_URL =
   'https://api.github.com/repos/octo/demo/releases/assets/123';
+const IPV6_BITS = 128n;
+const MAX_IPV6 = (1n << IPV6_BITS) - 1n;
+const ALLOCATED_IPV6_PREFIXES = [
+  '2001:200::/23',
+  '2001:400::/23',
+  '2001:600::/23',
+  '2001:800::/22',
+  '2001:c00::/23',
+  '2001:e00::/23',
+  '2001:1200::/23',
+  '2001:1400::/22',
+  '2001:1800::/23',
+  '2001:1a00::/23',
+  '2001:1c00::/22',
+  '2001:2000::/19',
+  '2001:4000::/23',
+  '2001:4200::/23',
+  '2001:4400::/23',
+  '2001:4600::/23',
+  '2001:4800::/23',
+  '2001:4a00::/23',
+  '2001:4c00::/23',
+  '2001:5000::/20',
+  '2001:8000::/19',
+  '2001:a000::/20',
+  '2001:b000::/20',
+  '2003::/18',
+  '2400::/12',
+  '2410::/12',
+  '2600::/12',
+  '2610::/23',
+  '2620::/23',
+  '2630::/12',
+  '2800::/12',
+  '2a00::/12',
+  '2a10::/12',
+  '2c00::/12',
+] as const;
+
+interface TestIpv6Range {
+  readonly prefix: string;
+  readonly first: bigint;
+  readonly last: bigint;
+}
+
+function parseTestIpv6(address: string): bigint {
+  const halves = address.split('::');
+  const left = halves[0] === '' ? [] : halves[0]!.split(':');
+  const right = halves.length === 1 || halves[1] === ''
+    ? []
+    : halves[1]!.split(':');
+  const groups = [
+    ...left,
+    ...new Array(8 - left.length - right.length).fill('0'),
+    ...right,
+  ];
+  return groups.reduce(
+    (value, group) => (value << 16n) | BigInt(`0x${group}`),
+    0n,
+  );
+}
+
+function formatTestIpv6(value: bigint): string {
+  const groups: string[] = [];
+  for (let shift = 112n; shift >= 0n; shift -= 16n) {
+    groups.push(((value >> shift) & 0xffffn).toString(16));
+  }
+  return groups.join(':');
+}
+
+const ALLOCATED_IPV6_RANGES: readonly TestIpv6Range[] =
+  ALLOCATED_IPV6_PREFIXES.map((prefix) => {
+    const [address, rawLength] = prefix.split('/');
+    const length = BigInt(rawLength!);
+    const hostBits = IPV6_BITS - length;
+    const mask = (MAX_IPV6 << hostBits) & MAX_IPV6;
+    const first = parseTestIpv6(address!) & mask;
+    return Object.freeze({
+      prefix,
+      first,
+      last: first | (MAX_IPV6 >> length),
+    });
+  });
+
+function isInAllocatedTestRange(value: bigint): boolean {
+  return ALLOCATED_IPV6_RANGES.some(
+    ({ first, last }) => value >= first && value <= last,
+  );
+}
 
 function expectCode(operation: () => unknown, code: string): void {
   let thrown: unknown;
@@ -49,6 +138,8 @@ describe('project-template artifact redirect state F2b-A', () => {
       'https://api.github.com:444/repos/octo/demo/releases/assets/123',
       'https://api.github.com/repos/octo/demo/releases/assets/123/',
       'https://api.github.com/repos/octo/demo/releases/assets/0',
+      'https://api.github.com/repos/octo/demo/releases/assets/123?',
+      'https://api.github.com/repos/octo/demo/releases/assets/123#',
       'https://api.github.com/repos/octo/demo/releases/assets/9007199254740992',
       'https://api.github.com/repos/octo/demo/releases/assets/9223372036854775808',
       `https://api.github.com/repos/octo/demo/releases/assets/${'9'.repeat(256)}`,
@@ -300,6 +391,47 @@ describe('project-template artifact DNS validation F2b-A', () => {
     ])).toBeUndefined();
   });
 
+  it.each(ALLOCATED_IPV6_RANGES)(
+    'accepts the first and last address of allocated prefix $prefix',
+    ({ first, last }) => {
+      expect(validateProjectTemplateArtifactDnsAnswers([
+        { address: formatTestIpv6(first), family: 6 },
+        { address: formatTestIpv6(last), family: 6 },
+      ])).toBeUndefined();
+    },
+  );
+
+  it.each(ALLOCATED_IPV6_RANGES)(
+    'rejects unallocated neighbors of allocated prefix $prefix',
+    ({ first, last }) => {
+      if (first > 0n && !isInAllocatedTestRange(first - 1n)) {
+        expectCode(
+          () => validateProjectTemplateArtifactDnsAnswers([{
+            address: formatTestIpv6(first - 1n),
+            family: 6,
+          }]),
+          'DNS_REJECTED',
+        );
+      }
+      if (last < MAX_IPV6 && !isInAllocatedTestRange(last + 1n)) {
+        expectCode(
+          () => validateProjectTemplateArtifactDnsAnswers([{
+            address: formatTestIpv6(last + 1n),
+            family: 6,
+          }]),
+          'DNS_REJECTED',
+        );
+      }
+    },
+  );
+
+  it('accepts an address in the GitHub CDN allocation', () => {
+    expect(validateProjectTemplateArtifactDnsAnswers([{
+      address: '2606:50c0::1',
+      family: 6,
+    }])).toBeUndefined();
+  });
+
   it.each([
     '0.0.0.0',
     '10.0.0.1',
@@ -325,10 +457,16 @@ describe('project-template artifact DNS validation F2b-A', () => {
     '2001:2::1',
     '2001:db8::1',
     '2002::1',
+    '2d00::',
+    '3000::',
+    '37ff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+    '3ffc::',
+    '3ffd:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
     '3ffe::',
     '3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
     '3fff::',
     '3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff',
+    '3fff:1000::',
     'fc00::1',
     'fe80::1',
     'ff00::1',
@@ -340,19 +478,6 @@ describe('project-template artifact DNS validation F2b-A', () => {
       }]),
       'DNS_REJECTED',
     );
-  });
-
-  it('keeps addresses just outside the added IPv6 ranges public', () => {
-    expect(validateProjectTemplateArtifactDnsAnswers([
-      {
-        address: '3ffd:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
-        family: 6,
-      },
-      {
-        address: '3fff:1000::',
-        family: 6,
-      },
-    ])).toBeUndefined();
   });
 
   it('rejects mixed public/private answers', () => {

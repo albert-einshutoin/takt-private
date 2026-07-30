@@ -78,6 +78,59 @@ interface ProjectTemplateArtifactDnsAnswerSnapshot {
   readonly bytes: readonly number[];
 }
 
+interface IpCidr {
+  readonly prefix: readonly number[];
+  readonly prefixLength: number;
+}
+
+// Versioned snapshot of ALLOCATED RIR prefixes from:
+// https://www.iana.org/assignments/ipv6-unicast-address-assignments/ipv6-unicast-address-assignments.xhtml
+// Last Updated: 2025-10-10.
+//
+// IANA reserves every unlisted part of 2000::/3 for future allocation. Keeping
+// a dated allow-table prevents a registry change from silently widening this
+// SSRF boundary; update this table and its first/last/neighbor tests together.
+// The partially allocated 2001::/23 and special-purpose 2002::/16 are
+// intentionally absent.
+const IANA_ALLOCATED_IPV6_CIDRS = Object.freeze(([
+  ['2001:200::', 23],
+  ['2001:400::', 23],
+  ['2001:600::', 23],
+  ['2001:800::', 22],
+  ['2001:c00::', 23],
+  ['2001:e00::', 23],
+  ['2001:1200::', 23],
+  ['2001:1400::', 22],
+  ['2001:1800::', 23],
+  ['2001:1a00::', 23],
+  ['2001:1c00::', 22],
+  ['2001:2000::', 19],
+  ['2001:4000::', 23],
+  ['2001:4200::', 23],
+  ['2001:4400::', 23],
+  ['2001:4600::', 23],
+  ['2001:4800::', 23],
+  ['2001:4a00::', 23],
+  ['2001:4c00::', 23],
+  ['2001:5000::', 20],
+  ['2001:8000::', 19],
+  ['2001:a000::', 20],
+  ['2001:b000::', 20],
+  ['2003::', 18],
+  ['2400::', 12],
+  ['2410::', 12],
+  ['2600::', 12],
+  ['2610::', 23],
+  ['2620::', 23],
+  ['2630::', 12],
+  ['2800::', 12],
+  ['2a00::', 12],
+  ['2a10::', 12],
+  ['2c00::', 12],
+] as const satisfies readonly (readonly [string, number])[]).map(
+  ([address, prefixLength]) => createIpCidr(address, prefixLength),
+));
+
 const stateAuthorities = new WeakMap<
 DisposableProjectTemplateArtifactRedirectState,
 RedirectStateAuthority
@@ -188,6 +241,7 @@ function parseAllowedRedirectTarget(base: URL, location: unknown): URL {
 
 function parseCanonicalAssetApiUrl(value: unknown): URL {
   if (!isRawLocationSafe(value)) throw invalidArgument();
+  if (value.includes('?') || value.includes('#')) throw invalidArgument();
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -507,6 +561,46 @@ function parseIpv6(address: string): readonly number[] | undefined {
   return bytes;
 }
 
+function createIpCidr(address: string, prefixLength: number): IpCidr {
+  const prefix = parseIpv6(address);
+  if (
+    prefix === undefined
+    || !Number.isSafeInteger(prefixLength)
+    || prefixLength < 0
+    || prefixLength > prefix.length * 8
+  ) {
+    throw invalidArgument();
+  }
+  return Object.freeze({
+    prefix: Object.freeze([...prefix]),
+    prefixLength,
+  });
+}
+
+function matchesCidr(
+  address: readonly number[],
+  cidr: IpCidr,
+): boolean {
+  if (
+    address.length !== cidr.prefix.length
+    || cidr.prefixLength < 0
+    || cidr.prefixLength > address.length * 8
+  ) {
+    return false;
+  }
+  const completeBytes = Math.floor(cidr.prefixLength / 8);
+  for (let index = 0; index < completeBytes; index += 1) {
+    if (address[index] !== cidr.prefix[index]) return false;
+  }
+  const remainingBits = cidr.prefixLength % 8;
+  if (remainingBits === 0) return true;
+  const mask = (0xff << (8 - remainingBits)) & 0xff;
+  return (
+    (address[completeBytes]! & mask)
+    === (cidr.prefix[completeBytes]! & mask)
+  );
+}
+
 function isPublicIpv4(bytes: readonly number[]): boolean {
   const [a, b] = bytes;
   if (a === undefined || b === undefined) return false;
@@ -529,15 +623,17 @@ function isPublicIpv4(bytes: readonly number[]): boolean {
 
 function isPublicIpv6(bytes: readonly number[]): boolean {
   if (bytes.length !== 16) return false;
-  // Fail closed to currently allocated global unicast (2000::/3). This also
-  // excludes mapped IPv4, ULA, link-local, multicast and translation prefixes.
-  if ((bytes[0]! & 0xe0) !== 0x20) return false;
+  if (!IANA_ALLOCATED_IPV6_CIDRS.some(
+    (cidr) => matchesCidr(bytes, cidr),
+  )) {
+    return false;
+  }
   const first = (bytes[0]! << 8) | bytes[1]!;
   const second = (bytes[2]! << 8) | bytes[3]!;
   const third = (bytes[4]! << 8) | bytes[5]!;
-  // Broad global-unicast allocation does not imply routability. IANA can add
-  // special-purpose exceptions independently, so this denylist and its
-  // boundary tests must be reviewed whenever that registry changes.
+  // An ALLOCATED parent can still contain non-routable special-purpose child
+  // ranges (for example 2001:db8::/32 inside 2001:c00::/23). Public therefore
+  // means allocated AND not special-purpose, never merely table membership.
   if (
     first === 0x2002
     || first === 0x3ffe
