@@ -16,6 +16,11 @@ const ARCHIVE_SHA = 'a'.repeat(64);
 const ASSET_NAME = 'template.taktpack';
 const CHECKSUM_NAME = `${ASSET_NAME}.sha256`;
 const CHECKSUM_LINE = `${ARCHIVE_SHA}  ${ASSET_NAME}\n`;
+const CURRENT_IDENTITY = {
+  owner: 'acme',
+  repo: 'template',
+  repositoryUrl: 'https://github.com/acme/template',
+} as const;
 
 function descriptor(version = '1.2.3'): Record<string, unknown> {
   return {
@@ -86,6 +91,89 @@ function createPort(overrides: Partial<GithubTemplateSourceMetadataPort> = {}): 
 }
 
 describe('resolveGithubTemplateSource', () => {
+  it.each([
+    ['extra string key', (source: Record<PropertyKey, unknown>) => {
+      source['unexpected'] = true;
+      return source;
+    }],
+    ['symbol key', (source: Record<PropertyKey, unknown>) => {
+      source[Symbol('unexpected')] = true;
+      return source;
+    }],
+    ['accessor', (source: Record<PropertyKey, unknown>) => {
+      Object.defineProperty(source, 'owner', {
+        enumerable: true,
+        get: () => 'acme',
+      });
+      return source;
+    }],
+    ['replaced prototype', (source: Record<PropertyKey, unknown>) => {
+      return Object.assign(Object.create({}), source);
+    }],
+    ['array', (source: Record<PropertyKey, unknown>) => {
+      return Object.assign([], source) as unknown as Record<PropertyKey, unknown>;
+    }],
+  ])('rejects github-ref source boundary with %s', async (_label, mutate) => {
+    const parsed = parseProjectTemplateGithubSourceSpec(
+      'github:acme/template@main',
+    );
+    const source = mutate({ ...parsed });
+    const fixture = createPort();
+    await expectResolutionCode(
+      resolveGithubTemplateSource({
+        source: source as never,
+        metadata: fixture.port,
+      }),
+      'INVALID_SOURCE_SPEC',
+    );
+    expect(fixture.calls).toEqual([]);
+  });
+
+  it('rejects release source extra/accessor keys and any canonical field drift', async () => {
+    const parsed = parseProjectTemplateGithubSourceSpec(
+      `https://github.com/acme/template/releases/download/v1.2.3/${ASSET_NAME}`,
+    );
+    const extra = { ...parsed, unexpected: true };
+    const accessor = { ...parsed };
+    Object.defineProperty(accessor, 'assetName', {
+      enumerable: true,
+      get: () => ASSET_NAME,
+    });
+    const drifted = { ...parsed, repositoryUrl: 'https://github.com/acme/other' };
+
+    for (const source of [extra, accessor, drifted]) {
+      const fixture = createPort();
+      await expectResolutionCode(
+        resolveGithubTemplateSource({
+          source: source as never,
+          metadata: fixture.port,
+        }),
+        'INVALID_SOURCE_SPEC',
+      );
+      expect(fixture.calls).toEqual([]);
+    }
+  });
+
+  it('accepts parser-frozen specs and exact plain clones for both source kinds', async () => {
+    const sources = [
+      parseProjectTemplateGithubSourceSpec('github:acme/template@main'),
+      parseProjectTemplateGithubSourceSpec(
+        `https://github.com/acme/template/releases/download/v1.2.3/${ASSET_NAME}`,
+      ),
+    ];
+    for (const source of sources) {
+      for (const candidate of [source, { ...source }]) {
+        await expect(resolveGithubTemplateSource({
+          source: candidate,
+          metadata: createPort().port,
+        })).resolves.toMatchObject({
+          owner: 'acme',
+          repo: 'template',
+        });
+      }
+    }
+  });
+
   it('resolves immutable descriptor, release, assets, and checksum evidence', async () => {
     const { port, calls } = createPort();
     const source = parseProjectTemplateGithubSourceSpec(
@@ -117,12 +205,12 @@ describe('resolveGithubTemplateSource', () => {
     expect(result.descriptorSha256).toBe(
       calculateProjectTemplateSourceDescriptorSha256(descriptor()),
     );
-    expect(result.dependencies).toEqual(
+    expect(result.declaredDependencies).toEqual(
       (descriptor()['repertoireDependencies'] as unknown[]),
     );
     expect(Object.isFrozen(result)).toBe(true);
-    expect(Object.isFrozen(result.dependencies)).toBe(true);
-    expect(Object.isFrozen(result.dependencies[0])).toBe(true);
+    expect(Object.isFrozen(result.declaredDependencies)).toBe(true);
+    expect(Object.isFrozen(result.declaredDependencies[0])).toBe(true);
 
     expect(calls[0]).toEqual({
       method: 'resolveRefToCommit',
@@ -343,6 +431,7 @@ describe('resolveGithubTemplateSource', () => {
   it.each([
     [undefined, 'update-available', false, true],
     [{
+      ...CURRENT_IDENTITY,
       version: '1.2.3',
       sha256: ARCHIVE_SHA,
       commit: COMMIT,
@@ -351,6 +440,7 @@ describe('resolveGithubTemplateSource', () => {
       ),
     }, 'up-to-date', false, false],
     [{
+      ...CURRENT_IDENTITY,
       version: '1.2.3+old',
       sha256: ARCHIVE_SHA,
       commit: COMMIT,
@@ -359,6 +449,7 @@ describe('resolveGithubTemplateSource', () => {
       ),
     }, 'version-republished', true, false],
     [{
+      ...CURRENT_IDENTITY,
       version: '1.2.3',
       sha256: 'b'.repeat(64),
       commit: COMMIT,
@@ -367,6 +458,7 @@ describe('resolveGithubTemplateSource', () => {
       ),
     }, 'version-republished', true, false],
     [{
+      ...CURRENT_IDENTITY,
       version: '2.0.0',
       sha256: ARCHIVE_SHA,
       commit: COMMIT,
@@ -400,6 +492,7 @@ describe('resolveGithubTemplateSource', () => {
       ),
       metadata: port,
       current: {
+        ...CURRENT_IDENTITY,
         version: '1.1.9',
         sha256: 'b'.repeat(64),
         commit: '1'.repeat(40),
@@ -407,6 +500,31 @@ describe('resolveGithubTemplateSource', () => {
       },
     })).resolves.toMatchObject({
       updateState: 'update-available',
+      hardBlocked: false,
+      downloadAllowed: true,
+    });
+  });
+
+  it('classifies a different repository identity as source-changed', async () => {
+    const { port } = createPort();
+    await expect(resolveGithubTemplateSource({
+      source: parseProjectTemplateGithubSourceSpec(
+        'github:acme/template@main',
+      ),
+      metadata: port,
+      current: {
+        owner: 'acme',
+        repo: 'fork',
+        repositoryUrl: 'https://github.com/acme/fork',
+        version: '1.2.3',
+        sha256: ARCHIVE_SHA,
+        commit: COMMIT,
+        descriptorSha256: calculateProjectTemplateSourceDescriptorSha256(
+          descriptor(),
+        ),
+      },
+    })).resolves.toMatchObject({
+      updateState: 'source-changed',
       hardBlocked: false,
       downloadAllowed: true,
     });
@@ -433,6 +551,47 @@ describe('resolveGithubTemplateSource', () => {
       expect((error as Error).message).not.toContain('stderr');
     }
   });
+
+  it.each([
+    ['ref metadata', 'INVALID_REF_METADATA', {
+      resolveRefToCommit: async () => throwingProxy({ commit: COMMIT }),
+    }],
+    ['descriptor payload', 'INVALID_DESCRIPTOR', {
+      readFileAtCommit: async () => throwingProxy(
+        new TextEncoder().encode(
+          serializeProjectTemplateSourceDescriptor(descriptor()),
+        ),
+      ),
+    }],
+    ['release metadata', 'INVALID_RELEASE_METADATA', {
+      getReleaseByTag: async () => throwingProxy(releaseMetadata()),
+    }],
+    ['checksum payload', 'INVALID_CHECKSUM', {
+      readReleaseAsset: async () => throwingProxy(
+        new TextEncoder().encode(CHECKSUM_LINE),
+      ),
+    }],
+  ])(
+    'redacts Proxy reflection failures from %s',
+    async (_label, code, overrides) => {
+      const { port } = createPort(
+        overrides as Partial<GithubTemplateSourceMetadataPort>,
+      );
+      const promise = resolveGithubTemplateSource({
+        source: parseProjectTemplateGithubSourceSpec(
+          'github:acme/template@main',
+        ),
+        metadata: port,
+      });
+      await expectResolutionCode(promise, code);
+      try {
+        await promise;
+      } catch (error) {
+        expect((error as Error).message).not.toContain('ghp_proxy_secret');
+        expect(JSON.stringify(error)).not.toContain('ghp_proxy_secret');
+      }
+    },
+  );
 });
 
 async function expectResolutionCode(
@@ -445,4 +604,19 @@ async function expectResolutionCode(
       code,
     }),
   );
+}
+
+function throwingProxy<T extends object>(target: T): T {
+  const fail = (): never => {
+    throw new Error('raw stderr ghp_proxy_secret');
+  };
+  return new Proxy(target, {
+    get(_target, property) {
+      if (property === 'then') return undefined;
+      return fail();
+    },
+    getPrototypeOf: fail,
+    ownKeys: fail,
+    getOwnPropertyDescriptor: fail,
+  });
 }

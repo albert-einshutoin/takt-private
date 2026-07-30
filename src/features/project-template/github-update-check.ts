@@ -103,6 +103,9 @@ export interface GithubTemplateSourceMetadataPort {
 }
 
 export interface GithubTemplateCurrentSourceEvidence {
+  readonly owner: string;
+  readonly repo: string;
+  readonly repositoryUrl: `https://github.com/${string}/${string}`;
   readonly version: string;
   readonly sha256: string;
   readonly commit: string;
@@ -113,7 +116,8 @@ export type GithubTemplateUpdateState =
   | 'update-available'
   | 'up-to-date'
   | 'version-republished'
-  | 'downgrade';
+  | 'downgrade'
+  | 'source-changed';
 
 export interface ResolveGithubTemplateSourceOptions {
   readonly source: ProjectTemplateGithubSourceSpec;
@@ -139,7 +143,11 @@ export interface ResolvedGithubTemplateSource {
   readonly checksumAssetSize: number;
   readonly sha256: string;
   readonly version: string;
-  readonly dependencies:
+  /**
+   * Unverified declarations only. They must not be applied or locked until a
+   * dependency resolver proves every declared tag resolves to its commit.
+   */
+  readonly declaredDependencies:
     readonly ProjectTemplateRepertoireDependencyV1[];
   readonly updateState: GithubTemplateUpdateState;
   readonly hardBlocked: boolean;
@@ -218,7 +226,11 @@ export async function resolveGithubTemplateSource(
       tag: descriptor.pack.releaseTag,
     })),
   );
-  const release = parseReleaseMetadata(releasePayload);
+  const release = normalizeValidationBoundary(
+    'INVALID_RELEASE_METADATA',
+    'release metadata failed strict validation',
+    () => parseReleaseMetadata(releasePayload),
+  );
   if (release.tagName !== descriptor.pack.releaseTag) {
     resolutionError(
       'INVALID_RELEASE_METADATA',
@@ -264,13 +276,18 @@ export async function resolveGithubTemplateSource(
       maxBytes: MAX_CHECKSUM_BYTES,
     })),
   );
-  const checksumText = parseChecksumPayload(
-    checksumPayload,
-    checksumAsset.size,
+  const checksumText = normalizeValidationBoundary(
+    'INVALID_CHECKSUM',
+    'checksum payload failed strict validation',
+    () => parseChecksumPayload(checksumPayload, checksumAsset.size),
   );
-  const checksum = parseCanonicalChecksum(
-    checksumText,
-    descriptor.pack.assetName,
+  const checksum = normalizeValidationBoundary(
+    'INVALID_CHECKSUM',
+    'checksum payload failed strict validation',
+    () => parseCanonicalChecksum(
+      checksumText,
+      descriptor.pack.assetName,
+    ),
   );
   if (checksum !== descriptor.pack.sha256) {
     resolutionError(
@@ -286,9 +303,10 @@ export async function resolveGithubTemplateSource(
     descriptor,
     requestedCommit,
     descriptorSha256,
+    source,
     options.current,
   );
-  const dependencies = Object.freeze(
+  const declaredDependencies = Object.freeze(
     descriptor.repertoireDependencies.map((dependency) => Object.freeze({
       ...dependency,
       capabilities: Object.freeze([...dependency.capabilities]),
@@ -313,7 +331,7 @@ export async function resolveGithubTemplateSource(
     checksumAssetSize: checksumAsset.size,
     sha256: descriptor.pack.sha256,
     version: descriptor.pack.version,
-    dependencies,
+    declaredDependencies,
     ...update,
   });
 }
@@ -322,14 +340,19 @@ function validateParsedSourceSpec(
   value: ProjectTemplateGithubSourceSpec,
 ): ProjectTemplateGithubSourceSpec {
   try {
-    if (value.kind === 'github-ref') {
+    const source = snapshotSourceSpec(value);
+    if (source['kind'] === 'github-ref') {
       const parsed = parseProjectTemplateGithubSourceSpec(
-        `github:${value.owner}/${value.repo}@${value.ref}`,
+        `github:${source['owner']}/${source['repo']}@${source['ref']}`,
       );
-      if (
-        parsed.kind !== value.kind
-        || parsed.repositoryUrl !== value.repositoryUrl
-      ) {
+      const keys = [
+        'kind',
+        'owner',
+        'repo',
+        'ref',
+        'repositoryUrl',
+      ] as const;
+      if (keys.some((key) => parsed[key] !== source[key])) {
         resolutionError(
           'INVALID_SOURCE_SPEC',
           'source spec is not canonical',
@@ -338,15 +361,26 @@ function validateParsedSourceSpec(
       }
       return parsed;
     }
-    const parsed = parseProjectTemplateGithubSourceSpec(value.assetUrl);
-    if (
-      parsed.kind !== value.kind
-      || parsed.owner !== value.owner
-      || parsed.repo !== value.repo
-      || parsed.ref !== value.ref
-      || parsed.assetName !== value.assetName
-      || parsed.repositoryUrl !== value.repositoryUrl
-    ) {
+    const parsed = parseProjectTemplateGithubSourceSpec(
+      source['assetUrl'],
+    );
+    if (parsed.kind !== 'github-release-asset') {
+      resolutionError(
+        'INVALID_SOURCE_SPEC',
+        'release source spec did not reconstruct as a release asset',
+        'source',
+      );
+    }
+    const keys = [
+      'kind',
+      'owner',
+      'repo',
+      'ref',
+      'assetName',
+      'repositoryUrl',
+      'assetUrl',
+    ] as const;
+    if (keys.some((key) => parsed[key] !== source[key])) {
       resolutionError(
         'INVALID_SOURCE_SPEC',
         'source spec is not canonical',
@@ -364,6 +398,68 @@ function validateParsedSourceSpec(
   }
 }
 
+function snapshotSourceSpec(
+  value: ProjectTemplateGithubSourceSpec,
+): Record<string, string> {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    resolutionError(
+      'INVALID_SOURCE_SPEC',
+      'source spec must be an exact plain object',
+      'source',
+    );
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const kindDescriptor = descriptors['kind'];
+  if (kindDescriptor === undefined || !('value' in kindDescriptor)) {
+    resolutionError(
+      'INVALID_SOURCE_SPEC',
+      'source spec kind must be an own data property',
+      'source.kind',
+    );
+  }
+  const expectedKeys = kindDescriptor.value === 'github-ref'
+    ? ['kind', 'owner', 'repo', 'ref', 'repositoryUrl']
+    : kindDescriptor.value === 'github-release-asset'
+      ? [
+        'kind',
+        'owner',
+        'repo',
+        'ref',
+        'assetName',
+        'repositoryUrl',
+        'assetUrl',
+      ]
+      : [];
+  const ownKeys = Reflect.ownKeys(value);
+  if (
+    expectedKeys.length === 0
+    || ownKeys.length !== expectedKeys.length
+    || ownKeys.some(
+      (key) => typeof key !== 'string' || !expectedKeys.includes(key),
+    )
+    || expectedKeys.some((key) => {
+      const descriptor = descriptors[key];
+      return descriptor === undefined
+        || !('value' in descriptor)
+        || typeof descriptor.value !== 'string';
+    })
+  ) {
+    resolutionError(
+      'INVALID_SOURCE_SPEC',
+      'source spec must contain exactly the canonical own data properties',
+      'source',
+    );
+  }
+  return Object.fromEntries(
+    expectedKeys.map((key) => [key, descriptors[key]!.value]),
+  ) as Record<string, string>;
+}
+
 async function resolveCommit(
   port: GithubTemplateSourceMetadataPort,
   owner: string,
@@ -373,42 +469,54 @@ async function resolveCommit(
   const payload = await callMetadataPort(
     () => port.resolveRefToCommit(Object.freeze({ owner, repo, ref })),
   );
-  const record = requirePlainRecord(
-    payload,
-    ['commit'],
+  return normalizeValidationBoundary(
     'INVALID_REF_METADATA',
-    'ref metadata',
+    'ref metadata failed strict validation',
+    () => {
+      const record = requirePlainRecord(
+        payload,
+        ['commit'],
+        'INVALID_REF_METADATA',
+        'ref metadata',
+      );
+      const commit = record['commit'];
+      if (typeof commit !== 'string' || !COMMIT_PATTERN.test(commit)) {
+        resolutionError(
+          'INVALID_REF_METADATA',
+          'resolved commit must be lowercase hexadecimal 40',
+          'ref.commit',
+        );
+      }
+      return commit;
+    },
   );
-  const commit = record['commit'];
-  if (typeof commit !== 'string' || !COMMIT_PATTERN.test(commit)) {
-    resolutionError(
-      'INVALID_REF_METADATA',
-      'resolved commit must be lowercase hexadecimal 40',
-      'ref.commit',
-    );
-  }
-  return commit;
 }
 
 function parseDescriptorPayload(
   payload: unknown,
 ): ProjectTemplateSourceDescriptorV1 {
-  if (!(typeof payload === 'string' || payload instanceof Uint8Array)) {
-    resolutionError(
-      'INVALID_DESCRIPTOR',
-      'descriptor payload must be bounded UTF-8 bytes or string',
-      'descriptor',
-    );
-  }
-  try {
-    return parseProjectTemplateSourceDescriptorJson(payload);
-  } catch {
-    resolutionError(
-      'INVALID_DESCRIPTOR',
-      'descriptor payload failed strict validation',
-      'descriptor',
-    );
-  }
+  return normalizeValidationBoundary(
+    'INVALID_DESCRIPTOR',
+    'descriptor payload failed strict validation',
+    () => {
+      if (!(typeof payload === 'string' || payload instanceof Uint8Array)) {
+        resolutionError(
+          'INVALID_DESCRIPTOR',
+          'descriptor payload must be bounded UTF-8 bytes or string',
+          'descriptor',
+        );
+      }
+      try {
+        return parseProjectTemplateSourceDescriptorJson(payload);
+      } catch {
+        resolutionError(
+          'INVALID_DESCRIPTOR',
+          'descriptor payload failed strict validation',
+          'descriptor',
+        );
+      }
+    },
+  );
 }
 
 function parseReleaseMetadata(payload: unknown): ParsedRelease {
@@ -551,6 +659,7 @@ function classifyUpdate(
   descriptor: ProjectTemplateSourceDescriptorV1,
   commit: string,
   descriptorSha256: string,
+  source: ProjectTemplateGithubSourceSpec,
   currentValue: GithubTemplateCurrentSourceEvidence | undefined,
 ): Pick<
 ResolvedGithubTemplateSource,
@@ -559,7 +668,18 @@ ResolvedGithubTemplateSource,
   if (currentValue === undefined) {
     return updateFlags('update-available');
   }
-  const current = parseCurrentEvidence(currentValue);
+  const current = normalizeValidationBoundary(
+    'INVALID_CURRENT_EVIDENCE',
+    'current evidence failed strict validation',
+    () => parseCurrentEvidence(currentValue),
+  );
+  if (
+    current.owner !== source.owner
+    || current.repo !== source.repo
+    || current.repositoryUrl !== source.repositoryUrl
+  ) {
+    return updateFlags('source-changed');
+  }
   const precedence = compareSemVer(descriptor.pack.version, current.version);
   if (precedence > 0) return updateFlags('update-available');
   if (precedence < 0) return updateFlags('downgrade');
@@ -579,7 +699,15 @@ function parseCurrentEvidence(
 ): GithubTemplateCurrentSourceEvidence {
   const record = requirePlainRecord(
     value,
-    ['version', 'sha256', 'commit', 'descriptorSha256'],
+    [
+      'owner',
+      'repo',
+      'repositoryUrl',
+      'version',
+      'sha256',
+      'commit',
+      'descriptorSha256',
+    ],
     'INVALID_CURRENT_EVIDENCE',
     'current',
   );
@@ -606,7 +734,53 @@ function parseCurrentEvidence(
       'current.commit',
     );
   }
-  return { version, sha256, commit, descriptorSha256 };
+  const owner = record['owner'];
+  const repo = record['repo'];
+  const repositoryUrl = record['repositoryUrl'];
+  if (
+    typeof owner !== 'string'
+    || typeof repo !== 'string'
+    || typeof repositoryUrl !== 'string'
+  ) {
+    resolutionError(
+      'INVALID_CURRENT_EVIDENCE',
+      'current repository identity must be canonical strings',
+      'current',
+    );
+  }
+  let parsedIdentity: ProjectTemplateGithubSourceSpec;
+  try {
+    parsedIdentity = parseProjectTemplateGithubSourceSpec(
+      `github:${owner}/${repo}@identity`,
+    );
+  } catch {
+    resolutionError(
+      'INVALID_CURRENT_EVIDENCE',
+      'current repository identity must be canonical',
+      'current',
+    );
+  }
+  if (
+    parsedIdentity.kind !== 'github-ref'
+    || parsedIdentity.owner !== owner
+    || parsedIdentity.repo !== repo
+    || parsedIdentity.repositoryUrl !== repositoryUrl
+  ) {
+    resolutionError(
+      'INVALID_CURRENT_EVIDENCE',
+      'current repository identity must be canonical',
+      'current',
+    );
+  }
+  return {
+    owner,
+    repo,
+    repositoryUrl: parsedIdentity.repositoryUrl,
+    version,
+    sha256,
+    commit,
+    descriptorSha256,
+  };
 }
 
 function updateFlags(
@@ -618,8 +792,22 @@ ResolvedGithubTemplateSource,
   return {
     updateState: state,
     hardBlocked: state === 'version-republished' || state === 'downgrade',
-    downloadAllowed: state === 'update-available',
+    downloadAllowed:
+      state === 'update-available' || state === 'source-changed',
   };
+}
+
+function normalizeValidationBoundary<T>(
+  code: GithubTemplateSourceResolutionErrorCode,
+  message: string,
+  validate: () => T,
+): T {
+  try {
+    return validate();
+  } catch (error) {
+    if (error instanceof GithubTemplateSourceResolutionError) throw error;
+    resolutionError(code, message);
+  }
 }
 
 function requireEvidenceHash(value: unknown, field: string): string {
