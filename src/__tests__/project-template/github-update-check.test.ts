@@ -612,6 +612,44 @@ describe('resolveGithubTemplateSource', () => {
     },
   );
 
+  it('freezes an escaped internal error before mutation and reinjection', async () => {
+    let captured: GithubTemplateSourceResolutionError | undefined;
+    const invalidSource = {
+      ...parseProjectTemplateGithubSourceSpec(
+        'github:acme/template@main',
+      ),
+      unexpected: true,
+    };
+    try {
+      await resolveGithubTemplateSource({
+        source: invalidSource as never,
+        metadata: createPort().port,
+      });
+    } catch (error) {
+      captured = error as GithubTemplateSourceResolutionError;
+    }
+    expect(captured).toBeInstanceOf(GithubTemplateSourceResolutionError);
+    expect(() => Object.assign(captured!, {
+      code: 'CHECKSUM_MISMATCH',
+      message: 'raw stderr ghp_mutated_internal_secret',
+      field: 'mutated',
+    })).toThrow(TypeError);
+    expect(Object.isFrozen(captured)).toBe(true);
+
+    const promise = resolveGithubTemplateSource({
+      source: parseProjectTemplateGithubSourceSpec(
+        'github:acme/template@main',
+      ),
+      metadata: createPort({
+        async resolveRefToCommit() {
+          return throwingProxy({ commit: COMMIT }, () => captured!);
+        },
+      }).port,
+    });
+    await expectResolutionCode(promise, 'INVALID_SOURCE_SPEC');
+    await expectRedacted(promise, 'ghp_mutated_internal_secret');
+  });
+
   it.each([
     ['ref metadata', 'INVALID_REF_METADATA', {
       resolveRefToCommit: async () => throwingResolutionErrorProxy(

@@ -962,6 +962,9 @@ function resolutionError(
     message,
     field,
   );
+  // WeakSet membership authenticates internal errors, so freeze their
+  // security-relevant fields before callers can observe and reinject them.
+  Object.freeze(error);
   INTERNAL_RESOLUTION_ERRORS.add(error);
   throw error;
 }
