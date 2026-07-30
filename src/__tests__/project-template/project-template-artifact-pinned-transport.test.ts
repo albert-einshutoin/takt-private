@@ -2547,7 +2547,11 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     const dnsCallbacks: Array<(...args: unknown[]) => void> = [];
     const responseCallbacks: Array<(response: FakeResponse) => void> = [];
     const retainedRequestListeners:
-      Array<(...args: unknown[]) => void> = [];
+      Array<readonly [
+        FakeRequest,
+        'error' | 'close',
+        (...args: unknown[]) => void,
+      ]> = [];
     const nativeOn = EventEmitter.prototype.on;
     vi.spyOn(EventEmitter.prototype, 'on').mockImplementation(
       function retainRequestCallbacks(
@@ -2559,7 +2563,11 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
           requests.includes(this as FakeRequest)
           && (event === 'error' || event === 'close')
         ) {
-          retainedRequestListeners.push(listener);
+          retainedRequestListeners.push([
+            this as FakeRequest,
+            event,
+            listener,
+          ]);
         }
         return Reflect.apply(nativeOn, this, [event, listener]);
       },
@@ -2587,9 +2595,13 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     const order: string[] = [];
     let pull = 0;
     const finalResponse = responses.at(-1)!;
+    const finalPause = vi.spyOn(finalResponse, 'pause');
     // Template packs may be large, so the end-to-end contract must preserve
     // one-chunk-per-pull backpressure across the complete redirect chain.
-    vi.spyOn(finalResponse, 'resume').mockImplementation(() => {
+    const finalResume = vi.spyOn(
+      finalResponse,
+      'resume',
+    ).mockImplementation(() => {
       pull += 1;
       finalResponse.emit('data', Buffer.from(`private-chunk-${pull}`));
       if (pull === 2) finalResponse.emit('end');
@@ -2624,8 +2636,26 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
       'private-chunk-2',
       'end',
     ]);
+    expect(finalResume).toHaveBeenCalledTimes(2);
+    expect(finalPause).toHaveBeenCalledTimes(3);
+    expect(handlers.onData).toHaveBeenCalledTimes(2);
+    expect(handlers.onEnd).toHaveBeenCalledTimes(1);
     expect(native.dnsLookup).toHaveBeenCalledTimes(4);
     expect(native.httpsRequest).toHaveBeenCalledTimes(4);
+    expect(retainedRequestListeners).toHaveLength(requests.length * 2);
+    expect(retainedRequestListeners).toHaveLength(8);
+    for (const request of requests) {
+      for (const event of ['error', 'close'] as const) {
+        expect(retainedRequestListeners.filter(
+          ([owner, kind]) => owner === request && kind === event,
+        )).toHaveLength(1);
+      }
+      expect(request.listenerCount('error')).toBe(0);
+      expect(request.listenerCount('close')).toBe(0);
+    }
+    for (const event of ['data', 'end', 'aborted', 'error', 'close']) {
+      expect(finalResponse.listenerCount(event)).toBe(0);
+    }
     for (const destroy of responseDestroys.slice(0, -1)) {
       expect(destroy).toHaveBeenCalledTimes(1);
     }
@@ -2658,7 +2688,7 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
     for (const listener of retainedBodyListeners) {
       expect(() => listener(Buffer.from('private-late-chunk'))).not.toThrow();
     }
-    for (const listener of retainedRequestListeners) {
+    for (const [, , listener] of retainedRequestListeners) {
       expect(() => listener(new Error('private late request'))).not.toThrow();
     }
     const lateResponses = responseCallbacks.map(
@@ -2680,6 +2710,10 @@ describe('project-template pinned artifact transport F2b-C slice 1', () => {
         callsBeforeLateCallbacks[name],
       );
     }
+    expect(finalResume).toHaveBeenCalledTimes(2);
+    expect(finalPause).toHaveBeenCalledTimes(3);
+    expect(handlers.onData).toHaveBeenCalledTimes(2);
+    expect(handlers.onEnd).toHaveBeenCalledTimes(1);
     expect(() => state.resolve(
       302,
       'https://objects.githubusercontent.com/revoked',
