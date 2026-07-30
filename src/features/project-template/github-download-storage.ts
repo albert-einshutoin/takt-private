@@ -84,6 +84,7 @@ const CACHE_TEMP_PARSE_PATTERN =
   /^\.tmp\.([1-9]\d*)\.([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([a-f0-9]{64})$/;
 const CACHE_RECLAIM_SCAN_LIMIT = 8192;
 const CACHE_RECLAIM_DELETE_LIMIT = 32;
+const NATIVE_PROCESS_KILL = process.kill.bind(process);
 
 export type GithubTemplateDownloadStoragePhase =
   | 'ingress-created'
@@ -152,7 +153,10 @@ export interface GithubTemplateCacheIoSeam {
     fd: number,
     kind: 'temporary' | 'final' | 'directory',
   ): void;
-  cacheProcessProbe?(pid: number): void;
+  cacheProcessProbe?(
+    pid: number,
+  ): 'alive' | 'missing' | 'inaccessible';
+  cacheReclaimClose?(kind: 'directory-stream'): void;
   cacheWrite?(
     fd: number,
     chunk: Uint8Array,
@@ -1154,26 +1158,45 @@ interface ReclaimCandidateAuthority {
   readonly path: string;
   readonly finalPath?: string;
   readonly fd: number;
+  readonly finalFd?: number;
   readonly inode: number;
   readonly bytes: number;
   readonly links: 1 | 2;
   readonly sha256: string;
 }
 
-function cacheOwnerIsDefinitelyDead(
+function cacheOwnerState(
   pid: number,
   ioSeam: GithubTemplateCacheIoSeam | undefined,
-): boolean {
-  if (pid === process.pid) return false;
+): 'alive' | 'missing' | 'inaccessible' {
+  if (pid === process.pid) return 'alive';
+  let seamProbe: GithubTemplateCacheIoSeam['cacheProcessProbe'];
   try {
-    if (ioSeam?.cacheProcessProbe !== undefined) {
-      ioSeam.cacheProcessProbe(pid);
-    } else {
-      process.kill(pid, 0);
+    seamProbe = ioSeam?.cacheProcessProbe;
+  } catch {
+    return 'inaccessible';
+  }
+  if (seamProbe !== undefined) {
+    try {
+      const result = Reflect.apply(seamProbe, ioSeam, [pid]) as unknown;
+      return (
+        result === 'alive'
+        || result === 'missing'
+        || result === 'inaccessible'
+      )
+        ? result
+        : 'inaccessible';
+    } catch {
+      // A seam exception is untrusted input, not native ESRCH evidence.
+      return 'inaccessible';
     }
-    return false;
+  }
+  try {
+    NATIVE_PROCESS_KILL(pid, 0);
+    return 'alive';
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ESRCH' ? 'missing' : 'inaccessible';
   }
 }
 
@@ -1294,10 +1317,15 @@ async function openReclaimCandidate(
 
     const retainedFd = fd;
     fd = undefined;
+    const retainedFinalFd = finalFd;
+    finalFd = undefined;
     return {
       path,
       ...(links === 2 ? { finalPath } : {}),
       fd: retainedFd,
+      ...(retainedFinalFd === undefined
+        ? {}
+        : { finalFd: retainedFinalFd }),
       inode: opened.ino,
       bytes: opened.size,
       links,
@@ -1341,20 +1369,114 @@ function revalidateReclaimCandidate(
         join(cache.shaRoot, `${basename(candidate.path).slice(-64)}.taktpack`),
       );
     }
-    if (candidate.finalPath === undefined) return false;
+    if (candidate.finalPath === undefined || candidate.finalFd === undefined) {
+      return false;
+    }
     const finalStat = lstatSync(candidate.finalPath);
+    const finalOpened = fstatSync(candidate.finalFd);
     return (
       !finalStat.isSymbolicLink()
       && isOwnedPrivateCacheFile(finalStat, cache.device, 2)
+      && isOwnedPrivateCacheFile(finalOpened, cache.device, 2)
       && finalStat.ino === candidate.inode
+      && finalOpened.ino === candidate.inode
       && finalStat.size === candidate.bytes
+      && finalOpened.size === candidate.bytes
       && realpathSync.native(candidate.finalPath) === candidate.finalPath
       && hashCacheDescriptor(candidate.fd, candidate.bytes)
+        === candidate.sha256
+      && hashCacheDescriptor(candidate.finalFd, candidate.bytes)
         === candidate.sha256
     );
   } catch {
     return false;
   }
+}
+
+function revalidateReclaimedFinal(
+  candidate: ReclaimCandidateAuthority,
+  cache: PreparedCacheDirectory,
+): void {
+  try {
+    if (
+      candidate.links !== 2
+      || candidate.finalPath === undefined
+      || candidate.finalFd === undefined
+    ) throw new Error();
+    const finalStat = lstatSync(candidate.finalPath);
+    const finalOpened = fstatSync(candidate.finalFd);
+    const tempOpened = fstatSync(candidate.fd);
+    if (
+      finalStat.isSymbolicLink()
+      || !isOwnedPrivateCacheFile(finalStat, cache.device, 1)
+      || !isOwnedPrivateCacheFile(finalOpened, cache.device, 1)
+      || !isOwnedPrivateCacheFile(tempOpened, cache.device, 1)
+      || finalStat.ino !== candidate.inode
+      || finalOpened.ino !== candidate.inode
+      || tempOpened.ino !== candidate.inode
+      || finalStat.size !== candidate.bytes
+      || finalOpened.size !== candidate.bytes
+      || tempOpened.size !== candidate.bytes
+      || realpathSync.native(candidate.finalPath) !== candidate.finalPath
+      || hashCacheDescriptor(candidate.finalFd, candidate.bytes)
+        !== candidate.sha256
+      || hashCacheDescriptor(candidate.fd, candidate.bytes)
+        !== candidate.sha256
+    ) throw new Error();
+  } catch {
+    throw storageError(
+      'CACHE_INVALID',
+      'GitHub template cache reclaimed final changed',
+      'cache-published',
+    );
+  }
+}
+
+function closeReclaimDescriptor(
+  fd: number,
+  kind: 'temporary' | 'final' | 'directory',
+  ioSeam: GithubTemplateCacheIoSeam | undefined,
+): GithubTemplateDownloadStorageError | undefined {
+  let failed = false;
+  try {
+    ioSeam?.cacheClose?.(fd, kind);
+  } catch {
+    failed = true;
+  }
+  try {
+    closeSync(fd);
+  } catch {
+    failed = true;
+  }
+  return failed
+    ? storageError(
+      'IO_FAILURE',
+      'GitHub template cache reclaim descriptor close failed',
+    )
+    : undefined;
+}
+
+function closeReclaimDirectoryStream(
+  directory: ReturnType<typeof opendirSync>,
+  ioSeam: GithubTemplateCacheIoSeam | undefined,
+): GithubTemplateDownloadStorageError | undefined {
+  let failed = false;
+  try {
+    ioSeam?.cacheReclaimClose?.('directory-stream');
+  } catch {
+    failed = true;
+  }
+  try {
+    directory.closeSync();
+  } catch {
+    failed = true;
+  }
+  return failed
+    ? storageError(
+      'IO_FAILURE',
+      'GitHub template cache reclaim directory close failed',
+    )
+    : undefined;
 }
 
 async function reclaimPreparedGithubTemplateCacheTemps(
@@ -1371,14 +1493,46 @@ async function reclaimPreparedGithubTemplateCacheTemps(
   let status: ReclaimedGithubTemplateCacheTemps['status'] = 'complete';
   let directory: ReturnType<typeof opendirSync> | undefined;
   let deletedAny = false;
+  let primaryError: GithubTemplateDownloadStorageError | undefined;
+  const retainedCandidates = new Set<ReclaimCandidateAuthority>();
+  const reclaimedLinkedCandidates: ReclaimCandidateAuthority[] = [];
 
-  assertCacheDirectoryAuthority(
-    cache.shaRoot,
-    cache.shaRootFd,
-    cache.device,
-    cache.shaRootInode,
-  );
+  const rememberError = (error: unknown): void => {
+    if (primaryError !== undefined) return;
+    primaryError = isInternalStorageError(error)
+      ? error
+      : storageError(
+        'IO_FAILURE',
+        'GitHub template cache reclaim failed',
+      );
+  };
+  const closeCandidate = (
+    candidate: ReclaimCandidateAuthority,
+  ): GithubTemplateDownloadStorageError | undefined => {
+    retainedCandidates.delete(candidate);
+    let closeError: GithubTemplateDownloadStorageError | undefined;
+    if (candidate.finalFd !== undefined) {
+      closeError = closeReclaimDescriptor(
+        candidate.finalFd,
+        'final',
+        ioSeam,
+      );
+    }
+    const tempCloseError = closeReclaimDescriptor(
+      candidate.fd,
+      'temporary',
+      ioSeam,
+    );
+    return closeError ?? tempCloseError;
+  };
+
   try {
+    assertCacheDirectoryAuthority(
+      cache.shaRoot,
+      cache.shaRootFd,
+      cache.device,
+      cache.shaRootInode,
+    );
     directory = opendirSync(cache.shaRoot);
     while (scanned < CACHE_RECLAIM_SCAN_LIMIT) {
       if (reclaimed >= CACHE_RECLAIM_DELETE_LIMIT) {
@@ -1393,7 +1547,10 @@ async function reclaimPreparedGithubTemplateCacheTemps(
       if (match === null) continue;
       matched += 1;
       const pid = Number(match[1]);
-      if (!Number.isSafeInteger(pid) || !cacheOwnerIsDefinitelyDead(pid, ioSeam)) {
+      if (
+        !Number.isSafeInteger(pid)
+        || cacheOwnerState(pid, ioSeam) !== 'missing'
+      ) {
         skipped += 1;
         continue;
       }
@@ -1420,56 +1577,54 @@ async function reclaimPreparedGithubTemplateCacheTemps(
         unsafeRetained += 1;
         continue;
       }
-      let closeFailed = false;
-      try {
-        runCachePhase(
-          ioSeam,
-          'before-cache-reclaim-unlink',
-          candidate.path,
-        );
-        assertCacheDirectoryAuthority(
-          cache.shaRoot,
-          cache.shaRootFd,
-          cache.device,
-          cache.shaRootInode,
-        );
-        const reclaimable = (
-          revalidateReclaimCandidate(candidate, cache)
-          && cacheOwnerIsDefinitelyDead(pid, ioSeam)
-        );
-        if (!reclaimable) {
-          skipped += 1;
-          unsafeRetained += 1;
-        } else {
-          try {
-            unlinkOwnedCacheTemp(
-              candidate.path,
-              cache.device,
-              candidate.inode,
-              candidate.links,
-            );
-          } catch (error) {
-            if (isInternalStorageError(error)) throw error;
-            throw storageError(
-              'IO_FAILURE',
-              'GitHub template cache reclaim unlink failed',
-            );
-          }
-          reclaimed += 1;
-          deletedAny = true;
-        }
-      } finally {
-        try {
-          closeSync(candidate.fd);
-        } catch {
-          closeFailed = true;
-        }
+      retainedCandidates.add(candidate);
+      runCachePhase(
+        ioSeam,
+        'before-cache-reclaim-unlink',
+        candidate.path,
+      );
+      assertCacheDirectoryAuthority(
+        cache.shaRoot,
+        cache.shaRootFd,
+        cache.device,
+        cache.shaRootInode,
+      );
+      // The untrusted probe runs before the final synchronous path/FD/hash
+      // validation. No seam executes between that validation and unlink.
+      const ownerStillMissing = cacheOwnerState(pid, ioSeam) === 'missing';
+      const reclaimable = (
+        ownerStillMissing
+        && revalidateReclaimCandidate(candidate, cache)
+      );
+      if (!reclaimable) {
+        skipped += 1;
+        unsafeRetained += 1;
+        const closeError = closeCandidate(candidate);
+        if (closeError !== undefined) throw closeError;
+        continue;
       }
-      if (closeFailed) {
+      try {
+        unlinkOwnedCacheTemp(
+          candidate.path,
+          cache.device,
+          candidate.inode,
+          candidate.links,
+        );
+      } catch (error) {
+        if (isInternalStorageError(error)) throw error;
         throw storageError(
           'IO_FAILURE',
-          'GitHub template cache reclaim close failed',
+          'GitHub template cache reclaim unlink failed',
         );
+      }
+      reclaimed += 1;
+      deletedAny = true;
+      if (candidate.links === 2) {
+        revalidateReclaimedFinal(candidate, cache);
+        reclaimedLinkedCandidates.push(candidate);
+      } else {
+        const closeError = closeCandidate(candidate);
+        if (closeError !== undefined) throw closeError;
       }
     }
     if (scanned === CACHE_RECLAIM_SCAN_LIMIT && status === 'complete') {
@@ -1477,44 +1632,50 @@ async function reclaimPreparedGithubTemplateCacheTemps(
       status = 'scan-limit';
     }
   } catch (error) {
-    if (isInternalStorageError(error)) throw error;
-    throw storageError(
-      'IO_FAILURE',
-      'GitHub template cache reclaim failed',
-    );
+    rememberError(error);
   } finally {
     if (directory !== undefined) {
+      const closeError = closeReclaimDirectoryStream(directory, ioSeam);
+      if (closeError !== undefined) rememberError(closeError);
+    }
+
+    if (deletedAny && process.platform !== 'win32') {
       try {
-        directory.closeSync();
-      } catch {
-        // Any earlier failure remains primary; final authority checks below
-        // prevent success after a directory replacement.
+        runCachePhase(ioSeam, 'before-cache-reclaim-fsync', cache.shaRoot);
+        assertCacheDirectoryAuthority(
+          cache.shaRoot,
+          cache.shaRootFd,
+          cache.device,
+          cache.shaRootInode,
+        );
+        syncCacheDirectoryDescriptor(cache.shaRootFd, ioSeam);
+      } catch (error) {
+        rememberError(error);
       }
     }
+    try {
+      assertCacheDirectoryAuthority(
+        cache.shaRoot,
+        cache.shaRootFd,
+        cache.device,
+        cache.shaRootInode,
+      );
+    } catch (error) {
+      rememberError(error);
+    }
+    for (const candidate of reclaimedLinkedCandidates) {
+      try {
+        revalidateReclaimedFinal(candidate, cache);
+      } catch (error) {
+        rememberError(error);
+      }
+    }
+    for (const candidate of [...retainedCandidates]) {
+      const closeError = closeCandidate(candidate);
+      if (closeError !== undefined) rememberError(closeError);
+    }
   }
-
-  if (deletedAny && process.platform !== 'win32') {
-    runCachePhase(ioSeam, 'before-cache-reclaim-fsync', cache.shaRoot);
-    assertCacheDirectoryAuthority(
-      cache.shaRoot,
-      cache.shaRootFd,
-      cache.device,
-      cache.shaRootInode,
-    );
-    syncCacheDirectoryDescriptor(cache.shaRootFd, ioSeam);
-    assertCacheDirectoryAuthority(
-      cache.shaRoot,
-      cache.shaRootFd,
-      cache.device,
-      cache.shaRootInode,
-    );
-  }
-  assertCacheDirectoryAuthority(
-    cache.shaRoot,
-    cache.shaRootFd,
-    cache.device,
-    cache.shaRootInode,
-  );
+  if (primaryError !== undefined) throw primaryError;
   if (status === 'complete' && unsafeRetained > 0) {
     status = 'unsafe-retained';
   }
@@ -1530,43 +1691,72 @@ async function reclaimPreparedGithubTemplateCacheTemps(
   });
 }
 
-export async function reclaimGithubTemplateCacheTemps(
-  options: ReclaimGithubTemplateCacheTempsOptions = {},
-): Promise<ReclaimedGithubTemplateCacheTemps> {
-  if (
-    typeof options !== 'object'
-    || options === null
-    || (
-      options.cacheRoot !== undefined
-      && typeof options.cacheRoot !== 'string'
-    )
-    || (
-      options.ioSeam !== undefined
-      && (
-        typeof options.ioSeam !== 'object'
-        || options.ioSeam === null
+function snapshotReclaimOptions(
+  value: ReclaimGithubTemplateCacheTempsOptions,
+): ReclaimGithubTemplateCacheTempsOptions {
+  try {
+    if (
+      typeof value !== 'object'
+      || value === null
+      || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype
+    ) throw new Error();
+    const allowed = new Set(['cacheRoot', 'ioSeam']);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (
+      Reflect.ownKeys(value).some(
+        (key) => typeof key !== 'string' || !allowed.has(key),
       )
-    )
-  ) {
+      || Object.values(descriptors).some(
+        (descriptor) => !('value' in descriptor),
+      )
+    ) throw new Error();
+    const cacheRoot = descriptors['cacheRoot']?.value as unknown;
+    const ioSeam = descriptors['ioSeam']?.value as unknown;
+    if (
+      (cacheRoot !== undefined && typeof cacheRoot !== 'string')
+      || (
+        ioSeam !== undefined
+        && (typeof ioSeam !== 'object' || ioSeam === null)
+      )
+    ) throw new Error();
+    return Object.freeze({
+      ...(cacheRoot === undefined ? {} : { cacheRoot }),
+      ...(ioSeam === undefined
+        ? {}
+        : { ioSeam: ioSeam as GithubTemplateCacheIoSeam }),
+    });
+  } catch {
     throw storageError(
       'INVALID_ARGUMENT',
       'GitHub template cache reclaim options are invalid',
     );
   }
+}
+
+export async function reclaimGithubTemplateCacheTemps(
+  value: ReclaimGithubTemplateCacheTempsOptions = {},
+): Promise<ReclaimedGithubTemplateCacheTemps> {
+  const options = snapshotReclaimOptions(value);
   const cache = prepareCacheDirectories(options.cacheRoot, options.ioSeam);
+  let result: ReclaimedGithubTemplateCacheTemps | undefined;
+  let primaryError: unknown;
   try {
-    return await reclaimPreparedGithubTemplateCacheTemps(
+    result = await reclaimPreparedGithubTemplateCacheTemps(
       cache,
       options.ioSeam,
     );
-  } finally {
-    try {
-      closeSync(cache.shaRootFd);
-    } catch {
-      // The retained descriptor is process-local and success did not grant
-      // authority over any returned path.
-    }
+  } catch (error) {
+    primaryError = error;
   }
+  const closeError = closeReclaimDescriptor(
+    cache.shaRootFd,
+    'directory',
+    options.ioSeam,
+  );
+  if (primaryError !== undefined) throw primaryError;
+  if (closeError !== undefined) throw closeError;
+  return result!;
 }
 
 function requireCacheFileIdentity(
