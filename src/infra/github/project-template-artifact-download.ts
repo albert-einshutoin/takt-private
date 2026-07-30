@@ -755,7 +755,33 @@ function processSettlement(
   event: SettlementEvent,
 ): void {
   if (
-    authority.phase === 'closed'
+    isClosed(authority)
+    || authority.pending !== pending
+    || !ownsLiveBridge(authority)
+  ) return;
+  try {
+    const signal = authority.snapshot?.signal;
+    if (signal !== undefined && signalAborted(signal)) {
+      closeIterator(authority, {
+        kind: 'error',
+        error: downloadError('ABORTED', 'Artifact download was aborted'),
+      });
+      return;
+    }
+  } catch {
+    bridgeFailure(authority);
+    return;
+  }
+  if (
+    isClosed(authority)
+    || authority.pending !== pending
+    || !ownsLiveBridge(authority)
+  ) return;
+  if (readRemainingDeadline(authority) === undefined) return;
+  // Both signal access and monotonic time are external hooks. A reentrant
+  // terminal outcome selected by either must win over this late settlement.
+  if (
+    isClosed(authority)
     || authority.pending !== pending
     || !ownsLiveBridge(authority)
   ) return;

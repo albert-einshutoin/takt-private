@@ -355,6 +355,7 @@ describe('project-template artifact download D1 cold iterator', () => {
         .mockReturnValueOnce(100)
         .mockReturnValueOnce(100)
         .mockReturnValueOnce(100)
+        .mockReturnValueOnce(100)
         .mockReturnValueOnce(1_001),
     });
     const iterator = createProjectTemplateArtifactDownloadPort(
@@ -368,7 +369,7 @@ describe('project-template artifact download D1 cold iterator', () => {
     });
     await expectCode(iterator.next(), 'TIMEOUT');
 
-    expect(dependencies.now).toHaveBeenCalledTimes(5);
+    expect(dependencies.now).toHaveBeenCalledTimes(6);
     expect(bridgeNext(bridge)).toHaveBeenCalledTimes(1);
     expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
   });
@@ -982,6 +983,232 @@ describe('project-template artifact download D1 cold iterator', () => {
       done: true,
     });
   });
+
+  it.each(['chunk', 'done', 'fail'] as const)(
+    'lets an expired absolute deadline win over late settlement.%s',
+    async (event) => {
+      let now = 100;
+      let settlement!: ProjectTemplateArtifactDownloadSettlement;
+      const dispose = vi.fn(() => undefined);
+      const bridge = createProjectTemplateArtifactDownloadBridge(
+        undefined,
+        (_state, owned): undefined => {
+          settlement = owned;
+          return undefined;
+        },
+        dispose,
+      );
+      const iterator = createProjectTemplateArtifactDownloadPort(
+        Object.freeze({ deadlineMs: 1_000 }),
+        makeDependencies(bridge, { now: vi.fn(() => now) }),
+      ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+      const pending = iterator.next();
+      const outcome = expectCode(pending, 'TIMEOUT');
+
+      now = 1_001;
+      if (event === 'chunk') settlement.chunk(Uint8Array.from([7]));
+      else settlement[event]();
+
+      await outcome;
+      expect(dispose).toHaveBeenCalledTimes(1);
+      await expect(iterator.next()).resolves.toEqual({
+        value: undefined,
+        done: true,
+      });
+    },
+  );
+
+  it.each(['chunk', 'done', 'fail'] as const)(
+    'lets an earlier abort listener win over settlement.%s',
+    async (event) => {
+      const controller = new AbortController();
+      let settlement!: ProjectTemplateArtifactDownloadSettlement;
+      controller.signal.addEventListener('abort', () => {
+        if (event === 'chunk') settlement.chunk(Uint8Array.from([7]));
+        else settlement[event]();
+      });
+      const dispose = vi.fn(() => undefined);
+      const bridge = createProjectTemplateArtifactDownloadBridge(
+        undefined,
+        (_state, owned): undefined => {
+          settlement = owned;
+          return undefined;
+        },
+        dispose,
+      );
+      const iterator = createProjectTemplateArtifactDownloadPort(
+        Object.freeze({ deadlineMs: 1_000 }),
+        makeDependencies(bridge),
+      ).openReleaseAsset({
+        ...VALID_INPUT,
+        signal: controller.signal,
+      })[Symbol.asyncIterator]();
+      const outcome = expectCode(iterator.next(), 'ABORTED');
+
+      controller.abort();
+
+      await outcome;
+      expect(dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['return', 'abort'] as const)(
+    'keeps signal getter %s reentry first-wins during settlement',
+    async (terminal) => {
+      const controller = new AbortController();
+      const nativeGetter = Object.getOwnPropertyDescriptor(
+        AbortSignal.prototype,
+        'aborted',
+      )!.get!;
+      let armed = false;
+      let iterator!: AsyncIterator<Uint8Array>;
+      let settlement!: ProjectTemplateArtifactDownloadSettlement;
+      const dispose = vi.fn(() => undefined);
+      const getter = vi.spyOn(
+        AbortSignal.prototype,
+        'aborted',
+        'get',
+      ).mockImplementation(function abortedWithReentry(this: AbortSignal) {
+        if (armed) {
+          armed = false;
+          if (terminal === 'return') void iterator.return!();
+          else controller.abort();
+        }
+        return Reflect.apply(nativeGetter, this, []) as boolean;
+      });
+      const bridge = createProjectTemplateArtifactDownloadBridge(
+        undefined,
+        (_state, owned): undefined => {
+          settlement = owned;
+          return undefined;
+        },
+        dispose,
+      );
+      iterator = createProjectTemplateArtifactDownloadPort(
+        Object.freeze({ deadlineMs: 1_000 }),
+        makeDependencies(bridge),
+      ).openReleaseAsset({
+        ...VALID_INPUT,
+        signal: controller.signal,
+      })[Symbol.asyncIterator]();
+      const pending = iterator.next();
+      const outcome = terminal === 'return'
+        ? expect(pending).resolves.toEqual({
+          value: undefined,
+          done: true,
+        })
+        : expectCode(pending, 'ABORTED');
+
+      armed = true;
+      settlement.done();
+
+      await outcome;
+      getter.mockRestore();
+      expect(dispose).toHaveBeenCalledTimes(1);
+      settlement.chunk(Uint8Array.from([9]));
+    },
+  );
+
+  it.each(['return', 'abort'] as const)(
+    'keeps monotonic now %s reentry first-wins during settlement',
+    async (terminal) => {
+      const controller = new AbortController();
+      let armed = false;
+      let iterator!: AsyncIterator<Uint8Array>;
+      let settlement!: ProjectTemplateArtifactDownloadSettlement;
+      const dispose = vi.fn(() => undefined);
+      const bridge = createProjectTemplateArtifactDownloadBridge(
+        undefined,
+        (_state, owned): undefined => {
+          settlement = owned;
+          return undefined;
+        },
+        dispose,
+      );
+      const dependencies = makeDependencies(bridge, {
+        now: vi.fn(() => {
+          if (armed) {
+            armed = false;
+            if (terminal === 'return') void iterator.return!();
+            else controller.abort();
+          }
+          return 100;
+        }),
+      });
+      iterator = createProjectTemplateArtifactDownloadPort(
+        Object.freeze({ deadlineMs: 1_000 }),
+        dependencies,
+      ).openReleaseAsset({
+        ...VALID_INPUT,
+        signal: controller.signal,
+      })[Symbol.asyncIterator]();
+      const pending = iterator.next();
+      const outcome = terminal === 'return'
+        ? expect(pending).resolves.toEqual({
+          value: undefined,
+          done: true,
+        })
+        : expectCode(pending, 'ABORTED');
+
+      armed = true;
+      settlement.chunk(Uint8Array.from([8]));
+
+      await outcome;
+      expect(dispose).toHaveBeenCalledTimes(1);
+      settlement.done();
+    },
+  );
+
+  it.each(['signal', 'now'] as const)(
+    'contains a throwing settlement-time %s hook as BRIDGE_FAILURE',
+    async (hook) => {
+      const controller = new AbortController();
+      const nativeGetter = Object.getOwnPropertyDescriptor(
+        AbortSignal.prototype,
+        'aborted',
+      )!.get!;
+      let armed = false;
+      let settlement!: ProjectTemplateArtifactDownloadSettlement;
+      const getter = vi.spyOn(
+        AbortSignal.prototype,
+        'aborted',
+        'get',
+      ).mockImplementation(function abortedWithFault(this: AbortSignal) {
+        if (armed && hook === 'signal') throw new Error('private signal');
+        return Reflect.apply(nativeGetter, this, []) as boolean;
+      });
+      const dispose = vi.fn(() => undefined);
+      const bridge = createProjectTemplateArtifactDownloadBridge(
+        undefined,
+        (_state, owned): undefined => {
+          settlement = owned;
+          return undefined;
+        },
+        dispose,
+      );
+      const iterator = createProjectTemplateArtifactDownloadPort(
+        Object.freeze({ deadlineMs: 1_000 }),
+        makeDependencies(bridge, {
+          now: vi.fn(() => {
+            if (armed && hook === 'now') throw new Error('private now');
+            return 100;
+          }),
+        }),
+      ).openReleaseAsset({
+        ...VALID_INPUT,
+        signal: controller.signal,
+      })[Symbol.asyncIterator]();
+      const pending = iterator.next();
+      const outcome = expectCode(pending, 'BRIDGE_FAILURE');
+
+      armed = true;
+      settlement.done();
+
+      await outcome;
+      getter.mockRestore();
+      expect(dispose).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each(['return', 'abort'] as const)(
     'keeps a branded bridge under its first owner across a duplicate claim and %s',
