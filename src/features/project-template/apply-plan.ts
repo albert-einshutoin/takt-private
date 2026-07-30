@@ -1228,10 +1228,22 @@ export function prepareProjectTemplateApplyPlan(
       return entry;
     }
 
+    // Large target snapshots intentionally omit file bodies. When their digest
+    // still matches the formal lock, the already verified immutable baseline is
+    // the same local content and can safely complete the three-way input.
+    const localContent = local?.content
+      ?? (
+        local !== undefined
+        && formalBase !== undefined
+        && base !== undefined
+        && local.sha256 === formalBase.sha256
+          ? base
+          : undefined
+      );
     const hasCompleteExistingMerge =
       formalBase !== undefined
       && base !== undefined
-      && local?.content !== undefined;
+      && localContent !== undefined;
     const localDiffersFromIncoming = local !== undefined
       && (
         local.sha256 !== entry.incomingSha256
@@ -1266,7 +1278,7 @@ export function prepareProjectTemplateApplyPlan(
       ? mergeSupportedSemanticConfig({
           document: semanticDocument,
           base: base!,
-          local: local!.content!,
+          local: localContent!,
           incoming,
         })
       : incomingValidation;
