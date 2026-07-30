@@ -81,6 +81,7 @@ export type { JudgeStatusResult } from './agents/agent-usecases.js';
 export {
   parseProjectTemplateManifest,
   serializeProjectTemplateManifest,
+  parseProjectTemplateGithubSourceSpec,
   parseTemplateLock,
   serializeTemplateLock,
   calculateProjectTemplateManifestSha256,
@@ -112,6 +113,9 @@ export {
 } from './features/project-template/index.js';
 export type {
   ProjectTemplateManifestV1,
+  ProjectTemplateGithubRefSourceSpec,
+  ProjectTemplateGithubReleaseAssetSourceSpec,
+  ProjectTemplateGithubSourceSpec,
   TemplateCapability,
   TemplateEntry,
   TemplateEntryPolicy,

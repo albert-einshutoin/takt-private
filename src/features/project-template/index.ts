@@ -2,6 +2,12 @@ export {
   parseProjectTemplateManifest,
   serializeProjectTemplateManifest,
 } from './manifest.js';
+export { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
+export type {
+  ProjectTemplateGithubRefSourceSpec,
+  ProjectTemplateGithubReleaseAssetSourceSpec,
+  ProjectTemplateGithubSourceSpec,
+} from './github-source-spec.js';
 export { parseTemplateLock, serializeTemplateLock } from './lock.js';
 export {
   calculateProjectTemplateManifestSha256,
