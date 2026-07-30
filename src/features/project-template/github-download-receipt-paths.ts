@@ -6,6 +6,7 @@ import {
   parse,
   resolve,
 } from 'node:path';
+import { types } from 'node:util';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const UUID_V4_PATTERN =
@@ -24,9 +25,12 @@ export class GithubTemplateDownloadReceiptPathError extends Error {
   }
 }
 
-export interface GithubTemplateDownloadReceiptPaths {
+export interface GithubTemplateDownloadArtifactPaths {
   readonly artifactDirectory: string;
   readonly artifactPath: string;
+}
+
+export interface GithubTemplateDownloadReceiptLocatorPaths {
   readonly receiptAncestors: readonly string[];
   readonly receiptDirectory: string;
   readonly receiptPath: string;
@@ -49,6 +53,8 @@ function ownDataRecord(
   if (
     typeof value !== 'object'
     || value === null
+    // Why: descriptor reads must never execute caller-controlled Proxy traps.
+    || types.isProxy(value)
     || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype
   ) throw new Error();
@@ -117,22 +123,13 @@ function requireChildPath(
   return path;
 }
 
-export function deriveGithubTemplateDownloadReceiptPaths(
+export function deriveGithubTemplateDownloadReceiptLocatorPaths(
   value: unknown,
-): GithubTemplateDownloadReceiptPaths {
+): GithubTemplateDownloadReceiptLocatorPaths {
   try {
-    const options = ownDataRecord(
-      value,
-      ['cacheRoot', 'receiptKey', 'archiveSha256'],
-    );
+    const options = ownDataRecord(value, ['cacheRoot', 'receiptKey']);
     const cacheRoot = requireCanonicalRoot(options['cacheRoot']);
     const receiptKey = requireSha256(options['receiptKey']);
-    const archiveSha256 = requireSha256(options['archiveSha256']);
-    const artifactDirectory = requireChildPath(cacheRoot, 'sha256');
-    const artifactPath = requireChildPath(
-      artifactDirectory,
-      `${archiveSha256}.taktpack`,
-    );
     const receipts = requireChildPath(cacheRoot, 'receipts');
     const version = requireChildPath(receipts, 'v1');
     const algorithm = requireChildPath(version, 'sha256');
@@ -145,8 +142,6 @@ export function deriveGithubTemplateDownloadReceiptPaths(
       `${receiptKey}.json`,
     );
     return Object.freeze({
-      artifactDirectory,
-      artifactPath,
       receiptAncestors: Object.freeze([
         receipts,
         version,
@@ -158,6 +153,27 @@ export function deriveGithubTemplateDownloadReceiptPaths(
     });
   } catch {
     throw pathError('GitHub template receipt path input is invalid');
+  }
+}
+
+export function deriveGithubTemplateDownloadArtifactPaths(
+  value: unknown,
+): GithubTemplateDownloadArtifactPaths {
+  try {
+    const options = ownDataRecord(value, ['cacheRoot', 'archiveSha256']);
+    const cacheRoot = requireCanonicalRoot(options['cacheRoot']);
+    const archiveSha256 = requireSha256(options['archiveSha256']);
+    const artifactDirectory = requireChildPath(cacheRoot, 'sha256');
+    const artifactPath = requireChildPath(
+      artifactDirectory,
+      `${archiveSha256}.taktpack`,
+    );
+    return Object.freeze({
+      artifactDirectory,
+      artifactPath,
+    });
+  } catch {
+    throw pathError('GitHub template artifact path input is invalid');
   }
 }
 

@@ -23,8 +23,10 @@ import {
 } from './control-root-contract.js';
 import {
   createGithubTemplateDownloadReceiptTempName,
-  deriveGithubTemplateDownloadReceiptPaths,
-  type GithubTemplateDownloadReceiptPaths,
+  deriveGithubTemplateDownloadArtifactPaths,
+  deriveGithubTemplateDownloadReceiptLocatorPaths,
+  type GithubTemplateDownloadArtifactPaths,
+  type GithubTemplateDownloadReceiptLocatorPaths,
 } from './github-download-receipt-paths.js';
 import {
   calculateGithubTemplateDownloadReceiptKey,
@@ -793,7 +795,7 @@ function requireArtifactBinding(
 async function openAndVerifyArtifact(
   cacheRoot: DirectoryAuthority,
   receipt: GithubTemplateDownloadReceiptV1,
-  paths: GithubTemplateDownloadReceiptPaths,
+  paths: GithubTemplateDownloadArtifactPaths,
   io: IoSnapshot | undefined,
   context: StoreContext,
 ): Promise<FileAuthority> {
@@ -850,7 +852,7 @@ async function openAndVerifyArtifact(
 
 function createReceiptDirectories(
   cacheRoot: DirectoryAuthority,
-  paths: GithubTemplateDownloadReceiptPaths,
+  paths: GithubTemplateDownloadReceiptLocatorPaths,
   io: IoSnapshot | undefined,
   context: StoreContext,
 ): DirectoryAuthority {
@@ -1330,21 +1332,26 @@ export async function storeGithubTemplateDownloadReceipt(
     }
     const cacheRoot = openDirectory(requestedRoot);
     context.directories.push(cacheRoot);
-    const paths = deriveGithubTemplateDownloadReceiptPaths({
+    const receiptPaths = deriveGithubTemplateDownloadReceiptLocatorPaths({
       cacheRoot: requestedRoot,
       receiptKey: prepared.receiptKey,
+    });
+    // Why: artifact authority is derived only after D2a authenticates the
+    // receipt above; receipt-key lookup must not grant artifact authority.
+    const artifactPaths = deriveGithubTemplateDownloadArtifactPaths({
+      cacheRoot: requestedRoot,
       archiveSha256: parsed.payload.archive.sha256,
     });
     context.artifact = await openAndVerifyArtifact(
       cacheRoot,
       parsed,
-      paths,
+      artifactPaths,
       options.io,
       context,
     );
     const receiptParent = createReceiptDirectories(
       cacheRoot,
-      paths,
+      receiptPaths,
       options.io,
       context,
     );
@@ -1408,7 +1415,7 @@ export async function storeGithubTemplateDownloadReceipt(
     const status = await publishReceipt(
       receiptParent,
       context.temporary,
-      paths.receiptPath,
+      receiptPaths.receiptPath,
       prepared.serialized,
       prepared.receiptKey,
       options.verifier,

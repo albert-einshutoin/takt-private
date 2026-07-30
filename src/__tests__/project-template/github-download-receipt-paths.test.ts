@@ -2,7 +2,8 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createGithubTemplateDownloadReceiptTempName,
-  deriveGithubTemplateDownloadReceiptPaths,
+  deriveGithubTemplateDownloadArtifactPaths,
+  deriveGithubTemplateDownloadReceiptLocatorPaths,
   parseGithubTemplateDownloadReceiptTempName,
 } from '../../features/project-template/github-download-receipt-paths.js';
 
@@ -12,20 +13,13 @@ const UUID = '123e4567-e89b-42d3-a456-426614174000';
 const CACHE_ROOT = resolve('/private/takt-cache');
 
 describe('GitHub template receipt private path contract', () => {
-  it('derives artifact and multi-provenance receipt paths from hashes only', () => {
-    const paths = deriveGithubTemplateDownloadReceiptPaths({
+  it('derives the receipt locator without artifact authority', () => {
+    const paths = deriveGithubTemplateDownloadReceiptLocatorPaths({
       cacheRoot: CACHE_ROOT,
       receiptKey: RECEIPT_KEY,
-      archiveSha256: ARCHIVE_SHA256,
     });
 
     expect(paths).toEqual({
-      artifactDirectory: join(CACHE_ROOT, 'sha256'),
-      artifactPath: join(
-        CACHE_ROOT,
-        'sha256',
-        `${ARCHIVE_SHA256}.taktpack`,
-      ),
       receiptAncestors: [
         join(CACHE_ROOT, 'receipts'),
         join(CACHE_ROOT, 'receipts', 'v1'),
@@ -52,52 +46,57 @@ describe('GitHub template receipt private path contract', () => {
     expect(Object.isFrozen(paths.receiptAncestors)).toBe(true);
   });
 
+  it('derives the artifact path without receipt authority', () => {
+    const paths = deriveGithubTemplateDownloadArtifactPaths({
+      cacheRoot: CACHE_ROOT,
+      archiveSha256: ARCHIVE_SHA256,
+    });
+
+    expect(paths).toEqual({
+      artifactDirectory: join(CACHE_ROOT, 'sha256'),
+      artifactPath: join(
+        CACHE_ROOT,
+        'sha256',
+        `${ARCHIVE_SHA256}.taktpack`,
+      ),
+    });
+    expect(Object.isFrozen(paths)).toBe(true);
+  });
+
   it.each([
     ['relative root', {
       cacheRoot: 'cache',
       receiptKey: RECEIPT_KEY,
-      archiveSha256: ARCHIVE_SHA256,
     }],
     ['non-canonical root', {
       cacheRoot: `${CACHE_ROOT}/../takt-cache`,
       receiptKey: RECEIPT_KEY,
-      archiveSha256: ARCHIVE_SHA256,
     }],
     ['receipt traversal', {
       cacheRoot: CACHE_ROOT,
       receiptKey: '../receipt',
-      archiveSha256: ARCHIVE_SHA256,
     }],
     ['uppercase receipt key', {
       cacheRoot: CACHE_ROOT,
       receiptKey: 'A'.repeat(64),
-      archiveSha256: ARCHIVE_SHA256,
-    }],
-    ['archive traversal', {
-      cacheRoot: CACHE_ROOT,
-      receiptKey: RECEIPT_KEY,
-      archiveSha256: '../../archive',
-    }],
-    ['uppercase archive hash', {
-      cacheRoot: CACHE_ROOT,
-      receiptKey: RECEIPT_KEY,
-      archiveSha256: 'B'.repeat(64),
     }],
     ['unknown path', {
       cacheRoot: CACHE_ROOT,
       receiptKey: RECEIPT_KEY,
-      archiveSha256: ARCHIVE_SHA256,
       receiptPath: '/tmp/caller-controlled.json',
+    }],
+    ['artifact authority', {
+      cacheRoot: CACHE_ROOT,
+      receiptKey: RECEIPT_KEY,
+      archiveSha256: ARCHIVE_SHA256,
     }],
     ['symbol', {
       cacheRoot: CACHE_ROOT,
       receiptKey: RECEIPT_KEY,
-      archiveSha256: ARCHIVE_SHA256,
       [Symbol('path')]: '/tmp/caller-controlled.json',
     }],
     ['accessor', Object.defineProperty({
       receiptKey: RECEIPT_KEY,
-      archiveSha256: ARCHIVE_SHA256,
     }, 'cacheRoot', {
       get() {
         throw new Error('ghp_receipt_path_secret');
@@ -108,10 +107,10 @@ describe('GitHub template receipt private path contract', () => {
         throw new Error('ghp_receipt_path_secret');
       },
     })],
-  ])('rejects invalid derived-path input: %s', (_label, value) => {
+  ])('rejects invalid receipt-locator input: %s', (_label, value) => {
     const error = (() => {
       try {
-        deriveGithubTemplateDownloadReceiptPaths(value);
+        deriveGithubTemplateDownloadReceiptLocatorPaths(value);
         return undefined;
       } catch (caught) {
         return caught;
@@ -119,6 +118,75 @@ describe('GitHub template receipt private path contract', () => {
     })();
     expect(error).toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect(String((error as Error).message)).not.toContain('secret');
+  });
+
+  it.each([
+    ['relative root', {
+      cacheRoot: 'cache',
+      archiveSha256: ARCHIVE_SHA256,
+    }],
+    ['non-canonical root', {
+      cacheRoot: `${CACHE_ROOT}/../takt-cache`,
+      archiveSha256: ARCHIVE_SHA256,
+    }],
+    ['archive traversal', {
+      cacheRoot: CACHE_ROOT,
+      archiveSha256: '../../archive',
+    }],
+    ['uppercase archive hash', {
+      cacheRoot: CACHE_ROOT,
+      archiveSha256: 'B'.repeat(64),
+    }],
+    ['receipt authority', {
+      cacheRoot: CACHE_ROOT,
+      receiptKey: RECEIPT_KEY,
+      archiveSha256: ARCHIVE_SHA256,
+    }],
+  ])('rejects invalid artifact-path input: %s', (_label, value) => {
+    expect(() => deriveGithubTemplateDownloadArtifactPaths(value))
+      .toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+  });
+
+  it('rejects transparent and value-returning Proxies before any trap runs', () => {
+    const cases = [
+      {
+        value: { cacheRoot: CACHE_ROOT, receiptKey: RECEIPT_KEY },
+        run: deriveGithubTemplateDownloadReceiptLocatorPaths,
+      },
+      {
+        value: { cacheRoot: CACHE_ROOT, archiveSha256: ARCHIVE_SHA256 },
+        run: deriveGithubTemplateDownloadArtifactPaths,
+      },
+      {
+        value: { pid: 1234, uuid: UUID, receiptKey: RECEIPT_KEY },
+        run: createGithubTemplateDownloadReceiptTempName,
+      },
+    ];
+
+    for (const testCase of cases) {
+      expect(() => testCase.run(new Proxy(testCase.value, {})))
+        .toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+
+      let trapCalls = 0;
+      const target = testCase.value;
+      const proxy = new Proxy(target, {
+        getPrototypeOf() {
+          trapCalls += 1;
+          return Object.prototype;
+        },
+        ownKeys() {
+          trapCalls += 1;
+          return Reflect.ownKeys(target);
+        },
+        getOwnPropertyDescriptor(_value, key) {
+          trapCalls += 1;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      });
+      expect(() => testCase.run(proxy))
+        .toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+      expect(trapCalls).toBe(0);
+    }
   });
 
   it('generates and parses one strict temporary receipt name', () => {
