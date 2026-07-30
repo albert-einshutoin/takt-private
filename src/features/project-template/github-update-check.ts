@@ -106,6 +106,7 @@ export interface GithubTemplateCurrentSourceEvidence {
   readonly owner: string;
   readonly repo: string;
   readonly repositoryUrl: `https://github.com/${string}/${string}`;
+  readonly canonicalSource: string;
   readonly version: string;
   readonly sha256: string;
   readonly commit: string;
@@ -125,11 +126,19 @@ export interface ResolveGithubTemplateSourceOptions {
   readonly current?: GithubTemplateCurrentSourceEvidence;
 }
 
+/**
+ * Advisory provenance and update evidence only; this is not download
+ * authority. Structural typing and Object.freeze do not prevent callers from
+ * forging an equivalent object. A downloader must either use a process-local
+ * seal or, under the shared mutation lease, re-resolve and exactly match
+ * canonicalSource, commit, descriptorSha256, releaseId, assetId, and sha256.
+ */
 export interface ResolvedGithubTemplateSource {
   readonly kind: 'resolved-github-template-source';
   readonly owner: string;
   readonly repo: string;
   readonly repositoryUrl: `https://github.com/${string}/${string}`;
+  readonly canonicalSource: string;
   readonly requestedRef: string;
   readonly releaseTag: string;
   readonly commit: string;
@@ -151,7 +160,7 @@ export interface ResolvedGithubTemplateSource {
     readonly ProjectTemplateRepertoireDependencyV1[];
   readonly updateState: GithubTemplateUpdateState;
   readonly hardBlocked: boolean;
-  readonly downloadAllowed: boolean;
+  readonly downloadEligible: boolean;
 }
 
 interface ParsedReleaseAsset {
@@ -170,6 +179,7 @@ export async function resolveGithubTemplateSource(
   options: ResolveGithubTemplateSourceOptions,
 ): Promise<ResolvedGithubTemplateSource> {
   const source = validateParsedSourceSpec(options.source);
+  const canonicalSource = canonicalizeSourceSpec(source);
   const { owner, repo, ref: requestedRef } = source;
   const requestedCommit = await resolveCommit(
     options.metadata,
@@ -318,6 +328,7 @@ export async function resolveGithubTemplateSource(
     owner,
     repo,
     repositoryUrl: source.repositoryUrl,
+    canonicalSource,
     requestedRef,
     releaseTag: descriptor.pack.releaseTag,
     commit: requestedCommit,
@@ -662,7 +673,7 @@ function classifyUpdate(
   currentValue: GithubTemplateCurrentSourceEvidence | undefined,
 ): Pick<
 ResolvedGithubTemplateSource,
-'updateState' | 'hardBlocked' | 'downloadAllowed'
+'updateState' | 'hardBlocked' | 'downloadEligible'
 > {
   if (currentValue === undefined) {
     return updateFlags('update-available');
@@ -676,6 +687,7 @@ ResolvedGithubTemplateSource,
     current.owner !== source.owner
     || current.repo !== source.repo
     || current.repositoryUrl !== source.repositoryUrl
+    || current.canonicalSource !== canonicalizeSourceSpec(source)
   ) {
     return updateFlags('source-changed');
   }
@@ -702,6 +714,7 @@ function parseCurrentEvidence(
       'owner',
       'repo',
       'repositoryUrl',
+      'canonicalSource',
       'version',
       'sha256',
       'commit',
@@ -736,10 +749,12 @@ function parseCurrentEvidence(
   const owner = record['owner'];
   const repo = record['repo'];
   const repositoryUrl = record['repositoryUrl'];
+  const canonicalSource = record['canonicalSource'];
   if (
     typeof owner !== 'string'
     || typeof repo !== 'string'
     || typeof repositoryUrl !== 'string'
+    || typeof canonicalSource !== 'string'
   ) {
     resolutionError(
       'INVALID_CURRENT_EVIDENCE',
@@ -747,34 +762,35 @@ function parseCurrentEvidence(
       'current',
     );
   }
-  let parsedIdentity: ProjectTemplateGithubSourceSpec;
+  let parsedCanonicalSource: ProjectTemplateGithubSourceSpec;
   try {
-    parsedIdentity = parseProjectTemplateGithubSourceSpec(
-      `github:${owner}/${repo}@identity`,
+    parsedCanonicalSource = parseProjectTemplateGithubSourceSpec(
+      canonicalSource,
     );
   } catch {
     resolutionError(
       'INVALID_CURRENT_EVIDENCE',
-      'current repository identity must be canonical',
-      'current',
+      'current canonical source must be a strict GitHub source',
+      'current.canonicalSource',
     );
   }
   if (
-    parsedIdentity.kind !== 'github-ref'
-    || parsedIdentity.owner !== owner
-    || parsedIdentity.repo !== repo
-    || parsedIdentity.repositoryUrl !== repositoryUrl
+    canonicalizeSourceSpec(parsedCanonicalSource) !== canonicalSource
+    || parsedCanonicalSource.owner !== owner
+    || parsedCanonicalSource.repo !== repo
+    || parsedCanonicalSource.repositoryUrl !== repositoryUrl
   ) {
     resolutionError(
       'INVALID_CURRENT_EVIDENCE',
-      'current repository identity must be canonical',
-      'current',
+      'current canonical source must match its repository identity',
+      'current.canonicalSource',
     );
   }
   return {
     owner,
     repo,
-    repositoryUrl: parsedIdentity.repositoryUrl,
+    repositoryUrl: parsedCanonicalSource.repositoryUrl,
+    canonicalSource,
     version,
     sha256,
     commit,
@@ -786,14 +802,21 @@ function updateFlags(
   state: GithubTemplateUpdateState,
 ): Pick<
 ResolvedGithubTemplateSource,
-'updateState' | 'hardBlocked' | 'downloadAllowed'
+'updateState' | 'hardBlocked' | 'downloadEligible'
 > {
   return {
     updateState: state,
     hardBlocked: state === 'version-republished' || state === 'downgrade',
-    downloadAllowed:
+    downloadEligible:
       state === 'update-available' || state === 'source-changed',
   };
+}
+
+function canonicalizeSourceSpec(
+  source: ProjectTemplateGithubSourceSpec,
+): string {
+  if (source.kind === 'github-release-asset') return source.assetUrl;
+  return `github:${source.owner}/${source.repo}@${source.ref}`;
 }
 
 function normalizeValidationBoundary<T>(

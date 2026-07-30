@@ -111,7 +111,11 @@ describe('package exports contract', () => {
     expectTypeOf<ProjectTemplateRepertoireCapabilityV1>()
       .toEqualTypeOf<'edit'>();
     expectTypeOf<ResolvedGithubTemplateSource>()
-      .toMatchTypeOf<{ commit: string; downloadAllowed: boolean }>();
+      .toMatchTypeOf<{
+        canonicalSource: string;
+        commit: string;
+        downloadEligible: boolean;
+      }>();
     expectTypeOf<GithubTemplateSourceMetadataPort>()
       .toHaveProperty('resolveRefToCommit');
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');

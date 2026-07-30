@@ -20,6 +20,7 @@ const CURRENT_IDENTITY = {
   owner: 'acme',
   repo: 'template',
   repositoryUrl: 'https://github.com/acme/template',
+  canonicalSource: 'github:acme/template@main',
 } as const;
 
 function descriptor(version = '1.2.3'): Record<string, unknown> {
@@ -205,6 +206,7 @@ describe('resolveGithubTemplateSource', () => {
       kind: 'resolved-github-template-source',
       owner: 'acme',
       repo: 'template',
+      canonicalSource: 'github:acme/template@main',
       requestedRef: 'main',
       releaseTag: 'v1.2.3',
       commit: COMMIT,
@@ -219,7 +221,7 @@ describe('resolveGithubTemplateSource', () => {
       version: '1.2.3',
       updateState: 'update-available',
       hardBlocked: false,
-      downloadAllowed: true,
+      downloadEligible: true,
     });
     expect(result.descriptorSha256).toBe(
       calculateProjectTemplateSourceDescriptorSha256(descriptor()),
@@ -487,7 +489,7 @@ describe('resolveGithubTemplateSource', () => {
     }, 'downgrade', true, false],
   ])(
     'classifies current evidence as %s => %s',
-    async (current, state, hardBlocked, downloadAllowed) => {
+    async (current, state, hardBlocked, downloadEligible) => {
       const { port } = createPort();
       await expect(resolveGithubTemplateSource({
         source: parseProjectTemplateGithubSourceSpec(
@@ -498,7 +500,7 @@ describe('resolveGithubTemplateSource', () => {
       })).resolves.toMatchObject({
         updateState: state,
         hardBlocked,
-        downloadAllowed,
+        downloadEligible,
       });
     },
   );
@@ -520,7 +522,7 @@ describe('resolveGithubTemplateSource', () => {
     })).resolves.toMatchObject({
       updateState: 'update-available',
       hardBlocked: false,
-      downloadAllowed: true,
+      downloadEligible: true,
     });
   });
 
@@ -535,6 +537,7 @@ describe('resolveGithubTemplateSource', () => {
         owner: 'acme',
         repo: 'fork',
         repositoryUrl: 'https://github.com/acme/fork',
+        canonicalSource: 'github:acme/fork@main',
         version: '1.2.3',
         sha256: ARCHIVE_SHA,
         commit: COMMIT,
@@ -545,9 +548,82 @@ describe('resolveGithubTemplateSource', () => {
     })).resolves.toMatchObject({
       updateState: 'source-changed',
       hardBlocked: false,
-      downloadAllowed: true,
+      downloadEligible: true,
     });
   });
+
+  it.each([
+    [
+      'branch',
+      'github:acme/template@main',
+      'github:acme/template@stable',
+    ],
+    [
+      'ref',
+      'github:acme/template@release/v1.2.3',
+      'github:acme/template@main',
+    ],
+    [
+      'source kind',
+      `https://github.com/acme/template/releases/download/v1.2.3/${ASSET_NAME}`,
+      'github:acme/template@v1.2.3',
+    ],
+    [
+      'release asset',
+      `https://github.com/acme/template/releases/download/v1.2.3/${ASSET_NAME}`,
+      'https://github.com/acme/template/releases/download/v1.2.3/other.taktpack',
+    ],
+  ])(
+    'classifies a same-repository %s change as source-changed',
+    async (_label, candidateSource, currentCanonicalSource) => {
+      await expect(resolveGithubTemplateSource({
+        source: parseProjectTemplateGithubSourceSpec(candidateSource),
+        metadata: createPort().port,
+        current: {
+          ...CURRENT_IDENTITY,
+          canonicalSource: currentCanonicalSource,
+          version: '1.2.3',
+          sha256: ARCHIVE_SHA,
+          commit: COMMIT,
+          descriptorSha256: calculateProjectTemplateSourceDescriptorSha256(
+            descriptor(),
+          ),
+        },
+      })).resolves.toMatchObject({
+        canonicalSource: candidateSource,
+        updateState: 'source-changed',
+        hardBlocked: false,
+        downloadEligible: true,
+      });
+    },
+  );
+
+  it.each([
+    ['malformed', 'not-a-source'],
+    ['non-canonical', 'github:Acme/Template@main'],
+    ['repository mismatch', 'github:acme/other@main'],
+  ])(
+    'rejects %s current canonical source evidence',
+    async (_label, canonicalSource) => {
+      const promise = resolveGithubTemplateSource({
+        source: parseProjectTemplateGithubSourceSpec(
+          'github:acme/template@main',
+        ),
+        metadata: createPort().port,
+        current: {
+          ...CURRENT_IDENTITY,
+          canonicalSource,
+          version: '1.2.3',
+          sha256: ARCHIVE_SHA,
+          commit: COMMIT,
+          descriptorSha256: calculateProjectTemplateSourceDescriptorSha256(
+            descriptor(),
+          ),
+        },
+      });
+      await expectResolutionCode(promise, 'INVALID_CURRENT_EVIDENCE');
+    },
+  );
 
   it('wraps metadata failures without exposing provider stderr or tokens', async () => {
     const { port } = createPort({
