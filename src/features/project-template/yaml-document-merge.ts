@@ -40,6 +40,7 @@ export type ProjectTemplateYamlMergeBlockedCode =
   | 'CUSTOM_TAG'
   | 'NON_STRING_KEY'
   | 'FORBIDDEN_PATH'
+  | 'GLOBAL_ONLY_PATH'
   | 'MIXED_EOL_UNSUPPORTED';
 
 export type ProjectTemplateYamlMergeResult =
@@ -217,6 +218,22 @@ function containsForbiddenPath(
   return resolveProjectTemplateConfigMergeRule(document, path).ownership === 'forbidden';
 }
 
+function containsGlobalOnlyPath(
+  document: ProjectTemplateConfigDocument,
+  value: SemanticValue,
+  path: readonly string[] = [],
+): boolean {
+  if (isMapping(value)) {
+    return Object.entries(value).some(([key, child]) => (
+      containsGlobalOnlyPath(document, child, [...path, key])
+    ));
+  }
+  if (Array.isArray(value)) {
+    return value.some((child) => containsGlobalOnlyPath(document, child, path));
+  }
+  return resolveProjectTemplateConfigMergeRule(document, path).ownership === 'global-only';
+}
+
 function incomingReviewDiagnostics(
   document: ProjectTemplateConfigDocument,
   value: SemanticValue,
@@ -367,6 +384,15 @@ export function mergeProjectTemplateYamlDocument(
   if ('status' in parsedIncoming) return parsedIncoming;
   if (containsForbiddenPath(options.document, parsedIncoming.value)) {
     return blocked('FORBIDDEN_PATH', 'incoming');
+  }
+  if (
+    options.reviewIncomingDocument
+    && containsGlobalOnlyPath(options.document, parsedIncoming.value)
+  ) {
+    // A first install has no local value to preserve when a template supplies
+    // a machine-local setting. Rejecting the document is safer than silently
+    // installing a path or runtime preference owned by another workstation.
+    return blocked('GLOBAL_ONLY_PATH', 'incoming');
   }
 
   const diagnostics = [

@@ -286,6 +286,35 @@ describe('project template three-way apply plan', () => {
     expect(prepared.resolvedContents).toEqual([]);
   });
 
+  it('blocks global-only configuration on a direct add', () => {
+    const incoming = 'analytics:\n  events_path: events.ndjson\n';
+    const planInput = input({});
+    planInput.incomingManifest.entries = [
+      manifestEntry('config.yaml', incoming, 'merge'),
+    ];
+    planInput.incomingContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(incoming),
+    }];
+    planInput.missingPathTracking = { 'config.yaml': 'not-repository' };
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      path: 'config.yaml',
+      action: 'conflict',
+      reasonCode: 'CONFLICT',
+      reviewRequired: true,
+      mergeDiagnostics: {
+        status: 'blocked',
+        code: 'GLOBAL_ONLY_PATH',
+        document: 'incoming',
+      },
+    });
+    expect(prepared.plan.defaultApplyPossible).toBe(false);
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
   it.each([
     ['git hooks', 'allow_git_hooks: true\n', ['allow_git_hooks']],
     [
@@ -385,6 +414,57 @@ describe('project template three-way apply plan', () => {
       afterSha256: hash(base),
     });
     expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('preserves a local-only hardened mode during a semantic content update', () => {
+    const base = 'language: en\n';
+    const local = 'language: en\n';
+    const incoming = 'language: ja\n';
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+    planInput.baseLock!.entries[0]!.mode = '0644';
+    planInput.localEntries[0]!.mode = '0600';
+    planInput.incomingManifest.entries[0]!.mode = '0644';
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'update',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeMode: '0600',
+      incomingMode: '0644',
+      afterMode: '0600',
+    });
+  });
+
+  it('reports a conflict when local and incoming modes both changed differently', () => {
+    const base = 'language: en\n';
+    const local = 'language: en\n';
+    const incoming = 'language: ja\n';
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+    planInput.baseLock!.entries[0]!.mode = '0644';
+    planInput.localEntries[0]!.mode = '0600';
+    planInput.incomingManifest.entries[0]!.mode = '0660';
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'BOTH_CHANGED',
+      reviewRequired: true,
+      mergeDiagnostics: {
+        status: 'conflict',
+        conflicts: [{ path: ['$mode'], reason: 'BOTH_CHANGED' }],
+      },
+    });
+    expect(prepared.plan.defaultApplyPossible).toBe(false);
   });
 
   it.each([

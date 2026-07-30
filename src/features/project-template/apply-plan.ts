@@ -85,6 +85,17 @@ function mergeSupportedSemanticConfig(options: {
     : mergeProjectTemplateDevloopPolicyYaml(options);
 }
 
+function resolveSemanticMode(
+  baseMode: string | undefined,
+  localMode: string | undefined,
+  incomingMode: string,
+): string | undefined {
+  if (baseMode === undefined || localMode === undefined) return incomingMode;
+  if (localMode === incomingMode || localMode === baseMode) return incomingMode;
+  if (incomingMode === baseMode) return localMode;
+  return undefined;
+}
+
 function compareAscii(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -1249,7 +1260,23 @@ export function prepareProjectTemplateApplyPlan(
 
     const content = Buffer.from(merge.content);
     const afterSha256 = sha256(content);
-    const afterMode = entry.incomingMode!;
+    const afterMode = resolveSemanticMode(
+      formalBase?.mode,
+      local?.mode,
+      entry.incomingMode!,
+    );
+    if (afterMode === undefined) {
+      const unresolved = overrideConflict(entry, 'BOTH_CHANGED');
+      return {
+        ...unresolved,
+        reviewRequired: true,
+        mergeDiagnostics: {
+          status: 'conflict',
+          conflicts: [{ path: ['$mode'], reason: 'BOTH_CHANGED' }],
+          diagnostics: mergeDiagnostics.diagnostics,
+        },
+      };
+    }
     const action: 'add' | 'keep' | 'update' = local === undefined
       ? 'add'
       : afterSha256 === local.sha256 && afterMode === local.mode
