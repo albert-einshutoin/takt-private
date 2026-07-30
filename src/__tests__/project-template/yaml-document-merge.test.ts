@@ -143,6 +143,23 @@ describe('project template YAML document three-way merge', () => {
       .toContain('openai');
   });
 
+  it('adds an incoming provider denylist when the project has no local list', () => {
+    const result = merge(
+      'language: en\n',
+      'language: en\n',
+      'language: en\nforbidden_providers: [openai]\n',
+    );
+
+    expect(result).toMatchObject({
+      status: 'merged',
+      changed: true,
+      reviewRequired: false,
+    });
+    const output = result.status === 'merged' ? result.content.toString() : '';
+    expect(output).toContain('forbidden_providers:');
+    expect(output).toContain('- openai');
+  });
+
   it('preserves ordered project gates while appending incoming gates', () => {
     const result = merge(
       'workflow_overrides:\n  quality_gates:\n    - npm test\n',

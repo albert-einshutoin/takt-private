@@ -470,7 +470,12 @@ export function mergeProjectTemplateYamlDocument(
       });
       return;
     }
-    const hasExplicitCollectionMerge = Array.isArray(local)
+    const collectionLocal = Array.isArray(local)
+      ? local
+      : local === MISSING && rule.sequencePolicy === 'monotonic-set'
+        ? []
+        : undefined;
+    const hasExplicitCollectionMerge = collectionLocal !== undefined
       && Array.isArray(incoming)
       && rule.sequencePolicy !== 'atomic';
     if (
@@ -485,14 +490,19 @@ export function mergeProjectTemplateYamlDocument(
       // only opt-in path for safe additive/set merging.
       return;
     }
-    if (Array.isArray(local) && Array.isArray(incoming)) {
+    if (collectionLocal !== undefined && Array.isArray(incoming)) {
       if (rule.sequencePolicy === 'monotonic-set') {
         const merged = mergeOrderedSequence(
-          local,
+          collectionLocal,
           [...(Array.isArray(base) ? base : []), ...incoming],
         );
-        if (!isDeepStrictEqual(local, merged)) {
-          setDocumentSequenceValue(parsedLocal.document, path, local, merged);
+        if (!isDeepStrictEqual(collectionLocal, merged)) {
+          setDocumentSequenceValue(
+            parsedLocal.document,
+            path,
+            collectionLocal,
+            merged,
+          );
           semanticChanged = true;
         }
         return;
@@ -504,19 +514,24 @@ export function mergeProjectTemplateYamlDocument(
               ?? canonicalSequenceIdentity(value)
             )
           : canonicalSequenceIdentity;
-        const merged = mergeOrderedSequence(local, incoming, identity);
-        if (!isDeepStrictEqual(local, merged)) {
-          setDocumentSequenceValue(parsedLocal.document, path, local, merged);
+        const merged = mergeOrderedSequence(collectionLocal, incoming, identity);
+        if (!isDeepStrictEqual(collectionLocal, merged)) {
+          setDocumentSequenceValue(
+            parsedLocal.document,
+            path,
+            collectionLocal,
+            merged,
+          );
           semanticChanged = true;
         }
         return;
       }
       if (rule.sequencePolicy === 'unordered-set' && Array.isArray(base)) {
-        const additions = [...local, ...incoming].filter(
+        const additions = [...collectionLocal, ...incoming].filter(
           (item) => !base.some((candidate) => isDeepStrictEqual(candidate, item)),
         );
         const retained = base.filter((item) => (
-          local.some((candidate) => isDeepStrictEqual(candidate, item))
+          collectionLocal.some((candidate) => isDeepStrictEqual(candidate, item))
           && incoming.some((candidate) => isDeepStrictEqual(candidate, item))
         ));
         const merged = [...retained];
@@ -525,8 +540,13 @@ export function mergeProjectTemplateYamlDocument(
             merged.push(item);
           }
         }
-        if (!isDeepStrictEqual(local, merged)) {
-          setDocumentSequenceValue(parsedLocal.document, path, local, merged);
+        if (!isDeepStrictEqual(collectionLocal, merged)) {
+          setDocumentSequenceValue(
+            parsedLocal.document,
+            path,
+            collectionLocal,
+            merged,
+          );
           semanticChanged = true;
         }
         return;
