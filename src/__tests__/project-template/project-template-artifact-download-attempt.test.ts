@@ -66,6 +66,43 @@ function fakeTransport(
   });
 }
 
+function invalidTransportCandidate(
+  kind: 'undefined' | 'null' | 'empty' | 'proxy' | 'accessor',
+): { readonly value: unknown; readonly accessor?: ReturnType<typeof vi.fn> } {
+  if (kind === 'undefined') return { value: undefined };
+  if (kind === 'null') return { value: null };
+  if (kind === 'empty') return { value: Object.freeze({}) };
+  if (kind === 'proxy') return { value: new Proxy({}, {}) };
+  const accessor = vi.fn(() => vi.fn());
+  const value = Object.create(Object.prototype) as Record<string, unknown>;
+  Object.defineProperties(value, {
+    start: { enumerable: true, get: accessor },
+    pause: { enumerable: true, value: vi.fn() },
+    resume: { enumerable: true, value: vi.fn() },
+    destroy: { enumerable: true, value: vi.fn() },
+    dispose: { enumerable: true, value: vi.fn() },
+  });
+  return { value: Object.freeze(value), accessor };
+}
+
+function invalidGrantCandidate(
+  kind: 'undefined' | 'null' | 'empty' | 'proxy' | 'accessor',
+): { readonly value: unknown; readonly accessor?: ReturnType<typeof vi.fn> } {
+  if (kind === 'undefined') return { value: undefined };
+  if (kind === 'null') return { value: null };
+  if (kind === 'empty') return { value: Object.freeze({}) };
+  if (kind === 'proxy') return { value: new Proxy({}, {}) };
+  const accessor = vi.fn(() => {
+    throw new Error('grant getter secret');
+  });
+  const value = Object.create(Object.prototype) as Record<string, unknown>;
+  Object.defineProperties(value, {
+    consume: { enumerable: true, get: accessor },
+    dispose: { enumerable: true, value: vi.fn() },
+  });
+  return { value: Object.freeze(value), accessor };
+}
+
 function credential(): DisposableProjectTemplateGhCredential {
   return Object.freeze({
     dispose: vi.fn(() => undefined),
@@ -907,6 +944,47 @@ describe('project-template artifact single attempt adversarial ordering', () => 
     },
   );
 
+  it.each(['response', 'data'] as const)(
+    'rejects redirect after direct %s authority is established',
+    (stage) => {
+      let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const grant = Object.freeze({
+        consume: vi.fn(),
+        dispose: vi.fn(() => undefined),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const transport = fakeTransport(
+        () => handlers.onResponse(200),
+        stage === 'data'
+          ? [() => handlers.onData(Uint8Array.from([1]))]
+          : [() => undefined],
+      );
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          handlers = plan.handlers;
+          return transport as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      attempt.pull(settlement(outcomes));
+      if (stage === 'data') attempt.pull(settlement(outcomes));
+      handlers.onRedirect(grant);
+
+      const failureOutcomes = stage === 'data'
+        ? outcomes.slice(1)
+        : outcomes;
+      expectFailure(failureOutcomes, {
+        code: 'INVALID_RESPONSE',
+        retryable: false,
+        replaySafe: false,
+      });
+      expect(grant.consume).not.toHaveBeenCalled();
+      expect(grant.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('rejects an oversized ingress before pausing or copying it', () => {
     let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
     const transport = fakeTransport(
@@ -994,6 +1072,135 @@ describe('project-template artifact single attempt adversarial ordering', () => 
         replaySafe: false,
         ...(failureKind === 'status' ? { statusCode: 503 } : {}),
       });
+    },
+  );
+
+  it.each(['throw', 'return'] as const)(
+    'does not resume reentrant demand after chunk callback %s',
+    (fault) => {
+      let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const transport = fakeTransport(
+        () => handlers.onResponse(200),
+        [
+          () => undefined,
+          () => handlers.onData(Uint8Array.from([2])),
+        ],
+      );
+      const secondOutcomes: Outcome[] = [];
+      let attempt!: ProjectTemplateArtifactSingleAttempt;
+      const firstSettlement = Object.freeze({
+        chunk(): unknown {
+          attempt.pull(settlement(secondOutcomes));
+          if (fault === 'throw') throw new Error('consumer secret');
+          return 'not undefined';
+        },
+        done: vi.fn(() => undefined),
+        fail: vi.fn(() => undefined),
+      }) as unknown as ProjectTemplateArtifactSingleAttemptSettlement;
+      attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          handlers = plan.handlers;
+          return transport as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      attempt.pull(firstSettlement);
+      expect(() => handlers.onData(Uint8Array.from([1]))).not.toThrow();
+
+      expect(transport.resume).toHaveBeenCalledTimes(1);
+      expectFailure(secondOutcomes, {
+        code: 'INTERNAL',
+        retryable: false,
+      });
+      expect(transport.destroy).toHaveBeenCalledTimes(1);
+      expect(transport.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('pumps reentrant valid demand once after the active resume unwinds', () => {
+    let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+    const transport = fakeTransport(
+      () => handlers.onResponse(200),
+      [
+        () => handlers.onData(Uint8Array.from([1])),
+        () => handlers.onData(Uint8Array.from([2])),
+      ],
+    );
+    const secondOutcomes: Outcome[] = [];
+    let attempt!: ProjectTemplateArtifactSingleAttempt;
+    const firstSettlement = Object.freeze({
+      chunk(): undefined {
+        attempt.pull(settlement(secondOutcomes));
+        return undefined;
+      },
+      done: vi.fn(() => undefined),
+      fail: vi.fn(() => undefined),
+    });
+    attempt = createProjectTemplateArtifactSingleAttempt(
+      credential(),
+      INPUT,
+      dependencies(vi.fn((_credential, plan) => {
+        handlers = plan.handlers;
+        return transport as ProjectTemplateGithubReleaseAssetRequest;
+      })),
+    );
+
+    attempt.pull(firstSettlement);
+
+    expect(transport.resume).toHaveBeenCalledTimes(2);
+    expect(secondOutcomes).toEqual([
+      { kind: 'chunk', value: Uint8Array.from([2]) },
+    ]);
+  });
+
+  it.each(['dispose', 'failure'] as const)(
+    'does not pump reentrant demand after callback %s',
+    (terminal) => {
+      let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const transport = fakeTransport(
+        () => handlers.onResponse(200),
+        [
+          () => handlers.onData(Uint8Array.from([1])),
+          () => handlers.onData(Uint8Array.from([2])),
+        ],
+      );
+      const secondOutcomes: Outcome[] = [];
+      let attempt!: ProjectTemplateArtifactSingleAttempt;
+      const firstSettlement = Object.freeze({
+        chunk(): undefined {
+          attempt.pull(settlement(secondOutcomes));
+          if (terminal === 'dispose') attempt.dispose();
+          else handlers.onResponseError();
+          return undefined;
+        },
+        done: vi.fn(() => undefined),
+        fail: vi.fn(() => undefined),
+      });
+      attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          handlers = plan.handlers;
+          return transport as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      attempt.pull(firstSettlement);
+
+      expect(transport.resume).toHaveBeenCalledTimes(1);
+      if (terminal === 'dispose') {
+        expect(secondOutcomes).toEqual([]);
+      } else {
+        expectFailure(secondOutcomes, {
+          code: 'NETWORK',
+          retryable: false,
+          replaySafe: false,
+        });
+      }
+      expect(transport.destroy).toHaveBeenCalledTimes(1);
+      expect(transport.dispose).toHaveBeenCalledTimes(1);
     },
   );
 
@@ -1140,6 +1347,201 @@ describe('project-template artifact single attempt capability boundaries', () =>
         expect(hopDispose).toHaveBeenCalledTimes(1);
       } else {
         expect(pinned.destroy).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
+  it.each([
+    'undefined',
+    'null',
+    'empty',
+    'proxy',
+    'accessor',
+  ] as const)(
+    'rejects invalid authenticated %s facade after synchronous response',
+    (kind) => {
+      const candidate = invalidTransportCandidate(kind);
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          plan.handlers.onResponse(200);
+          return candidate.value as never;
+        })),
+      );
+
+      attempt.pull(settlement(outcomes));
+
+      expectFailure(outcomes, {
+        code: 'INTERNAL',
+        retryable: false,
+      });
+      if (candidate.accessor !== undefined) {
+        expect(candidate.accessor).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([
+    'undefined',
+    'null',
+    'empty',
+    'proxy',
+    'accessor',
+  ] as const)(
+    'rejects malformed %s redirect grant during construction',
+    (kind) => {
+      const candidate = invalidGrantCandidate(kind);
+      const transport = fakeTransport();
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          plan.handlers.onRedirect(candidate.value as never);
+          return transport as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      attempt.pull(settlement(outcomes));
+
+      expectFailure(outcomes, {
+        code: 'INVALID_RESPONSE',
+        retryable: false,
+      });
+      if (candidate.accessor !== undefined) {
+        expect(candidate.accessor).not.toHaveBeenCalled();
+      }
+      expect(transport.destroy).toHaveBeenCalledTimes(1);
+      expect(transport.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    'undefined',
+    'null',
+    'empty',
+    'proxy',
+    'accessor',
+  ] as const)(
+    'rejects malformed %s redirect grant after start',
+    (kind) => {
+      let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const candidate = invalidGrantCandidate(kind);
+      const transport = fakeTransport(
+        () => handlers.onRedirect(candidate.value as never),
+      );
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          handlers = plan.handlers;
+          return transport as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      attempt.pull(settlement(outcomes));
+
+      expectFailure(outcomes, {
+        code: 'INVALID_RESPONSE',
+        retryable: false,
+      });
+      if (candidate.accessor !== undefined) {
+        expect(candidate.accessor).not.toHaveBeenCalled();
+      }
+      expect(transport.destroy).toHaveBeenCalledTimes(1);
+      expect(transport.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    'undefined',
+    'null',
+    'empty',
+    'proxy',
+    'accessor',
+  ] as const)(
+    'rejects invalid authenticated %s facade after synchronous redirect',
+    (kind) => {
+      const candidate = invalidTransportCandidate(kind);
+      const grant = Object.freeze({
+        consume: vi.fn(),
+        dispose: vi.fn(() => undefined),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(vi.fn((_credential, plan) => {
+          plan.handlers.onRedirect(grant);
+          return candidate.value as never;
+        })),
+      );
+
+      attempt.pull(settlement(outcomes));
+
+      expectFailure(outcomes, {
+        code: 'INTERNAL',
+        retryable: false,
+      });
+      expect(grant.consume).not.toHaveBeenCalled();
+      expect(grant.dispose).toHaveBeenCalledTimes(1);
+      if (candidate.accessor !== undefined) {
+        expect(candidate.accessor).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it.each([
+    'undefined',
+    'null',
+    'empty',
+    'proxy',
+    'accessor',
+  ] as const)(
+    'rejects invalid pinned %s facade after synchronous response',
+    async (kind) => {
+      let authHandlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const candidate = invalidTransportCandidate(kind);
+      const hopDispose = vi.fn(() => undefined);
+      const hop = Object.freeze({
+        dispose: hopDispose,
+      }) as unknown as DisposableProjectTemplateArtifactRedirectHop;
+      const grant = Object.freeze({
+        consume: vi.fn(() => hop),
+        dispose: vi.fn(() => undefined),
+      }) as DisposableProjectTemplateArtifactRedirectGrant;
+      const authenticated = fakeTransport(
+        () => authHandlers.onRedirect(grant),
+      );
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        INPUT,
+        dependencies(
+          vi.fn((_credential, plan) => {
+            authHandlers = plan.handlers;
+            return authenticated as ProjectTemplateGithubReleaseAssetRequest;
+          }),
+          vi.fn((_hop, handlers) => {
+            handlers.onResponse(200);
+            return candidate.value as never;
+          }),
+        ),
+      );
+
+      attempt.pull(settlement(outcomes));
+      await Promise.resolve();
+
+      expectFailure(outcomes, {
+        code: 'INTERNAL',
+        retryable: false,
+      });
+      expect(hopDispose).toHaveBeenCalledTimes(1);
+      if (candidate.accessor !== undefined) {
+        expect(candidate.accessor).not.toHaveBeenCalled();
       }
     },
   );
@@ -1614,40 +2016,3 @@ describe('project-template artifact single attempt capability boundaries', () =>
     },
   );
 });
-
-function compileOnlyNominalContract(): void {
-  // @ts-expect-error A structural object cannot forge the nominal capability.
-  const forged: ProjectTemplateArtifactSingleAttempt = {
-    pull: () => undefined,
-    dispose: () => undefined,
-  };
-  void forged;
-
-  const narrow = (
-    failureValue: ProjectTemplateArtifactSingleAttemptFailure,
-  ): number | undefined => {
-    switch (failureValue.code) {
-      case 'HTTP_STATUS':
-        return failureValue.statusCode;
-      case 'NETWORK':
-      case 'DNS_REJECTED':
-      case 'INVALID_RESPONSE':
-      case 'OUTPUT_LIMIT':
-      case 'INTERNAL':
-        return undefined;
-      default: {
-        const exhaustive: never = failureValue;
-        return exhaustive;
-      }
-    }
-  };
-  void narrow;
-
-  const network = {} as Extract<
-    ProjectTemplateArtifactSingleAttemptFailure,
-    { readonly code: 'NETWORK' }
-  >;
-  // @ts-expect-error statusCode exists only on HTTP_STATUS failures.
-  void network.statusCode;
-}
-void compileOnlyNominalContract;

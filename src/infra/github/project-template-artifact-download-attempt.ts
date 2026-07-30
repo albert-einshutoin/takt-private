@@ -147,6 +147,7 @@ interface AttemptState {
   construction: AttemptConstructionLatch | undefined;
   bodyReady: boolean;
   resuming: boolean;
+  resumeRequested: boolean;
   receivedBytes: number;
   deliveredAny: boolean;
   deliveryGeneration: number;
@@ -395,6 +396,53 @@ function copyChunk(ingress: ChunkIngress): Uint8Array {
   return copy;
 }
 
+function isTransportCapability(value: unknown): value is AttemptTransport {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const methodNames = ['start', 'pause', 'resume', 'destroy', 'dispose'];
+  return (
+    Reflect.ownKeys(value).length === methodNames.length
+    && methodNames.every((name) => {
+      const descriptor = descriptors[name];
+      return (
+        descriptor !== undefined
+        && 'value' in descriptor
+        && typeof descriptor.value === 'function'
+        && !types.isProxy(descriptor.value)
+      );
+    })
+  );
+}
+
+function isRedirectGrantCapability(
+  value: unknown,
+): value is DisposableProjectTemplateArtifactRedirectGrant {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  return (
+    Reflect.ownKeys(value).length === 2
+    && ['consume', 'dispose'].every((name) => {
+      const descriptor = descriptors[name];
+      return (
+        descriptor !== undefined
+        && 'value' in descriptor
+        && typeof descriptor.value === 'function'
+        && !types.isProxy(descriptor.value)
+      );
+    })
+  );
+}
+
 function safelyStop(transport: AttemptTransport | undefined): void {
   if (transport === undefined) return;
   try {
@@ -488,6 +536,7 @@ function failAttempt(
   state.input = undefined;
   state.construction = undefined;
   state.deliveryClaim = undefined;
+  state.resumeRequested = false;
   state.token.active = false;
   state.token.dispatch = undefined;
   const pending = state.pending;
@@ -510,6 +559,7 @@ function finishAttempt(state: AttemptState): void {
   state.input = undefined;
   state.construction = undefined;
   state.deliveryClaim = undefined;
+  state.resumeRequested = false;
   state.token.active = false;
   state.token.dispatch = undefined;
   const pending = state.pending;
@@ -528,14 +578,32 @@ function resumeDemand(state: AttemptState): void {
     || !state.bodyReady
     || state.pending === undefined
     || state.transport === undefined
-    || state.resuming
-    || state.deliveryClaim !== undefined
   ) return;
+  if (state.resuming || state.deliveryClaim !== undefined) {
+    // A single bit is sufficient: demand is singular and each successful
+    // chunk clears its settlement before another pull can be registered.
+    state.resumeRequested = true;
+    return;
+  }
   state.resuming = true;
   try {
-    state.transport.resume();
-  } catch {
-    failAttempt(state, NETWORK_FAILURE);
+    do {
+      state.resumeRequested = false;
+      if (
+        state.phase !== 'active'
+        || !state.bodyReady
+        || state.pending === undefined
+        || state.transport === undefined
+        || state.deliveryClaim !== undefined
+      ) break;
+      try {
+        state.transport.resume();
+      } catch {
+        failAttempt(state, NETWORK_FAILURE);
+      }
+      // Repeat only when a reentrant pull explicitly latched fresh demand.
+      // An empty resume therefore cannot create a busy loop.
+    } while (state.resumeRequested);
   } finally {
     state.resuming = false;
   }
@@ -606,11 +674,16 @@ function onData(state: AttemptState, chunk: unknown): void {
   state.receivedBytes += copied.byteLength;
   state.deliveredAny = true;
   state.pending = undefined;
+  let callbackSucceeded = false;
   try {
     const result = Reflect.apply(pending.chunk, pending.receiver, [copied]);
     if (result !== undefined) throw invalidArgument();
+    callbackSucceeded = true;
   } finally {
-    if (state.deliveryClaim === claim) {
+    // Reentrant demand is released only after the callback contract commits.
+    // Keeping the claim on throw/non-undefined lets the outer dispatcher fail
+    // the attempt before any newly registered demand can resume the wire.
+    if (callbackSucceeded && state.deliveryClaim === claim) {
       state.deliveryClaim = undefined;
       resumeDemand(state);
     }
@@ -656,6 +729,10 @@ function createPhysicalHandlers(
       onRedirect: (
         grant: DisposableProjectTemplateArtifactRedirectGrant,
       ): void => {
+        if (!isRedirectGrantCapability(grant)) {
+          dispatch({ kind: 'failure', failure: INVALID_RESPONSE_FAILURE });
+          return;
+        }
         if (dispatch({ kind: 'redirect', grant })) return;
         try {
           grant.dispose();
@@ -860,11 +937,13 @@ function handoffRedirect(
       }
       return;
     }
-    pinned = Reflect.apply(
+    const candidate: unknown = Reflect.apply(
       state.dependencies.createPinnedTransport,
       state.dependencies.receiver,
       [hop, pinnedHandlers],
     );
+    if (!isTransportCapability(candidate)) throw invalidArgument();
+    pinned = candidate;
     hop = undefined;
   } catch {
     nextToken.active = false;
@@ -912,17 +991,23 @@ function scheduleRedirectHandoff(
   token: AttemptCallbackToken,
   grant: DisposableProjectTemplateArtifactRedirectGrant,
 ): void {
+  const grantIsValid = isRedirectGrantCapability(grant);
   if (
-    state.phase !== 'active'
+    !grantIsValid
+    || state.phase !== 'active'
     || state.transportKind !== 'authenticated'
     || state.pendingGrant !== undefined
+    || state.bodyReady
+    || state.deliveredAny
   ) {
-    try {
-      grant.dispose();
-    } catch {
-      // A duplicate or late grant receives no attempt authority.
+    if (grantIsValid) {
+      try {
+        grant.dispose();
+      } catch {
+        // A duplicate or late grant receives no attempt authority.
+      }
     }
-    failAttempt(state);
+    failAttempt(state, INVALID_RESPONSE_FAILURE);
     return;
   }
   state.pendingGrant = grant;
@@ -973,7 +1058,7 @@ function startAttempt(state: AttemptState): void {
   );
   let request: ProjectTemplateGithubReleaseAssetRequest;
   try {
-    request = Reflect.apply(
+    const candidate: unknown = Reflect.apply(
       state.dependencies.createAuthenticatedRequest,
       state.dependencies.receiver,
       [credential, Object.freeze({
@@ -983,6 +1068,8 @@ function startAttempt(state: AttemptState): void {
         handlers: handlers.authenticated,
       })],
     );
+    if (!isTransportCapability(candidate)) throw invalidArgument();
+    request = candidate;
   } catch {
     state.construction = undefined;
     disposeLatchedRedirect(latch);
@@ -1043,6 +1130,7 @@ function disposeAttempt(state: AttemptState): undefined {
   state.input = undefined;
   state.construction = undefined;
   state.deliveryClaim = undefined;
+  state.resumeRequested = false;
   state.pending = undefined;
   disposePendingGrant(state);
   safelyStop(takeTransport(state));
@@ -1081,6 +1169,7 @@ export function createProjectTemplateArtifactSingleAttempt(
     construction: undefined,
     bodyReady: false,
     resuming: false,
+    resumeRequested: false,
     receivedBytes: 0,
     deliveredAny: false,
     deliveryGeneration: 0,
