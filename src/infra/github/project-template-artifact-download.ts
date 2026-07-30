@@ -8,6 +8,8 @@ import {
 } from '../../features/project-template/github-repository-coordinates.js';
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_TRANSACTIONAL_TIMER_ARMS = 8;
+const TIMER_SETUP_MARGIN_MS = 1;
 const NativePromise = Promise;
 const NativeUint8Array = Uint8Array;
 const NATIVE_UINT8_ARRAY_PROTOTYPE = Uint8Array.prototype;
@@ -116,7 +118,7 @@ interface DownloadCallbackToken {
 interface DownloadTimerRegistration {
   readonly token: DownloadCallbackToken;
   readonly listener: () => void;
-  readonly finalArm: boolean;
+  readonly delay: number;
 }
 
 interface DownloadSettlementToken {
@@ -592,7 +594,9 @@ function armDeadline(
   const registration: DownloadTimerRegistration = {
     token,
     listener,
-    finalArm: remaining <= MAX_TIMER_DELAY_MS,
+    delay: remaining <= MAX_TIMER_DELAY_MS
+      ? Math.max(0, remaining - TIMER_SETUP_MARGIN_MS)
+      : MAX_TIMER_DELAY_MS,
   };
   token.dispatch = (): void => {
     if (
@@ -611,7 +615,7 @@ function armDeadline(
     timer = Reflect.apply(
       authority.port.dependencies.setTimer,
       authority.port.dependencies.receiver,
-      [listener, Math.min(remaining, MAX_TIMER_DELAY_MS)],
+      [listener, registration.delay],
     );
   } catch {
     authority.armingTimer = false;
@@ -640,20 +644,38 @@ function armDeadline(
       // The callback token is already revoked or the sync fire is contained.
     }
     if (!isClosed(authority)) {
-      if (registration.finalArm) {
-        closeIterator(authority, {
-          kind: 'error',
-          error: downloadError('TIMEOUT', 'Artifact download timed out'),
-        });
-      } else {
-        bridgeFailure(authority);
-      }
+      bridgeFailure(authority);
     }
     return false;
   }
   authority.timer = timer;
   authority.hasTimer = true;
   return true;
+}
+
+function armFreshDeadline(
+  authority: DownloadIteratorAuthority,
+  initialRemaining: number,
+): boolean {
+  let remaining = initialRemaining;
+  for (let attempt = 0; attempt < MAX_TRANSACTIONAL_TIMER_ARMS; attempt += 1) {
+    if (!armDeadline(authority, remaining)) return false;
+    const freshRemaining = readRemainingDeadline(authority);
+    if (freshRemaining === undefined) return false;
+    const registration = authority.timerRegistration;
+    if (
+      registration !== undefined
+      && freshRemaining >= registration.delay
+    ) {
+      return true;
+    }
+    // The timer hook consumed budget. Revoke its generation before the
+    // caller-controlled clear hook, then retry with the fresh absolute budget.
+    clearDeadline(authority);
+    remaining = freshRemaining;
+  }
+  bridgeFailure(authority);
+  return false;
 }
 
 function handleTimer(
@@ -670,15 +692,8 @@ function handleTimer(
   authority.timerRegistration = undefined;
   authority.timer = undefined;
   authority.hasTimer = false;
-  if (registration.finalArm) {
-    closeIterator(authority, {
-      kind: 'error',
-      error: downloadError('TIMEOUT', 'Artifact download timed out'),
-    });
-    return;
-  }
   const remaining = readRemainingDeadline(authority);
-  if (remaining !== undefined) armDeadline(authority, remaining);
+  if (remaining !== undefined) armFreshDeadline(authority, remaining);
 }
 
 function createPhysicalCallback(
@@ -985,7 +1000,7 @@ function createIterator(
             disposeBridge(current);
             return pendingPromise;
           }
-          if (!armDeadline(current, remaining)) {
+          if (!armFreshDeadline(current, remaining)) {
             disposeBridge(current);
             return pendingPromise;
           }

@@ -354,6 +354,7 @@ describe('project-template artifact download D1 cold iterator', () => {
         .mockReturnValueOnce(100)
         .mockReturnValueOnce(100)
         .mockReturnValueOnce(100)
+        .mockReturnValueOnce(100)
         .mockReturnValueOnce(1_001),
     });
     const iterator = createProjectTemplateArtifactDownloadPort(
@@ -367,7 +368,7 @@ describe('project-template artifact download D1 cold iterator', () => {
     });
     await expectCode(iterator.next(), 'TIMEOUT');
 
-    expect(dependencies.now).toHaveBeenCalledTimes(4);
+    expect(dependencies.now).toHaveBeenCalledTimes(5);
     expect(bridgeNext(bridge)).toHaveBeenCalledTimes(1);
     expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
   });
@@ -445,9 +446,11 @@ describe('project-template artifact download D1 cold iterator', () => {
   it('revokes listener, timer, waiter, and bridge on abort or deadline', async () => {
     for (const terminal of ['abort', 'deadline'] as const) {
       const callbacks: Array<() => void> = [];
+      let now = 100;
       const never = new Promise<IteratorResult<Uint8Array>>(() => {});
       const bridge = makeBridge(vi.fn(() => never));
       const dependencies = makeDependencies(bridge, {
+        now: vi.fn(() => now),
         setTimer: vi.fn((callback: () => void) => {
           callbacks.push(callback);
           return Object.freeze({ timer: terminal });
@@ -468,7 +471,10 @@ describe('project-template artifact download D1 cold iterator', () => {
       );
 
       if (terminal === 'abort') controller.abort('private abort reason');
-      else callbacks[0]!();
+      else {
+        now = 1_000;
+        callbacks[0]!();
+      }
 
       await outcome;
       expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
@@ -631,7 +637,7 @@ describe('project-template artifact download D1 cold iterator', () => {
       const pending = iterator.next();
 
       if (boundary === 'timer') {
-        await expectCode(pending, 'TIMEOUT');
+        await expectCode(pending, 'BRIDGE_FAILURE');
       } else {
         await expect(pending).resolves.toEqual({
           value: undefined,
@@ -1095,7 +1101,121 @@ describe('project-template artifact download D1 cold iterator', () => {
       done: true,
     });
 
-    expect(delays).toEqual([100]);
+    expect(delays).toEqual([99]);
+    await iterator.return!();
+    await pendingDone;
+  });
+
+  it('expires and disposes before pull when setTimer consumes the deadline', async () => {
+    let now = 0;
+    let lateTimer!: () => void;
+    const bridge = makeBridge();
+    const clearTimer = vi.fn();
+    const dependencies = makeDependencies(bridge, {
+      now: vi.fn(() => now),
+      setTimer: vi.fn((callback: () => void) => {
+        lateTimer = callback;
+        now = 1_001;
+        return Object.freeze({ timer: true });
+      }),
+      clearTimer,
+    });
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+
+    await expectCode(iterator.next(), 'TIMEOUT');
+    expect(bridgeNext(bridge)).not.toHaveBeenCalled();
+    expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
+    expect(clearTimer).toHaveBeenCalledTimes(1);
+    lateTimer();
+    expect(dependencies.setTimer).toHaveBeenCalledTimes(1);
+    expect(clearTimer).toHaveBeenCalledTimes(1);
+  });
+
+  it('transactionally shortens a timer after its hook consumes budget', async () => {
+    let now = 0;
+    const timers: Array<{ callback: () => void; delay: number }> = [];
+    const bridge = makeBridge(
+      vi.fn(() => new Promise<IteratorResult<Uint8Array>>(() => {})),
+    );
+    const clearTimer = vi.fn();
+    const dependencies = makeDependencies(bridge, {
+      now: vi.fn(() => now),
+      setTimer: vi.fn((callback: () => void, delay: number) => {
+        timers.push({ callback, delay });
+        now = 900;
+        return Object.freeze({ generation: timers.length });
+      }),
+      clearTimer,
+    });
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    const pendingDone = expect(pending).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+
+    expect(timers.map(({ delay }) => delay)).toEqual([999, 99]);
+    expect(clearTimer).toHaveBeenCalledTimes(1);
+    timers[0]!.callback();
+    expect(timers).toHaveLength(2);
+    expect(clearTimer).toHaveBeenCalledTimes(1);
+    expect(bridgeNext(bridge)).toHaveBeenCalledTimes(1);
+    await iterator.return!();
+    await pendingDone;
+    expect(clearTimer).toHaveBeenCalledTimes(2);
+  });
+
+  it('bounds transactional rearming when every timer hook consumes time', async () => {
+    let now = 0;
+    const bridge = makeBridge();
+    const dependencies = makeDependencies(bridge, {
+      now: vi.fn(() => now),
+      setTimer: vi.fn(() => {
+        now += 2;
+        return Object.freeze({ timer: now });
+      }),
+    });
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+
+    await expectCode(iterator.next(), 'BRIDGE_FAILURE');
+    expect(dependencies.setTimer).toHaveBeenCalledTimes(8);
+    expect(dependencies.clearTimer).toHaveBeenCalledTimes(8);
+    expect(bridgeNext(bridge)).not.toHaveBeenCalled();
+    expect(bridgeDispose(bridge)).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts one safety-margin arm when monotonic reads drift slightly', async () => {
+    let now = 0;
+    const bridge = makeBridge(
+      vi.fn(() => new Promise<IteratorResult<Uint8Array>>(() => {})),
+    );
+    const dependencies = makeDependencies(bridge, {
+      now: vi.fn(() => {
+        now += 0.1;
+        return now;
+      }),
+    });
+    const iterator = createProjectTemplateArtifactDownloadPort(
+      Object.freeze({ deadlineMs: 1_000 }),
+      dependencies,
+    ).openReleaseAsset(VALID_INPUT)[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    const pendingDone = expect(pending).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+
+    expect(dependencies.setTimer).toHaveBeenCalledTimes(1);
+    expect(bridgeNext(bridge)).toHaveBeenCalledTimes(1);
     await iterator.return!();
     await pendingDone;
   });
