@@ -149,6 +149,15 @@ interface CandidateAuthority {
   readonly receipt?: GithubTemplateDownloadReceiptV1;
 }
 
+interface ReclaimedFinalEvidence {
+  readonly path: string;
+  readonly device: number;
+  readonly inode: number;
+  readonly bytes: number;
+  readonly receiptKey: string;
+  readonly serialized: string;
+}
+
 function reclaimError(
   code: GithubTemplateDownloadReceiptReclaimErrorCode,
   message: string,
@@ -819,6 +828,41 @@ function assertAuthenticatedLinkedAuthority(
   }
 }
 
+function validateReclaimedFinalEvidence(
+  evidence: ReclaimedFinalEvidence,
+): void {
+  const final = openCandidateFile(evidence.path, evidence.device);
+  if (final === undefined) {
+    throw reclaimError(
+      'CACHE_INVALID',
+      'GitHub template receipt reclaimed final is unsafe',
+    );
+  }
+  let failure: GithubTemplateDownloadReceiptReclaimError | undefined;
+  try {
+    if (
+      final.links !== 1
+      || final.inode !== evidence.inode
+      || final.bytes !== evidence.bytes
+    ) throw new Error();
+    assertFile(final, 1);
+    const bytes = readExact(final, undefined);
+    if (
+      bytes.toString('utf8') !== evidence.serialized
+      || calculateGithubTemplateDownloadReceiptKey(evidence.serialized)
+        !== evidence.receiptKey
+    ) throw new Error();
+  } catch {
+    failure = reclaimError(
+      'CACHE_INVALID',
+      'GitHub template receipt reclaimed final changed',
+    );
+  }
+  const closeFailure = closeNativeDescriptor(final);
+  failure ??= closeFailure;
+  if (failure !== undefined) throw failure;
+}
+
 function candidateStableBeforeUnlink(
   candidate: CandidateAuthority,
   serialized: string | undefined,
@@ -851,6 +895,7 @@ async function reclaimCandidate(
 ): Promise<{
   readonly outcome: 'reclaimed' | 'skipped' | 'unsafe';
   readonly sealedSerialized?: string;
+  readonly finalEvidence?: ReclaimedFinalEvidence;
 }> {
   let authenticated = candidate;
   if (candidate.final !== undefined) {
@@ -924,7 +969,17 @@ async function reclaimCandidate(
       outcome: 'reclaimed',
       ...(candidate.final === undefined
         ? {}
-        : { sealedSerialized: authenticated.serialized }),
+        : {
+          sealedSerialized: authenticated.serialized,
+          finalEvidence: Object.freeze({
+            path: candidate.final.path,
+            device: candidate.final.device,
+            inode: candidate.final.inode,
+            bytes: candidate.final.bytes,
+            receiptKey: candidate.receiptKey,
+            serialized: authenticated.serialized!,
+          }),
+        }),
     };
   } catch (error) {
     if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
@@ -965,6 +1020,7 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
   let truncated = false;
   let status: ReclaimedGithubTemplateDownloadReceiptTemps['status'] =
     'complete';
+  const reclaimedFinals: ReclaimedFinalEvidence[] = [];
   try {
     let parent = root;
     let hierarchyMissing = false;
@@ -1110,7 +1166,12 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
             candidateFailure ??= nativeCloseFailure;
           }
           if (candidateFailure !== undefined) throw candidateFailure;
-          if (candidateResult?.outcome === 'reclaimed') reclaimed += 1;
+          if (candidateResult?.outcome === 'reclaimed') {
+            reclaimed += 1;
+            if (candidateResult.finalEvidence !== undefined) {
+              reclaimedFinals.push(candidateResult.finalEvidence);
+            }
+          }
           else {
             skipped += 1;
             if (candidateResult?.outcome === 'unsafe') unsafeRetained += 1;
@@ -1205,6 +1266,9 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
   try {
     assertDirectory(root);
     for (const authority of openedAncestors) assertDirectory(authority);
+    for (const evidence of reclaimedFinals) {
+      validateReclaimedFinalEvidence(evidence);
+    }
   } catch (error) {
     primary ??= (
       error instanceof GithubTemplateDownloadReceiptReclaimError

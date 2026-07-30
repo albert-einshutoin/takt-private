@@ -937,4 +937,39 @@ describe('GitHub template receipt orphan reclaim D2b', () => {
     expect(error).toMatchObject({ code: 'CACHE_INVALID' });
     if (existsSync(movedRoot)) roots.push(movedRoot);
   });
+
+  it.each([
+    'shard-close',
+    'root-close',
+  ] as const)('revalidates reclaimed final after %s callback', async (kind) => {
+    const fixture = await createStoredFixture();
+    const temporary = tempPath(
+      fixture.shard,
+      920014,
+      fixture.prepared.receiptKey,
+    );
+    linkSync(fixture.finalPath, temporary);
+    let directoryCloses = 0;
+    let changed = false;
+    const error = await reclaimGithubTemplateDownloadReceiptTemps({
+      cacheRoot: fixture.cacheRoot,
+      verifier: hmacVerifier(),
+      io: {
+        processProbe: () => 'missing',
+        close(_fd, descriptorKind) {
+          if (descriptorKind !== 'directory') return;
+          directoryCloses += 1;
+          const target = kind === 'shard-close' ? 1 : 5;
+          if (changed || directoryCloses !== target) return;
+          changed = true;
+          const bytes = Buffer.from(fixture.prepared.serialized);
+          bytes[bytes.byteLength - 2] = bytes[bytes.byteLength - 2]! ^ 1;
+          writeFileSync(fixture.finalPath, bytes);
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(existsSync(fixture.finalPath)).toBe(true);
+    expect(existsSync(temporary)).toBe(false);
+  });
 });
