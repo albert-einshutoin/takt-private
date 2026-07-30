@@ -38,6 +38,12 @@ const RECEIPT_TEMP_PATTERN =
 const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
 const DIRECTORY_FLAG = process.platform === 'win32' ? 0 : constants.O_DIRECTORY;
 
+export type GithubTemplateDownloadReceiptState =
+  | 'none'
+  | 'temporary-only'
+  | 'receipt-present'
+  | 'receipt-published';
+
 export type GithubTemplateDownloadReceiptStorageErrorCode =
   | 'INVALID_ARGUMENT'
   | 'INVALID_AUTHORITY'
@@ -50,6 +56,7 @@ export class GithubTemplateDownloadReceiptStorageError extends Error {
   constructor(
     public readonly code: GithubTemplateDownloadReceiptStorageErrorCode,
     message: string,
+    public readonly receiptState: GithubTemplateDownloadReceiptState = 'none',
   ) {
     super(message);
     this.name = 'GithubTemplateDownloadReceiptStorageError';
@@ -113,6 +120,7 @@ export interface StoredGithubTemplateDownloadReceipt {
   readonly artifactSha256: string;
   readonly bytes: number;
   readonly status: 'stored' | 'existing';
+  readonly directoryDurability: 'synced' | 'unsupported';
 }
 
 interface VerifierSnapshot {
@@ -148,17 +156,28 @@ interface FileAuthority {
 
 interface StoreContext {
   readonly directories: DirectoryAuthority[];
+  readonly artifacts: {
+    temporaryPath?: string;
+    finalPath?: string;
+    publicationSynced: boolean;
+  };
   artifact?: FileAuthority;
   temporary?: FileAuthority;
   final?: FileAuthority;
+  receiptParent?: DirectoryAuthority;
 }
 
 function storageError(
   code: GithubTemplateDownloadReceiptStorageErrorCode,
   message: string,
+  receiptState: GithubTemplateDownloadReceiptState = 'none',
 ): GithubTemplateDownloadReceiptStorageError {
   return Object.freeze(
-    new GithubTemplateDownloadReceiptStorageError(code, message),
+    new GithubTemplateDownloadReceiptStorageError(
+      code,
+      message,
+      receiptState,
+    ),
   );
 }
 
@@ -298,6 +317,11 @@ function requireDirectoryStat(
   if (
     !stat.isDirectory()
     || !isProjectTemplatePrivateDirectoryMode(stat.mode)
+    || (
+      process.platform !== 'win32'
+      && typeof process.getuid === 'function'
+      && stat.uid !== process.getuid()
+    )
     || (expectedDevice !== undefined && stat.dev !== expectedDevice)
   ) throw new Error();
 }
@@ -380,10 +404,8 @@ function ensureDirectory(
       'GitHub template receipt directory path is invalid',
     );
   }
-  let created = false;
   try {
     mkdirSync(path, { mode: 0o700 });
-    created = true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
       throw storageError(
@@ -395,7 +417,9 @@ function ensureDirectory(
   const authority = openDirectory(path, parent.device);
   assertDirectory(parent);
   try {
-    if (created) syncDescriptor(parent.fd, 'directory', io);
+    // EEXIST is not durability evidence. Sync the retained parent after the
+    // child has been opened and identity-checked on both creation paths.
+    syncDescriptor(parent.fd, 'directory', io);
   } catch (error) {
     try {
       closeSync(authority.fd);
@@ -419,6 +443,11 @@ function requireFileStat(
     || stat.nlink !== expectedLinks
     || stat.size !== expectedBytes
     || !isProjectTemplatePrivateFileMode(stat.mode)
+    || (
+      process.platform !== 'win32'
+      && typeof process.getuid === 'function'
+      && stat.uid !== process.getuid()
+    )
   ) throw new Error();
 }
 
@@ -619,41 +648,55 @@ function writeAll(
   }
 }
 
+/** @internal Makes the Windows directory-fsync limitation explicit to D2b. */
+export function githubTemplateReceiptDirectoryDurability(
+  platform: NodeJS.Platform = process.platform,
+): 'synced' | 'unsupported' {
+  return platform === 'win32' ? 'unsupported' : 'synced';
+}
+
 function syncDescriptor(
   fd: number,
   kind: 'file' | 'directory',
   io: IoSnapshot | undefined,
-): void {
-  if (kind === 'directory' && process.platform === 'win32') return;
+): 'synced' | 'unsupported' {
+  if (
+    kind === 'directory'
+    && githubTemplateReceiptDirectoryDurability() === 'unsupported'
+  ) return 'unsupported';
   try {
     if (io?.fsync === undefined) fsyncSync(fd);
     else Reflect.apply(io.fsync, io.receiver, [fd, kind]);
   } catch {
     throw storageError('IO_FAILURE', 'GitHub template receipt sync failed');
   }
+  return 'synced';
 }
 
-function closeDescriptor(
+function runCloseHook(
   fd: number,
   kind: 'artifact' | 'temporary' | 'final' | 'directory',
   io: IoSnapshot | undefined,
 ): GithubTemplateDownloadReceiptStorageError | undefined {
-  let failed = false;
   try {
     if (io?.close !== undefined) {
       Reflect.apply(io.close, io.receiver, [fd, kind]);
     }
   } catch {
-    failed = true;
+    return storageError('IO_FAILURE', 'GitHub template receipt close failed');
   }
+  return undefined;
+}
+
+function closeDescriptor(
+  fd: number,
+): GithubTemplateDownloadReceiptStorageError | undefined {
   try {
     closeSync(fd);
   } catch {
-    failed = true;
+    return storageError('IO_FAILURE', 'GitHub template receipt close failed');
   }
-  return failed
-    ? storageError('IO_FAILURE', 'GitHub template receipt close failed')
-    : undefined;
+  return undefined;
 }
 
 async function verifyAuthentication(
@@ -789,6 +832,7 @@ function createTemporaryReceipt(
   receiptKey: string,
   content: Uint8Array,
   io: IoSnapshot | undefined,
+  context: StoreContext,
 ): FileAuthority {
   const path = join(
     parent.path,
@@ -814,6 +858,7 @@ function createTemporaryReceipt(
         | NO_FOLLOW,
       0o600,
     );
+    context.artifacts.temporaryPath = path;
     const created = fstatSync(fd);
     requireFileStat(created, parent.device, 0, 1);
     writeAll(fd, content, io);
@@ -923,6 +968,7 @@ async function publishReceipt(
   try {
     linkSync(temporary.path, finalPath);
     linked = true;
+    context.artifacts.finalPath = finalPath;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
       throw storageError(
@@ -930,6 +976,7 @@ async function publishReceipt(
         'GitHub template receipt publication failed',
       );
     }
+    context.artifacts.finalPath = finalPath;
   }
   if (linked) {
     assertFile(temporary, 2);
@@ -948,21 +995,16 @@ async function publishReceipt(
     runPhase(io, 'before-receipt-publish-fsync', parent.path);
     assertDirectory(parent);
     syncDescriptor(parent.fd, 'directory', io);
+    context.artifacts.publicationSynced = true;
   }
   runPhase(io, 'before-receipt-temp-unlink', temporary.path);
   unlinkOwnedTemporary(temporary, linked ? 2 : 1, io);
   runPhase(io, 'before-receipt-unlink-fsync', parent.path);
   assertDirectory(parent);
   syncDescriptor(parent.fd, 'directory', io);
-  const closeFailure = closeDescriptor(
-    temporary.fd,
-    'temporary',
-    io,
-  );
-  context.temporary = undefined;
-  if (closeFailure !== undefined) throw closeFailure;
 
   runPhase(io, 'before-receipt-final-verify', finalPath);
+  assertDirectory(parent);
   let final: FileAuthority;
   try {
     final = openFile(
@@ -992,6 +1034,11 @@ async function publishReceipt(
     true,
   );
   assertFile(final, 1);
+  syncDescriptor(final.fd, 'file', io);
+  assertFile(final, 1);
+  assertDirectory(parent);
+  syncDescriptor(parent.fd, 'directory', io);
+  context.artifacts.publicationSynced = true;
   return linked ? 'stored' : 'existing';
 }
 
@@ -1005,25 +1052,133 @@ function normalizeFailure(
   );
 }
 
-function closeContext(
+function receiptPathExists(path: string | undefined): boolean {
+  if (path === undefined) return false;
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    // Any result other than authoritative ENOENT is an uncertain retained
+    // receipt and must not be reported as absent.
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
+function classifyReceiptState(
   context: StoreContext,
-  io: IoSnapshot | undefined,
-): GithubTemplateDownloadReceiptStorageError | undefined {
-  let failure: GithubTemplateDownloadReceiptStorageError | undefined;
+): GithubTemplateDownloadReceiptState {
+  if (context.artifacts.publicationSynced) return 'receipt-published';
+  if (receiptPathExists(context.artifacts.finalPath)) {
+    return 'receipt-present';
+  }
+  if (receiptPathExists(context.artifacts.temporaryPath)) {
+    return 'temporary-only';
+  }
+  return 'none';
+}
+
+function withReceiptState(
+  error: GithubTemplateDownloadReceiptStorageError,
+  context: StoreContext,
+): GithubTemplateDownloadReceiptStorageError {
+  return storageError(
+    error.code,
+    error.message,
+    classifyReceiptState(context),
+  );
+}
+
+function contextDescriptors(
+  context: StoreContext,
+): ReadonlyArray<readonly [
+  number,
+  'artifact' | 'temporary' | 'final' | 'directory',
+]> {
+  const descriptors: Array<readonly [
+    number,
+    'artifact' | 'temporary' | 'final' | 'directory',
+  ]> = [];
   for (const [authority, kind] of [
     [context.final, 'final'],
     [context.temporary, 'temporary'],
     [context.artifact, 'artifact'],
   ] as const) {
-    if (authority === undefined) continue;
-    const closeFailure = closeDescriptor(authority.fd, kind, io);
-    if (failure === undefined) failure = closeFailure;
+    if (authority !== undefined) descriptors.push([authority.fd, kind]);
   }
   for (const directory of [...context.directories].reverse()) {
-    const closeFailure = closeDescriptor(directory.fd, 'directory', io);
+    descriptors.push([directory.fd, 'directory']);
+  }
+  return descriptors;
+}
+
+function runContextCloseHooks(
+  context: StoreContext,
+  io: IoSnapshot | undefined,
+): GithubTemplateDownloadReceiptStorageError | undefined {
+  let failure: GithubTemplateDownloadReceiptStorageError | undefined;
+  for (const [fd, kind] of contextDescriptors(context)) {
+    const closeFailure = runCloseHook(fd, kind, io);
     if (failure === undefined) failure = closeFailure;
   }
   return failure;
+}
+
+function closeContextDescriptors(
+  context: StoreContext,
+): GithubTemplateDownloadReceiptStorageError | undefined {
+  let failure: GithubTemplateDownloadReceiptStorageError | undefined;
+  for (const [fd] of contextDescriptors(context)) {
+    const closeFailure = closeDescriptor(fd);
+    if (failure === undefined) failure = closeFailure;
+  }
+  return failure;
+}
+
+async function verifyJointSuccessBoundary(
+  context: StoreContext,
+  receipt: GithubTemplateDownloadReceiptV1,
+  serialized: string,
+  receiptKey: string,
+  verifier: VerifierSnapshot,
+  io: IoSnapshot | undefined,
+): Promise<void> {
+  try {
+    if (
+      context.artifact === undefined
+      || context.final === undefined
+      || context.receiptParent === undefined
+    ) throw new Error();
+    for (const directory of context.directories) assertDirectory(directory);
+    assertFile(context.artifact, 1);
+    assertFile(context.final, 1);
+    if (
+      hashFile(context.artifact, io) !== receipt.payload.archive.sha256
+    ) throw new Error();
+    const bytes = readExact(context.final.fd, context.final.bytes, io);
+    await verifyReceiptBytes(
+      bytes,
+      serialized,
+      receiptKey,
+      verifier,
+      false,
+    );
+    // The verifier is asynchronous. Recheck every retained path/FD and exact
+    // byte string after it returns, with no seam before native close.
+    for (const directory of context.directories) assertDirectory(directory);
+    assertFile(context.artifact, 1);
+    assertFile(context.final, 1);
+    if (
+      hashFile(context.artifact, io) !== receipt.payload.archive.sha256
+      || readExact(context.final.fd, context.final.bytes, io)
+        .toString('utf8') !== serialized
+      || calculateGithubTemplateDownloadReceiptKey(serialized) !== receiptKey
+    ) throw new Error();
+  } catch {
+    throw storageError(
+      'CACHE_INVALID',
+      'GitHub template receipt joint authority changed before close',
+    );
+  }
 }
 
 /**
@@ -1047,8 +1202,14 @@ export async function storeGithubTemplateDownloadReceipt(
       'prepared GitHub template receipt authority is invalid',
     );
   }
-  const context: StoreContext = { directories: [] };
+  const context: StoreContext = {
+    directories: [],
+    artifacts: { publicationSynced: false },
+  };
   let result: StoredGithubTemplateDownloadReceipt | undefined;
+  let jointReceipt: GithubTemplateDownloadReceiptV1 | undefined;
+  let jointSerialized: string | undefined;
+  let jointReceiptKey: string | undefined;
   let failure: GithubTemplateDownloadReceiptStorageError | undefined;
   try {
     const prepared = claim.prepared;
@@ -1095,6 +1256,7 @@ export async function storeGithubTemplateDownloadReceipt(
       options.io,
       context,
     );
+    context.receiptParent = receiptParent;
     const serializedBytes = Buffer.from(prepared.serialized, 'utf8');
     if (
       serializedBytes.byteLength === 0
@@ -1111,6 +1273,7 @@ export async function storeGithubTemplateDownloadReceipt(
       prepared.receiptKey,
       serializedBytes,
       options.io,
+      context,
     );
     runPhase(
       options.io,
@@ -1179,11 +1342,37 @@ export async function storeGithubTemplateDownloadReceipt(
       artifactSha256: parsed.payload.archive.sha256,
       bytes: serializedBytes.byteLength,
       status,
+      directoryDurability:
+        githubTemplateReceiptDirectoryDurability(),
     });
+    jointReceipt = parsed;
+    jointSerialized = prepared.serialized;
+    jointReceiptKey = prepared.receiptKey;
   } catch (error) {
     failure = normalizeFailure(error);
   }
-  const closeFailure = closeContext(context, options.io);
+  const closeHookFailure = runContextCloseHooks(context, options.io);
+  if (failure === undefined) failure = closeHookFailure;
+  if (
+    failure === undefined
+    && jointReceipt !== undefined
+    && jointSerialized !== undefined
+    && jointReceiptKey !== undefined
+  ) {
+    try {
+      await verifyJointSuccessBoundary(
+        context,
+        jointReceipt,
+        jointSerialized,
+        jointReceiptKey,
+        options.verifier,
+        options.io,
+      );
+    } catch (error) {
+      failure = normalizeFailure(error);
+    }
+  }
+  const closeFailure = closeContextDescriptors(context);
   if (failure === undefined) failure = closeFailure;
   try {
     consumePreparedGithubTemplateDownloadReceiptStorageClaim(claim);
@@ -1195,6 +1384,6 @@ export async function storeGithubTemplateDownloadReceipt(
       );
     }
   }
-  if (failure !== undefined) throw failure;
+  if (failure !== undefined) throw withReceiptState(failure, context);
   return result!;
 }

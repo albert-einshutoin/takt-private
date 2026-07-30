@@ -2,6 +2,7 @@ import { createHash, createHmac } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  fsyncSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -11,6 +12,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -22,6 +24,7 @@ import {
   writeTaktpack,
 } from '../../features/project-template/index.js';
 import {
+  githubTemplateReceiptDirectoryDurability,
   GithubTemplateDownloadReceiptStorageError,
   storeGithubTemplateDownloadReceipt,
   type GithubTemplateDownloadReceiptVerifier,
@@ -199,6 +202,8 @@ describe('GitHub template authenticated receipt durable store D2a', () => {
       artifactSha256: fixture.materialized.sha256,
       bytes: Buffer.byteLength(fixture.prepared.serialized, 'utf8'),
       status: 'stored',
+      directoryDurability:
+        githubTemplateReceiptDirectoryDurability(),
     });
     expect(Object.isFrozen(stored)).toBe(true);
     expect(stored).not.toHaveProperty('path');
@@ -210,6 +215,13 @@ describe('GitHub template authenticated receipt durable store D2a', () => {
       path = dirname(path)) {
       expect(statSync(path).mode & 0o777).toBe(0o700);
     }
+  });
+
+  it('reports Windows directory fsync as explicitly unsupported', () => {
+    expect(githubTemplateReceiptDirectoryDurability('win32'))
+      .toBe('unsupported');
+    expect(githubTemplateReceiptDirectoryDurability('darwin')).toBe('synced');
+    expect(githubTemplateReceiptDirectoryDurability('linux')).toBe('synced');
   });
 
   it('rejects clone, reuse, and parallel use before verifier progress', async () => {
@@ -482,7 +494,10 @@ describe('GitHub template authenticated receipt durable store D2a', () => {
           writeFileSync(fixture.materialized.cachePath, corrupted);
         },
       },
-    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+    })).rejects.toMatchObject({
+      code: 'CACHE_INVALID',
+      receiptState: 'receipt-published',
+    });
   });
 
   it('rejects artifact path replacement while retaining the opened FD', async () => {
@@ -559,6 +574,188 @@ describe('GitHub template authenticated receipt durable store D2a', () => {
     })).rejects.toMatchObject({ code: 'RECEIPT_CONFLICT' });
     expect(readFileSync(fixture.receiptPath, 'utf8'))
       .toBe(fixture.prepared.serialized);
+  });
+
+  it.each(['final-unlink', 'ancestor-swap'] as const)(
+    'rejects %s at the final joint success boundary',
+    async (mutation) => {
+      const fixture = await createFixture();
+      await expect(storeGithubTemplateDownloadReceipt({
+        prepared: fixture.prepared,
+        cacheRoot: fixture.cacheRoot,
+        verifier: verifier(),
+        ioSeam: {
+          onPhase(phase) {
+            if (phase !== 'before-artifact-success-verify') return;
+            if (mutation === 'final-unlink') {
+              unlinkSync(fixture.receiptPath);
+              return;
+            }
+            const receipts = join(fixture.cacheRoot, 'receipts');
+            renameSync(receipts, `${receipts}.replaced`);
+            mkdirSync(receipts, { mode: 0o700 });
+          },
+        },
+      })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+    },
+  );
+
+  it('revalidates after close hooks mutate a successful final', async () => {
+    const fixture = await createFixture();
+    let mutated = false;
+    await expect(storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+      ioSeam: {
+        close(_fd, kind) {
+          if (kind !== 'final' || mutated) return;
+          mutated = true;
+          unlinkSync(fixture.receiptPath);
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
+  it('fsyncs an identical EEXIST winner file and retained parent', async () => {
+    const fixture = await createFixture();
+    mkdirSync(dirname(fixture.receiptPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    writeFileSync(
+      fixture.receiptPath,
+      fixture.prepared.serialized,
+      { mode: 0o600 },
+    );
+    const fsyncKinds: Array<'file' | 'directory'> = [];
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+      ioSeam: {
+        fsync(fd, kind) {
+          fsyncKinds.push(kind);
+          // Exercise the real syscall while observing its type.
+          if (process.platform !== 'win32' || kind === 'file') fsyncSync(fd);
+        },
+      },
+    });
+    expect(fsyncKinds.filter((kind) => kind === 'file')).toHaveLength(2);
+    expect(fsyncKinds).toContain('directory');
+  });
+
+  it('preserves the primary failure when a close hook also fails', async () => {
+    const fixture = await createFixture();
+    const error = await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+      ioSeam: {
+        onPhase(phase) {
+          if (phase !== 'before-artifact-final-verify') return;
+          const corrupted = Buffer.from(fixture.content);
+          corrupted[0] = corrupted[0]! ^ 0xff;
+          writeFileSync(fixture.materialized.cachePath, corrupted);
+        },
+        close() {
+          throw new Error('secondary close failure');
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: 'CACHE_INVALID',
+      receiptState: 'temporary-only',
+    });
+  });
+
+  it('rejects EEXIST parent replacement after before-final phase', async () => {
+    const fixture = await createFixture();
+    mkdirSync(dirname(fixture.receiptPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    writeFileSync(
+      fixture.receiptPath,
+      fixture.prepared.serialized,
+      { mode: 0o600 },
+    );
+    await expect(storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+      ioSeam: {
+        onPhase(phase, path) {
+          if (phase !== 'before-receipt-final-verify') return;
+          const parent = dirname(path);
+          renameSync(parent, `${parent}.replaced`);
+          mkdirSync(parent, { mode: 0o700 });
+          writeFileSync(path, fixture.prepared.serialized, { mode: 0o600 });
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
+  it.each([
+    ['none', 'initial-auth'],
+    ['temporary-only', 'temp-fsync'],
+    ['receipt-present', 'publish-fsync'],
+    ['receipt-published', 'temp-unlink'],
+    ['receipt-published', 'close'],
+  ] as const)('reports receiptState %s after %s failure', async (
+    receiptState,
+    failurePoint,
+  ) => {
+    const fixture = await createFixture();
+    const error = await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: failurePoint === 'initial-auth'
+        ? verifier('unavailable')
+        : verifier(),
+      ioSeam: failurePoint === 'initial-auth'
+        ? undefined
+        : {
+          onPhase(phase) {
+            if (
+              (failurePoint === 'temp-fsync'
+                && phase === 'before-receipt-temp-fsync')
+              || (failurePoint === 'publish-fsync'
+                && phase === 'before-receipt-publish-fsync')
+              || (failurePoint === 'temp-unlink'
+                && phase === 'before-receipt-temp-unlink')
+            ) throw new Error('fault');
+          },
+          close(_fd, kind) {
+            if (failurePoint === 'close' && kind === 'artifact') {
+              throw new Error('fault');
+            }
+          },
+        },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ receiptState });
+  });
+
+  it('fsyncs retained parents even when receipt directories already exist', async () => {
+    const fixture = await createFixture();
+    mkdirSync(dirname(fixture.receiptPath), {
+      recursive: true,
+      mode: 0o700,
+    });
+    const error = await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+      ioSeam: {
+        fsync(_fd, kind) {
+          if (kind === 'directory') throw new Error('repair failed');
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: 'IO_FAILURE',
+      receiptState: 'none',
+    });
   });
 
   it.each([
