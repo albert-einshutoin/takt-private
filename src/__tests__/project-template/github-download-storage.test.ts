@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -889,25 +890,266 @@ describe('GitHub template existing global cache materialization', () => {
     })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
   });
 
-  it('claims synchronously and reports a stable cache miss', async () => {
+  it('claims synchronously and publishes a stable cache miss', async () => {
     const cacheRoot = prepareCacheRoot();
     const { staged } = await stagePack(makeRoot('takt-github-download-'));
 
     const first = materializeGithubTemplateCache({ staged, cacheRoot });
     const second = materializeGithubTemplateCache({ staged, cacheRoot });
     const settled = await Promise.allSettled([first, second]);
-    const failures = settled
-      .filter((entry): entry is PromiseRejectedResult => (
-        entry.status === 'rejected'
-      ))
-      .map((entry) => entry.reason as GithubTemplateDownloadStorageError);
-    const codes = failures.map((error) => error.code).sort();
-
-    expect(codes).toEqual(['CACHE_MISS', 'INVALID_AUTHORITY']);
-    expect(failures.find((error) => error.code === 'CACHE_MISS'))
-      .toMatchObject({ artifactState: 'none' });
+    expect(settled.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1);
+    const failure = settled.find(
+      (entry): entry is PromiseRejectedResult => entry.status === 'rejected',
+    );
+    expect(failure?.reason).toMatchObject({ code: 'INVALID_AUTHORITY' });
+    const success = settled.find(
+      (entry): entry is PromiseFulfilledResult<
+        Awaited<ReturnType<typeof materializeGithubTemplateCache>>
+      > => entry.status === 'fulfilled',
+    );
+    expect(success?.value).toMatchObject({ status: 'cache-published' });
     expect(existsSync(staged.stagingPath)).toBe(false);
   });
+
+  it('supports partial cache writes and leaves no private temp', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+
+    let tempPath = '';
+    const cached = await materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase, path) {
+          if (phase === 'before-cache-temp-fsync') tempPath = path;
+        },
+        cacheWrite(fd, chunk, offset, length, position) {
+          const partial = Math.max(1, Math.floor(length / 2));
+          return writeSync(fd, chunk, offset, partial, position);
+        },
+      },
+    });
+
+    expect(cached.status).toBe('cache-published');
+    expect(tempPath).toMatch(
+      /\/\.tmp\.\d+\.[0-9a-f-]{36}\.[a-f0-9]{64}$/,
+    );
+    expect(readFileSync(cached.cachePath)).toEqual(content);
+    expect(
+      readdirSync(join(cacheRoot, 'sha256')).filter(
+        (entry) => entry.startsWith('.tmp.'),
+      ),
+    ).toEqual([]);
+  });
+
+  it.each(['read', 'write'] as const)(
+    'rejects zero-progress cache %s and cleans owned temp',
+    async (operation) => {
+      const cacheRoot = prepareCacheRoot();
+      const { staged } = await stagePack(
+        makeRoot('takt-github-download-'),
+      );
+
+      await expect(materializeGithubTemplateCache({
+        staged,
+        cacheRoot,
+        ioSeam: operation === 'read'
+          ? { cacheRead: () => 0 }
+          : { cacheWrite: () => 0 },
+      })).rejects.toMatchObject({ code: 'IO_FAILURE' });
+      expect(readdirSync(join(cacheRoot, 'sha256'))).toEqual([]);
+    },
+  );
+
+  it.each(['fsync', 'link', 'unlink'] as const)(
+    'redacts native cache %s seam failure',
+    async (operation) => {
+      const cacheRoot = prepareCacheRoot();
+      const { staged } = await stagePack(
+        makeRoot('takt-github-download-'),
+      );
+      const fault = () => {
+        throw new Error('ghp_native_publish_secret');
+      };
+      const error = await materializeGithubTemplateCache({
+        staged,
+        cacheRoot,
+        ioSeam: operation === 'fsync'
+          ? { cacheFsync: fault }
+          : operation === 'link'
+            ? { cacheLink: fault }
+            : { cacheUnlink: fault },
+      }).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: 'IO_FAILURE' });
+      expect(String((error as Error).message)).not.toContain(
+        'ghp_native_publish_secret',
+      );
+    },
+  );
+
+  it.each(['temporary', 'final', 'directory'] as const)(
+    'fails closed for cache %s descriptor close fault',
+    async (kind) => {
+      const cacheRoot = prepareCacheRoot();
+      const { staged } = await stagePack(
+        makeRoot('takt-github-download-'),
+      );
+      const error = await materializeGithubTemplateCache({
+        staged,
+        cacheRoot,
+        ioSeam: {
+          cacheClose(_fd, descriptorKind) {
+            if (descriptorKind === kind) {
+              throw new Error('ghp_cache_close_secret');
+            }
+          },
+        },
+      }).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({
+        code: 'IO_FAILURE',
+        artifactState: 'cache-published',
+      });
+      expect(String((error as Error).message)).not.toContain(
+        'ghp_cache_close_secret',
+      );
+    },
+  );
+
+  it('treats an EEXIST link winner as a strictly verified cache hit', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+
+    const result = await materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase, path) {
+          if (phase === 'before-cache-link') {
+            writeFileSync(
+              join(dirname(path), `${sha256(content)}.taktpack`),
+              content,
+              { mode: 0o600 },
+            );
+          }
+        },
+      },
+    });
+
+    expect(result.status).toBe('cache-hit');
+  });
+
+  it('never overwrites an invalid EEXIST link winner', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    let winnerPath = '';
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase, path) {
+          if (phase === 'before-cache-link') {
+            winnerPath = join(
+              dirname(path),
+              `${sha256(content)}.taktpack`,
+            );
+            writeFileSync(winnerPath, Buffer.alloc(content.byteLength), {
+              mode: 0o600,
+            });
+          }
+        },
+      },
+    })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+    expect(readFileSync(winnerPath)).toEqual(
+      Buffer.alloc(content.byteLength),
+    );
+  });
+
+  it('detects staging mutation between retained-FD verification and copy', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+    let firstRead = true;
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        cacheRead(fd, buffer, offset, length, position) {
+          if (firstRead) {
+            firstRead = false;
+            writeFileSync(
+              staged.stagingPath,
+              Buffer.alloc(content.byteLength),
+            );
+          }
+          return readSync(fd, buffer, offset, length, position);
+        },
+      },
+    })).rejects.toMatchObject({ code: 'HASH_MISMATCH' });
+  });
+
+  it('revalidates and detects final tampering after own link publication', async () => {
+    const cacheRoot = prepareCacheRoot();
+    const { content, staged } = await stagePack(
+      makeRoot('takt-github-download-'),
+    );
+
+    await expect(materializeGithubTemplateCache({
+      staged,
+      cacheRoot,
+      ioSeam: {
+        onCachePhase(phase, path) {
+          if (phase === 'before-cache-final-inspect') {
+            writeFileSync(path, Buffer.alloc(content.byteLength), {
+              mode: 0o600,
+            });
+          }
+        },
+      },
+    })).rejects.toMatchObject({
+      code: 'CACHE_INVALID',
+      artifactState: 'cache-published',
+    });
+  });
+
+  it.each([
+    ['before-cache-temp-fsync', 'none'],
+    ['before-cache-link', 'none'],
+    ['before-cache-temp-unlink', 'cache-published'],
+    ['before-cache-publish-parent-fsync', 'cache-published'],
+    ['before-cache-temp-unlink-parent-fsync', 'cache-published'],
+  ] as const)(
+    'fails closed for cache publication fault at %s',
+    async (faultPhase, artifactState) => {
+      const cacheRoot = prepareCacheRoot();
+      const { staged } = await stagePack(
+        makeRoot('takt-github-download-'),
+      );
+      const error = await materializeGithubTemplateCache({
+        staged,
+        cacheRoot,
+        ioSeam: {
+          onCachePhase(phase) {
+            if (phase === faultPhase) {
+              throw new Error('ghp_publish_fault_secret');
+            }
+          },
+        },
+      }).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: 'IO_FAILURE', artifactState });
+      expect(String((error as Error).message)).not.toContain(
+        'ghp_publish_fault_secret',
+      );
+    },
+  );
 
   it('rejects clone and forge without consuming the original', async () => {
     const cacheRoot = prepareCacheRoot();
