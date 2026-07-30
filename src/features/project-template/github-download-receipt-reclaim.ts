@@ -445,28 +445,58 @@ function assertFile(
   authority: FileAuthority,
   expectedLinks: 0 | 1 | 2,
 ): void {
-  const opened = fstatSync(authority.fd);
-  if (
-    !opened.isFile()
-    || opened.dev !== authority.device
-    || opened.ino !== authority.inode
-    || opened.size !== authority.bytes
-    || opened.nlink !== expectedLinks
-    || !isProjectTemplatePrivateFileMode(opened.mode)
-    || !privateOwnerMatches(opened)
-  ) throw new Error();
-  if (expectedLinks !== 0) {
-    const pathStat = lstatSync(authority.path);
+  try {
+    const opened = fstatSync(authority.fd);
     if (
-      pathStat.isSymbolicLink()
-      || realpathSync.native(authority.path) !== authority.path
-      || pathStat.dev !== authority.device
-      || pathStat.ino !== authority.inode
-      || pathStat.size !== authority.bytes
-      || pathStat.nlink !== expectedLinks
-      || !isProjectTemplatePrivateFileMode(pathStat.mode)
-      || !privateOwnerMatches(pathStat)
+      !opened.isFile()
+      || opened.dev !== authority.device
+      || opened.ino !== authority.inode
+      || opened.size !== authority.bytes
+      || opened.nlink !== expectedLinks
+      || !isProjectTemplatePrivateFileMode(opened.mode)
+      || !privateOwnerMatches(opened)
     ) throw new Error();
+    if (expectedLinks !== 0) {
+      const pathStat = lstatSync(authority.path);
+      if (
+        pathStat.isSymbolicLink()
+        || realpathSync.native(authority.path) !== authority.path
+        || pathStat.dev !== authority.device
+        || pathStat.ino !== authority.inode
+        || pathStat.size !== authority.bytes
+        || pathStat.nlink !== expectedLinks
+        || !isProjectTemplatePrivateFileMode(pathStat.mode)
+        || !privateOwnerMatches(pathStat)
+      ) throw new Error();
+    }
+  } catch {
+    throw reclaimError(
+      'CACHE_INVALID',
+      'GitHub template receipt reclaim file authority changed',
+    );
+  }
+}
+
+function assertOpenedFile(
+  authority: FileAuthority,
+  expectedLinks: 0 | 1,
+): void {
+  try {
+    const opened = fstatSync(authority.fd);
+    if (
+      !opened.isFile()
+      || opened.dev !== authority.device
+      || opened.ino !== authority.inode
+      || opened.size !== authority.bytes
+      || opened.nlink !== expectedLinks
+      || !isProjectTemplatePrivateFileMode(opened.mode)
+      || !privateOwnerMatches(opened)
+    ) throw new Error();
+  } catch {
+    throw reclaimError(
+      'CACHE_INVALID',
+      'GitHub template receipt reclaim opened file changed',
+    );
   }
 }
 
@@ -638,50 +668,71 @@ function closeDescriptor(
   kind: 'temporary' | 'final' | 'directory',
   io: IoSnapshot | undefined,
 ): GithubTemplateDownloadReceiptReclaimError | undefined {
-  let failed = false;
+  const hookFailure = runDescriptorCloseHook(authority, kind, io);
+  const nativeFailure = closeNativeDescriptor(authority);
+  return hookFailure ?? nativeFailure;
+}
+
+function runDescriptorCloseHook(
+  authority: { readonly fd: number },
+  kind: 'temporary' | 'final' | 'directory',
+  io: IoSnapshot | undefined,
+): GithubTemplateDownloadReceiptReclaimError | undefined {
   try {
     if (io?.close !== undefined) {
       Reflect.apply(io.close, io.receiver, [authority.fd, kind]);
     }
   } catch {
-    failed = true;
+    return reclaimError(
+      'IO_FAILURE',
+      'GitHub template receipt reclaim descriptor close failed',
+    );
   }
+  return undefined;
+}
+
+function closeNativeDescriptor(
+  authority: { readonly fd: number },
+): GithubTemplateDownloadReceiptReclaimError | undefined {
   try {
     closeSync(authority.fd);
   } catch {
-    failed = true;
-  }
-  return failed
-    ? reclaimError(
+    return reclaimError(
       'IO_FAILURE',
       'GitHub template receipt reclaim descriptor close failed',
-    )
-    : undefined;
+    );
+  }
+  return undefined;
 }
 
-function closeStream(
-  directory: Dir,
+function runStreamCloseHook(
   io: IoSnapshot | undefined,
 ): GithubTemplateDownloadReceiptReclaimError | undefined {
-  let failed = false;
   try {
     if (io?.closeDirectoryStream !== undefined) {
       Reflect.apply(io.closeDirectoryStream, io.receiver, []);
     }
   } catch {
-    failed = true;
+    return reclaimError(
+      'IO_FAILURE',
+      'GitHub template receipt reclaim stream close failed',
+    );
   }
+  return undefined;
+}
+
+function closeNativeStream(
+  directory: Dir,
+): GithubTemplateDownloadReceiptReclaimError | undefined {
   try {
     directory.closeSync();
   } catch {
-    failed = true;
-  }
-  return failed
-    ? reclaimError(
+    return reclaimError(
       'IO_FAILURE',
       'GitHub template receipt reclaim stream close failed',
-    )
-    : undefined;
+    );
+  }
+  return undefined;
 }
 
 function emptyResult(
@@ -739,6 +790,56 @@ function assertAllDirectories(
   assertDirectory(shard);
 }
 
+function assertAuthenticatedLinkedAuthority(
+  candidate: CandidateAuthority,
+  serialized: string,
+  afterUnlink: boolean,
+): void {
+  if (candidate.final === undefined) {
+    throw reclaimError(
+      'CACHE_INVALID',
+      'GitHub template receipt reclaim linked authority is incomplete',
+    );
+  }
+  if (afterUnlink) assertOpenedFile(candidate.temporary, 1);
+  else assertFile(candidate.temporary, 2);
+  assertFile(candidate.final, afterUnlink ? 1 : 2);
+  const temporaryBytes = readExact(candidate.temporary, undefined);
+  const finalBytes = readExact(candidate.final, undefined);
+  if (
+    !temporaryBytes.equals(finalBytes)
+    || finalBytes.toString('utf8') !== serialized
+    || calculateGithubTemplateDownloadReceiptKey(serialized)
+      !== candidate.receiptKey
+  ) {
+    throw reclaimError(
+      'CACHE_INVALID',
+      'GitHub template receipt reclaim linked bytes changed',
+    );
+  }
+}
+
+function candidateStableBeforeUnlink(
+  candidate: CandidateAuthority,
+  serialized: string | undefined,
+): boolean {
+  try {
+    if (candidate.final !== undefined) {
+      if (serialized === undefined) return false;
+      assertAuthenticatedLinkedAuthority(candidate, serialized, false);
+    } else {
+      assertFile(candidate.temporary, 1);
+    }
+    return true;
+  } catch (error) {
+    if (
+      error instanceof GithubTemplateDownloadReceiptReclaimError
+      && error.code === 'CACHE_INVALID'
+    ) return false;
+    throw error;
+  }
+}
+
 async function reclaimCandidate(
   candidate: CandidateAuthority,
   pid: number,
@@ -747,7 +848,10 @@ async function reclaimCandidate(
   shard: DirectoryAuthority,
   verifier: VerifierSnapshot,
   io: IoSnapshot | undefined,
-): Promise<'reclaimed' | 'skipped' | 'unsafe'> {
+): Promise<{
+  readonly outcome: 'reclaimed' | 'skipped' | 'unsafe';
+  readonly sealedSerialized?: string;
+}> {
   let authenticated = candidate;
   if (candidate.final !== undefined) {
     const evidence = await authenticatedLinkedCandidate(
@@ -757,46 +861,71 @@ async function reclaimCandidate(
       verifier,
       io,
     );
-    if (evidence === undefined) return 'unsafe';
+    if (evidence === undefined) return { outcome: 'unsafe' };
     authenticated = { ...candidate, ...evidence };
   }
   runPhase(io, 'before-reclaim-unlink', candidate.temporary.path);
-  if (ownerState(pid, io) !== 'missing') return 'skipped';
+  if (ownerState(pid, io) !== 'missing') return { outcome: 'skipped' };
   try {
     assertAllDirectories(root, ancestors, shard);
-    assertFile(candidate.temporary, candidate.temporary.links);
-    if (candidate.final !== undefined) {
-      assertFile(candidate.final, 2);
-      const finalBytes = readExact(candidate.final, undefined);
-      const temporaryBytes = readExact(candidate.temporary, undefined);
-      if (
-        authenticated.serialized === undefined
-        || finalBytes.toString('utf8') !== authenticated.serialized
-        || !finalBytes.equals(temporaryBytes)
-        || calculateGithubTemplateDownloadReceiptKey(
-          finalBytes.toString('utf8'),
-        ) !== candidate.receiptKey
-      ) return 'unsafe';
-    }
+    if (!candidateStableBeforeUnlink(
+      candidate,
+      authenticated.serialized,
+    )) return { outcome: 'unsafe' };
     if (io?.unlink !== undefined) {
       Reflect.apply(io.unlink, io.receiver, [candidate.temporary.path]);
     }
+    // The unlink seam is a notification/fault hook, never path authority.
+    assertAllDirectories(root, ancestors, shard);
+    if (!candidateStableBeforeUnlink(
+      candidate,
+      authenticated.serialized,
+    )) return { outcome: 'unsafe' };
     unlinkSync(candidate.temporary.path);
     assertAllDirectories(root, ancestors, shard);
-    assertFile(
-      candidate.temporary,
-      candidate.final === undefined ? 0 : 1,
-    );
-    if (candidate.final !== undefined) assertFile(candidate.final, 1);
+    if (candidate.final !== undefined) {
+      assertAuthenticatedLinkedAuthority(
+        candidate,
+        authenticated.serialized!,
+        true,
+      );
+    } else assertOpenedFile(candidate.temporary, 0);
     runPhase(io, 'after-reclaim-unlink', candidate.temporary.path);
+    assertAllDirectories(root, ancestors, shard);
+    if (candidate.final !== undefined) {
+      assertAuthenticatedLinkedAuthority(
+        candidate,
+        authenticated.serialized!,
+        true,
+      );
+    } else assertOpenedFile(candidate.temporary, 0);
     if (process.platform !== 'win32') {
       runPhase(io, 'before-reclaim-fsync', shard.path);
       assertAllDirectories(root, ancestors, shard);
+      if (candidate.final !== undefined) {
+        assertAuthenticatedLinkedAuthority(
+          candidate,
+          authenticated.serialized!,
+          true,
+        );
+      } else assertOpenedFile(candidate.temporary, 0);
       if (io?.fsync === undefined) fsyncSync(shard.fd);
       else Reflect.apply(io.fsync, io.receiver, [shard.fd]);
     }
     assertAllDirectories(root, ancestors, shard);
-    return 'reclaimed';
+    if (candidate.final !== undefined) {
+      assertAuthenticatedLinkedAuthority(
+        candidate,
+        authenticated.serialized!,
+        true,
+      );
+    } else assertOpenedFile(candidate.temporary, 0);
+    return {
+      outcome: 'reclaimed',
+      ...(candidate.final === undefined
+        ? {}
+        : { sealedSerialized: authenticated.serialized }),
+    };
   } catch (error) {
     if (error instanceof GithubTemplateDownloadReceiptReclaimError) {
       throw error;
@@ -898,11 +1027,13 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
             unsafeRetained += 1;
             continue;
           }
-          let outcome: 'reclaimed' | 'skipped' | 'unsafe' | undefined;
+          let candidateResult: Awaited<ReturnType<
+            typeof reclaimCandidate
+          >> | undefined;
           let candidateFailure:
             GithubTemplateDownloadReceiptReclaimError | undefined;
           try {
-            outcome = await reclaimCandidate(
+            candidateResult = await reclaimCandidate(
               candidate,
               parsed.pid,
               root,
@@ -921,28 +1052,68 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
                 )
             );
           } finally {
-            let closeFailure:
+            let closeHookFailure:
               GithubTemplateDownloadReceiptReclaimError | undefined;
             if (candidate.final !== undefined) {
-              closeFailure = closeDescriptor(
+              closeHookFailure = runDescriptorCloseHook(
                 candidate.final,
                 'final',
                 options.io,
               );
             }
-            const temporaryClose = closeDescriptor(
+            const temporaryHook = runDescriptorCloseHook(
               candidate.temporary,
               'temporary',
               options.io,
             );
-            closeFailure ??= temporaryClose;
-            candidateFailure ??= closeFailure;
+            closeHookFailure ??= temporaryHook;
+            candidateFailure ??= closeHookFailure;
+            if (
+              candidateResult?.outcome === 'reclaimed'
+              && candidateFailure === undefined
+            ) {
+              try {
+                assertAllDirectories(
+                  root,
+                  openedAncestors,
+                  shard,
+                );
+                if (candidate.final !== undefined) {
+                  assertAuthenticatedLinkedAuthority(
+                    candidate,
+                    candidateResult.sealedSerialized!,
+                    true,
+                  );
+                } else {
+                  assertOpenedFile(candidate.temporary, 0);
+                }
+              } catch (error) {
+                candidateFailure = (
+                  error instanceof GithubTemplateDownloadReceiptReclaimError
+                    ? error
+                    : reclaimError(
+                      'CACHE_INVALID',
+                      'GitHub template receipt reclaim post-state changed',
+                    )
+                );
+              }
+            }
+            let nativeCloseFailure:
+              GithubTemplateDownloadReceiptReclaimError | undefined;
+            if (candidate.final !== undefined) {
+              nativeCloseFailure = closeNativeDescriptor(candidate.final);
+            }
+            const temporaryClose = closeNativeDescriptor(
+              candidate.temporary,
+            );
+            nativeCloseFailure ??= temporaryClose;
+            candidateFailure ??= nativeCloseFailure;
           }
           if (candidateFailure !== undefined) throw candidateFailure;
-          if (outcome === 'reclaimed') reclaimed += 1;
+          if (candidateResult?.outcome === 'reclaimed') reclaimed += 1;
           else {
             skipped += 1;
-            if (outcome === 'unsafe') unsafeRetained += 1;
+            if (candidateResult?.outcome === 'unsafe') unsafeRetained += 1;
           }
         }
       } catch (error) {
@@ -956,11 +1127,43 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
         );
       } finally {
         if (directory !== undefined) {
-          const streamFailure = closeStream(directory, options.io);
-          shardFailure ??= streamFailure;
+          const streamHookFailure = runStreamCloseHook(options.io);
+          shardFailure ??= streamHookFailure;
+          const streamCloseFailure = closeNativeStream(directory);
+          shardFailure ??= streamCloseFailure;
+          try {
+            assertAllDirectories(root, openedAncestors, shard);
+          } catch (error) {
+            shardFailure ??= (
+              error instanceof GithubTemplateDownloadReceiptReclaimError
+                ? error
+                : reclaimError(
+                  'CACHE_INVALID',
+                  'GitHub template receipt reclaim post-scan changed',
+                )
+            );
+          }
         }
-        const closeFailure = closeDescriptor(shard, 'directory', options.io);
-        shardFailure ??= closeFailure;
+        const shardHookFailure = runDescriptorCloseHook(
+          shard,
+          'directory',
+          options.io,
+        );
+        shardFailure ??= shardHookFailure;
+        try {
+          assertAllDirectories(root, openedAncestors, shard);
+        } catch (error) {
+          shardFailure ??= (
+            error instanceof GithubTemplateDownloadReceiptReclaimError
+              ? error
+              : reclaimError(
+                'CACHE_INVALID',
+                'GitHub template receipt reclaim shard changed before close',
+              )
+          );
+        }
+        const shardCloseFailure = closeNativeDescriptor(shard);
+        shardFailure ??= shardCloseFailure;
       }
       if (shardFailure !== undefined) throw shardFailure;
       if (scanned >= SCAN_LIMIT || reclaimed >= DELETE_LIMIT) break outer;
@@ -984,11 +1187,39 @@ export async function reclaimGithubTemplateDownloadReceiptTemps(
         )
     );
   }
-  for (const authority of [...openedAncestors].reverse()) {
-    const closeFailure = closeDescriptor(authority, 'directory', options.io);
+  const finalDirectories = [...openedAncestors].reverse();
+  for (const authority of finalDirectories) {
+    const hookFailure = runDescriptorCloseHook(
+      authority,
+      'directory',
+      options.io,
+    );
+    primary ??= hookFailure;
+  }
+  const rootHookFailure = runDescriptorCloseHook(
+    root,
+    'directory',
+    options.io,
+  );
+  primary ??= rootHookFailure;
+  try {
+    assertDirectory(root);
+    for (const authority of openedAncestors) assertDirectory(authority);
+  } catch (error) {
+    primary ??= (
+      error instanceof GithubTemplateDownloadReceiptReclaimError
+        ? error
+        : reclaimError(
+          'CACHE_INVALID',
+          'GitHub template receipt reclaim hierarchy changed before close',
+        )
+    );
+  }
+  for (const authority of finalDirectories) {
+    const closeFailure = closeNativeDescriptor(authority);
     primary ??= closeFailure;
   }
-  const rootCloseFailure = closeDescriptor(root, 'directory', options.io);
+  const rootCloseFailure = closeNativeDescriptor(root);
   primary ??= rootCloseFailure;
   if (primary !== undefined) throw primary;
   return Object.freeze({
