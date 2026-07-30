@@ -408,7 +408,7 @@ describe('project-template gh credential bootstrap F1', () => {
         });
         return Object.create(prototype) as PassThrough;
       },
-      expectedExecutions: 1,
+      expectedExecutions: 0,
     },
   ])('contains $label stdio validation failures', async ({
     makeStream,
@@ -522,6 +522,61 @@ describe('project-template gh credential bootstrap F1', () => {
     expect([...retained!]).toEqual(new Array(retained!.length).fill(0));
     child.emit('close', 2, 'SIGTERM');
     await expect(observed).resolves.toMatchObject({ code: 'ABORTED' });
+  });
+
+  it('does not schedule force-kill after SIGTERM synchronously closes the child', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const child = new FakeChildProcess();
+    vi.spyOn(child, 'kill').mockImplementation((signal = 'SIGTERM') => {
+      child.signals.push(signal);
+      child.emit('close', 2, signal);
+      return true;
+    });
+    const { dependencies } = makeDependencies(child);
+    const pending = acquireProjectTemplateGhCredential(
+      { signal: controller.signal, deadlineMs: 10_100 },
+      dependencies,
+    );
+    const observed = pending.catch((error: unknown) => error);
+    controller.abort();
+    const error = await observed;
+
+    expect(error).toMatchObject({ code: 'ABORTED' });
+    expect(child.signals).toEqual(['SIGTERM']);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(child.listenerCount('error')).toBe(0);
+    expect(child.listenerCount('close')).toBe(0);
+    expect(child.stdout.listenerCount('data')).toBe(0);
+    expect(child.stderr.listenerCount('data')).toBe(0);
+  });
+
+  it('does not schedule reap after SIGKILL synchronously closes the child', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const child = new FakeChildProcess();
+    vi.spyOn(child, 'kill').mockImplementation((signal = 'SIGTERM') => {
+      child.signals.push(signal);
+      if (signal === 'SIGKILL') child.emit('close', 2, signal);
+      return true;
+    });
+    const { dependencies } = makeDependencies(child);
+    const pending = acquireProjectTemplateGhCredential(
+      { signal: controller.signal, deadlineMs: 10_100 },
+      dependencies,
+    );
+    const observed = pending.catch((error: unknown) => error);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const error = await observed;
+
+    expect(error).toMatchObject({ code: 'ABORTED' });
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(child.listenerCount('error')).toBe(0);
+    expect(child.listenerCount('close')).toBe(0);
+    expect(child.stdout.listenerCount('data')).toBe(0);
+    expect(child.stderr.listenerCount('data')).toBe(0);
   });
 
   it('bounds reap cleanup when kill throws and close never arrives', async () => {

@@ -472,18 +472,22 @@ function isReadableStream(value: unknown): value is Readable {
   if (
     typeof value !== 'object'
     || value === null
-    || types.isProxy(value)
   ) {
     return false;
   }
+  let current: object | null = value;
   try {
-    // A Proxy can still exist in the prototype chain. Keep the intrinsic
-    // validation inside this boundary so its traps cannot escape the process
-    // termination path.
-    return value instanceof Readable;
+    while (current !== null) {
+      // Check every link before prototype access: instanceof would execute a
+      // Proxy trap hidden anywhere in the chain.
+      if (types.isProxy(current)) return false;
+      if (current === Readable.prototype) return true;
+      current = Object.getPrototypeOf(current) as object | null;
+    }
   } catch {
     return false;
   }
+  return false;
 }
 
 export async function acquireProjectTemplateGhCredential(
@@ -706,11 +710,13 @@ export async function acquireProjectTemplateGhCredential(
         // authoritative, retain neither while waiting for the child to reap.
         wipeRetainedOutput();
         safeKill('SIGTERM');
+        if (settled) return;
         // Rejection is deliberately deferred to "close": callers must never
         // continue while a credential-producing child may still be alive.
         timers.forceKill = setTimeout(() => {
           if (settled) return;
           safeKill('SIGKILL');
+          if (settled) return;
           timers.reap = setTimeout(() => {
             rejectOnce(authError(
               'PROCESS_FAILED',
