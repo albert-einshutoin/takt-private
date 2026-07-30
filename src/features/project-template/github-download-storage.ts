@@ -1340,19 +1340,27 @@ function assertDiscardDirectory(
   authority: DiscardDirectoryAuthority,
 ): void {
   const pathStat = lstatSync(authority.path);
-  const fdStat = fstatSync(authority.fd);
+  assertDiscardDirectoryDescriptor(authority);
   if (
     pathStat.isSymbolicLink()
     || !pathStat.isDirectory()
-    || !fdStat.isDirectory()
     || realpathSync.native(authority.path) !== authority.path
     || pathStat.dev !== authority.device
-    || fdStat.dev !== authority.device
     || pathStat.ino !== authority.inode
-    || fdStat.ino !== authority.inode
     || pathStat.uid !== authority.uid
-    || fdStat.uid !== authority.uid
     || pathStat.mode !== authority.mode
+  ) throw new Error();
+}
+
+function assertDiscardDirectoryDescriptor(
+  authority: DiscardDirectoryAuthority,
+): void {
+  const fdStat = fstatSync(authority.fd);
+  if (
+    !fdStat.isDirectory()
+    || fdStat.dev !== authority.device
+    || fdStat.ino !== authority.inode
+    || fdStat.uid !== authority.uid
     || fdStat.mode !== authority.mode
   ) throw new Error();
 }
@@ -1411,6 +1419,33 @@ function runDiscardPhase(
   assertDiscardAuthority(opened, authority, fileState, directoryState);
 }
 
+function assertRetainedDiscardDirectories(
+  retained: ReadonlySet<DiscardDirectoryAuthority>,
+  authority: StagedGithubTemplateDownloadAuthority,
+  fileState: 'present' | 'unlinked' | 'closed',
+  directoryState: 'present' | 'removed',
+): void {
+  for (const directory of retained) {
+    if (
+      directory.path === authority.stagingDirectory
+      && directoryState === 'removed'
+    ) {
+      assertDiscardDirectoryDescriptor(directory);
+      requireAuthoritativeAbsence(directory.path);
+    } else {
+      assertDiscardDirectory(directory);
+    }
+  }
+  if (fileState === 'present') {
+    requireSealedStagingFile(authority);
+  } else {
+    requireAuthoritativeAbsence(authority.stagingPath);
+  }
+  if (directoryState === 'removed') {
+    requireAuthoritativeAbsence(authority.stagingDirectory);
+  }
+}
+
 function syncDiscardDirectory(
   fd: number,
   authority: StagedGithubTemplateDownloadAuthority,
@@ -1444,9 +1479,46 @@ function closeDiscardDescriptor(
       authority.ioSeam.receiver,
       [fd, kind],
     );
-    reassert();
   }
+  // A hook may close this numeric descriptor and cause the OS to reuse that
+  // number for an unrelated file. Reassert immediately before native close so
+  // we never close by number alone.
+  reassert();
   closeSync(fd);
+}
+
+function closeDiscardFileIfStillSealed(
+  fd: number,
+  authority: StagedGithubTemplateDownloadAuthority,
+  fileState: 'present' | 'unlinked' | 'closed',
+): void {
+  if (fileState === 'closed') return;
+  try {
+    const stat = fstatSync(fd);
+    if (
+      !stat.isFile()
+      || stat.dev !== authority.stagingDevice
+      || stat.ino !== authority.stagingInode
+      || stat.uid !== authority.stagingUid
+      || stat.mode !== authority.stagingMode
+      || stat.size !== authority.bytes
+      || stat.nlink !== (fileState === 'present' ? 1 : 0)
+    ) return;
+    closeSync(fd);
+  } catch {
+    // EBADF or identity loss means this number is no longer our authority.
+  }
+}
+
+function closeDiscardDirectoryIfStillSealed(
+  authority: DiscardDirectoryAuthority,
+): void {
+  try {
+    assertDiscardDirectoryDescriptor(authority);
+    closeSync(authority.fd);
+  } catch {
+    // Never blind-close a numeric descriptor after its identity was lost.
+  }
 }
 
 /**
@@ -1650,38 +1722,30 @@ export function discardStagedGithubTemplateDownload(
         );
       } catch (error) {
         primaryError ??= error;
-        try {
-          closeSync(fileFd);
-        } catch {
-          // Every descriptor receives a native close attempt.
-        }
+        closeDiscardFileIfStillSealed(fileFd, authority, fileState);
       }
     }
+    const retainedDirectories = new Set(
+      openedDirectories.map((descriptor) => descriptor.authority),
+    );
     for (const descriptor of openedDirectories.reverse()) {
       try {
         closeDiscardDescriptor(
           descriptor.fd,
           descriptor.kind,
           authority,
-          () => {
-            assertDiscardDirectory(descriptor.authority);
-            if (fileState === 'present') {
-              requireSealedStagingFile(authority);
-            } else {
-              requireAuthoritativeAbsence(authority.stagingPath);
-            }
-            if (directoryState === 'removed') {
-              requireAuthoritativeAbsence(authority.stagingDirectory);
-            }
-          },
+          () => assertRetainedDiscardDirectories(
+            retainedDirectories,
+            authority,
+            fileState,
+            directoryState,
+          ),
         );
       } catch (error) {
         primaryError ??= error;
-        try {
-          closeSync(descriptor.fd);
-        } catch {
-          // Continue closing the remaining retained authorities.
-        }
+        closeDiscardDirectoryIfStillSealed(descriptor.authority);
+      } finally {
+        retainedDirectories.delete(descriptor.authority);
       }
     }
   }

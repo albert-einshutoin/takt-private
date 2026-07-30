@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   readSync,
@@ -1545,6 +1549,125 @@ describe('GitHub template staged discard', () => {
       'project-root',
     ]));
   });
+
+  it('revalidates every retained authority after successful close hooks', async () => {
+    const projectRoot = makeRoot('takt-github-discard-');
+    let armed = false;
+    const closeAttempts: string[] = [];
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        discardClose(_fd, kind) {
+          if (armed) closeAttempts.push(kind);
+        },
+      },
+    });
+    armed = true;
+
+    expect(discardStagedGithubTemplateDownload(staged)).toMatchObject({
+      status: 'discarded',
+      artifactState: 'none',
+    });
+    expect(new Set(closeAttempts)).toEqual(new Set([
+      'file',
+      'staging-directory',
+      'staging-root',
+      'control-root',
+      'project-root',
+    ]));
+  });
+
+  it('never closes an unrelated descriptor reused by a hostile fsync hook', async () => {
+    const projectRoot = makeRoot('takt-github-discard-');
+    const unrelatedPath = join(projectRoot, 'unrelated.txt');
+    writeFileSync(unrelatedPath, 'keep');
+    let armed = false;
+    let reusedFd: number | undefined;
+    prepareControlRoot(projectRoot);
+    const content = await makePack(projectRoot);
+    const staged = await stageGithubTemplateDownload({
+      projectRoot,
+      expectedBytes: content.byteLength,
+      expectedSha256: sha256(content),
+      chunks: chunks(content),
+      ioSeam: {
+        discardFsync(fd) {
+          if (!armed || reusedFd !== undefined) return;
+          closeSync(fd);
+          reusedFd = openSync(unrelatedPath, constants.O_RDONLY);
+          expect(reusedFd).toBe(fd);
+        },
+      },
+    });
+    armed = true;
+
+    let error: unknown;
+    try {
+      discardStagedGithubTemplateDownload(staged);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({
+      code: 'CLEANUP_FAILED',
+      artifactState: 'staging-only',
+    });
+    expect(reusedFd).toBeDefined();
+    expect(fstatSync(reusedFd!).isFile()).toBe(true);
+    closeSync(reusedFd!);
+  });
+
+  it.each([
+    'file',
+    'staging-directory',
+    'staging-root',
+    'control-root',
+    'project-root',
+  ] as const)(
+    'never closes an unrelated descriptor reused by the %s close hook',
+    async (targetKind) => {
+      const projectRoot = makeRoot('takt-github-discard-');
+      const unrelatedPath = join(projectRoot, 'unrelated.txt');
+      writeFileSync(unrelatedPath, 'keep');
+      let armed = false;
+      let reusedFd: number | undefined;
+      prepareControlRoot(projectRoot);
+      const content = await makePack(projectRoot);
+      const staged = await stageGithubTemplateDownload({
+        projectRoot,
+        expectedBytes: content.byteLength,
+        expectedSha256: sha256(content),
+        chunks: chunks(content),
+        ioSeam: {
+          discardClose(fd, kind) {
+            if (!armed || kind !== targetKind || reusedFd !== undefined) return;
+            closeSync(fd);
+            reusedFd = openSync(unrelatedPath, constants.O_RDONLY);
+            expect(reusedFd).toBe(fd);
+          },
+        },
+      });
+      armed = true;
+
+      let error: unknown;
+      try {
+        discardStagedGithubTemplateDownload(staged);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toMatchObject({
+        code: 'CLEANUP_FAILED',
+        artifactState: targetKind === 'file' ? 'staging-only' : 'none',
+      });
+      expect(reusedFd).toBeDefined();
+      expect(fstatSync(reusedFd!).isFile()).toBe(true);
+      closeSync(reusedFd!);
+    },
+  );
 });
 
 describe('GitHub template existing global cache materialization', () => {
