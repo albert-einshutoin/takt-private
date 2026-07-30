@@ -194,6 +194,22 @@ async function createFixture() {
 }
 
 describe('GitHub template authenticated receipt offline reader D2b', () => {
+  it('never short-circuits native close after synchronous seal failure', () => {
+    const source = readFileSync(join(
+      process.cwd(),
+      'src',
+      'features',
+      'project-template',
+      'github-download-receipt-offline-read.ts',
+    ), 'utf8');
+    expect(source).not.toContain(
+      'return failure ?? closeDescriptors(context);',
+    );
+    expect(source).toContain(
+      'const closeFailure = closeDescriptors(context);',
+    );
+  });
+
   it.each([
     ['cross-process', readGithubTemplateDownloadReceiptByReceiptKey],
     ['same-process', readGithubTemplateDownloadReceiptStored],
@@ -1112,6 +1128,67 @@ describe('GitHub template authenticated receipt offline reader D2b', () => {
         },
       },
     })).rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
+  it('closes every retained descriptor after a final-preflight path swap', async () => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    const descriptors: number[] = [];
+    const error = await readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+      io: {
+        onPhase(phase) {
+          if (phase === 'before-final-preflight') {
+            const shard = dirname(fixture.receiptPath);
+            renameSync(shard, `${shard}.replacement`);
+          }
+        },
+        close(fd) {
+          descriptors.push(fd);
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(descriptors).toHaveLength(8);
+    for (const fd of descriptors) {
+      expect(() => fstatSync(fd)).toThrow();
+    }
+  });
+
+  it('preserves cache failure when close hooks also fail and still closes all FDs', async () => {
+    const fixture = await createFixture();
+    await storeGithubTemplateDownloadReceipt({
+      prepared: fixture.prepared,
+      cacheRoot: fixture.cacheRoot,
+      verifier: verifier(),
+    });
+    const mutated = Buffer.from(fixture.content);
+    mutated[0] = mutated[0]! ^ 0xff;
+    writeFileSync(fixture.artifactPath, mutated);
+    const descriptors: number[] = [];
+    const error = await readGithubTemplateDownloadReceiptByReceiptKey({
+      cacheRoot: fixture.cacheRoot,
+      receiptKey: fixture.prepared.receiptKey,
+      verifier: verifier(),
+      io: {
+        close(fd) {
+          descriptors.push(fd);
+          throw new Error('ghp_offline_close_secret');
+        },
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'CACHE_INVALID' });
+    expect(String((error as Error).message)).not.toContain('secret');
+    expect(descriptors).toHaveLength(8);
+    for (const fd of descriptors) {
+      expect(() => fstatSync(fd)).toThrow();
+    }
   });
 
 });

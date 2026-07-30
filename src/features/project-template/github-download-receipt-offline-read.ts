@@ -959,7 +959,8 @@ function verifyAndCloseSynchronously(
       'GitHub template offline receipt authority changed before close',
     );
   }
-  return failure ?? closeDescriptors(context);
+  const closeFailure = closeDescriptors(context);
+  return failure ?? closeFailure;
 }
 
 function normalizeFailure(
