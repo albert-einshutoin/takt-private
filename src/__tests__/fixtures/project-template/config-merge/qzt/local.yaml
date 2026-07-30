@@ -1,0 +1,21 @@
+# Curated from qzt without credentials or machine-local paths.
+subscription_only: true
+provider: codex-cli
+allowed_providers:
+  - codex-cli
+  - cursor-cli
+  - opencode-cli
+  - agy-cli
+forbidden_providers:
+  - codex
+  - claude-sdk
+provider_routing:
+  personas:
+    planner:
+      provider: opencode-cli
+      model: qzt-planner
+workflow_overrides:
+  quality_gates:
+    - npm test
+    - cargo test --all
+minimal_output: false

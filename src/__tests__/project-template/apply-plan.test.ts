@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   calculateProjectTemplateManifestSha256,
+  canonicalizeTaktpackJson,
   createProjectTemplateApplyPlan,
+  prepareProjectTemplateApplyPlan,
   type ProjectTemplateApplyPlanInput,
   type ProjectTemplateLocalSnapshotEntry,
   type TemplateEntryPolicy,
@@ -45,7 +47,7 @@ function input(
     policy?: TemplateEntryPolicy;
   },
 ): ProjectTemplateApplyPlanInput {
-  const path = 'config.yaml';
+  const path = policy === 'merge' ? 'config.yaml' : 'workflows/test.yaml';
   const incomingEntries = incoming === undefined
     ? []
     : [manifestEntry(path, incoming, policy)];
@@ -115,7 +117,7 @@ describe('project template three-way apply plan', () => {
 
       expect(plan.entries).toHaveLength(1);
       expect(plan.entries[0]).toMatchObject({
-        path: 'config.yaml',
+        path: 'workflows/test.yaml',
         policy: 'managed',
         action,
         reasonCode,
@@ -143,11 +145,11 @@ describe('project template three-way apply plan', () => {
     },
   );
 
-  it('routes divergent merge-policy changes to semantic merge without mutating the target', () => {
+  it('fails closed before semantic merge when base bytes are unavailable', () => {
     const planInput = input({
-      base: 'base',
-      local: 'local',
-      incoming: 'next',
+      base: 'language: en\n',
+      local: 'language: ja\n',
+      incoming: 'language: en\ntimezone: UTC\n',
       policy: 'merge',
     });
     const before = planInput.localEntries.map((entry) => ({
@@ -160,9 +162,554 @@ describe('project template three-way apply plan', () => {
     expect(plan.entries[0]).toMatchObject({
       policy: 'merge',
       action: 'conflict',
-      reasonCode: 'SEMANTIC_MERGE_REQUIRED',
+      reasonCode: 'BASE_UNAVAILABLE',
     });
     expect(planInput.localEntries).toEqual(before);
+  });
+
+  it('seals a successful config semantic merge while keeping incoming provenance', () => {
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = `${base}timezone: Asia/Tokyo\n`;
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+    const resolved = prepared.resolvedContents[0]?.content;
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      policy: 'merge',
+      action: 'update',
+      reasonCode: 'SEMANTIC_MERGED',
+      baseSha256: hash(base),
+      incomingSha256: hash(incoming),
+      afterSha256: hash(Buffer.from(resolved ?? []).toString()),
+      mergeDiagnostics: {
+        status: 'merged',
+      },
+    });
+    expect(Buffer.from(resolved ?? []).toString()).toContain('planner: claude');
+    expect(Buffer.from(resolved ?? []).toString()).toContain('timezone: Asia/Tokyo');
+    expect(prepared.plan.entries[0]?.afterSha256).not.toBe(hash(incoming));
+    expect(Object.isFrozen(prepared.plan.entries[0]?.mergeDiagnostics)).toBe(true);
+
+    const planBody = structuredClone(prepared.plan) as Record<string, unknown>;
+    delete planBody['planId'];
+    expect(hash(canonicalizeTaktpackJson(planBody))).toBe(prepared.plan.planId);
+    const entries = planBody['entries'] as Array<Record<string, unknown>>;
+    const mergeDiagnostics = entries[0]?.['mergeDiagnostics'] as Record<string, unknown>;
+    mergeDiagnostics['diagnostics'] = [{
+      code: 'RULE_REVIEW_REQUIRED',
+      path: ['timezone'],
+      message: 'synthetic diagnostic',
+    }];
+    expect(hash(canonicalizeTaktpackJson(planBody))).not.toBe(prepared.plan.planId);
+  });
+
+  it('seals exact semantic conflicts without exposing resolved bytes', () => {
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = 'provider_routing:\n  personas:\n    planner: cursor\n';
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'CONFLICT',
+      mergeDiagnostics: {
+        status: 'conflict',
+        conflicts: [{
+          path: ['provider_routing', 'personas', 'planner'],
+          reason: 'BOTH_CHANGED',
+        }],
+      },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('fails closed when the base content is missing or does not match the formal lock', () => {
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = `${base}timezone: Asia/Tokyo\n`;
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+
+    const missing = prepareProjectTemplateApplyPlan(planInput);
+    const mismatched = prepareProjectTemplateApplyPlan({
+      ...planInput,
+      baseContents: [{
+        path: 'config.yaml',
+        content: Buffer.from('language: ja\n'),
+      }],
+    });
+
+    for (const prepared of [missing, mismatched]) {
+      expect(prepared.plan.entries[0]).toMatchObject({
+        action: 'conflict',
+        reasonCode: 'BASE_UNAVAILABLE',
+        mergeDiagnostics: { status: 'base-unavailable' },
+      });
+      expect(prepared.plan.entries[0]).not.toHaveProperty('afterSha256');
+    }
+  });
+
+  it('recovers a legacy base from incoming bytes that match the formal lock', () => {
+    const base = 'language: en\n';
+    const local = 'language: ja\n';
+    const prepared = prepareProjectTemplateApplyPlan(input({
+      base,
+      local,
+      incoming: base,
+      policy: 'merge',
+    }));
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'keep',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeSha256: hash(local),
+      afterSha256: hash(local),
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('recovers a legacy base from unchanged local bytes that match the formal lock', () => {
+    const base = 'language: en\n';
+    const incoming = `${base}timezone: UTC\n`;
+
+    const prepared = prepareProjectTemplateApplyPlan(input({
+      base,
+      local: base,
+      incoming,
+      policy: 'merge',
+    }));
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'update',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeSha256: hash(base),
+      afterSha256: hash(incoming),
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('reuses a verified baseline when an unchanged large local snapshot omits content', () => {
+    const base = `${'# padding\n'.repeat(8_000)}language: en\n`;
+    const incoming = `${base}timezone: UTC\n`;
+    const planInput = input({
+      base,
+      local: base,
+      incoming,
+      policy: 'merge',
+    });
+    delete planInput.localEntries[0]!.content;
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'update',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeSha256: hash(base),
+      afterSha256: hash(incoming),
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('reuses verified incoming bytes for a large current config with a local-only mode', () => {
+    const base = `${'# padding\n'.repeat(8_000)}language: en\n`;
+    const incoming = `${base}timezone: UTC\n`;
+    const planInput = input({
+      base,
+      local: incoming,
+      incoming,
+      policy: 'merge',
+    });
+    planInput.localEntries[0]!.mode = '0600';
+    delete planInput.localEntries[0]!.content;
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'keep',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeSha256: hash(incoming),
+      afterSha256: hash(incoming),
+      beforeMode: '0600',
+      afterMode: '0600',
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('preserves opaque-content review for a large semantic first install', () => {
+    const incoming = `${'# token: sensitive-looking-value\n'.repeat(2_500)}language: en\n`;
+
+    const prepared = prepareProjectTemplateApplyPlan(input({
+      incoming,
+      policy: 'merge',
+    }));
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'add',
+      reasonCode: 'SEMANTIC_MERGED',
+      reviewRequired: true,
+      mergeDiagnostics: { status: 'merged' },
+    });
+    expect(prepared.plan.defaultApplyPossible).toBe(false);
+  });
+
+  it('blocks an unsafe devloop policy on a direct add', () => {
+    const incoming = 'mode: unsafe\n';
+    const planInput = input({});
+    planInput.incomingManifest.entries = [
+      manifestEntry('devloopd.yaml', incoming, 'merge'),
+    ];
+    planInput.incomingContents = [{
+      path: 'devloopd.yaml',
+      content: Buffer.from(incoming),
+    }];
+    planInput.missingPathTracking = { 'devloopd.yaml': 'not-repository' };
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      path: 'devloopd.yaml',
+      action: 'conflict',
+      reasonCode: 'CONFLICT',
+      mergeDiagnostics: {
+        status: 'blocked',
+        code: 'MERGED_DEVLOOP_POLICY_INVALID',
+      },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it.each([
+    ['Config.yaml', 'subscription_only: true\nprovider: codex\n'],
+    ['DEVLOOPD.YAML', 'mode: unsafe\n'],
+  ])(
+    'applies semantic validation to case-variant direct add %s',
+    (path, incoming) => {
+      const planInput = input({});
+      planInput.incomingManifest.entries = [
+        manifestEntry(path, incoming, 'merge'),
+      ];
+      planInput.incomingContents = [{ path, content: Buffer.from(incoming) }];
+      planInput.missingPathTracking = { [path]: 'not-repository' };
+
+      const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+      expect(prepared.plan.entries[0]).toMatchObject({
+        path,
+        action: 'conflict',
+        reasonCode: 'CONFLICT',
+        reviewRequired: true,
+        mergeDiagnostics: { status: 'blocked' },
+      });
+      expect(prepared.resolvedContents).toEqual([]);
+    },
+  );
+
+  it('blocks global-only configuration on a direct add', () => {
+    const incoming = 'analytics:\n  events_path: events.ndjson\n';
+    const planInput = input({});
+    planInput.incomingManifest.entries = [
+      manifestEntry('config.yaml', incoming, 'merge'),
+    ];
+    planInput.incomingContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(incoming),
+    }];
+    planInput.missingPathTracking = { 'config.yaml': 'not-repository' };
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      path: 'config.yaml',
+      action: 'conflict',
+      reasonCode: 'CONFLICT',
+      reviewRequired: true,
+      mergeDiagnostics: {
+        status: 'blocked',
+        code: 'GLOBAL_ONLY_PATH',
+        document: 'incoming',
+      },
+    });
+    expect(prepared.plan.defaultApplyPossible).toBe(false);
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it.each(['managed', 'scaffold'] as const)(
+    'requires semantic review when config.yaml is declared %s',
+    (policy) => {
+      const incoming = 'allow_git_hooks: true\n';
+      const planInput = input({
+        incoming,
+        policy,
+      });
+      planInput.incomingManifest.entries = [
+        manifestEntry('config.yaml', incoming, policy),
+      ];
+      planInput.incomingContents = [{
+        path: 'config.yaml',
+        content: Buffer.from(incoming),
+      }];
+      planInput.missingPathTracking = { 'config.yaml': 'not-repository' };
+
+      const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+      expect(prepared.plan.entries[0]).toMatchObject({
+        action: 'add',
+        policy,
+        reviewRequired: true,
+        mergeDiagnostics: { status: 'merged' },
+      });
+      expect(prepared.plan.defaultApplyPossible).toBe(false);
+    },
+  );
+
+  it.each([
+    ['git hooks', 'allow_git_hooks: true\n', ['allow_git_hooks'], []],
+    [
+      'provider network access',
+      'provider_options:\n  codex:\n    network_access: true\n',
+      ['provider_options', 'codex', 'network_access'],
+      [],
+    ],
+    [
+      'OpenCode network access',
+      'provider_options:\n  opencode:\n    network_access: true\n',
+      ['provider_options', 'opencode', 'network_access'],
+      [],
+    ],
+    [
+      'runtime prepare scripts',
+      'runtime:\n  prepare:\n    - .takt/automation/prepare.sh\n',
+      ['runtime', 'prepare'],
+      ['external-command'],
+    ],
+    [
+      'subscription boundary changes',
+      'subscription_only: false\n',
+      ['subscription_only'],
+      [],
+    ],
+    [
+      'submodule fetching',
+      'with_submodules: true\n',
+      ['with_submodules'],
+      [],
+    ],
+    [
+      'automatic pull request creation',
+      'auto_pr: true\n',
+      ['auto_pr'],
+      [],
+    ],
+  ] as const)(
+    'requires review for a direct config add containing %s',
+    (_label, incoming, path, capabilities) => {
+      const planInput = input({});
+      planInput.incomingManifest.entries = [
+        {
+          ...manifestEntry('config.yaml', incoming, 'merge'),
+          capabilities: [...capabilities],
+        },
+      ];
+      planInput.incomingManifest.capabilities = [...capabilities];
+      planInput.incomingContents = [{
+        path: 'config.yaml',
+        content: Buffer.from(incoming),
+      }];
+      planInput.missingPathTracking = { 'config.yaml': 'not-repository' };
+
+      const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+      expect(prepared.plan).toMatchObject({
+        reviewRequired: true,
+        defaultApplyPossible: false,
+      });
+      expect(prepared.plan.entries[0]).toMatchObject({
+        path: 'config.yaml',
+        action: 'add',
+        reviewRequired: true,
+        mergeDiagnostics: {
+          status: 'merged',
+          diagnostics: expect.arrayContaining([
+            expect.objectContaining({
+              code: 'RULE_REVIEW_REQUIRED',
+              path,
+            }),
+          ]),
+        },
+      });
+    },
+  );
+
+  it.each([
+    [
+      'unsafe provider',
+      'subscription_only: true\nprovider: codex\n',
+    ],
+    [
+      'credential',
+      'subscription_only: true\nprovider: codex-cli\nopenai_api_key: synthetic\n',
+    ],
+  ] as const)('blocks a direct config update containing an %s', (_label, incoming) => {
+    const base = 'subscription_only: true\nprovider: codex-cli\n';
+    const planInput = input({
+      base,
+      local: base,
+      incoming,
+      policy: 'merge',
+    });
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'CONFLICT',
+      mergeDiagnostics: { status: 'blocked' },
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('preserves a project-owned value when local still matches the base', () => {
+    const base = 'subscription_only: true\nprovider: codex-cli\n';
+    const incoming = 'subscription_only: true\nprovider: cursor-cli\n';
+    const planInput = input({
+      base,
+      local: base,
+      incoming,
+      policy: 'merge',
+    });
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'keep',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeSha256: hash(base),
+      incomingSha256: hash(incoming),
+      afterSha256: hash(base),
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('preserves a locally deleted config when incoming still matches the base', () => {
+    const base = 'subscription_only: true\nprovider: codex-cli\n';
+    const planInput = input({
+      base,
+      incoming: base,
+      policy: 'merge',
+    });
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      path: 'config.yaml',
+      action: 'keep',
+      reasonCode: 'LOCAL_DELETED',
+      reviewRequired: false,
+    });
+    expect(prepared.resolvedContents).toEqual([]);
+  });
+
+  it('blocks deletion of a present merge-owned semantic config', () => {
+    const base = 'language: en\n';
+    const prepared = prepareProjectTemplateApplyPlan(input({
+      base,
+      local: base,
+      incoming: undefined,
+      policy: 'merge',
+    }));
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'CONFLICT',
+      reviewRequired: true,
+    });
+    expect(prepared.plan.defaultApplyPossible).toBe(false);
+  });
+
+  it('preserves a local-only hardened mode during a semantic content update', () => {
+    const base = 'language: en\n';
+    const local = 'language: en\n';
+    const incoming = 'language: ja\n';
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+    planInput.baseLock!.entries[0]!.mode = '0644';
+    planInput.localEntries[0]!.mode = '0600';
+    planInput.incomingManifest.entries[0]!.mode = '0644';
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'update',
+      reasonCode: 'SEMANTIC_MERGED',
+      beforeMode: '0600',
+      incomingMode: '0644',
+      afterMode: '0600',
+    });
+  });
+
+  it('reports a conflict when local and incoming modes both changed differently', () => {
+    const base = 'language: en\n';
+    const local = 'language: en\n';
+    const incoming = 'language: ja\n';
+    const planInput = input({ base, local, incoming, policy: 'merge' });
+    planInput.baseLock!.entries[0]!.mode = '0644';
+    planInput.localEntries[0]!.mode = '0600';
+    planInput.incomingManifest.entries[0]!.mode = '0660';
+    planInput.baseContents = [{
+      path: 'config.yaml',
+      content: Buffer.from(base),
+    }];
+
+    const prepared = prepareProjectTemplateApplyPlan(planInput);
+
+    expect(prepared.plan.entries[0]).toMatchObject({
+      action: 'conflict',
+      reasonCode: 'BOTH_CHANGED',
+      reviewRequired: true,
+      mergeDiagnostics: {
+        status: 'conflict',
+        conflicts: [{ path: ['$mode'], reason: 'BOTH_CHANGED' }],
+      },
+    });
+    expect(prepared.plan.defaultApplyPossible).toBe(false);
   });
 
   it.each([
@@ -293,7 +840,7 @@ describe('project template three-way apply plan', () => {
     ['large', Buffer.alloc(70 * 1024, 0x61), 'too-large'],
   ] as const)('does not emit a %s file body diff', (_label, content, kind) => {
     const planInput = input({ base: 'old', local: 'old', incoming: 'next' });
-    planInput.incomingContents = [{ path: 'config.yaml', content }];
+    planInput.incomingContents = [{ path: 'workflows/test.yaml', content }];
     planInput.incomingManifest.entries[0]!.sha256 =
       createHash('sha256').update(content).digest('hex');
 
@@ -331,17 +878,17 @@ describe('project template three-way apply plan', () => {
     const directory = createProjectTemplateApplyPlan({
       ...planInput,
       targetRootState: 'directory',
-      missingPathTracking: { 'config.yaml': 'untracked' },
+      missingPathTracking: { 'workflows/test.yaml': 'untracked' },
     });
     const stagedDeletion = createProjectTemplateApplyPlan({
       ...planInput,
       targetRootState: 'directory',
-      missingPathTracking: { 'config.yaml': 'staged' },
+      missingPathTracking: { 'workflows/test.yaml': 'staged' },
     });
     const missingRoot = createProjectTemplateApplyPlan({
       ...planInput,
       targetRootState: 'missing',
-      missingPathTracking: { 'config.yaml': 'not-repository' },
+      missingPathTracking: { 'workflows/test.yaml': 'not-repository' },
     });
 
     expect(stagedDeletion.preconditionToken).not.toBe(directory.preconditionToken);
@@ -645,7 +1192,7 @@ describe('project template three-way apply plan', () => {
 
   it('requires review when a missing tracked path is reported clean', () => {
     const planInput = input({ incoming: 'next' });
-    planInput.missingPathTracking = { 'config.yaml': 'tracked-clean' };
+    planInput.missingPathTracking = { 'workflows/test.yaml': 'tracked-clean' };
 
     const plan = createProjectTemplateApplyPlan(planInput);
 

@@ -87,6 +87,7 @@ describe('project template apply storage', () => {
     expect(lstatSync(storage.controlRoot).mode & 0o777).toBe(0o700);
     expect(lstatSync(storage.stagingRoot).mode & 0o777).toBe(0o700);
     expect(lstatSync(storage.backupsRoot).mode & 0o777).toBe(0o700);
+    expect(lstatSync(storage.baselinesRoot).mode & 0o777).toBe(0o700);
     expect(lstatSync(storage.controlRoot).dev).toBe(lstatSync(storage.targetRoot).dev);
     expect(readFileSync(join(storage.controlRoot, '.gitignore'), 'utf8')).toBe('*\n');
     expect(lstatSync(join(storage.controlRoot, '.gitignore')).mode & 0o077).toBe(0);
@@ -105,12 +106,14 @@ describe('project template apply storage', () => {
 
     const storage = await initializeProjectTemplateApplyStorage({ repoPath, io });
 
-    expect(events.slice(0, 6)).toEqual([
+    expect(events.slice(0, 8)).toEqual([
       ['mkdir', storage.controlRoot],
       ['directory-fsync', storage.repoRoot],
       ['mkdir', storage.stagingRoot],
       ['directory-fsync', storage.controlRoot],
       ['mkdir', storage.backupsRoot],
+      ['directory-fsync', storage.controlRoot],
+      ['mkdir', storage.baselinesRoot],
       ['directory-fsync', storage.controlRoot],
     ]);
   });
@@ -122,6 +125,7 @@ describe('project template apply storage', () => {
     const canonicalControlRoot = join(canonicalRepoPath, '.takt-template-state');
     mkdirSync(join(controlRoot, 'staging'), { recursive: true, mode: 0o700 });
     mkdirSync(join(controlRoot, 'backups'), { mode: 0o700 });
+    mkdirSync(join(controlRoot, 'merge-baselines'), { mode: 0o700 });
     writeFileSync(join(controlRoot, '.gitignore'), '*\n', { mode: 0o600 });
     const events: Array<[ProjectTemplateApplyStorageIoOperation, string]> = [];
     const io = createProjectTemplateApplyStorageIo({
@@ -136,6 +140,7 @@ describe('project template apply storage', () => {
 
     expect(events).toEqual([
       ['directory-fsync', canonicalRepoPath],
+      ['directory-fsync', canonicalControlRoot],
       ['directory-fsync', canonicalControlRoot],
       ['directory-fsync', canonicalControlRoot],
     ]);

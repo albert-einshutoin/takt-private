@@ -20,8 +20,9 @@ import type {
   ProjectTemplateIncomingContent,
   ProjectTemplateIncomingInspectionEvidence,
 } from './apply-plan-types.js';
-import { createProjectTemplateApplyPlan } from './apply-plan.js';
+import { prepareProjectTemplateApplyPlan } from './apply-plan.js';
 import { runProjectTemplateDoctor } from './apply-doctor.js';
+import { portablePathKey } from './filesystem-scan.js';
 import {
   captureProjectTemplateBackupFile,
   initializeProjectTemplateApplyStorage,
@@ -52,6 +53,10 @@ import {
   captureProjectTemplateTargetSnapshot,
 } from './target-snapshot.js';
 import type { ProjectTemplateManifestV1, TemplateLockV1 } from './types.js';
+import {
+  readProjectTemplateMergeBaseline,
+  writeProjectTemplateMergeBaseline,
+} from './merge-baseline-store.js';
 import {
   consumeProjectTemplateApplyApprovalEvidence,
   isProjectTemplateApplyApprovalEvidence,
@@ -172,6 +177,15 @@ function changedEntries(plan: ProjectTemplateApplyPlan): ChangedPlanEntry[] {
       || entry.action === 'update'
       || entry.action === 'delete')
     .sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function usesSemanticMergeBaseline(entry: {
+  policy: string;
+  path: string;
+}): boolean {
+  const portablePath = portablePathKey(entry.path);
+  return entry.policy === 'merge'
+    && (portablePath === 'config.yaml' || portablePath === 'devloopd.yaml');
 }
 
 async function safeLstat(path: string) {
@@ -493,7 +507,9 @@ async function verifyCompletePlanSemantics(options: {
   projectRoot: string;
   plan: ProjectTemplateApplyPlan;
   manifest: ProjectTemplateManifestV1;
-  contents: ReadonlyMap<string, Buffer>;
+  incomingContents: ReadonlyMap<string, Buffer>;
+  resolvedContents: ReadonlyMap<string, Buffer>;
+  baseContents: readonly ProjectTemplateIncomingContent[];
   incomingInspection: ProjectTemplateIncomingInspectionEvidence;
   baselineStrategy: 'conflict' | 'adopt-identical';
   baseLock?: TemplateLockV1;
@@ -508,15 +524,16 @@ async function verifyCompletePlanSemantics(options: {
     options.projectRoot,
     candidatePaths,
   );
-  let expected: ProjectTemplateApplyPlan;
+  let expected: ReturnType<typeof prepareProjectTemplateApplyPlan>;
   try {
-    expected = createProjectTemplateApplyPlan({
+    expected = prepareProjectTemplateApplyPlan({
       ...(options.baseLock === undefined ? {} : { baseLock: options.baseLock }),
+      baseContents: options.baseContents,
       incomingManifest: options.manifest,
       localEntries: snapshot.entries,
       targetRootState: snapshot.rootState,
       missingPathTracking: snapshot.missingPathTracking,
-      incomingContents: [...options.contents].map(([path, content]) => ({
+      incomingContents: [...options.incomingContents].map(([path, content]) => ({
         path,
         content,
       })),
@@ -536,16 +553,24 @@ async function verifyCompletePlanSemantics(options: {
   // current witnesses, mode, capabilities), summary, precondition and lock
   // intent metadata. Re-derivation prevents an attacker from changing a field
   // and merely recomputing the self-referential checksum.
-  return expected.planId === options.plan.planId;
+  if (expected.plan.planId !== options.plan.planId) return false;
+  if (expected.resolvedContents.length !== options.resolvedContents.size) return false;
+  return expected.resolvedContents.every((item) => (
+    options.resolvedContents.get(item.path)?.equals(Buffer.from(item.content))
+    ?? false
+  ));
 }
 
 function validateApplyInput(options: {
   plan: ProjectTemplateApplyPlan;
   incomingManifest: ProjectTemplateManifestV1;
   incomingContents: readonly ProjectTemplateIncomingContent[];
+  resolvedContents?: readonly ProjectTemplateIncomingContent[];
   approvalEvidence?: ProjectTemplateApplyApprovalEvidence;
 }): {
   manifest: ProjectTemplateManifestV1;
+  incomingContents: Map<string, Buffer>;
+  resolvedContents: Map<string, Buffer>;
   contents: Map<string, Buffer>;
 } {
   const manifest = parseProjectTemplateManifest(options.incomingManifest);
@@ -613,20 +638,61 @@ function validateApplyInput(options: {
     }
     contents.set(item.path, content);
   }
+  for (const entry of manifest.entries) {
+    if (entry.policy !== 'excluded' && !contents.has(entry.path)) {
+      throw new Error('incoming content evidence is incomplete');
+    }
+  }
+  const resolvedContents = new Map<string, Buffer>();
+  for (const item of options.resolvedContents ?? []) {
+    const entry = manifestByPath.get(item.path);
+    const planned = planByPath.get(item.path);
+    const content = Buffer.from(item.content);
+    if (
+      entry === undefined
+      || planned === undefined
+      || resolvedContents.has(item.path)
+      || planned.policy !== 'merge'
+      || (planned.action !== 'add' && planned.action !== 'update')
+      || planned.afterSha256 === planned.incomingSha256
+      || planned.afterSha256 === undefined
+      || hash(content) !== planned.afterSha256
+    ) {
+      throw new Error('resolved merge content is not sealed by the apply plan');
+    }
+    resolvedContents.set(item.path, content);
+  }
+  const effectiveContents = new Map(contents);
   for (const entry of changedEntries(options.plan)) {
     if (
       (entry.action === 'add' || entry.action === 'update')
       && (
         entry.afterSha256 === undefined
         || entry.afterMode === undefined
-        || contents.get(entry.path) === undefined
-        || hash(contents.get(entry.path)!) !== entry.afterSha256
+        || (
+          entry.afterSha256 !== entry.incomingSha256
+            ? entry.policy !== 'merge'
+              || resolvedContents.get(entry.path) === undefined
+            : contents.get(entry.path) === undefined
+              || hash(contents.get(entry.path)!) !== entry.afterSha256
+        )
       )
     ) {
       throw new Error('apply plan content evidence is incomplete');
     }
+    if (
+      (entry.action === 'add' || entry.action === 'update')
+      && entry.afterSha256 !== entry.incomingSha256
+    ) {
+      effectiveContents.set(entry.path, resolvedContents.get(entry.path)!);
+    }
   }
-  return { manifest, contents };
+  return {
+    manifest,
+    incomingContents: contents,
+    resolvedContents,
+    contents: effectiveContents,
+  };
 }
 
 async function captureBefore(
@@ -720,6 +786,7 @@ export async function applyProjectTemplatePlan(options: {
   plan: ProjectTemplateApplyPlan;
   incomingManifest: ProjectTemplateManifestV1;
   incomingContents: readonly ProjectTemplateIncomingContent[];
+  resolvedContents?: readonly ProjectTemplateIncomingContent[];
   incomingInspection: ProjectTemplateIncomingInspectionEvidence;
   baselineStrategy: 'conflict' | 'adopt-identical';
   approvalEvidence?: ProjectTemplateApplyApprovalEvidence;
@@ -773,11 +840,38 @@ export async function applyProjectTemplatePlan(options: {
     if (!baseLockVerification.matched) {
       return notStarted('BASE_LOCK_DRIFT', 'formal template lock changed after preview');
     }
+    const baseContents: ProjectTemplateIncomingContent[] = [];
+    try {
+      for (const entry of baseLockVerification.baseLock?.entries ?? []) {
+        if (!usesSemanticMergeBaseline(entry)) continue;
+        try {
+          baseContents.push({
+            path: entry.path,
+            content: await readProjectTemplateMergeBaseline({
+              storage,
+              expectedSha256: entry.sha256,
+            }),
+          });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          // Locks written before baseline persistence have no blob to load.
+          // Re-derivation below decides whether this specific plan can proceed
+          // without a three-way base; any semantic edit still fails closed.
+        }
+      }
+    } catch {
+      return notStarted(
+        'INVALID_APPLY_INPUT',
+        'formal merge baseline is missing or invalid',
+      );
+    }
     if (!await verifyCompletePlanSemantics({
       projectRoot: options.projectRoot,
       plan: options.plan,
       manifest: validated.manifest,
-      contents: validated.contents,
+      incomingContents: validated.incomingContents,
+      resolvedContents: validated.resolvedContents,
+      baseContents,
       incomingInspection: options.incomingInspection,
       baselineStrategy: options.baselineStrategy,
       ...(baseLockVerification.baseLock === undefined
@@ -804,6 +898,25 @@ export async function applyProjectTemplatePlan(options: {
       return notStarted(
         'INVALID_APPLY_INPUT',
         'apply approval evidence is invalid or unavailable',
+      );
+    }
+    try {
+      for (const entry of validated.manifest.entries) {
+        if (!usesSemanticMergeBaseline(entry)) continue;
+        const content = validated.incomingContents.get(entry.path);
+        if (content === undefined) {
+          throw new Error('incoming merge baseline content is unavailable');
+        }
+        await writeProjectTemplateMergeBaseline({
+          storage,
+          expectedSha256: entry.sha256,
+          content,
+        });
+      }
+    } catch {
+      return notStarted(
+        'INVALID_APPLY_INPUT',
+        'incoming merge baseline could not be stored durably',
       );
     }
     backupId = `backup-${randomUUID()}`;

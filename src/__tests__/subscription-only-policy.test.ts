@@ -15,7 +15,10 @@ import {
 } from '../infra/config/loaders/workflowFileLoader.js';
 import { inspectWorkflowFile } from '../infra/config/loaders/workflowDoctor.js';
 import { validateWorkflowConfig } from '../core/workflow/engine/WorkflowValidator.js';
-import { findForbiddenSubscriptionOnlyConfigKeyPaths } from '../core/subscription-only/policy.js';
+import {
+  assertRawSubscriptionOnlyProjectConfig,
+  findForbiddenSubscriptionOnlyConfigKeyPaths,
+} from '../core/subscription-only/policy.js';
 import type { WorkflowConfig } from '../core/models/index.js';
 
 function writeProjectConfig(projectDir: string, content: string): void {
@@ -100,6 +103,32 @@ describe('subscription-only policy', () => {
     expect(config.subscriptionOnly).toBe(true);
     expect(config.allowedProviders).toEqual(['codex-cli', 'cursor-cli']);
     expect(config.forbiddenProviders).toEqual(['codex', 'opencode']);
+  });
+
+  it.each([
+    ['provider', { provider: 'codex' }],
+    ['persona provider', { persona_providers: { planner: { provider: 'codex' } } }],
+    ['provider routing', { provider_routing: { steps: { plan: { provider: 'codex' } } } }],
+    ['TAKT provider', { takt_providers: { assistant: { provider: 'codex' } } }],
+    ['rate fallback', { rate_limit_fallback: { switch_chain: [{ provider: 'codex' }] } }],
+    [
+      'provider profile',
+      { provider_profiles: { codex: { default_permission_mode: 'readonly' } } },
+    ],
+  ] as const)('rejects an unsafe raw %s reference', (_label, providerConfig) => {
+    expect(() => assertRawSubscriptionOnlyProjectConfig({
+      subscription_only: true,
+      provider: 'codex-cli',
+      ...providerConfig,
+    }, 'raw project config')).toThrow(/codex/i);
+  });
+
+  it('rejects raw allowed and forbidden provider overlap', () => {
+    expect(() => assertRawSubscriptionOnlyProjectConfig({
+      subscription_only: true,
+      allowed_providers: ['codex-cli'],
+      forbidden_providers: ['codex-cli'],
+    }, 'raw project config')).toThrow(/both allowed_providers and forbidden_providers/i);
   });
 
   it('detects forbidden API key config nested inside arrays', () => {

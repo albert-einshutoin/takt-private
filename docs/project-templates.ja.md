@@ -150,6 +150,35 @@ command behavior の検出時は `reviewRequired` になります。
 alias、非scalar execution value、depth/node 上限超過は `incomplete` のまま
 review-required です。
 
+`README.md`、`automation/**`、`quality-gates/**` は project-owned の
+`scaffold` 候補です。既存ファイルを置換せず、存在しない場合だけ生成します。
+`quality-gates/logs/**` は runtime state のため常に excluded です。共有wrapperを
+scaffoldする場合、そのwrapperはproject-local gateへ委譲し、gateの欠落・失敗を
+弱いfallbackで成功に変換してはいけません。
+
+## config YAMLの三者マージ
+
+`config.yaml` と `devloopd.yaml` の `merge` entryは、正式lockが参照するbase、
+現在のlocal、incoming templateを使ってschema-awareに三者マージします。
+provider routing、allowed/forbidden provider、base branch、workflow command gateは
+project-ownedです。languageなどの安全なdefaultはtemplate-managed、loggingやCLI pathは
+global-only、API key・token・passwordなどのcredential pathはforbiddenです。
+credential名を `api.key` のように複数mappingへ分割しても禁止判定を回避できません。
+
+mappingはleaf単位で比較します。同じleafをlocalとincomingが別々に変更した場合は、
+具体的なpathを持つconflictになります。sequenceはfieldごとに `atomic`、
+`unordered-set`、削除を許さない`monotonic-set`、または`ordered-keyed`を明示し、
+未登録sequenceを暗黙に連結しません。quality gateのidentityはruntimeと共有し、
+省略されたdefault timeoutなどを理由に同じcommandを重複追加しません。
+
+編集元にはlocal YAML documentを使い、未変更node、mapping順、local comment、
+sequence itemの表現、BOM、単一種類の改行、final newlineを保持します。semantic no-opは
+local bytesをそのまま返します。alias、anchor、merge key、custom tag、複数document、
+directive、および変更を伴うmixed EOLはfail-closedです。unknown keyは黙って削除せず、
+保持後に同じproject schema validatorへ渡し、未対応ならpath付きerrorにします。
+merge結果はapply planのdigestと診断へsealされ、executorは保存済みbaseから再導出して
+一致しないresolved bytesを適用しません。
+
 directory 列挙は bounded `opendir` stream を使い、`maxNodes + 1` で停止します。
 この global witness に達すると残りの再帰と sibling もすべて停止します。inode と
 realpath の検証に失敗した名前は `[unverified-entry]` としてだけ記録し、列挙された

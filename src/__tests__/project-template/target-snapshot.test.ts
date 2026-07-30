@@ -148,6 +148,25 @@ describe('project template target snapshot', () => {
     )).toEqual(gitBefore);
   });
 
+  it('retains bounded large semantic config content but keeps other large files opaque', async () => {
+    const root = makeRoot(false);
+    const config = `${'# padding\n'.repeat(8_000)}language: ja\n`;
+    const opaque = 'x'.repeat(70 * 1024);
+    writeTakt(root, 'config.yaml', config);
+    writeTakt(root, 'notes.txt', opaque);
+
+    const snapshot = await captureProjectTemplateTargetSnapshot(root, [
+      'config.yaml',
+      'notes.txt',
+    ]);
+    const entries = Object.fromEntries(
+      snapshot.entries.map((entry) => [entry.path, entry]),
+    );
+
+    expect(Buffer.from(entries['config.yaml']?.content ?? []).toString()).toBe(config);
+    expect(entries['notes.txt']?.content).toBeUndefined();
+  });
+
   it('distinguishes modified, untracked, ignored, and non-repository files', async () => {
     const root = makeRoot();
     writeTakt(root, 'tracked.yaml', 'base\n');

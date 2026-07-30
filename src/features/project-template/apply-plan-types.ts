@@ -8,10 +8,20 @@ import type {
   CapturedProjectTemplateTargetEntry,
   ProjectTemplateGitTrackingStatus,
 } from './target-snapshot.js';
+import type {
+  ProjectTemplateYamlMergeBlockedCode,
+  ProjectTemplateYamlMergeConflict,
+  ProjectTemplateYamlMergeDiagnostic,
+} from './yaml-document-merge.js';
 
 export type ProjectTemplateLocalSnapshotEntry = CapturedProjectTemplateTargetEntry;
 
 export interface ProjectTemplateIncomingContent {
+  path: string;
+  content: Uint8Array;
+}
+
+export interface ProjectTemplateBaseContent {
   path: string;
   content: Uint8Array;
 }
@@ -29,6 +39,7 @@ export interface ProjectTemplateApplyPlanInput {
   localEntries: readonly ProjectTemplateLocalSnapshotEntry[];
   targetRootState?: 'missing' | 'directory';
   missingPathTracking?: Readonly<Record<string, ProjectTemplateGitTrackingStatus>>;
+  baseContents?: readonly ProjectTemplateBaseContent[];
   incomingContents?: readonly ProjectTemplateIncomingContent[];
   incomingInspection?: ProjectTemplateIncomingInspectionEvidence;
   baselineStrategy?: 'conflict' | 'adopt-identical';
@@ -47,6 +58,9 @@ export type ProjectTemplateApplyReasonCode =
   | 'LOCAL_CHANGED'
   | 'BOTH_CHANGED'
   | 'SEMANTIC_MERGE_REQUIRED'
+  | 'SEMANTIC_MERGED'
+  | 'CONFLICT'
+  | 'BASE_UNAVAILABLE'
   | 'ALREADY_CURRENT'
   | 'UNCHANGED'
   | 'NEW_ENTRY'
@@ -82,6 +96,32 @@ export type ProjectTemplateEntryDiff =
   | { kind: 'redacted' }
   | { kind: 'unavailable' };
 
+export type ProjectTemplateApplyMergeDiagnostics =
+  | {
+    readonly status: 'merged';
+    readonly diagnostics: readonly ProjectTemplateYamlMergeDiagnostic[];
+  }
+  | {
+    readonly status: 'conflict';
+    readonly conflicts: readonly ProjectTemplateYamlMergeConflict[];
+    readonly diagnostics: readonly ProjectTemplateYamlMergeDiagnostic[];
+  }
+  | {
+    readonly status: 'blocked';
+    readonly code:
+      | ProjectTemplateYamlMergeBlockedCode
+      | 'MERGED_CONFIG_INVALID'
+      | 'MERGED_DEVLOOP_POLICY_INVALID';
+    readonly document: 'base' | 'local' | 'incoming' | 'merged';
+    readonly path?: readonly string[];
+    readonly message?: string;
+    readonly diagnostics: readonly ProjectTemplateYamlMergeDiagnostic[];
+  }
+  | {
+    readonly status: 'base-unavailable';
+    readonly diagnostics: readonly [];
+  };
+
 interface ProjectTemplateApplyPlanEntryBase {
   path: string;
   reasonCode: ProjectTemplateApplyReasonCode;
@@ -98,6 +138,7 @@ interface ProjectTemplateApplyPlanEntryBase {
   rollbackImpact: ProjectTemplateRollbackImpact;
   reviewRequired: boolean;
   diff?: ProjectTemplateEntryDiff;
+  mergeDiagnostics?: ProjectTemplateApplyMergeDiagnostics;
 }
 
 export interface ManagedProjectTemplateApplyPlanEntry
@@ -152,6 +193,11 @@ export interface ProjectTemplateApplyPlan {
   defaultApplyPossible: boolean;
   entries: readonly ProjectTemplateApplyPlanEntry[];
   summary: ProjectTemplateApplyPlanSummary;
+}
+
+export interface PreparedProjectTemplateApplyPlan {
+  readonly plan: ProjectTemplateApplyPlan;
+  readonly resolvedContents: readonly ProjectTemplateIncomingContent[];
 }
 
 export type ProjectTemplatePolicyActionMap = {

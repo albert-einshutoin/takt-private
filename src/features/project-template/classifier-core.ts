@@ -28,13 +28,13 @@ import {
   requireArray,
   requireRecord,
 } from './validation.js';
+import { MAX_PROJECT_TEMPLATE_YAML_DEPTH } from './yaml-limits.js';
 
 const MAX_CLASSIFIER_CONTENT_BYTES = 1024 * 1024;
 const MAX_ABSOLUTE_PATH_PREFIXES = 8;
 const MAX_ABSOLUTE_PATH_PREFIX_LENGTH = 1024;
 const MAX_ABSOLUTE_PATH_PREFIX_TOTAL = 4096;
 const MAX_YAML_INSPECTION_NODES = 4096;
-const MAX_YAML_INSPECTION_DEPTH = 32;
 const KNOWN_COMMAND_PATTERN =
   /^(?:npm|pnpm|yarn|bun|make|cargo|go|swift|python|ruby|bash|sh|gh|git|curl)(?:\s|$)/i;
 const EXECUTION_KEYS = new Set(['run', 'command', 'script']);
@@ -113,6 +113,15 @@ function classifyPath(relativePath: string): {
       suggestedPolicy: 'merge',
     };
   }
+  if (lower === 'readme.md') {
+    return {
+      classification: 'project-owned',
+      reasonCode: 'PROJECT_CONFIG',
+      // Scaffold is create-if-missing: importing a template must never replace
+      // the target project's existing top-level TAKT documentation.
+      suggestedPolicy: 'scaffold',
+    };
+  }
   if (
     segments[0] === 'workflows'
     && segments.length > 1
@@ -150,7 +159,13 @@ function classifyPath(relativePath: string): {
     };
   }
   if (segments[0] === 'quality-gates' && segments.length > 1) {
-    return { classification: 'project-owned', reasonCode: 'PROJECT_QUALITY_GATE' };
+    return {
+      classification: 'project-owned',
+      reasonCode: 'PROJECT_QUALITY_GATE',
+      // Quality gates are project-specific starting points. Preserve existing
+      // local gates and generate only paths absent from the target.
+      suggestedPolicy: 'scaffold',
+    };
   }
   // Unknown paths never become portable merely because their contents look
   // harmless; a later explicit manifest/review may opt them in.
@@ -186,7 +201,10 @@ function inspectYamlCommands(text: string): {
   const visit = (node: YamlNode | null, depth: number): void => {
     if (node === null || incomplete && visitedNodes > MAX_YAML_INSPECTION_NODES) return;
     visitedNodes += 1;
-    if (visitedNodes > MAX_YAML_INSPECTION_NODES || depth > MAX_YAML_INSPECTION_DEPTH) {
+    if (
+      visitedNodes > MAX_YAML_INSPECTION_NODES
+      || depth > MAX_PROJECT_TEMPLATE_YAML_DEPTH
+    ) {
       incomplete = true;
       return;
     }
