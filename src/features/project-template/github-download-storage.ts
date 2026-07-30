@@ -1311,6 +1311,32 @@ function cleanupConsumedStaging(
   syncDirectory(authority.stagingRoot);
 }
 
+function storageArtifactExists(path: string | undefined): boolean {
+  if (path === undefined) return false;
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
+function classifyMaterializationArtifacts(
+  authority: StagedGithubTemplateDownloadAuthority,
+  artifacts: CachePublicationArtifacts,
+): 'none' | 'staging-only' | 'cache-published' {
+  if (storageArtifactExists(artifacts.finalPath)) {
+    return 'cache-published';
+  }
+  if (
+    storageArtifactExists(artifacts.tempPath)
+    || storageArtifactExists(authority.stagingPath)
+  ) {
+    return 'staging-only';
+  }
+  return 'none';
+}
+
 function syncCacheFileDescriptor(
   fd: number,
   ioSeam: GithubTemplateCacheIoSeam | undefined,
@@ -1335,7 +1361,15 @@ function closeCacheDescriptor(
   kind: 'temporary' | 'final' | 'directory',
   ioSeam: GithubTemplateCacheIoSeam | undefined,
 ): void {
-  ioSeam?.cacheClose?.(fd, kind);
+  try {
+    ioSeam?.cacheClose?.(fd, kind);
+  } catch {
+    throw storageError(
+      'IO_FAILURE',
+      'GitHub template cache close hook failed',
+      'cache-published',
+    );
+  }
   closeSync(fd);
 }
 
@@ -1454,6 +1488,7 @@ function unlinkOwnedCacheTemp(
   path: string,
   expectedDevice: number,
   expectedInode: number,
+  expectedLinks: 1 | 2,
 ): void {
   const stat = lstatSync(path);
   if (
@@ -1461,7 +1496,7 @@ function unlinkOwnedCacheTemp(
     || !stat.isFile()
     || stat.dev !== expectedDevice
     || stat.ino !== expectedInode
-    || (stat.nlink !== 1 && stat.nlink !== 2)
+    || stat.nlink !== expectedLinks
     || !isProjectTemplatePrivateFileMode(stat.mode)
     || realpathSync.native(path) !== path
   ) {
@@ -1471,6 +1506,81 @@ function unlinkOwnedCacheTemp(
     );
   }
   unlinkSync(path);
+}
+
+function requirePublishedTempAlias(
+  tempPath: string,
+  tempFd: number,
+  finalPath: string,
+  expectedDevice: number,
+  expectedInode: number,
+  expectedBytes: number,
+): void {
+  requireOwnedCacheTemp(
+    tempPath,
+    tempFd,
+    expectedDevice,
+    expectedInode,
+    expectedBytes,
+    2,
+  );
+  try {
+    const finalStat = lstatSync(finalPath);
+    if (
+      finalStat.isSymbolicLink()
+      || !finalStat.isFile()
+      || finalStat.dev !== expectedDevice
+      || finalStat.ino !== expectedInode
+      || finalStat.nlink !== 2
+      || finalStat.size !== expectedBytes
+      || !isProjectTemplatePrivateFileMode(finalStat.mode)
+      || realpathSync.native(finalPath) !== finalPath
+    ) throw new Error();
+  } catch {
+    throw storageError(
+      'CACHE_INVALID',
+      'GitHub template cache final alias changed',
+      'staging-only',
+    );
+  }
+}
+
+function runCacheLinkSeam(
+  ioSeam: GithubTemplateCacheIoSeam | undefined,
+  tempPath: string,
+  finalPath: string,
+): void {
+  try {
+    ioSeam?.cacheLink?.(tempPath, finalPath);
+  } catch {
+    throw storageError(
+      'IO_FAILURE',
+      'GitHub template cache link hook failed',
+      'staging-only',
+    );
+  }
+}
+
+function runCacheUnlinkSeam(
+  ioSeam: GithubTemplateCacheIoSeam | undefined,
+  path: string,
+): void {
+  try {
+    ioSeam?.cacheUnlink?.(path);
+  } catch {
+    throw storageError(
+      'IO_FAILURE',
+      'GitHub template cache unlink hook failed',
+      'cache-published',
+    );
+  }
+}
+
+interface CachePublicationArtifacts {
+  cachePublished: boolean;
+  tempPresent: boolean;
+  tempPath?: string;
+  finalPath?: string;
 }
 
 async function publishCacheMiss(
@@ -1484,10 +1594,7 @@ async function publishCacheMiss(
   stagingFd: number,
   authority: StagedGithubTemplateDownloadAuthority,
   ioSeam: GithubTemplateCacheIoSeam | undefined,
-  artifactTracker: {
-    cachePublished: boolean;
-    tempPresent: boolean;
-  },
+  artifactTracker: CachePublicationArtifacts,
 ): Promise<{
   readonly status: 'cache-hit' | 'cache-published';
   readonly verified: Awaited<ReturnType<typeof verifyExistingCacheFinal>>;
@@ -1528,6 +1635,7 @@ async function publishCacheMiss(
     );
     tempExists = true;
     artifactTracker.tempPresent = true;
+    artifactTracker.tempPath = tempPath;
     const created = fstatSync(tempFd);
     tempInode = created.ino;
     if (
@@ -1661,8 +1769,8 @@ async function publishCacheMiss(
       cache.shaRootInode,
     );
     runCachePhase(ioSeam, 'before-cache-link', tempPath);
+    runCacheLinkSeam(ioSeam, tempPath, cachePath);
     try {
-      ioSeam?.cacheLink?.(tempPath, cachePath);
       linkSync(tempPath, cachePath);
       linked = true;
       artifactTracker.cachePublished = true;
@@ -1709,8 +1817,23 @@ async function publishCacheMiss(
     }
 
     runCachePhase(ioSeam, 'before-cache-temp-unlink', tempPath);
-    ioSeam?.cacheUnlink?.(tempPath);
-    unlinkOwnedCacheTemp(tempPath, cache.device, tempInode);
+    if (linked) {
+      requirePublishedTempAlias(
+        tempPath,
+        tempFd,
+        cachePath,
+        cache.device,
+        tempInode,
+        authority.bytes,
+      );
+    }
+    runCacheUnlinkSeam(ioSeam, tempPath);
+    unlinkOwnedCacheTemp(
+      tempPath,
+      cache.device,
+      tempInode,
+      linked ? 2 : 1,
+    );
     tempExists = false;
     artifactTracker.tempPresent = false;
     runCachePhase(
@@ -1752,23 +1875,40 @@ async function publishCacheMiss(
       linked ? 'cache-published' : 'staging-only',
     );
   } finally {
-    if (tempFd !== undefined) {
-      try {
-        closeSync(tempFd);
-      } catch {
-        // Preserve the publication outcome; owned path cleanup follows.
-      }
-    }
     if (tempExists && tempInode !== undefined) {
       try {
-        unlinkOwnedCacheTemp(tempPath, cache.device, tempInode);
-        artifactTracker.tempPresent = false;
-        syncCacheDirectoryDescriptor(cache.shaRootFd, undefined);
+        if (!linked || tempFd !== undefined) {
+          if (linked && tempFd !== undefined) {
+            requirePublishedTempAlias(
+              tempPath,
+              tempFd,
+              cachePath,
+              cache.device,
+              tempInode,
+              authority.bytes,
+            );
+          }
+          unlinkOwnedCacheTemp(
+            tempPath,
+            cache.device,
+            tempInode,
+            linked ? 2 : 1,
+          );
+          artifactTracker.tempPresent = false;
+          syncCacheDirectoryDescriptor(cache.shaRootFd, undefined);
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
           artifactTracker.tempPresent = false;
         }
         // Never unlink a path whose sealed inode authority was lost.
+      }
+    }
+    if (tempFd !== undefined) {
+      try {
+        closeSync(tempFd);
+      } catch {
+        // Preserve the publication outcome after owned path cleanup.
       }
     }
   }
@@ -1790,7 +1930,7 @@ export async function materializeGithubTemplateCache(
   let cacheFinalFd: number | undefined;
   let cacheFinalPath: string | undefined;
   let cacheFinalInode: number | undefined;
-  const publicationArtifacts = {
+  const publicationArtifacts: CachePublicationArtifacts = {
     cachePublished: false,
     tempPresent: false,
   };
@@ -1806,6 +1946,7 @@ export async function materializeGithubTemplateCache(
       cache.shaRoot,
       `${authority.sha256}.taktpack`,
     );
+    publicationArtifacts.finalPath = cachePath;
     let cacheExists = true;
     try {
       lstatSync(cachePath);
@@ -2004,21 +2145,11 @@ export async function materializeGithubTemplateCache(
     }
   }
   if (primaryError !== undefined) {
-    if (
-      isInternalStorageError(primaryError)
-      && primaryError.artifactState !== 'cache-published'
-      && !cacheAvailable
-    ) {
-      let artifactState: 'none' | 'staging-only' = 'staging-only';
-      if (!publicationArtifacts.tempPresent) {
-        try {
-          lstatSync(authority.stagingPath);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            artifactState = 'none';
-          }
-        }
-      }
+    if (isInternalStorageError(primaryError)) {
+      const artifactState = classifyMaterializationArtifacts(
+        authority,
+        publicationArtifacts,
+      );
       if (primaryError.artifactState !== artifactState) {
         primaryError = storageError(
           primaryError.code,
