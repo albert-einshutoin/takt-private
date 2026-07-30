@@ -914,11 +914,24 @@ type PinnedTransportPhase =
   | 'terminal'
   | 'disposed';
 
+type PinnedTransportBodyEventKind =
+  | 'data'
+  | 'end'
+  | 'aborted'
+  | 'error'
+  | 'close';
+
+interface PinnedTransportBodyListenerToken {
+  active: boolean;
+  dispatch?: (event: PinnedTransportBodyEventKind) => void;
+}
+
 interface PinnedTransportBody {
-  readonly response: Readable;
-  readonly pause: (...args: unknown[]) => unknown;
-  readonly resume: (...args: unknown[]) => unknown;
-  readonly destroy: (...args: unknown[]) => unknown;
+  readonly listenerToken: PinnedTransportBodyListenerToken;
+  response?: Readable;
+  pause?: (...args: unknown[]) => unknown;
+  resume?: (...args: unknown[]) => unknown;
+  destroy?: (...args: unknown[]) => unknown;
   responseListeners: ReadonlyArray<
     readonly [event: string, listener: (...args: unknown[]) => void]
   >;
@@ -950,7 +963,8 @@ type PinnedTransportPumpEvent =
   }
   | {
     readonly kind: 'body-event';
-    readonly body: PinnedTransportBody;
+    readonly token: PinnedTransportBodyListenerToken;
+    readonly event: PinnedTransportBodyEventKind;
   };
 
 interface PinnedTransportAuthority {
@@ -970,6 +984,17 @@ const pinnedTransportAuthorities = new WeakMap<
   PinnedTransportAuthority
 >();
 const pinnedTransportFacades = new WeakSet<object>();
+
+function createPinnedBodyListener(
+  token: PinnedTransportBodyListenerToken,
+  event: PinnedTransportBodyEventKind,
+): (...args: unknown[]) => void {
+  return () => {
+    if (!token.active) return;
+    const dispatch = token.dispatch;
+    if (dispatch !== undefined) Reflect.apply(dispatch, undefined, [event]);
+  };
+}
 
 function exactPinnedHandlers(
   value: unknown,
@@ -1093,7 +1118,7 @@ function isPinnedReadable(value: unknown): value is Readable {
   }
   try {
     let current: object | null = value;
-    while (current !== null) {
+    for (let depth = 0; current !== null && depth < 8; depth += 1) {
       if (types.isProxy(current)) return false;
       if (current === Readable.prototype) return true;
       current = Object.getPrototypeOf(current);
@@ -1275,6 +1300,8 @@ export function createProjectTemplateArtifactPinnedTransport(
   };
   const isStopped = (current: PinnedTransportAuthority): boolean =>
     current.phase === 'terminal' || current.phase === 'disposed';
+  const isDisposed = (current: PinnedTransportAuthority): boolean =>
+    current.phase === 'disposed';
   const removeRequestListeners = (
     request: ClientRequest | undefined,
     listeners: PinnedTransportAttempt['requestListeners'],
@@ -1414,40 +1441,71 @@ export function createProjectTemplateArtifactPinnedTransport(
   const detachBody = (
     current: PinnedTransportAuthority,
     expected?: PinnedTransportBody,
-  ): PinnedTransportBody | undefined => {
+  ): Readonly<{
+    response: Readable | undefined;
+    destroy: ((...args: unknown[]) => unknown) | undefined;
+    responseListeners: PinnedTransportBody['responseListeners'];
+    request: ClientRequest | undefined;
+    requestDestroy: ((...args: unknown[]) => unknown) | undefined;
+    requestListeners: PinnedTransportAttempt['requestListeners'];
+  }> | undefined => {
     const body = current.body;
     if (body === undefined || (expected !== undefined && body !== expected)) {
       return undefined;
     }
     current.body = undefined;
-    return body;
-  };
-  const cleanDetachedBody = (body: PinnedTransportBody): boolean => {
-    let succeeded = removeRequestListeners(
-      body.request,
-      body.requestListeners,
-    );
-    for (const [event, listener] of body.responseListeners) {
-      try {
-        EventEmitter.prototype.removeListener.call(
-          body.response,
-          event,
-          listener,
-        );
-      } catch {
-        succeeded = false;
-      }
-    }
-    try {
-      Reflect.apply(body.destroy, body.response, []);
-    } catch {
-      succeeded = false;
-    }
-    if (!destroyRequest(body.request, body.requestDestroy)) succeeded = false;
+    // Revoke the only object captured by externally retainable listeners
+    // before copying or cleaning any event-capable resource.
+    body.listenerToken.active = false;
+    body.listenerToken.dispatch = undefined;
+    const detached = Object.freeze({
+      response: body.response,
+      destroy: body.destroy,
+      responseListeners: Object.freeze([...body.responseListeners]),
+      request: body.request,
+      requestDestroy: body.requestDestroy,
+      requestListeners: Object.freeze([...body.requestListeners]),
+    });
+    body.response = undefined;
+    body.pause = undefined;
+    body.resume = undefined;
+    body.destroy = undefined;
     body.responseListeners = [];
     body.request = undefined;
     body.requestDestroy = undefined;
     body.requestListeners = [];
+    return detached;
+  };
+  const cleanDetachedBody = (
+    body: NonNullable<ReturnType<typeof detachBody>>,
+  ): boolean => {
+    let succeeded = removeRequestListeners(
+      body.request,
+      body.requestListeners,
+    );
+    if (body.response !== undefined) {
+      for (const [event, listener] of body.responseListeners) {
+        try {
+          EventEmitter.prototype.removeListener.call(
+            body.response,
+            event,
+            listener,
+          );
+        } catch {
+          succeeded = false;
+        }
+      }
+    }
+    if (body.response === undefined || body.destroy === undefined) {
+      succeeded = false;
+    } else {
+      try {
+        Reflect.apply(body.destroy, body.response, []);
+      } catch {
+        succeeded = false;
+      }
+    }
+    if (!destroyRequest(body.request, body.requestDestroy)) succeeded = false;
     return succeeded;
   };
   const terminate = (
@@ -1488,6 +1546,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     for (const event of pendingEvents) {
       if (event.kind === 'response') containResponse(event.response);
     }
+    if (isDisposed(authority)) return;
     if (notification !== undefined) {
       invoke(notification);
     }
@@ -1765,6 +1824,7 @@ export function createProjectTemplateArtifactPinnedTransport(
     for (const event of pendingEvents) {
       if (event.kind === 'response') containResponse(event.response);
     }
+    if (isDisposed(current)) return;
     if (!cleaned) {
       invoke('onResponseError');
       return;
@@ -1796,7 +1856,14 @@ export function createProjectTemplateArtifactPinnedTransport(
       terminate(current, 'onInvalidResponse');
       return;
     }
+    const listenerToken: PinnedTransportBodyListenerToken = {
+      active: true,
+    };
+    listenerToken.dispatch = (event) => {
+      enqueue({ kind: 'body-event', token: listenerToken, event });
+    };
     const body: PinnedTransportBody = {
+      listenerToken,
       response,
       pause,
       resume,
@@ -1820,15 +1887,16 @@ export function createProjectTemplateArtifactPinnedTransport(
     ) {
       return;
     }
-    const listeners = [
+    const events = [
       'data',
       'end',
       'aborted',
       'error',
       'close',
-    ].map((event) => [
+    ] as const satisfies readonly PinnedTransportBodyEventKind[];
+    const listeners = events.map((event) => [
       event,
-      () => enqueue({ kind: 'body-event', body }),
+      createPinnedBodyListener(listenerToken, event),
     ] as const);
     for (const [event, listener] of listeners) {
       try {
@@ -1837,10 +1905,6 @@ export function createProjectTemplateArtifactPinnedTransport(
         terminate(current, 'onResponseError');
         return;
       }
-      body.responseListeners = Object.freeze([
-        ...body.responseListeners,
-        [event, listener] as const,
-      ]);
       if (
         current.phase !== 'accepting-body'
         || current.body !== body
@@ -1856,6 +1920,10 @@ export function createProjectTemplateArtifactPinnedTransport(
         }
         return;
       }
+      body.responseListeners = Object.freeze([
+        ...body.responseListeners,
+        [event, listener] as const,
+      ]);
     }
     if (!removeRequestListeners(body.request, body.requestListeners)) {
       terminate(current, 'onResponseError');
