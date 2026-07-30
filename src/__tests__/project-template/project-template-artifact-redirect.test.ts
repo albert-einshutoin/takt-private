@@ -27,6 +27,13 @@ function expectCode(operation: () => unknown, code: string): void {
   expect(String(thrown)).not.toContain('secret');
 }
 
+function consumeRedirect(
+  state: ReturnType<typeof createProjectTemplateArtifactRedirectState>,
+  location: string,
+): void {
+  state.resolve(302, location).consume().dispose();
+}
+
 describe('project-template artifact redirect state F2b-A', () => {
   it('accepts only the canonical api.github.com release asset API base', () => {
     const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
@@ -42,14 +49,28 @@ describe('project-template artifact redirect state F2b-A', () => {
       'https://api.github.com:444/repos/octo/demo/releases/assets/123',
       'https://api.github.com/repos/octo/demo/releases/assets/123/',
       'https://api.github.com/repos/octo/demo/releases/assets/0',
+      'https://api.github.com/repos/octo/demo/releases/assets/9007199254740992',
+      'https://api.github.com/repos/octo/demo/releases/assets/9223372036854775808',
+      `https://api.github.com/repos/octo/demo/releases/assets/${'9'.repeat(256)}`,
       'https://api.github.com/repos/octo/demo/releases/assets/123?secret=1',
       'https://release-assets.githubusercontent.com/x',
+      'https://api.github.com/repos/owner--name/demo/releases/assets/123',
+      'https://api.github.com/repos/owner-/demo/releases/assets/123',
+      'https://api.github.com/repos/octo/./releases/assets/123',
+      'https://api.github.com/repos/octo/../releases/assets/123',
+      'https://api.github.com/repos/octo/demo.git/releases/assets/123',
+      `https://api.github.com/repos/octo/${'r'.repeat(101)}/releases/assets/123`,
     ]) {
       expectCode(
         () => createProjectTemplateArtifactRedirectState(invalid),
         'INVALID_ARGUMENT',
       );
     }
+
+    const maximum = createProjectTemplateArtifactRedirectState(
+      'https://api.github.com/repos/Owner/repo..template/releases/assets/9007199254740991',
+    );
+    maximum.dispose();
   });
 
   it.each([301, 302, 303, 307, 308])(
@@ -116,10 +137,115 @@ describe('project-template artifact redirect state F2b-A', () => {
     'https://OBJECTS.githubusercontent.com/file',
     '//OBJECTS.githubusercontent.com/file',
     'https://%6fbjects.githubusercontent.com/file',
+    'https://@objects.githubusercontent.com/file',
+    '//@objects.githubusercontent.com/file',
+    'https://objects.githubusercontent.com/file#',
+    '/relative#',
   ])('rejects forbidden redirect target %s', (location) => {
     const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
     expectCode(() => state.resolve(302, location), 'REDIRECT_FORBIDDEN');
     state.dispose();
+  });
+
+  it('allows @ and encoded # as path/query data', () => {
+    const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    const grant = state.resolve(302, '/path@name?value=@%23');
+    grant.dispose();
+    state.dispose();
+  });
+
+  it('limits consumed redirect hops to three without spending failures', () => {
+    const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    expectCode(
+      () => state.resolve(200, '/invalid-status'),
+      'INVALID_REDIRECT',
+    );
+    expectCode(
+      () => state.resolve(302, 'https://evil.example/forbidden'),
+      'REDIRECT_FORBIDDEN',
+    );
+    const discarded = state.resolve(302, '/discarded');
+    discarded.dispose();
+
+    consumeRedirect(state, '/one');
+    consumeRedirect(state, '/two');
+    consumeRedirect(state, '/three');
+    expectCode(() => state.resolve(302, '/four'), 'REDIRECT_LIMIT');
+    state.dispose();
+  });
+
+  it('keeps loop rejection distinct and visited identity bounded under replay', () => {
+    const state = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    const add = vi.spyOn(Set.prototype, 'add');
+    const identityAddCount = (): number => add.mock.calls.filter(
+      ([value]) => typeof value === 'string' && value.startsWith('https://'),
+    ).length;
+    for (let attempt = 0; attempt < 1_000; attempt += 1) {
+      expectCode(
+        () => state.resolve(302, ASSET_API_URL),
+        'REDIRECT_LOOP',
+      );
+    }
+    expect(identityAddCount()).toBe(0);
+    consumeRedirect(state, '/one');
+    consumeRedirect(state, '/two');
+    consumeRedirect(state, '/three');
+    expect(identityAddCount()).toBe(3);
+    expectCode(() => state.resolve(302, '/four'), 'REDIRECT_LIMIT');
+    state.dispose();
+  });
+
+  it('uses normalized percent encoding only for loop identity', () => {
+    const pathState = createProjectTemplateArtifactRedirectState(ASSET_API_URL);
+    consumeRedirect(
+      pathState,
+      'https://objects.githubusercontent.com/%66ile',
+    );
+    expectCode(
+      () => pathState.resolve(
+        302,
+        'https://objects.githubusercontent.com/file',
+      ),
+      'REDIRECT_LOOP',
+    );
+    pathState.dispose();
+
+    const queryState = createProjectTemplateArtifactRedirectState(
+      ASSET_API_URL,
+    );
+    consumeRedirect(
+      queryState,
+      'https://objects.githubusercontent.com/file?token=%61',
+    );
+    expectCode(
+      () => queryState.resolve(
+        302,
+        'https://objects.githubusercontent.com/file?token=a',
+      ),
+      'REDIRECT_LOOP',
+    );
+    queryState.dispose();
+
+    const reservedState = createProjectTemplateArtifactRedirectState(
+      ASSET_API_URL,
+    );
+    consumeRedirect(
+      reservedState,
+      'https://objects.githubusercontent.com/folder%2fname?token=%2f',
+    );
+    expectCode(
+      () => reservedState.resolve(
+        302,
+        'https://objects.githubusercontent.com/folder%2Fname?token=%2F',
+      ),
+      'REDIRECT_LOOP',
+    );
+    const distinct = reservedState.resolve(
+      302,
+      'https://objects.githubusercontent.com/folder/name?token=/',
+    );
+    distinct.dispose();
+    reservedState.dispose();
   });
 
   it('resolves relative locations, advances only on consume, and rejects loops', () => {
@@ -199,6 +325,10 @@ describe('project-template artifact DNS validation F2b-A', () => {
     '2001:2::1',
     '2001:db8::1',
     '2002::1',
+    '3ffe::',
+    '3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+    '3fff::',
+    '3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff',
     'fc00::1',
     'fe80::1',
     'ff00::1',
@@ -210,6 +340,19 @@ describe('project-template artifact DNS validation F2b-A', () => {
       }]),
       'DNS_REJECTED',
     );
+  });
+
+  it('keeps addresses just outside the added IPv6 ranges public', () => {
+    expect(validateProjectTemplateArtifactDnsAnswers([
+      {
+        address: '3ffd:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+        family: 6,
+      },
+      {
+        address: '3fff:1000::',
+        family: 6,
+      },
+    ])).toBeUndefined();
   });
 
   it('rejects mixed public/private answers', () => {

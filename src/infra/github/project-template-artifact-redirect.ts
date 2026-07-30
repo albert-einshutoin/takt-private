@@ -3,6 +3,8 @@ import { types } from 'node:util';
 
 const MAX_LOCATION_LENGTH = 8_192;
 const MAX_DNS_ANSWERS = 64;
+const MAX_REDIRECTS = 3;
+const MAX_ASSET_ID = BigInt(Number.MAX_SAFE_INTEGER);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const REDIRECT_HOSTS = new Set([
   'api.github.com',
@@ -11,13 +13,17 @@ const REDIRECT_HOSTS = new Set([
   'github-releases.githubusercontent.com',
 ]);
 const ASSET_API_PATH =
-  /^\/repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/releases\/assets\/[1-9][0-9]*$/;
+  /^\/repos\/([^/]+)\/([^/]+)\/releases\/assets\/([1-9][0-9]*)$/;
+const OWNER_PATTERN =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const REPOSITORY_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
 
 export type ProjectTemplateArtifactRedirectErrorCode =
   | 'INVALID_ARGUMENT'
   | 'INVALID_REDIRECT'
   | 'REDIRECT_FORBIDDEN'
   | 'REDIRECT_LOOP'
+  | 'REDIRECT_LIMIT'
   | 'DNS_REJECTED';
 
 export class ProjectTemplateArtifactRedirectError extends Error {
@@ -52,6 +58,7 @@ interface RedirectStateAuthority {
   visited: Set<string> | undefined;
   pendingGrant: DisposableProjectTemplateArtifactRedirectGrant | undefined;
   children: Set<object> | undefined;
+  redirectCount: number | undefined;
 }
 
 interface RedirectGrantAuthority {
@@ -95,6 +102,7 @@ function redirectError(
     INVALID_REDIRECT: 'Artifact redirect response is invalid',
     REDIRECT_FORBIDDEN: 'Artifact redirect target is forbidden',
     REDIRECT_LOOP: 'Artifact redirect loop was rejected',
+    REDIRECT_LIMIT: 'Artifact redirect limit was exceeded',
     DNS_REJECTED: 'Artifact redirect DNS answers were rejected',
   };
   return Object.freeze(
@@ -129,11 +137,12 @@ function isRawLocationSafe(value: unknown): value is string {
   return true;
 }
 
-function locationHasNonCanonicalAuthorityHost(location: string): boolean {
+function locationHasForbiddenRawAuthority(location: string): boolean {
   const match =
     /^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\/\/([^/?#]*)/.exec(location);
   if (match === null) return false;
   const authority = match[1]!;
+  if (authority.includes('@')) return true;
   const hostAndPort = authority.slice(authority.lastIndexOf('@') + 1);
   if (hostAndPort.startsWith('[')) return true;
   const host = hostAndPort.split(':', 1)[0]!;
@@ -142,7 +151,10 @@ function locationHasNonCanonicalAuthorityHost(location: string): boolean {
 
 function parseAllowedRedirectTarget(base: URL, location: unknown): URL {
   if (!isRawLocationSafe(location)) throw invalidRedirect();
-  if (locationHasNonCanonicalAuthorityHost(location)) {
+  if (
+    location.includes('#')
+    || locationHasForbiddenRawAuthority(location)
+  ) {
     throw forbiddenRedirect();
   }
 
@@ -182,6 +194,7 @@ function parseCanonicalAssetApiUrl(value: unknown): URL {
   } catch {
     throw invalidArgument();
   }
+  const pathMatch = ASSET_API_PATH.exec(parsed.pathname);
   // The first request carries GitHub API authorization. Keeping this entry
   // point narrower than the redirect allowlist prevents future callers from
   // accidentally starting an authenticated request at an asset CDN.
@@ -194,11 +207,45 @@ function parseCanonicalAssetApiUrl(value: unknown): URL {
     || parsed.password !== ''
     || parsed.search !== ''
     || parsed.hash !== ''
-    || !ASSET_API_PATH.test(parsed.pathname)
+    || pathMatch === null
   ) {
     throw invalidArgument();
   }
+  const owner = pathMatch[1]!;
+  const repo = pathMatch[2]!;
+  const assetId = pathMatch[3]!;
+  // Keep this transport boundary aligned with github-source-spec grammar so a
+  // URL cannot bypass the portable repository-coordinate contract.
+  if (
+    !OWNER_PATTERN.test(owner)
+    || owner.includes('--')
+    || !REPOSITORY_PATTERN.test(repo)
+    || repo === '.'
+    || repo === '..'
+    || repo.toLowerCase().endsWith('.git')
+  ) {
+    throw invalidArgument();
+  }
+  try {
+    if (BigInt(assetId) > MAX_ASSET_ID) throw invalidArgument();
+  } catch (error) {
+    if (error instanceof ProjectTemplateArtifactRedirectError) throw error;
+    throw invalidArgument();
+  }
   return parsed;
+}
+
+function canonicalRedirectIdentity(target: URL): string {
+  // Identity normalization is deliberately separate from targetUrl. Signed
+  // GitHub asset URLs must be requested byte-for-byte as WHATWG serialized
+  // them; only loop comparison decodes RFC 3986 unreserved escapes.
+  return target.href.replace(/%([0-9A-Fa-f]{2})/g, (_match, rawHex: string) => {
+    const code = Number.parseInt(rawHex, 16);
+    const character = String.fromCharCode(code);
+    return /^[A-Za-z0-9._~-]$/.test(character)
+      ? character
+      : `%${rawHex.toUpperCase()}`;
+  });
 }
 
 function disposeGrantAuthority(
@@ -251,8 +298,8 @@ function createRedirectGrant(
   owner: DisposableProjectTemplateArtifactRedirectState,
   ownerAuthority: RedirectStateAuthority,
   targetUrl: URL,
+  identity: string,
 ): DisposableProjectTemplateArtifactRedirectGrant {
-  const identity = targetUrl.href;
   const grant = Object.freeze<DisposableProjectTemplateArtifactRedirectGrant>({
     consume(this: DisposableProjectTemplateArtifactRedirectGrant):
     DisposableProjectTemplateArtifactRedirectHop {
@@ -270,6 +317,7 @@ function createRedirectGrant(
         stateAuthority === undefined
         || stateAuthority.pendingGrant !== this
         || stateAuthority.visited === undefined
+        || stateAuthority.redirectCount === undefined
       ) {
         disposeGrantAuthority(this);
         throw invalidArgument();
@@ -278,6 +326,7 @@ function createRedirectGrant(
       const consumedIdentity = authority.identity;
       stateAuthority.currentUrl = consumedTarget;
       stateAuthority.visited.add(consumedIdentity);
+      stateAuthority.redirectCount += 1;
       disposeGrantAuthority(this);
       return createRedirectHop(stateAuthority, consumedTarget);
     },
@@ -308,6 +357,7 @@ export function createProjectTemplateArtifactRedirectState(
         authority === undefined
         || authority.currentUrl === undefined
         || authority.visited === undefined
+        || authority.redirectCount === undefined
         || authority.pendingGrant !== undefined
       ) {
         throw invalidArgument();
@@ -323,10 +373,14 @@ export function createProjectTemplateArtifactRedirectState(
         authority.currentUrl,
         location,
       );
-      if (authority.visited.has(target.href)) {
+      const identity = canonicalRedirectIdentity(target);
+      if (authority.visited.has(identity)) {
         throw redirectError('REDIRECT_LOOP');
       }
-      return createRedirectGrant(this, authority, target);
+      if (authority.redirectCount >= MAX_REDIRECTS) {
+        throw redirectError('REDIRECT_LIMIT');
+      }
+      return createRedirectGrant(this, authority, target, identity);
     },
     dispose(this: DisposableProjectTemplateArtifactRedirectState): void {
       if (!stateFacades.has(this)) throw invalidArgument();
@@ -349,15 +403,17 @@ export function createProjectTemplateArtifactRedirectState(
       authority.visited = undefined;
       authority.pendingGrant = undefined;
       authority.children = undefined;
+      authority.redirectCount = undefined;
       stateAuthorities.delete(this);
     },
   });
   stateFacades.add(state);
   stateAuthorities.set(state, {
     currentUrl: base,
-    visited: new Set([base.href]),
+    visited: new Set([canonicalRedirectIdentity(base)]),
     pendingGrant: undefined,
     children: new Set(),
+    redirectCount: 0,
   });
   return state;
 }
@@ -479,8 +535,13 @@ function isPublicIpv6(bytes: readonly number[]): boolean {
   const first = (bytes[0]! << 8) | bytes[1]!;
   const second = (bytes[2]! << 8) | bytes[3]!;
   const third = (bytes[4]! << 8) | bytes[5]!;
+  // Broad global-unicast allocation does not imply routability. IANA can add
+  // special-purpose exceptions independently, so this denylist and its
+  // boundary tests must be reviewed whenever that registry changes.
   if (
     first === 0x2002
+    || first === 0x3ffe
+    || (first === 0x3fff && (second & 0xf000) === 0)
     || (
       first === 0x2001
       && (
