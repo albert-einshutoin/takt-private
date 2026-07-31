@@ -3,7 +3,6 @@ import { DEFAULT_TAKTPACK_LIMITS } from '../../features/project-template/archive
 import { parseProjectTemplateGithubSourceSpec } from '../../features/project-template/github-source-spec.js';
 import {
   claimResolvedGithubTemplateSourceForDownload,
-  claimResolvedGithubTemplateSourceForReceipt,
   consumeResolvedGithubTemplateSourceReceiptClaim,
   discardResolvedGithubTemplateSourceDownloadClaim,
   GithubTemplateSourceResolutionError,
@@ -121,8 +120,6 @@ describe('resolveGithubTemplateSource', () => {
 
     expect(() => claimResolvedGithubTemplateSourceForDownload(resolved))
       .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
-    expect(() => claimResolvedGithubTemplateSourceForReceipt(resolved))
-      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
     expect(() => discardResolvedGithubTemplateSourceDownloadClaim({
       ...claim,
     })).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
@@ -160,7 +157,10 @@ describe('resolveGithubTemplateSource', () => {
 
   it('rejects invalid receipt claims without inspecting or consuming the real claim', async () => {
     const resolved = await resolveDownloadAuthorityFixture();
-    const receiptClaim = claimResolvedGithubTemplateSourceForReceipt(resolved);
+    const receiptClaim =
+      handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
+        claimResolvedGithubTemplateSourceForDownload(resolved),
+      );
     const trap = vi.fn(() => {
       throw new Error('SECRET_SENTINEL');
     });

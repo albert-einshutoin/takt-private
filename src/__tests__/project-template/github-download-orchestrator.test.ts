@@ -22,6 +22,7 @@ import {
   type GithubTemplateArchiveAssetPort,
 } from '../../features/project-template/github-download-orchestrator.js';
 import * as githubDownloadStorage from '../../features/project-template/github-download-storage.js';
+import * as githubUpdateCheck from '../../features/project-template/github-update-check.js';
 import {
   createProjectTemplateExportPlan,
   parseProjectTemplateGithubSourceSpec,
@@ -51,6 +52,7 @@ function makeRoot(prefix: string): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -188,15 +190,159 @@ function stagingEntries(projectRoot: string): string[] {
 }
 
 describe('GitHub template download orchestrator O1', () => {
+  it('rejects a forged fresh resolver result before asset or cache work', async () => {
+    const fixture = await makeFixture();
+    const materialize = vi.spyOn(
+      githubDownloadStorage,
+      'materializeGithubTemplateCache',
+    );
+    vi.spyOn(
+      githubUpdateCheck,
+      'resolveGithubTemplateSource',
+    ).mockResolvedValue(Object.freeze({
+      ...fixture.advisory,
+    }) as ResolvedGithubTemplateSource);
+
+    await expect(downloadGithubTemplateSource({
+      projectRoot: fixture.projectRoot,
+      source: fixture.source,
+      advisory: fixture.advisory,
+      metadata: fixture.metadata,
+      asset: fixture.asset,
+      cacheRoot: fixture.cacheRoot,
+      authenticator: fixture.authenticator,
+      verifier: fixture.verifier,
+    })).rejects.toMatchObject({ code: 'SOURCE_RESOLUTION_FAILED' });
+
+    expect(fixture.assetCalls).toEqual([]);
+    expect(materialize).not.toHaveBeenCalled();
+    expect(readdirSync(fixture.cacheRoot)).toEqual([]);
+  });
+
+  it.each([
+    'open',
+    'stream',
+    'hash',
+    'size',
+    'cache',
+    'sign',
+  ] as const)(
+    'consumes fresh download authority after %s failure',
+    async (boundary) => {
+      const fixture = await makeFixture();
+      const originalClaim =
+        githubUpdateCheck.claimResolvedGithubTemplateSourceForDownload;
+      let captured:
+        ReturnType<typeof originalClaim> | undefined;
+      vi.spyOn(
+        githubUpdateCheck,
+        'claimResolvedGithubTemplateSourceForDownload',
+      ).mockImplementation((value) => {
+        captured = originalClaim(value);
+        return captured;
+      });
+      let asset = fixture.asset;
+      let authenticator = fixture.authenticator;
+      if (boundary === 'open') {
+        asset = {
+          openReleaseAsset() {
+            throw new Error('SECRET_SENTINEL');
+          },
+        };
+      } else if (boundary === 'stream') {
+        asset = {
+          openReleaseAsset() {
+            return (async function* () {
+              throw new Error('SECRET_SENTINEL');
+            })();
+          },
+        };
+      } else if (boundary === 'hash') {
+        asset = {
+          openReleaseAsset() {
+            const corrupt = fixture.content.slice();
+            corrupt[0] = (corrupt[0] ?? 0) ^ 0xff;
+            return (async function* () {
+              yield corrupt;
+            })();
+          },
+        };
+      } else if (boundary === 'size') {
+        asset = {
+          openReleaseAsset() {
+            return (async function* () {
+              yield fixture.content.subarray(1);
+            })();
+          },
+        };
+      } else if (boundary === 'cache') {
+        vi.spyOn(
+          githubDownloadStorage,
+          'materializeGithubTemplateCache',
+        ).mockRejectedValue(new Error('SECRET_SENTINEL'));
+      } else {
+        authenticator = {
+          async acquireSigningKey() {
+            throw new Error('SECRET_SENTINEL');
+          },
+        };
+      }
+
+      const error = await downloadGithubTemplateSource({
+        projectRoot: fixture.projectRoot,
+        source: fixture.source,
+        advisory: fixture.advisory,
+        metadata: fixture.metadata,
+        asset,
+        cacheRoot: fixture.cacheRoot,
+        authenticator,
+        verifier: fixture.verifier,
+      }).catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).not.toContain('SECRET_SENTINEL');
+      expect(captured).toBeDefined();
+      expect(() =>
+        githubUpdateCheck
+          .handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
+            captured!,
+          )
+      ).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+      vi.restoreAllMocks();
+    },
+  );
+
   it('re-resolves under the download lease, stages, and consumes staging privately', async () => {
     const fixture = await makeFixture();
+    const originalClaim =
+      githubUpdateCheck.claimResolvedGithubTemplateSourceForDownload;
+    const claimed: unknown[] = [];
+    let claimEstablished = false;
+    vi.spyOn(
+      githubUpdateCheck,
+      'claimResolvedGithubTemplateSourceForDownload',
+    ).mockImplementation((value) => {
+      claimed.push(value);
+      claimEstablished = true;
+      return originalClaim(value);
+    });
+    const asset: GithubTemplateArchiveAssetPort = {
+      openReleaseAsset(input) {
+        expect(claimEstablished).toBe(true);
+        return Reflect.apply(
+          fixture.asset.openReleaseAsset,
+          fixture.asset,
+          [input],
+        );
+      },
+    };
 
     const result = await downloadGithubTemplateSource({
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
       metadata: fixture.metadata,
-      asset: fixture.asset,
+      asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
       verifier: fixture.verifier,
@@ -236,6 +382,8 @@ describe('GitHub template download orchestrator O1', () => {
         maxBytes: fixture.content.byteLength,
       },
     ]);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]).not.toBe(fixture.advisory);
     expect(stagingEntries(fixture.projectRoot)).toEqual([]);
     const lease = acquireProjectTemplateMutationLease(
       fixture.projectRoot,

@@ -8,8 +8,9 @@ import {
   type MaterializedGithubTemplateCache,
 } from './github-download-storage.js';
 import {
-  claimResolvedGithubTemplateSourceForReceipt,
   consumeResolvedGithubTemplateSourceReceiptClaim,
+  handoffResolvedGithubTemplateSourceDownloadClaimForReceipt,
+  type ClaimedResolvedGithubTemplateSourceForDownload,
   type ResolvedGithubTemplateSource,
 } from './github-update-check.js';
 import { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
@@ -120,7 +121,7 @@ export interface GithubTemplateDownloadReceiptV1 {
 }
 
 export interface PrepareGithubTemplateDownloadReceiptOptions {
-  readonly resolved: ResolvedGithubTemplateSource;
+  readonly downloadClaim: ClaimedResolvedGithubTemplateSourceForDownload;
   readonly materialized: MaterializedGithubTemplateCache;
   readonly authenticator: GithubTemplateDownloadReceiptAuthenticator;
 }
@@ -210,14 +211,14 @@ function ownDataRecord(
 function snapshotPrepareOptions(
   value: PrepareGithubTemplateDownloadReceiptOptions,
 ): {
-  resolved: unknown;
+  downloadClaim: unknown;
   materialized: unknown;
   authenticator: AuthenticatorSnapshot;
 } {
   try {
     const options = ownDataRecord(
       value,
-      ['resolved', 'materialized', 'authenticator'],
+      ['downloadClaim', 'materialized', 'authenticator'],
     );
     const authenticator = ownDataRecord(
       options['authenticator'],
@@ -227,7 +228,7 @@ function snapshotPrepareOptions(
       throw new Error();
     }
     return {
-      resolved: options['resolved'],
+      downloadClaim: options['downloadClaim'],
       materialized: options['materialized'],
       authenticator: {
         receiver:
@@ -719,14 +720,18 @@ export async function prepareGithubTemplateDownloadReceipt(
 ): Promise<PreparedGithubTemplateDownloadReceipt> {
   const options = snapshotPrepareOptions(value);
   let resolvedClaim:
-    ReturnType<typeof claimResolvedGithubTemplateSourceForReceipt> | undefined;
+    ReturnType<
+      typeof handoffResolvedGithubTemplateSourceDownloadClaimForReceipt
+    > | undefined;
   let materializedClaim:
     ReturnType<typeof claimMaterializedGithubTemplateCacheForReceipt> | undefined;
   try {
     try {
-      resolvedClaim = claimResolvedGithubTemplateSourceForReceipt(
-        options.resolved,
-      );
+      resolvedClaim =
+        handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
+          options.downloadClaim as
+            ClaimedResolvedGithubTemplateSourceForDownload,
+        );
       materializedClaim = claimMaterializedGithubTemplateCacheForReceipt(
         options.materialized,
       );

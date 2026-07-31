@@ -29,7 +29,10 @@ import {
   type ProjectTemplateGithubSourceSpec,
 } from './github-source-spec.js';
 import {
+  claimResolvedGithubTemplateSourceForDownload,
+  discardResolvedGithubTemplateSourceDownloadClaim,
   resolveGithubTemplateSource,
+  type ClaimedResolvedGithubTemplateSourceForDownload,
   type GithubTemplateCurrentSourceEvidence,
   type GithubTemplateSourceMetadataPort,
   type ResolvedGithubTemplateSource,
@@ -697,6 +700,8 @@ export async function downloadGithubTemplateSource(
 
   let lease: ProjectTemplateMutationLease | undefined;
   let staged: StagedGithubTemplateDownload | undefined;
+  let downloadClaim:
+    ClaimedResolvedGithubTemplateSourceForDownload | undefined;
   let failure: GithubTemplateDownloadOrchestratorError | undefined;
   let result: DownloadedGithubTemplateSource | undefined;
   try {
@@ -761,17 +766,26 @@ export async function downloadGithubTemplateSource(
         'GitHub template download lease was lost',
       );
     }
+    try {
+      downloadClaim = claimResolvedGithubTemplateSourceForDownload(fresh);
+    } catch {
+      throw orchestratorError(
+        'SOURCE_RESOLUTION_FAILED',
+        'GitHub template source resolution failed',
+      );
+    }
+    const sealed = downloadClaim.resolved;
     let chunks: AsyncIterable<Uint8Array>;
     try {
       chunks = Reflect.apply(
         snapshot.openReleaseAsset,
         snapshot.assetReceiver,
         [Object.freeze({
-          owner: fresh.owner,
-          repo: fresh.repo,
-          releaseId: fresh.releaseId,
-          assetId: fresh.assetId,
-          maxBytes: fresh.assetSize,
+          owner: sealed.owner,
+          repo: sealed.repo,
+          releaseId: sealed.releaseId,
+          assetId: sealed.assetId,
+          maxBytes: sealed.assetSize,
           ...(snapshot.signal === undefined
             ? {}
             : { signal: snapshot.signal }),
@@ -794,8 +808,8 @@ export async function downloadGithubTemplateSource(
     try {
       staged = await stageGithubTemplateDownload({
         projectRoot: snapshot.projectRoot,
-        expectedBytes: fresh.assetSize,
-        expectedSha256: fresh.sha256,
+        expectedBytes: sealed.assetSize,
+        expectedSha256: sealed.sha256,
         chunks,
         ...(snapshot.signal === undefined
           ? {}
@@ -881,11 +895,16 @@ export async function downloadGithubTemplateSource(
       typeof prepareGithubTemplateDownloadReceipt
     >>;
     try {
-      prepared = await prepareGithubTemplateDownloadReceipt({
-        resolved: fresh,
+      const preparing = prepareGithubTemplateDownloadReceipt({
+        downloadClaim,
         materialized,
         authenticator: snapshot.authenticator,
       });
+      // Receipt preparation synchronously hands this exact claim to its own
+      // finally block before its first signer await. Disarm the download
+      // cleanup here so the same authority never has two cleanup owners.
+      downloadClaim = undefined;
+      prepared = await preparing;
     } catch {
       throw orchestratorError(
         'RECEIPT_FAILED',
@@ -923,15 +942,15 @@ export async function downloadGithubTemplateSource(
     }
     result = Object.freeze({
       status: 'downloaded',
-      commit: fresh.commit,
-      version: fresh.version,
-      sha256: fresh.sha256,
+      commit: sealed.commit,
+      version: sealed.version,
+      sha256: sealed.sha256,
       receiptKey: stored.receiptKey,
       cacheStatus: materialized.status,
       receiptStatus: stored.status,
       artifactState: 'cache-published',
       receiptState: 'receipt-published',
-      bytes: fresh.assetSize,
+      bytes: sealed.assetSize,
       directoryDurability: stored.directoryDurability,
     });
   } catch (error) {
@@ -942,6 +961,34 @@ export async function downloadGithubTemplateSource(
         'GitHub template download failed',
       );
   } finally {
+    if (downloadClaim !== undefined) {
+      // Revoke logical provenance before filesystem and lease cleanup. Even
+      // if either physical cleanup later fails, the checked source can never
+      // be replayed outside the lease that established its identity.
+      try {
+        discardResolvedGithubTemplateSourceDownloadClaim(downloadClaim);
+      } catch {
+        if (failure === undefined) {
+          failure = orchestratorError(
+            'CLEANUP_FAILED',
+            'GitHub template download authority cleanup failed',
+            result?.artifactState,
+            result?.receiptState,
+            undefined,
+            'failed',
+          );
+        } else {
+          failure = orchestratorError(
+            failure.code,
+            failure.message,
+            failure.artifactState,
+            failure.receiptState,
+            failure.releaseState,
+            'failed',
+          );
+        }
+      }
+    }
     if (staged !== undefined) {
       try {
         const discarded = discardStagedGithubTemplateDownload(staged);

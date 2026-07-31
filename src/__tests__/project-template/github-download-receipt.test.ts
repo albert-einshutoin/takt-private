@@ -30,6 +30,7 @@ import {
 } from '../../features/project-template/github-download-storage.js';
 import { parseProjectTemplateGithubSourceSpec } from '../../features/project-template/github-source-spec.js';
 import {
+  claimResolvedGithubTemplateSourceForDownload,
   resolveGithubTemplateSource,
   type GithubTemplateSourceMetadataPort,
 } from '../../features/project-template/github-update-check.js';
@@ -192,7 +193,9 @@ async function createFixture(options: FixtureOptions = {}) {
     staged,
     cacheRoot: realpathSync.native(cacheRoot),
   });
-  return { resolved, materialized };
+  const downloadClaim =
+    claimResolvedGithubTemplateSourceForDownload(resolved);
+  return { downloadClaim, materialized };
 }
 
 function authenticator(keyId = 'receipt-key-1', secret = 'test-secret') {
@@ -377,13 +380,14 @@ describe('GitHub template authenticated download receipt D1', () => {
 
   it('rejects clones and consumes both authorities after signer failure', async () => {
     const cloneFixture = await createFixture();
-    for (const resolved of [
-      { ...cloneFixture.resolved },
-      JSON.parse(JSON.stringify(cloneFixture.resolved)) as typeof cloneFixture.resolved,
-      new Proxy(cloneFixture.resolved, {}),
+    for (const downloadClaim of [
+      { ...cloneFixture.downloadClaim },
+      JSON.parse(JSON.stringify(cloneFixture.downloadClaim)) as
+        typeof cloneFixture.downloadClaim,
+      new Proxy(cloneFixture.downloadClaim, {}),
     ]) {
       await expect(prepareGithubTemplateDownloadReceipt({
-        resolved,
+        downloadClaim,
         materialized: cloneFixture.materialized,
         authenticator: authenticator(),
       })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
@@ -405,7 +409,7 @@ describe('GitHub template authenticated download receipt D1', () => {
           ) as typeof materializedFixture.materialized
           : new Proxy(materializedFixture.materialized, {});
       await expect(prepareGithubTemplateDownloadReceipt({
-        resolved: materializedFixture.resolved,
+        downloadClaim: materializedFixture.downloadClaim,
         materialized,
         authenticator: authenticator(),
       })).rejects.toMatchObject({ code: 'INVALID_AUTHORITY' });
@@ -476,7 +480,7 @@ describe('GitHub template authenticated download receipt D1', () => {
       return value;
     }],
     ['accessor', (value: Record<PropertyKey, unknown>) => {
-      Object.defineProperty(value, 'resolved', {
+      Object.defineProperty(value, 'downloadClaim', {
         get() {
           throw new Error('ghp_receipt_option_secret');
         },

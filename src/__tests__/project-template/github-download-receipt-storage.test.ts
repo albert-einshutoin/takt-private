@@ -42,6 +42,7 @@ import {
 } from '../../features/project-template/github-download-storage.js';
 import { parseProjectTemplateGithubSourceSpec } from '../../features/project-template/github-source-spec.js';
 import {
+  claimResolvedGithubTemplateSourceForDownload,
   resolveGithubTemplateSource,
   type GithubTemplateSourceMetadataPort,
 } from '../../features/project-template/github-update-check.js';
@@ -160,7 +161,8 @@ async function createFixture() {
     cacheRoot: canonicalCacheRoot,
   });
   const prepared = await prepareGithubTemplateDownloadReceipt({
-    resolved,
+    downloadClaim:
+      claimResolvedGithubTemplateSourceForDownload(resolved),
     materialized,
     authenticator: {
       async acquireSigningKey() {

@@ -256,15 +256,6 @@ export function handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
   return createResolvedReceiptClaim(authority);
 }
 
-export function claimResolvedGithubTemplateSourceForReceipt(
-  value: unknown,
-): ClaimedResolvedGithubTemplateSource {
-  const downloadClaim = claimResolvedGithubTemplateSourceForDownload(value);
-  return handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
-    downloadClaim,
-  );
-}
-
 function createResolvedReceiptClaim(
   authority: ResolvedGithubTemplateSourceAuthority,
 ): ClaimedResolvedGithubTemplateSource {
