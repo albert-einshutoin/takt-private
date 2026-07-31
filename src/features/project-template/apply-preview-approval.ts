@@ -7,7 +7,9 @@ import {
 import type { ProjectTemplateApplyPreview } from './apply-preview-types.js';
 import {
   consumeProjectTemplateApprovalRecord,
+  hasProjectTemplateApprovalClaim,
   initializeProjectTemplateApplyStorage,
+  readProjectTemplateApprovalRecord,
   writeProjectTemplateApprovalRecord,
   type ProjectTemplateApplyStorage,
   type ProjectTemplateApplyStorageIo,
@@ -21,6 +23,7 @@ const CAPTURED_CREATE_HASH = createHash;
 const CAPTURED_RANDOM_UUID = randomUUID;
 const CAPTURED_DATE = Date;
 const CAPTURED_DATE_GET_TIME = Date.prototype.getTime;
+const CAPTURED_DATE_PARSE = Date.parse;
 const CAPTURED_DATE_TO_ISO_STRING = Date.prototype.toISOString;
 const CAPTURED_NUMBER_IS_FINITE = Number.isFinite;
 const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
@@ -35,6 +38,9 @@ const CAPTURED_REFLECT_APPLY = Reflect.apply;
 const CAPTURED_REFLECT_OWN_KEYS = Reflect.ownKeys;
 const CAPTURED_REFLECT_RECEIVER = Reflect;
 const CAPTURED_TYPES_IS_PROXY = types.isProxy;
+const CAPTURED_WEAK_MAP_DELETE = WeakMap.prototype.delete;
+const CAPTURED_WEAK_MAP_GET = WeakMap.prototype.get;
+const CAPTURED_WEAK_MAP_HAS = WeakMap.prototype.has;
 const CAPTURED_WEAK_MAP_SET = WeakMap.prototype.set;
 const HASH_SAMPLE = CAPTURED_CREATE_HASH('sha256');
 const CAPTURED_HASH_UPDATE = HASH_SAMPLE.update;
@@ -49,9 +55,8 @@ export interface ProjectTemplateApplyPreviewApprovalEvidence {
 }
 
 interface ProjectTemplateApplyPreviewApprovalAuthority {
-  readonly approvalId: string;
-  readonly nonce: string;
-  readonly projectIdentity: string;
+  state: 'active' | 'consuming' | 'revoking' | 'consumed' | 'revoked';
+  readonly record: ProjectTemplateApplyPreviewApprovalRecord;
 }
 
 interface ProjectTemplateApplyPreviewApprovalRecord {
@@ -163,7 +168,10 @@ function snapshotOptions(value: unknown): ApprovalIssuanceOptionsSnapshot {
   const baselineStrategy = descriptors['baselineStrategy']!.value as unknown;
   const expiresInMs = descriptors['expiresInMs']?.value as unknown
     ?? DEFAULT_APPROVAL_TTL_MS;
-  const now = descriptors['now']?.value as unknown ?? new CAPTURED_DATE();
+  const nowDescriptor = descriptors['now'];
+  const now = nowDescriptor === undefined || nowDescriptor.value === undefined
+    ? new CAPTURED_DATE()
+    : nowDescriptor.value as unknown;
   if (typeof projectRoot !== 'string' || projectRoot.length === 0) {
     invalidIssuance('apply preview approval project root is invalid');
   }
@@ -310,11 +318,7 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
     ) as ProjectTemplateApplyPreviewApprovalEvidence;
     CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_SET, APPROVAL_AUTHORITIES, [
       evidence,
-      CAPTURED_REFLECT_APPLY(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{
-        approvalId,
-        nonce,
-        projectIdentity: identity,
-      }]),
+      { state: 'active', record },
     ]);
     return evidence;
   } catch {
@@ -332,4 +336,402 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
     // issuance boundary. No authority is registered before durable success.
     throw new Error('project template apply preview approval issuance failed');
   }
+}
+
+interface ApprovalOperationSnapshot {
+  readonly storage: ProjectTemplateApplyStorage;
+  readonly preview?: ProjectTemplateApplyPreview;
+  readonly baselineStrategy?: 'conflict' | 'adopt-identical';
+  readonly evidence: unknown;
+  readonly nowMs: number;
+}
+
+function operationNow(value: unknown, provided: boolean): number | undefined {
+  const now = provided ? value : new CAPTURED_DATE();
+  if (
+    typeof now !== 'object'
+    || now === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [now])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [now],
+    ) !== CAPTURED_DATE.prototype
+  ) return undefined;
+  const nowMs = CAPTURED_REFLECT_APPLY(
+    CAPTURED_DATE_GET_TIME,
+    now,
+    [],
+  ) as number;
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_NUMBER_IS_FINITE,
+    CAPTURED_NUMBER_RECEIVER,
+    [nowMs],
+  ) ? nowMs : undefined;
+}
+
+function snapshotOperationOptions(
+  value: unknown,
+  operation: 'consume' | 'revoke',
+): ApprovalOperationSnapshot | undefined {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [value],
+    ) !== CAPTURED_OBJECT_PROTOTYPE
+  ) return undefined;
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as Record<PropertyKey, PropertyDescriptor>;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [descriptors],
+  ) as PropertyKey[];
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    const descriptor = descriptors[key];
+    if (
+      descriptor === undefined
+      || !('value' in descriptor)
+      || (key !== 'storage'
+        && key !== 'evidence'
+        && key !== 'now'
+        && (operation !== 'consume'
+          || (key !== 'preview' && key !== 'baselineStrategy')))
+    ) return undefined;
+  }
+  const storage = descriptors['storage'];
+  const evidence = descriptors['evidence'];
+  if (
+    storage === undefined
+    || !('value' in storage)
+    || evidence === undefined
+    || !('value' in evidence)
+  ) return undefined;
+  const nowDescriptor = descriptors['now'];
+  const nowMs = operationNow(
+    nowDescriptor?.value,
+    nowDescriptor !== undefined && nowDescriptor.value !== undefined,
+  );
+  if (nowMs === undefined) return undefined;
+  if (operation === 'revoke') {
+    if (keys.length < 2 || keys.length > 3) return undefined;
+    return {
+      storage: storage.value as ProjectTemplateApplyStorage,
+      evidence: evidence.value,
+      nowMs,
+    };
+  }
+  const preview = descriptors['preview'];
+  const baseline = descriptors['baselineStrategy'];
+  if (
+    preview === undefined
+    || !('value' in preview)
+    || baseline === undefined
+    || !('value' in baseline)
+    || (baseline.value !== 'conflict' && baseline.value !== 'adopt-identical')
+    || keys.length < 4
+    || keys.length > 5
+  ) return undefined;
+  return {
+    storage: storage.value as ProjectTemplateApplyStorage,
+    preview: preview.value as ProjectTemplateApplyPreview,
+    baselineStrategy: baseline.value,
+    evidence: evidence.value,
+    nowMs,
+  };
+}
+
+function authorityFor(
+  value: unknown,
+): ProjectTemplateApplyPreviewApprovalAuthority | undefined {
+  return typeof value === 'object' && value !== null
+    ? CAPTURED_REFLECT_APPLY(
+      CAPTURED_WEAK_MAP_GET,
+      APPROVAL_AUTHORITIES,
+      [value],
+    ) as ProjectTemplateApplyPreviewApprovalAuthority | undefined
+    : undefined;
+}
+
+export function isProjectTemplateApplyPreviewApprovalEvidence(
+  value: unknown,
+): value is ProjectTemplateApplyPreviewApprovalEvidence {
+  return typeof value === 'object'
+    && value !== null
+    && CAPTURED_REFLECT_APPLY(
+      CAPTURED_WEAK_MAP_HAS,
+      APPROVAL_AUTHORITIES,
+      [value],
+    ) as boolean;
+}
+
+function finishAuthority(
+  evidence: object,
+  authority: ProjectTemplateApplyPreviewApprovalAuthority,
+  state: 'consumed' | 'revoked',
+): void {
+  authority.state = state;
+  CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_DELETE,
+    APPROVAL_AUTHORITIES,
+    [evidence],
+  );
+}
+
+function parseApprovalRecord(
+  value: unknown,
+): ProjectTemplateApplyPreviewApprovalRecord | undefined {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [value],
+    ) !== CAPTURED_OBJECT_PROTOTYPE
+  ) return undefined;
+  const expected = [
+    'schemaVersion', 'approvalId', 'nonce', 'decision', 'context',
+    'projectIdentity', 'previewId', 'contentPlanId',
+    'contentPreconditionToken', 'repertoireDependencyPlanId',
+    'repertoireDependencyPreconditionToken', 'baselineStrategy',
+    'reviewSurfaceSha256', 'issuedAt', 'expiresAt',
+  ];
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as Record<PropertyKey, PropertyDescriptor>;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [descriptors],
+  ) as PropertyKey[];
+  if (keys.length !== expected.length) return undefined;
+  for (let index = 0; index < expected.length; index += 1) {
+    const descriptor = descriptors[expected[index]!];
+    if (descriptor === undefined || !('value' in descriptor)) return undefined;
+  }
+  for (let index = 0; index < keys.length; index += 1) {
+    let known = false;
+    for (let cursor = 0; cursor < expected.length; cursor += 1) {
+      if (keys[index] === expected[cursor]) known = true;
+    }
+    if (!known) return undefined;
+  }
+  return value as ProjectTemplateApplyPreviewApprovalRecord;
+}
+
+function recordMatches(options: {
+  record: ProjectTemplateApplyPreviewApprovalRecord;
+  authority: ProjectTemplateApplyPreviewApprovalAuthority;
+  storage: ProjectTemplateApplyStorage;
+  preview: ProjectTemplateApplyPreview;
+  baselineStrategy: 'conflict' | 'adopt-identical';
+  nowMs: number;
+}): boolean {
+  const expected = options.authority.record;
+  const issuedAt = CAPTURED_REFLECT_APPLY(
+    CAPTURED_DATE_PARSE,
+    CAPTURED_DATE,
+    [options.record.issuedAt],
+  ) as number;
+  const expiresAt = CAPTURED_REFLECT_APPLY(
+    CAPTURED_DATE_PARSE,
+    CAPTURED_DATE,
+    [options.record.expiresAt],
+  ) as number;
+  return options.record.schemaVersion === '1.0'
+    && options.record.approvalId === expected.approvalId
+    && options.record.nonce === expected.nonce
+    && options.record.decision === 'approved'
+    && options.record.context === APPROVAL_CONTEXT
+    && options.record.projectIdentity === expected.projectIdentity
+    && options.record.projectIdentity === projectIdentity(options.storage)
+    && options.record.previewId === expected.previewId
+    && options.record.previewId === options.preview.previewId
+    && options.record.contentPlanId === expected.contentPlanId
+    && options.record.contentPlanId === options.preview.bindings.contentPlanId
+    && options.record.contentPreconditionToken === expected.contentPreconditionToken
+    && options.record.contentPreconditionToken
+      === options.preview.bindings.contentPreconditionToken
+    && options.record.repertoireDependencyPlanId
+      === expected.repertoireDependencyPlanId
+    && options.record.repertoireDependencyPlanId
+      === options.preview.bindings.repertoireDependencyPlanId
+    && options.record.repertoireDependencyPreconditionToken
+      === expected.repertoireDependencyPreconditionToken
+    && options.record.repertoireDependencyPreconditionToken
+      === options.preview.bindings.repertoireDependencyPreconditionToken
+    && options.record.baselineStrategy === expected.baselineStrategy
+    && options.record.baselineStrategy === options.baselineStrategy
+    && options.record.reviewSurfaceSha256 === expected.reviewSurfaceSha256
+    && options.record.reviewSurfaceSha256
+      === projectTemplateApplyPreviewReviewSurfaceSha256(options.preview)
+    && options.record.issuedAt === expected.issuedAt
+    && options.record.expiresAt === expected.expiresAt
+    && CAPTURED_REFLECT_APPLY(
+      CAPTURED_NUMBER_IS_FINITE,
+      CAPTURED_NUMBER_RECEIVER,
+      [issuedAt],
+    )
+    && CAPTURED_REFLECT_APPLY(
+      CAPTURED_NUMBER_IS_FINITE,
+      CAPTURED_NUMBER_RECEIVER,
+      [expiresAt],
+    )
+    && issuedAt < expiresAt
+    && issuedAt <= options.nowMs
+    && options.nowMs < expiresAt;
+}
+
+function dispositionClaim(options: {
+  authority: ProjectTemplateApplyPreviewApprovalAuthority;
+  disposition: 'consumed' | 'revoked';
+  claimedAt: string;
+}): Record<string, string> {
+  const record = options.authority.record;
+  return {
+    schemaVersion: '1.0',
+    approvalId: record.approvalId,
+    nonce: record.nonce,
+    context: APPROVAL_CONTEXT,
+    projectIdentity: record.projectIdentity,
+    previewId: record.previewId,
+    contentPlanId: record.contentPlanId,
+    repertoireDependencyPlanId: record.repertoireDependencyPlanId,
+    disposition: options.disposition,
+    claimedAt: options.claimedAt,
+  };
+}
+
+function operationTimestamp(nowMs: number): string {
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_DATE_TO_ISO_STRING,
+    new CAPTURED_DATE(nowMs),
+    [],
+  ) as string;
+}
+
+async function consumeReserved(options: {
+  storage: ProjectTemplateApplyStorage;
+  preview: ProjectTemplateApplyPreview;
+  baselineStrategy: 'conflict' | 'adopt-identical';
+  evidence: object;
+  authority: ProjectTemplateApplyPreviewApprovalAuthority;
+  nowMs: number;
+}): Promise<boolean> {
+  try {
+    if (
+      options.authority.record.projectIdentity !== projectIdentity(options.storage)
+      || await hasProjectTemplateApprovalClaim({
+        storage: options.storage,
+        approvalId: options.authority.record.approvalId,
+      })
+    ) return false;
+    const value = await readProjectTemplateApprovalRecord({
+      storage: options.storage,
+      approvalId: options.authority.record.approvalId,
+    });
+    const record = parseApprovalRecord(value);
+    if (record === undefined || !recordMatches({ ...options, record })) return false;
+    await consumeProjectTemplateApprovalRecord({
+      storage: options.storage,
+      approvalId: record.approvalId,
+      claim: dispositionClaim({
+        authority: options.authority,
+        disposition: 'consumed',
+        claimedAt: operationTimestamp(options.nowMs),
+      }),
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    finishAuthority(options.evidence, options.authority, 'consumed');
+  }
+}
+
+export function consumeProjectTemplateApplyPreviewApproval(
+  value: unknown,
+): Promise<boolean> {
+  const options = snapshotOperationOptions(value, 'consume');
+  if (options === undefined) return Promise.resolve(false);
+  const authority = authorityFor(options.evidence);
+  if (authority === undefined || authority.state !== 'active') {
+    return Promise.resolve(false);
+  }
+  let preview: ProjectTemplateApplyPreview;
+  try {
+    preview = assertProjectTemplateApplyPreview(options.preview);
+  } catch {
+    return Promise.resolve(false);
+  }
+  authority.state = 'consuming';
+  return consumeReserved({
+    storage: options.storage,
+    preview,
+    baselineStrategy: options.baselineStrategy!,
+    evidence: options.evidence as object,
+    authority,
+    nowMs: options.nowMs,
+  });
+}
+
+async function revokeReserved(options: {
+  storage: ProjectTemplateApplyStorage;
+  evidence: object;
+  authority: ProjectTemplateApplyPreviewApprovalAuthority;
+  nowMs: number;
+}): Promise<boolean> {
+  try {
+    if (
+      options.authority.record.projectIdentity !== projectIdentity(options.storage)
+      || await hasProjectTemplateApprovalClaim({
+        storage: options.storage,
+        approvalId: options.authority.record.approvalId,
+      })
+    ) return false;
+    await consumeProjectTemplateApprovalRecord({
+      storage: options.storage,
+      approvalId: options.authority.record.approvalId,
+      claim: dispositionClaim({
+        authority: options.authority,
+        disposition: 'revoked',
+        claimedAt: operationTimestamp(options.nowMs),
+      }),
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    finishAuthority(options.evidence, options.authority, 'revoked');
+  }
+}
+
+export function revokeProjectTemplateApplyPreviewApproval(
+  value: unknown,
+): Promise<boolean> {
+  const options = snapshotOperationOptions(value, 'revoke');
+  if (options === undefined) return Promise.resolve(false);
+  const authority = authorityFor(options.evidence);
+  if (authority === undefined || authority.state !== 'active') {
+    return Promise.resolve(false);
+  }
+  authority.state = 'revoking';
+  return revokeReserved({
+    storage: options.storage,
+    evidence: options.evidence as object,
+    authority,
+    nowMs: options.nowMs,
+  });
 }

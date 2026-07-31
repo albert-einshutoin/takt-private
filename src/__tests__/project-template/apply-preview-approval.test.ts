@@ -8,6 +8,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,7 +16,10 @@ import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  consumeProjectTemplateApplyPreviewApproval,
+  isProjectTemplateApplyPreviewApprovalEvidence,
   issueTrustedProjectTemplateApplyPreviewApproval,
+  revokeProjectTemplateApplyPreviewApproval,
 } from '../../features/project-template/apply-preview-approval.js';
 import {
   isProjectTemplateApplyApprovalEvidence,
@@ -31,6 +35,7 @@ import {
   renderProjectTemplateApplyPreviewJson,
 } from '../../features/project-template/apply-preview.js';
 import {
+  consumeProjectTemplateApprovalRecord,
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
   type ProjectTemplateApplyStorageIo,
@@ -613,5 +618,498 @@ describe('project template apply preview approval issuance G6.1', () => {
       )).filter((name) => name.endsWith('.json'));
       expect(records).toHaveLength(2);
     }
+  });
+});
+
+describe('project template revocable preview approval authority G6.2', () => {
+  it('consumes once and durably records a token-free disposition claim', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const recordPath = join(
+      storage.controlRoot,
+      'approvals',
+      `${evidence.approvalId}.json`,
+    );
+    const issuedRecord = readFileSync(recordPath);
+
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(evidence)).toBe(true);
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence,
+    })).resolves.toBe(true);
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(evidence)).toBe(false);
+    writeFileSync(recordPath, issuedRecord, { mode: 0o600 });
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence,
+    })).resolves.toBe(false);
+    await expect(revokeProjectTemplateApplyPreviewApproval({
+      storage,
+      evidence,
+    })).resolves.toBe(false);
+    const claim = readFileSync(join(
+      storage.controlRoot,
+      'approval-claims',
+      `${evidence.approvalId}.json`,
+    ), 'utf8');
+    expect(JSON.parse(claim)).toEqual({
+      schemaVersion: '1.0',
+      approvalId: evidence.approvalId,
+      nonce: expect.stringMatching(/^[a-f0-9-]{36}$/),
+      context: 'project-template-apply-preview-review',
+      projectIdentity: expect.stringMatching(/^[a-f0-9]{64}$/),
+      disposition: 'consumed',
+      previewId: value.previewId,
+      contentPlanId: value.bindings.contentPlanId,
+      repertoireDependencyPlanId: value.bindings.repertoireDependencyPlanId,
+      claimedAt: expect.any(String),
+    });
+    expect(claim).not.toContain('preconditionToken');
+  });
+
+  it('revokes an active authority even when its approval record is missing', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    unlinkSync(join(
+      storage.controlRoot,
+      'approvals',
+      `${evidence.approvalId}.json`,
+    ));
+
+    await expect(revokeProjectTemplateApplyPreviewApproval({
+      storage,
+      evidence,
+    })).resolves.toBe(true);
+    const claim = JSON.parse(readFileSync(join(
+      storage.controlRoot,
+      'approval-claims',
+      `${evidence.approvalId}.json`,
+    ), 'utf8')) as Record<string, unknown>;
+    expect(claim).toEqual({
+      schemaVersion: '1.0',
+      approvalId: evidence.approvalId,
+      nonce: expect.stringMatching(/^[a-f0-9-]{36}$/),
+      context: 'project-template-apply-preview-review',
+      projectIdentity: expect.stringMatching(/^[a-f0-9]{64}$/),
+      previewId: value.previewId,
+      contentPlanId: value.bindings.contentPlanId,
+      repertoireDependencyPlanId: value.bindings.repertoireDependencyPlanId,
+      disposition: 'revoked',
+      claimedAt: expect.any(String),
+    });
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(evidence)).toBe(false);
+  });
+
+  it('accepts a fresh process-local preview with identical sealed bindings', async () => {
+    const projectRoot = makeRepo();
+    const issuedPreview = preview();
+    const freshPreview = preview();
+    expect(freshPreview).not.toBe(issuedPreview);
+    expect(freshPreview.previewId).toBe(issuedPreview.previewId);
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: issuedPreview,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: freshPreview,
+      baselineStrategy: 'conflict',
+      evidence,
+    })).resolves.toBe(true);
+  });
+
+  it('rejects cloned and hostile evidence without invoking its hooks', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const get = vi.fn();
+    const accessor = {};
+    Object.defineProperty(accessor, 'approvalId', { get });
+    for (const forged of [
+      { ...evidence },
+      new Proxy({}, { get }),
+      accessor,
+      runInNewContext('({ schemaVersion: "1.0", approvalId: "approval-x" })'),
+    ]) {
+      expect(isProjectTemplateApplyPreviewApprovalEvidence(forged)).toBe(false);
+      await expect(consumeProjectTemplateApplyPreviewApproval({
+        storage,
+        preview: value,
+        baselineStrategy: 'conflict',
+        evidence: forged,
+      })).resolves.toBe(false);
+      await expect(revokeProjectTemplateApplyPreviewApproval({
+        storage,
+        evidence: forged,
+      })).resolves.toBe(false);
+    }
+    expect(get).not.toHaveBeenCalled();
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(evidence)).toBe(true);
+  });
+
+  it('requires preview membership before reservation without invoking hooks', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const get = vi.fn();
+    const accessor = {};
+    Object.defineProperty(accessor, 'previewId', { get });
+    for (const forged of [
+      { ...value },
+      new Proxy({}, { get }),
+      accessor,
+      runInNewContext('({ schemaVersion: "1.0" })'),
+    ]) {
+      await expect(consumeProjectTemplateApplyPreviewApproval({
+        storage,
+        preview: forged,
+        baselineStrategy: 'conflict',
+        evidence,
+      })).resolves.toBe(false);
+    }
+    expect(get).not.toHaveBeenCalled();
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(evidence)).toBe(true);
+    await expect(revokeProjectTemplateApplyPreviewApproval({
+      storage,
+      evidence,
+    })).resolves.toBe(true);
+  });
+
+  it('rejects non-exact operation DTOs without invoking accessors', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const get = vi.fn();
+    const accessor = { preview: value, baselineStrategy: 'conflict', evidence };
+    Object.defineProperty(accessor, 'storage', { enumerable: true, get });
+    for (const options of [
+      accessor,
+      new Proxy({}, { get }),
+      runInNewContext('({ storage: {}, evidence: {} })'),
+      { storage, preview: value, baselineStrategy: 'conflict', evidence, extra: true },
+      { storage, preview: value, baselineStrategy: 'conflict', evidence, now: null },
+    ]) {
+      await expect(consumeProjectTemplateApplyPreviewApproval(options))
+        .resolves.toBe(false);
+    }
+    expect(get).not.toHaveBeenCalled();
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(evidence)).toBe(true);
+    await expect(revokeProjectTemplateApplyPreviewApproval({ storage, evidence }))
+      .resolves.toBe(true);
+  });
+
+  it.each([
+    ['schemaVersion', '2.0'],
+    ['approvalId', 'approval-foreign'],
+    ['nonce', '00000000-0000-0000-0000-000000000000'],
+    ['nonce', undefined],
+    ['decision', 'rejected'],
+    ['context', 'project-template-apply-review'],
+    ['projectIdentity', 'f'.repeat(64)],
+    ['previewId', 'f'.repeat(64)],
+    ['contentPlanId', 'f'.repeat(64)],
+    ['contentPreconditionToken', 'f'.repeat(64)],
+    ['repertoireDependencyPlanId', 'f'.repeat(64)],
+    ['repertoireDependencyPreconditionToken', 'f'.repeat(64)],
+    ['baselineStrategy', 'adopt-identical'],
+    ['reviewSurfaceSha256', 'f'.repeat(64)],
+    ['issuedAt', 'not-a-time'],
+    ['expiresAt', '2026-08-01T00:00:00.000Z'],
+    ['extraField', 'unexpected'],
+  ] as const)('rejects a record with tampered %s', async (field, replacement) => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+      now: new Date('2026-08-01T00:00:00.000Z'),
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const recordPath = join(
+      storage.controlRoot,
+      'approvals',
+      `${evidence.approvalId}.json`,
+    );
+    const record = JSON.parse(readFileSync(recordPath, 'utf8')) as Record<string, unknown>;
+    record[field] = replacement;
+    writeFileSync(recordPath, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence,
+      now: new Date('2026-08-01T00:01:00.000Z'),
+    })).resolves.toBe(false);
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(evidence)).toBe(false);
+  });
+
+  it('rejects exact expiry boundary, cross-project use, and another preview', async () => {
+    const issuedAt = new Date('2026-08-01T00:00:00.000Z');
+    const value = preview();
+
+    const expiryRoot = makeRepo();
+    const expired = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot: expiryRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+      now: issuedAt,
+    });
+    const expiryStorage = await initializeProjectTemplateApplyStorage({ repoPath: expiryRoot });
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage: expiryStorage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence: expired,
+      now: new Date('2026-08-01T00:05:00.000Z'),
+    })).resolves.toBe(false);
+
+    const sourceRoot = makeRepo();
+    const crossProject = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot: sourceRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const otherStorage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage: otherStorage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence: crossProject,
+    })).resolves.toBe(false);
+
+    const mismatchRoot = makeRepo();
+    const mismatched = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot: mismatchRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const mismatchStorage = await initializeProjectTemplateApplyStorage({ repoPath: mismatchRoot });
+    const otherPreview = preview({
+      inspection: false,
+      local: 'same',
+      incoming: 'next',
+    });
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage: mismatchStorage,
+      preview: otherPreview,
+      baselineStrategy: 'conflict',
+      evidence: mismatched,
+    })).resolves.toBe(false);
+  });
+
+  it('reserves authority synchronously across consume and revoke races', async () => {
+    const value = preview();
+    const consumeRoot = makeRepo();
+    const consumeEvidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot: consumeRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const consumeStorage = await initializeProjectTemplateApplyStorage({ repoPath: consumeRoot });
+    const doubleConsume = await Promise.all([
+      consumeProjectTemplateApplyPreviewApproval({
+        storage: consumeStorage,
+        preview: value,
+        baselineStrategy: 'conflict',
+        evidence: consumeEvidence,
+      }),
+      consumeProjectTemplateApplyPreviewApproval({
+        storage: consumeStorage,
+        preview: value,
+        baselineStrategy: 'conflict',
+        evidence: consumeEvidence,
+      }),
+    ]);
+    expect(doubleConsume.filter(Boolean)).toHaveLength(1);
+
+    const raceRoot = makeRepo();
+    const raceEvidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot: raceRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const raceStorage = await initializeProjectTemplateApplyStorage({ repoPath: raceRoot });
+    const consumeRevoke = await Promise.all([
+      consumeProjectTemplateApplyPreviewApproval({
+        storage: raceStorage,
+        preview: value,
+        baselineStrategy: 'conflict',
+        evidence: raceEvidence,
+      }),
+      revokeProjectTemplateApplyPreviewApproval({
+        storage: raceStorage,
+        evidence: raceEvidence,
+      }),
+    ]);
+    expect(consumeRevoke.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('checks a preexisting burn claim before reading the approval record', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    await consumeProjectTemplateApprovalRecord({
+      storage,
+      approvalId: evidence.approvalId,
+      claim: {
+        schemaVersion: '1.0',
+        approvalId: evidence.approvalId,
+        context: 'project-template-apply-preview-review',
+        state: 'burned',
+        burnedAt: new Date().toISOString(),
+      },
+    });
+    let approvalReads = 0;
+    const io = createProjectTemplateApplyStorageIo({
+      before: (operation, path) => {
+        if (operation === 'read' && path.includes('/approvals/')) {
+          approvalReads += 1;
+          throw new Error('approval record must not be read after burn');
+        }
+      },
+    });
+    const checkedStorage = { ...storage, io };
+    writeFileSync(join(
+      storage.controlRoot,
+      'approvals',
+      `${evidence.approvalId}.json`,
+    ), 'not-json', { mode: 0o600 });
+
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage: checkedStorage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence,
+    })).resolves.toBe(false);
+    expect(approvalReads).toBe(0);
+  });
+
+  it.each([
+    ['write', 'after'],
+    ['chmod', 'before'],
+    ['file-fsync', 'before'],
+    ['directory-fsync', 'before'],
+  ] as const)('never retries authority after claim %s uncertainty', async (
+    faultOperation,
+    faultTiming,
+  ) => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    let injected = false;
+    const io = createProjectTemplateApplyStorageIo({
+      [faultTiming]: (
+        operation: ProjectTemplateApplyStorageIoOperation,
+        path: string,
+      ) => {
+        if (
+          !injected
+          && operation === faultOperation
+          && (
+            path.includes('/approval-claims/')
+            || path.endsWith('/approval-claims')
+          )
+        ) {
+          injected = true;
+          throw new Error(`private claim fault ${projectRoot} token=secret`);
+        }
+      },
+    });
+    const faultStorage = { ...storage, io };
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage: faultStorage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence,
+    })).resolves.toBe(false);
+    expect(injected).toBe(true);
+    await expect(revokeProjectTemplateApplyPreviewApproval({
+      storage,
+      evidence,
+    })).resolves.toBe(false);
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(evidence)).toBe(false);
+  });
+
+  it('snapshots consume time before awaiting claim storage', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const issuedAt = new Date('2026-08-01T00:00:00.000Z');
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+      now: issuedAt,
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const baseIo = storage.io;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gatedIo: ProjectTemplateApplyStorageIo = {
+      ...baseIo,
+      lstat: async (path) => {
+        if (
+          path.includes('/approval-claims/')
+          && path.endsWith(`${evidence.approvalId}.json`)
+        ) await gate;
+        return await baseIo.lstat(path);
+      },
+    };
+    const now = new Date('2026-08-01T00:01:00.000Z');
+    const pending = consumeProjectTemplateApplyPreviewApproval({
+      storage: { ...storage, io: gatedIo },
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence,
+      now,
+    });
+    now.setTime(Date.parse('2026-08-01T00:06:00.000Z'));
+    release();
+    await expect(pending).resolves.toBe(true);
   });
 });
