@@ -30,6 +30,7 @@ import {
   listWorkflowEntries,
   loadWorkflowByIdentifier,
 } from '../infra/config/loaders/workflowLoader.js';
+import { loadPersonaPromptFromPath } from '../infra/config/loaders/agentLoader.js';
 
 const SAMPLE_WORKFLOW = `name: coordinated-workflow
 description: coordinated workflow
@@ -71,6 +72,44 @@ describe('workflow repertoire read coordination', () => {
     return path;
   }
 
+  function createProjectWorkflowWithScopedResources(): void {
+    const workflowDir = join(projectDir, '.takt', 'workflows');
+    const packageDir = join(configDir, 'repertoire', '@owner', 'repo');
+    mkdirSync(workflowDir, { recursive: true });
+    mkdirSync(join(packageDir, 'facets', 'instructions'), { recursive: true });
+    mkdirSync(join(packageDir, 'facets', 'personas'), { recursive: true });
+    mkdirSync(join(packageDir, 'provider-options'), { recursive: true });
+    writeFileSync(join(packageDir, 'facets', 'instructions', 'review.md'), 'Use approved repertoire instructions.');
+    writeFileSync(join(packageDir, 'facets', 'personas', 'reviewer.md'), 'You review changes.');
+    writeFileSync(join(packageDir, 'provider-options', 'safe.yaml'), 'codex:\n  network_access: false\n');
+    writeFileSync(join(workflowDir, 'scoped-resources.yaml'), `name: scoped-resources
+workflow_config:
+  provider_options:
+    extends: "@owner/repo/safe"
+initial_step: review
+steps:
+  - name: review
+    persona: "@owner/repo/reviewer"
+    instruction: "@owner/repo/review"
+`);
+  }
+
+  function createRepertoireWorkflowWithPartial(): string {
+    const packageDir = join(configDir, 'repertoire', '@owner', 'repo');
+    const workflowsDir = join(packageDir, 'workflows');
+    const partialsDir = join(packageDir, 'facets', 'partials', 'instructions');
+    mkdirSync(workflowsDir, { recursive: true });
+    mkdirSync(partialsDir, { recursive: true });
+    writeFileSync(join(partialsDir, 'shared.md'), 'Approved shared partial.');
+    writeFileSync(join(workflowsDir, 'partial.yaml'), `name: partial-workflow
+initial_step: review
+steps:
+  - name: review
+    instruction: "Before {partial:shared} After"
+`);
+    return join(partialsDir, 'shared.md');
+  }
+
   it('blocks list and direct scope reads behind a writer, then succeeds after release', async () => {
     createRepertoireWorkflow();
     const writer = await acquireRepertoireCoordinationLease({
@@ -92,8 +131,84 @@ describe('workflow repertoire read coordination', () => {
     expect(loadWorkflowByIdentifier('@owner/repo/review', projectDir)?.name).toBe('coordinated-workflow');
   });
 
+  it('blocks project workflow facet, persona, and provider reads behind a writer', async () => {
+    createProjectWorkflowWithScopedResources();
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+    });
+    try {
+      expect(() => loadWorkflowByIdentifier('scoped-resources', projectDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+    } finally {
+      writer.release();
+    }
+
+    const workflow = loadWorkflowByIdentifier('scoped-resources', projectDir);
+    expect(workflow?.steps[0]?.instruction).toBe('Use approved repertoire instructions.');
+    expect(workflow?.steps[0]?.personaPath).toBe(
+      join(configDir, 'repertoire', '@owner', 'repo', 'facets', 'personas', 'reviewer.md'),
+    );
+    expect(workflow?.providerOptions).toEqual({ codex: { networkAccess: false } });
+  });
+
+  it('reads a package instruction partial only under the outer workflow permit', () => {
+    createRepertoireWorkflowWithPartial();
+    const workflow = loadWorkflowByIdentifier('@owner/repo/partial', projectDir);
+    expect(workflow?.steps[0]?.instruction).toBe('Before Approved shared partial. After');
+  });
+
+  it('blocks runtime repertoire persona reads behind a writer and succeeds after release', async () => {
+    createProjectWorkflowWithScopedResources();
+    const personaPath = join(configDir, 'repertoire', '@owner', 'repo', 'facets', 'personas', 'reviewer.md');
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+    });
+    try {
+      expect(() => loadPersonaPromptFromPath(personaPath, projectDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+    } finally {
+      writer.release();
+    }
+    expect(loadPersonaPromptFromPath(personaPath, projectDir)).toBe('You review changes.');
+  });
+
+  it.each([
+    ['facet', 'facets/instructions/review.md'],
+    ['persona', 'facets/personas/reviewer.md'],
+    ['provider options', 'provider-options/safe.yaml'],
+  ])('rejects a symlinked scoped %s resource', (_kind, relativePath) => {
+    createProjectWorkflowWithScopedResources();
+    const resourcePath = join(configDir, 'repertoire', '@owner', 'repo', relativePath);
+    const outsidePath = join(projectDir, `outside-${relativePath.replaceAll('/', '-')}`);
+    writeFileSync(outsidePath, 'outside');
+    rmSync(resourcePath);
+    symlinkSync(outsidePath, resourcePath);
+
+    expect(() => loadWorkflowByIdentifier('scoped-resources', projectDir)).toThrow(
+      expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
+    );
+  });
+
+  it('rejects a hard-linked scoped facet instead of parsing aliased bytes', () => {
+    createProjectWorkflowWithScopedResources();
+    const resourcePath = join(configDir, 'repertoire', '@owner', 'repo', 'facets', 'instructions', 'review.md');
+    const outsidePath = join(projectDir, 'outside-facet.md');
+    writeFileSync(outsidePath, 'outside');
+    rmSync(resourcePath);
+    linkSync(outsidePath, resourcePath);
+
+    expect(() => loadWorkflowByIdentifier('scoped-resources', projectDir)).toThrow(
+      expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
+    );
+  });
+
   it('honors a writer held by another process for workflow discovery', async () => {
     createRepertoireWorkflow();
+    createProjectWorkflowWithScopedResources();
     const readyPath = join(configDir, 'child.ready');
     const releasePath = join(configDir, 'child.release');
     const vitestEntry = fileURLToPath(new URL('../../node_modules/vitest/vitest.mjs', import.meta.url));
@@ -117,6 +232,9 @@ describe('workflow repertoire read coordination', () => {
         expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
       );
       expect(() => loadWorkflowByIdentifier('@owner/repo/review', projectDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+      expect(() => loadWorkflowByIdentifier('scoped-resources', projectDir)).toThrow(
         expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
       );
       writeFileSync(releasePath, 'release\n', { flag: 'wx', mode: 0o600 });
