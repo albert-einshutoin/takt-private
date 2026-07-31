@@ -41,6 +41,7 @@ type ReviewValue =
 interface PreviewSeal {
   readonly previewId: string;
   readonly canonicalBody: string;
+  readonly reviewSurfaceSha256: string;
   readonly human: string;
   readonly json: string;
 }
@@ -65,6 +66,8 @@ interface ContentReviewDto {
 }
 
 const PREVIEW_ID_DOMAIN = 'takt.project-template.apply-preview.v1\u0000';
+const PREVIEW_REVIEW_DOMAIN =
+  'takt.project-template.apply-preview-review.v1\u0000';
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_ARRAY_RECEIVER = Array;
 const CAPTURED_JSON_RECEIVER = JSON;
@@ -230,10 +233,10 @@ function canonicalJson(value: ReviewValue): string {
   return `${json}}`;
 }
 
-function hashPreviewBody(canonicalBody: string): string {
+function hashDomainBody(domain: string, canonicalBody: string): string {
   const hash = CAPTURED_CREATE_HASH('sha256');
   CAPTURED_REFLECT_APPLY(CAPTURED_HASH_UPDATE, hash, [
-    PREVIEW_ID_DOMAIN + canonicalBody,
+    domain + canonicalBody,
     'utf8',
   ]);
   return CAPTURED_REFLECT_APPLY(
@@ -241,6 +244,10 @@ function hashPreviewBody(canonicalBody: string): string {
     hash,
     ['hex'],
   ) as string;
+}
+
+function hashPreviewBody(canonicalBody: string): string {
+  return hashDomainBody(PREVIEW_ID_DOMAIN, canonicalBody);
 }
 
 function contentReview(plan: ProjectTemplateApplyPlan): ContentReviewDto {
@@ -542,9 +549,28 @@ export function createProjectTemplateApplyPreview(
   );
   CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_SET, PREVIEW_SEALS, [
     preview,
-    freeze({ previewId, canonicalBody, human, json }),
+    freeze({
+      previewId,
+      canonicalBody,
+      reviewSurfaceSha256: hashDomainBody(PREVIEW_REVIEW_DOMAIN, json),
+      human,
+      json,
+    }),
   ]);
   return preview;
+}
+
+/** Internal approval binding over the exact canonical surface shown to users. */
+export function projectTemplateApplyPreviewReviewSurfaceSha256(
+  value: ProjectTemplateApplyPreview,
+): string {
+  const preview = assertProjectTemplateApplyPreview(value);
+  const seal = CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_GET,
+    PREVIEW_SEALS,
+    [preview],
+  ) as PreviewSeal;
+  return seal.reviewSurfaceSha256;
 }
 
 /** Rejects clones and deserialized review DTOs without traversing them. */
