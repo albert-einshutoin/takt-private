@@ -79,6 +79,7 @@ function makeHandlers(): ProjectTemplateGithubApiRequestHandlers {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   https.request.mockReset();
 });
