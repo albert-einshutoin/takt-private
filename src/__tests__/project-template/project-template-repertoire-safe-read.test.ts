@@ -1,5 +1,6 @@
 import {
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -13,6 +14,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createProjectTemplateRepertoireSafeReadContext,
+  ProjectTemplateRepertoireSafeReadError,
   readProjectTemplateRepertoireDirectory,
   readProjectTemplateRepertoireFile,
   type ProjectTemplateRepertoireSafeReadPhase,
@@ -31,6 +33,47 @@ afterEach(() => {
 });
 
 describe('project template repertoire safe read G3.1', () => {
+  it('normalizes hostile runtime error codes without prototype setters', () => {
+    const original = Object.getOwnPropertyDescriptor(
+      ProjectTemplateRepertoireSafeReadError.prototype,
+      'code',
+    );
+    let calls = 0;
+    let value: ProjectTemplateRepertoireSafeReadError;
+    try {
+      Object.defineProperty(
+        ProjectTemplateRepertoireSafeReadError.prototype,
+        'code',
+        {
+          configurable: true,
+          set() {
+            calls += 1;
+          },
+        },
+      );
+      value = new ProjectTemplateRepertoireSafeReadError({
+        toString() {
+          throw new Error('must not coerce');
+        },
+      } as never);
+    } finally {
+      if (original === undefined) {
+        Reflect.deleteProperty(
+          ProjectTemplateRepertoireSafeReadError.prototype,
+          'code',
+        );
+      } else {
+        Object.defineProperty(
+          ProjectTemplateRepertoireSafeReadError.prototype,
+          'code',
+          original,
+        );
+      }
+    }
+    expect(calls).toBe(0);
+    expect(value!.code).toBe('INVALID_ARGUMENT');
+  });
+
   it('returns bounded private bytes and a relative identity witness', () => {
     const root = makeRoot();
     mkdirSync(join(root, 'workflows'));
@@ -214,5 +257,149 @@ describe('project template repertoire safe read G3.1', () => {
       'lock.yaml',
       hostile as never,
     )).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+  });
+
+  it('does not resolve mutable WeakMap methods for context authority', () => {
+    const root = makeRoot();
+    writeFileSync(join(root, 'lock.yaml'), 'secret-outside-context');
+    const legitimate = createProjectTemplateRepertoireSafeReadContext(root);
+    const forged = {};
+    const originalGet = WeakMap.prototype.get;
+    const originalHas = WeakMap.prototype.has;
+    const originalSet = WeakMap.prototype.set;
+    let calls = 0;
+    let thrown: unknown;
+    try {
+      WeakMap.prototype.get = function poisonedGet(key: object) {
+        calls += 1;
+        return Reflect.apply(originalGet, this, [
+          key === forged ? legitimate : key,
+        ]);
+      };
+      WeakMap.prototype.has = function poisonedHas() {
+        calls += 1;
+        return true;
+      };
+      WeakMap.prototype.set = function poisonedSet() {
+        calls += 1;
+        return this;
+      };
+      try {
+        readProjectTemplateRepertoireFile(
+          forged as never,
+          'lock.yaml',
+          'lock',
+        );
+      } catch (error) {
+        thrown = error;
+      }
+    } finally {
+      WeakMap.prototype.get = originalGet;
+      WeakMap.prototype.has = originalHas;
+      WeakMap.prototype.set = originalSet;
+    }
+    expect(calls).toBe(0);
+    expect(thrown).toEqual(expect.objectContaining({
+      code: 'INVALID_CONTEXT',
+    }));
+  });
+
+  it.each(['before-close', 'after-close'] as const)(
+    'revalidates a file around the late %s seam',
+    (attackPhase) => {
+      const root = makeRoot();
+      writeFileSync(join(root, 'lock.yaml'), 'before');
+      writeFileSync(join(root, 'replacement.yaml'), 'after');
+      const context = createProjectTemplateRepertoireSafeReadContext(
+        root,
+        (relativePath, phase) => {
+          if (relativePath === 'lock.yaml' && phase === attackPhase) {
+            renameSync(
+              join(root, 'replacement.yaml'),
+              join(root, 'lock.yaml'),
+            );
+          }
+        },
+      );
+      expect(() => readProjectTemplateRepertoireFile(
+        context,
+        'lock.yaml',
+        'lock',
+      )).toThrow(expect.objectContaining({
+        code: 'CHANGED_DURING_READ',
+      }));
+    },
+  );
+
+  it.each(['before-close', 'after-close'] as const)(
+    'revalidates a directory around the late %s seam',
+    (attackPhase) => {
+      const root = makeRoot();
+      mkdirSync(join(root, 'workflows'));
+      mkdirSync(join(root, 'replacement'));
+      writeFileSync(join(root, 'workflows', 'before.yaml'), 'before');
+      writeFileSync(join(root, 'replacement', 'after.yaml'), 'after');
+      const context = createProjectTemplateRepertoireSafeReadContext(
+        root,
+        (relativePath, phase) => {
+          if (relativePath === 'workflows' && phase === attackPhase) {
+            renameSync(join(root, 'workflows'), join(root, 'original'));
+            renameSync(join(root, 'replacement'), join(root, 'workflows'));
+          }
+        },
+      );
+      expect(() => readProjectTemplateRepertoireDirectory(
+        context,
+        'workflows',
+      )).toThrow(expect.objectContaining({
+        code: 'CHANGED_DURING_READ',
+      }));
+    },
+  );
+
+  it('does not call mutable Stats type predicates or leak their errors', () => {
+    const root = makeRoot();
+    writeFileSync(join(root, 'lock.yaml'), 'safe');
+    const statsPrototype = Object.getPrototypeOf(lstatSync(root)) as {
+      isDirectory: () => boolean;
+      isFile: () => boolean;
+      isSymbolicLink: () => boolean;
+    };
+    const originals = {
+      isDirectory: statsPrototype.isDirectory,
+      isFile: statsPrototype.isFile,
+      isSymbolicLink: statsPrototype.isSymbolicLink,
+    };
+    let calls = 0;
+    const poison = () => {
+      calls += 1;
+      throw new Error(`leaked ${root}`);
+    };
+    try {
+      statsPrototype.isDirectory = poison;
+      statsPrototype.isFile = poison;
+      statsPrototype.isSymbolicLink = poison;
+      const context = createProjectTemplateRepertoireSafeReadContext(root);
+      expect(readProjectTemplateRepertoireFile(
+        context,
+        'lock.yaml',
+        'lock',
+      ).content.toString()).toBe('safe');
+    } finally {
+      statsPrototype.isDirectory = originals.isDirectory;
+      statsPrototype.isFile = originals.isFile;
+      statsPrototype.isSymbolicLink = originals.isSymbolicLink;
+    }
+    expect(calls).toBe(0);
+  });
+
+  it('rejects Windows-reserved names returned by directory enumeration', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, 'providers'));
+    writeFileSync(join(root, 'providers', 'CON.yaml'), '');
+    expect(() => readProjectTemplateRepertoireDirectory(
+      createProjectTemplateRepertoireSafeReadContext(root),
+      'providers',
+    )).toThrow(expect.objectContaining({ code: 'UNSAFE_ENTRY' }));
   });
 });
