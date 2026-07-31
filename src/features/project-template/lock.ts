@@ -17,6 +17,23 @@ import {
   validatePathIdentities,
 } from './validation.js';
 
+const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+
+function append<T>(values: T[], value: T): void {
+  CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_DEFINE_PROPERTY,
+    CAPTURED_OBJECT_RECEIVER,
+    [values, `${values.length}`, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    }],
+  );
+}
+
 function parseLockEntry(value: unknown, index: number): TemplateLockEntry {
   const field = `lock.entries[${index}]`;
   const entry = requireRecord(value, field);
@@ -43,7 +60,10 @@ export function parseTemplateLock(value: unknown): TemplateLockV1 {
   if (capabilities === undefined) {
     throw new ProjectTemplateValidationError('INVALID_LOCK', 'lock.capabilities is required', 'lock.capabilities');
   }
-  const entries = rawEntries.map(parseLockEntry);
+  const entries: TemplateLockEntry[] = [];
+  for (let index = 0; index < rawEntries.length; index += 1) {
+    append(entries, parseLockEntry(rawEntries[index], index));
+  }
   validatePathIdentities(entries, 'lock.entries');
   validateDeclaredCapabilities(entries, capabilities, 'lock.entries.capabilities');
   return {

@@ -3,7 +3,9 @@ import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import {
   calculateProjectTemplateManifestSha256,
+  validateManifestLockPair,
 } from '../../features/project-template/binding.js';
+import { ProjectTemplateValidationError } from '../../features/project-template/errors.js';
 import {
   parseProjectTemplateManifest,
   serializeProjectTemplateManifest,
@@ -28,6 +30,20 @@ function manifest(entrySha = 'a'.repeat(64)) {
       sha256: entrySha,
       capabilities: ['executable'],
     }],
+  };
+}
+
+function lockFor(value: ReturnType<typeof manifest>) {
+  return {
+    schemaVersion: '1.0',
+    manifestSha256: calculateProjectTemplateManifestSha256(value),
+    packVersion: value.packVersion,
+    source: { ...value.source },
+    capabilities: [...value.capabilities],
+    entries: value.entries.map((entry) => ({
+      ...entry,
+      capabilities: [...entry.capabilities],
+    })),
   };
 }
 
@@ -150,6 +166,112 @@ describe('project template manifest composition binding hardening', () => {
       accessor,
       runInNewContext('({ schemaVersion: "1.0" })'),
     ]) expect(() => calculateProjectTemplateManifestSha256(value)).toThrow();
+    expect(proxyHook).not.toHaveBeenCalled();
+    expect(accessorHook).not.toHaveBeenCalled();
+  });
+
+  it('compares every source and capability field under poisoned hooks', () => {
+    const base = manifest();
+    base.capabilities.push('github-write');
+    base.entries[0]!.mode = '0644';
+    const validLock = lockFor(base);
+    const mismatchLocks = [
+      { ...validLock, source: { ...validLock.source, commit: 'b'.repeat(40) } },
+      { ...validLock, source: { ...validLock.source, ref: 'v1.2.4' } },
+      {
+        ...validLock,
+        source: {
+          kind: 'github',
+          uri: 'https://github.com/example/another-template',
+          ref: validLock.source.ref,
+          commit: validLock.source.commit,
+        },
+      },
+      {
+        ...validLock,
+        source: {
+          kind: 'git',
+          uri: 'https://git.example.com/project/template.git',
+          ref: validLock.source.ref,
+          commit: validLock.source.commit,
+        },
+      },
+      { ...validLock, capabilities: ['executable'] },
+      {
+        ...validLock,
+        entries: [{ ...validLock.entries[0]!, capabilities: [] }],
+      },
+    ];
+    const expectedFields = [
+      'source', 'source', 'source', 'source',
+      'capabilities', 'entries[0].capabilities',
+    ];
+    const hookTargets = [
+      [JSON, 'stringify'],
+      [Array.prototype, 'map'],
+      [Array.prototype, Symbol.iterator],
+      [Object, 'entries'],
+      [Object, 'values'],
+      [Object, 'fromEntries'],
+    ].map(([receiver, key]) => ({
+      descriptor: Object.getOwnPropertyDescriptor(receiver, key as PropertyKey)!,
+      key: key as PropertyKey,
+      receiver,
+    }));
+    let calls = 0;
+    let validError: unknown;
+    const actualFields: string[] = [];
+    try {
+      for (let index = 0; index < hookTargets.length; index += 1) {
+        const item = hookTargets[index]!;
+        Object.defineProperty(item.receiver, item.key, {
+          ...item.descriptor,
+          value() {
+            calls += 1;
+            throw new Error('poisoned manifest lock comparison hook');
+          },
+        });
+      }
+      try {
+        validateManifestLockPair(base, validLock);
+      } catch (error) {
+        validError = error;
+      }
+      for (let index = 0; index < mismatchLocks.length; index += 1) {
+        try {
+          validateManifestLockPair(base, mismatchLocks[index]);
+        } catch (error) {
+          if (error instanceof ProjectTemplateValidationError) {
+            actualFields.push(error.field ?? '');
+          }
+        }
+      }
+    } finally {
+      for (let index = hookTargets.length - 1; index >= 0; index -= 1) {
+        const item = hookTargets[index]!;
+        Object.defineProperty(item.receiver, item.key, item.descriptor);
+      }
+    }
+    expect(validError).toBeUndefined();
+    expect(calls).toBe(0);
+    expect(actualFields).toEqual(expectedFields);
+  });
+
+  it('rejects hostile lock shapes without invoking their hooks', () => {
+    const base = manifest();
+    const validLock = lockFor(base);
+    const proxyHook = vi.fn();
+    const accessorHook = vi.fn();
+    const accessor = { ...validLock } as Record<string, unknown>;
+    Object.defineProperty(accessor, 'packVersion', {
+      enumerable: true,
+      get: accessorHook,
+    });
+    for (const value of [
+      new Proxy({}, { get: proxyHook, ownKeys: proxyHook }),
+      accessor,
+      runInNewContext('({ schemaVersion: "1.0" })'),
+    ]) expect(() => validateManifestLockPair(base, value)).toThrow();
     expect(proxyHook).not.toHaveBeenCalled();
     expect(accessorHook).not.toHaveBeenCalled();
   });

@@ -31,8 +31,28 @@ function assertLockMatch(condition: boolean, field: string): void {
   }
 }
 
-function canonicalCapabilities(value: readonly string[] | undefined): string {
-  return JSON.stringify(value ?? []);
+function capabilitiesMatch(
+  lockCapabilities: readonly string[],
+  manifestCapabilities: readonly string[] | undefined,
+): boolean {
+  const expected = manifestCapabilities ?? [];
+  if (lockCapabilities.length !== expected.length) return false;
+  for (let index = 0; index < lockCapabilities.length; index += 1) {
+    if (lockCapabilities[index] !== expected[index]) return false;
+  }
+  return true;
+}
+
+function sourcesMatch(
+  lock: TemplateLockV1['source'],
+  manifest: ProjectTemplateManifestV1['source'],
+): boolean {
+  // Source identity is fixed-schema evidence. Explicit comparisons keep
+  // toJSON or serializer hooks from changing which repository/ref was bound.
+  return lock.kind === manifest.kind
+    && lock.uri === manifest.uri
+    && lock.ref === manifest.ref
+    && lock.commit === manifest.commit;
 }
 
 /**
@@ -44,8 +64,11 @@ export function validateManifestLockPair(manifestValue: unknown, lockValue: unkn
   const manifest: ProjectTemplateManifestV1 = parseProjectTemplateManifest(manifestValue);
   const lock: TemplateLockV1 = parseTemplateLock(lockValue);
   assertLockMatch(lock.packVersion === manifest.packVersion, 'packVersion');
-  assertLockMatch(JSON.stringify(lock.source) === JSON.stringify(manifest.source), 'source');
-  assertLockMatch(canonicalCapabilities(lock.capabilities) === canonicalCapabilities(manifest.capabilities), 'capabilities');
+  assertLockMatch(sourcesMatch(lock.source, manifest.source), 'source');
+  assertLockMatch(
+    capabilitiesMatch(lock.capabilities, manifest.capabilities),
+    'capabilities',
+  );
   assertLockMatch(lock.entries.length === manifest.entries.length, 'entries.length');
   for (let index = 0; index < manifest.entries.length; index += 1) {
     const manifestEntry = manifest.entries[index]!;
@@ -55,7 +78,7 @@ export function validateManifestLockPair(manifestValue: unknown, lockValue: unkn
     assertLockMatch(lockEntry.mode === manifestEntry.mode, `entries[${index}].mode`);
     assertLockMatch(lockEntry.sha256 === manifestEntry.sha256, `entries[${index}].sha256`);
     assertLockMatch(
-      canonicalCapabilities(lockEntry.capabilities) === canonicalCapabilities(manifestEntry.capabilities),
+      capabilitiesMatch(lockEntry.capabilities, manifestEntry.capabilities),
       `entries[${index}].capabilities`,
     );
   }
