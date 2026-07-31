@@ -13,10 +13,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   lstatSync,
-  mkdirSync,
   readdirSync,
   realpathSync,
-  renameSync,
   rmSync,
   rmdirSync,
 } from 'node:fs';
@@ -34,10 +32,8 @@ vi.mock('node:fs', () => ({
     isDirectory: () => true,
     isSymbolicLink: () => false,
   })),
-  mkdirSync: vi.fn(),
   readdirSync: vi.fn().mockReturnValue(['unknown-file']),
   realpathSync: vi.fn((path: string) => path),
-  renameSync: vi.fn(),
   rmSync: vi.fn(),
   rmdirSync: vi.fn(),
 }));
@@ -46,10 +42,12 @@ const {
   mockAcquireCoordinationLease,
   mockReleaseCoordinationLease,
   mockCaptureDirectoryTreeProof,
+  mockDetachToMaintenance,
 } = vi.hoisted(() => ({
   mockAcquireCoordinationLease: vi.fn(),
   mockReleaseCoordinationLease: vi.fn(),
   mockCaptureDirectoryTreeProof: vi.fn(),
+  mockDetachToMaintenance: vi.fn(),
 }));
 
 vi.mock('../../features/repertoire/coordination-lease.js', () => ({
@@ -64,6 +62,10 @@ vi.mock('../../features/repertoire/filesystem-proof.js', () => ({
 vi.mock('../../features/repertoire/remove.js', () => ({
   findScopeReferences: vi.fn().mockReturnValue([]),
   shouldRemoveOwnerDir: vi.fn().mockReturnValue(false),
+}));
+
+vi.mock('../../features/repertoire/maintenance-transaction.js', () => ({
+  detachToMaintenance: mockDetachToMaintenance,
 }));
 
 vi.mock('../../infra/config/paths.js', () => ({
@@ -106,14 +108,13 @@ import { success } from '../../shared/ui/index.js';
 describe('repertoireRemoveCommand — scan configuration', () => {
   beforeEach(() => {
     vi.mocked(rmSync).mockReset();
-    vi.mocked(mkdirSync).mockReset();
-    vi.mocked(renameSync).mockReset();
     vi.mocked(readdirSync).mockReset().mockImplementation((path) => (
       String(path).includes('.remove-') ? ['package.quarantined'] : ['unknown-file']
     ) as never);
     vi.mocked(rmdirSync).mockReset();
     vi.mocked(lstatSync).mockReset();
     mockAcquireCoordinationLease.mockReset();
+    mockDetachToMaintenance.mockReset();
     mockReleaseCoordinationLease.mockReset();
     vi.mocked(success).mockClear();
     vi.mocked(findScopeReferences).mockClear();
@@ -267,15 +268,12 @@ describe('repertoireRemoveCommand — scan configuration', () => {
       globalConfigDir: '/home/user/.takt',
       mode: 'write',
     });
-    expect(renameSync).toHaveBeenCalledWith(
-      '/home/user/.takt/repertoire/@owner/repo',
-      expect.stringMatching(/\.remove-[0-9a-f]{64}\/package\.quarantined$/),
-    );
-    expect(vi.mocked(rmSync)).toHaveBeenCalledWith(
-      expect.stringMatching(/\.remove-[0-9a-f]{64}$/),
-      { recursive: true, force: true },
-    );
-    expect(vi.mocked(rmSync).mock.invocationCallOrder.at(-1))
+    expect(mockDetachToMaintenance).toHaveBeenCalledWith(expect.objectContaining({
+      globalConfigDir: '/home/user/.takt',
+      sourceDir: '/home/user/.takt/repertoire/@owner/repo',
+      kind: 'payload',
+    }));
+    expect(mockDetachToMaintenance.mock.invocationCallOrder.at(-1))
       .toBeLessThan(mockReleaseCoordinationLease.mock.invocationCallOrder[0]!);
   });
 
@@ -321,7 +319,7 @@ describe('repertoireRemoveCommand — scan configuration', () => {
 
   it('releases the writer when deletion throws', async () => {
     vi.mocked(confirm).mockResolvedValue(true);
-    vi.mocked(rmSync).mockImplementationOnce(() => {
+    mockDetachToMaintenance.mockImplementationOnce(() => {
       throw new Error('delete failed');
     });
 
@@ -339,7 +337,7 @@ describe('repertoireRemoveCommand — scan configuration', () => {
     await expect(repertoireRemoveCommand('@owner/repo'))
       .rejects.toThrow('reference read failed');
 
-    expect(renameSync).not.toHaveBeenCalled();
+    expect(mockDetachToMaintenance).not.toHaveBeenCalled();
     expect(rmSync).not.toHaveBeenCalled();
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
@@ -355,17 +353,12 @@ describe('repertoireRemoveCommand — scan configuration', () => {
     expect(rmdirSync).not.toHaveBeenCalled();
   });
 
-  it('preserves quarantine when a foreign entry appears before recursive removal', async () => {
+  it('preserves the maintenance payload when detach cannot be proven', async () => {
     vi.mocked(confirm).mockResolvedValue(true);
-    let quarantineReads = 0;
-    vi.mocked(readdirSync).mockImplementation((path) => {
-      if (String(path).includes('.remove-')) {
-        quarantineReads += 1;
-        return quarantineReads === 1
-          ? ['package.quarantined'] as never
-          : ['package.quarantined', 'foreign'] as never;
-      }
-      return ['unknown-file'] as never;
+    mockDetachToMaintenance.mockImplementationOnce(() => {
+      throw Object.assign(new Error('Repertoire package recovery is required'), {
+        code: 'RECOVERY_REQUIRED',
+      });
     });
 
     await expect(repertoireRemoveCommand('@owner/repo'))
