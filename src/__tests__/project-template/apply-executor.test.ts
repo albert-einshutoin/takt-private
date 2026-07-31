@@ -50,6 +50,9 @@ import {
   readProjectTemplateMergeBaseline,
   writeProjectTemplateMergeBaseline,
 } from '../../features/project-template/merge-baseline-store.js';
+import {
+  PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+} from '../../features/project-template/repertoire-dependency-lock.js';
 
 const roots: string[] = [];
 const source = {
@@ -816,6 +819,10 @@ describe('project template atomic apply executor', () => {
       'approval-claims',
       `${approvalEvidence.approvalId}.json`,
     ))).toBe(true);
+    expect(existsSync(join(
+      root,
+      PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+    ))).toBe(false);
   });
 
   it('rejects same-plan replay after rollback even when the issued record is restored', async () => {

@@ -22,8 +22,11 @@ import {
   revokeProjectTemplateApplyPreviewApproval,
 } from '../../features/project-template/apply-preview-approval.js';
 import {
+  consumeProjectTemplateApplyApprovalEvidence,
   isProjectTemplateApplyApprovalEvidence,
+  issueTrustedProjectTemplateApplyApproval,
 } from '../../features/project-template/apply-approval.js';
+import { applyProjectTemplatePlan } from '../../features/project-template/apply-executor.js';
 import {
   createProjectTemplateApplyPlan,
 } from '../../features/project-template/apply-plan.js';
@@ -171,6 +174,42 @@ function preview(options: Parameters<typeof contentInput>[0] = {
       contentPlan.incomingManifestSha256,
     ),
   });
+}
+
+function legacyContentReviewFixture() {
+  const path = 'hooks/install.sh';
+  const content = '#!/bin/sh\necho approved\n';
+  const incomingManifest = {
+    schemaVersion: '1.0' as const,
+    packVersion: '2.0.0',
+    takt: { minVersion: '0.48.0' },
+    source,
+    capabilities: ['executable' as const],
+    entries: [{
+      path,
+      policy: 'managed' as const,
+      mode: '0755' as const,
+      sha256: sha256(content),
+      capabilities: ['executable' as const],
+    }],
+  };
+  const incomingContents = [{ path, content: Buffer.from(content) }];
+  const incomingInspection = {
+    archiveSha256: 'e'.repeat(64),
+    manifestSha256: calculateProjectTemplateManifestSha256(incomingManifest),
+    currentTaktVersion: '0.48.0',
+    compatibilityStatus: 'compatible' as const,
+  };
+  const plan = createProjectTemplateApplyPlan({
+    incomingManifest,
+    localEntries: [],
+    targetRootState: 'directory',
+    missingPathTracking: { [path]: 'untracked' },
+    incomingContents,
+    incomingInspection,
+    baselineStrategy: 'adopt-identical',
+  });
+  return { plan, incomingManifest, incomingContents, incomingInspection };
 }
 
 afterEach(() => {
@@ -1350,5 +1389,98 @@ describe('project template revocable preview approval authority G6.2', () => {
       baselineStrategy: 'conflict',
       evidence,
     })).resolves.toBe(false);
+  });
+});
+
+describe('project template legacy and preview approval isolation G6.3', () => {
+  it('does not elevate content-only legacy approval into companion-lock authority', async () => {
+    const projectRoot = makeRepo();
+    const { plan: contentPlan } = legacyContentReviewFixture();
+    const legacyEvidence = await issueTrustedProjectTemplateApplyApproval({
+      projectRoot,
+      plan: contentPlan,
+      baselineStrategy: 'adopt-identical',
+      decision: 'approved',
+    });
+    const value = preview();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const legacyRecord = JSON.parse(readFileSync(join(
+      storage.controlRoot,
+      'approvals',
+      `${legacyEvidence.approvalId}.json`,
+    ), 'utf8')) as Record<string, unknown>;
+
+    expect(legacyRecord['context']).toBe('project-template-apply-review');
+    expect(legacyRecord).toHaveProperty('planId');
+    expect(legacyRecord).not.toHaveProperty('repertoireDependencyPlanId');
+    expect(isProjectTemplateApplyPreviewApprovalEvidence(legacyEvidence)).toBe(false);
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence: legacyEvidence,
+    })).resolves.toBe(false);
+    expect(existsSync(join(
+      storage.controlRoot,
+      'approval-claims',
+      `${legacyEvidence.approvalId}.json`,
+    ))).toBe(false);
+    await expect(consumeProjectTemplateApplyApprovalEvidence({
+      storage,
+      plan: contentPlan,
+      baselineStrategy: 'adopt-identical',
+      evidence: legacyEvidence,
+    })).resolves.toBe(true);
+  });
+
+  it('rejects preview approval at the legacy consumer and executor without burning it', async () => {
+    const projectRoot = makeRepo();
+    const fixture = legacyContentReviewFixture();
+    const value = preview();
+    const previewEvidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const previewRecord = JSON.parse(readFileSync(join(
+      storage.controlRoot,
+      'approvals',
+      `${previewEvidence.approvalId}.json`,
+    ), 'utf8')) as Record<string, unknown>;
+
+    expect(previewRecord['context']).toBe('project-template-apply-preview-review');
+    expect(previewRecord).toHaveProperty('repertoireDependencyPlanId');
+    expect(previewRecord).not.toHaveProperty('planId');
+    expect(isProjectTemplateApplyApprovalEvidence(previewEvidence)).toBe(false);
+    await expect(consumeProjectTemplateApplyApprovalEvidence({
+      storage,
+      plan: fixture.plan,
+      baselineStrategy: 'adopt-identical',
+      evidence: previewEvidence as never,
+    })).resolves.toBe(false);
+    await expect(applyProjectTemplatePlan({
+      projectRoot,
+      plan: fixture.plan,
+      incomingManifest: fixture.incomingManifest,
+      incomingContents: fixture.incomingContents,
+      incomingInspection: fixture.incomingInspection,
+      baselineStrategy: 'adopt-identical',
+      approvalEvidence: previewEvidence as never,
+    })).resolves.toMatchObject({
+      status: 'not_started',
+      code: 'INVALID_APPLY_INPUT',
+    });
+    expect(existsSync(join(
+      storage.controlRoot,
+      'approval-claims',
+      `${previewEvidence.approvalId}.json`,
+    ))).toBe(false);
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence: previewEvidence,
+    })).resolves.toBe(true);
   });
 });
