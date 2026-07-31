@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   GithubTemplateArchiveAssetInput,
@@ -715,6 +716,29 @@ describe('project-template artifact download D4 retry bridge', () => {
     expect(species).not.toHaveBeenCalled();
     expect(credential.dispose).not.toHaveBeenCalled();
     expect(value.createAttempt).not.toHaveBeenCalled();
+  });
+
+  it('accepts a native credential Promise created in another realm', async () => {
+    const credential = controlledCredential();
+    const promise = runInNewContext(
+      'Promise.resolve(credential)',
+      { credential: credential.credential },
+    ) as Promise<DisposableProjectTemplateGhCredential>;
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    value.attempts[0]!.settlement!.chunk(Uint8Array.from([7]));
+
+    await expect(pending).resolves.toEqual({
+      value: Uint8Array.from([7]),
+      done: false,
+    });
+    await value.iterator.return!();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a native Promise with an own constructor without reading it', async () => {

@@ -35,17 +35,13 @@ const ATTEMPT_TIMEOUT_MS = 120_000;
 const MAX_TRANSACTIONAL_TIMER_ARMS = 8;
 const TIMER_SETUP_MARGIN_MS = 1;
 const RETRY_DELAYS_MS = Object.freeze([0, 250, 1_000] as const);
-const NativePromise = Promise;
-const NATIVE_PROMISE_PROTOTYPE = Promise.prototype;
 const NATIVE_PROMISE_THEN = Promise.prototype.then;
-const NATIVE_PROMISE_CONSTRUCTOR = Object.getOwnPropertyDescriptor(
-  Promise.prototype,
-  'constructor',
-)?.value;
-const NATIVE_PROMISE_SPECIES_GETTER = Object.getOwnPropertyDescriptor(
+const FUNCTION_TO_STRING = Function.prototype.toString;
+const NATIVE_PROMISE_CONSTRUCTOR_SOURCE = Reflect.apply(
+  FUNCTION_TO_STRING,
   Promise,
-  Symbol.species,
-)?.get;
+  [],
+);
 const NativeAbortController = AbortController;
 const NativeUint8Array = Uint8Array;
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(
@@ -835,27 +831,46 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
     || value === null
     || types.isProxy(value)
     || !types.isPromise(value)
-    || Object.getPrototypeOf(value) !== NATIVE_PROMISE_PROTOTYPE
     || Reflect.ownKeys(value).length !== 0
-    || NATIVE_PROMISE_CONSTRUCTOR !== NativePromise
-    || NATIVE_PROMISE_SPECIES_GETTER === undefined
   ) return false;
-  const constructorDescriptor = Object.getOwnPropertyDescriptor(
-    NATIVE_PROMISE_PROTOTYPE,
-    'constructor',
-  );
-  const speciesDescriptor = Object.getOwnPropertyDescriptor(
-    NativePromise,
-    Symbol.species,
-  );
-  return (
-    constructorDescriptor !== undefined
-    && 'value' in constructorDescriptor
-    && constructorDescriptor.value === NativePromise
-    && speciesDescriptor !== undefined
-    && 'get' in speciesDescriptor
-    && speciesDescriptor.get === NATIVE_PROMISE_SPECIES_GETTER
-  );
+  try {
+    // A dependency may execute in another VM realm, so identity against this
+    // realm's Promise.prototype would reject a genuine native Promise. Native
+    // source plus the constructor/prototype cycle rejects subclasses without
+    // consulting mutable then/species hooks; settlement still uses our
+    // captured intrinsic `then` below.
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (
+      typeof prototype !== 'object'
+      || prototype === null
+      || types.isProxy(prototype)
+    ) return false;
+    const constructorDescriptor = Object.getOwnPropertyDescriptor(
+      prototype,
+      'constructor',
+    );
+    if (
+      constructorDescriptor === undefined
+      || !('value' in constructorDescriptor)
+      || typeof constructorDescriptor.value !== 'function'
+      || types.isProxy(constructorDescriptor.value)
+    ) return false;
+    const constructor = constructorDescriptor.value as
+      (...args: unknown[]) => unknown;
+    const prototypeDescriptor = Object.getOwnPropertyDescriptor(
+      constructor,
+      'prototype',
+    );
+    return (
+      prototypeDescriptor !== undefined
+      && 'value' in prototypeDescriptor
+      && prototypeDescriptor.value === prototype
+      && Reflect.apply(FUNCTION_TO_STRING, constructor, [])
+        === NATIVE_PROMISE_CONSTRUCTOR_SOURCE
+    );
+  } catch {
+    return false;
+  }
 }
 
 function observeLateCredentialPromise(promise: Promise<unknown>): void {
