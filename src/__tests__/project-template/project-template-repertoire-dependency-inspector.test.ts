@@ -2,6 +2,7 @@ import {
   Dir,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -26,6 +27,17 @@ function root(): string {
   const value = mkdtempSync(join(tmpdir(), 'takt-installed-inspector-'));
   roots.push(value);
   return value;
+}
+
+function openDescriptorCount(): number | undefined {
+  for (const fdPath of ['/dev/fd', '/proc/self/fd']) {
+    try {
+      return readdirSync(fdPath).length;
+    } catch {
+      // Continue to the next platform-specific process descriptor view.
+    }
+  }
+  return undefined;
 }
 
 afterEach(() => {
@@ -330,6 +342,44 @@ describe('project template installed repertoire dependency inspector G3.2', () =
     });
   });
 
+  it.each([
+    ['after-lock', '.takt-repertoire-lock.yaml'],
+    ['after-manifest', 'takt-repertoire.yaml'],
+    ['after-scope', '.takt-repertoire-lock.yaml'],
+  ] as const)(
+    'rejects an in-place file rewrite at the %s seam',
+    (attackPhase, fileName) => {
+      const repertoireRoot = root();
+      const packageDir = install(repertoireRoot);
+      let mutations = 0;
+      const callbacks: string[] = [];
+      const port =
+        createProjectTemplateInstalledRepertoireDependencyInspectionPort(
+          { projectRoot: repertoireRoot, language: 'en', repertoireRoot },
+          (phase) => {
+            callbacks.push(phase);
+            if (phase !== attackPhase || mutations !== 0) return;
+            mutations += 1;
+            writeFileSync(
+              join(packageDir, fileName),
+              fileName === 'takt-repertoire.yaml'
+                ? 'name: rewritten\n'
+                : 'source: github:evil/replacement\n'
+                  + 'ref: 9.9.9\n'
+                  + 'commit: abcdef0123456789abcdef0123456789abcdef01\n'
+                  + 'imported_at: 2026-07-31T00:00:00.000Z\n',
+            );
+          },
+        );
+
+      expect(port.inspect(request())).toMatchObject({
+        observations: [{ state: 'invalid', reason: 'INVALID_INSTALLATION' }],
+      });
+      expect(mutations).toBe(1);
+      expect(callbacks.at(-1)).toBe('after-scope');
+    },
+  );
+
   it('validates dependency order and uniqueness before a missing-root branch', () => {
     const container = root();
     const repertoireRoot = join(container, 'missing');
@@ -361,8 +411,35 @@ describe('project template installed repertoire dependency inspector G3.2', () =
         repertoireRoot: join(container, 'missing'),
       });
     expect(() => port.inspect(request(undefined, {
-      deadlineMs: performance.now() + 0.5,
+      deadlineMs: performance.now() + 0.03,
     }))).toThrow(expect.objectContaining({ code: 'TIMEOUT' }));
+  });
+
+  it('closes every opened missing-parent directory across short deadlines', () => {
+    const repertoireRoot = root();
+    for (let index = 0; index < 64; index += 1) {
+      writeFileSync(join(repertoireRoot, `entry-${index}`), '');
+    }
+    const port =
+      createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+        projectRoot: repertoireRoot,
+        language: 'en',
+        repertoireRoot,
+      });
+    const before = openDescriptorCount();
+    if (before === undefined) return;
+    for (let index = 0; index < 300; index += 1) {
+      try {
+        port.inspect(request(undefined, {
+          deadlineMs: performance.now() + 0.03,
+        }));
+      } catch {
+        // The deadline is intentionally shorter than a complete witness read.
+      }
+    }
+    const after = openDescriptorCount();
+    expect(after).toBeDefined();
+    expect(after).toBeLessThanOrEqual(before + 4);
   });
 
   it('rejects symlink roots and snapshots context before later mutation', () => {

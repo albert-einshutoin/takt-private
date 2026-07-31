@@ -240,6 +240,29 @@ function witnessIdentity(
     + `${witness.size}:${witness.mtimeMs}:${witness.ctimeMs}`;
 }
 
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function sameFileEvidence(
+  before: {
+    readonly content: Uint8Array;
+    readonly witness: ProjectTemplateRepertoireRelativeWitness;
+  },
+  after: {
+    readonly content: Uint8Array;
+    readonly witness: ProjectTemplateRepertoireRelativeWitness;
+  },
+): boolean {
+  return witnessIdentity(before.witness) === witnessIdentity(after.witness)
+    && sha256(before.content) === sha256(after.content)
+    && sameBytes(before.content, after.content);
+}
+
 function isDirectory(stat: Stats): boolean {
   return (stat.mode & TYPE_MASK) === constants.S_IFDIR;
 }
@@ -533,9 +556,12 @@ function stableDirectoryListing(
   if (!isDirectory(before) || isSymbolicLink(before)) throw INTERNAL_FAILURE;
   checkpoint(request);
   const directory = CAPTURED_OPENDIR_SYNC(path);
-  checkpoint(request);
-  const names: string[] = [];
+  let result: string | undefined;
+  let pendingFailure: unknown;
+  let closeFailed = false;
   try {
+    checkpoint(request);
+    const names: string[] = [];
     while (names.length <= MAX_WITNESS_DIRECTORY_ENTRIES) {
       checkpoint(request);
       const entry = CAPTURED_REFLECT_APPLY(
@@ -547,27 +573,44 @@ function stableDirectoryListing(
       if (entry === null) break;
       append(names, entry.name);
     }
-  } finally {
-    CAPTURED_REFLECT_APPLY(CAPTURED_DIR_CLOSE_SYNC, directory, []);
-    checkpoint(request);
-  }
-  if (names.length > MAX_WITNESS_DIRECTORY_ENTRIES) throw INTERNAL_FAILURE;
-  for (let index = 1; index < names.length; index += 1) {
-    checkpoint(request);
-    const value = names[index]!;
-    let cursor = index;
-    while (cursor > 0 && names[cursor - 1]! > value) {
-      if ((cursor & 31) === 0) checkpoint(request);
-      defineOwn(names, cursor, names[cursor - 1]!);
-      cursor -= 1;
+    if (names.length > MAX_WITNESS_DIRECTORY_ENTRIES) throw INTERNAL_FAILURE;
+    for (let index = 1; index < names.length; index += 1) {
+      checkpoint(request);
+      const value = names[index]!;
+      let cursor = index;
+      while (cursor > 0 && names[cursor - 1]! > value) {
+        if ((cursor & 31) === 0) checkpoint(request);
+        defineOwn(names, cursor, names[cursor - 1]!);
+        cursor -= 1;
+      }
+      defineOwn(names, cursor, value);
     }
-    defineOwn(names, cursor, value);
+    checkpoint(request);
+    const after = CAPTURED_LSTAT_SYNC(path);
+    checkpoint(request);
+    if (identity(before) !== identity(after)) throw INTERNAL_FAILURE;
+    result = `${identity(after)}:${sha256(joinArray(names, '\u0000'))}`;
+  } catch (error) {
+    pendingFailure = error;
+  } finally {
+    try {
+      CAPTURED_REFLECT_APPLY(CAPTURED_DIR_CLOSE_SYNC, directory, []);
+    } catch {
+      closeFailed = true;
+    }
   }
-  checkpoint(request);
-  const after = CAPTURED_LSTAT_SYNC(path);
-  checkpoint(request);
-  if (identity(before) !== identity(after)) throw INTERNAL_FAILURE;
-  return `${identity(after)}:${sha256(joinArray(names, '\u0000'))}`;
+  // Why: close is always attempted first; cancellation has precedence over a
+  // redacted close failure once the descriptor can no longer leak.
+  try {
+    checkpoint(request);
+  } catch (error) {
+    if (isStopFailure(error)) throw error;
+    throw INTERNAL_FAILURE;
+  }
+  if (isStopFailure(pendingFailure)) throw pendingFailure;
+  if (closeFailed || pendingFailure !== undefined) throw INTERNAL_FAILURE;
+  if (result === undefined) throw INTERNAL_FAILURE;
+  return result;
 }
 
 function errno(value: unknown): string | undefined {
@@ -787,9 +830,22 @@ function inspectScope(
       scope.scope,
       scope.packageRelativePath,
     );
-    // Why: files and directory witnesses must describe one installation.
-    // Re-reading after every attacker-visible seam rejects path replacement
-    // even when each individual safe read was internally coherent.
+    // Why: after the last external callback, re-read the complete evidence
+    // chain without another inspector seam. Individual safe reads retain their
+    // own no-follow and post-close checks, while this chain prevents mixing
+    // old file bytes with a later directory snapshot.
+    checkpoint(request);
+    const lockAfter = readProjectTemplateRepertoireFile(
+      safeContext,
+      lockRelativePath,
+      'lock',
+    );
+    checkpoint(request);
+    const manifestAfter = readProjectTemplateRepertoireFile(
+      safeContext,
+      manifestRelativePath,
+      'manifest',
+    );
     checkpoint(request);
     const packageAfter = readProjectTemplateRepertoireDirectory(
       safeContext,
@@ -802,7 +858,9 @@ function inspectScope(
     );
     checkpoint(request);
     if (
-      witnessIdentity(packageAfter.witness)
+      !sameFileEvidence(lockRead, lockAfter)
+      || !sameFileEvidence(manifestRead, manifestAfter)
+      || witnessIdentity(packageAfter.witness)
         !== witnessIdentity(packageDirectory.witness)
       || joinArray(packageAfter.entries, '\u0000')
         !== joinArray(packageDirectory.entries, '\u0000')
