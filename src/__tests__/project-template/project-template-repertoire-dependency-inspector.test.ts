@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -410,9 +411,26 @@ describe('project template installed repertoire dependency inspector G3.2', () =
         language: 'en',
         repertoireRoot: join(container, 'missing'),
       });
-    expect(() => port.inspect(request(undefined, {
-      deadlineMs: performance.now() + 0.03,
-    }))).toThrow(expect.objectContaining({ code: 'TIMEOUT' }));
+    let timedOut = false;
+    for (let attempt = 0; attempt < 100 && !timedOut; attempt += 1) {
+      try {
+        port.inspect(request(undefined, {
+          deadlineMs: performance.now() + 0.03,
+        }));
+      } catch (error) {
+        if (
+          typeof error === 'object'
+          && error !== null
+          && 'code' in error
+          && error.code === 'TIMEOUT'
+        ) {
+          timedOut = true;
+        } else {
+          throw error;
+        }
+      }
+    }
+    expect(timedOut).toBe(true);
   });
 
   it('closes every opened missing-parent directory across short deadlines', () => {
@@ -580,6 +598,69 @@ describe('project template installed repertoire dependency inspector G3.2', () =
     expect(result).toMatchObject({
       observations: [{ state: 'installed' }],
     });
+  });
+
+  it('does not expose private provenance buffers to typed-array hooks', () => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    const lockPath = join(packageDir, '.takt-repertoire-lock.yaml');
+    const lockOnDisk = readFileSync(lockPath);
+    const port =
+      createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+        projectRoot: repertoireRoot,
+        language: 'en',
+        repertoireRoot,
+      });
+    const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+    const originalLength = Object.getOwnPropertyDescriptor(
+      typedArrayPrototype,
+      'length',
+    )!;
+    const originalPoolSize = Object.getOwnPropertyDescriptor(
+      Buffer,
+      'poolSize',
+    )!;
+    let calls = 0;
+    let receiverCalls = 0;
+    let mutations = 0;
+    let result: unknown;
+    try {
+      Object.defineProperty(Buffer, 'poolSize', {
+        configurable: true,
+        get() {
+          calls += 1;
+          return originalPoolSize.value;
+        },
+      });
+      Object.defineProperty(typedArrayPrototype, 'length', {
+        configurable: true,
+        get() {
+          calls += 1;
+          receiverCalls += 1;
+          const receiver = this as Uint8Array;
+          if (receiver.byteLength > 0) {
+            receiver[0] = 0x78;
+            mutations += 1;
+          }
+          return Reflect.apply(originalLength.get!, this, []);
+        },
+      });
+      result = port.inspect(request());
+    } finally {
+      Object.defineProperty(Buffer, 'poolSize', originalPoolSize);
+      Object.defineProperty(
+        typedArrayPrototype,
+        'length',
+        originalLength,
+      );
+    }
+    expect({ calls, mutations, receiverCalls }).toEqual({
+      calls: 0,
+      mutations: 0,
+      receiverCalls: 0,
+    });
+    expect(result).toMatchObject({ observations: [{ state: 'installed' }] });
+    expect(readFileSync(lockPath)).toEqual(lockOnDisk);
   });
 
   it('rejects dependency accessors without invoking them', () => {

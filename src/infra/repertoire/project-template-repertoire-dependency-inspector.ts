@@ -59,6 +59,7 @@ const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
   Object.getOwnPropertyDescriptor;
 const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
   Object.getOwnPropertyDescriptors;
+const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
 const CAPTURED_OBJECT_HAS_OWN_PROPERTY = Object.prototype.hasOwnProperty;
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_REFLECT_RECEIVER = Reflect;
@@ -87,6 +88,16 @@ const CAPTURED_ABORTED_GETTER =
 const INSPECTION_STOP_ERRORS = new WeakSet<object>();
 const CAPTURED_WEAK_SET_ADD = WeakSet.prototype.add;
 const CAPTURED_WEAK_SET_HAS = WeakSet.prototype.has;
+const CAPTURED_TYPED_ARRAY_PROTOTYPE = CAPTURED_REFLECT_APPLY(
+  CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+  CAPTURED_OBJECT_RECEIVER,
+  [Uint8Array.prototype],
+);
+const CAPTURED_TYPED_ARRAY_BYTE_LENGTH_GETTER = CAPTURED_REFLECT_APPLY(
+  CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+  CAPTURED_OBJECT_RECEIVER,
+  [CAPTURED_TYPED_ARRAY_PROTOTYPE, 'byteLength'],
+)!.get!;
 const INTERNAL_FAILURE = CAPTURED_REFLECT_APPLY(
   CAPTURED_OBJECT_FREEZE,
   CAPTURED_OBJECT_RECEIVER,
@@ -241,8 +252,20 @@ function witnessIdentity(
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
+  // Why: direct .length dispatches through the mutable shared TypedArray
+  // prototype and would expose private provenance buffers to hostile getters.
+  const leftLength = CAPTURED_REFLECT_APPLY(
+    CAPTURED_TYPED_ARRAY_BYTE_LENGTH_GETTER,
+    left,
+    [],
+  ) as number;
+  const rightLength = CAPTURED_REFLECT_APPLY(
+    CAPTURED_TYPED_ARRAY_BYTE_LENGTH_GETTER,
+    right,
+    [],
+  ) as number;
+  if (leftLength !== rightLength) return false;
+  for (let index = 0; index < leftLength; index += 1) {
     if (left[index] !== right[index]) return false;
   }
   return true;
