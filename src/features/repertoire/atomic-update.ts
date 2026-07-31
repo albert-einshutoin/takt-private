@@ -15,6 +15,11 @@ import {
   rmSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
+import {
+  captureDirectoryTreeProof,
+  sameTreeProof,
+  type TreeProof,
+} from './filesystem-proof.js';
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 
@@ -71,6 +76,9 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
   const parentIdentity = readRequiredDirectoryIdentity(parentDir);
   mkdirSync(stagingDir, { mode: PRIVATE_DIRECTORY_MODE });
   const stagingIdentity = readRequiredDirectoryIdentity(stagingDir);
+  const originalTree = originalIdentity === undefined
+    ? undefined
+    : captureDirectoryTreeProof(packageDir, parentDir);
 
   try {
     await install(stagingDir);
@@ -81,8 +89,10 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
 
   assertDirectoryIdentity(parentDir, parentIdentity);
   assertDirectoryIdentity(stagingDir, stagingIdentity);
+  const stagingTree = captureDirectoryTreeProof(stagingDir, parentDir);
   assertOptionalDirectoryIdentity(backupDir, undefined);
   assertOptionalDirectoryIdentity(packageDir, originalIdentity);
+  assertOptionalTree(packageDir, parentDir, originalTree);
 
   if (originalIdentity !== undefined) {
     // POSIX rename may replace an existing destination. Re-prove both the
@@ -90,19 +100,23 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
     assertDirectoryIdentity(parentDir, parentIdentity);
     assertOptionalDirectoryIdentity(backupDir, undefined);
     assertDirectoryIdentity(packageDir, originalIdentity);
+    assertOptionalTree(packageDir, parentDir, originalTree);
     renameOwnedDirectory(packageDir, backupDir);
     assertDirectoryIdentity(backupDir, originalIdentity);
+    assertRelocatedTree(backupDir, parentDir, originalTree!);
   }
 
   try {
     assertDirectoryIdentity(parentDir, parentIdentity);
     assertDirectoryIdentity(stagingDir, stagingIdentity);
+    assertRelocatedTree(stagingDir, parentDir, stagingTree);
     assertOptionalDirectoryIdentity(packageDir, undefined);
     renameOwnedDirectory(stagingDir, packageDir);
   } catch (error) {
     if (originalIdentity !== undefined) {
       assertDirectoryIdentity(parentDir, parentIdentity);
       assertDirectoryIdentity(backupDir, originalIdentity);
+      assertRelocatedTree(backupDir, parentDir, originalTree!);
       assertOptionalDirectoryIdentity(packageDir, undefined);
       renameOwnedDirectory(backupDir, packageDir);
     }
@@ -112,6 +126,7 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
   assertDirectoryIdentity(parentDir, parentIdentity);
   assertDirectoryIdentity(packageDir, stagingIdentity);
   if (originalIdentity !== undefined) {
+    assertRelocatedTree(backupDir, parentDir, originalTree!);
     removeOwnedDirectory(backupDir, originalIdentity);
   }
 }
@@ -172,4 +187,21 @@ function renameOwnedDirectory(source: string, destination: string): void {
 
 function sameIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function assertOptionalTree(
+  path: string,
+  parentDir: string,
+  expected: TreeProof | undefined,
+): void {
+  if (expected === undefined) return;
+  if (!sameTreeProof(expected, captureDirectoryTreeProof(path, parentDir))) {
+    throw new AtomicUpdateRecoveryError();
+  }
+}
+
+function assertRelocatedTree(path: string, parentDir: string, expected: TreeProof): void {
+  if (!sameTreeProof(expected, captureDirectoryTreeProof(path, parentDir), true)) {
+    throw new AtomicUpdateRecoveryError();
+  }
 }

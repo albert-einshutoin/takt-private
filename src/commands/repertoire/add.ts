@@ -17,7 +17,6 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -46,6 +45,17 @@ import { parseTarVerboseListing } from '../../features/repertoire/tar-parser.js'
 import { resolveRef } from '../../features/repertoire/github-ref-resolver.js';
 import { atomicReplace, cleanupResiduals } from '../../features/repertoire/atomic-update.js';
 import { acquireRepertoireCoordinationLease } from '../../features/repertoire/coordination-lease.js';
+import {
+  captureDirectoryTreeProof,
+  captureNearestParentProof,
+  captureRegularFileProof,
+  sameFileProof,
+  sameParentProof,
+  sameTreeProof,
+  type FileProof,
+  type ParentProof,
+  type TreeProof,
+} from '../../features/repertoire/filesystem-proof.js';
 import { generateLockFile, extractCommitSha } from '../../features/repertoire/lock-file.js';
 import { TAKT_REPERTOIRE_MANIFEST_FILENAME, TAKT_REPERTOIRE_LOCK_FILENAME } from '../../features/repertoire/constants.js';
 import {
@@ -63,23 +73,24 @@ const require = createRequire(import.meta.url);
 const { version: TAKT_VERSION } = require('../../../package.json') as { version: string };
 
 const GH_API_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
+const safeReflectApply = Reflect.apply.bind(Reflect);
+const safeStringStartsWithMethod = String.prototype.startsWith;
+const safeStringStartsWith = (value: string, search: string): boolean => (
+  safeReflectApply(safeStringStartsWithMethod, value, [search]) as boolean
+);
 
 const log = createLogger('repertoire-add');
 
 type RepertoireMutationOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Test-only observation after the first synchronous lease attempt. */
+  onLeaseAttempted?: () => void;
 };
 
 type PackageState =
-  | { exists: false; parentRealpath: string }
-  | {
-    exists: true;
-    dev: number;
-    ino: number;
-    lockDigest: string | undefined;
-    realpath: string;
-  };
+  | { exists: false; parent: ParentProof }
+  | { exists: true; tree: TreeProof };
 
 export async function repertoireAddCommand(
   spec: string,
@@ -241,7 +252,7 @@ export async function repertoireAddCommand(
     }
     info('');
 
-    const sourceDigest = digestSourceFiles(packConfigPath, targets.map((target) => target.absolutePath));
+    const sourceProofs = captureSourceProofs(packConfigPath, targets, tmpExtractDir);
     const confirmed = await confirm('インストールしますか？', false);
     if (!confirmed) {
       info('キャンセルしました');
@@ -263,18 +274,24 @@ export async function repertoireAddCommand(
       }
     }
 
-    const lease = await acquireRepertoireCoordinationLease({
+    const leasePromise = acquireRepertoireCoordinationLease({
       globalConfigDir: getGlobalConfigDir(),
       mode: 'write',
       ...(mutationOptions.signal === undefined ? {} : { signal: mutationOptions.signal }),
       ...(mutationOptions.timeoutMs === undefined ? {} : { timeoutMs: mutationOptions.timeoutMs }),
     });
+    mutationOptions.onLeaseAttempted?.();
+    const lease = await leasePromise;
     try {
       const freshPackageState = capturePackageState(packageDir, repertoireDir);
       if (!samePackageState(initialPackageState, freshPackageState)) {
         throw new Error('Package state changed while waiting for coordination lease');
       }
-      if (digestSourceFiles(packConfigPath, targets.map((target) => target.absolutePath)) !== sourceDigest) {
+      const freshTargets = collectCopyTargets(packageRoot);
+      if (!sameTargetSet(targets, freshTargets) || !sameSourceProofs(
+        sourceProofs,
+        captureSourceProofs(packConfigPath, freshTargets, tmpExtractDir),
+      )) {
         throw new Error('Downloaded package source changed while waiting for coordination lease');
       }
       cleanupResiduals(packageDir);
@@ -282,11 +299,23 @@ export async function repertoireAddCommand(
       await atomicReplace({
         packageDir,
         install: async (stagingDir) => {
-          for (const target of targets) {
+          for (let index = 0; index < targets.length; index += 1) {
+            const target = targets[index]!;
+            if (!sameTargetSet(targets, collectCopyTargets(packageRoot))) {
+              throw new Error('Downloaded package target set changed before copy');
+            }
+            if (!sameFileProof(
+              sourceProofs[index + 1]!,
+              captureRegularFileProof(target.absolutePath, tmpExtractDir),
+            )) throw new Error('Downloaded package source changed before copy');
             const destFile = join(stagingDir, target.relativePath);
             mkdirSync(dirname(destFile), { recursive: true });
             copyFileSync(target.absolutePath, destFile);
           }
+          if (!sameFileProof(
+            sourceProofs[0]!,
+            captureRegularFileProof(packConfigPath, tmpExtractDir),
+          )) throw new Error('Downloaded package manifest changed before copy');
           copyFileSync(packConfigPath, join(stagingDir, TAKT_REPERTOIRE_MANIFEST_FILENAME));
 
           const lock = generateLockFile({
@@ -308,24 +337,11 @@ export async function repertoireAddCommand(
   }
 }
 
-function digestSourceFiles(manifestPath: string, sourcePaths: string[]): string {
-  const hash = createHash('sha256');
-  for (const path of [manifestPath, ...sourcePaths].sort()) {
-    hash.update(path);
-    hash.update('\0');
-    hash.update(readFileSync(path));
-    hash.update('\0');
-  }
-  return hash.digest('hex');
-}
-
 function capturePackageState(packageDir: string, repertoireDir: string): PackageState {
   assertLexicallyInside(packageDir, repertoireDir);
   const repertoireRealpath = realpathSync(repertoireDir);
   if (!existsSync(packageDir)) {
-    const parentRealpath = realpathNearestExistingParent(dirname(packageDir));
-    assertResolvedInside(parentRealpath, repertoireRealpath);
-    return { exists: false, parentRealpath };
+    return { exists: false, parent: captureNearestParentProof(packageDir, repertoireDir) };
   }
 
   const stat = lstatSync(packageDir);
@@ -334,50 +350,60 @@ function capturePackageState(packageDir: string, repertoireDir: string): Package
   }
   const packageRealpath = realpathSync(packageDir);
   assertResolvedInside(packageRealpath, repertoireRealpath);
-  const lockPath = join(packageDir, TAKT_REPERTOIRE_LOCK_FILENAME);
-  return {
-    exists: true,
-    dev: stat.dev,
-    ino: stat.ino,
-    lockDigest: existsSync(lockPath) ? digestFile(lockPath) : undefined,
-    realpath: packageRealpath,
-  };
-}
-
-function realpathNearestExistingParent(start: string): string {
-  let candidate = start;
-  while (!existsSync(candidate)) {
-    const parent = dirname(candidate);
-    if (parent === candidate) throw new Error('Package parent cannot be proven safe');
-    candidate = parent;
-  }
-  return realpathSync(candidate);
+  return { exists: true, tree: captureDirectoryTreeProof(packageDir, repertoireDir) };
 }
 
 function assertLexicallyInside(path: string, root: string): void {
   const relativePath = relative(root, path);
-  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+  if (safeStringStartsWith(relativePath, '..') || isAbsolute(relativePath)) {
     throw new Error('Package path escapes repertoire directory');
   }
 }
 
 function assertResolvedInside(path: string, root: string): void {
   const relativePath = relative(root, path);
-  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+  if (safeStringStartsWith(relativePath, '..') || isAbsolute(relativePath)) {
     throw new Error('Package path escapes repertoire directory');
   }
 }
 
-function digestFile(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
-
 function samePackageState(left: PackageState, right: PackageState): boolean {
   if (left.exists !== right.exists) return false;
-  if (!left.exists) return !right.exists && left.parentRealpath === right.parentRealpath;
+  if (!left.exists) return !right.exists && sameParentProof(left.parent, right.parent);
   if (!right.exists) return false;
-  return left.dev === right.dev
-    && left.ino === right.ino
-    && left.realpath === right.realpath
-    && left.lockDigest === right.lockDigest;
+  return sameTreeProof(left.tree, right.tree);
+}
+
+function captureSourceProofs(
+  manifestPath: string,
+  targets: Array<{ absolutePath: string }>,
+  containmentRoot: string,
+): FileProof[] {
+  const proofs: FileProof[] = [captureRegularFileProof(manifestPath, containmentRoot)];
+  for (let index = 0; index < targets.length; index += 1) {
+    proofs[index + 1] = captureRegularFileProof(targets[index]!.absolutePath, containmentRoot);
+  }
+  return proofs;
+}
+
+function sameSourceProofs(left: FileProof[], right: FileProof[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (!sameFileProof(left[index]!, right[index]!)) return false;
+  }
+  return true;
+}
+
+function sameTargetSet(
+  left: Array<{ absolutePath: string; relativePath: string }>,
+  right: Array<{ absolutePath: string; relativePath: string }>,
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (
+      left[index]!.absolutePath !== right[index]!.absolutePath
+      || left[index]!.relativePath !== right[index]!.relativePath
+    ) return false;
+  }
+  return true;
 }

@@ -26,22 +26,50 @@ import {
 } from '../../infra/config/paths.js';
 import { getWorkflowCategoriesPath } from '../../infra/config/global/index.js';
 import { acquireRepertoireCoordinationLease } from '../../features/repertoire/coordination-lease.js';
-import { findScopeReferences, type ScanConfig } from '../../features/repertoire/remove.js';
+import {
+  captureDirectoryTreeProof,
+  sameTreeProof,
+  type TreeProof,
+} from '../../features/repertoire/filesystem-proof.js';
+import { findScopeReferences, type ScanConfig, type ScopeReference } from '../../features/repertoire/remove.js';
 import { confirm } from '../../shared/prompt/index.js';
 import { info, success } from '../../shared/ui/index.js';
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
+const safeReflectApply = Reflect.apply.bind(Reflect);
+const safeStringStartsWithMethod = String.prototype.startsWith;
+const safeStringIndexOfMethod = String.prototype.indexOf;
+const safeStringSliceMethod = String.prototype.slice;
+const safeArraySortMethod = Array.prototype.sort;
+const safeArrayJoinMethod = Array.prototype.join;
+const safeBufferToStringMethod = Buffer.prototype.toString;
+const safeStringStartsWith = (value: string, search: string): boolean => (
+  safeReflectApply(safeStringStartsWithMethod, value, [search]) as boolean
+);
+const safeStringIndexOf = (value: string, search: string): number => (
+  safeReflectApply(safeStringIndexOfMethod, value, [search]) as number
+);
+const safeStringSlice = (value: string, start: number, end?: number): string => (
+  safeReflectApply(safeStringSliceMethod, value, end === undefined ? [start] : [start, end]) as string
+);
+const safeArraySort = (values: string[]): string[] => (
+  safeReflectApply(safeArraySortMethod, values, []) as string[]
+);
+const safeArrayJoin = (values: string[], separator: string): string => (
+  safeReflectApply(safeArrayJoinMethod, values, [separator]) as string
+);
+const safeBufferToString = (value: Buffer, encoding: BufferEncoding): string => (
+  safeReflectApply(safeBufferToStringMethod, value, [encoding]) as string
+);
 
 type RepertoireMutationOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Test-only observation after the first synchronous lease attempt. */
+  onLeaseAttempted?: () => void;
 };
 
-type PackageIdentity = {
-  dev: number;
-  ino: number;
-  realpath: string;
-};
+type PackageIdentity = TreeProof;
 
 export async function repertoireRemoveCommand(
   scope: string,
@@ -63,12 +91,14 @@ export async function repertoireRemoveCommand(
     return;
   }
 
-  const lease = await acquireRepertoireCoordinationLease({
+  const leasePromise = acquireRepertoireCoordinationLease({
     globalConfigDir: getGlobalConfigDir(),
     mode: 'write',
     ...(mutationOptions.signal === undefined ? {} : { signal: mutationOptions.signal }),
     ...(mutationOptions.timeoutMs === undefined ? {} : { timeoutMs: mutationOptions.timeoutMs }),
   });
+  mutationOptions.onLeaseAttempted?.();
+  const lease = await leasePromise;
   try {
     if (!existsSync(packageDir)) {
       throw new Error('Package state changed while waiting for coordination lease');
@@ -83,7 +113,11 @@ export async function repertoireRemoveCommand(
       throw new Error('Package references changed while waiting for coordination lease');
     }
 
-    removeViaQuarantine(packageDir, initialIdentity);
+    const beforeRename = capturePackageIdentity(packageDir, repertoireDir, scope);
+    if (!sameTreeProof(freshIdentity, beforeRename)) {
+      throw new Error('Package state changed before quarantine');
+    }
+    removeViaQuarantine(packageDir, repertoireDir, beforeRename);
     removeOwnerDirectoryOnlyWhenExactlyEmpty(dirname(packageDir));
   } finally {
     await lease.release();
@@ -93,16 +127,16 @@ export async function repertoireRemoveCommand(
 }
 
 function parseScope(scope: string): { owner: string; repo: string } {
-  if (!scope.startsWith('@')) {
+  if (!safeStringStartsWith(scope, '@')) {
     throw new Error(`Invalid scope: "${scope}". Expected @{owner}/{repo}`);
   }
-  const withoutAt = scope.slice(1);
-  const slashIdx = withoutAt.indexOf('/');
+  const withoutAt = safeStringSlice(scope, 1);
+  const slashIdx = safeStringIndexOf(withoutAt, '/');
   if (slashIdx < 0) {
     throw new Error(`Invalid scope: "${scope}". Expected @{owner}/{repo}`);
   }
-  const owner = withoutAt.slice(0, slashIdx);
-  const repo = withoutAt.slice(slashIdx + 1);
+  const owner = safeStringSlice(withoutAt, 0, slashIdx);
+  const repo = safeStringSlice(withoutAt, slashIdx + 1);
   validateScopeOwner(owner);
   validateScopeRepo(repo);
   return { owner, repo };
@@ -122,7 +156,7 @@ function capturePackageIdentity(
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error('Package state cannot be proven safe');
   }
-  return { dev: stat.dev, ino: stat.ino, realpath: realPackageDir };
+  return captureDirectoryTreeProof(packageDir, repertoireDir);
 }
 
 function createReferenceScanConfig(): ScanConfig {
@@ -142,23 +176,36 @@ function reportReferences(scope: string, refs: Array<{ filePath: string }>): voi
   for (const ref of refs) info(`  ${ref.filePath}`);
 }
 
-function removeViaQuarantine(packageDir: string, expected: PackageIdentity): void {
-  const nonce = randomBytes(32).toString('hex');
+function removeViaQuarantine(
+  packageDir: string,
+  repertoireDir: string,
+  expected: PackageIdentity,
+): void {
+  const nonce = safeBufferToString(randomBytes(32), 'hex');
   const quarantineDir = join(dirname(packageDir), `.remove-${nonce}`);
   mkdirSync(quarantineDir, { mode: PRIVATE_DIRECTORY_MODE });
   const quarantinedPackage = join(quarantineDir, 'package.quarantined');
 
   // rename is the deletion linearization point. Building a fresh O_EXCL-style
   // container first avoids overwriting a prior quarantine on nonce collision.
+  if (!sameTreeProof(expected, captureDirectoryTreeProof(packageDir, repertoireDir))) {
+    throw recoveryRequired();
+  }
   renameSync(packageDir, quarantinedPackage);
-  const moved = lstatSync(quarantinedPackage);
-  if (
-    !moved.isDirectory()
-    || moved.isSymbolicLink()
-    || moved.dev !== expected.dev
-    || moved.ino !== expected.ino
-  ) {
-    throw new Error('Quarantined package identity cannot be proven safe');
+  const moved = captureDirectoryTreeProof(quarantinedPackage, repertoireDir);
+  if (!sameTreeProof(expected, moved, true)) throw recoveryRequired();
+  const quarantineEntries = readdirSync(quarantineDir);
+  if (quarantineEntries.length !== 1 || quarantineEntries[0] !== 'package.quarantined') {
+    throw recoveryRequired();
+  }
+  // Re-prove the complete moved tree immediately before recursive removal. A
+  // same-UID foreign addition leaves quarantine intact for manual recovery.
+  if (!sameTreeProof(moved, captureDirectoryTreeProof(quarantinedPackage, repertoireDir))) {
+    throw recoveryRequired();
+  }
+  const finalEntries = readdirSync(quarantineDir);
+  if (finalEntries.length !== 1 || finalEntries[0] !== 'package.quarantined') {
+    throw recoveryRequired();
   }
   rmSync(quarantineDir, { recursive: true, force: true });
 }
@@ -170,17 +217,27 @@ function removeOwnerDirectoryOnlyWhenExactlyEmpty(ownerDir: string): void {
   if (readdirSync(ownerDir).length === 0) rmdirSync(ownerDir);
 }
 
-function referenceFingerprint(refs: Array<{ filePath: string }>): string {
-  return refs.map((ref) => ref.filePath).sort().join('\0');
+function referenceFingerprint(refs: ScopeReference[]): string {
+  const records: string[] = [];
+  for (let index = 0; index < refs.length; index += 1) {
+    const ref = refs[index]!;
+    records[index] = `${ref.filePath}\0${ref.dev ?? '-'}\0${ref.ino ?? '-'}\0${ref.contentDigest ?? '-'}`;
+  }
+  safeArraySort(records);
+  return safeArrayJoin(records, '\0');
 }
 
 function sameIdentity(left: PackageIdentity, right: PackageIdentity): boolean {
-  return left.dev === right.dev
-    && left.ino === right.ino
-    && left.realpath === right.realpath;
+  return sameTreeProof(left, right);
 }
 
 function isPathInsideDirectory(path: string, directory: string): boolean {
   const relativePath = relative(directory, path);
-  return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
+  return relativePath === '' || (!safeStringStartsWith(relativePath, '..') && !isAbsolute(relativePath));
+}
+
+function recoveryRequired(): Error & { code: 'RECOVERY_REQUIRED' } {
+  return Object.assign(new Error('Repertoire package recovery is required'), {
+    code: 'RECOVERY_REQUIRED' as const,
+  });
 }

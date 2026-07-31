@@ -42,13 +42,23 @@ vi.mock('node:fs', () => ({
   rmdirSync: vi.fn(),
 }));
 
-const { mockAcquireCoordinationLease, mockReleaseCoordinationLease } = vi.hoisted(() => ({
+const {
+  mockAcquireCoordinationLease,
+  mockReleaseCoordinationLease,
+  mockCaptureDirectoryTreeProof,
+} = vi.hoisted(() => ({
   mockAcquireCoordinationLease: vi.fn(),
   mockReleaseCoordinationLease: vi.fn(),
+  mockCaptureDirectoryTreeProof: vi.fn(),
 }));
 
 vi.mock('../../features/repertoire/coordination-lease.js', () => ({
   acquireRepertoireCoordinationLease: mockAcquireCoordinationLease,
+}));
+
+vi.mock('../../features/repertoire/filesystem-proof.js', () => ({
+  captureDirectoryTreeProof: mockCaptureDirectoryTreeProof,
+  sameTreeProof: (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right),
 }));
 
 vi.mock('../../features/repertoire/remove.js', () => ({
@@ -98,7 +108,9 @@ describe('repertoireRemoveCommand — scan configuration', () => {
     vi.mocked(rmSync).mockReset();
     vi.mocked(mkdirSync).mockReset();
     vi.mocked(renameSync).mockReset();
-    vi.mocked(readdirSync).mockReset().mockReturnValue(['unknown-file']);
+    vi.mocked(readdirSync).mockReset().mockImplementation((path) => (
+      String(path).includes('.remove-') ? ['package.quarantined'] : ['unknown-file']
+    ) as never);
     vi.mocked(rmdirSync).mockReset();
     vi.mocked(lstatSync).mockReset();
     mockAcquireCoordinationLease.mockReset();
@@ -119,6 +131,13 @@ describe('repertoireRemoveCommand — scan configuration', () => {
     mockAcquireCoordinationLease.mockResolvedValue({
       mode: 'write',
       release: mockReleaseCoordinationLease,
+    });
+    mockCaptureDirectoryTreeProof.mockReturnValue({
+      dev: 1,
+      ino: 1,
+      mode: 0o40700,
+      realpath: '/home/user/.takt/repertoire/@owner/repo',
+      contentFingerprint: 'stable',
     });
   });
 
@@ -275,13 +294,9 @@ describe('repertoireRemoveCommand — scan configuration', () => {
 
   it('revalidates package identity and releases without deletion after lease acquisition', async () => {
     vi.mocked(confirm).mockResolvedValue(true);
-    let statCalls = 0;
-    vi.mocked(lstatSync).mockImplementation(() => ({
-      dev: 1,
-      ino: statCalls++ === 0 ? 1 : 2,
-      isDirectory: () => true,
-      isSymbolicLink: () => false,
-    } as ReturnType<typeof lstatSync>));
+    mockCaptureDirectoryTreeProof
+      .mockReturnValueOnce({ dev: 1, ino: 1, contentFingerprint: 'initial' })
+      .mockReturnValueOnce({ dev: 1, ino: 2, contentFingerprint: 'changed' });
 
     await expect(repertoireRemoveCommand('@owner/repo'))
       .rejects.toThrow(/changed while waiting/);
@@ -331,16 +346,40 @@ describe('repertoireRemoveCommand — scan configuration', () => {
 
   it('keeps an owner directory containing an unknown file', async () => {
     vi.mocked(confirm).mockResolvedValue(true);
-    vi.mocked(readdirSync).mockReturnValue(['unknown-file'] as never);
+    vi.mocked(readdirSync).mockImplementation((path) => (
+      String(path).includes('.remove-') ? ['package.quarantined'] : ['unknown-file']
+    ) as never);
 
     await repertoireRemoveCommand('@owner/repo');
 
     expect(rmdirSync).not.toHaveBeenCalled();
   });
 
+  it('preserves quarantine when a foreign entry appears before recursive removal', async () => {
+    vi.mocked(confirm).mockResolvedValue(true);
+    let quarantineReads = 0;
+    vi.mocked(readdirSync).mockImplementation((path) => {
+      if (String(path).includes('.remove-')) {
+        quarantineReads += 1;
+        return quarantineReads === 1
+          ? ['package.quarantined'] as never
+          : ['package.quarantined', 'foreign'] as never;
+      }
+      return ['unknown-file'] as never;
+    });
+
+    await expect(repertoireRemoveCommand('@owner/repo'))
+      .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+
+    expect(rmSync).not.toHaveBeenCalled();
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
   it('removes an exactly empty owner directory non-recursively', async () => {
     vi.mocked(confirm).mockResolvedValue(true);
-    vi.mocked(readdirSync).mockReturnValue([] as never);
+    vi.mocked(readdirSync).mockImplementation((path) => (
+      String(path).includes('.remove-') ? ['package.quarantined'] : []
+    ) as never);
 
     await repertoireRemoveCommand('@owner/repo');
 

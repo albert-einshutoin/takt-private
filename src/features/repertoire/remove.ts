@@ -13,6 +13,7 @@ const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeStringIncludesMethod = String.prototype.includes;
 const safeStringEndsWithMethod = String.prototype.endsWith;
 const safeArrayPushMethod = Array.prototype.push;
+const safeArraySortMethod = Array.prototype.sort;
 const safeSetHasMethod = Set.prototype.has;
 const safeSetAddMethod = Set.prototype.add;
 const safeNumber = Number;
@@ -25,6 +26,9 @@ const safeStringEndsWith = (value: string, search: string): boolean => (
 const safeArrayPush = <T>(values: T[], value: T): void => {
   safeReflectApply(safeArrayPushMethod, values, [value]);
 };
+const safeArraySort = (values: string[]): string[] => (
+  safeReflectApply(safeArraySortMethod, values, []) as string[]
+);
 const safeSetHas = (values: Set<string>, value: string): boolean => (
   safeReflectApply(safeSetHasMethod, values, [value]) as boolean
 );
@@ -95,6 +99,7 @@ function scanYamlFilesInDir(
   if (!checkedExists(directory, failClosed)) return;
   const entries = checkedReadDirectory(directory, failClosed);
   if (entries === undefined) return;
+  safeArraySort(entries);
 
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index]!;

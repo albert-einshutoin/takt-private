@@ -19,6 +19,9 @@ const {
   mockCleanupResiduals,
   mockAcquireCoordinationLease,
   mockReleaseCoordinationLease,
+  mockCaptureRegularFileProof,
+  mockCaptureDirectoryTreeProof,
+  mockCaptureNearestParentProof,
   secureTempDir,
 } = vi.hoisted(() => ({
   mockMkdtempSync: vi.fn(),
@@ -37,6 +40,9 @@ const {
   mockCleanupResiduals: vi.fn(),
   mockAcquireCoordinationLease: vi.fn(),
   mockReleaseCoordinationLease: vi.fn(),
+  mockCaptureRegularFileProof: vi.fn(),
+  mockCaptureDirectoryTreeProof: vi.fn(),
+  mockCaptureNearestParentProof: vi.fn(),
   secureTempDir: '/secure/tmp/takt-import-a1b2c3',
 }));
 
@@ -117,6 +123,15 @@ vi.mock('../../features/repertoire/coordination-lease.js', () => ({
   acquireRepertoireCoordinationLease: mockAcquireCoordinationLease,
 }));
 
+vi.mock('../../features/repertoire/filesystem-proof.js', () => ({
+  captureRegularFileProof: mockCaptureRegularFileProof,
+  captureDirectoryTreeProof: mockCaptureDirectoryTreeProof,
+  captureNearestParentProof: mockCaptureNearestParentProof,
+  sameFileProof: (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right),
+  sameTreeProof: (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right),
+  sameParentProof: (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right),
+}));
+
 vi.mock('../../features/repertoire/pack-summary.js', () => ({
   PACKAGE_PROVIDER_OPTIONS_DIR: '/__takt_repertoire_package__/provider-options',
   summarizeFacetsByType: vi.fn(() => 'personas: 1'),
@@ -167,6 +182,9 @@ describe('repertoireAddCommand temporary directory handling', () => {
       mode: 'write',
       release: mockReleaseCoordinationLease,
     });
+    mockCaptureRegularFileProof.mockImplementation((path: string) => ({ path, digest: 'stable' }));
+    mockCaptureDirectoryTreeProof.mockReturnValue({ dev: 1, ino: 1, contentFingerprint: 'stable' });
+    mockCaptureNearestParentProof.mockReturnValue({ dev: 1, ino: 1, realpath: '/home/user/.takt/repertoire' });
     mockReadFileSync.mockReturnValue('path: .');
     mockResolveRef.mockReturnValue('main');
     mockResolveRepertoireConfigPath.mockReturnValue(join(secureTempDir, 'extract', '.takt', 'takt-repertoire.yaml'));
@@ -338,17 +356,38 @@ describe('repertoireAddCommand temporary directory handling', () => {
   });
 
   it('releases without mutation when downloaded source bytes change before publication', async () => {
-    mockReadFileSync
-      .mockReturnValueOnce('path: .')
-      .mockReturnValueOnce('path: .')
-      .mockReturnValueOnce('original')
-      .mockReturnValueOnce('path: .')
-      .mockReturnValueOnce('changed');
+    mockCaptureRegularFileProof
+      .mockReturnValueOnce({ path: 'manifest', digest: 'original' })
+      .mockReturnValueOnce({ path: 'source', digest: 'original' })
+      .mockReturnValueOnce({ path: 'manifest', digest: 'changed' })
+      .mockReturnValueOnce({ path: 'source', digest: 'original' });
 
     await expect(repertoireAddCommand('github:owner/repo@main'))
       .rejects.toThrow(/source changed while waiting/);
 
     expect(mockCleanupResiduals).not.toHaveBeenCalled();
+    expect(mockAtomicReplace).not.toHaveBeenCalled();
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a newly added copy target after lease acquisition', async () => {
+    const originalTarget = {
+      absolutePath: `${secureTempDir}/extract/facets/personas/coder.md`,
+      relativePath: 'facets/personas/coder.md',
+    };
+    mockCollectCopyTargets
+      .mockReturnValueOnce([originalTarget])
+      .mockReturnValueOnce([
+        originalTarget,
+        {
+          absolutePath: `${secureTempDir}/extract/facets/personas/foreign.md`,
+          relativePath: 'facets/personas/foreign.md',
+        },
+      ]);
+
+    await expect(repertoireAddCommand('github:owner/repo@main'))
+      .rejects.toThrow(/source changed while waiting/);
+
     expect(mockAtomicReplace).not.toHaveBeenCalled();
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
@@ -362,12 +401,9 @@ describe('repertoireAddCommand temporary directory handling', () => {
       || target === packageDir
       || target === lockPath
     ));
-    mockReadFileSync
-      .mockReturnValueOnce('path: .')
-      .mockReturnValueOnce('path: .')
-      .mockReturnValueOnce('source')
-      .mockReturnValueOnce('approved-lock')
-      .mockReturnValueOnce('changed-lock');
+    mockCaptureDirectoryTreeProof
+      .mockReturnValueOnce({ dev: 1, ino: 1, contentFingerprint: 'approved' })
+      .mockReturnValueOnce({ dev: 1, ino: 1, contentFingerprint: 'changed' });
 
     await expect(repertoireAddCommand('github:owner/repo@main'))
       .rejects.toThrow(/changed while waiting/);
