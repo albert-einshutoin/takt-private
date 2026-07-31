@@ -10,6 +10,9 @@ import { getRepertoireDir } from '../paths.js';
 const safeObjectFreeze = Object.freeze.bind(Object);
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
+const safeWeakSetAddMethod = WeakSet.prototype.add;
+const safeWeakSetHasMethod = WeakSet.prototype.has;
+const trustedAccesses = new WeakSet<RepertoireResourceReadAccess>();
 
 /** @internal Binds all repertoire resource I/O to one already-active workflow read lease. */
 export function createRepertoireResourceReadAccess(
@@ -23,7 +26,7 @@ export function createRepertoireResourceReadAccess(
   };
   const expectedRealPath = (path: string): string => join(context.repertoireRealPath, relativePath(path));
 
-  return safeObjectFreeze({
+  const access = safeObjectFreeze({
     contains: (path: string) => {
       const candidate = relative(context.repertoireDir, path);
       return !candidate.startsWith('..') && !isAbsolute(candidate);
@@ -69,6 +72,8 @@ export function createRepertoireResourceReadAccess(
       }
     },
   });
+  safeReflectApply(safeWeakSetAddMethod, trustedAccesses, [access]);
+  return access;
 }
 
 /** Selects the lease-bound adapter only when a candidate actually enters repertoire. */
@@ -101,7 +106,11 @@ function getRequiredRepertoireAccess(
   const inside = !candidate.startsWith('..') && !isAbsolute(candidate);
   if (!inside) return undefined;
   const access = context.repertoireReadAccess;
-  if (!access?.contains(path)) {
+  if (
+    access === undefined
+    || !(safeReflectApply(safeWeakSetHasMethod, trustedAccesses, [access]) as boolean)
+    || !access.contains(path)
+  ) {
     // Custom roots are supported by pure resolver tests and embedding hosts. The
     // process-owned repertoire root is the only root governed by coordination.
     if (resolve(context.repertoireDir) === resolve(getRepertoireDir())) throw failed();

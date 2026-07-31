@@ -31,6 +31,7 @@ import {
   loadWorkflowByIdentifier,
 } from '../infra/config/loaders/workflowLoader.js';
 import { loadPersonaPromptFromPath } from '../infra/config/loaders/agentLoader.js';
+import { resolveFacetByName } from '../infra/config/loaders/resource-resolver.js';
 
 const SAMPLE_WORKFLOW = `name: coordinated-workflow
 description: coordinated workflow
@@ -357,6 +358,23 @@ steps:
       expect(existsSync(coordinationDir)).toBe(false);
     }
     expect(hooks).toBe(0);
+  });
+
+  it('rejects a forged repertoire filesystem capability', () => {
+    createProjectWorkflowWithScopedResources();
+    const forged = {
+      contains: () => true,
+      exists: () => true,
+      isSymlink: () => false,
+      readText: () => 'forged',
+      realpath: (path: string) => path,
+    };
+
+    expect(() => resolveFacetByName('@owner/repo/review', 'instructions', {
+      lang: 'en',
+      repertoireDir: join(configDir, 'repertoire'),
+      repertoireReadAccess: forged,
+    })).toThrow(expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }));
   });
 
   it('normalizes filesystem discovery failures without path or cause leakage', () => {

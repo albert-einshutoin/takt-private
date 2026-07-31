@@ -239,8 +239,10 @@ export function resolveWorkflowProviderOptionsWithHost(
 }
 
 function isRepertoirePath(path: string, context: FacetResolutionContext): boolean {
-  return context.repertoireReadAccess?.contains(path) === true
-    || (context.repertoireDir !== undefined && isPathInside(resolve(context.repertoireDir), resolve(path)));
+  if (context.repertoireDir === undefined) return false;
+  const root = resolve(context.repertoireDir);
+  const candidate = resolve(path);
+  return candidate === root || isPathInside(root, candidate);
 }
 
 function resolveWorkflowProviderOptionsFromDir(
