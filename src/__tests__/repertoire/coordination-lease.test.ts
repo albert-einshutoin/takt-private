@@ -45,7 +45,7 @@ const moduleSourcePath = fileURLToPath(
 const productionModuleExists = existsSync(moduleSourcePath);
 const forceContract = process.env['TAKT_H1_FORCE_CONTRACT'] === '1';
 const contractEnabled = productionModuleExists || forceContract;
-const contractCaseCount = 13;
+const contractCaseCount = 17;
 const roots: string[] = [];
 const children = new Set<ChildProcess>();
 const childOutput = new WeakMap<ChildProcess, { stdout: Buffer[]; stderr: Buffer[] }>();
@@ -176,9 +176,12 @@ describeContract(
       'fails closed when a prior lease path is replaced by a %s',
       async (kind) => {
         const globalConfigDir = makeGlobalConfigDir();
-        const leasePath = await discoverReaderLeasePath(globalConfigDir);
+        const evidence = await discoverReaderLeaseEvidence(globalConfigDir);
+        const leasePath = evidence.path;
         const source = join(globalConfigDir, `${kind}-source`);
-        writeFileSync(source, '{}\n', { mode: 0o600 });
+        // Preserve a fully valid owner record so link type/count is the only
+        // unsafe property exercised by this fixture.
+        writeFileSync(source, `${JSON.stringify(evidence.payload)}\n`, { mode: 0o600 });
         if (kind === 'symlink') symlinkSync(source, leasePath);
         else linkSync(source, leasePath);
 
@@ -188,26 +191,39 @@ describeContract(
       },
     );
 
-    it('fails closed for broad modes and invalid ownership metadata', async () => {
-      const broadModeRoot = makeGlobalConfigDir();
-      const broadLeasePath = await discoverReaderLeasePath(broadModeRoot);
-      chmodSync(dirname(broadLeasePath), 0o755);
-      await expect(acquire(broadModeRoot, 'read', 150))
-        .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+    it.each([
+      ['directory mode', (evidence: LeaseEvidence) => {
+        chmodSync(dirname(evidence.path), 0o755);
+      }],
+      ['file mode', (evidence: LeaseEvidence) => {
+        writeLeasePayload(evidence.path, evidence.payload);
+        chmodSync(evidence.path, 0o644);
+      }],
+      ['pid', (evidence: LeaseEvidence) => {
+        writeLeasePayload(evidence.path, { ...evidence.payload, pid: 0 });
+      }],
+      ['uid', (evidence: LeaseEvidence) => {
+        const uid = evidence.payload['uid'];
+        writeLeasePayload(evidence.path, {
+          ...evidence.payload,
+          uid: typeof uid === 'number' ? uid + 1 : 0,
+        });
+      }],
+      ['token', (evidence: LeaseEvidence) => {
+        writeLeasePayload(evidence.path, { ...evidence.payload, token: '' });
+      }],
+    ] as const)(
+      'fails closed when only %s is unsafe',
+      async (_label, makeUnsafe) => {
+        const globalConfigDir = makeGlobalConfigDir();
+        const evidence = await discoverReaderLeaseEvidence(globalConfigDir);
+        makeUnsafe(evidence);
 
-      const invalidOwnerRoot = makeGlobalConfigDir();
-      const invalidOwner = await discoverReaderLeaseEvidence(invalidOwnerRoot);
-      const invalidOwnerPath = invalidOwner.path;
-      writeFileSync(invalidOwnerPath, JSON.stringify({
-        ...invalidOwner.payload,
-        pid: 0,
-        uid: -1,
-        token: '',
-      }), { mode: 0o600 });
-      await expect(acquire(invalidOwnerRoot, 'write', 150))
-        .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
-      expect(existsSync(invalidOwnerPath)).toBe(true);
-    });
+        await expect(acquire(globalConfigDir, 'write', 150))
+          .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+        expect(existsSync(evidence.path)).toBe(true);
+      },
+    );
 
     it('never auto-reclaims an apparently stale or dead owner', async () => {
       const globalConfigDir = makeGlobalConfigDir();
@@ -306,14 +322,12 @@ function coordinationArtifacts(globalConfigDir: string): {
   return { directories, files };
 }
 
-async function discoverReaderLeasePath(globalConfigDir: string): Promise<string> {
-  return (await discoverReaderLeaseEvidence(globalConfigDir)).path;
-}
-
-async function discoverReaderLeaseEvidence(globalConfigDir: string): Promise<{
+type LeaseEvidence = {
   path: string;
   payload: Record<string, unknown>;
-}> {
+};
+
+async function discoverReaderLeaseEvidence(globalConfigDir: string): Promise<LeaseEvidence> {
   const lease = await acquire(globalConfigDir, 'read');
   const files = coordinationArtifacts(globalConfigDir).files;
   const leasePath = files.find((path) => {
@@ -332,6 +346,10 @@ async function discoverReaderLeaseEvidence(globalConfigDir: string): Promise<{
 
 function readLeasePayload(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+}
+
+function writeLeasePayload(path: string, payload: Record<string, unknown>): void {
+  writeFileSync(path, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
 }
 
 async function waitForWriterIntent(globalConfigDir: string): Promise<void> {

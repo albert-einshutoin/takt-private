@@ -15,6 +15,14 @@ type CoordinationModule = {
 };
 
 const isChildContractProcess = process.env['TAKT_REPERTOIRE_LEASE_CHILD'] === '1';
+// The shared test setup deliberately clears TAKT_* variables before each test.
+// Capture this child-process protocol at module evaluation so setup isolation
+// cannot erase the parent-provided inputs before the contract starts.
+const childContractEnvironment: Record<string, string | undefined> = {
+  TAKT_REPERTOIRE_LEASE_CONFIG_DIR: process.env['TAKT_REPERTOIRE_LEASE_CONFIG_DIR'],
+  TAKT_REPERTOIRE_LEASE_READY_PATH: process.env['TAKT_REPERTOIRE_LEASE_READY_PATH'],
+  TAKT_REPERTOIRE_LEASE_RELEASE_PATH: process.env['TAKT_REPERTOIRE_LEASE_RELEASE_PATH'],
+};
 
 it.runIf(isChildContractProcess)(
   'holds a repertoire lease in an independent process',
@@ -45,7 +53,7 @@ it.runIf(isChildContractProcess)(
 );
 
 function requiredEnvironment(name: string): string {
-  const value = process.env[name];
+  const value = childContractEnvironment[name];
   if (!value) throw new Error(`${name} is required for the child-process contract`);
   return value;
 }
