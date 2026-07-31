@@ -4,6 +4,8 @@ import { parseProjectTemplateGithubSourceSpec } from '../../features/project-tem
 import {
   claimResolvedGithubTemplateSourceForDownload,
   consumeResolvedGithubTemplateSourceReceiptClaim,
+  demoteResolvedGithubTemplateSourceToAdvisory,
+  discardResolvedGithubTemplateSource,
   discardResolvedGithubTemplateSourceDownloadClaim,
   GithubTemplateSourceResolutionError,
   handoffResolvedGithubTemplateSourceDownloadClaimForReceipt,
@@ -96,6 +98,216 @@ function createPort(overrides: Partial<GithubTemplateSourceMetadataPort> = {}): 
 }
 
 describe('resolveGithubTemplateSource', () => {
+  it('demotes active authority into deeply frozen advisory evidence', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+
+    const advisory = demoteResolvedGithubTemplateSourceToAdvisory(resolved);
+
+    expect(advisory).toMatchObject({
+      kind: 'github-template-source-advisory',
+      source: {
+        owner: 'acme',
+        repo: 'template',
+        commit: COMMIT,
+      },
+      release: {
+        tag: 'v1.2.3',
+        id: 101,
+        asset: { id: 201, name: ASSET_NAME, size: 1024 },
+        checksumAsset: {
+          id: 202,
+          name: CHECKSUM_NAME,
+          size: CHECKSUM_LINE.length,
+        },
+        sha256: ARCHIVE_SHA,
+        version: '1.2.3',
+      },
+      updateState: 'update-available',
+      hardBlocked: false,
+      downloadEligible: true,
+    });
+    expect(Reflect.ownKeys(advisory)).toEqual([
+      'kind',
+      'source',
+      'release',
+      'declaredDependencies',
+      'updateState',
+      'hardBlocked',
+      'downloadEligible',
+    ]);
+    expect(Object.isFrozen(advisory)).toBe(true);
+    expect(Object.isFrozen(advisory.source)).toBe(true);
+    expect(Object.isFrozen(advisory.release)).toBe(true);
+    expect(Object.isFrozen(advisory.release.asset)).toBe(true);
+    expect(Object.isFrozen(advisory.release.checksumAsset)).toBe(true);
+    expect(Object.isFrozen(advisory.declaredDependencies)).toBe(true);
+    expect(Object.isFrozen(advisory.declaredDependencies[0])).toBe(true);
+    expect(Object.isFrozen(
+      advisory.declaredDependencies[0]!.capabilities,
+    )).toBe(true);
+    expect(Reflect.ownKeys(advisory)).not.toContain('metadata');
+    expect(Reflect.ownKeys(advisory)).not.toContain('credential');
+    expect(() => claimResolvedGithubTemplateSourceForDownload(advisory))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => consumeResolvedGithubTemplateSourceReceiptClaim(
+      advisory as never,
+    )).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => claimResolvedGithubTemplateSourceForDownload(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => demoteResolvedGithubTemplateSourceToAdvisory(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+  });
+
+  it('discards unused active authority exactly once', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+
+    expect(() => discardResolvedGithubTemplateSource(resolved)).not.toThrow();
+    expect(() => discardResolvedGithubTemplateSource(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => claimResolvedGithubTemplateSourceForDownload(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => demoteResolvedGithubTemplateSourceToAdvisory(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+  });
+
+  it('rejects synchronous reentry while advisory evidence is copied', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+    const mapDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      'map',
+    )!;
+    let reentryError: unknown;
+    let reentryClaim: unknown;
+    Object.defineProperty(Array.prototype, 'map', {
+      ...mapDescriptor,
+      value: function (this: unknown, ...args: unknown[]): unknown {
+        if (this === resolved.declaredDependencies) {
+          try {
+            reentryClaim =
+              claimResolvedGithubTemplateSourceForDownload(resolved);
+          } catch (error) {
+            reentryError = error;
+          }
+        }
+        return Reflect.apply(
+          mapDescriptor.value as (...values: unknown[]) => unknown,
+          this,
+          args,
+        );
+      },
+    });
+
+    try {
+      expect(demoteResolvedGithubTemplateSourceToAdvisory(resolved))
+        .toMatchObject({ kind: 'github-template-source-advisory' });
+    } finally {
+      Object.defineProperty(Array.prototype, 'map', mapDescriptor);
+    }
+    expect(reentryClaim).toBeUndefined();
+    expect(reentryError).toMatchObject({ code: 'INVALID_AUTHORITY' });
+  });
+
+  it('restores active authority when advisory evidence copying fails', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+    const mapDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      'map',
+    )!;
+    Object.defineProperty(Array.prototype, 'map', {
+      ...mapDescriptor,
+      value: function (this: unknown, ...args: unknown[]): unknown {
+        if (this === resolved.declaredDependencies) {
+          throw new Error('COPY_FAILED');
+        }
+        return Reflect.apply(
+          mapDescriptor.value as (...values: unknown[]) => unknown,
+          this,
+          args,
+        );
+      },
+    });
+
+    try {
+      expect(() => demoteResolvedGithubTemplateSourceToAdvisory(resolved))
+        .toThrow('COPY_FAILED');
+    } finally {
+      Object.defineProperty(Array.prototype, 'map', mapDescriptor);
+    }
+
+    const claim = claimResolvedGithubTemplateSourceForDownload(resolved);
+    expect(claim.resolved).toBe(resolved);
+    discardResolvedGithubTemplateSourceDownloadClaim(claim);
+  });
+
+  it.each(['demote', 'discard'] as const)(
+    'rejects cloned, forged, and proxied authority during %s without consuming the canonical result',
+    async (operation) => {
+      const resolved = await resolveDownloadAuthorityFixture();
+      const trap = vi.fn(() => {
+        throw new Error('SECRET_SENTINEL');
+      });
+      const candidates = [
+        Object.freeze({ ...resolved }),
+        JSON.parse(JSON.stringify(resolved)),
+        Object.freeze({ kind: 'resolved-github-template-source' }),
+        new Proxy(resolved, {
+          get: trap,
+          getOwnPropertyDescriptor: trap,
+          getPrototypeOf: trap,
+          ownKeys: trap,
+        }),
+      ];
+
+      for (const candidate of candidates) {
+        const invoke = () => operation === 'demote'
+          ? demoteResolvedGithubTemplateSourceToAdvisory(candidate)
+          : discardResolvedGithubTemplateSource(candidate);
+        expect(invoke).toThrow(expect.objectContaining({
+          code: 'INVALID_AUTHORITY',
+        }));
+      }
+      expect(trap).not.toHaveBeenCalled();
+
+      const claim = claimResolvedGithubTemplateSourceForDownload(resolved);
+      expect(claim.resolved).toBe(resolved);
+      discardResolvedGithubTemplateSourceDownloadClaim(claim);
+    },
+  );
+
+  it.each(['demote-first', 'claim-first'] as const)(
+    'permits one synchronous authority winner when operations race: %s',
+    async (order) => {
+      const resolved = await resolveDownloadAuthorityFixture();
+      const demote = async () =>
+        demoteResolvedGithubTemplateSourceToAdvisory(resolved);
+      const claim = async () =>
+        claimResolvedGithubTemplateSourceForDownload(resolved);
+      const results = await Promise.allSettled(
+        order === 'demote-first'
+          ? [demote(), claim()]
+          : [claim(), demote()],
+      );
+
+      expect(results.filter((result) => result.status === 'fulfilled'))
+        .toHaveLength(1);
+      expect(results.filter((result) => result.status === 'rejected'))
+        .toHaveLength(1);
+      const rejected = results.find((result) => result.status === 'rejected');
+      expect(rejected).toMatchObject({
+        reason: { code: 'INVALID_AUTHORITY' },
+      });
+      const fulfilled = results.find(
+        (result) => result.status === 'fulfilled',
+      );
+      if (
+        fulfilled?.status === 'fulfilled'
+        && 'resolved' in fulfilled.value
+      ) {
+        discardResolvedGithubTemplateSourceDownloadClaim(fulfilled.value);
+      }
+    },
+  );
+
   it('rejects forged, cloned, and proxied resolved provenance for download', async () => {
     const resolved = await resolveDownloadAuthorityFixture();
     const candidates = [

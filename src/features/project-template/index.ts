@@ -24,6 +24,8 @@ export type {
   ProjectTemplateSourceDescriptorV1,
 } from './source-descriptor.js';
 export {
+  demoteResolvedGithubTemplateSourceToAdvisory,
+  discardResolvedGithubTemplateSource,
   GithubTemplateSourceResolutionError,
   resolveGithubTemplateSource,
 } from './github-update-check.js';
@@ -34,6 +36,7 @@ export type {
   GithubTemplateGetReleaseInput,
   GithubTemplateReadReleaseAssetInput,
   GithubTemplateSourceMetadataPort,
+  GithubTemplateSourceAdvisory,
   GithubTemplateCurrentSourceEvidence,
   GithubTemplateUpdateState,
   ResolveGithubTemplateSourceOptions,

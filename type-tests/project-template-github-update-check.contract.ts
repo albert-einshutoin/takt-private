@@ -1,14 +1,28 @@
 import {
   claimResolvedGithubTemplateSourceForDownload,
   consumeResolvedGithubTemplateSourceReceiptClaim,
+  demoteResolvedGithubTemplateSourceToAdvisory,
+  discardResolvedGithubTemplateSource,
   discardResolvedGithubTemplateSourceDownloadClaim,
   handoffResolvedGithubTemplateSourceDownloadClaimForReceipt,
   type ClaimedResolvedGithubTemplateSource,
   type ClaimedResolvedGithubTemplateSourceForDownload,
+  type GithubTemplateSourceAdvisory,
   type ResolvedGithubTemplateSource,
 } from '../src/features/project-template/github-update-check.js';
 
 declare const resolved: ResolvedGithubTemplateSource;
+
+const advisory: GithubTemplateSourceAdvisory =
+  demoteResolvedGithubTemplateSourceToAdvisory(resolved);
+const structuralAdvisory: GithubTemplateSourceAdvisory = { ...advisory };
+void structuralAdvisory.source.owner;
+void structuralAdvisory.release.asset.id;
+// @ts-expect-error Advisory evidence has a distinct non-authority shape.
+const resolvedFromAdvisory: ResolvedGithubTemplateSource = advisory;
+void resolvedFromAdvisory;
+
+discardResolvedGithubTemplateSource(resolved);
 
 const downloadClaim: ClaimedResolvedGithubTemplateSourceForDownload =
   claimResolvedGithubTemplateSourceForDownload(resolved);

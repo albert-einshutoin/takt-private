@@ -165,11 +165,51 @@ export interface ResolvedGithubTemplateSource {
   readonly downloadEligible: boolean;
 }
 
+/**
+ * Authority-free evidence for UI, persistence decisions, and drift comparison.
+ * Its distinct discriminant prevents accidental structural reuse as a fresh
+ * resolution result, while runtime download authority remains WeakMap-only.
+ */
+export interface GithubTemplateSourceAdvisory {
+  readonly kind: 'github-template-source-advisory';
+  readonly source: {
+    readonly owner: string;
+    readonly repo: string;
+    readonly repositoryUrl: `https://github.com/${string}/${string}`;
+    readonly canonicalSource: string;
+    readonly requestedRef: string;
+    readonly commit: string;
+    readonly descriptorSha256: string;
+  };
+  readonly release: {
+    readonly tag: string;
+    readonly id: number;
+    readonly asset: {
+      readonly id: number;
+      readonly name: string;
+      readonly size: number;
+    };
+    readonly checksumAsset: {
+      readonly id: number;
+      readonly name: string;
+      readonly size: number;
+    };
+    readonly sha256: string;
+    readonly version: string;
+  };
+  readonly declaredDependencies:
+    readonly ProjectTemplateRepertoireDependencyV1[];
+  readonly updateState: GithubTemplateUpdateState;
+  readonly hardBlocked: boolean;
+  readonly downloadEligible: boolean;
+}
+
 interface ResolvedGithubTemplateSourceAuthority {
   readonly result: ResolvedGithubTemplateSource;
   readonly descriptor: ProjectTemplateSourceDescriptorV1;
   state:
     | 'active'
+    | 'demoting'
     | 'download-owned'
     | 'receipt-consuming'
     | 'consumed';
@@ -203,9 +243,9 @@ const RESOLVED_SOURCE_DOWNLOAD_CLAIMS = new WeakMap<
   ResolvedGithubTemplateSourceAuthority
 >();
 
-export function claimResolvedGithubTemplateSourceForDownload(
+function requireActiveResolvedAuthority(
   value: unknown,
-): ClaimedResolvedGithubTemplateSourceForDownload {
+): ResolvedGithubTemplateSourceAuthority {
   const authority = (
     typeof value === 'object' && value !== null
       ? RESOLVED_SOURCE_AUTHORITIES.get(value)
@@ -218,6 +258,86 @@ export function claimResolvedGithubTemplateSourceForDownload(
   ) {
     invalidResolvedAuthority('resolved GitHub template source authority');
   }
+  return authority;
+}
+
+function consumeActiveResolvedAuthority(
+  authority: ResolvedGithubTemplateSourceAuthority,
+): void {
+  authority.state = 'consumed';
+  RESOLVED_SOURCE_AUTHORITIES.delete(authority.result);
+}
+
+export function demoteResolvedGithubTemplateSourceToAdvisory(
+  value: unknown,
+): GithubTemplateSourceAdvisory {
+  const authority = requireActiveResolvedAuthority(value);
+  const resolved = authority.result;
+  // Reserve synchronously before copying nested evidence. Even if a mutable
+  // intrinsic is compromised, reentry cannot exchange the same result for a
+  // claim while demotion is in progress.
+  authority.state = 'demoting';
+  let advisory: GithubTemplateSourceAdvisory;
+  try {
+    advisory = Object.freeze<GithubTemplateSourceAdvisory>({
+      kind: 'github-template-source-advisory',
+      source: Object.freeze({
+        owner: resolved.owner,
+        repo: resolved.repo,
+        repositoryUrl: resolved.repositoryUrl,
+        canonicalSource: resolved.canonicalSource,
+        requestedRef: resolved.requestedRef,
+        commit: resolved.commit,
+        descriptorSha256: resolved.descriptorSha256,
+      }),
+      release: Object.freeze({
+        tag: resolved.releaseTag,
+        id: resolved.releaseId,
+        asset: Object.freeze({
+          id: resolved.assetId,
+          name: resolved.assetName,
+          size: resolved.assetSize,
+        }),
+        checksumAsset: Object.freeze({
+          id: resolved.checksumAssetId,
+          name: resolved.checksumAssetName,
+          size: resolved.checksumAssetSize,
+        }),
+        sha256: resolved.sha256,
+        version: resolved.version,
+      }),
+      declaredDependencies: Object.freeze(
+        resolved.declaredDependencies.map((dependency) => Object.freeze({
+          ...dependency,
+          capabilities: Object.freeze([...dependency.capabilities]),
+        })),
+      ),
+      updateState: resolved.updateState,
+      hardBlocked: resolved.hardBlocked,
+      downloadEligible: resolved.downloadEligible,
+    });
+  } catch (error) {
+    authority.state = 'active';
+    throw error;
+  }
+  // Build every structural copy before consuming. Once this synchronous state
+  // transition occurs, no throw or reentry can strand active authority behind
+  // an advisory result.
+  consumeActiveResolvedAuthority(authority);
+  return advisory;
+}
+
+export function discardResolvedGithubTemplateSource(value: unknown): void {
+  const authority = requireActiveResolvedAuthority(value);
+  // Fresh results that lose a compare/race must be explicitly retired so no
+  // later code can accidentally exchange the stale object for download power.
+  consumeActiveResolvedAuthority(authority);
+}
+
+export function claimResolvedGithubTemplateSourceForDownload(
+  value: unknown,
+): ClaimedResolvedGithubTemplateSourceForDownload {
+  const authority = requireActiveResolvedAuthority(value);
   // The existing authority is deliberately advanced instead of copying its
   // provenance into a second authority: one state cell makes concurrent
   // download, discard, and receipt ownership mutually exclusive.

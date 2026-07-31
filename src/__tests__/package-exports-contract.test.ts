@@ -8,6 +8,7 @@ import type {
   GithubTemplateArchiveAssetInput,
   GithubTemplateArchiveAssetPort,
   GithubTemplateDownloadOrchestratorErrorCode,
+  GithubTemplateSourceAdvisory,
   PreparedProjectTemplateApplyPlan,
   ProjectTemplateApplyMergeDiagnostics,
   ProjectTemplateBaseContent,
@@ -67,6 +68,10 @@ describe('package exports contract', () => {
         sourceDescriptorMaxBytes: api.MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
         sourceDescriptorSchema: typeof api.projectTemplateSourceDescriptorV1JsonSchema,
         resolveGithubTemplateSource: typeof api.resolveGithubTemplateSource,
+        demoteGithubTemplateSource:
+          typeof api.demoteResolvedGithubTemplateSourceToAdvisory,
+        discardGithubTemplateSource:
+          typeof api.discardResolvedGithubTemplateSource,
         sourceResolutionError: typeof api.GithubTemplateSourceResolutionError,
         downloadGithubTemplateSource: typeof api.downloadGithubTemplateSource,
         downloadOrchestratorError:
@@ -87,6 +92,8 @@ describe('package exports contract', () => {
       sourceDescriptorMaxBytes: 65536,
       sourceDescriptorSchema: 'object',
       resolveGithubTemplateSource: 'function',
+      demoteGithubTemplateSource: 'function',
+      discardGithubTemplateSource: 'function',
       sourceResolutionError: 'function',
       downloadGithubTemplateSource: 'function',
       downloadOrchestratorError: 'function',
@@ -126,6 +133,12 @@ describe('package exports contract', () => {
         commit: string;
         downloadEligible: boolean;
       }>();
+    expectTypeOf<GithubTemplateSourceAdvisory>()
+      .toMatchTypeOf<{
+        kind: 'github-template-source-advisory';
+        source: { commit: string };
+        release: { asset: { id: number } };
+      }>();
     expectTypeOf<GithubTemplateSourceMetadataPort>()
       .toHaveProperty('resolveRefToCommit');
     expectTypeOf<DownloadGithubTemplateSourceOptions>()
@@ -158,6 +171,7 @@ describe('package exports contract', () => {
     expect(declarationEntry).toContain('ProjectTemplateRepertoireDependencyV1');
     expect(declarationEntry).toContain('ProjectTemplateRepertoireCapabilityV1');
     expect(declarationEntry).toContain('ResolvedGithubTemplateSource');
+    expect(declarationEntry).toContain('GithubTemplateSourceAdvisory');
     expect(declarationEntry).toContain('GithubTemplateSourceMetadataPort');
     expect(declarationEntry).toContain('DownloadGithubTemplateSourceOptions');
     expect(declarationEntry).toContain('DownloadedGithubTemplateSource');
