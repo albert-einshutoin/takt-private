@@ -245,13 +245,50 @@ const RESOLVED_SOURCE_DOWNLOAD_CLAIMS = new WeakMap<
   object,
   ResolvedGithubTemplateSourceAuthority
 >();
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_WEAK_MAP_GET = WeakMap.prototype.get;
+const CAPTURED_WEAK_MAP_SET = WeakMap.prototype.set;
+const CAPTURED_WEAK_MAP_DELETE = WeakMap.prototype.delete;
+
+function authorityMapGet(
+  map: WeakMap<object, ResolvedGithubTemplateSourceAuthority>,
+  key: object,
+): ResolvedGithubTemplateSourceAuthority | undefined {
+  // Authority decisions must not consult mutable prototype properties after
+  // module initialization. A poisoned WeakMap method could otherwise reenter
+  // between validation and retirement or replace the selected primary error.
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_GET,
+    map,
+    [key],
+  ) as ResolvedGithubTemplateSourceAuthority | undefined;
+}
+
+function authorityMapSet(
+  map: WeakMap<object, ResolvedGithubTemplateSourceAuthority>,
+  key: object,
+  authority: ResolvedGithubTemplateSourceAuthority,
+): void {
+  CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_SET,
+    map,
+    [key, authority],
+  );
+}
+
+function authorityMapDelete(
+  map: WeakMap<object, ResolvedGithubTemplateSourceAuthority>,
+  key: object,
+): void {
+  CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_DELETE, map, [key]);
+}
 
 function requireActiveResolvedAuthority(
   value: unknown,
 ): ResolvedGithubTemplateSourceAuthority {
   const authority = (
     typeof value === 'object' && value !== null
-      ? RESOLVED_SOURCE_AUTHORITIES.get(value)
+      ? authorityMapGet(RESOLVED_SOURCE_AUTHORITIES, value)
       : undefined
   );
   if (
@@ -268,7 +305,7 @@ function consumeActiveResolvedAuthority(
   authority: ResolvedGithubTemplateSourceAuthority,
 ): void {
   authority.state = 'consumed';
-  RESOLVED_SOURCE_AUTHORITIES.delete(authority.result);
+  authorityMapDelete(RESOLVED_SOURCE_AUTHORITIES, authority.result);
 }
 
 export function demoteResolvedGithubTemplateSourceToAdvisory(
@@ -348,34 +385,34 @@ export function claimResolvedGithubTemplateSourceForDownload(
   const claim = Object.freeze({
     resolved: authority.result,
   }) as ClaimedResolvedGithubTemplateSourceForDownload;
-  RESOLVED_SOURCE_DOWNLOAD_CLAIMS.set(claim, authority);
+  authorityMapSet(RESOLVED_SOURCE_DOWNLOAD_CLAIMS, claim, authority);
   return claim;
 }
 
 export function discardResolvedGithubTemplateSourceDownloadClaim(
   claim: ClaimedResolvedGithubTemplateSourceForDownload,
 ): void {
-  const authority = RESOLVED_SOURCE_DOWNLOAD_CLAIMS.get(claim);
+  const authority = authorityMapGet(RESOLVED_SOURCE_DOWNLOAD_CLAIMS, claim);
   if (authority === undefined || authority.state !== 'download-owned') {
     invalidResolvedAuthority(
       'resolved GitHub template source download claim',
     );
   }
-  RESOLVED_SOURCE_DOWNLOAD_CLAIMS.delete(claim);
   authority.state = 'consumed';
+  authorityMapDelete(RESOLVED_SOURCE_DOWNLOAD_CLAIMS, claim);
 }
 
 export function handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
   claim: ClaimedResolvedGithubTemplateSourceForDownload,
 ): ClaimedResolvedGithubTemplateSource {
-  const authority = RESOLVED_SOURCE_DOWNLOAD_CLAIMS.get(claim);
+  const authority = authorityMapGet(RESOLVED_SOURCE_DOWNLOAD_CLAIMS, claim);
   if (authority === undefined || authority.state !== 'download-owned') {
     invalidResolvedAuthority(
       'resolved GitHub template source download claim',
     );
   }
-  RESOLVED_SOURCE_DOWNLOAD_CLAIMS.delete(claim);
   authority.state = 'receipt-consuming';
+  authorityMapDelete(RESOLVED_SOURCE_DOWNLOAD_CLAIMS, claim);
   return createResolvedReceiptClaim(authority);
 }
 
@@ -388,19 +425,19 @@ function createResolvedReceiptClaim(
     resolved: authority.result,
     descriptor: authority.descriptor,
   }) as ClaimedResolvedGithubTemplateSource;
-  RESOLVED_SOURCE_CLAIMS.set(claim, authority);
+  authorityMapSet(RESOLVED_SOURCE_CLAIMS, claim, authority);
   return claim;
 }
 
 export function consumeResolvedGithubTemplateSourceReceiptClaim(
   claim: ClaimedResolvedGithubTemplateSource,
 ): void {
-  const authority = RESOLVED_SOURCE_CLAIMS.get(claim);
+  const authority = authorityMapGet(RESOLVED_SOURCE_CLAIMS, claim);
   if (authority === undefined || authority.state !== 'receipt-consuming') {
     invalidResolvedAuthority('resolved GitHub template source claim');
   }
-  RESOLVED_SOURCE_CLAIMS.delete(claim);
   authority.state = 'consumed';
+  authorityMapDelete(RESOLVED_SOURCE_CLAIMS, claim);
 }
 
 function invalidResolvedAuthority(subject: string): never {
@@ -600,7 +637,7 @@ export async function resolveGithubTemplateSource(
   const descriptorSnapshot = parseProjectTemplateSourceDescriptorJson(
     serializeProjectTemplateSourceDescriptor(descriptor),
   );
-  RESOLVED_SOURCE_AUTHORITIES.set(result, {
+  authorityMapSet(RESOLVED_SOURCE_AUTHORITIES, result, {
     result,
     descriptor: Object.freeze({
       ...descriptorSnapshot,

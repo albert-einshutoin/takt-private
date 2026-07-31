@@ -170,6 +170,94 @@ describe('resolveGithubTemplateSource', () => {
       .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
   });
 
+  it('retires canonical authority with module-captured WeakMap intrinsics', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+    const resolvedForClaim = await resolveDownloadAuthorityFixture();
+    const getDescriptor = Object.getOwnPropertyDescriptor(
+      WeakMap.prototype,
+      'get',
+    )!;
+    const deleteDescriptor = Object.getOwnPropertyDescriptor(
+      WeakMap.prototype,
+      'delete',
+    )!;
+    const setDescriptor = Object.getOwnPropertyDescriptor(
+      WeakMap.prototype,
+      'set',
+    )!;
+    const applyDescriptor = Object.getOwnPropertyDescriptor(
+      Reflect,
+      'apply',
+    )!;
+    let traps = 0;
+    const poison = () => {
+      traps += 1;
+      claimResolvedGithubTemplateSourceForDownload(resolved);
+      throw new Error('MUTABLE_INTRINSIC_EXECUTED');
+    };
+    Object.defineProperty(WeakMap.prototype, 'get', {
+      ...getDescriptor,
+      value: poison,
+    });
+    Object.defineProperty(WeakMap.prototype, 'delete', {
+      ...deleteDescriptor,
+      value: poison,
+    });
+    Object.defineProperty(WeakMap.prototype, 'set', {
+      ...setDescriptor,
+      value: poison,
+    });
+    Object.defineProperty(Reflect, 'apply', {
+      ...applyDescriptor,
+      value: poison,
+    });
+
+    let discardError: unknown;
+    let claimLifecycleError: unknown;
+    let claimError: unknown;
+    let invalidError: unknown;
+    try {
+      try {
+        discardResolvedGithubTemplateSource(resolved);
+      } catch (error) {
+        discardError = error;
+      }
+      try {
+        claimResolvedGithubTemplateSourceForDownload(resolved);
+      } catch (error) {
+        claimError = error;
+      }
+      try {
+        discardResolvedGithubTemplateSource({});
+      } catch (error) {
+        invalidError = error;
+      }
+      try {
+        const claim =
+          claimResolvedGithubTemplateSourceForDownload(resolvedForClaim);
+        discardResolvedGithubTemplateSourceDownloadClaim(claim);
+      } catch (error) {
+        claimLifecycleError = error;
+      }
+    } finally {
+      Object.defineProperty(WeakMap.prototype, 'get', getDescriptor);
+      Object.defineProperty(WeakMap.prototype, 'delete', deleteDescriptor);
+      Object.defineProperty(WeakMap.prototype, 'set', setDescriptor);
+      Object.defineProperty(Reflect, 'apply', applyDescriptor);
+    }
+    expect(discardError).toBeUndefined();
+    expect(claimError).toMatchObject({
+      code: 'INVALID_AUTHORITY',
+      message: 'resolved GitHub template source authority is invalid',
+    });
+    expect(invalidError).toMatchObject({
+      code: 'INVALID_AUTHORITY',
+      message: 'resolved GitHub template source authority is invalid',
+    });
+    expect(claimLifecycleError).toBeUndefined();
+    expect(traps).toBe(0);
+  });
+
   it('rejects synchronous reentry while advisory evidence is copied', async () => {
     const resolved = await resolveDownloadAuthorityFixture();
     const mapDescriptor = Object.getOwnPropertyDescriptor(

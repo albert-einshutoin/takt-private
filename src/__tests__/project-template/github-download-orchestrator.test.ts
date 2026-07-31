@@ -626,7 +626,7 @@ describe('GitHub template download orchestrator O1', () => {
       },
     };
 
-    await expect(downloadGithubTemplateSource({
+    const error = await downloadGithubTemplateSource({
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
@@ -635,7 +635,12 @@ describe('GitHub template download orchestrator O1', () => {
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
       verifier: fixture.verifier,
-    })).rejects.toMatchObject({ code: 'SOURCE_DRIFT' });
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: 'SOURCE_DRIFT',
+      message: 'GitHub template source changed before download',
+      cleanupState: undefined,
+    });
     expect(fixture.assetCalls).toEqual([]);
     expect(fresh).toBeDefined();
     expect(() =>
