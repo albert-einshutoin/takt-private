@@ -71,6 +71,11 @@ vi.mock('../infra/config/index.js', () => ({
   resolveWorkflowConfigValues: (...args: unknown[]) => mockResolveWorkflowConfigValues(...args),
 }));
 
+vi.mock('../infra/config/loaders/workflowResolver.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  loadWorkflowByIdentifierWithReadContext: (...args: unknown[]) => mockLoadWorkflowByIdentifier(...args.slice(0, 3)),
+}));
+
 vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
   writeRunMetaFileDurably: mockRunMetaWrite,
 }));

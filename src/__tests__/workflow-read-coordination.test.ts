@@ -34,6 +34,8 @@ import { loadPersonaPromptFromPath } from '../infra/config/loaders/agentLoader.j
 import { resolveFacetByName } from '../infra/config/loaders/resource-resolver.js';
 import { createRepertoireResourceReadAccess } from '../infra/config/loaders/repertoireResourceReadAccess.js';
 import { resolveWorkflowProviderOptionsWithHost } from '../infra/config/loaders/workflowProviderOptionsResolver.js';
+import { executeTaskWorkflow } from '../features/tasks/execute/taskWorkflowExecution.js';
+import { resolveProjectTemplateRunStartMutexPath } from '../features/project-template/apply-guard.js';
 
 const SAMPLE_WORKFLOW = `name: coordinated-workflow
 description: coordinated workflow
@@ -73,6 +75,12 @@ describe('workflow repertoire read coordination', () => {
     const path = join(workflowsDir, `${name}.yaml`);
     writeFileSync(path, SAMPLE_WORKFLOW);
     return path;
+  }
+
+  function createProjectRuntimeWorkflow(name = 'runtime'): void {
+    const workflowsDir = join(projectDir, '.takt', 'workflows');
+    mkdirSync(workflowsDir, { recursive: true });
+    writeFileSync(join(workflowsDir, `${name}.yaml`), SAMPLE_WORKFLOW);
   }
 
   function createProjectWorkflowWithScopedResources(): void {
@@ -172,6 +180,105 @@ ${stepFields}`);
 
     expect(listWorkflowEntries(projectDir).map(({ name }) => name)).toContain('@owner/repo/review');
     expect(loadWorkflowByIdentifier('@owner/repo/review', projectDir)?.name).toBe('coordinated-workflow');
+  });
+
+  it('acquires global repertoire before the project run-start mutex', async () => {
+    createProjectRuntimeWorkflow();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(projectDir);
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+    });
+    let executorCalled = false;
+    const executionFailure = executeTaskWorkflow({
+      task: 'lock order',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'runtime',
+    }, async () => {
+      executorCalled = true;
+      return { success: true };
+    }).catch((error: unknown) => error);
+
+    try {
+      await delay(50);
+      expect(executorCalled).toBe(false);
+      expect(existsSync(mutexPath)).toBe(false);
+    } finally {
+      writer.release();
+    }
+    await expect(executionFailure).resolves.toMatchObject({ code: 'WRITER_PENDING' });
+  });
+
+  it('releases both read boundaries before awaiting an unresolved executor Promise', async () => {
+    createProjectRuntimeWorkflow();
+    const mutexPath = resolveProjectTemplateRunStartMutexPath(projectDir);
+    let executorStarted: (() => void) | undefined;
+    let resolveExecutor: ((result: { success: boolean }) => void) | undefined;
+    const started = new Promise<void>((resolve) => { executorStarted = resolve; });
+    const pending = new Promise<{ success: boolean }>((resolve) => { resolveExecutor = resolve; });
+    const execution = executeTaskWorkflow({
+      task: 'release before provider work',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'runtime',
+    }, () => {
+      expect(existsSync(mutexPath)).toBe(true);
+      executorStarted!();
+      return pending;
+    });
+
+    await started;
+    expect(existsSync(mutexPath)).toBe(false);
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+      timeoutMs: 250,
+    });
+    writer.release();
+    resolveExecutor!({ success: true });
+    await expect(execution).resolves.toEqual({ success: true });
+  });
+
+  it('releases runtime read boundaries when workflow loading fails', async () => {
+    createProjectRuntimeWorkflow('broken');
+    writeFileSync(
+      join(projectDir, '.takt', 'workflows', 'broken.yaml'),
+      'name: broken\ninitial_step: missing\nsteps: []\n',
+    );
+    await expect(executeTaskWorkflow({
+      task: 'read failure',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'broken',
+    }, async () => ({ success: true }))).rejects.toThrow();
+
+    expect(existsSync(resolveProjectTemplateRunStartMutexPath(projectDir))).toBe(false);
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+      timeoutMs: 250,
+    });
+    writer.release();
+  });
+
+  it('rejects custom thenables without adopting them', async () => {
+    createProjectRuntimeWorkflow();
+    let adopted = false;
+    const thenable = {
+      then() {
+        adopted = true;
+      },
+    };
+
+    await expect(executeTaskWorkflow({
+      task: 'reject thenable',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'runtime',
+    }, (() => thenable) as never)).rejects.toMatchObject({ code: 'WORKFLOW_DISCOVERY_FAILED' });
+    expect(adopted).toBe(false);
+    expect(existsSync(resolveProjectTemplateRunStartMutexPath(projectDir))).toBe(false);
   });
 
   it('blocks project workflow facet, persona, and provider reads behind a writer', async () => {

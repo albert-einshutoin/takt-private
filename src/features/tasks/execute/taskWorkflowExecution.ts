@@ -1,5 +1,7 @@
 import type { WorkflowConfig } from '../../../core/models/index.js';
-import { loadWorkflowByIdentifier, isWorkflowPath, resolveWorkflowConfigValues } from '../../../infra/config/index.js';
+import { isWorkflowPath, resolveWorkflowConfigValues } from '../../../infra/config/index.js';
+import { loadWorkflowByIdentifierWithReadContext } from '../../../infra/config/loaders/workflowResolver.js';
+import type { InternalWorkflowReadContext } from '../../../infra/config/loaders/workflowDiscovery.js';
 import { resolveProviderOptionsWithTrace } from '../../../infra/config/resolveConfigValue.js';
 import { info, error } from '../../../shared/ui/index.js';
 import { createLogger } from '../../../shared/utils/index.js';
@@ -12,6 +14,7 @@ import {
   withProjectTemplateRunStartPermit,
   type ProjectTemplateRunStartPermit,
 } from '../../project-template/apply-lease.js';
+import { prepareWorkflowRuntimeRead } from './workflowRuntimeReadBoundary.js';
 
 const log = createLogger('task');
 
@@ -48,11 +51,19 @@ export async function executeTaskWorkflow(
     currentTaskIssueNumber,
     onRunningEvidencePublished,
   } = options;
-  const startWorkflow = (
-    projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit,
+  const prepareWorkflow = (
+    readContext: InternalWorkflowReadContext,
   ): Promise<WorkflowExecutionResult> => {
+    const startWorkflow = (
+      projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit,
+    ): Promise<WorkflowExecutionResult> => {
     const traceTaskMetadata = resolveTraceTaskMetadata(options);
-    const workflowConfig = loadWorkflowByIdentifier(workflowIdentifier, projectCwd, { lookupCwd: cwd });
+    const workflowConfig = loadWorkflowByIdentifierWithReadContext(
+      workflowIdentifier,
+      projectCwd,
+      { lookupCwd: cwd },
+      readContext,
+    );
     const safeWorkflowIdentifier = sanitizeTerminalText(workflowIdentifier);
 
     if (!workflowConfig) {
@@ -111,16 +122,20 @@ export async function executeTaskWorkflow(
         ? { projectTemplateRunStartPermit }
         : {}),
     });
-  };
+    };
 
-  // Loading project-owned workflow/config and synchronously publishing run
-  // evidence must be one critical section. Otherwise apply can commit between
-  // the read and publication, allowing a run with the old template snapshot.
-  // The executor returns its Promise only after the production bootstrap has
-  // synchronously published meta.json, so the mutex is not held for execution.
-  return existsSync(projectCwd)
-    ? withProjectTemplateRunStartPermit(projectCwd, startWorkflow)
-    : startWorkflow();
+    // Global repertoire is always acquired before the project run-start mutex.
+    // This fixed order avoids global/project deadlocks. The executor must create
+    // its Promise after synchronous evidence publication; project then global
+    // release before any provider/network/engine continuation adopts it.
+    return existsSync(projectCwd)
+      ? withProjectTemplateRunStartPermit(projectCwd, startWorkflow)
+      : startWorkflow();
+  };
+  return prepareWorkflowRuntimeRead({
+    ...(abortSignal ? { abortSignal } : {}),
+    prepare: prepareWorkflow,
+  });
 }
 
 function resolveTraceTaskMetadata(options: ExecuteTaskOptions): WorkflowTraceTaskMetadata | undefined {

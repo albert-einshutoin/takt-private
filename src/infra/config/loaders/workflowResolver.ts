@@ -479,6 +479,20 @@ export function loadWorkflowByIdentifierForWorkflowCall(
   return loadWorkflowByIdentifierInternal(identifier, projectCwd, options);
 }
 
+/** @internal Runtime-only loader for callers already holding one read permit. */
+export function loadWorkflowByIdentifierWithReadContext(
+  identifier: string,
+  projectCwd: string,
+  options: WorkflowLookupOptions,
+  readContext: InternalWorkflowReadContext,
+): WorkflowConfig | null {
+  const snapshot = snapshotPublicWorkflowLookupOptions(options);
+  return loadWorkflowByIdentifierInternal(identifier, projectCwd, {
+    ...snapshot,
+    repertoireReadContext: readContext,
+  });
+}
+
 function loadIdentifierWithPermitOnRepertoireAccess(
   identifier: string,
   projectCwd: string,
