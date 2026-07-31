@@ -1,25 +1,36 @@
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, relative } from 'node:path';
+import {
+  Stats,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+  type BigIntStats,
+} from 'node:fs';
+import { dirname, isAbsolute, join, relative } from 'node:path';
+
+export const PROOF_MAX_DEPTH = 32;
+export const PROOF_MAX_ENTRIES = 4_096;
+export const PROOF_MAX_SINGLE_FILE_BYTES = 2 * 1024 * 1024;
+export const PROOF_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeArraySortMethod = Array.prototype.sort;
 const safeArrayJoinMethod = Array.prototype.join;
 const safeArrayPushMethod = Array.prototype.push;
 const safeStringStartsWithMethod = String.prototype.startsWith;
+const safeBigIntToStringMethod = BigInt.prototype.toString;
+const safeStatsIsFileMethod = Stats.prototype.isFile;
+const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
+const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
 const safeNumber = Number;
-const safeArraySort = (values: string[]): string[] => (
-  safeReflectApply(safeArraySortMethod, values, []) as string[]
-);
-const safeArrayJoin = (values: string[], separator: string): string => (
-  safeReflectApply(safeArrayJoinMethod, values, [separator]) as string
-);
-const safeArrayPush = <T>(values: T[], value: T): void => {
-  safeReflectApply(safeArrayPushMethod, values, [value]);
-};
-const safeStringStartsWith = (value: string, search: string): boolean => (
-  safeReflectApply(safeStringStartsWithMethod, value, [search]) as boolean
-);
+const safeBufferAlloc = Buffer.alloc.bind(Buffer);
+const safeBufferConcat = Buffer.concat.bind(Buffer);
+const FILE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 
 export class RepertoireFilesystemProofError extends Error {
   readonly code = 'RECOVERY_REQUIRED' as const;
@@ -39,7 +50,10 @@ export type FileProof = {
   nlink: number;
   size: number;
   digest: string;
+  stableIdentity: string;
 };
+
+export type ApprovedFile = { proof: FileProof; bytes: Buffer };
 
 export type TreeProof = {
   dev: number;
@@ -47,6 +61,7 @@ export type TreeProof = {
   mode: number;
   realpath: string;
   contentFingerprint: string;
+  stableIdentity: string;
 };
 
 export type ParentProof = {
@@ -54,71 +69,77 @@ export type ParentProof = {
   ino: number;
   mode: number;
   realpath: string;
+  stableIdentity: string;
 };
 
-type FileStat = NonNullable<ReturnType<typeof lstatSync>>;
+export type TreeProofProbe = {
+  /** Test-only race injection after a directory's first sorted listing. */
+  afterDirectoryRead?: (directory: string) => void;
+};
 
-export function captureRegularFileProof(path: string, containmentRoot: string): FileProof {
+export function readApprovedRegularFile(path: string, containmentRoot: string): ApprovedFile {
   try {
     const rootRealpath = realpathSync(containmentRoot);
-    const before = lstatSync(path);
+    const pathBefore = lstatBigInt(path);
+    assertRegularFile(pathBefore);
     const resolvedBefore = realpathSync(path);
     assertContained(resolvedBefore, rootRealpath);
-    assertRegularFile(before);
-    const bytes = readFileSync(path);
-    const after = lstatSync(path);
-    const resolvedAfter = realpathSync(path);
-    assertRegularFile(after);
-    if (
-      before.dev !== after.dev
-      || before.ino !== after.ino
-      || before.mode !== after.mode
-      || before.nlink !== after.nlink
-      || before.size !== after.size
-      || before.mtimeMs !== after.mtimeMs
-      || before.ctimeMs !== after.ctimeMs
-      || resolvedBefore !== resolvedAfter
-    ) throw new RepertoireFilesystemProofError();
-    return {
-      path,
-      realpath: resolvedAfter,
-      dev: safeNumber(after.dev),
-      ino: safeNumber(after.ino),
-      mode: after.mode,
-      nlink: after.nlink,
-      size: safeNumber(after.size),
-      digest: createHash('sha256').update(bytes).digest('hex'),
-    };
+    let fd: number | undefined;
+    try {
+      fd = openSync(path, FILE_OPEN_FLAGS);
+      const opened = fstatSync(fd, { bigint: true });
+      assertRegularFile(opened);
+      assertSameStableStat(pathBefore, opened);
+      if (opened.size > BigInt(PROOF_MAX_SINGLE_FILE_BYTES)) throw recovery();
+      const bytes = readBounded(fd, safeNumber(opened.size));
+      const openedAfter = fstatSync(fd, { bigint: true });
+      const pathAfter = lstatBigInt(path);
+      const resolvedAfter = realpathSync(path);
+      assertSameStableStat(opened, openedAfter);
+      assertSameStableStat(opened, pathAfter);
+      if (resolvedBefore !== resolvedAfter || bytes.length !== safeNumber(opened.size)) throw recovery();
+      const stableIdentity = stableStatDigest(openedAfter);
+      return {
+        bytes,
+        proof: {
+          path,
+          realpath: resolvedAfter,
+          dev: safeNumber(openedAfter.dev),
+          ino: safeNumber(openedAfter.ino),
+          mode: safeNumber(openedAfter.mode),
+          nlink: safeNumber(openedAfter.nlink),
+          size: safeNumber(openedAfter.size),
+          digest: createHash('sha256').update(bytes).digest('hex'),
+          stableIdentity,
+        },
+      };
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
   } catch (error) {
     if (error instanceof RepertoireFilesystemProofError) throw error;
-    throw new RepertoireFilesystemProofError();
+    throw recovery();
   }
 }
 
-export function captureDirectoryTreeProof(path: string, containmentRoot: string): TreeProof {
+export function captureRegularFileProof(path: string, containmentRoot: string): FileProof {
+  return readApprovedRegularFile(path, containmentRoot).proof;
+}
+
+export function captureDirectoryTreeProof(
+  path: string,
+  containmentRoot: string,
+  probe: TreeProofProbe = {},
+): TreeProof {
   try {
     const containmentRealpath = realpathSync(containmentRoot);
-    const root = lstatSync(path);
-    assertDirectory(root);
-    const rootRealpath = realpathSync(path);
-    assertContained(rootRealpath, containmentRealpath);
-    const records: string[] = [];
-    visitTree(path, path, rootRealpath, records);
-    const fresh = lstatSync(path);
-    assertDirectory(fresh);
-    if (root.dev !== fresh.dev || root.ino !== fresh.ino || root.mode !== fresh.mode) {
-      throw new RepertoireFilesystemProofError();
-    }
-    return {
-      dev: safeNumber(fresh.dev),
-      ino: safeNumber(fresh.ino),
-      mode: fresh.mode,
-      realpath: rootRealpath,
-      contentFingerprint: createHash('sha256').update(safeArrayJoin(records, '\0')).digest('hex'),
-    };
+    const first = captureTreeSnapshot(path, containmentRealpath, probe);
+    const second = captureTreeSnapshot(path, containmentRealpath, {});
+    if (first.snapshotDigest !== second.snapshotDigest) throw recovery();
+    return second.proof;
   } catch (error) {
     if (error instanceof RepertoireFilesystemProofError) throw error;
-    throw new RepertoireFilesystemProofError();
+    throw recovery();
   }
 }
 
@@ -126,75 +147,207 @@ export function captureNearestParentProof(path: string, containmentRoot: string)
   try {
     const containmentRealpath = realpathSync(containmentRoot);
     let candidate = dirname(path);
-    while (!existsSync(candidate)) {
-      const parent = dirname(candidate);
-      if (parent === candidate) throw new RepertoireFilesystemProofError();
-      candidate = parent;
+    let stat: BigIntStats;
+    while (true) {
+      try {
+        stat = lstatBigInt(candidate);
+        break;
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+        const parent = dirname(candidate);
+        if (parent === candidate) throw recovery();
+        candidate = parent;
+      }
     }
-    const stat = lstatSync(candidate);
     assertDirectory(stat);
     const resolved = realpathSync(candidate);
     assertContained(resolved, containmentRealpath);
-    return { dev: safeNumber(stat.dev), ino: safeNumber(stat.ino), mode: stat.mode, realpath: resolved };
+    return {
+      dev: safeNumber(stat.dev),
+      ino: safeNumber(stat.ino),
+      mode: safeNumber(stat.mode),
+      realpath: resolved,
+      stableIdentity: stableStatDigest(stat),
+    };
   } catch (error) {
     if (error instanceof RepertoireFilesystemProofError) throw error;
-    throw new RepertoireFilesystemProofError();
+    throw recovery();
   }
 }
 
 export function sameFileProof(left: FileProof, right: FileProof): boolean {
   return left.path === right.path && left.realpath === right.realpath
-    && left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
-    && left.nlink === right.nlink && left.size === right.size && left.digest === right.digest;
+    && left.stableIdentity === right.stableIdentity && left.digest === right.digest;
 }
 
 export function sameTreeProof(left: TreeProof, right: TreeProof, allowRelocation = false): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+  return left.stableIdentity === right.stableIdentity
     && left.contentFingerprint === right.contentFingerprint
     && (allowRelocation || left.realpath === right.realpath);
 }
 
 export function sameParentProof(left: ParentProof, right: ParentProof): boolean {
-  return left.dev === right.dev && left.ino === right.ino
-    && left.mode === right.mode && left.realpath === right.realpath;
+  return left.stableIdentity === right.stableIdentity && left.realpath === right.realpath;
 }
 
-function visitTree(root: string, directory: string, rootRealpath: string, records: string[]): void {
-  const entries = safeArraySort(readdirSync(directory));
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index]!;
-    const child = `${directory}/${entry}`;
-    const stat = lstatSync(child);
+function captureTreeSnapshot(
+  path: string,
+  containmentRealpath: string,
+  probe: TreeProofProbe,
+): { proof: TreeProof; snapshotDigest: string } {
+  const root = lstatBigInt(path);
+  assertDirectory(root);
+  const rootRealpath = realpathSync(path);
+  assertContained(rootRealpath, containmentRealpath);
+  const budget = { entries: 0, totalBytes: 0 };
+  const records: string[] = [];
+  visitTree(path, path, rootRealpath, records, budget, 0, probe);
+  const fresh = lstatBigInt(path);
+  assertDirectory(fresh);
+  assertSameStableStat(root, fresh);
+  const stableIdentity = stableStatDigest(fresh);
+  const contentFingerprint = createHash('sha256').update(safeArrayJoin(records, '\0')).digest('hex');
+  return {
+    proof: {
+      dev: safeNumber(fresh.dev),
+      ino: safeNumber(fresh.ino),
+      mode: safeNumber(fresh.mode),
+      realpath: rootRealpath,
+      contentFingerprint,
+      stableIdentity,
+    },
+    snapshotDigest: createHash('sha256')
+      .update(`${stableIdentity}\0${contentFingerprint}\0${budget.entries}\0${budget.totalBytes}`)
+      .digest('hex'),
+  };
+}
+
+function visitTree(
+  root: string,
+  directory: string,
+  rootRealpath: string,
+  records: string[],
+  budget: { entries: number; totalBytes: number },
+  depth: number,
+  probe: TreeProofProbe,
+): void {
+  if (depth > PROOF_MAX_DEPTH) throw recovery();
+  const directoryBefore = lstatBigInt(directory);
+  assertDirectory(directoryBefore);
+  const entriesBefore = sortedEntries(directory);
+  probe.afterDirectoryRead?.(directory);
+  for (let index = 0; index < entriesBefore.length; index += 1) {
+    budget.entries += 1;
+    if (budget.entries > PROOF_MAX_ENTRIES) throw recovery();
+    const entry = entriesBefore[index]!;
+    const child = join(directory, entry);
+    const stat = lstatBigInt(child);
     const childRealpath = realpathSync(child);
     assertContained(childRealpath, rootRealpath);
     const relativePath = relative(root, child);
-    if (stat.isDirectory() && !stat.isSymbolicLink()) {
-      safeArrayPush(records, `d:${relativePath}:${stat.dev}:${stat.ino}:${stat.mode}`);
-      visitTree(root, child, rootRealpath, records);
+    if (isDirectory(stat) && !isSymbolicLink(stat)) {
+      safeArrayPush(records, `d:${relativePath}:${stableStatDigest(stat)}`);
+      visitTree(root, child, rootRealpath, records, budget, depth + 1, probe);
       continue;
     }
     assertRegularFile(stat);
-    const proof = captureRegularFileProof(child, root);
+    const approved = readApprovedRegularFile(child, root);
+    budget.totalBytes += approved.bytes.length;
+    if (budget.totalBytes > PROOF_MAX_TOTAL_BYTES) throw recovery();
     safeArrayPush(records, safeArrayJoin([
-      'f', relativePath, `${proof.dev}`, `${proof.ino}`, `${proof.mode}`,
-      `${proof.nlink}`, `${proof.size}`, proof.digest,
+      'f', relativePath, approved.proof.stableIdentity, approved.proof.digest,
     ], ':'));
   }
+  const entriesAfter = sortedEntries(directory);
+  const directoryAfter = lstatBigInt(directory);
+  assertSameStableStat(directoryBefore, directoryAfter);
+  if (safeArrayJoin(entriesBefore, '\0') !== safeArrayJoin(entriesAfter, '\0')) throw recovery();
 }
 
-function assertDirectory(stat: FileStat): void {
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new RepertoireFilesystemProofError();
-}
-
-function assertRegularFile(stat: FileStat): void {
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
-    throw new RepertoireFilesystemProofError();
+function readBounded(fd: number, expectedSize: number): Buffer {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (total < expectedSize) {
+    const chunk = safeBufferAlloc(Math.min(64 * 1024, expectedSize - total));
+    const count = readSync(fd, chunk, 0, chunk.length, null);
+    if (count === 0) break;
+    total += count;
+    safeArrayPush(chunks, count === chunk.length ? chunk : chunk.subarray(0, count));
   }
+  const probe = safeBufferAlloc(1);
+  if (readSync(fd, probe, 0, 1, null) !== 0) throw recovery();
+  return safeBufferConcat(chunks, total);
+}
+
+function sortedEntries(directory: string): string[] {
+  return safeArraySort(readdirSync(directory));
+}
+
+function lstatBigInt(path: string): BigIntStats {
+  return lstatSync(path, { bigint: true });
+}
+
+function stableStatDigest(stat: BigIntStats): string {
+  return safeArrayJoin([
+    bigintString(stat.dev), bigintString(stat.ino), bigintString(stat.mode),
+    bigintString(stat.uid), bigintString(stat.nlink), bigintString(stat.size),
+    bigintString(stat.mtimeNs), bigintString(stat.ctimeNs),
+  ], ':');
+}
+
+function assertSameStableStat(left: BigIntStats, right: BigIntStats): void {
+  if (stableStatDigest(left) !== stableStatDigest(right)) throw recovery();
+}
+
+function isFile(stat: BigIntStats): boolean {
+  return safeReflectApply(safeStatsIsFileMethod, stat, []) as boolean;
+}
+
+function isDirectory(stat: BigIntStats): boolean {
+  return safeReflectApply(safeStatsIsDirectoryMethod, stat, []) as boolean;
+}
+
+function isSymbolicLink(stat: BigIntStats): boolean {
+  return safeReflectApply(safeStatsIsSymbolicLinkMethod, stat, []) as boolean;
+}
+
+function assertDirectory(stat: BigIntStats): void {
+  if (!isDirectory(stat) || isSymbolicLink(stat)) throw recovery();
+}
+
+function assertRegularFile(stat: BigIntStats): void {
+  if (!isFile(stat) || isSymbolicLink(stat) || stat.nlink !== 1n) throw recovery();
 }
 
 function assertContained(path: string, root: string): void {
   const relativePath = relative(root, path);
-  if (safeStringStartsWith(relativePath, '..') || isAbsolute(relativePath)) {
-    throw new RepertoireFilesystemProofError();
-  }
+  if (safeStringStartsWith(relativePath, '..') || isAbsolute(relativePath)) throw recovery();
+}
+
+function bigintString(value: bigint): string {
+  return safeReflectApply(safeBigIntToStringMethod, value, [10]) as string;
+}
+
+function isMissing(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+function recovery(): RepertoireFilesystemProofError {
+  return new RepertoireFilesystemProofError();
+}
+
+function safeArraySort(values: string[]): string[] {
+  return safeReflectApply(safeArraySortMethod, values, []) as string[];
+}
+
+function safeArrayJoin(values: string[], separator: string): string {
+  return safeReflectApply(safeArrayJoinMethod, values, [separator]) as string;
+}
+
+function safeArrayPush<T>(values: T[], value: T): void {
+  safeReflectApply(safeArrayPushMethod, values, [value]);
+}
+
+function safeStringStartsWith(value: string, search: string): boolean {
+  return safeReflectApply(safeStringStartsWithMethod, value, [search]) as boolean;
 }

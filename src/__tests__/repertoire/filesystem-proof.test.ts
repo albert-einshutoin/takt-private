@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import {
   captureDirectoryTreeProof,
   captureRegularFileProof,
+  PROOF_MAX_DEPTH,
+  PROOF_MAX_SINGLE_FILE_BYTES,
   sameFileProof,
   sameTreeProof,
 } from '../../features/repertoire/filesystem-proof.js';
@@ -78,5 +80,39 @@ describe('repertoire filesystem proofs', () => {
       String.prototype.startsWith = originalStartsWith;
     }
     expect(proof!).toMatchObject({ contentFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/) });
+  });
+
+  it('rejects a foreign addition injected between directory listings', () => {
+    const packageDir = join(root, 'package');
+    mkdirSync(packageDir);
+    writeFileSync(join(packageDir, 'content.md'), 'content');
+    let injected = false;
+
+    expect(() => captureDirectoryTreeProof(packageDir, root, {
+      afterDirectoryRead: (directory) => {
+        if (!injected && directory === packageDir) {
+          injected = true;
+          writeFileSync(join(packageDir, 'foreign.md'), 'foreign');
+        }
+      },
+    })).toThrow(expect.objectContaining({ code: 'RECOVERY_REQUIRED' }));
+    expect(injected).toBe(true);
+  });
+
+  it('fails closed at the depth and single-file byte budgets', () => {
+    const packageDir = join(root, 'package');
+    let deep = packageDir;
+    mkdirSync(deep);
+    for (let index = 0; index <= PROOF_MAX_DEPTH; index += 1) {
+      deep = join(deep, `d${index}`);
+      mkdirSync(deep);
+    }
+    expect(() => captureDirectoryTreeProof(packageDir, root))
+      .toThrow(expect.objectContaining({ code: 'RECOVERY_REQUIRED' }));
+
+    const large = join(root, 'large.md');
+    writeFileSync(large, Buffer.alloc(PROOF_MAX_SINGLE_FILE_BYTES + 1));
+    expect(() => captureRegularFileProof(large, root))
+      .toThrow(expect.objectContaining({ code: 'RECOVERY_REQUIRED' }));
   });
 });
