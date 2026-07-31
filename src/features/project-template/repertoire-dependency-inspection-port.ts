@@ -6,6 +6,9 @@ import {
   type ProjectTemplateRepertoireDependencyV1,
 } from './source-descriptor.js';
 import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from './repertoire-dependency-canonical.js';
+import {
   SEMVER_PATTERN_SOURCE,
   SOURCE_REF_PATTERN_SOURCE,
 } from './validation.js';
@@ -820,28 +823,6 @@ function canonicalCapabilities(
   return capabilities.length === 0 ? '[]' : '["edit"]';
 }
 
-function canonicalDependencies(
-  dependencies: readonly ProjectTemplateRepertoireDependencyV1[],
-): string {
-  let json = '[';
-  for (let index = 0; index < dependencies.length; index += 1) {
-    const dependency = dependencies[index]!;
-    if (index !== 0) json += ',';
-    json += '{"scope":'
-      + canonicalString(dependency.scope)
-      + ',"version":'
-      + canonicalString(dependency.version)
-      + ',"source":'
-      + canonicalString(dependency.source)
-      + ',"commit":'
-      + canonicalString(dependency.commit)
-      + ',"capabilities":'
-      + canonicalCapabilities(dependency.capabilities)
-      + '}';
-  }
-  return `${json}]`;
-}
-
 function canonicalObservations(
   observations:
     readonly ProjectTemplateRepertoireDependencyObservation[],
@@ -878,9 +859,12 @@ function createVerifiedInspection(
   observations:
     readonly ProjectTemplateRepertoireDependencyObservation[],
 ): VerifiedProjectTemplateRepertoireDependencyInspection {
-  const declarationSha256 = sha256(
-    canonicalDependencies(request.dependencies),
-  );
+  // Why: descriptor and authority code must use the same declaration seal;
+  // otherwise byte-order drift can mint a token for a different declaration.
+  const declarationSha256 =
+    calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+      request.dependencies,
+    );
   const preconditionBody = '{"schemaVersion":"1.0"'
     + ',"sourceDescriptorSha256":'
     + canonicalString(request.sourceDescriptorSha256)

@@ -109,6 +109,12 @@ describe('project template repertoire dependency inspection authority G2', () =>
         .update(JSON.stringify([dependency()]), 'utf8')
         .digest('hex'),
     );
+    expect(first.declarationSha256).toBe(
+      'f672d85e355b31ff0ffde241213b3f7c0b8ca769a516f8386252166c080b83ab',
+    );
+    expect(first.preconditionToken).toBe(
+      '794b2bf0f674da876a9b89ec50ca6ed14d62f360a79c7145e3e11b6e7a23c580',
+    );
     expect(first.preconditionToken).toBe(second.preconditionToken);
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first.observations)).toBe(true);
