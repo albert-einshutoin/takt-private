@@ -3,7 +3,11 @@ import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureDirectoryTreeProof } from '../../features/repertoire/filesystem-proof.js';
-import { detachToMaintenance } from '../../features/repertoire/maintenance-transaction.js';
+import {
+  assertMaintenanceTransactionsReady,
+  classifyMaintenanceTransactions,
+  detachToMaintenance,
+} from '../../features/repertoire/maintenance-transaction.js';
 
 describe('detachToMaintenance', () => {
   const roots: string[] = [];
@@ -31,6 +35,10 @@ describe('detachToMaintenance', () => {
     expect(existsSync(packageDir)).toBe(false);
     expect(existsSync(join(transaction, 'payload', 'workflow.yaml'))).toBe(true);
     expect(existsSync(join(transaction, 'complete'))).toBe(true);
+    expect(classifyMaintenanceTransactions(root)).toEqual({
+      complete: [transaction],
+      incomplete: [],
+    });
   });
 
   it('does not detach when the tree differs from the authorization proof', () => {
@@ -53,5 +61,17 @@ describe('detachToMaintenance', () => {
     expect(existsSync(join(packageDir, 'foreign.yaml'))).toBe(true);
     const transactions = join(root, '.repertoire-maintenance', 'transactions');
     expect(readdirSync(transactions)).toHaveLength(1);
+    expect(() => assertMaintenanceTransactionsReady(root))
+      .toThrow(expect.objectContaining({ code: 'RECOVERY_REQUIRED' }));
+  });
+
+  it('classifies a restart after durable intent but before rename as incomplete', () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-'));
+    roots.push(root);
+    const transaction = join(root, '.repertoire-maintenance', 'transactions', 'a'.repeat(64));
+    mkdirSync(transaction, { recursive: true });
+    writeFileSync(join(transaction, 'intent.json'), JSON.stringify({ version: 1 }));
+    expect(classifyMaintenanceTransactions(root).incomplete).toEqual([transaction]);
+    expect(() => assertMaintenanceTransactionsReady(root)).toThrow();
   });
 });

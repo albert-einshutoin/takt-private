@@ -14,6 +14,7 @@ import {
 import { dirname } from 'node:path';
 import { captureDirectoryTreeProof, type TreeProof } from './filesystem-proof.js';
 import {
+  assertMaintenanceTransactionsReady,
   detachToMaintenance,
   RepertoireMaintenanceError,
 } from './maintenance-transaction.js';
@@ -50,6 +51,7 @@ export interface AtomicReplaceOptions {
 export async function atomicReplace(options: AtomicReplaceOptions): Promise<void> {
   const { globalConfigDir, packageDir, install } = options;
   try {
+    assertMaintenanceTransactionsReady(globalConfigDir);
     mkdirSync(dirname(packageDir), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const original = readOptionalTree(packageDir, globalConfigDir);
     if (original !== undefined) {
