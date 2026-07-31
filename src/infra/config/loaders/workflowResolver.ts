@@ -4,7 +4,8 @@
 
 import { existsSync, lstatSync, realpathSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
+import { types as utilTypes } from 'node:util';
 import { isScopeRef, parseScopeRef } from 'faceted-prompting';
 import type { WorkflowConfig } from '../../../core/models/index.js';
 import { validateWorkflowCallContracts as validateWorkflowCallContractsImpl } from './workflowCallContractValidator.js';
@@ -18,7 +19,10 @@ import {
   resolveWorkflowFileWithReadGuard,
   type NamedWorkflowLookupDir,
 } from './workflowLookupDirectories.js';
-import { loadWorkflowFileWithResolutionOptions } from './workflowResolvedLoader.js';
+import {
+  loadWorkflowApprovedTextWithResolutionOptions,
+  loadWorkflowFileWithResolutionOptions,
+} from './workflowResolvedLoader.js';
 import { getGlobalConfigDir } from '../paths.js';
 import { type WorkflowTrustInfo } from './workflowTrustSource.js';
 import {
@@ -27,6 +31,7 @@ import {
   iterateWorkflowDir,
   listRepertoireWorkflowEntriesWithReadContext,
   loadAllWorkflowsWithSourcesFromDirs,
+  readRepertoireWorkflowTextWithReadContext,
   type WorkflowDirEntry,
   type WorkflowDiscoveryConfig,
   type WorkflowDiscoveryWithSource,
@@ -38,6 +43,15 @@ import {
   assertActiveRepertoireReadPermit,
   withImmediateRepertoireReadPermit,
 } from '../../../features/repertoire/read-permit.js';
+
+const safeObjectCreate = Object.create.bind(Object);
+const safeObjectFreeze = Object.freeze.bind(Object);
+const safeObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor.bind(Object);
+const safeObjectGetPrototypeOf = Object.getPrototypeOf.bind(Object);
+const safeObjectHasOwn = Object.hasOwn.bind(Object);
+const safeReflectOwnKeys = Reflect.ownKeys.bind(Reflect);
+const safeIsProxy = utilTypes.isProxy.bind(utilTypes);
+const localObjectPrototype = Object.prototype;
 
 interface LoadWorkflowsOptions {
   onWarning?: (message: string) => void;
@@ -172,12 +186,19 @@ function loadWorkflowForDiscovery(
   readContext?: InternalWorkflowReadContext,
 ): WorkflowConfig {
   assertEntryRead(entry, readContext);
-  return loadWorkflowFileWithResolutionOptions(entry.path, {
+  const options = {
     projectCwd: cwd,
     lookupCwd: cwd,
     source: entry.source,
-    loadMode: 'discovery',
-  });
+    loadMode: 'discovery' as const,
+  };
+  return entry.source === 'repertoire' && readContext !== undefined
+    ? loadWorkflowApprovedTextWithResolutionOptions(
+      entry.path,
+      readRepertoireWorkflowTextWithReadContext(entry.path, readContext),
+      options,
+    )
+    : loadWorkflowFileWithResolutionOptions(entry.path, options);
 }
 
 function loadWorkflowForRuntime(
@@ -186,11 +207,18 @@ function loadWorkflowForRuntime(
   readContext?: InternalWorkflowReadContext,
 ): WorkflowConfig {
   assertEntryRead(entry, readContext);
-  return loadWorkflowFileWithResolutionOptions(entry.path, {
+  const options = {
     projectCwd: cwd,
     lookupCwd: cwd,
     source: entry.source,
-  });
+  };
+  return entry.source === 'repertoire' && readContext !== undefined
+    ? loadWorkflowApprovedTextWithResolutionOptions(
+      entry.path,
+      readRepertoireWorkflowTextWithReadContext(entry.path, readContext),
+      options,
+    )
+    : loadWorkflowFileWithResolutionOptions(entry.path, options);
 }
 
 function validateLoadedWorkflowEntryContracts(
@@ -293,16 +321,11 @@ function loadRepertoireWorkflowByRef(
     assertRead,
   )) return null;
   const filePath = resolveWorkflowFileWithReadGuard(workflowsDir, scopeRef.name, assertRead, true);
-  if (filePath) {
-    assertCanonicalRepertoireFile(
-      filePath,
-      join(readContext.repertoireRealPath, `@${scopeRef.owner}`, scopeRef.repo, 'workflows', basename(filePath)),
-      assertRead,
-    );
-    assertRead();
-  }
+  const approvedText = filePath
+    ? readRepertoireWorkflowTextWithReadContext(filePath, readContext)
+    : undefined;
   return filePath
-    ? loadWorkflowFileWithResolutionOptions(filePath, {
+    ? loadWorkflowApprovedTextWithResolutionOptions(filePath, approvedText!, {
       projectCwd,
       lookupCwd: projectCwd,
       source: 'repertoire',
@@ -391,7 +414,11 @@ export function loadWorkflowByIdentifier(
   options?: WorkflowLookupOptions,
 ): WorkflowConfig | null {
   if (isScopeRef(identifier)) {
-    return loadRepertoireIdentifierWithImmediatePermit(identifier, projectCwd, options);
+    return loadRepertoireIdentifierWithImmediatePermit(
+      identifier,
+      projectCwd,
+      snapshotPublicWorkflowLookupOptions(options),
+    );
   }
   return loadWorkflowByIdentifierInternal(identifier, projectCwd, options);
 }
@@ -420,6 +447,33 @@ function loadRepertoireIdentifierWithImmediatePermit(
       repertoireReadContext: createInternalWorkflowReadContext(globalConfigDir, permit),
     }),
   });
+}
+
+function snapshotPublicWorkflowLookupOptions(options: unknown): WorkflowLookupOptions {
+  if (options === undefined) return safeObjectFreeze(safeObjectCreate(null)) as WorkflowLookupOptions;
+  if (
+    typeof options !== 'object'
+    || options === null
+    || safeIsProxy(options)
+  ) throw new WorkflowDiscoveryReadError();
+  const prototype = safeObjectGetPrototypeOf(options);
+  if (prototype !== localObjectPrototype && prototype !== null) throw new WorkflowDiscoveryReadError();
+  const keys = safeReflectOwnKeys(options);
+  if (keys.length > 2) throw new WorkflowDiscoveryReadError();
+  const snapshot = safeObjectCreate(null) as Record<string, string>;
+  for (const key of keys) {
+    if (typeof key !== 'string' || (key !== 'basePath' && key !== 'lookupCwd')) {
+      throw new WorkflowDiscoveryReadError();
+    }
+    const descriptor = safeObjectGetOwnPropertyDescriptor(options, key);
+    if (
+      descriptor === undefined
+      || !safeObjectHasOwn(descriptor, 'value')
+      || typeof descriptor.value !== 'string'
+    ) throw new WorkflowDiscoveryReadError();
+    snapshot[key] = descriptor.value;
+  }
+  return safeObjectFreeze(snapshot) as WorkflowLookupOptions;
 }
 
 export function loadAllWorkflowsWithSources(
@@ -528,27 +582,6 @@ function assertCanonicalRepertoireDirectory(
     || !sameIdentity(before, after)
   ) throw new WorkflowDiscoveryReadError();
   return true;
-}
-
-function assertCanonicalRepertoireFile(
-  path: string,
-  expectedRealPath: string,
-  assertRead: () => void,
-): void {
-  const before = repertoireLstatOrMissing(path, assertRead);
-  if (before === undefined || !before.isFile() || before.isSymbolicLink()) {
-    throw new WorkflowDiscoveryReadError();
-  }
-  assertRead();
-  let resolved: string;
-  try {
-    resolved = realpathSync(path);
-  } catch {
-    throw new WorkflowDiscoveryReadError();
-  }
-  if (resolved !== expectedRealPath) throw new WorkflowDiscoveryReadError();
-  const after = repertoireLstatOrMissing(resolved, assertRead);
-  if (after === undefined || !sameIdentity(before, after)) throw new WorkflowDiscoveryReadError();
 }
 
 function repertoireLstatOrMissing(path: string, assertRead: () => void): Stats | undefined {

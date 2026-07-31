@@ -44,12 +44,15 @@ function loadWorkflowFromFileInternal(
   projectDir: string,
   options: LoadWorkflowFromFileOptions | undefined,
   loadMode: WorkflowLoadMode,
+  approvedText?: string,
 ): WorkflowConfig {
-  if (!existsSync(filePath)) {
+  if (approvedText === undefined && !existsSync(filePath)) {
     throw new Error(`Workflow file not found: ${filePath}`);
   }
 
-  const raw = parseYaml(readFileSync(filePath, 'utf-8'));
+  // Repertoire callers pass descriptor-approved bytes so parsing never reopens
+  // a path that could have changed after its filesystem identity was checked.
+  const raw = parseYaml(approvedText ?? readFileSync(filePath, 'utf-8'));
   const workflowDir = dirname(filePath);
   const context: FacetResolutionContext = {
     lang: resolveWorkflowConfigValue(projectDir, 'language'),
@@ -116,4 +119,24 @@ export function loadWorkflowFromFileForDiscovery(
   options?: LoadWorkflowFromFileOptions,
 ): WorkflowConfig {
   return loadWorkflowFromFileInternal(filePath, projectDir, options, 'discovery');
+}
+
+/** @internal Parses caller-approved bytes while preserving path-based trust and relative resolution. */
+export function loadWorkflowFromApprovedText(
+  filePath: string,
+  approvedText: string,
+  projectDir: string,
+  options?: LoadWorkflowFromFileOptions,
+): WorkflowConfig {
+  return loadWorkflowFromFileInternal(filePath, projectDir, options, 'runtime', approvedText);
+}
+
+/** @internal Discovery variant of loadWorkflowFromApprovedText. */
+export function loadWorkflowFromApprovedTextForDiscovery(
+  filePath: string,
+  approvedText: string,
+  projectDir: string,
+  options?: LoadWorkflowFromFileOptions,
+): WorkflowConfig {
+  return loadWorkflowFromFileInternal(filePath, projectDir, options, 'discovery', approvedText);
 }

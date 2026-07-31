@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
 import {
   existsSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -14,8 +16,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { acquireRepertoireCoordinationLease } from '../features/repertoire/coordination-lease.js';
+import {
+  assertActiveRepertoireReadPermit,
+  withImmediateRepertoireReadPermit,
+} from '../features/repertoire/read-permit.js';
 import { invalidateGlobalConfigCache } from '../infra/config/global/globalConfig.js';
-import { iterateWorkflowDir } from '../infra/config/loaders/workflowDiscovery.js';
+import {
+  createInternalWorkflowReadContext,
+  iterateWorkflowDir,
+} from '../infra/config/loaders/workflowDiscovery.js';
+import { readApprovedRepertoireWorkflowText } from '../infra/config/loaders/workflowRepertoireSafeReader.js';
 import {
   listWorkflowEntries,
   loadWorkflowByIdentifier,
@@ -151,6 +161,84 @@ describe('workflow repertoire read coordination', () => {
     expect(() => loadWorkflowByIdentifier('@owner/repo/review', projectDir)).toThrow(
       expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
     );
+  });
+
+  it('rejects a cross-root hard link even while the source root has a writer', async () => {
+    const workflowsDir = join(configDir, 'repertoire', '@owner', 'repo', 'workflows');
+    mkdirSync(workflowsDir, { recursive: true });
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'takt-workflow-hardlink-source-'));
+    const sourceWorkflows = join(sourceRoot, 'repertoire', '@owner', 'repo', 'workflows');
+    mkdirSync(sourceWorkflows, { recursive: true });
+    const source = join(sourceWorkflows, 'review.yaml');
+    writeFileSync(source, SAMPLE_WORKFLOW);
+    linkSync(source, join(workflowsDir, 'review.yaml'));
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: sourceRoot,
+      mode: 'write',
+    });
+    try {
+      expect(() => listWorkflowEntries(projectDir)).toThrow(
+        expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
+      );
+      expect(() => loadWorkflowByIdentifier('@owner/repo/review', projectDir)).toThrow(
+        expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
+      );
+    } finally {
+      writer.release();
+      rmSync(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects replacement after opening instead of parsing stale approved bytes', () => {
+    const workflowPath = createRepertoireWorkflow();
+    const backupPath = `${workflowPath}.before`;
+
+    expect(() => withImmediateRepertoireReadPermit({
+      globalConfigDir: configDir,
+      operation: (permit) => {
+        const context = createInternalWorkflowReadContext(configDir, permit);
+        return readApprovedRepertoireWorkflowText({
+          assertRead: () => assertActiveRepertoireReadPermit(permit, configDir),
+          expectedRealPath: join(context.repertoireRealPath, '@owner', 'repo', 'workflows', 'review.yaml'),
+          path: workflowPath,
+          repertoireDir: context.repertoireDir,
+        }, {
+          afterOpen: () => {
+            renameSync(workflowPath, backupPath);
+            writeFileSync(workflowPath, SAMPLE_WORKFLOW.replace('coordinated-workflow', 'replacement'));
+          },
+        });
+      },
+    })).toThrow(expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }));
+  });
+
+  it('rejects unsafe direct-ref option shapes before acquiring a permit or invoking hooks', () => {
+    createRepertoireWorkflow();
+    const coordinationDir = join(configDir, '.takt-repertoire-coordination');
+    let hooks = 0;
+    const accessor = Object.defineProperty({}, 'lookupCwd', {
+      get: () => {
+        hooks += 1;
+        return projectDir;
+      },
+    });
+    const proxy = new Proxy({ lookupCwd: projectDir }, {
+      ownKeys: () => {
+        hooks += 1;
+        return ['lookupCwd'];
+      },
+    });
+    const inherited = Object.create({ lookupCwd: projectDir });
+    const symbol = { [Symbol('lookupCwd')]: projectDir };
+    const extra = { lookupCwd: projectDir, unexpected: projectDir };
+
+    for (const options of [accessor, proxy, inherited, symbol, extra]) {
+      expect(() => loadWorkflowByIdentifier('@owner/repo/review', projectDir, options as never)).toThrow(
+        expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
+      );
+      expect(existsSync(coordinationDir)).toBe(false);
+    }
+    expect(hooks).toBe(0);
   });
 
   it('normalizes filesystem discovery failures without path or cause leakage', () => {

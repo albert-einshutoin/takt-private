@@ -5,24 +5,22 @@ import { createLogger, getErrorMessage } from '../../../shared/utils/index.js';
 import { getGlobalConfigDir } from '../paths.js';
 import { formatWorkflowLoadWarning } from './workflowLoadWarning.js';
 import { isMissingWorkflowCallArgError } from './workflowCallableArgResolver.js';
-import { loadWorkflowFileWithResolutionOptions } from './workflowResolvedLoader.js';
+import {
+  loadWorkflowApprovedTextWithResolutionOptions,
+  loadWorkflowFileWithResolutionOptions,
+} from './workflowResolvedLoader.js';
 import type { WorkflowConfig } from '../../../core/models/index.js';
 import {
   assertActiveRepertoireReadPermit,
   withImmediateRepertoireReadPermit,
   type RepertoireReadPermit,
 } from '../../../features/repertoire/read-permit.js';
+import { WorkflowDiscoveryReadError } from './workflowDiscoveryError.js';
+import { readApprovedRepertoireWorkflowText } from './workflowRepertoireSafeReader.js';
 
 const log = createLogger('workflow-discovery');
 
-export class WorkflowDiscoveryReadError extends Error {
-  readonly code = 'WORKFLOW_DISCOVERY_FAILED' as const;
-
-  constructor() {
-    super('Workflow discovery failed');
-    this.name = 'WorkflowDiscoveryReadError';
-  }
-}
+export { WorkflowDiscoveryReadError } from './workflowDiscoveryError.js';
 
 /** @internal Authority threaded only while repertoire material is read. */
 export interface InternalWorkflowReadContext {
@@ -87,7 +85,9 @@ function isHiddenInternalCallableWorkflowMetadata(
   let text: string;
   try {
     assertRepertoireRead(source, readContext);
-    text = readFileSync(filePath, 'utf-8');
+    text = source === 'repertoire' && readContext !== undefined
+      ? readRepertoireWorkflowTextWithReadContext(filePath, readContext)
+      : readFileSync(filePath, 'utf-8');
   } catch {
     throw discoveryReadFailed();
   }
@@ -128,13 +128,24 @@ function emitWorkflowLoadWarning(options: LoadWorkflowsOptions | undefined, work
   }
 }
 
-function loadWorkflowEntry(entry: WorkflowDirEntry, cwd: string): WorkflowConfig {
-  return loadWorkflowFileWithResolutionOptions(entry.path, {
+function loadWorkflowEntry(
+  entry: WorkflowDirEntry,
+  cwd: string,
+  readContext?: InternalWorkflowReadContext,
+): WorkflowConfig {
+  const options = {
     projectCwd: cwd,
     lookupCwd: cwd,
     source: entry.source,
-    loadMode: 'discovery',
-  });
+    loadMode: 'discovery' as const,
+  };
+  return entry.source === 'repertoire' && readContext !== undefined
+    ? loadWorkflowApprovedTextWithResolutionOptions(
+      entry.path,
+      readRepertoireWorkflowTextWithReadContext(entry.path, readContext),
+      options,
+    )
+    : loadWorkflowFileWithResolutionOptions(entry.path, options);
 }
 
 export function* iterateWorkflowDir(
@@ -378,11 +389,30 @@ function assertRepertoireEntryPath(
     || !segments[0]?.startsWith('@')
     || segments[2] !== 'workflows'
   ) throw discoveryReadFailed();
-  validateCanonicalRepertoireFile(
-    entry.path,
-    join(readContext.repertoireRealPath, ...segments),
-    readContext,
-  );
+  validateCanonicalRepertoireFile(entry.path, join(readContext.repertoireRealPath, ...segments), readContext);
+}
+
+/** @internal Reads approved repertoire YAML bytes exactly once for parsing. */
+export function readRepertoireWorkflowTextWithReadContext(
+  path: string,
+  readContext: InternalWorkflowReadContext,
+): string {
+  const relativePath = relative(readContext.repertoireDir, path);
+  const segments = relativePath.split(sep);
+  if (
+    relativePath.startsWith('..')
+    || isAbsolute(relativePath)
+    || segments.length !== 4
+    || !segments[0]?.startsWith('@')
+    || segments[2] !== 'workflows'
+    || (!segments[3]?.endsWith('.yaml') && !segments[3]?.endsWith('.yml'))
+  ) throw discoveryReadFailed();
+  return readApprovedRepertoireWorkflowText({
+    assertRead: () => assertRepertoireRead('repertoire', readContext),
+    expectedRealPath: join(readContext.repertoireRealPath, ...segments),
+    path,
+    repertoireDir: readContext.repertoireDir,
+  });
 }
 
 /** @internal Establishes canonical global/repertoire identity under the lease. */

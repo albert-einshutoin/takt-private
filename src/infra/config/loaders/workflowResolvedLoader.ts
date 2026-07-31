@@ -1,6 +1,11 @@
 import type { WorkflowConfig } from '../../../core/models/index.js';
 import type { WorkflowCallArgResolutionPolicy } from './workflowCallableArgResolver.js';
-import { loadWorkflowFromFile, loadWorkflowFromFileForDiscovery } from './workflowFileLoader.js';
+import {
+  loadWorkflowFromApprovedText,
+  loadWorkflowFromApprovedTextForDiscovery,
+  loadWorkflowFromFile,
+  loadWorkflowFromFileForDiscovery,
+} from './workflowFileLoader.js';
 import {
   resolveWorkflowTrustInfo,
   type WorkflowTrustInfo,
@@ -51,4 +56,26 @@ export function loadWorkflowFileWithResolutionOptions(
   });
 
   return workflow;
+}
+
+/** @internal Loads descriptor-approved bytes without reopening filePath. */
+export function loadWorkflowApprovedTextWithResolutionOptions(
+  filePath: string,
+  approvedText: string,
+  options: WorkflowResolvedLoaderOptions,
+): WorkflowConfig {
+  const trustInfo = resolveWorkflowTrustInfo({
+    filePath,
+    projectCwd: options.projectCwd,
+    lookupCwd: options.lookupCwd,
+    source: options.source,
+  });
+  const loadWorkflow = options.loadMode === 'discovery'
+    ? loadWorkflowFromApprovedTextForDiscovery
+    : loadWorkflowFromApprovedText;
+  return loadWorkflow(filePath, approvedText, options.projectCwd, {
+    trustInfo,
+    callableArgs: options.callableArgs,
+    callableArgPolicy: buildWorkflowCallArgPolicy(options.parentTrustInfo, trustInfo),
+  });
 }
