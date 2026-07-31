@@ -218,6 +218,12 @@ export interface ProjectTemplateRepertoireSafeDirectoryRead {
   readonly witness: ProjectTemplateRepertoireRelativeWitness;
 }
 
+export interface ProjectTemplateRepertoireSafeEntryInspection {
+  readonly kind: 'file' | 'directory';
+  readonly relativePath: string;
+  readonly witness: ProjectTemplateRepertoireRelativeWitness;
+}
+
 function failure(
   code: ProjectTemplateRepertoireSafeReadErrorCode,
 ): ProjectTemplateRepertoireSafeReadError {
@@ -617,6 +623,99 @@ export function createProjectTemplateRepertoireSafeReadContext(
   return context;
 }
 
+/**
+ * Bind a new opaque context to a verified child directory of an existing root.
+ *
+ * Why: capability discovery needs a package-local authority. Requiring callers
+ * to recover an absolute child path would widen that authority and disclose the
+ * canonical root that the context deliberately keeps private.
+ */
+export function narrowProjectTemplateRepertoireSafeReadContext(
+  context: ProjectTemplateRepertoireSafeReadContext,
+  relativePath: string,
+): ProjectTemplateRepertoireSafeReadContext {
+  const state = requireContext(context);
+  const segments = validateRelativePath(relativePath);
+  const directory = readProjectTemplateRepertoireDirectory(
+    context,
+    relativePath,
+  );
+  let absolutePath: string;
+  let current: Stats;
+  try {
+    absolutePath = requireCanonicalPath(state, segments, true);
+    current = CAPTURED_LSTAT_SYNC(absolutePath);
+    requireEntryType(current, true);
+  } catch {
+    throw failure('CHANGED_DURING_READ');
+  }
+  const rootIdentity = identity(current);
+  if (!sameIdentity(rootIdentity, directory.witness)) {
+    throw failure('CHANGED_DURING_READ');
+  }
+  const narrowed = freeze({
+    kind: 'project-template-repertoire-safe-read-context' as const,
+  });
+  CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_SET,
+    SAFE_READ_CONTEXTS,
+    [narrowed, freeze({
+      root: absolutePath,
+      rootIdentity,
+      raceHook: state.raceHook,
+    })],
+  );
+  return narrowed;
+}
+
+/**
+ * Clone an opaque root binding without its test/race seam. Final snapshot
+ * revalidation uses this form so no caller callback can run after capture.
+ */
+export function detachProjectTemplateRepertoireSafeReadContextCallbacks(
+  context: ProjectTemplateRepertoireSafeReadContext,
+): ProjectTemplateRepertoireSafeReadContext {
+  const state = requireContext(context);
+  requireStableRoot(state);
+  const detached = freeze({
+    kind: 'project-template-repertoire-safe-read-context' as const,
+  });
+  CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_SET,
+    SAFE_READ_CONTEXTS,
+    [detached, freeze({
+      root: state.root,
+      rootIdentity: state.rootIdentity,
+    })],
+  );
+  return detached;
+}
+
+/** Inspect bounded identity/size before allocating or reading file content. */
+export function inspectProjectTemplateRepertoireEntry(
+  context: ProjectTemplateRepertoireSafeReadContext,
+  relativePath: string,
+): ProjectTemplateRepertoireSafeEntryInspection {
+  const state = requireContext(context);
+  const segments = validateRelativePath(relativePath);
+  requireStableRoot(state);
+  const absolutePath = requireCanonicalPath(state, segments, true);
+  const before = safeLstat(absolutePath);
+  const directory = isDirectory(before);
+  requireEntryType(before, directory);
+  const stable = identity(before);
+  pathPostcheck(state, absolutePath, stable, directory, segments);
+  return freeze({
+    kind: directory ? 'directory' as const : 'file' as const,
+    relativePath,
+    witness: relativeWitness(
+      directory ? 'directory' : 'file',
+      relativePath,
+      stable,
+    ),
+  });
+}
+
 export function readProjectTemplateRepertoireFile(
   context: ProjectTemplateRepertoireSafeReadContext,
   relativePath: string,
@@ -804,12 +903,12 @@ function sortEntries(entries: string[]): void {
   }
 }
 
-export function readProjectTemplateRepertoireDirectory(
+function readDirectoryAt(
   context: ProjectTemplateRepertoireSafeReadContext,
   relativePath: string,
+  segments: readonly string[],
 ): ProjectTemplateRepertoireSafeDirectoryRead {
   const state = requireContext(context);
-  const segments = validateRelativePath(relativePath);
   requireStableRoot(state);
   const absolutePath = requireCanonicalPath(state, segments, true);
   invokePhase(state, relativePath, 'before-lstat');
@@ -919,4 +1018,18 @@ export function readProjectTemplateRepertoireDirectory(
     if (isFailure(error)) throw error;
     throw failure('READ_FAILED');
   }
+}
+
+export function readProjectTemplateRepertoireDirectory(
+  context: ProjectTemplateRepertoireSafeReadContext,
+  relativePath: string,
+): ProjectTemplateRepertoireSafeDirectoryRead {
+  return readDirectoryAt(context, relativePath, validateRelativePath(relativePath));
+}
+
+/** Read the opaque context root without manufacturing a relative path. */
+export function readProjectTemplateRepertoireRootDirectory(
+  context: ProjectTemplateRepertoireSafeReadContext,
+): ProjectTemplateRepertoireSafeDirectoryRead {
+  return readDirectoryAt(context, '', []);
 }

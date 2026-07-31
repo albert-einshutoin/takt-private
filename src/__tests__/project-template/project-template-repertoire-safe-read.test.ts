@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createProjectTemplateRepertoireSafeReadContext,
+  narrowProjectTemplateRepertoireSafeReadContext,
   ProjectTemplateRepertoireSafeReadError,
   readProjectTemplateRepertoireDirectory,
   readProjectTemplateRepertoireFile,
@@ -33,6 +34,27 @@ afterEach(() => {
 });
 
 describe('project template repertoire safe read G3.1', () => {
+  it('narrows a context to a verified child directory without exposing roots', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, 'package', 'workflows'), { recursive: true });
+    writeFileSync(join(root, 'package', 'workflows', 'review.yaml'), 'steps: []\n');
+    const narrowed = narrowProjectTemplateRepertoireSafeReadContext(
+      createProjectTemplateRepertoireSafeReadContext(root),
+      'package',
+    );
+    expect(readProjectTemplateRepertoireFile(
+      narrowed,
+      'workflows/review.yaml',
+      'workflow',
+    ).content.toString()).toBe('steps: []\n');
+    expect(Reflect.ownKeys(narrowed)).toEqual(['kind']);
+    expect(() => readProjectTemplateRepertoireFile(
+      narrowed,
+      '../outside.yaml',
+      'workflow',
+    )).toThrow(expect.objectContaining({ code: 'INVALID_PATH' }));
+  });
+
   it('does not expose private bytes through mutable Buffer allocation surfaces', () => {
     const root = makeRoot();
     const secret = 'private-repertoire-bytes';
