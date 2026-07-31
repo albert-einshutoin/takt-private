@@ -23,7 +23,11 @@ const FILE_LIMITS = {
   provider: 1024 * 1024,
 } as const;
 const PORTABLE_SEGMENT_PATTERN =
-  /^(?![ .])(?!.*[ .]$)[A-Za-z0-9@._-]+$/;
+  /^(?![ .])(?!.*[ .]$)[A-Za-z0-9._-]+$/;
+const REPERTOIRE_OWNER_SEGMENT_PATTERN =
+  /^@(?![a-z0-9-]*--)[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
+const REPERTOIRE_PACKAGE_SEGMENT_PATTERN =
+  /^(?!\.{1,2}$)(?!.*\.git$)[a-z0-9._-]{1,100}$/;
 const WINDOWS_RESERVED_SEGMENT_PATTERN =
   /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\.|$)/i;
 const REPERTOIRE_LOCK_SEGMENT = '.takt-repertoire-lock.yaml';
@@ -363,17 +367,57 @@ function validateRelativePath(relativePath: unknown): string[] {
         WINDOWS_RESERVED_SEGMENT_PATTERN,
         [segment],
       )
-      || (
-        segment !== REPERTOIRE_LOCK_SEGMENT
-        && !CAPTURED_REFLECT_APPLY(
-          CAPTURED_REGEXP_TEST,
-          PORTABLE_SEGMENT_PATTERN,
-          [segment],
-        )
-      )
+      || !isPortableSegmentAt(segments, index, segment)
     ) throw failure('INVALID_PATH');
   }
   return segments;
+}
+
+function regexpTest(pattern: RegExp, value: string): boolean {
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_REGEXP_TEST,
+    pattern,
+    [value],
+  ) as boolean;
+}
+
+function isRepertoireOwnerSegment(value: string): boolean {
+  return regexpTest(REPERTOIRE_OWNER_SEGMENT_PATTERN, value);
+}
+
+function isPortableSegmentAt(
+  segments: readonly string[],
+  index: number,
+  segment: string,
+): boolean {
+  // Why: @owner and the dot-prefixed lock are private-takt layout exceptions;
+  // accepting them elsewhere would broaden every generic safe-read path.
+  if (index === 0 && isRepertoireOwnerSegment(segment)) return true;
+  if (segment === REPERTOIRE_LOCK_SEGMENT) {
+    return segments.length === 3
+      && index === 2
+      && isRepertoireOwnerSegment(segments[0]!)
+      && regexpTest(REPERTOIRE_PACKAGE_SEGMENT_PATTERN, segments[1]!);
+  }
+  return regexpTest(PORTABLE_SEGMENT_PATTERN, segment);
+}
+
+function isPortableDirectoryEntryAt(
+  parentSegments: readonly string[],
+  name: string,
+): boolean {
+  if (parentSegments.length === 0 && isRepertoireOwnerSegment(name)) {
+    return true;
+  }
+  if (name === REPERTOIRE_LOCK_SEGMENT) {
+    return parentSegments.length === 2
+      && isRepertoireOwnerSegment(parentSegments[0]!)
+      && regexpTest(
+        REPERTOIRE_PACKAGE_SEGMENT_PATTERN,
+        parentSegments[1]!,
+      );
+  }
+  return regexpTest(PORTABLE_SEGMENT_PATTERN, name);
 }
 
 function safeLstat(path: string): Stats {
@@ -717,7 +761,10 @@ export function readProjectTemplateRepertoireFile(
   }
 }
 
-function validateDirectoryEntryName(name: string): string {
+function validateDirectoryEntryName(
+  parentSegments: readonly string[],
+  name: string,
+): string {
   if (
     name.length === 0
     || name.length > 255
@@ -731,14 +778,7 @@ function validateDirectoryEntryName(name: string): string {
       WINDOWS_RESERVED_SEGMENT_PATTERN,
       [name],
     )
-    || (
-      name !== REPERTOIRE_LOCK_SEGMENT
-      && !CAPTURED_REFLECT_APPLY(
-        CAPTURED_REGEXP_TEST,
-        PORTABLE_SEGMENT_PATTERN,
-        [name],
-      )
-    )
+    || !isPortableDirectoryEntryAt(parentSegments, name)
   ) throw failure('UNSAFE_ENTRY');
   const normalized = CAPTURED_REFLECT_APPLY(
     CAPTURED_STRING_NORMALIZE,
@@ -809,7 +849,7 @@ export function readProjectTemplateRepertoireDirectory(
         [],
       ) as ReturnType<Dir['readSync']>;
       if (entry === null) break;
-      const normalizedName = validateDirectoryEntryName(entry.name);
+      const normalizedName = validateDirectoryEntryName(segments, entry.name);
       for (let index = 0; index < normalized.length; index += 1) {
         if (normalized[index] === normalizedName) {
           throw failure('UNSAFE_ENTRY');

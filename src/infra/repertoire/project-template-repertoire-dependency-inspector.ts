@@ -59,6 +59,7 @@ const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
   Object.getOwnPropertyDescriptor;
 const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
   Object.getOwnPropertyDescriptors;
+const CAPTURED_OBJECT_HAS_OWN_PROPERTY = Object.prototype.hasOwnProperty;
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_REFLECT_RECEIVER = Reflect;
 const CAPTURED_REFLECT_OWN_KEYS = Reflect.ownKeys;
@@ -86,6 +87,15 @@ const CAPTURED_ABORTED_GETTER =
 const INSPECTION_STOP_ERRORS = new WeakSet<object>();
 const CAPTURED_WEAK_SET_ADD = WeakSet.prototype.add;
 const CAPTURED_WEAK_SET_HAS = WeakSet.prototype.has;
+const INTERNAL_FAILURE = CAPTURED_REFLECT_APPLY(
+  CAPTURED_OBJECT_FREEZE,
+  CAPTURED_OBJECT_RECEIVER,
+  [CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_CREATE,
+    CAPTURED_OBJECT_RECEIVER,
+    [null],
+  )],
+) as object;
 
 export interface ProjectTemplateInstalledRepertoireDependencyInspectorContext {
   readonly projectRoot: string;
@@ -177,6 +187,29 @@ function test(pattern: RegExp, value: string): boolean {
     pattern,
     [value],
   ) as boolean;
+}
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_HAS_OWN_PROPERTY,
+    value,
+    [key],
+  ) as boolean;
+}
+
+function isOwnDataDescriptor(
+  descriptor: PropertyDescriptor | undefined,
+): descriptor is PropertyDescriptor & { value: unknown } {
+  return descriptor !== undefined && hasOwn(descriptor, 'value');
+}
+
+function ownDataValue(
+  descriptors: Record<PropertyKey, PropertyDescriptor>,
+  key: PropertyKey,
+): unknown {
+  if (!hasOwn(descriptors, key)) return undefined;
+  const descriptor = descriptors[key];
+  return isOwnDataDescriptor(descriptor) ? descriptor.value : undefined;
 }
 
 function sha256(value: string | Uint8Array): string {
@@ -298,15 +331,17 @@ function snapshotInspectionInput(value: unknown): InspectionInput {
         && key !== allowed[3]
         && key !== allowed[4]
       )
-      || !('value' in descriptors[key]!)
+      || !isOwnDataDescriptor(descriptors[key])
     ) throw fixedFailure('INVALID_ARGUMENT');
   }
-  const deadlineMs = descriptors['deadlineMs']?.value;
-  const signal = descriptors['signal']?.value;
-  const dependencies = descriptors['dependencies']?.value;
-  const sourceDescriptorSha256 =
-    descriptors['sourceDescriptorSha256']?.value;
-  const manifestSha256 = descriptors['manifestSha256']?.value;
+  const deadlineMs = ownDataValue(descriptors, 'deadlineMs');
+  const signal = ownDataValue(descriptors, 'signal');
+  const dependencies = ownDataValue(descriptors, 'dependencies');
+  const sourceDescriptorSha256 = ownDataValue(
+    descriptors,
+    'sourceDescriptorSha256',
+  );
+  const manifestSha256 = ownDataValue(descriptors, 'manifestSha256');
   if (
     typeof sourceDescriptorSha256 !== 'string'
     || !test(SHA256_PATTERN, sourceDescriptorSha256)
@@ -325,6 +360,13 @@ function snapshotInspectionInput(value: unknown): InspectionInput {
       throw fixedFailure('INVALID_ARGUMENT');
     }
   }
+  const capturedSignal = signal as AbortSignal | undefined;
+  const boundary: InspectionInput = freeze({
+    signal: capturedSignal,
+    deadlineMs,
+    scopes: freeze([]) as readonly `@${string}/${string}`[],
+  });
+  checkpoint(boundary);
   const lengthDescriptor = CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
     CAPTURED_OBJECT_RECEIVER,
@@ -332,7 +374,7 @@ function snapshotInspectionInput(value: unknown): InspectionInput {
   ) as PropertyDescriptor | undefined;
   if (
     lengthDescriptor === undefined
-    || !('value' in lengthDescriptor)
+    || !isOwnDataDescriptor(lengthDescriptor)
     || !CAPTURED_NUMBER_IS_SAFE_INTEGER(lengthDescriptor.value)
     || lengthDescriptor.value < 0
     || lengthDescriptor.value
@@ -340,6 +382,7 @@ function snapshotInspectionInput(value: unknown): InspectionInput {
   ) throw fixedFailure('INVALID_ARGUMENT');
   const scopes: `@${string}/${string}`[] = [];
   for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    checkpoint(boundary);
     const dependencyDescriptor = CAPTURED_REFLECT_APPLY(
       CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
       CAPTURED_OBJECT_RECEIVER,
@@ -347,7 +390,7 @@ function snapshotInspectionInput(value: unknown): InspectionInput {
     ) as PropertyDescriptor | undefined;
     if (
       dependencyDescriptor === undefined
-      || !('value' in dependencyDescriptor)
+      || !isOwnDataDescriptor(dependencyDescriptor)
       || typeof dependencyDescriptor.value !== 'object'
       || dependencyDescriptor.value === null
       || CAPTURED_TYPES_IS_PROXY(dependencyDescriptor.value)
@@ -359,13 +402,14 @@ function snapshotInspectionInput(value: unknown): InspectionInput {
     ) as PropertyDescriptor | undefined;
     if (
       scopeDescriptor === undefined
-      || !('value' in scopeDescriptor)
+      || !isOwnDataDescriptor(scopeDescriptor)
       || typeof scopeDescriptor.value !== 'string'
     ) throw fixedFailure('INVALID_ARGUMENT');
     append(scopes, scopeDescriptor.value as `@${string}/${string}`);
   }
+  checkpoint(boundary);
   return freeze({
-    signal,
+    signal: capturedSignal,
     deadlineMs,
     scopes: freeze(scopes),
   });
@@ -399,12 +443,12 @@ function exactContext(
         && key !== 'language'
         && key !== 'repertoireRoot'
       )
-      || !('value' in descriptors[key]!)
+      || !isOwnDataDescriptor(descriptors[key])
     ) throw fixedFailure('INVALID_ARGUMENT');
   }
-  const projectRoot = descriptors['projectRoot']?.value;
-  const language = descriptors['language']?.value;
-  const configuredRoot = descriptors['repertoireRoot']?.value;
+  const projectRoot = ownDataValue(descriptors, 'projectRoot');
+  const language = ownDataValue(descriptors, 'language');
+  const configuredRoot = ownDataValue(descriptors, 'repertoireRoot');
   if (
     typeof projectRoot !== 'string'
     || !CAPTURED_IS_ABSOLUTE(projectRoot)
@@ -479,36 +523,50 @@ function invokeSeam(
   checkpoint(request);
 }
 
-function stableDirectoryListing(path: string): string {
+function stableDirectoryListing(
+  path: string,
+  request: InspectionInput,
+): string {
+  checkpoint(request);
   const before = CAPTURED_LSTAT_SYNC(path);
-  if (!isDirectory(before) || isSymbolicLink(before)) throw new Error();
+  checkpoint(request);
+  if (!isDirectory(before) || isSymbolicLink(before)) throw INTERNAL_FAILURE;
+  checkpoint(request);
   const directory = CAPTURED_OPENDIR_SYNC(path);
+  checkpoint(request);
   const names: string[] = [];
   try {
     while (names.length <= MAX_WITNESS_DIRECTORY_ENTRIES) {
+      checkpoint(request);
       const entry = CAPTURED_REFLECT_APPLY(
         CAPTURED_DIR_READ_SYNC,
         directory,
         [],
       ) as ReturnType<Dir['readSync']>;
+      checkpoint(request);
       if (entry === null) break;
       append(names, entry.name);
     }
   } finally {
     CAPTURED_REFLECT_APPLY(CAPTURED_DIR_CLOSE_SYNC, directory, []);
+    checkpoint(request);
   }
-  if (names.length > MAX_WITNESS_DIRECTORY_ENTRIES) throw new Error();
+  if (names.length > MAX_WITNESS_DIRECTORY_ENTRIES) throw INTERNAL_FAILURE;
   for (let index = 1; index < names.length; index += 1) {
+    checkpoint(request);
     const value = names[index]!;
     let cursor = index;
     while (cursor > 0 && names[cursor - 1]! > value) {
+      if ((cursor & 31) === 0) checkpoint(request);
       defineOwn(names, cursor, names[cursor - 1]!);
       cursor -= 1;
     }
     defineOwn(names, cursor, value);
   }
+  checkpoint(request);
   const after = CAPTURED_LSTAT_SYNC(path);
-  if (identity(before) !== identity(after)) throw new Error();
+  checkpoint(request);
+  if (identity(before) !== identity(after)) throw INTERNAL_FAILURE;
   return `${identity(after)}:${sha256(joinArray(names, '\u0000'))}`;
 }
 
@@ -519,20 +577,23 @@ function errno(value: unknown): string | undefined {
     CAPTURED_OBJECT_RECEIVER,
     [value, 'code'],
   ) as PropertyDescriptor | undefined;
-  return descriptor !== undefined && 'value' in descriptor
+  return isOwnDataDescriptor(descriptor)
     && typeof descriptor.value === 'string'
     ? descriptor.value
     : undefined;
 }
 
-function missingRootWitness(root: string): string {
+function missingRootWitness(root: string, request: InspectionInput): string {
   let current = root;
   let missingDepth = 0;
   while (missingDepth < MAX_MISSING_PARENT_DEPTH) {
+    checkpoint(request);
     try {
       return `root-missing:${missingDepth}:${sha256(current)}:`
-        + stableDirectoryListing(current);
+        + stableDirectoryListing(current, request);
     } catch (error) {
+      if (isStopFailure(error)) throw error;
+      checkpoint(request);
       if (errno(error) !== 'ENOENT') throw error;
       const parent = CAPTURED_DIRNAME(current);
       if (parent === current) throw error;
@@ -540,10 +601,15 @@ function missingRootWitness(root: string): string {
       missingDepth += 1;
     }
   }
-  throw new Error();
+  throw INTERNAL_FAILURE;
 }
 
-function invalid(scope: ScopeParts, detail: string): ScopeInspection {
+function invalid(
+  request: InspectionInput,
+  scope: ScopeParts,
+  detail: string,
+): ScopeInspection {
+  checkpoint(request);
   return {
     observation: freeze({
       scope: scope.scope,
@@ -554,7 +620,12 @@ function invalid(scope: ScopeParts, detail: string): ScopeInspection {
   };
 }
 
-function missing(scope: ScopeParts, detail: string): ScopeInspection {
+function missing(
+  request: InspectionInput,
+  scope: ScopeParts,
+  detail: string,
+): ScopeInspection {
+  checkpoint(request);
   return {
     observation: freeze({
       scope: scope.scope,
@@ -576,56 +647,76 @@ function inspectScope(
   invokeSeam(state, request, 'before-parent', scope.scope, scope.ownerSegment);
   const ownerPath = appendPath(state.repertoireRoot, scope.ownerSegment);
   try {
+    checkpoint(request);
     CAPTURED_LSTAT_SYNC(ownerPath);
+    checkpoint(request);
   } catch (error) {
+    if (isStopFailure(error)) throw error;
+    checkpoint(request);
     if (errno(error) === 'ENOENT') {
       try {
-        const listing = stableDirectoryListing(state.repertoireRoot);
+        const listing = stableDirectoryListing(state.repertoireRoot, request);
         try {
+          checkpoint(request);
           CAPTURED_LSTAT_SYNC(ownerPath);
-          return invalid(scope, 'owner-race');
+          checkpoint(request);
+          return invalid(request, scope, 'owner-race');
         } catch (afterError) {
+          if (isStopFailure(afterError)) throw afterError;
+          checkpoint(request);
           if (errno(afterError) !== 'ENOENT') {
-            return invalid(scope, 'owner-parent');
+            return invalid(request, scope, 'owner-parent');
           }
         }
-        return missing(scope, `owner:${listing}`);
+        return missing(request, scope, `owner:${listing}`);
       } catch {
-        return invalid(scope, 'owner-parent');
+        return invalid(request, scope, 'owner-parent');
       }
     }
-    return invalid(scope, 'owner');
+    return invalid(request, scope, 'owner');
   }
   let owner;
   try {
+    checkpoint(request);
     owner = readProjectTemplateRepertoireDirectory(
       safeContext,
       scope.ownerSegment,
     );
+    checkpoint(request);
   } catch {
-    return invalid(scope, 'owner');
+    return invalid(request, scope, 'owner');
   }
   invokeSeam(state, request, 'after-parent', scope.scope, scope.ownerSegment);
   const packagePath = appendPath(ownerPath, scope.packageSegment);
   try {
+    checkpoint(request);
     CAPTURED_LSTAT_SYNC(packagePath);
+    checkpoint(request);
   } catch (error) {
+    if (isStopFailure(error)) throw error;
+    checkpoint(request);
     if (errno(error) === 'ENOENT') {
       let ownerAfter;
       try {
+        checkpoint(request);
         ownerAfter = readProjectTemplateRepertoireDirectory(
           safeContext,
           scope.ownerSegment,
         );
+        checkpoint(request);
       } catch {
-        return invalid(scope, 'package-parent');
+        return invalid(request, scope, 'package-parent');
       }
       try {
+        checkpoint(request);
         CAPTURED_LSTAT_SYNC(packagePath);
-        return invalid(scope, 'package-race');
+        checkpoint(request);
+        return invalid(request, scope, 'package-race');
       } catch (afterError) {
+        if (isStopFailure(afterError)) throw afterError;
+        checkpoint(request);
         if (errno(afterError) !== 'ENOENT') {
-          return invalid(scope, 'package-parent');
+          return invalid(request, scope, 'package-parent');
         }
       }
       if (
@@ -633,23 +724,26 @@ function inspectScope(
           !== witnessIdentity(owner.witness)
         || joinArray(ownerAfter.entries, '\u0000')
           !== joinArray(owner.entries, '\u0000')
-      ) return invalid(scope, 'package-parent');
+      ) return invalid(request, scope, 'package-parent');
       return missing(
+        request,
         scope,
         `package:${witnessIdentity(owner.witness)}:`
         + sha256(joinArray(owner.entries, '\u0000')),
       );
     }
-    return invalid(scope, 'package');
+    return invalid(request, scope, 'package');
   }
   let packageDirectory;
   try {
+    checkpoint(request);
     packageDirectory = readProjectTemplateRepertoireDirectory(
       safeContext,
       scope.packageRelativePath,
     );
+    checkpoint(request);
   } catch {
-    return invalid(scope, 'package');
+    return invalid(request, scope, 'package');
   }
   const lockRelativePath =
     `${scope.packageRelativePath}/${TAKT_REPERTOIRE_LOCK_FILENAME}`;
@@ -657,11 +751,13 @@ function inspectScope(
     `${scope.packageRelativePath}/${TAKT_REPERTOIRE_MANIFEST_FILENAME}`;
   try {
     invokeSeam(state, request, 'before-lock', scope.scope, lockRelativePath);
+    checkpoint(request);
     const lockRead = readProjectTemplateRepertoireFile(
       safeContext,
       lockRelativePath,
       'lock',
     );
+    checkpoint(request);
     invokeSeam(state, request, 'after-lock', scope.scope, lockRelativePath);
     const lock = parseProjectTemplateRepertoireStrictLock(lockRead.content);
     invokeSeam(
@@ -676,6 +772,7 @@ function inspectScope(
       manifestRelativePath,
       'manifest',
     );
+    checkpoint(request);
     invokeSeam(
       state,
       request,
@@ -690,6 +787,31 @@ function inspectScope(
       scope.scope,
       scope.packageRelativePath,
     );
+    // Why: files and directory witnesses must describe one installation.
+    // Re-reading after every attacker-visible seam rejects path replacement
+    // even when each individual safe read was internally coherent.
+    checkpoint(request);
+    const packageAfter = readProjectTemplateRepertoireDirectory(
+      safeContext,
+      scope.packageRelativePath,
+    );
+    checkpoint(request);
+    const ownerAfter = readProjectTemplateRepertoireDirectory(
+      safeContext,
+      scope.ownerSegment,
+    );
+    checkpoint(request);
+    if (
+      witnessIdentity(packageAfter.witness)
+        !== witnessIdentity(packageDirectory.witness)
+      || joinArray(packageAfter.entries, '\u0000')
+        !== joinArray(packageDirectory.entries, '\u0000')
+      || witnessIdentity(ownerAfter.witness)
+        !== witnessIdentity(owner.witness)
+      || joinArray(ownerAfter.entries, '\u0000')
+        !== joinArray(owner.entries, '\u0000')
+    ) return invalid(request, scope, 'coherence');
+    checkpoint(request);
     // Interim G3.2 contract: G3.3 replaces this empty set with strictly
     // parsed manifest capabilities. This infra-private port is not exported
     // from a package/public barrel.
@@ -716,8 +838,24 @@ function inspectScope(
     if (
       isStopFailure(error)
     ) throw error;
-    return invalid(scope, 'io');
+    return invalid(request, scope, 'io');
   }
+}
+
+function finalizeInspection(
+  request: InspectionInput,
+  witnessParts: readonly string[],
+  observations: ProjectTemplateRepertoireDependencyObservation[],
+): unknown {
+  checkpoint(request);
+  const witnessSha256 = sha256(
+    WITNESS_DOMAIN + joinArray(witnessParts, '\n'),
+  );
+  checkpoint(request);
+  return freeze({
+    witnessSha256,
+    observations: freeze(observations),
+  });
 }
 
 function inspectRequest(
@@ -727,30 +865,50 @@ function inspectRequest(
   const input = snapshotInspectionInput(request);
   checkpoint(input);
   const observations: ProjectTemplateRepertoireDependencyObservation[] = [];
+  const scopes: ScopeParts[] = [];
   const witnessParts: string[] = [
     `language:${state.language}`,
     `project:${state.projectRootSha256}`,
     `root:${sha256(state.repertoireRoot)}`,
   ];
+  let previousScope: string | undefined;
+  // Why: every filesystem branch must consume the same canonical declaration
+  // snapshot, including the missing-root fast path.
+  for (let index = 0; index < input.scopes.length; index += 1) {
+    checkpoint(input);
+    const scope = scopeParts(input.scopes[index]);
+    if (
+      scope === undefined
+      || (previousScope !== undefined && scope.scope <= previousScope)
+    ) throw fixedFailure('INVALID_ARGUMENT');
+    previousScope = scope.scope;
+    append(scopes, scope);
+  }
+  checkpoint(input);
   let rootStat: Stats;
   try {
+    checkpoint(input);
     rootStat = CAPTURED_LSTAT_SYNC(state.repertoireRoot);
+    checkpoint(input);
   } catch (error) {
+    if (isStopFailure(error)) throw error;
+    checkpoint(input);
     if (errno(error) !== 'ENOENT') {
       rootStat = undefined as never;
     } else {
       let rootWitness: string | undefined;
       try {
-        rootWitness = missingRootWitness(state.repertoireRoot);
-      } catch {
+        rootWitness = missingRootWitness(state.repertoireRoot, input);
+      } catch (witnessError) {
+        if (isStopFailure(witnessError)) throw witnessError;
         rootWitness = undefined;
       }
-      for (let index = 0; index < input.scopes.length; index += 1) {
-        const scope = scopeParts(input.scopes[index]);
-        if (scope === undefined) throw fixedFailure('INVALID_ARGUMENT');
+      for (let index = 0; index < scopes.length; index += 1) {
+        checkpoint(input);
+        const scope = scopes[index]!;
         const inspected = rootWitness === undefined
-          ? invalid(scope, 'root-parent')
-          : missing(scope, rootWitness);
+          ? invalid(input, scope, 'root-parent')
+          : missing(input, scope, rootWitness);
         append(observations, inspected.observation);
         append(
           witnessParts,
@@ -758,10 +916,7 @@ function inspectRequest(
           + inspected.privateWitness,
         );
       }
-      return freeze({
-        witnessSha256: sha256(WITNESS_DOMAIN + joinArray(witnessParts, '\n')),
-        observations: freeze(observations),
-      });
+      return finalizeInspection(input, witnessParts, observations);
     }
   }
   const validRoot = rootStat !== undefined
@@ -775,24 +930,22 @@ function inspectRequest(
   > | undefined;
   if (validRoot) {
     try {
+      checkpoint(input);
       safeContext = createProjectTemplateRepertoireSafeReadContext(
         state.repertoireRoot,
       );
-    } catch {
+      checkpoint(input);
+    } catch (error) {
+      if (isStopFailure(error)) throw error;
+      checkpoint(input);
       safeContext = undefined;
     }
   }
-  let previousScope: string | undefined;
-  for (let index = 0; index < input.scopes.length; index += 1) {
+  for (let index = 0; index < scopes.length; index += 1) {
     checkpoint(input);
-    const scope = scopeParts(input.scopes[index]);
-    if (
-      scope === undefined
-      || (previousScope !== undefined && scope.scope <= previousScope)
-    ) throw fixedFailure('INVALID_ARGUMENT');
-    previousScope = scope.scope;
+    const scope = scopes[index]!;
     const inspected = safeContext === undefined
-      ? invalid(scope, 'root')
+      ? invalid(input, scope, 'root')
       : inspectScope(state, input, safeContext, scope);
     append(observations, inspected.observation);
     append(
@@ -801,11 +954,7 @@ function inspectRequest(
       + inspected.privateWitness,
     );
   }
-  checkpoint(input);
-  return freeze({
-    witnessSha256: sha256(WITNESS_DOMAIN + joinArray(witnessParts, '\n')),
-    observations: freeze(observations),
-  });
+  return finalizeInspection(input, witnessParts, observations);
 }
 
 /**

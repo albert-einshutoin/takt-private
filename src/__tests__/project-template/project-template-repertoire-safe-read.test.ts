@@ -207,6 +207,47 @@ describe('project template repertoire safe read G3.1', () => {
     )).toThrow(expect.objectContaining({ code: 'INVALID_PATH' }));
   });
 
+  it('allows repertoire exception names only at their canonical positions', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '@acme', 'package'), { recursive: true });
+    writeFileSync(
+      join(root, '@acme', 'package', '.takt-repertoire-lock.yaml'),
+      'lock',
+    );
+    const context = createProjectTemplateRepertoireSafeReadContext(root);
+    expect(readProjectTemplateRepertoireDirectory(context, '@acme').entries)
+      .toEqual(['package']);
+    expect(readProjectTemplateRepertoireFile(
+      context,
+      '@acme/package/.takt-repertoire-lock.yaml',
+      'lock',
+    ).content.toString()).toBe('lock');
+    for (const relativePath of [
+      'foo@bar',
+      '.takt-repertoire-lock.yaml',
+      'workflows/.takt-repertoire-lock.yaml',
+      '@acme/.takt-repertoire-lock.yaml',
+      '@acme/Bad/.takt-repertoire-lock.yaml',
+      '@acme/package/nested/.takt-repertoire-lock.yaml',
+    ]) {
+      expect(() => readProjectTemplateRepertoireFile(
+        context,
+        relativePath,
+        'lock',
+      )).toThrow(expect.objectContaining({ code: 'INVALID_PATH' }));
+    }
+  });
+
+  it('applies canonical repertoire exceptions to directory entries', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, 'providers'));
+    writeFileSync(join(root, 'providers', 'foo@bar'), '');
+    expect(() => readProjectTemplateRepertoireDirectory(
+      createProjectTemplateRepertoireSafeReadContext(root),
+      'providers',
+    )).toThrow(expect.objectContaining({ code: 'UNSAFE_ENTRY' }));
+  });
+
   it('rejects symlink and hard-link inputs without exposing paths', () => {
     const root = makeRoot();
     const outside = makeRoot();

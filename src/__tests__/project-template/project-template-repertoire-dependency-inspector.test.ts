@@ -306,6 +306,65 @@ describe('project template installed repertoire dependency inspector G3.2', () =
     }
   });
 
+  it('rejects a package directory replaced before provenance files are read', () => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    let replaced = false;
+    const port =
+      createProjectTemplateInstalledRepertoireDependencyInspectionPort(
+        { projectRoot: repertoireRoot, language: 'en', repertoireRoot },
+        (phase) => {
+          if (phase !== 'before-lock' || replaced) return;
+          replaced = true;
+          renameSync(packageDir, `${packageDir}-original`);
+          install(repertoireRoot, '@acme/repertoire', {
+            source: 'github:evil/replacement',
+            ref: '9.9.9',
+            commit: 'abcdef0123456789abcdef0123456789abcdef01',
+          });
+        },
+      );
+
+    expect(port.inspect(request())).toMatchObject({
+      observations: [{ state: 'invalid', reason: 'INVALID_INSTALLATION' }],
+    });
+  });
+
+  it('validates dependency order and uniqueness before a missing-root branch', () => {
+    const container = root();
+    const repertoireRoot = join(container, 'missing');
+    const port =
+      createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+        projectRoot: container,
+        language: 'en',
+        repertoireRoot,
+      });
+    expect(() => port.inspect(request([
+      dependency('@acme/two'),
+      dependency('@acme/one'),
+    ]))).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    expect(() => port.inspect(request([
+      dependency('@acme/one'),
+      dependency('@acme/one'),
+    ]))).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+  });
+
+  it('enforces a short deadline while witnessing a missing root parent', () => {
+    const container = root();
+    for (let index = 1023; index >= 0; index -= 1) {
+      writeFileSync(join(container, `entry-${String(index).padStart(4, '0')}`), '');
+    }
+    const port =
+      createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+        projectRoot: container,
+        language: 'en',
+        repertoireRoot: join(container, 'missing'),
+      });
+    expect(() => port.inspect(request(undefined, {
+      deadlineMs: performance.now() + 0.5,
+    }))).toThrow(expect.objectContaining({ code: 'TIMEOUT' }));
+  });
+
   it('rejects symlink roots and snapshots context before later mutation', () => {
     const realRoot = root();
     install(realRoot);
@@ -464,6 +523,79 @@ describe('project template installed repertoire dependency inspector G3.2', () =
     });
     expect(() => port.inspect(request([hostile as never])))
       .toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    expect(calls).toBe(0);
+  });
+
+  it('rejects accessors without consulting an inherited descriptor value', () => {
+    const repertoireRoot = root();
+    const port =
+      createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+        projectRoot: repertoireRoot,
+        language: 'en',
+        repertoireRoot,
+      });
+    const hostile = Object.defineProperty({}, 'scope', {
+      enumerable: true,
+      get() {
+        throw new Error('accessor must not run');
+      },
+    });
+    const original = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      'value',
+    );
+    let calls = 0;
+    let thrown: unknown;
+    try {
+      Object.defineProperty(Object.prototype, 'value', {
+        configurable: true,
+        get() {
+          calls += 1;
+          return '@acme/repertoire';
+        },
+      });
+      try {
+        port.inspect(request([hostile as never]));
+      } catch (error) {
+        thrown = error;
+      }
+    } finally {
+      if (original === undefined) {
+        Reflect.deleteProperty(Object.prototype, 'value');
+      } else {
+        Object.defineProperty(Object.prototype, 'value', original);
+      }
+    }
+    expect(calls).toBe(0);
+    expect(thrown).toEqual(expect.objectContaining({
+      code: 'INVALID_ARGUMENT',
+    }));
+  });
+
+  it('does not resolve a replaced global Error during invalid witnessing', () => {
+    const repertoireRoot = root();
+    for (let index = 0; index < 1025; index += 1) {
+      writeFileSync(join(repertoireRoot, `entry-${index}`), '');
+    }
+    const port =
+      createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+        projectRoot: repertoireRoot,
+        language: 'en',
+        repertoireRoot,
+      });
+    const OriginalError = Error;
+    let calls = 0;
+    try {
+      globalThis.Error = function PoisonedError() {
+        calls += 1;
+        return new OriginalError('poisoned');
+      } as ErrorConstructor;
+      expect(port.inspect(request())).toMatchObject({
+        observations: [{ state: 'invalid' }],
+      });
+    } finally {
+      globalThis.Error = OriginalError;
+    }
     expect(calls).toBe(0);
   });
 });
