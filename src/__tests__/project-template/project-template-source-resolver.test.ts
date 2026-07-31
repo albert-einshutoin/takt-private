@@ -192,6 +192,111 @@ describe('authenticated project-template source resolver F3', () => {
     expect(value.dispose).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects a successful first response that settles after abort', async () => {
+    const controller = new AbortController();
+    let resolveRequest!: (body: Buffer) => void;
+    let announceRequest!: () => void;
+    const requestCalled = new Promise<void>((resolve) => {
+      announceRequest = resolve;
+    });
+    const body = Buffer.from(JSON.stringify({ sha: COMMIT }));
+    const value = harness({
+      signal: controller.signal,
+      requestMetadata: () => new Promise((resolve) => {
+        announceRequest();
+        resolveRequest = resolve;
+      }),
+    });
+    const pending = resolveAuthenticatedGithubTemplateSource(
+      value.options,
+      value.dependencies,
+    );
+
+    await requestCalled;
+    controller.abort('SECRET');
+    resolveRequest(body);
+    const error = await pending.catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({ code: 'METADATA_PORT_FAILURE' });
+    expect(String(error)).not.toContain('SECRET');
+    expect(body.every((byte) => byte === 0)).toBe(true);
+    expect(value.requestMetadata).toHaveBeenCalledTimes(1);
+    expect(value.openReleaseAsset).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes a credential that settles successfully after abort', async () => {
+    const controller = new AbortController();
+    let resolveCredential!: (
+      credential: DisposableProjectTemplateGhCredential,
+    ) => void;
+    let announceCredential!: () => void;
+    const credentialCalled = new Promise<void>((resolve) => {
+      announceCredential = resolve;
+    });
+    const value = harness({
+      signal: controller.signal,
+      acquireCredential: () => new Promise((resolve) => {
+        announceCredential();
+        resolveCredential = resolve;
+      }),
+    });
+    const pending = resolveAuthenticatedGithubTemplateSource(
+      value.options,
+      value.dependencies,
+    );
+
+    await credentialCalled;
+    controller.abort('SECRET');
+    resolveCredential(value.credential);
+    const error = await pending.catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({ code: 'METADATA_PORT_FAILURE' });
+    expect(String(error)).not.toContain('SECRET');
+    expect(value.requestMetadata).not.toHaveBeenCalled();
+    expect(value.openReleaseAsset).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes a malformed acquired credential exactly once', async () => {
+    const dispose = vi.fn(() => undefined);
+    const value = harness({
+      acquireCredential: async () => Object.freeze({
+        dispose,
+        unexpected: true,
+      }) as unknown as DisposableProjectTemplateGhCredential,
+    });
+
+    await expect(resolveAuthenticatedGithubTemplateSource(
+      value.options,
+      value.dependencies,
+    )).rejects.toMatchObject({ code: 'METADATA_PORT_FAILURE' });
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(value.requestMetadata).not.toHaveBeenCalled();
+    expect(value.openReleaseAsset).not.toHaveBeenCalled();
+  });
+
+  it('copies descriptor bytes without invoking a hostile iterator and wipes it', async () => {
+    const value = harness();
+    const iterator = vi.fn(() => {
+      throw new Error('SECRET iterator');
+    });
+    Object.defineProperty(value.rawBodies[1], Symbol.iterator, {
+      configurable: true,
+      get: iterator,
+    });
+
+    await expect(resolveAuthenticatedGithubTemplateSource(
+      value.options,
+      value.dependencies,
+    )).resolves.toMatchObject({ commit: COMMIT });
+
+    expect(iterator).not.toHaveBeenCalled();
+    expect(value.rawBodies[1]!.every((byte) => byte === 0)).toBe(true);
+    expect(value.dispose).toHaveBeenCalledTimes(1);
+  });
+
   it('returns a checksum iterator on overflow and consumes no later chunk', async () => {
     const returned = vi.fn(async () => ({
       value: undefined,
@@ -215,6 +320,54 @@ describe('authenticated project-template source resolver F3', () => {
       value.dependencies,
     )).rejects.toMatchObject({ code: 'METADATA_PORT_FAILURE' });
     expect(next).toHaveBeenCalledTimes(1);
+    expect(returned).toHaveBeenCalledTimes(1);
+    expect(value.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a checksum iterator whose next settles successfully after abort', async () => {
+    const controller = new AbortController();
+    let resolveNext!: (
+      result: IteratorResult<Uint8Array>,
+    ) => void;
+    let announceNext!: () => void;
+    const nextCalled = new Promise<void>((resolve) => {
+      announceNext = resolve;
+    });
+    const returned = vi.fn(async () => ({
+      value: undefined,
+      done: true as const,
+    }));
+    const value = harness({
+      signal: controller.signal,
+      checksumIterable: {
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              announceNext();
+              return new Promise((resolve) => {
+                resolveNext = resolve;
+              });
+            },
+            return: returned,
+          };
+        },
+      },
+    });
+    const pending = resolveAuthenticatedGithubTemplateSource(
+      value.options,
+      value.dependencies,
+    );
+
+    await nextCalled;
+    controller.abort('SECRET');
+    resolveNext({
+      value: new TextEncoder().encode(CHECKSUM),
+      done: false,
+    });
+    const error = await pending.catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({ code: 'METADATA_PORT_FAILURE' });
+    expect(String(error)).not.toContain('SECRET');
     expect(returned).toHaveBeenCalledTimes(1);
     expect(value.dispose).toHaveBeenCalledTimes(1);
   });

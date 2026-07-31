@@ -23,6 +23,20 @@ import {
 } from './project-template-gh-auth.js';
 
 const MAX_JSON_METADATA_BYTES = 1024 * 1024;
+const ABORT_SIGNAL_ABORTED_GETTER = Object.getOwnPropertyDescriptor(
+  AbortSignal.prototype,
+  'aborted',
+)?.get;
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(
+  Uint8Array.prototype,
+) as object;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  'byteLength',
+)?.get;
+const TYPED_ARRAY_SET = Uint8Array.prototype.set;
+const TYPED_ARRAY_FILL = Uint8Array.prototype.fill;
+const BUFFER_TO_STRING = Buffer.prototype.toString;
 
 export interface ResolveAuthenticatedGithubTemplateSourceOptions {
   readonly source: string;
@@ -131,11 +145,14 @@ function snapshotSignal(value: unknown): AbortSignal | undefined {
     || Object.getPrototypeOf(value) !== AbortSignal.prototype
   ) throw invalidArgument();
   try {
-    const getter = Object.getOwnPropertyDescriptor(
-      AbortSignal.prototype,
-      'aborted',
-    )?.get;
-    if (typeof getter?.call(value) !== 'boolean') throw invalidArgument();
+    if (
+      ABORT_SIGNAL_ABORTED_GETTER === undefined
+      || typeof Reflect.apply(
+        ABORT_SIGNAL_ABORTED_GETTER,
+        value,
+        [],
+      ) !== 'boolean'
+    ) throw invalidArgument();
   } catch {
     throw invalidArgument();
   }
@@ -242,6 +259,47 @@ function snapshotCredential(value: unknown): CredentialSnapshot {
   });
 }
 
+function snapshotCredentialCleanup(
+  value: unknown,
+): CredentialSnapshot | undefined {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'dispose');
+  if (
+    descriptor === undefined
+    || !('value' in descriptor)
+    || typeof descriptor.value !== 'function'
+    || types.isProxy(descriptor.value)
+  ) return undefined;
+  return Object.freeze({
+    receiver: value as DisposableProjectTemplateGhCredential,
+    dispose: descriptor.value as
+      DisposableProjectTemplateGhCredential['dispose'],
+  });
+}
+
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  if (signal === undefined) return false;
+  if (ABORT_SIGNAL_ABORTED_GETTER === undefined) throw closedFacade();
+  try {
+    return Reflect.apply(
+      ABORT_SIGNAL_ABORTED_GETTER,
+      signal,
+      [],
+    ) as boolean;
+  } catch {
+    throw closedFacade();
+  }
+}
+
+function requireActiveSignal(signal: AbortSignal | undefined): void {
+  if (signalAborted(signal)) throw closedFacade();
+}
+
 function encodePath(value: string): string {
   return value.split('/').map(encodeURIComponent).join('/');
 }
@@ -265,10 +323,54 @@ function requestOptions(
 
 function parseJsonBuffer(value: Buffer): unknown {
   try {
-    return JSON.parse(value.toString('utf8')) as unknown;
+    return JSON.parse(Reflect.apply(
+      BUFFER_TO_STRING,
+      value,
+      ['utf8'],
+    ) as string) as unknown;
   } finally {
-    value.fill(0);
+    Reflect.apply(TYPED_ARRAY_FILL, value, [0]);
   }
+}
+
+function copyAndWipeBuffer(value: Buffer): Uint8Array {
+  try {
+    if (
+      TYPED_ARRAY_BYTE_LENGTH_GETTER === undefined
+      || !Buffer.isBuffer(value)
+      || types.isProxy(value)
+    ) throw closedFacade();
+    const byteLength = Reflect.apply(
+      TYPED_ARRAY_BYTE_LENGTH_GETTER,
+      value,
+      [],
+    ) as number;
+    const copy = new Uint8Array(byteLength);
+    Reflect.apply(TYPED_ARRAY_SET, copy, [value]);
+    return copy;
+  } finally {
+    if (Buffer.isBuffer(value) && !types.isProxy(value)) {
+      Reflect.apply(TYPED_ARRAY_FILL, value, [0]);
+    }
+  }
+}
+
+function validateBoundedBuffer(value: unknown, maxBytes: number): Buffer {
+  if (
+    !Buffer.isBuffer(value)
+    || types.isProxy(value)
+    || TYPED_ARRAY_BYTE_LENGTH_GETTER === undefined
+  ) throw closedFacade();
+  const byteLength = Reflect.apply(
+    TYPED_ARRAY_BYTE_LENGTH_GETTER,
+    value,
+    [],
+  ) as number;
+  if (byteLength > maxBytes) {
+    Reflect.apply(TYPED_ARRAY_FILL, value, [0]);
+    throw closedFacade();
+  }
+  return value;
 }
 
 function projectCommit(value: Buffer): unknown {
@@ -309,6 +411,7 @@ async function collectChecksum(
   port: ChecksumPortSnapshot,
   input: Parameters<GithubTemplateArchiveAssetPort['openReleaseAsset']>[0],
 ): Promise<Uint8Array> {
+  requireActiveSignal(input.signal);
   let iterable: AsyncIterable<Uint8Array>;
   try {
     iterable = Reflect.apply(
@@ -326,6 +429,7 @@ async function collectChecksum(
   try {
     for (;;) {
       const next = await iterator.next();
+      requireActiveSignal(input.signal);
       if (next.done === true) {
         complete = true;
         break;
@@ -350,6 +454,7 @@ async function collectChecksum(
     result.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  requireActiveSignal(input.signal);
   return result;
 }
 
@@ -372,6 +477,7 @@ function createMetadataFacade(
     ) => Promise<unknown>,
   ): Promise<unknown> => {
     if (control.state !== 'active' || control.busy) throw closedFacade();
+    requireActiveSignal(options.signal);
     control.busy = true;
     try {
       if (control.credential === undefined) {
@@ -385,21 +491,35 @@ function createMetadataFacade(
               : { signal: options.signal }),
           })],
         );
+        // Ownership starts at settlement, before exact-shape validation. This
+        // keeps a malformed facade with a valid dispose hook reclaimable.
+        control.credential = snapshotCredentialCleanup(acquired);
+        requireActiveSignal(options.signal);
         control.credential = snapshotCredential(acquired);
       }
-      return await operation(control.credential.receiver);
+      const result = await operation(control.credential.receiver);
+      requireActiveSignal(options.signal);
+      return result;
     } finally {
       control.busy = false;
     }
   };
 
-  const request = (
+  const request = async (
     request: RequestProjectTemplateGithubApiMetadataOptions,
-  ): Promise<Buffer> => Reflect.apply(
-    dependencies.requestMetadata,
-    dependencies.receiver,
-    [request],
-  );
+  ): Promise<Buffer> => {
+    const value = await Reflect.apply(
+      dependencies.requestMetadata,
+      dependencies.receiver,
+      [request],
+    );
+    const buffer = validateBoundedBuffer(value, request.maxBytes);
+    if (signalAborted(options.signal)) {
+      Reflect.apply(TYPED_ARRAY_FILL, buffer, [0]);
+      throw closedFacade();
+    }
+    return buffer;
+  };
 
   const facade = Object.freeze<GithubTemplateSourceMetadataPort>({
     resolveRefToCommit: (input) => withMetadata(async (credential) =>
@@ -427,9 +547,7 @@ function createMetadataFacade(
           options,
         ),
       );
-      const copy = Uint8Array.from(raw);
-      raw.fill(0);
-      return copy;
+      return copyAndWipeBuffer(raw);
     }),
     getReleaseByTag: (input) => withMetadata(async (credential) =>
       projectRelease(await request(
@@ -507,13 +625,20 @@ export async function resolveAuthenticatedGithubTemplateSource(
   }
   const metadata = createMetadataFacade(options, dependencies);
   try {
-    return await resolveGithubTemplateSource({
+    const result = await resolveGithubTemplateSource({
       source,
       metadata: metadata.facade,
       ...(options.current === undefined
         ? {}
         : { current: options.current }),
     });
+    if (signalAborted(options.signal)) {
+      throw Object.freeze(new GithubTemplateSourceResolutionError(
+        'METADATA_PORT_FAILURE',
+        'GitHub metadata operation failed',
+      ));
+    }
+    return result;
   } finally {
     metadata.close();
   }
