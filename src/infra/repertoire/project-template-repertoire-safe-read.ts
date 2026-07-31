@@ -11,7 +11,7 @@ import {
   realpathSync,
   type Stats,
 } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
 
 const MAX_RELATIVE_PATH_LENGTH = 1024;
 const MAX_RELATIVE_PATH_DEPTH = 32;
@@ -23,9 +23,10 @@ const FILE_LIMITS = {
   provider: 1024 * 1024,
 } as const;
 const PORTABLE_SEGMENT_PATTERN =
-  /^(?![ .])(?!.*[ .]$)[A-Za-z0-9._-]+$/;
+  /^(?![ .])(?!.*[ .]$)[A-Za-z0-9@._-]+$/;
 const WINDOWS_RESERVED_SEGMENT_PATTERN =
   /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\.|$)/i;
+const REPERTOIRE_LOCK_SEGMENT = '.takt-repertoire-lock.yaml';
 // eslint-disable-next-line no-control-regex -- portable paths reject C0/DEL.
 const CONTROL_PATTERN = /[\u0000-\u001f\u007f]/;
 const CAPTURED_OBJECT_CREATE = Object.create;
@@ -54,7 +55,6 @@ const CAPTURED_OPENDIR_SYNC = opendirSync;
 const CAPTURED_READ_SYNC = readSync;
 const CAPTURED_REALPATH_NATIVE = realpathSync.native;
 const CAPTURED_IS_ABSOLUTE = isAbsolute;
-const CAPTURED_JOIN = join;
 
 const SAFE_READ_CONTEXTS =
   new WeakMap<ProjectTemplateRepertoireSafeReadContext, SafeReadState>();
@@ -363,10 +363,13 @@ function validateRelativePath(relativePath: unknown): string[] {
         WINDOWS_RESERVED_SEGMENT_PATTERN,
         [segment],
       )
-      || !CAPTURED_REFLECT_APPLY(
-        CAPTURED_REGEXP_TEST,
-        PORTABLE_SEGMENT_PATTERN,
-        [segment],
+      || (
+        segment !== REPERTOIRE_LOCK_SEGMENT
+        && !CAPTURED_REFLECT_APPLY(
+          CAPTURED_REGEXP_TEST,
+          PORTABLE_SEGMENT_PATTERN,
+          [segment],
+        )
       )
     ) throw failure('INVALID_PATH');
   }
@@ -410,7 +413,7 @@ function requireCanonicalPath(
   let current = state.root;
   const count = includeFinal ? segments.length : segments.length - 1;
   for (let index = 0; index < count; index += 1) {
-    current = CAPTURED_JOIN(current, segments[index]!);
+    current = appendPath(current, segments[index]!);
     const stat = safeLstat(current);
     if (
       isSymbolicLink(stat)
@@ -426,9 +429,13 @@ function requireCanonicalPath(
   }
   let result = state.root;
   for (let index = 0; index < segments.length; index += 1) {
-    result = CAPTURED_JOIN(result, segments[index]!);
+    result = appendPath(result, segments[index]!);
   }
   return result;
+}
+
+function appendPath(parent: string, segment: string): string {
+  return parent === '/' ? `/${segment}` : `${parent}/${segment}`;
 }
 
 function fileType(stat: Stats): number {
@@ -724,10 +731,13 @@ function validateDirectoryEntryName(name: string): string {
       WINDOWS_RESERVED_SEGMENT_PATTERN,
       [name],
     )
-    || !CAPTURED_REFLECT_APPLY(
-      CAPTURED_REGEXP_TEST,
-      PORTABLE_SEGMENT_PATTERN,
-      [name],
+    || (
+      name !== REPERTOIRE_LOCK_SEGMENT
+      && !CAPTURED_REFLECT_APPLY(
+        CAPTURED_REGEXP_TEST,
+        PORTABLE_SEGMENT_PATTERN,
+        [name],
+      )
     )
   ) throw failure('UNSAFE_ENTRY');
   const normalized = CAPTURED_REFLECT_APPLY(
