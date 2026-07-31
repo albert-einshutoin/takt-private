@@ -288,24 +288,39 @@ function dependencyOwnKeys(
   ) as PropertyKey[];
 }
 
+function defineDependencyDataProperty(
+  target: object,
+  key: PropertyKey,
+  value: unknown,
+): void {
+  const descriptor = INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_OBJECT_CREATE,
+    Object,
+    [null],
+  ) as PropertyDescriptor;
+  // Why: ToPropertyDescriptor reads all six descriptor field names. A normal
+  // object would inherit hostile post-init `get`/`set` hooks before the
+  // captured defineProperty intrinsic can establish the data property.
+  descriptor.configurable = true;
+  descriptor.enumerable = true;
+  descriptor.value = value;
+  descriptor.writable = true;
+  INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_OBJECT_DEFINE_PROPERTY,
+    Object,
+    [target, key, descriptor],
+  );
+}
+
 function defineArrayValue(
   target: unknown[],
   index: number,
   value: unknown,
 ): void {
-  INTRINSIC_REFLECT_APPLY(
-    INTRINSIC_OBJECT_DEFINE_PROPERTY,
-    Object,
-    [
-      target,
-      INTRINSIC_STRING(index),
-      {
-        configurable: true,
-        enumerable: true,
-        value,
-        writable: true,
-      },
-    ],
+  defineDependencyDataProperty(
+    target,
+    INTRINSIC_STRING(index),
+    value,
   );
 }
 
@@ -442,19 +457,10 @@ function snapshotDependencyRecord(
         typeof key === 'string' ? `${field}.${key}` : field,
       );
     }
-    INTRINSIC_REFLECT_APPLY(
-      INTRINSIC_OBJECT_DEFINE_PROPERTY,
-      Object,
-      [
-        snapshot,
-        key,
-        {
-          configurable: true,
-          enumerable: true,
-          value: descriptor.value,
-          writable: true,
-        },
-      ],
+    defineDependencyDataProperty(
+      snapshot,
+      key,
+      descriptor.value,
     );
   }
   return snapshot;

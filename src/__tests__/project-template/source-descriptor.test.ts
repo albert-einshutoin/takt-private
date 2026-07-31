@@ -95,6 +95,78 @@ describe('project template source descriptor', () => {
     expect(parsed).toHaveLength(2);
   });
 
+  it('builds internal data descriptors without inherited get/set hooks', () => {
+    const validDependencies = validDescriptor()['repertoireDependencies'];
+    const invalidDependencies = (
+      validDescriptor()['repertoireDependencies']
+    ) as Array<Record<string, unknown>>;
+    invalidDependencies[0]!['commit'] = 'short';
+    let calls = 0;
+    let reentryCalls = 0;
+    let reentering = false;
+    let parsed;
+    let validFailure: unknown;
+    let invalidFailure: unknown;
+    const originalGet = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      'get',
+    );
+    const originalSet = Object.getOwnPropertyDescriptor(
+      Object.prototype,
+      'set',
+    );
+    const poison = () => {
+      calls += 1;
+      if (!reentering) {
+        reentryCalls += 1;
+        reentering = true;
+        try {
+          parseProjectTemplateRepertoireDependencies([]);
+        } finally {
+          reentering = false;
+        }
+      }
+      return () => undefined;
+    };
+
+    Object.defineProperties(Object.prototype, {
+      get: { configurable: true, get: poison },
+      set: { configurable: true, get: poison },
+    });
+    try {
+      try {
+        parsed = parseProjectTemplateRepertoireDependencies(
+          validDependencies,
+        );
+      } catch (error) {
+        validFailure = error;
+      }
+      try {
+        parseProjectTemplateRepertoireDependencies(invalidDependencies);
+      } catch (error) {
+        invalidFailure = error;
+      }
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'get');
+      Reflect.deleteProperty(Object.prototype, 'set');
+      if (originalGet !== undefined) {
+        Object.defineProperty(Object.prototype, 'get', originalGet);
+      }
+      if (originalSet !== undefined) {
+        Object.defineProperty(Object.prototype, 'set', originalSet);
+      }
+    }
+
+    expect(calls).toBe(0);
+    expect(reentryCalls).toBe(0);
+    expect(validFailure).toBeUndefined();
+    expect(parsed?.[0]?.scope).toBe('@acme/alpha');
+    expect(invalidFailure).toMatchObject({
+      name: 'ProjectTemplateValidationError',
+      code: 'INVALID_SOURCE',
+    });
+  });
+
   it.each([
     ['top-level', (value: Record<string, unknown>) => {
       value['unexpected'] = true;
