@@ -1,4 +1,4 @@
-import { Stats, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { Stats, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { InternalWorkflowReadContext } from './workflowDiscovery.js';
 import { WorkflowDiscoveryReadError } from './workflowDiscoveryError.js';
@@ -111,13 +111,7 @@ function getRequiredRepertoireAccess(
 }
 
 function lstatExists(path: string): boolean {
-  try {
-    lstatSync(path);
-    return true;
-  } catch (error) {
-    if (isMissing(error)) return false;
-    throw error;
-  }
+  return existsSync(path);
 }
 
 function readNodeText(path: string): string {
