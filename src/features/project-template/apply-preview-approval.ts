@@ -661,20 +661,20 @@ async function consumeReserved(options: {
   }
 }
 
-export function consumeProjectTemplateApplyPreviewApproval(
+export async function consumeProjectTemplateApplyPreviewApproval(
   value: unknown,
 ): Promise<boolean> {
   const options = snapshotOperationOptions(value, 'consume');
-  if (options === undefined) return Promise.resolve(false);
+  if (options === undefined) return false;
   const authority = authorityFor(options.evidence);
   if (authority === undefined || authority.state !== 'active') {
-    return Promise.resolve(false);
+    return false;
   }
   let preview: ProjectTemplateApplyPreview;
   try {
     preview = assertProjectTemplateApplyPreview(options.preview);
   } catch {
-    return Promise.resolve(false);
+    return false;
   }
   authority.state = 'consuming';
   return consumeReserved({
@@ -718,14 +718,14 @@ async function revokeReserved(options: {
   }
 }
 
-export function revokeProjectTemplateApplyPreviewApproval(
+export async function revokeProjectTemplateApplyPreviewApproval(
   value: unknown,
 ): Promise<boolean> {
   const options = snapshotOperationOptions(value, 'revoke');
-  if (options === undefined) return Promise.resolve(false);
+  if (options === undefined) return false;
   const authority = authorityFor(options.evidence);
   if (authority === undefined || authority.state !== 'active') {
-    return Promise.resolve(false);
+    return false;
   }
   authority.state = 'revoking';
   return revokeReserved({

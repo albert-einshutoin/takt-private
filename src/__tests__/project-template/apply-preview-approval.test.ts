@@ -1112,4 +1112,49 @@ describe('project template revocable preview approval authority G6.2', () => {
     release();
     await expect(pending).resolves.toBe(true);
   });
+
+  it('fails closed without invoking mutable Promise.resolve', async () => {
+    const originalResolve = Promise.resolve;
+    let poisonHooks = 0;
+    Object.defineProperty(Promise, 'resolve', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        poisonHooks += 1;
+        return originalResolve.call(Promise, true);
+      },
+    });
+    let invalidConsume: boolean;
+    let forgedConsume: boolean;
+    let invalidRevoke: boolean;
+    let forgedRevoke: boolean;
+    try {
+      invalidConsume = await consumeProjectTemplateApplyPreviewApproval({});
+      forgedConsume = await consumeProjectTemplateApplyPreviewApproval({
+        storage: {},
+        preview: {},
+        baselineStrategy: 'conflict',
+        evidence: {},
+      });
+      invalidRevoke = await revokeProjectTemplateApplyPreviewApproval({});
+      forgedRevoke = await revokeProjectTemplateApplyPreviewApproval({
+        storage: {},
+        evidence: {},
+      });
+    } finally {
+      Object.defineProperty(Promise, 'resolve', {
+        configurable: true,
+        writable: true,
+        value: originalResolve,
+      });
+    }
+    expect({ invalidConsume, forgedConsume, invalidRevoke, forgedRevoke })
+      .toEqual({
+        invalidConsume: false,
+        forgedConsume: false,
+        invalidRevoke: false,
+        forgedRevoke: false,
+      });
+    expect(poisonHooks).toBe(0);
+  });
 });
