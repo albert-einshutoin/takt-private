@@ -130,6 +130,9 @@ export {
 export {
   resolveAuthenticatedGithubTemplateSource,
 } from './infra/github/project-template-source-resolver.js';
+export {
+  createProjectTemplateGithubSourceComposition,
+} from './infra/github/project-template-github-source-composition.js';
 export type {
   ProjectTemplateGithubArchiveAssetPortDependencies,
 } from './infra/github/project-template-github-archive-asset-port.js';
@@ -137,6 +140,11 @@ export type {
   ProjectTemplateSourceResolverDependencies,
   ResolveAuthenticatedGithubTemplateSourceOptions,
 } from './infra/github/project-template-source-resolver.js';
+export type {
+  ProjectTemplateGithubSourceComposition,
+  ProjectTemplateGithubSourceCompositionContext,
+  ProjectTemplateGithubSourceCompositionDependencies,
+} from './infra/github/project-template-github-source-composition.js';
 export type {
   ProjectTemplateManifestV1,
   ProjectTemplateGithubRefSourceSpec,

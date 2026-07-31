@@ -19,6 +19,8 @@ import type {
   ProjectTemplateGithubSourceSpec,
   ProjectTemplateRepertoireCapabilityV1,
   ProjectTemplateRepertoireDependencyV1,
+  ProjectTemplateGithubSourceComposition,
+  ProjectTemplateGithubSourceCompositionDependencies,
   ProjectTemplateSourceDescriptorPackV1,
   ProjectTemplateSourceDescriptorV1,
   ResolvedGithubTemplateSource,
@@ -78,6 +80,8 @@ describe('package exports contract', () => {
         downloadGithubTemplateSource: typeof api.downloadGithubTemplateSource,
         downloadOrchestratorError:
           typeof api.GithubTemplateDownloadOrchestratorError,
+        createGithubSourceComposition:
+          typeof api.createProjectTemplateGithubSourceComposition,
       }));
     `);
 
@@ -99,6 +103,7 @@ describe('package exports contract', () => {
       sourceResolutionError: 'function',
       downloadGithubTemplateSource: 'function',
       downloadOrchestratorError: 'function',
+      createGithubSourceComposition: 'function',
     });
     expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
       .toMatchTypeOf<readonly unknown[]>();
@@ -169,6 +174,13 @@ describe('package exports contract', () => {
       .toHaveProperty('openReleaseAsset');
     expectTypeOf<GithubTemplateDownloadOrchestratorErrorCode>()
       .toMatchTypeOf<string>();
+    expectTypeOf<ProjectTemplateGithubSourceComposition>()
+      .toMatchTypeOf<{
+        resolver: GithubTemplateSourceResolverPort;
+        archive: GithubTemplateArchiveAssetPort;
+      }>();
+    expectTypeOf<ProjectTemplateGithubSourceCompositionDependencies>()
+      .toHaveProperty('requestMetadata');
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');
     expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
     expect(declarationEntry).toContain('ProjectTemplateGithubRefSourceSpec');
@@ -189,6 +201,10 @@ describe('package exports contract', () => {
     expect(declarationEntry).toContain('GithubTemplateArchiveAssetPort');
     expect(declarationEntry)
       .toContain('GithubTemplateDownloadOrchestratorErrorCode');
+    expect(declarationEntry)
+      .toContain('ProjectTemplateGithubSourceComposition');
+    expect(declarationEntry)
+      .toContain('ProjectTemplateGithubSourceCompositionDependencies');
   });
 
   it('keeps GitHub template download storage authority out of the root API', () => {
