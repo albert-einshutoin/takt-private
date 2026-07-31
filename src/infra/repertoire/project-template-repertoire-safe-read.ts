@@ -43,8 +43,7 @@ const CAPTURED_STRING_NORMALIZE = String.prototype.normalize;
 const CAPTURED_STRING_SPLIT = String.prototype.split;
 const CAPTURED_STRING_STARTS_WITH = String.prototype.startsWith;
 const CAPTURED_STRING_TO_LOWER_CASE = String.prototype.toLowerCase;
-const CAPTURED_BUFFER_ALLOC_UNSAFE = Buffer.allocUnsafe;
-const CAPTURED_BUFFER_COPY = Buffer.prototype.copy;
+const CAPTURED_BUFFER_ALLOC_UNSAFE_SLOW = Buffer.allocUnsafeSlow;
 const CAPTURED_DIR_READ_SYNC = Dir.prototype.readSync;
 const CAPTURED_DIR_CLOSE_SYNC = Dir.prototype.closeSync;
 const CAPTURED_CLOSE_SYNC = closeSync;
@@ -617,16 +616,17 @@ export function readProjectTemplateRepertoireFile(
     let total = 0;
     while (total <= limit) {
       const remaining = limit + 1 - total;
+      const requested = remaining < 64 * 1024 ? remaining : 64 * 1024;
       const chunk = CAPTURED_REFLECT_APPLY(
-        CAPTURED_BUFFER_ALLOC_UNSAFE,
+        CAPTURED_BUFFER_ALLOC_UNSAFE_SLOW,
         Buffer,
-        [remaining < 64 * 1024 ? remaining : 64 * 1024],
+        [requested],
       ) as Buffer;
       const count = CAPTURED_READ_SYNC(
         descriptor,
         chunk,
         0,
-        chunk.length,
+        requested,
         null,
       );
       if (count === 0) break;
@@ -637,18 +637,20 @@ export function readProjectTemplateRepertoireFile(
     }
     if (total > limit) throw failure('LIMIT_EXCEEDED');
     const content = CAPTURED_REFLECT_APPLY(
-      CAPTURED_BUFFER_ALLOC_UNSAFE,
+      CAPTURED_BUFFER_ALLOC_UNSAFE_SLOW,
       Buffer,
       [total],
     ) as Buffer;
     let contentOffset = 0;
     for (let index = 0; index < chunkCount; index += 1) {
       const count = chunkLengths[index]!;
-      CAPTURED_REFLECT_APPLY(
-        CAPTURED_BUFFER_COPY,
-        chunks[index]!,
-        [content, contentOffset, 0, count],
-      );
+      const chunk = chunks[index]!;
+      // Why: Buffer.copy and TypedArray length access both return to mutable
+      // post-init surfaces. Integer-indexed access uses internal slots and
+      // copies only bytes that readSync initialized.
+      for (let byte = 0; byte < count; byte += 1) {
+        content[contentOffset + byte] = chunk[byte]!;
+      }
       contentOffset += count;
     }
     invokePhase(state, relativePath, 'after-content');

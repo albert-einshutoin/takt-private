@@ -28,7 +28,7 @@ const UINT8_ARRAY_BUFFER_GETTER =
   )!.get!;
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
 const CAPTURED_TEXT_DECODER_DECODE = TextDecoder.prototype.decode;
-const CAPTURED_BUFFER_FROM = Buffer.from;
+const CAPTURED_BUFFER_ALLOC_UNSAFE_SLOW = Buffer.allocUnsafeSlow;
 const CAPTURED_BUFFER_RECEIVER = Buffer;
 const CAPTURED_DATE = Date;
 const CAPTURED_DATE_TO_ISO_STRING = Date.prototype.toISOString;
@@ -204,23 +204,36 @@ function exactByteLength(value: unknown): number {
   }
 }
 
-function copyBoundedBytes(value: unknown): Buffer {
+interface BoundedByteSnapshot {
+  readonly bytes: Buffer;
+  readonly byteLength: number;
+}
+
+function copyBoundedBytes(value: unknown): BoundedByteSnapshot {
   const byteLength = exactByteLength(value);
   if (byteLength > MAX_LOCK_BYTES) throw failure('LIMIT_EXCEEDED');
   try {
-    return CAPTURED_REFLECT_APPLY(
-      CAPTURED_BUFFER_FROM,
+    const bytes = CAPTURED_REFLECT_APPLY(
+      CAPTURED_BUFFER_ALLOC_UNSAFE_SLOW,
       CAPTURED_BUFFER_RECEIVER,
-      [value],
+      [byteLength],
     ) as Buffer;
+    const source = value as Uint8Array;
+    // Why: Buffer.from consults mutable pool and TypedArray length surfaces.
+    // Bounded integer-indexed copying snapshots only internal-slot bytes and
+    // cannot hand private output storage to an attacker-controlled getter.
+    for (let index = 0; index < byteLength; index += 1) {
+      bytes[index] = source[index]!;
+    }
+    return { bytes, byteLength };
   } catch {
     throw failure('INVALID_ARGUMENT');
   }
 }
 
 function rejectExcessiveYamlDepth(text: string): void {
-  // Why: reject pathological indentation before the YAML library allocates
-  // attacker-influenced worklists whose prototypes may have been poisoned.
+  // Why: reject pathological indentation before canonical-shape scanning;
+  // the G3 boundary never builds attacker-influenced recursive structures.
   let lineStart = true;
   let indentation = 0;
   for (let index = 0; index < text.length; index += 1) {
@@ -286,11 +299,10 @@ function deriveVersion(ref: string): string {
 }
 
 /**
- * Recognize the exact mapping emitted by the current repertoire lock writer.
+ * Recognize only the exact mapping emitted by the repertoire lock writer.
  *
- * Why: this canonical four-line subset can be validated without handing
- * already-understood security fields to third-party parser code. Other valid
- * YAML forms still take the full parser path for backward compatibility.
+ * Why: G3 accepts this canonical four-line subset and fails closed for every
+ * other YAML spelling, so no third-party parser or post-init hook is involved.
  */
 function prevalidateCanonicalShape(
   text: string,
@@ -411,11 +423,12 @@ function rejectNonCanonicalLock(text: string): never {
 export function parseProjectTemplateRepertoireStrictLock(
   value: unknown,
 ): ProjectTemplateRepertoireStrictLock {
-  // Why: the legacy repertoire lock parser is intentionally permissive for
-  // CLI listing. Inspection consumes only this bounded, non-coercing parser.
-  const bytes = copyBoundedBytes(value);
+  // Why: legacy CLI listing remains permissive elsewhere. Inspection accepts
+  // only this bounded, canonical writer representation at the trust boundary.
+  const snapshot = copyBoundedBytes(value);
+  const bytes = snapshot.bytes;
   if (
-    bytes.length >= 3
+    snapshot.byteLength >= 3
     && bytes[0] === 0xef
     && bytes[1] === 0xbb
     && bytes[2] === 0xbf
@@ -441,8 +454,8 @@ export function parseProjectTemplateRepertoireStrictLock(
     throw failure('INVALID_YAML');
   }
   rejectExcessiveYamlDepth(text);
-  // Why: malformed canonical lock fields are rejected before a third-party
-  // YAML parser can observe post-initialization prototype poisoning.
+  // Why: only the writer's exact canonical form is accepted; all other YAML
+  // spellings fail closed without invoking third-party parser code.
   const canonical = prevalidateCanonicalShape(text);
   if (canonical !== undefined) return materializeLock(canonical);
   return rejectNonCanonicalLock(text);

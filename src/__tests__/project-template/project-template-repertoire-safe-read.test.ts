@@ -33,6 +33,75 @@ afterEach(() => {
 });
 
 describe('project template repertoire safe read G3.1', () => {
+  it('does not expose private bytes through mutable Buffer allocation surfaces', () => {
+    const root = makeRoot();
+    const secret = 'private-repertoire-bytes';
+    writeFileSync(join(root, 'lock.yaml'), secret);
+    const context = createProjectTemplateRepertoireSafeReadContext(root);
+    const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+    const originalLength = Object.getOwnPropertyDescriptor(
+      typedArrayPrototype,
+      'length',
+    )!;
+    const originalPoolSize = Object.getOwnPropertyDescriptor(
+      Buffer,
+      'poolSize',
+    )!;
+    let calls = 0;
+    let reentries = 0;
+    let active = false;
+    let leakedReceiver: unknown;
+    let result: ReturnType<typeof readProjectTemplateRepertoireFile> | undefined;
+    try {
+      Object.defineProperty(Buffer, 'poolSize', {
+        configurable: true,
+        get() {
+          calls += 1;
+          if (!active) {
+            active = true;
+            reentries += 1;
+            try {
+              readProjectTemplateRepertoireFile(
+                context,
+                'lock.yaml',
+                'lock',
+              );
+            } catch {
+              // The callback itself is hostile; only invocation is relevant.
+            } finally {
+              active = false;
+            }
+          }
+          return 8192;
+        },
+      });
+      Object.defineProperty(typedArrayPrototype, 'length', {
+        configurable: true,
+        get() {
+          calls += 1;
+          leakedReceiver = this;
+          return Reflect.apply(originalLength.get!, this, []);
+        },
+      });
+      result = readProjectTemplateRepertoireFile(
+        context,
+        'lock.yaml',
+        'lock',
+      );
+    } finally {
+      Object.defineProperty(Buffer, 'poolSize', originalPoolSize);
+      Object.defineProperty(
+        typedArrayPrototype,
+        'length',
+        originalLength,
+      );
+    }
+    expect(calls).toBe(0);
+    expect(reentries).toBe(0);
+    expect(leakedReceiver).toBeUndefined();
+    expect(result!.content.toString()).toBe(secret);
+  });
+
   it('normalizes hostile runtime error codes without prototype setters', () => {
     const original = Object.getOwnPropertyDescriptor(
       ProjectTemplateRepertoireSafeReadError.prototype,

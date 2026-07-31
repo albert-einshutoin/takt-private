@@ -27,6 +27,83 @@ function validLock(overrides: Partial<Record<
 }
 
 describe('project template repertoire strict lock G3.1', () => {
+  it('snapshots bytes without mutable Buffer pool or TypedArray length access', () => {
+    const canonical = new Uint8Array(validLock());
+    const bom = new Uint8Array(Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      validLock(),
+    ]));
+    const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+    const originalLength = Object.getOwnPropertyDescriptor(
+      typedArrayPrototype,
+      'length',
+    )!;
+    const originalPoolSize = Object.getOwnPropertyDescriptor(
+      Buffer,
+      'poolSize',
+    )!;
+    let calls = 0;
+    let reentries = 0;
+    let active = false;
+    let leakedReceiver: unknown;
+    let parsed: ReturnType<
+    typeof parseProjectTemplateRepertoireStrictLock
+    > | undefined;
+    let bomFailure: unknown;
+    try {
+      Object.defineProperty(Buffer, 'poolSize', {
+        configurable: true,
+        get() {
+          calls += 1;
+          if (!active) {
+            active = true;
+            reentries += 1;
+            try {
+              parseProjectTemplateRepertoireStrictLock(canonical);
+            } catch {
+              // The callback itself is hostile; only invocation is relevant.
+            } finally {
+              active = false;
+            }
+          }
+          return 8192;
+        },
+      });
+      Object.defineProperty(typedArrayPrototype, 'length', {
+        configurable: true,
+        get() {
+          calls += 1;
+          leakedReceiver = this;
+          return Reflect.apply(originalLength.get!, this, []);
+        },
+      });
+      parsed = parseProjectTemplateRepertoireStrictLock(canonical);
+      canonical[8] = 0x58;
+      try {
+        parseProjectTemplateRepertoireStrictLock(bom);
+      } catch (error) {
+        bomFailure = error;
+      }
+    } finally {
+      Object.defineProperty(Buffer, 'poolSize', originalPoolSize);
+      Object.defineProperty(
+        typedArrayPrototype,
+        'length',
+        originalLength,
+      );
+    }
+    expect(calls).toBe(0);
+    expect(reentries).toBe(0);
+    expect(leakedReceiver).toBeUndefined();
+    expect(parsed).toMatchObject({
+      source: 'github:acme/repertoire',
+      version: '1.2.3',
+    });
+    expect(bomFailure).toEqual(expect.objectContaining({
+      code: 'INVALID_YAML',
+    }));
+  });
+
   it('normalizes hostile runtime error codes without prototype setters', () => {
     const original = Object.getOwnPropertyDescriptor(
       ProjectTemplateRepertoireStrictLockError.prototype,
@@ -299,7 +376,7 @@ describe('project template repertoire strict lock G3.1', () => {
     });
   });
 
-  it('uses a setter-safe YAML worklist and rejects depth beyond 32', () => {
+  it('rejects depth beyond 32 without Array prototype setters', () => {
     const originalZero = Object.getOwnPropertyDescriptor(
       Array.prototype,
       '0',
