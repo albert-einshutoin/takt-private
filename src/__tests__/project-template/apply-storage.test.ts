@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -28,6 +29,7 @@ import {
   writeProjectTemplateBackupManifest,
   writeProjectTemplateStagingFile,
   type ProjectTemplateApplyJournal,
+  type ProjectTemplateApplyStorageIo,
   type ProjectTemplateApplyStorageIoOperation,
   type ProjectTemplateBackupManifest,
 } from '../../features/project-template/apply-storage.js';
@@ -125,6 +127,64 @@ describe('project template apply storage', () => {
         .rejects.toMatchObject({ code: 'UNSAFE_CONTROL_ROOT' });
     },
   );
+
+  it('rejects a same-content mode swap before opening control .gitignore', async () => {
+    const repoPath = makeRepo();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath });
+    const ignorePath = join(storage.controlRoot, '.gitignore');
+    let swapped = false;
+    const io = createProjectTemplateApplyStorageIo({
+      before: (operation, path) => {
+        if (!swapped && operation === 'read' && path === ignorePath) {
+          swapped = true;
+          chmodSync(path, 0o644);
+        }
+      },
+    });
+
+    await expect(initializeProjectTemplateApplyStorage({ repoPath, io }))
+      .rejects.toMatchObject({ code: 'UNSAFE_CONTROL_ROOT' });
+    expect(swapped).toBe(true);
+  });
+
+  it('rejects a same-content pathname replacement after reading control .gitignore', async () => {
+    const repoPath = makeRepo();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath });
+    const ignorePath = join(storage.controlRoot, '.gitignore');
+    let replaced = false;
+    const io = createProjectTemplateApplyStorageIo({
+      after: (operation, path) => {
+        if (!replaced && operation === 'read' && path === ignorePath) {
+          replaced = true;
+          const replacement = join(storage.controlRoot, '.gitignore.replacement');
+          writeFileSync(replacement, '*\n', { mode: 0o600 });
+          renameSync(replacement, ignorePath);
+        }
+      },
+    });
+
+    await expect(initializeProjectTemplateApplyStorage({ repoPath, io }))
+      .rejects.toMatchObject({ code: 'UNSAFE_CONTROL_ROOT' });
+    expect(replaced).toBe(true);
+  });
+
+  it('passes repository device identity into the private control ignore read', async () => {
+    const repoPath = makeRepo();
+    await initializeProjectTemplateApplyStorage({ repoPath });
+    const baseIo = createProjectTemplateApplyStorageIo();
+    let privateReads = 0;
+    const io: ProjectTemplateApplyStorageIo = {
+      ...baseIo,
+      readPrivateFile: async (path, maxBytes, expectedDevice) => {
+        privateReads += 1;
+        return await baseIo.readPrivateFile(path, maxBytes, expectedDevice + 1);
+      },
+    };
+
+    await expect(initializeProjectTemplateApplyStorage({ repoPath, io }))
+      .rejects.toMatchObject({ code: 'UNSAFE_CONTROL_ROOT' });
+    expect(privateReads).toBe(1);
+  });
 
   it('durably publishes each newly created control directory in its parent', async () => {
     const repoPath = makeRepo();

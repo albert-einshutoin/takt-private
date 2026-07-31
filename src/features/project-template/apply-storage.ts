@@ -16,7 +16,6 @@ import {
 import { basename, dirname, join, resolve } from 'node:path';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import {
-  isProjectTemplateOwnerOnlyMode,
   isProjectTemplatePrivateDirectoryMode,
   isProjectTemplatePrivateFileMode,
   PROJECT_TEMPLATE_CONTROL_DIRECTORY,
@@ -208,96 +207,6 @@ function projectTemplateApprovalRecordContent(record: unknown): Buffer {
   // Preserve the established approval-record encoding. The canonical renderer
   // already terminates its JSON and storage adds the historical trailing LF.
   return Buffer.from(`${canonicalizeTaktpackJson(record)}\n`);
-}
-
-export type ProjectTemplateApprovalDiscardOutcome =
-  | 'absent'
-  | 'removed'
-  | 'uncertain';
-
-/**
- * Removes only the caller's exact private approval record after uncertain
- * publication. Any identity/content ambiguity fails closed as `uncertain`.
- *
- * @internal
- */
-export async function discardProjectTemplateApprovalRecordIfIdentityMatches(
-  options: {
-    storage: ProjectTemplateApplyStorage;
-    approvalId: string;
-    record: unknown;
-  },
-): Promise<ProjectTemplateApprovalDiscardOutcome> {
-  const { approvalsRoot, approvalPath } = projectTemplateApprovalPath(
-    options.storage,
-    options.approvalId,
-  );
-  const expected = projectTemplateApprovalRecordContent(options.record);
-  try {
-    const rootEntry = await tryLstat(options.storage.io, approvalsRoot);
-    if (rootEntry === undefined) return 'absent';
-    if (
-      rootEntry.isSymbolicLink()
-      || !rootEntry.isDirectory()
-      || rootEntry.dev !== options.storage.device
-      || !isProjectTemplatePrivateDirectoryMode(
-        rootEntry.mode,
-        options.storage.platform,
-      )
-    ) return 'uncertain';
-    const tempPrefix = `.${options.approvalId}.json.`;
-    const tempSuffix = '.tmp';
-    const candidates = [approvalPath];
-    const entries = await options.storage.io.readdir(
-      approvalsRoot,
-      MAX_CONTROL_DIRECTORY_ENTRIES,
-    );
-    for (let index = 0; index < entries.length; index += 1) {
-      const name = entries[index]!.name;
-      if (name.startsWith(tempPrefix) && name.endsWith(tempSuffix)) {
-        candidates.push(join(approvalsRoot, name));
-      }
-    }
-    let removed = false;
-    for (let index = 0; index < candidates.length; index += 1) {
-      const candidate = candidates[index]!;
-      const before = await tryLstat(options.storage.io, candidate);
-      if (before === undefined) continue;
-      if (
-        before.isSymbolicLink()
-        || !before.isFile()
-        || before.nlink !== 1
-        || before.dev !== options.storage.device
-        || !isProjectTemplatePrivateFileMode(
-          before.mode,
-          options.storage.platform,
-        )
-        || before.size !== expected.byteLength
-      ) return 'uncertain';
-      const content = await options.storage.io.readPrivateFile(
-        candidate,
-        expected.byteLength,
-        options.storage.device,
-      );
-      const afterRead = await options.storage.io.lstat(candidate);
-      if (
-        !content.equals(expected)
-        || !areProjectTemplateFileStatsEqual(before, afterRead)
-      ) return 'uncertain';
-      await options.storage.io.unlink(candidate);
-      removed = true;
-    }
-    if (!removed) return 'absent';
-    await options.storage.io.fsyncDirectory(approvalsRoot);
-    for (let index = 0; index < candidates.length; index += 1) {
-      if (await tryLstat(options.storage.io, candidates[index]!) !== undefined) {
-        return 'uncertain';
-      }
-    }
-    return 'removed';
-  } catch {
-    return 'uncertain';
-  }
 }
 
 export async function readProjectTemplateApprovalRecord(options: {
@@ -1111,19 +1020,23 @@ async function assertControlIgnoreFile(
   controlIgnorePath: string,
   io: ProjectTemplateApplyStorageIo,
 ): Promise<void> {
-  const entry = await io.lstat(controlIgnorePath);
-  if (
-    entry.isSymbolicLink()
-    || !entry.isFile()
-    || entry.nlink !== 1
-    || entry.dev !== storage.device
-    || !isProjectTemplateOwnerOnlyMode(entry.mode, storage.platform)
-    || entry.size !== CONTROL_GITIGNORE_CONTENT.byteLength
-    || !(await io.readFile(
+  let content: Buffer;
+  try {
+    // One nofollow FD-bound read verifies regular-file type, nlink, exact 0600
+    // mode, device, size bound, and pre/post path identity. A separate lstat
+    // plus pathname read would reopen a swap window during concurrent init.
+    content = await io.readPrivateFile(
       controlIgnorePath,
       CONTROL_GITIGNORE_CONTENT.byteLength,
-    )).equals(CONTROL_GITIGNORE_CONTENT)
-  ) {
+      storage.device,
+    );
+  } catch {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template control ignore file is unsafe',
+    );
+  }
+  if (!content.equals(CONTROL_GITIGNORE_CONTENT)) {
     throw new ProjectTemplateApplyStorageError(
       'UNSAFE_CONTROL_ROOT',
       'project template control ignore file is unsafe',

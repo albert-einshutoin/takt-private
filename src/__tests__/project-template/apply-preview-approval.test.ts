@@ -426,16 +426,17 @@ describe('project template apply preview approval issuance G6.1', () => {
   });
 
   it.each([
-    ['after write', 'write', 'after'],
-    ['before rename', 'rename', 'before'],
-    ['file fsync', 'file-fsync', 'after'],
-    ['after rename', 'rename', 'after'],
-    ['directory fsync', 'directory-fsync', 'before'],
+    ['after write', 'write', 'after', 0],
+    ['before rename', 'rename', 'before', 0],
+    ['file fsync', 'file-fsync', 'after', 0],
+    ['after rename', 'rename', 'after', 1],
+    ['directory fsync', 'directory-fsync', 'before', 1],
   ] as const)(
-    'removes its record and temporary files after a recoverable %s failure',
-    async (_label, faultOperation, faultTiming) => {
+    'burns authority without destructively cleaning final record after %s failure',
+    async (_label, faultOperation, faultTiming, expectedRecords) => {
       const projectRoot = makeRepo();
       const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+      const value = preview();
       let injected = false;
       const io = createProjectTemplateApplyStorageIo({
         [faultTiming]: (
@@ -457,14 +458,32 @@ describe('project template apply preview approval issuance G6.1', () => {
       });
       await expect(issueTrustedProjectTemplateApplyPreviewApproval({
         projectRoot,
-        preview: preview(),
+        preview: value,
         baselineStrategy: 'conflict',
         io,
       })).rejects.toThrow(
         'project template apply preview approval issuance failed',
       );
       expect(injected).toBe(true);
-      expect(readdirSync(join(storage.controlRoot, 'approvals'))).toEqual([]);
+      expect(readdirSync(join(storage.controlRoot, 'approvals')))
+        .toHaveLength(expectedRecords);
+      const claims = readdirSync(join(storage.controlRoot, 'approval-claims'));
+      expect(claims).toHaveLength(1);
+      const claimText = readFileSync(join(
+        storage.controlRoot,
+        'approval-claims',
+        claims[0]!,
+      ), 'utf8');
+      expect(JSON.parse(claimText)).toMatchObject({
+        context: 'project-template-apply-preview-review',
+        state: 'burned',
+      });
+      expect(claimText).not.toContain(projectRoot);
+      expect(claimText).not.toContain(value.bindings.contentPreconditionToken);
+      expect(claimText).not.toContain(
+        value.bindings.repertoireDependencyPreconditionToken,
+      );
+      expect(claimText).not.toContain('nonce');
     },
   );
 
@@ -472,6 +491,7 @@ describe('project template apply preview approval issuance G6.1', () => {
     const projectRoot = makeRepo();
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
     let renameFailed = false;
+    let approvalUnlinks = 0;
     const io = createProjectTemplateApplyStorageIo({
       after: (operation, path) => {
         if (
@@ -482,6 +502,15 @@ describe('project template apply preview approval issuance G6.1', () => {
           renameFailed = true;
           writeFileSync(path, '{"foreign":true}\n', { mode: 0o600 });
           throw new Error('injected post-rename uncertainty');
+        }
+      },
+      before: (operation, path) => {
+        if (
+          operation === 'unlink'
+          && path.includes('/approvals/')
+          && path.endsWith('.json')
+        ) {
+          approvalUnlinks += 1;
         }
       },
     });
@@ -501,6 +530,7 @@ describe('project template apply preview approval issuance G6.1', () => {
       'approvals',
       records[0]!,
     ), 'utf8')).toBe('{"foreign":true}\n');
+    expect(approvalUnlinks).toBe(0);
     const claimPath = join(
       storage.controlRoot,
       'approval-claims',

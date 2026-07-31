@@ -7,7 +7,6 @@ import {
 import type { ProjectTemplateApplyPreview } from './apply-preview-types.js';
 import {
   consumeProjectTemplateApprovalRecord,
-  discardProjectTemplateApprovalRecordIfIdentityMatches,
   initializeProjectTemplateApplyStorage,
   writeProjectTemplateApprovalRecord,
   type ProjectTemplateApplyStorage,
@@ -228,7 +227,7 @@ function snapshotOptions(value: unknown): ApprovalIssuanceOptionsSnapshot {
   };
 }
 
-async function burnUncertainApproval(options: {
+async function burnFailedApproval(options: {
   storage: ProjectTemplateApplyStorage;
   approvalId: string;
   burnedAt: string;
@@ -249,8 +248,8 @@ async function burnUncertainApproval(options: {
       },
     });
   } catch {
-    // The process-local burn still prevents authority creation in this run.
-    // G6.2 consumes the durable claim whenever publication completed.
+    // The process-local burn still prevents authority creation in this run;
+    // consumption also checks the durable claim before trusting a record.
   }
 }
 
@@ -320,18 +319,14 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
     return evidence;
   } catch {
     if (storage !== undefined && record !== undefined) {
-      const outcome = await discardProjectTemplateApprovalRecordIfIdentityMatches({
+      // Burn first and retain a possible orphan record. Without a storage lease
+      // or atomic identity-bound delete, unlinking the final pathname could
+      // destroy a foreign replacement introduced after publication failed.
+      await burnFailedApproval({
         storage,
         approvalId,
-        record,
+        burnedAt: options.issuedAt,
       });
-      if (outcome === 'uncertain') {
-        await burnUncertainApproval({
-          storage,
-          approvalId,
-          burnedAt: options.issuedAt,
-        });
-      }
     }
     // Storage paths, injected hook errors, and secrets must not cross the
     // issuance boundary. No authority is registered before durable success.
