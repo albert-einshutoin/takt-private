@@ -63,10 +63,12 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
   const { packageDir, install } = options;
   const stagingDir = `${packageDir}.tmp`;
   const backupDir = `${packageDir}.bak`;
+  const parentDir = dirname(packageDir);
 
   cleanupResiduals(packageDir);
   const originalIdentity = readOptionalDirectoryIdentity(packageDir);
-  mkdirSync(dirname(packageDir), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  mkdirSync(parentDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  const parentIdentity = readRequiredDirectoryIdentity(parentDir);
   mkdirSync(stagingDir, { mode: PRIVATE_DIRECTORY_MODE });
   const stagingIdentity = readRequiredDirectoryIdentity(stagingDir);
 
@@ -77,24 +79,37 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
     throw error;
   }
 
+  assertDirectoryIdentity(parentDir, parentIdentity);
   assertDirectoryIdentity(stagingDir, stagingIdentity);
+  assertOptionalDirectoryIdentity(backupDir, undefined);
   assertOptionalDirectoryIdentity(packageDir, originalIdentity);
 
   if (originalIdentity !== undefined) {
-    renameSync(packageDir, backupDir);
+    // POSIX rename may replace an existing destination. Re-prove both the
+    // destination absence and parent identity at the last synchronous boundary.
+    assertDirectoryIdentity(parentDir, parentIdentity);
+    assertOptionalDirectoryIdentity(backupDir, undefined);
+    assertDirectoryIdentity(packageDir, originalIdentity);
+    renameOwnedDirectory(packageDir, backupDir);
     assertDirectoryIdentity(backupDir, originalIdentity);
   }
 
   try {
-    renameSync(stagingDir, packageDir);
+    assertDirectoryIdentity(parentDir, parentIdentity);
+    assertDirectoryIdentity(stagingDir, stagingIdentity);
+    assertOptionalDirectoryIdentity(packageDir, undefined);
+    renameOwnedDirectory(stagingDir, packageDir);
   } catch (error) {
     if (originalIdentity !== undefined) {
+      assertDirectoryIdentity(parentDir, parentIdentity);
       assertDirectoryIdentity(backupDir, originalIdentity);
-      renameSync(backupDir, packageDir);
+      assertOptionalDirectoryIdentity(packageDir, undefined);
+      renameOwnedDirectory(backupDir, packageDir);
     }
     throw error;
   }
 
+  assertDirectoryIdentity(parentDir, parentIdentity);
   assertDirectoryIdentity(packageDir, stagingIdentity);
   if (originalIdentity !== undefined) {
     removeOwnedDirectory(backupDir, originalIdentity);
@@ -107,7 +122,12 @@ function readOptionalDirectoryIdentity(path: string): DirectoryIdentity | undefi
 }
 
 function readRequiredDirectoryIdentity(path: string): DirectoryIdentity {
-  const stat = lstatSync(path);
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    throw new AtomicUpdateRecoveryError();
+  }
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new AtomicUpdateRecoveryError();
   }
@@ -135,7 +155,19 @@ function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): voi
 
 function removeOwnedDirectory(path: string, expected: DirectoryIdentity): void {
   assertDirectoryIdentity(path, expected);
-  rmSync(path, { recursive: true, force: true });
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    throw new AtomicUpdateRecoveryError();
+  }
+}
+
+function renameOwnedDirectory(source: string, destination: string): void {
+  try {
+    renameSync(source, destination);
+  } catch {
+    throw new AtomicUpdateRecoveryError();
+  }
 }
 
 function sameIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean {

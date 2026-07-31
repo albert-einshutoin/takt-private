@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -175,5 +175,62 @@ describe('atomicReplace', () => {
     expect(stagingDirSeen).toBe(`${packageDir}.tmp`);
     expect(existsSync(join(packageDir, 'manifest.yaml'))).toBe(true);
     expect(existsSync(stagingDirSeen)).toBe(false);
+  });
+
+  it('preserves a foreign backup created during install and requires recovery', async () => {
+    const packageDir = join(tempDir, 'takt-fullstack');
+    mkdirSync(packageDir);
+    writeFileSync(join(packageDir, 'original.yaml'), 'original');
+
+    await expect(atomicReplace({
+      packageDir,
+      install: async (stagingDir) => {
+        writeFileSync(join(stagingDir, 'new.yaml'), 'new');
+        mkdirSync(`${packageDir}.bak`);
+        writeFileSync(join(`${packageDir}.bak`, 'foreign.yaml'), 'foreign');
+      },
+    })).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+
+    expect(existsSync(join(packageDir, 'original.yaml'))).toBe(true);
+    expect(existsSync(join(`${packageDir}.tmp`, 'new.yaml'))).toBe(true);
+    expect(existsSync(join(`${packageDir}.bak`, 'foreign.yaml'))).toBe(true);
+  });
+
+  it('preserves a foreign package that appears before first-install publication', async () => {
+    const packageDir = join(tempDir, 'takt-fullstack');
+
+    await expect(atomicReplace({
+      packageDir,
+      install: async (stagingDir) => {
+        writeFileSync(join(stagingDir, 'new.yaml'), 'new');
+        mkdirSync(packageDir);
+        writeFileSync(join(packageDir, 'foreign.yaml'), 'foreign');
+      },
+    })).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+
+    expect(existsSync(join(packageDir, 'foreign.yaml'))).toBe(true);
+    expect(existsSync(join(`${packageDir}.tmp`, 'new.yaml'))).toBe(true);
+  });
+
+  it('preserves data when the package parent identity changes during install', async () => {
+    const packageDir = join(tempDir, 'owner', 'takt-fullstack');
+    const displacedOwner = join(tempDir, 'owner.displaced');
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(join(packageDir, 'original.yaml'), 'original');
+
+    await expect(atomicReplace({
+      packageDir,
+      install: async (stagingDir) => {
+        writeFileSync(join(stagingDir, 'new.yaml'), 'new');
+        renameSync(join(tempDir, 'owner'), displacedOwner);
+        mkdirSync(join(tempDir, 'owner'));
+        mkdirSync(packageDir);
+        writeFileSync(join(packageDir, 'foreign.yaml'), 'foreign');
+      },
+    })).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+
+    expect(existsSync(join(packageDir, 'foreign.yaml'))).toBe(true);
+    expect(existsSync(join(displacedOwner, 'takt-fullstack', 'original.yaml'))).toBe(true);
+    expect(existsSync(join(displacedOwner, 'takt-fullstack.tmp', 'new.yaml'))).toBe(true);
   });
 });
