@@ -177,13 +177,15 @@ export function hasCoordinatedRepertoireContext(context?: FacetResolutionContext
   if (access !== undefined) {
     const authority = getAccessAuthority(access);
     if (authority !== undefined) {
-      try {
-        assertAuthorityMatchesContext(authority, context);
-        return true;
-      } catch (error) {
+      if (!hasMatchingRootBinding(authority, context)) {
         if (resolve(context.repertoireDir) !== resolve(getRepertoireDir())) return false;
-        throw error;
+        throw failed();
       }
+      // Root mismatch is the only condition that can select custom injected
+      // access. Once bound, revoked permits and replaced roots are authority
+      // failures and must propagate rather than silently changing provenance.
+      authority.assertRootIdentity();
+      return true;
     }
   }
   return resolve(context.repertoireDir) === resolve(getRepertoireDir());
@@ -219,8 +221,16 @@ function assertAuthorityMatchesContext(
   authority: RepertoireAccessAuthority,
   context: FacetResolutionContext,
 ): void {
-  if (!context.repertoireDir || resolve(context.repertoireDir) !== authority.lexicalRoot) throw failed();
+  if (!hasMatchingRootBinding(authority, context)) throw failed();
   authority.assertRootIdentity();
+}
+
+function hasMatchingRootBinding(
+  authority: RepertoireAccessAuthority,
+  context: FacetResolutionContext,
+): boolean {
+  return context.repertoireDir !== undefined
+    && resolve(context.repertoireDir) === authority.lexicalRoot;
 }
 
 function isInsideOrEqual(root: string, candidate: string): boolean {

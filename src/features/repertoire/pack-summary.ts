@@ -4,7 +4,7 @@
  * Extracted to keep install summary parsing testable.
  */
 
-import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { dirname, resolve } from 'node:path';
 import { createLogger, getErrorMessage, isPathInside } from '../../shared/utils/index.js';
@@ -16,6 +16,7 @@ import {
   resolveWorkflowProviderOptionsWithHost,
 } from '../../infra/config/loaders/workflowProviderOptionsResolver.js';
 import type { ScopedProviderOptionsCandidateDirs } from '../../infra/config/loaders/providerOptionsLookupDirectories.js';
+import { readStableWorkflowResourceText } from '../../infra/config/loaders/workflowResourceSafeReader.js';
 
 const log = createLogger('pack-summary');
 const PACKAGE_ROOT = '/__takt_repertoire_package__';
@@ -95,7 +96,7 @@ function toPackageAbsolutePath(relativePath: string): string {
 
 const nodeFileAccess: ProviderOptionsFileAccess = {
   exists: (path) => existsSync(path),
-  readText: (path) => readFileSync(path, 'utf-8'),
+  readText: (path, trustedBaseDir) => readStableWorkflowResourceText(path, trustedBaseDir),
   realpath: (path) => realpathSync(path),
   isSymlink: (path) => lstatSync(path).isSymbolicLink(),
 };

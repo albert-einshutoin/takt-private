@@ -548,6 +548,56 @@ ${stepFields}`);
     expect(callbacks).toBe(5);
   });
 
+  it('rejects an expired valid capability for the same root before invoking injected access', () => {
+    createProjectWorkflowWithScopedResources();
+    const repertoireDir = join(configDir, 'repertoire');
+    const workflowDir = join(repertoireDir, '@owner', 'repo', 'workflows');
+    const alternateConfigDir = mkdtempSync(join(tmpdir(), 'takt-workflow-read-alternate-config-'));
+    let expiredAccess: ReturnType<typeof createRepertoireResourceReadAccess> | undefined;
+    let callbacks = 0;
+
+    withImmediateRepertoireReadPermit({
+      globalConfigDir: configDir,
+      operation: (permit) => {
+        expiredAccess = createRepertoireResourceReadAccess(
+          createInternalWorkflowReadContext(configDir, permit),
+        );
+      },
+    });
+
+    // The bound root is now a custom root from this process's perspective. A
+    // matching minted capability must still fail closed when its permit ended.
+    process.env.TAKT_CONFIG_DIR = alternateConfigDir;
+    writeFileSync(join(alternateConfigDir, 'config.yaml'), 'enable_builtin_workflows: false\n');
+    invalidateGlobalConfigCache();
+
+    try {
+      expect(() => resolveWorkflowProviderOptionsWithHost(
+        { extends: 'safe' },
+        workflowDir,
+        {
+          rootDir: workflowDir,
+          context: {
+            lang: 'en',
+            workflowDir,
+            repertoireDir,
+            repertoireReadAccess: expiredAccess,
+          },
+          fileAccess: {
+            exists: () => { callbacks += 1; return true; },
+            readText: () => { callbacks += 1; return 'codex:\n  network_access: false\n'; },
+            realpath: (path) => { callbacks += 1; return path; },
+          },
+        },
+      )).toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
+      expect(callbacks).toBe(0);
+    } finally {
+      process.env.TAKT_CONFIG_DIR = configDir;
+      invalidateGlobalConfigCache();
+      rmSync(alternateConfigDir, { recursive: true, force: true });
+    }
+  });
+
   it('normalizes filesystem discovery failures without path or cause leakage', () => {
     const invalidRoot = join(projectDir, 'not-a-directory');
     writeFileSync(invalidRoot, 'data');
