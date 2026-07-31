@@ -18,6 +18,9 @@ import type {
   ProjectTemplateArtifactPinnedTransport,
   ProjectTemplateArtifactPinnedTransportHandlers,
 } from '../../infra/github/project-template-artifact-redirect.js';
+import {
+  MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES,
+} from '../../infra/github/project-template-artifact-download-contract.js';
 
 const INPUT = Object.freeze({
   owner: 'octo',
@@ -1139,6 +1142,49 @@ describe('project-template artifact single attempt adversarial ordering', () => 
     });
     expect(transport.pause).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES - 1, 'chunk'],
+    [MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES, 'chunk'],
+    [MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES + 1, 'failure'],
+  ] as const)(
+    'enforces the shared chunk cap at %i bytes before transport pause',
+    (byteLength, expected) => {
+      let handlers!: ProjectTemplateGithubReleaseAssetRequestHandlers;
+      const transport = fakeTransport(
+        () => handlers.onResponse(200),
+        [() => handlers.onData(new Uint8Array(byteLength))],
+      );
+      const outcomes: Outcome[] = [];
+      const attempt = createProjectTemplateArtifactSingleAttempt(
+        credential(),
+        Object.freeze({
+          ...INPUT,
+          maxBytes: MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES + 1,
+        }),
+        dependencies(vi.fn((_credential, plan) => {
+          handlers = plan.handlers;
+          return transport as ProjectTemplateGithubReleaseAssetRequest;
+        })),
+      );
+
+      attempt.pull(settlement(outcomes));
+
+      if (expected === 'failure') {
+        expectFailure(outcomes, {
+          code: 'OUTPUT_LIMIT',
+          retryable: false,
+          replaySafe: false,
+        });
+        expect(transport.pause).not.toHaveBeenCalled();
+      } else {
+        expect(outcomes).toEqual([
+          { kind: 'chunk', value: new Uint8Array(byteLength) },
+        ]);
+        expect(transport.pause).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
 
   it.each(['data', 'end'] as const)(
     'rejects %s before an accepted response status',

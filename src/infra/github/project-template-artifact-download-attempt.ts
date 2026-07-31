@@ -14,6 +14,10 @@ import {
   type ProjectTemplateArtifactPinnedTransport,
   type ProjectTemplateArtifactPinnedTransportHandlers,
 } from './project-template-artifact-redirect.js';
+import {
+  isRetryableProjectTemplateArtifactHttpStatus,
+  MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES,
+} from './project-template-artifact-download-contract.js';
 
 export interface ProjectTemplateArtifactDownloadAttemptDependencies {
   readonly createAuthenticatedRequest:
@@ -276,12 +280,7 @@ const OUTPUT_LIMIT_FAILURE = terminalFailure('OUTPUT_LIMIT');
 function statusFailure(statusCode: number): HttpFailure {
   return httpFailure(
     statusCode,
-    statusCode === 408
-      || statusCode === 429
-      || statusCode === 500
-      || statusCode === 502
-      || statusCode === 503
-      || statusCode === 504,
+    isRetryableProjectTemplateArtifactHttpStatus(statusCode),
   );
 }
 
@@ -806,6 +805,7 @@ function onData(state: AttemptState, chunk: unknown): void {
   const maxBytes = state.input?.maxBytes;
   if (
     maxBytes === undefined
+    || ingress.byteLength > MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES
     || ingress.byteLength > maxBytes - state.receivedBytes
   ) {
     failAttempt(state, OUTPUT_LIMIT_FAILURE);
