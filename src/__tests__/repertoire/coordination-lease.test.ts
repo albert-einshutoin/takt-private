@@ -146,6 +146,47 @@ describeContract(
       await waitForChild(child);
     });
 
+    it('keeps add mutation-free behind a writer and publishes only after release', async () => {
+      const globalConfigDir = makeGlobalConfigDir();
+      mkdirSync(join(globalConfigDir, 'repertoire'), { recursive: true, mode: 0o700 });
+      const packageDir = join(globalConfigDir, 'repertoire', '@owner', 'repo');
+      const readyPath = join(globalConfigDir, 'add.ready');
+      const writer = await acquire(globalConfigDir, 'write', 2_000);
+      const child = spawnMutationChild(globalConfigDir, readyPath, 'add');
+
+      await waitForPath(readyPath, 5_000);
+      await delay(100);
+      expect(existsSync(packageDir)).toBe(false);
+      expect(packageResiduals(globalConfigDir)).toEqual([]);
+
+      await writer.release();
+      await waitForChild(child);
+      expect(readFileSync(join(packageDir, 'facets', 'personas', 'coder.md'), 'utf8')).toBe('# coder\n');
+      expect(packageResiduals(globalConfigDir)).toEqual([]);
+      expect(releasedTombstones(globalConfigDir)).toBeGreaterThanOrEqual(2);
+    });
+
+    it('keeps remove mutation-free behind a writer and deletes quarantine after release', async () => {
+      const globalConfigDir = makeGlobalConfigDir();
+      const packageDir = join(globalConfigDir, 'repertoire', '@owner', 'repo');
+      mkdirSync(packageDir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(packageDir, 'sentinel'), 'installed\n');
+      const readyPath = join(globalConfigDir, 'remove.ready');
+      const writer = await acquire(globalConfigDir, 'write', 2_000);
+      const child = spawnMutationChild(globalConfigDir, readyPath, 'remove');
+
+      await waitForPath(readyPath, 5_000);
+      await delay(100);
+      expect(readFileSync(join(packageDir, 'sentinel'), 'utf8')).toBe('installed\n');
+      expect(packageResiduals(globalConfigDir)).toEqual([]);
+
+      await writer.release();
+      await waitForChild(child);
+      expect(existsSync(packageDir)).toBe(false);
+      expect(packageResiduals(globalConfigDir)).toEqual([]);
+      expect(releasedTombstones(globalConfigDir)).toBeGreaterThanOrEqual(2);
+    });
+
     it('creates only private 0700 directories and 0600 coordination files', async () => {
       const globalConfigDir = makeGlobalConfigDir();
       const lease = await acquire(globalConfigDir, 'read');
@@ -394,6 +435,48 @@ function spawnChildLeaseHolder(
   childOutput.set(child, output);
   children.add(child);
   return child;
+}
+
+function spawnMutationChild(
+  globalConfigDir: string,
+  readyPath: string,
+  action: 'add' | 'remove',
+): ChildProcess {
+  const vitestEntry = fileURLToPath(new URL('../../../node_modules/vitest/vitest.mjs', import.meta.url));
+  const childTest = fileURLToPath(new URL('./mutation-coordination-child.test.ts', import.meta.url));
+  mkdirSync(join(globalConfigDir, 'tmp'), { recursive: true, mode: 0o700 });
+  const child = spawn(process.execPath, [vitestEntry, 'run', childTest], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      TMPDIR: join(globalConfigDir, 'tmp'),
+      TAKT_REPERTOIRE_MUTATION_CHILD: '1',
+      TAKT_REPERTOIRE_MUTATION_ACTION: action,
+      TAKT_REPERTOIRE_MUTATION_ROOT: globalConfigDir,
+      TAKT_REPERTOIRE_MUTATION_READY_PATH: readyPath,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const output = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+  child.stdout?.on('data', (chunk: Buffer) => output.stdout.push(chunk));
+  child.stderr?.on('data', (chunk: Buffer) => output.stderr.push(chunk));
+  childOutput.set(child, output);
+  children.add(child);
+  return child;
+}
+
+function packageResiduals(globalConfigDir: string): string[] {
+  const ownerDir = join(globalConfigDir, 'repertoire', '@owner');
+  if (!existsSync(ownerDir)) return [];
+  return readdirSync(ownerDir).filter((entry) => (
+    entry.endsWith('.tmp') || entry.endsWith('.bak') || entry.startsWith('.remove-')
+  ));
+}
+
+function releasedTombstones(globalConfigDir: string): number {
+  const releasedDir = join(globalConfigDir, '.takt-repertoire-coordination', 'released');
+  if (!existsSync(releasedDir)) return 0;
+  return readdirSync(releasedDir).filter((entry) => entry.endsWith('.released')).length;
 }
 
 async function waitForPath(path: string, timeoutMs: number): Promise<void> {

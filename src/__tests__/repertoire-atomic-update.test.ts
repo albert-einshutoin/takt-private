@@ -4,7 +4,7 @@
  * Target: src/features/repertoire/atomic-update.ts
  *
  * Atomic update steps under test:
- *   Step 0: Clean up leftover .tmp/ and .bak/ from previous failed runs
+ *   Step 0: Fail closed on unowned .tmp/ and .bak/ from previous runs
  *   Step 1: Rename existing → {repo}.bak/ (backup)
  *   Step 2: Create new packageDir, call install()
  *   Step 3: On success, remove .bak/; on failure, restore from .bak/
@@ -12,7 +12,7 @@
  * Failure injection scenarios:
  *   - Step 2 failure: .tmp/ removed, existing package preserved
  *   - Step 3→4 rename failure: restore from .bak/
- *   - Step 5 failure: warn only, new package is in place
+ *   - Successful publication: install writes only into the supplied staging directory
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -36,36 +36,38 @@ describe('repertoire atomic install: leftover cleanup (Step 0)', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  // U24: 前回の .tmp/ をクリーンアップ
+  // U24: 前回の .tmp/ は所有権を証明できないため保持して復旧要求
   // Given: {repo}.tmp/ が既に存在する
   // When:  installPackage() 呼び出し
-  // Then:  .tmp/ が削除されてインストールが継続する
-  it('should clean up leftover {repo}.tmp/ before starting installation', () => {
+  // Then:  .tmp/ を削除せず RECOVERY_REQUIRED
+  it('should preserve an unknown {repo}.tmp/ and require recovery', () => {
     const packageDir = join(tempDir, 'takt-fullstack');
     const tmpDirPath = `${packageDir}.tmp`;
     mkdirSync(packageDir, { recursive: true });
     mkdirSync(tmpDirPath, { recursive: true });
     writeFileSync(join(tmpDirPath, 'stale.yaml'), 'stale');
 
-    cleanupResiduals(packageDir);
+    expect(() => cleanupResiduals(packageDir))
+      .toThrow(expect.objectContaining({ code: 'RECOVERY_REQUIRED' }));
 
-    expect(existsSync(tmpDirPath)).toBe(false);
+    expect(existsSync(join(tmpDirPath, 'stale.yaml'))).toBe(true);
   });
 
-  // U25: 前回の .bak/ をクリーンアップ
+  // U25: 前回の .bak/ は所有権を証明できないため保持して復旧要求
   // Given: {repo}.bak/ が既に存在する
   // When:  installPackage() 呼び出し
-  // Then:  .bak/ が削除されてインストールが継続する
-  it('should clean up leftover {repo}.bak/ before starting installation', () => {
+  // Then:  .bak/ を削除せず RECOVERY_REQUIRED
+  it('should preserve an unknown {repo}.bak/ and require recovery', () => {
     const packageDir = join(tempDir, 'takt-fullstack');
     const bakDirPath = `${packageDir}.bak`;
     mkdirSync(packageDir, { recursive: true });
     mkdirSync(bakDirPath, { recursive: true });
     writeFileSync(join(bakDirPath, 'old.yaml'), 'old');
 
-    cleanupResiduals(packageDir);
+    expect(() => cleanupResiduals(packageDir))
+      .toThrow(expect.objectContaining({ code: 'RECOVERY_REQUIRED' }));
 
-    expect(existsSync(bakDirPath)).toBe(false);
+    expect(existsSync(join(bakDirPath, 'old.yaml'))).toBe(true);
   });
 });
 
@@ -126,23 +128,22 @@ describe('repertoire atomic install: failure recovery', () => {
     expect(existsSync(join(packageDir, 'original.yaml'))).toBe(true);
   });
 
-  // U28: Step 5 失敗（.bak/ 削除失敗）— 警告のみ、新パッケージは正常配置済み
+  // U28: staging 完成後にのみ新パッケージを公開
   // Given: install() が成功し、新パッケージが配置済み
   // When:  atomicReplace() 完了
   // Then:  新パッケージが正常に配置されている
-  it('should warn but not exit when Step 5 (.bak/ removal) fails', async () => {
+  it('should publish content written into the supplied staging directory', async () => {
     const packageDir = join(tempDir, 'takt-fullstack');
     mkdirSync(packageDir, { recursive: true });
     writeFileSync(join(packageDir, 'old.yaml'), 'old content');
 
     const options: AtomicReplaceOptions = {
       packageDir,
-      install: async () => {
-        writeFileSync(join(packageDir, 'new.yaml'), 'new content');
+      install: async (stagingDir) => {
+        writeFileSync(join(stagingDir, 'new.yaml'), 'new content');
       },
     };
 
-    // Should not throw even if .bak removal conceptually failed
     await expect(atomicReplace(options)).resolves.not.toThrow();
 
     // New package content is in place

@@ -22,6 +22,7 @@ const COORDINATION_DIRECTORY_NAME = '.takt-repertoire-coordination';
 const READERS_DIRECTORY_NAME = 'readers';
 const RELEASED_DIRECTORY_NAME = 'released';
 const RELEASED_ARTIFACT_FILENAME = 'lease.released';
+const RELEASE_PUBLISHING_SUFFIX = '.publishing';
 const WRITER_INTENT_FILENAME = 'writer.intent';
 const LEASE_VERSION = 1;
 const MAX_LEASE_BYTES = 4_096;
@@ -270,7 +271,16 @@ async function acquireWriteLease(
 
   while (true) {
     throwIfAborted(signal);
-    const state = scanStableState(paths);
+    let state: CoordinationSnapshot;
+    try {
+      state = scanStableState(paths);
+    } catch (error) {
+      if (isWriterPending(error)) {
+        await waitForRetry(deadline, signal);
+        continue;
+      }
+      throw error;
+    }
     enforceTombstoneLimits(state.releasedCount, 'write');
     try {
       identity = createLeaseFile(paths.writerIntent, record, paths.root);
@@ -283,7 +293,16 @@ async function acquireWriteLease(
 
   try {
     while (true) {
-      const state = scanStableState(paths);
+      let state: CoordinationSnapshot;
+      try {
+        state = scanStableState(paths);
+      } catch (error) {
+        if (isWriterPending(error)) {
+          await waitForRetry(deadline, signal);
+          continue;
+        }
+        throw error;
+      }
       enforceTombstoneLimits(state.releasedCount, 'write');
       assertPublishedLease(
         state.writer === undefined ? [] : [state.writer],
@@ -585,6 +604,12 @@ function scanReleased(
   const digests: string[] = [];
   const evidence: LeaseEvidence[] = [];
   for (const containerName of entries) {
+    // Release is published by an atomic directory rename. A visible staging
+    // container is therefore a bounded in-flight transition, never evidence
+    // that can authorize another lease from a partial tombstone snapshot.
+    if (containerName.endsWith(RELEASE_PUBLISHING_SUFFIX)) {
+      throw new RepertoireCoordinationError('WRITER_PENDING');
+    }
     const match = safeRegExpExec(RELEASED_CONTAINER_PATTERN, containerName);
     if (!match) throw new RepertoireCoordinationError('UNSAFE_STATE');
     const container = join(directory, containerName);
@@ -713,8 +738,9 @@ function releaseOwnedLease(
   }
   const containerName = `${nonce}.${expected.pid}.${expected.token}.${expected.mode}.released`;
   const container = join(paths.released, containerName);
+  const publishingContainer = `${container}${RELEASE_PUBLISHING_SUFFIX}`;
   try {
-    mkdirSync(container, { mode: PRIVATE_DIRECTORY_MODE });
+    mkdirSync(publishingContainer, { mode: PRIVATE_DIRECTORY_MODE });
   } catch (error) {
     // A nonce collision is never retried: preserving the existing container is
     // more important than making release appear successful under a compromised
@@ -724,12 +750,15 @@ function releaseOwnedLease(
     }
     throw error;
   }
-  enforcePrivateDirectoryMode(container);
-  assertPrivateDirectory(container);
+  enforcePrivateDirectoryMode(publishingContainer);
+  assertPrivateDirectory(publishingContainer);
   syncDirectory(paths.released);
-  const releasedPath = join(container, RELEASED_ARTIFACT_FILENAME);
+  const publishingPath = join(publishingContainer, RELEASED_ARTIFACT_FILENAME);
 
-  // rename is the release linearization point. There is intentionally no
+  // The first rename retires the active claim into a private staging
+  // container. The second publishes a complete tombstone atomically, so a
+  // waiter can never mistake an empty container for permanent unsafe state.
+  // There is intentionally no
   // ownership check before it: a check-then-unlink sequence can delete a
   // foreign claim installed between those operations. The 256-bit container
   // is created immediately beforehand with O_EXCL-like mkdir semantics, so
@@ -737,10 +766,12 @@ function releaseOwnedLease(
   // A malicious same-UID process can still mutate a 0700 directory after it is
   // published; the post-rename identity check and full scan fail closed but
   // cannot provide a stronger OS isolation boundary than the shared UID.
-  renameSync(path, releasedPath);
+  renameSync(path, publishingPath);
   syncDirectory(parentDirectory);
-  syncDirectory(container);
+  syncDirectory(publishingContainer);
+  renameSync(publishingContainer, container);
   syncDirectory(paths.released);
+  const releasedPath = join(container, RELEASED_ARTIFACT_FILENAME);
 
   const released = readExactPrivateLease(releasedPath, expected.mode);
   if (!sameOwnerAndIdentity(released, expected, identity)) {
@@ -772,6 +803,10 @@ function sameOwner(actual: LeaseRecord, expected: LeaseRecord): boolean {
     && actual.pid === expected.pid
     && actual.uid === expected.uid
     && actual.createdAt === expected.createdAt;
+}
+
+function isWriterPending(error: unknown): boolean {
+  return error instanceof RepertoireCoordinationError && error.code === 'WRITER_PENDING';
 }
 
 function enforceTombstoneLimits(

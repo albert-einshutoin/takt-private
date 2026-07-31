@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { findScopeReferences } from '../features/repertoire/remove.js';
@@ -165,5 +165,28 @@ describe('repertoire reference integrity: non-detection', () => {
     const refs = findScopeReferences('@nrslib/takt-ensemble-fixture', makeScanConfig(tempDir));
 
     expect(refs).toHaveLength(0);
+  });
+});
+
+describe('repertoire reference integrity: fail-closed authorization', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'takt-ref-fail-closed-'));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('rejects a partial scan when a discovered path cannot be inspected', () => {
+    const workflowsDir = join(tempDir, 'workflows');
+    mkdirSync(workflowsDir, { recursive: true });
+    symlinkSync('loop', join(workflowsDir, 'loop'));
+
+    expect(() => findScopeReferences('@owner/repo', {
+      ...makeScanConfig(tempDir),
+      failClosed: true,
+    })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
   });
 });

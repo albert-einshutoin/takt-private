@@ -143,6 +143,7 @@ import { collectCopyTargets } from '../../features/repertoire/file-filter.js';
 import { detectEditWorkflows } from '../../features/repertoire/pack-summary.js';
 import { cleanupResiduals } from '../../features/repertoire/atomic-update.js';
 import { confirm } from '../../shared/prompt/index.js';
+import { success } from '../../shared/ui/index.js';
 
 const mockCollectCopyTargets = vi.mocked(collectCopyTargets);
 const mockDetectEditWorkflows = vi.mocked(detectEditWorkflows);
@@ -155,7 +156,12 @@ describe('repertoireAddCommand temporary directory handling', () => {
     mockExistsSync.mockImplementation((target: string) => (
       target === secureTempDir || target === '/home/user/.takt/repertoire'
     ));
-    mockLstatSync.mockReturnValue({ dev: 1, ino: 1, isDirectory: () => true });
+    mockLstatSync.mockReturnValue({
+      dev: 1,
+      ino: 1,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    });
     mockRealpathSync.mockImplementation((target: string) => target);
     mockAcquireCoordinationLease.mockResolvedValue({
       mode: 'write',
@@ -164,8 +170,10 @@ describe('repertoireAddCommand temporary directory handling', () => {
     mockReadFileSync.mockReturnValue('path: .');
     mockResolveRef.mockReturnValue('main');
     mockResolveRepertoireConfigPath.mockReturnValue(join(secureTempDir, 'extract', '.takt', 'takt-repertoire.yaml'));
-    mockAtomicReplace.mockImplementation(async ({ install }: { install: () => Promise<void> }) => {
-      await install();
+    mockAtomicReplace.mockImplementation(async ({ install }: {
+      install: (stagingDir: string) => Promise<void>;
+    }) => {
+      await install('/home/user/.takt/repertoire/@owner/repo.tmp');
     });
     mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
       if (args[0] === 'api') return Buffer.from('tarball');
@@ -327,5 +335,75 @@ describe('repertoireAddCommand temporary directory handling', () => {
     expect(mockCleanupResiduals).not.toHaveBeenCalled();
     expect(mockAtomicReplace).not.toHaveBeenCalled();
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
+  it('releases without mutation when downloaded source bytes change before publication', async () => {
+    mockReadFileSync
+      .mockReturnValueOnce('path: .')
+      .mockReturnValueOnce('path: .')
+      .mockReturnValueOnce('original')
+      .mockReturnValueOnce('path: .')
+      .mockReturnValueOnce('changed');
+
+    await expect(repertoireAddCommand('github:owner/repo@main'))
+      .rejects.toThrow(/source changed while waiting/);
+
+    expect(mockCleanupResiduals).not.toHaveBeenCalled();
+    expect(mockAtomicReplace).not.toHaveBeenCalled();
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
+  it('revalidates existing target inode and lock digest after acquisition', async () => {
+    const packageDir = '/home/user/.takt/repertoire/@owner/repo';
+    const lockPath = join(packageDir, 'takt-repertoire.lock.yaml');
+    mockExistsSync.mockImplementation((target: string) => (
+      target === secureTempDir
+      || target === '/home/user/.takt/repertoire'
+      || target === packageDir
+      || target === lockPath
+    ));
+    mockReadFileSync
+      .mockReturnValueOnce('path: .')
+      .mockReturnValueOnce('path: .')
+      .mockReturnValueOnce('source')
+      .mockReturnValueOnce('approved-lock')
+      .mockReturnValueOnce('changed-lock');
+
+    await expect(repertoireAddCommand('github:owner/repo@main'))
+      .rejects.toThrow(/changed while waiting/);
+
+    expect(mockConfirm).toHaveBeenCalledTimes(2);
+    expect(mockAtomicReplace).not.toHaveBeenCalled();
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed on an unknown residual discovered under the writer', async () => {
+    const residual = '/home/user/.takt/repertoire/@owner/repo.bak';
+    mockExistsSync.mockImplementation((target: string) => (
+      target === secureTempDir
+      || target === '/home/user/.takt/repertoire'
+      || target === residual
+    ));
+    mockCleanupResiduals.mockImplementationOnce(() => {
+      throw Object.assign(new Error('recovery required'), { code: 'RECOVERY_REQUIRED' });
+    });
+
+    await expect(repertoireAddCommand('github:owner/repo@main'))
+      .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+
+    expect(mockAtomicReplace).not.toHaveBeenCalled();
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
+  it('does not report success when writer release fails after publication', async () => {
+    mockReleaseCoordinationLease.mockImplementationOnce(() => {
+      throw Object.assign(new Error('release recovery required'), { code: 'RECOVERY_REQUIRED' });
+    });
+
+    await expect(repertoireAddCommand('github:owner/repo@main'))
+      .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+
+    expect(mockAtomicReplace).toHaveBeenCalledOnce();
+    expect(success).not.toHaveBeenCalled();
   });
 });

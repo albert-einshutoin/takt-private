@@ -12,6 +12,15 @@ import { createLogger } from '../../shared/utils/debug.js';
 
 const log = createLogger('repertoire-remove');
 
+export class RepertoireReferenceScanError extends Error {
+  readonly code = 'REFERENCE_SCAN_FAILED' as const;
+
+  constructor() {
+    super('Repertoire reference scan could not be completed safely');
+    this.name = 'RepertoireReferenceScanError';
+  }
+}
+
 export interface ScopeReference {
   /** Absolute path to the file containing the @scope reference. */
   filePath: string;
@@ -20,7 +29,12 @@ export interface ScopeReference {
 /**
  * Recursively scan a directory for YAML files containing the given @scope substring.
  */
-function scanYamlFilesInDir(dir: string, scope: string, results: ScopeReference[]): void {
+function scanYamlFilesInDir(
+  dir: string,
+  scope: string,
+  results: ScopeReference[],
+  failClosed: boolean,
+): void {
   if (!existsSync(dir)) return;
 
   for (const entry of readdirSync(dir)) {
@@ -30,11 +44,12 @@ function scanYamlFilesInDir(dir: string, scope: string, results: ScopeReference[
       stats = statSync(filePath);
     } catch (err) {
       log.debug('Failed to stat file', { filePath, err });
+      if (failClosed) throw new RepertoireReferenceScanError();
       continue;
     }
 
     if (stats.isDirectory()) {
-      scanYamlFilesInDir(filePath, scope, results);
+      scanYamlFilesInDir(filePath, scope, results, failClosed);
       continue;
     }
 
@@ -45,6 +60,7 @@ function scanYamlFilesInDir(dir: string, scope: string, results: ScopeReference[
       content = readFileSync(filePath, 'utf-8');
     } catch (err) {
       log.debug('Failed to read file', { filePath, err });
+      if (failClosed) throw new RepertoireReferenceScanError();
       continue;
     }
 
@@ -67,6 +83,8 @@ export interface ScanConfig {
   providerOptionsDirs: string[];
   /** Individual YAML files to check for the scope substring (e.g. workflow-categories.yaml). */
   categoriesFiles: string[];
+  /** Abort on an unreadable discovered path rather than return partial evidence. */
+  failClosed?: boolean;
 }
 
 /**
@@ -83,17 +101,18 @@ export interface ScanConfig {
 export function findScopeReferences(scope: string, config: ScanConfig): ScopeReference[] {
   const results: ScopeReference[] = [];
   const scannedDirs = new Set<string>();
+  const failClosed = config.failClosed ?? false;
 
   for (const dir of config.workflowDirs) {
     if (!scannedDirs.has(dir)) {
-      scanYamlFilesInDir(dir, scope, results);
+      scanYamlFilesInDir(dir, scope, results, failClosed);
       scannedDirs.add(dir);
     }
   }
 
   for (const dir of config.providerOptionsDirs) {
     if (!scannedDirs.has(dir)) {
-      scanYamlFilesInDir(dir, scope, results);
+      scanYamlFilesInDir(dir, scope, results, failClosed);
       scannedDirs.add(dir);
     }
   }
@@ -107,6 +126,7 @@ export function findScopeReferences(scope: string, config: ScanConfig): ScopeRef
       }
     } catch (err) {
       log.debug('Failed to read categories file', { filePath, err });
+      if (failClosed) throw new RepertoireReferenceScanError();
     }
   }
 

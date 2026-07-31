@@ -11,7 +11,15 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { lstatSync, realpathSync, rmSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  rmdirSync,
+} from 'node:fs';
 import { join } from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -20,9 +28,18 @@ import { join } from 'node:path';
 
 vi.mock('node:fs', () => ({
   existsSync: vi.fn().mockReturnValue(true),
-  lstatSync: vi.fn(() => ({ dev: 1, ino: 1, isDirectory: () => true })),
+  lstatSync: vi.fn(() => ({
+    dev: 1,
+    ino: 1,
+    isDirectory: () => true,
+    isSymbolicLink: () => false,
+  })),
+  mkdirSync: vi.fn(),
+  readdirSync: vi.fn().mockReturnValue(['unknown-file']),
   realpathSync: vi.fn((path: string) => path),
+  renameSync: vi.fn(),
   rmSync: vi.fn(),
+  rmdirSync: vi.fn(),
 }));
 
 const { mockAcquireCoordinationLease, mockReleaseCoordinationLease } = vi.hoisted(() => ({
@@ -70,6 +87,7 @@ import { repertoireRemoveCommand } from '../../commands/repertoire/remove.js';
 import { findScopeReferences } from '../../features/repertoire/remove.js';
 import { getWorkflowCategoriesPath } from '../../infra/config/global/index.js';
 import { confirm } from '../../shared/prompt/index.js';
+import { success } from '../../shared/ui/index.js';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -78,9 +96,14 @@ import { confirm } from '../../shared/prompt/index.js';
 describe('repertoireRemoveCommand — scan configuration', () => {
   beforeEach(() => {
     vi.mocked(rmSync).mockReset();
+    vi.mocked(mkdirSync).mockReset();
+    vi.mocked(renameSync).mockReset();
+    vi.mocked(readdirSync).mockReset().mockReturnValue(['unknown-file']);
+    vi.mocked(rmdirSync).mockReset();
     vi.mocked(lstatSync).mockReset();
     mockAcquireCoordinationLease.mockReset();
     mockReleaseCoordinationLease.mockReset();
+    vi.mocked(success).mockClear();
     vi.mocked(findScopeReferences).mockClear();
     vi.mocked(findScopeReferences).mockReturnValue([]);
     vi.mocked(getWorkflowCategoriesPath).mockClear();
@@ -91,6 +114,7 @@ describe('repertoireRemoveCommand — scan configuration', () => {
       dev: 1,
       ino: 1,
       isDirectory: () => true,
+      isSymbolicLink: () => false,
     } as ReturnType<typeof lstatSync>);
     mockAcquireCoordinationLease.mockResolvedValue({
       mode: 'write',
@@ -115,6 +139,9 @@ describe('repertoireRemoveCommand — scan configuration', () => {
 
     // Then: exactly 1 categories file
     expect(scanConfig.categoriesFiles).toHaveLength(1);
+
+    // Removal decisions must never rely on a partial, best-effort scan.
+    expect(scanConfig.failClosed).toBe(true);
   });
 
   it('should include global workflows dir in scan', async () => {
@@ -205,8 +232,9 @@ describe('repertoireRemoveCommand — scan configuration', () => {
   });
 
   it('holds no writer during reference scan or confirmation and encloses the full deletion', async () => {
+    let referenceScans = 0;
     vi.mocked(findScopeReferences).mockImplementation(() => {
-      expect(mockAcquireCoordinationLease).not.toHaveBeenCalled();
+      if (referenceScans++ === 0) expect(mockAcquireCoordinationLease).not.toHaveBeenCalled();
       return [];
     });
     vi.mocked(confirm).mockImplementation(async () => {
@@ -220,8 +248,12 @@ describe('repertoireRemoveCommand — scan configuration', () => {
       globalConfigDir: '/home/user/.takt',
       mode: 'write',
     });
-    expect(vi.mocked(rmSync)).toHaveBeenCalledWith(
+    expect(renameSync).toHaveBeenCalledWith(
       '/home/user/.takt/repertoire/@owner/repo',
+      expect.stringMatching(/\.remove-[0-9a-f]{64}\/package\.quarantined$/),
+    );
+    expect(vi.mocked(rmSync)).toHaveBeenCalledWith(
+      expect.stringMatching(/\.remove-[0-9a-f]{64}$/),
       { recursive: true, force: true },
     );
     expect(vi.mocked(rmSync).mock.invocationCallOrder.at(-1))
@@ -248,6 +280,7 @@ describe('repertoireRemoveCommand — scan configuration', () => {
       dev: 1,
       ino: statCalls++ === 0 ? 1 : 2,
       isDirectory: () => true,
+      isSymbolicLink: () => false,
     } as ReturnType<typeof lstatSync>));
 
     await expect(repertoireRemoveCommand('@owner/repo'))
@@ -280,5 +313,49 @@ describe('repertoireRemoveCommand — scan configuration', () => {
     await expect(repertoireRemoveCommand('@owner/repo')).rejects.toThrow('delete failed');
 
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed when the fresh reference scan cannot be completed', async () => {
+    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(findScopeReferences)
+      .mockReturnValueOnce([])
+      .mockImplementationOnce(() => { throw new Error('reference read failed'); });
+
+    await expect(repertoireRemoveCommand('@owner/repo'))
+      .rejects.toThrow('reference read failed');
+
+    expect(renameSync).not.toHaveBeenCalled();
+    expect(rmSync).not.toHaveBeenCalled();
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an owner directory containing an unknown file', async () => {
+    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(readdirSync).mockReturnValue(['unknown-file'] as never);
+
+    await repertoireRemoveCommand('@owner/repo');
+
+    expect(rmdirSync).not.toHaveBeenCalled();
+  });
+
+  it('removes an exactly empty owner directory non-recursively', async () => {
+    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(readdirSync).mockReturnValue([] as never);
+
+    await repertoireRemoveCommand('@owner/repo');
+
+    expect(rmdirSync).toHaveBeenCalledWith('/home/user/.takt/repertoire/@owner');
+  });
+
+  it('does not publish success when writer release requires recovery', async () => {
+    vi.mocked(confirm).mockResolvedValue(true);
+    mockReleaseCoordinationLease.mockImplementationOnce(() => {
+      throw Object.assign(new Error('release recovery required'), { code: 'RECOVERY_REQUIRED' });
+    });
+
+    await expect(repertoireRemoveCommand('@owner/repo'))
+      .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+
+    expect(success).not.toHaveBeenCalled();
   });
 });
