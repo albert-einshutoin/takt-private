@@ -157,6 +157,8 @@ export type {
   GithubTemplateUpdateState,
   ResolveGithubTemplateSourceOptions,
   ResolvedGithubTemplateSource,
+  GithubTemplateSourceResolutionInput,
+  GithubTemplateSourceResolverPort,
   DownloadGithubTemplateSourceOptions,
   DownloadedGithubTemplateSource,
   GithubTemplateArchiveAssetInput,

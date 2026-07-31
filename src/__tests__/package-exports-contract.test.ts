@@ -9,6 +9,8 @@ import type {
   GithubTemplateArchiveAssetPort,
   GithubTemplateDownloadOrchestratorErrorCode,
   GithubTemplateSourceAdvisory,
+  GithubTemplateSourceResolutionInput,
+  GithubTemplateSourceResolverPort,
   PreparedProjectTemplateApplyPlan,
   ProjectTemplateApplyMergeDiagnostics,
   ProjectTemplateBaseContent,
@@ -141,6 +143,12 @@ describe('package exports contract', () => {
       }>();
     expectTypeOf<GithubTemplateSourceMetadataPort>()
       .toHaveProperty('resolveRefToCommit');
+    expectTypeOf<GithubTemplateSourceResolverPort>()
+      .toHaveProperty('resolveForDownload');
+    expectTypeOf<GithubTemplateSourceResolutionInput>()
+      .toMatchTypeOf<{ source: string }>();
+    expectTypeOf<DownloadGithubTemplateSourceOptions>()
+      .toHaveProperty('resolver');
     expectTypeOf<DownloadGithubTemplateSourceOptions>()
       .toHaveProperty('asset');
     expectTypeOf<DownloadedGithubTemplateSource>()
@@ -173,6 +181,8 @@ describe('package exports contract', () => {
     expect(declarationEntry).toContain('ResolvedGithubTemplateSource');
     expect(declarationEntry).toContain('GithubTemplateSourceAdvisory');
     expect(declarationEntry).toContain('GithubTemplateSourceMetadataPort');
+    expect(declarationEntry).toContain('GithubTemplateSourceResolverPort');
+    expect(declarationEntry).toContain('GithubTemplateSourceResolutionInput');
     expect(declarationEntry).toContain('DownloadGithubTemplateSourceOptions');
     expect(declarationEntry).toContain('DownloadedGithubTemplateSource');
     expect(declarationEntry).toContain('GithubTemplateArchiveAssetInput');

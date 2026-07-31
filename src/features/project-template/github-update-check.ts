@@ -88,6 +88,9 @@ export interface GithubTemplateReadReleaseAssetInput {
 /**
  * Injected metadata-only boundary. Implementations may use GitHub APIs, but
  * tokens, commands, URLs, and raw stderr never cross into this pure resolver.
+ *
+ * @deprecated Application flows should expose GithubTemplateSourceResolverPort
+ * so raw metadata and credential-bearing implementations remain private.
  */
 export interface GithubTemplateSourceMetadataPort {
   resolveRefToCommit(
@@ -420,6 +423,10 @@ interface ParsedRelease {
   assets: ParsedReleaseAsset[];
 }
 
+/**
+ * @deprecated Use a GithubTemplateSourceResolverPort outside low-level
+ * resolver implementations.
+ */
 export async function resolveGithubTemplateSource(
   options: ResolveGithubTemplateSourceOptions,
 ): Promise<ResolvedGithubTemplateSource> {

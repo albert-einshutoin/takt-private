@@ -26,17 +26,20 @@ import {
 } from './github-download-receipt-storage.js';
 import {
   parseProjectTemplateGithubSourceSpec,
-  type ProjectTemplateGithubSourceSpec,
 } from './github-source-spec.js';
 import {
   claimResolvedGithubTemplateSourceForDownload,
+  discardResolvedGithubTemplateSource,
   discardResolvedGithubTemplateSourceDownloadClaim,
-  resolveGithubTemplateSource,
   type ClaimedResolvedGithubTemplateSourceForDownload,
   type GithubTemplateCurrentSourceEvidence,
-  type GithubTemplateSourceMetadataPort,
+  type GithubTemplateSourceAdvisory,
   type ResolvedGithubTemplateSource,
 } from './github-update-check.js';
+import type {
+  GithubTemplateSourceResolutionInput,
+  GithubTemplateSourceResolverPort,
+} from './github-source-resolver-port.js';
 
 const RESOLVED_FIELDS = [
   'kind',
@@ -72,11 +75,9 @@ const CURRENT_FIELDS = [
   'commit',
   'descriptorSha256',
 ] as const;
-const METADATA_METHODS = [
-  'resolveRefToCommit',
-  'readFileAtCommit',
-  'getReleaseByTag',
-  'readReleaseAsset',
+const RESOLVER_METHODS = [
+  'resolveAdvisory',
+  'resolveForDownload',
 ] as const;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
@@ -134,8 +135,8 @@ export interface GithubTemplateArchiveAssetPort {
 export interface DownloadGithubTemplateSourceOptions {
   readonly projectRoot: string;
   readonly source: string;
-  readonly advisory: ResolvedGithubTemplateSource;
-  readonly metadata: GithubTemplateSourceMetadataPort;
+  readonly advisory: GithubTemplateSourceAdvisory;
+  readonly resolver: GithubTemplateSourceResolverPort;
   readonly asset: GithubTemplateArchiveAssetPort;
   readonly cacheRoot: string;
   readonly authenticator: GithubTemplateDownloadReceiptAuthenticator;
@@ -160,9 +161,9 @@ export interface DownloadedGithubTemplateSource {
 
 interface OptionsSnapshot {
   readonly projectRoot: string;
-  readonly source: ProjectTemplateGithubSourceSpec;
-  readonly advisory: ResolvedSnapshot;
-  readonly metadata: GithubTemplateSourceMetadataPort;
+  readonly source: string;
+  readonly advisory: GithubTemplateSourceAdvisory;
+  readonly resolver: GithubTemplateSourceResolverPort;
   readonly assetReceiver: GithubTemplateArchiveAssetPort;
   readonly openReleaseAsset: GithubTemplateArchiveAssetPort['openReleaseAsset'];
   readonly current?: GithubTemplateCurrentSourceEvidence;
@@ -359,6 +360,99 @@ function snapshotResolved(value: unknown): ResolvedSnapshot {
   }) as ResolvedSnapshot;
 }
 
+function snapshotAdvisory(value: unknown): GithubTemplateSourceAdvisory {
+  const advisory = ownDataRecord(value, [
+    'kind',
+    'source',
+    'release',
+    'declaredDependencies',
+    'updateState',
+    'hardBlocked',
+    'downloadEligible',
+  ]);
+  const source = ownDataRecord(advisory['source'], [
+    'owner',
+    'repo',
+    'repositoryUrl',
+    'canonicalSource',
+    'requestedRef',
+    'commit',
+    'descriptorSha256',
+  ]);
+  const release = ownDataRecord(advisory['release'], [
+    'tag',
+    'id',
+    'asset',
+    'checksumAsset',
+    'sha256',
+    'version',
+  ]);
+  const asset = ownDataRecord(release['asset'], ['id', 'name', 'size']);
+  const checksumAsset = ownDataRecord(
+    release['checksumAsset'],
+    ['id', 'name', 'size'],
+  );
+  const flat = snapshotResolved({
+    kind: 'resolved-github-template-source',
+    owner: source['owner'],
+    repo: source['repo'],
+    repositoryUrl: source['repositoryUrl'],
+    canonicalSource: source['canonicalSource'],
+    requestedRef: source['requestedRef'],
+    releaseTag: release['tag'],
+    commit: source['commit'],
+    descriptorSha256: source['descriptorSha256'],
+    releaseId: release['id'],
+    assetId: asset['id'],
+    assetName: asset['name'],
+    assetSize: asset['size'],
+    checksumAssetId: checksumAsset['id'],
+    checksumAssetName: checksumAsset['name'],
+    checksumAssetSize: checksumAsset['size'],
+    sha256: release['sha256'],
+    version: release['version'],
+    declaredDependencies: advisory['declaredDependencies'],
+    updateState: advisory['updateState'],
+    hardBlocked: advisory['hardBlocked'],
+    downloadEligible: advisory['downloadEligible'],
+  });
+  if (advisory['kind'] !== 'github-template-source-advisory') {
+    throw new Error();
+  }
+  return Object.freeze({
+    kind: 'github-template-source-advisory',
+    source: Object.freeze({
+      owner: flat.owner,
+      repo: flat.repo,
+      repositoryUrl: flat.repositoryUrl,
+      canonicalSource: flat.canonicalSource,
+      requestedRef: flat.requestedRef,
+      commit: flat.commit,
+      descriptorSha256: flat.descriptorSha256,
+    }),
+    release: Object.freeze({
+      tag: flat.releaseTag,
+      id: flat.releaseId,
+      asset: Object.freeze({
+        id: flat.assetId,
+        name: flat.assetName,
+        size: flat.assetSize,
+      }),
+      checksumAsset: Object.freeze({
+        id: flat.checksumAssetId,
+        name: flat.checksumAssetName,
+        size: flat.checksumAssetSize,
+      }),
+      sha256: flat.sha256,
+      version: flat.version,
+    }),
+    declaredDependencies: flat.declaredDependencies,
+    updateState: flat.updateState,
+    hardBlocked: flat.hardBlocked,
+    downloadEligible: flat.downloadEligible,
+  });
+}
+
 function snapshotCurrent(
   value: unknown,
 ): GithubTemplateCurrentSourceEvidence | undefined {
@@ -373,55 +467,29 @@ function snapshotCurrent(
   return Object.freeze(current) as unknown as GithubTemplateCurrentSourceEvidence;
 }
 
-function snapshotMetadata(value: unknown): GithubTemplateSourceMetadataPort {
-  const methods = ownDataRecord(value, METADATA_METHODS);
+function snapshotResolver(value: unknown): GithubTemplateSourceResolverPort {
+  const methods = ownDataRecord(value, RESOLVER_METHODS);
   if (
-    METADATA_METHODS.some(
+    RESOLVER_METHODS.some(
       (method) => typeof methods[method] !== 'function',
     )
   ) throw new Error();
-  const receiver = value as GithubTemplateSourceMetadataPort;
+  const receiver = value as GithubTemplateSourceResolverPort;
   return Object.freeze({
-    resolveRefToCommit: (
-      input: Parameters<GithubTemplateSourceMetadataPort[
-        'resolveRefToCommit'
-      ]>[0],
-    ) => Reflect.apply(
-      methods['resolveRefToCommit'] as
-        GithubTemplateSourceMetadataPort['resolveRefToCommit'],
-      receiver,
-      [input],
-    ) as Promise<unknown>,
-    readFileAtCommit: (
-      input: Parameters<GithubTemplateSourceMetadataPort[
-        'readFileAtCommit'
-      ]>[0],
-    ) => Reflect.apply(
-      methods['readFileAtCommit'] as
-        GithubTemplateSourceMetadataPort['readFileAtCommit'],
-      receiver,
-      [input],
-    ) as Promise<unknown>,
-    getReleaseByTag: (
-      input: Parameters<GithubTemplateSourceMetadataPort[
-        'getReleaseByTag'
-      ]>[0],
-    ) => Reflect.apply(
-      methods['getReleaseByTag'] as
-        GithubTemplateSourceMetadataPort['getReleaseByTag'],
-      receiver,
-      [input],
-    ) as Promise<unknown>,
-    readReleaseAsset: (
-      input: Parameters<GithubTemplateSourceMetadataPort[
-        'readReleaseAsset'
-      ]>[0],
-    ) => Reflect.apply(
-      methods['readReleaseAsset'] as
-        GithubTemplateSourceMetadataPort['readReleaseAsset'],
-      receiver,
-      [input],
-    ) as Promise<unknown>,
+    resolveAdvisory: (input: GithubTemplateSourceResolutionInput) =>
+      Reflect.apply(
+        methods['resolveAdvisory'] as
+          GithubTemplateSourceResolverPort['resolveAdvisory'],
+        receiver,
+        [input],
+      ) as Promise<GithubTemplateSourceAdvisory>,
+    resolveForDownload: (input: GithubTemplateSourceResolutionInput) =>
+      Reflect.apply(
+        methods['resolveForDownload'] as
+          GithubTemplateSourceResolverPort['resolveForDownload'],
+        receiver,
+        [input],
+      ) as Promise<ResolvedGithubTemplateSource>,
   });
 }
 
@@ -486,7 +554,7 @@ function snapshotOptions(value: unknown): OptionsSnapshot {
       'projectRoot',
       'source',
       'advisory',
-      'metadata',
+      'resolver',
       'asset',
       'cacheRoot',
       'authenticator',
@@ -511,8 +579,9 @@ function snapshotOptions(value: unknown): OptionsSnapshot {
     ) {
       throw new Error();
     }
-    const advisory = snapshotResolved(options['advisory']);
-    const metadata = snapshotMetadata(options['metadata']);
+    parseProjectTemplateGithubSourceSpec(source);
+    const advisory = snapshotAdvisory(options['advisory']);
+    const resolver = snapshotResolver(options['resolver']);
     const assetRecord = ownDataRecord(options['asset'], ['openReleaseAsset']);
     if (typeof assetRecord['openReleaseAsset'] !== 'function') {
       throw new Error();
@@ -520,10 +589,10 @@ function snapshotOptions(value: unknown): OptionsSnapshot {
     const signal = snapshotSignal(options['signal']);
     return Object.freeze({
       projectRoot,
-      source: parseProjectTemplateGithubSourceSpec(source),
+      source,
       cacheRoot,
       advisory,
-      metadata,
+      resolver,
       authenticator: snapshotAuthenticator(options['authenticator']),
       verifier: snapshotVerifier(options['verifier']),
       assetReceiver: options['asset'] as GithubTemplateArchiveAssetPort,
@@ -574,26 +643,33 @@ function dependenciesEqual(
 }
 
 function resolvedExactlyMatches(
-  advisory: ResolvedSnapshot,
-  fresh: ResolvedGithubTemplateSource,
+  advisory: GithubTemplateSourceAdvisory,
+  freshSnapshot: ResolvedSnapshot,
 ): boolean {
-  let freshSnapshot: ResolvedSnapshot;
-  try {
-    freshSnapshot = snapshotResolved(fresh);
-  } catch {
-    return false;
-  }
-  for (const field of RESOLVED_FIELDS) {
-    if (field === 'declaredDependencies') {
-      if (!dependenciesEqual(
-        advisory.declaredDependencies,
-        freshSnapshot.declaredDependencies,
-      )) return false;
-      continue;
-    }
-    if (advisory[field] !== freshSnapshot[field]) return false;
-  }
-  return true;
+  return advisory.source.owner === freshSnapshot.owner
+    && advisory.source.repo === freshSnapshot.repo
+    && advisory.source.repositoryUrl === freshSnapshot.repositoryUrl
+    && advisory.source.canonicalSource === freshSnapshot.canonicalSource
+    && advisory.source.requestedRef === freshSnapshot.requestedRef
+    && advisory.source.commit === freshSnapshot.commit
+    && advisory.source.descriptorSha256 === freshSnapshot.descriptorSha256
+    && advisory.release.tag === freshSnapshot.releaseTag
+    && advisory.release.id === freshSnapshot.releaseId
+    && advisory.release.asset.id === freshSnapshot.assetId
+    && advisory.release.asset.name === freshSnapshot.assetName
+    && advisory.release.asset.size === freshSnapshot.assetSize
+    && advisory.release.checksumAsset.id === freshSnapshot.checksumAssetId
+    && advisory.release.checksumAsset.name === freshSnapshot.checksumAssetName
+    && advisory.release.checksumAsset.size === freshSnapshot.checksumAssetSize
+    && advisory.release.sha256 === freshSnapshot.sha256
+    && advisory.release.version === freshSnapshot.version
+    && dependenciesEqual(
+      advisory.declaredDependencies,
+      freshSnapshot.declaredDependencies,
+    )
+    && advisory.updateState === freshSnapshot.updateState
+    && advisory.hardBlocked === freshSnapshot.hardBlocked
+    && advisory.downloadEligible === freshSnapshot.downloadEligible;
 }
 
 function requireGuardPassed(
@@ -700,6 +776,7 @@ export async function downloadGithubTemplateSource(
 
   let lease: ProjectTemplateMutationLease | undefined;
   let staged: StagedGithubTemplateDownload | undefined;
+  let freshAuthority: ResolvedGithubTemplateSource | undefined;
   let downloadClaim:
     ClaimedResolvedGithubTemplateSourceForDownload | undefined;
   let failure: GithubTemplateDownloadOrchestratorError | undefined;
@@ -721,16 +798,21 @@ export async function downloadGithubTemplateSource(
       );
     }
 
-    let fresh: ResolvedGithubTemplateSource;
     try {
-      fresh = await resolveGithubTemplateSource({
+      const resolutionInput = Object.freeze({
         source: snapshot.source,
-        metadata: snapshot.metadata,
         ...(snapshot.current === undefined
           ? {}
           : { current: snapshot.current }),
+        ...(snapshot.signal === undefined
+          ? {}
+          : { signal: snapshot.signal }),
       });
+      freshAuthority = await snapshot.resolver.resolveForDownload(
+        resolutionInput,
+      );
     } catch {
+      throwIfAborted(snapshot);
       throw orchestratorError(
         'SOURCE_RESOLUTION_FAILED',
         'GitHub template source resolution failed',
@@ -744,16 +826,25 @@ export async function downloadGithubTemplateSource(
         'GitHub template download lease was lost',
       );
     }
-    if (!resolvedExactlyMatches(snapshot.advisory, fresh)) {
+    let freshSnapshot: ResolvedSnapshot;
+    try {
+      freshSnapshot = snapshotResolved(freshAuthority);
+    } catch {
       throw orchestratorError(
-        'SOURCE_DRIFT',
-        'GitHub template source changed before download',
+        'SOURCE_RESOLUTION_FAILED',
+        'GitHub template source resolution failed',
       );
     }
-    if (!fresh.downloadEligible || fresh.hardBlocked) {
+    if (!freshSnapshot.downloadEligible || freshSnapshot.hardBlocked) {
       throw orchestratorError(
         'DOWNLOAD_NOT_ELIGIBLE',
         'GitHub template source is not eligible for download',
+      );
+    }
+    if (!resolvedExactlyMatches(snapshot.advisory, freshSnapshot)) {
+      throw orchestratorError(
+        'SOURCE_DRIFT',
+        'GitHub template source changed before download',
       );
     }
 
@@ -767,7 +858,11 @@ export async function downloadGithubTemplateSource(
       );
     }
     try {
-      downloadClaim = claimResolvedGithubTemplateSourceForDownload(fresh);
+      downloadClaim =
+        claimResolvedGithubTemplateSourceForDownload(freshAuthority);
+      // A successful claim is the only handoff that disarms the outer fresh
+      // authority cleanup owner. Every earlier failure retires the result.
+      freshAuthority = undefined;
     } catch {
       throw orchestratorError(
         'SOURCE_RESOLUTION_FAILED',
@@ -961,6 +1056,34 @@ export async function downloadGithubTemplateSource(
         'GitHub template download failed',
       );
   } finally {
+    if (freshAuthority !== undefined) {
+      // Resolution returns one fresh authority into this scope. Retire it
+      // before any physical cleanup whenever drift, cancellation, lease loss,
+      // ineligibility, or a failed claim prevents the exact handoff.
+      try {
+        discardResolvedGithubTemplateSource(freshAuthority);
+      } catch {
+        if (failure === undefined) {
+          failure = orchestratorError(
+            'CLEANUP_FAILED',
+            'GitHub template source authority cleanup failed',
+            result?.artifactState,
+            result?.receiptState,
+            undefined,
+            'failed',
+          );
+        } else {
+          failure = orchestratorError(
+            failure.code,
+            failure.message,
+            failure.artifactState,
+            failure.receiptState,
+            failure.releaseState,
+            'failed',
+          );
+        }
+      }
+    }
     if (downloadClaim !== undefined) {
       // Revoke logical provenance before filesystem and lease cleanup. Even
       // if either physical cleanup later fails, the checked source can never

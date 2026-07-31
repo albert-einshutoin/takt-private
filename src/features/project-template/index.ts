@@ -42,6 +42,10 @@ export type {
   ResolveGithubTemplateSourceOptions,
   ResolvedGithubTemplateSource,
 } from './github-update-check.js';
+export type {
+  GithubTemplateSourceResolutionInput,
+  GithubTemplateSourceResolverPort,
+} from './github-source-resolver-port.js';
 export {
   downloadGithubTemplateSource,
   GithubTemplateDownloadOrchestratorError,

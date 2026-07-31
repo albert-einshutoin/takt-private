@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   acquireProjectTemplateMutationLease,
 } from '../../features/project-template/apply-lease.js';
+import * as applyLease from '../../features/project-template/apply-lease.js';
 import {
   downloadGithubTemplateSource,
   type GithubTemplateArchiveAssetPort,
@@ -29,10 +30,17 @@ import {
   writeTaktpack,
 } from '../../features/project-template/index.js';
 import {
+  demoteResolvedGithubTemplateSourceToAdvisory,
+  discardResolvedGithubTemplateSource,
   resolveGithubTemplateSource,
+  type GithubTemplateSourceAdvisory,
   type GithubTemplateSourceMetadataPort,
   type ResolvedGithubTemplateSource,
 } from '../../features/project-template/github-update-check.js';
+import type {
+  GithubTemplateSourceResolutionInput,
+  GithubTemplateSourceResolverPort,
+} from '../../features/project-template/github-source-resolver-port.js';
 import {
   serializeProjectTemplateSourceDescriptor,
   type ProjectTemplateSourceDescriptorV1,
@@ -127,8 +135,34 @@ async function makeFixture() {
   const source = parseProjectTemplateGithubSourceSpec(
     'github:acme/template@main',
   );
-  const advisory = await resolveGithubTemplateSource({ source, metadata });
+  const advisory = demoteResolvedGithubTemplateSourceToAdvisory(
+    await resolveGithubTemplateSource({ source, metadata }),
+  );
   calls.length = 0;
+  const resolverInputs: GithubTemplateSourceResolutionInput[] = [];
+  const resolverMethods: string[] = [];
+  const resolver: GithubTemplateSourceResolverPort = {
+    async resolveAdvisory(input) {
+      resolverMethods.push('resolveAdvisory');
+      resolverInputs.push(input);
+      return demoteResolvedGithubTemplateSourceToAdvisory(
+        await resolveGithubTemplateSource({
+          source: parseProjectTemplateGithubSourceSpec(input.source),
+          metadata,
+          ...(input.current === undefined ? {} : { current: input.current }),
+        }),
+      );
+    },
+    async resolveForDownload(input) {
+      resolverMethods.push('resolveForDownload');
+      resolverInputs.push(input);
+      return resolveGithubTemplateSource({
+        source: parseProjectTemplateGithubSourceSpec(input.source),
+        metadata,
+        ...(input.current === undefined ? {} : { current: input.current }),
+      });
+    },
+  };
   const assetCalls: unknown[] = [];
   const asset: GithubTemplateArchiveAssetPort = {
     openReleaseAsset(input) {
@@ -172,6 +206,9 @@ async function makeFixture() {
     content,
     metadata,
     projectRoot,
+    resolver,
+    resolverInputs,
+    resolverMethods,
     setCommit(value: string) {
       commit = value;
     },
@@ -190,34 +227,133 @@ function stagingEntries(projectRoot: string): string[] {
 }
 
 describe('GitHub template download orchestrator O1', () => {
-  it('rejects a forged fresh resolver result before asset or cache work', async () => {
+  it('passes one exact frozen input through the high-level resolver port', async () => {
     const fixture = await makeFixture();
-    const materialize = vi.spyOn(
-      githubDownloadStorage,
-      'materializeGithubTemplateCache',
-    );
-    vi.spyOn(
-      githubUpdateCheck,
-      'resolveGithubTemplateSource',
-    ).mockResolvedValue(Object.freeze({
-      ...fixture.advisory,
-    }) as ResolvedGithubTemplateSource);
+    const controller = new AbortController();
+    const inputs: GithubTemplateSourceResolutionInput[] = [];
+    const resolver: GithubTemplateSourceResolverPort = {
+      async resolveAdvisory() {
+        throw new Error('unused');
+      },
+      async resolveForDownload(input) {
+        inputs.push(input);
+        return resolveGithubTemplateSource({
+          source: parseProjectTemplateGithubSourceSpec(input.source),
+          metadata: fixture.metadata,
+          ...(input.current === undefined ? {} : { current: input.current }),
+        });
+      },
+    };
 
     await expect(downloadGithubTemplateSource({
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
       verifier: fixture.verifier,
-    })).rejects.toMatchObject({ code: 'SOURCE_RESOLUTION_FAILED' });
+      signal: controller.signal,
+    })).resolves.toMatchObject({ status: 'downloaded' });
 
-    expect(fixture.assetCalls).toEqual([]);
-    expect(materialize).not.toHaveBeenCalled();
-    expect(readdirSync(fixture.cacheRoot)).toEqual([]);
+    expect(inputs).toHaveLength(1);
+    expect(Reflect.ownKeys(inputs[0]!)).toEqual(['source', 'signal']);
+    expect(Object.isFrozen(inputs[0])).toBe(true);
+    expect(Object.getPrototypeOf(inputs[0])).toBe(Object.prototype);
+    expect(inputs[0]!.source).toBe(fixture.source);
+    expect(inputs[0]!.signal).toBe(controller.signal);
   });
+
+  it.each([
+    [false, 'SOURCE_RESOLUTION_FAILED'],
+    [true, 'ABORTED'],
+  ] as const)(
+    'redacts resolver failure and maps cancellation=%s to %s',
+    async (abort, code) => {
+      const fixture = await makeFixture();
+      const controller = new AbortController();
+      const resolver: GithubTemplateSourceResolverPort = {
+        resolveAdvisory: fixture.resolver.resolveAdvisory,
+        async resolveForDownload() {
+          if (abort) controller.abort();
+          throw new Error('ghp_resolver_secret');
+        },
+      };
+
+      const error = await downloadGithubTemplateSource({
+        projectRoot: fixture.projectRoot,
+        source: fixture.source,
+        advisory: fixture.advisory,
+        resolver,
+        asset: fixture.asset,
+        cacheRoot: fixture.cacheRoot,
+        authenticator: fixture.authenticator,
+        verifier: fixture.verifier,
+        signal: controller.signal,
+      }).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code });
+      expect(String(error)).not.toContain('ghp_resolver_secret');
+      expect(fixture.assetCalls).toEqual([]);
+      expect(readdirSync(fixture.cacheRoot)).toEqual([]);
+    },
+  );
+
+  it.each(['clone', 'proxy'] as const)(
+    'rejects a forged fresh resolver %s result before asset or cache work',
+    async (attack) => {
+      const fixture = await makeFixture();
+      let traps = 0;
+      const materialize = vi.spyOn(
+        githubDownloadStorage,
+        'materializeGithubTemplateCache',
+      );
+      const resolver: GithubTemplateSourceResolverPort = {
+        resolveAdvisory: fixture.resolver.resolveAdvisory,
+        async resolveForDownload(input) {
+          const real = await fixture.resolver.resolveForDownload(input);
+          const forged = attack === 'clone'
+            ? Object.freeze({ ...real })
+            : new Proxy(real, {
+              get(target, property, receiver) {
+                // Promise resolution must inspect `then`; count any later
+                // property access by the orchestrator as a boundary failure.
+                if (property === 'then') return undefined;
+                traps += 1;
+                return Reflect.get(target, property, receiver);
+              },
+              getPrototypeOf() {
+                traps += 1;
+                throw new Error('ghp_proxy_secret');
+              },
+              ownKeys() {
+                traps += 1;
+                throw new Error('ghp_proxy_secret');
+              },
+            });
+          discardResolvedGithubTemplateSource(real);
+          return forged as ResolvedGithubTemplateSource;
+        },
+      };
+
+      await expect(downloadGithubTemplateSource({
+        projectRoot: fixture.projectRoot,
+        source: fixture.source,
+        advisory: fixture.advisory,
+        resolver,
+        asset: fixture.asset,
+        cacheRoot: fixture.cacheRoot,
+        authenticator: fixture.authenticator,
+        verifier: fixture.verifier,
+      })).rejects.toMatchObject({ code: 'SOURCE_RESOLUTION_FAILED' });
+
+      expect(fixture.assetCalls).toEqual([]);
+      expect(materialize).not.toHaveBeenCalled();
+      expect(readdirSync(fixture.cacheRoot)).toEqual([]);
+      expect(traps).toBe(0);
+    },
+  );
 
   it.each([
     'open',
@@ -292,7 +428,7 @@ describe('GitHub template download orchestrator O1', () => {
         projectRoot: fixture.projectRoot,
         source: fixture.source,
         advisory: fixture.advisory,
-        metadata: fixture.metadata,
+        resolver: fixture.resolver,
         asset,
         cacheRoot: fixture.cacheRoot,
         authenticator,
@@ -341,7 +477,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -384,6 +520,7 @@ describe('GitHub template download orchestrator O1', () => {
     ]);
     expect(claimed).toHaveLength(1);
     expect(claimed[0]).not.toBe(fixture.advisory);
+    expect(fixture.resolverMethods).toEqual(['resolveForDownload']);
     expect(stagingEntries(fixture.projectRoot)).toEqual([]);
     const lease = acquireProjectTemplateMutationLease(
       fixture.projectRoot,
@@ -395,27 +532,29 @@ describe('GitHub template download orchestrator O1', () => {
   it('rejects advisory ineligibility before guard, lease, metadata, or asset work', async () => {
     const fixture = await makeFixture();
     const current = {
-      owner: fixture.advisory.owner,
-      repo: fixture.advisory.repo,
-      repositoryUrl: fixture.advisory.repositoryUrl,
-      canonicalSource: fixture.advisory.canonicalSource,
-      version: fixture.advisory.version,
-      sha256: fixture.advisory.sha256,
-      commit: fixture.advisory.commit,
-      descriptorSha256: fixture.advisory.descriptorSha256,
+      owner: fixture.advisory.source.owner,
+      repo: fixture.advisory.source.repo,
+      repositoryUrl: fixture.advisory.source.repositoryUrl,
+      canonicalSource: fixture.advisory.source.canonicalSource,
+      version: fixture.advisory.release.version,
+      sha256: fixture.advisory.release.sha256,
+      commit: fixture.advisory.source.commit,
+      descriptorSha256: fixture.advisory.source.descriptorSha256,
     };
-    const ineligible = await resolveGithubTemplateSource({
-      source: parseProjectTemplateGithubSourceSpec(fixture.source),
-      metadata: fixture.metadata,
-      current,
-    });
+    const ineligible = demoteResolvedGithubTemplateSourceToAdvisory(
+      await resolveGithubTemplateSource({
+        source: parseProjectTemplateGithubSourceSpec(fixture.source),
+        metadata: fixture.metadata,
+        current,
+      }),
+    );
     fixture.calls.length = 0;
 
     await expect(downloadGithubTemplateSource({
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: ineligible,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -423,6 +562,7 @@ describe('GitHub template download orchestrator O1', () => {
       current,
     })).rejects.toMatchObject({ code: 'DOWNLOAD_NOT_ELIGIBLE' });
     expect(fixture.calls).toEqual([]);
+    expect(fixture.resolverInputs).toEqual([]);
     expect(fixture.assetCalls).toEqual([]);
   });
 
@@ -437,7 +577,7 @@ describe('GitHub template download orchestrator O1', () => {
         projectRoot: fixture.projectRoot,
         source: fixture.source,
         advisory: fixture.advisory,
-        metadata: fixture.metadata,
+        resolver: fixture.resolver,
         asset: fixture.asset,
         cacheRoot: fixture.cacheRoot,
         authenticator: fixture.authenticator,
@@ -447,30 +587,169 @@ describe('GitHub template download orchestrator O1', () => {
       blocker.release();
     }
     expect(fixture.calls).toEqual([]);
+    expect(fixture.resolverInputs).toEqual([]);
+    expect(fixture.assetCalls).toEqual([]);
+  });
+
+  it('fails lease acquisition before invoking the resolver', async () => {
+    const fixture = await makeFixture();
+    vi.spyOn(
+      applyLease,
+      'acquireProjectTemplateMutationLease',
+    ).mockImplementation(() => {
+      throw new Error('coordination unavailable');
+    });
+
+    await expect(downloadGithubTemplateSource({
+      projectRoot: fixture.projectRoot,
+      source: fixture.source,
+      advisory: fixture.advisory,
+      resolver: fixture.resolver,
+      asset: fixture.asset,
+      cacheRoot: fixture.cacheRoot,
+      authenticator: fixture.authenticator,
+      verifier: fixture.verifier,
+    })).rejects.toMatchObject({ code: 'COORDINATION_FAILED' });
+    expect(fixture.resolverInputs).toEqual([]);
     expect(fixture.assetCalls).toEqual([]);
   });
 
   it('rejects any fresh resolved authority field drift before asset access', async () => {
     const fixture = await makeFixture();
     fixture.setCommit(OTHER_COMMIT);
+    let fresh: ResolvedGithubTemplateSource | undefined;
+    const resolver: GithubTemplateSourceResolverPort = {
+      resolveAdvisory: fixture.resolver.resolveAdvisory,
+      async resolveForDownload(input) {
+        fresh = await fixture.resolver.resolveForDownload(input);
+        return fresh;
+      },
+    };
 
     await expect(downloadGithubTemplateSource({
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
       verifier: fixture.verifier,
     })).rejects.toMatchObject({ code: 'SOURCE_DRIFT' });
     expect(fixture.assetCalls).toEqual([]);
+    expect(fresh).toBeDefined();
+    expect(() =>
+      githubUpdateCheck.claimResolvedGithubTemplateSourceForDownload(fresh)
+    ).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => discardResolvedGithubTemplateSource(fresh))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
     const lease = acquireProjectTemplateMutationLease(
       fixture.projectRoot,
       'download',
     );
     lease.release();
   });
+
+  it('discards a valid fresh authority when download claiming fails', async () => {
+    const fixture = await makeFixture();
+    let fresh: ResolvedGithubTemplateSource | undefined;
+    const resolver: GithubTemplateSourceResolverPort = {
+      resolveAdvisory: fixture.resolver.resolveAdvisory,
+      async resolveForDownload(input) {
+        fresh = await fixture.resolver.resolveForDownload(input);
+        return fresh;
+      },
+    };
+    const claim = vi.spyOn(
+      githubUpdateCheck,
+      'claimResolvedGithubTemplateSourceForDownload',
+    ).mockImplementation(() => {
+      throw new Error('ghp_claim_secret');
+    });
+
+    await expect(downloadGithubTemplateSource({
+      projectRoot: fixture.projectRoot,
+      source: fixture.source,
+      advisory: fixture.advisory,
+      resolver,
+      asset: fixture.asset,
+      cacheRoot: fixture.cacheRoot,
+      authenticator: fixture.authenticator,
+      verifier: fixture.verifier,
+    })).rejects.toMatchObject({ code: 'SOURCE_RESOLUTION_FAILED' });
+    claim.mockRestore();
+
+    expect(fixture.assetCalls).toEqual([]);
+    expect(fresh).toBeDefined();
+    expect(() =>
+      githubUpdateCheck.claimResolvedGithubTemplateSourceForDownload(fresh)
+    ).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+  });
+
+  it.each([
+    ['ineligible', 'DOWNLOAD_NOT_ELIGIBLE'],
+    ['aborted', 'ABORTED'],
+    ['lease-lost', 'LEASE_LOST'],
+  ] as const)(
+    'retires fresh authority after post-resolution %s',
+    async (boundary, code) => {
+      const fixture = await makeFixture();
+      const controller = new AbortController();
+      let fresh: ResolvedGithubTemplateSource | undefined;
+      const resolver: GithubTemplateSourceResolverPort = {
+        resolveAdvisory: fixture.resolver.resolveAdvisory,
+        async resolveForDownload(input) {
+          if (boundary === 'ineligible') {
+            fresh = await resolveGithubTemplateSource({
+              source: parseProjectTemplateGithubSourceSpec(input.source),
+              metadata: fixture.metadata,
+              current: {
+                owner: fixture.advisory.source.owner,
+                repo: fixture.advisory.source.repo,
+                repositoryUrl: fixture.advisory.source.repositoryUrl,
+                canonicalSource: fixture.advisory.source.canonicalSource,
+                version: fixture.advisory.release.version,
+                sha256: fixture.advisory.release.sha256,
+                commit: fixture.advisory.source.commit,
+                descriptorSha256:
+                  fixture.advisory.source.descriptorSha256,
+              },
+            });
+          } else {
+            fresh = await fixture.resolver.resolveForDownload(input);
+          }
+          if (boundary === 'aborted') controller.abort();
+          if (boundary === 'lease-lost') {
+            unlinkSync(join(
+              fixture.projectRoot,
+              '.takt-template-state',
+              'apply.lock',
+            ));
+          }
+          return fresh;
+        },
+      };
+
+      await expect(downloadGithubTemplateSource({
+        projectRoot: fixture.projectRoot,
+        source: fixture.source,
+        advisory: fixture.advisory,
+        resolver,
+        asset: fixture.asset,
+        cacheRoot: fixture.cacheRoot,
+        authenticator: fixture.authenticator,
+        verifier: fixture.verifier,
+        signal: controller.signal,
+      })).rejects.toMatchObject({ code });
+
+      expect(fresh).toBeDefined();
+      expect(() =>
+        githubUpdateCheck.claimResolvedGithubTemplateSourceForDownload(fresh)
+      ).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+      expect(fixture.assetCalls).toEqual([]);
+      expect(readdirSync(fixture.cacheRoot)).toEqual([]);
+    },
+  );
 
   it.each([
     'kind',
@@ -521,16 +800,82 @@ describe('GitHub template download orchestrator O1', () => {
       hardBlocked: true,
       downloadEligible: false,
     };
-    const advisory = Object.freeze({
-      ...fixture.advisory,
-      [field]: replacements[field],
-    }) as ResolvedGithubTemplateSource;
+    const sourceFields = new Set([
+      'owner',
+      'repo',
+      'repositoryUrl',
+      'canonicalSource',
+      'requestedRef',
+      'commit',
+      'descriptorSha256',
+    ]);
+    const releaseFields: Record<string, string> = {
+      releaseTag: 'tag',
+      releaseId: 'id',
+      sha256: 'sha256',
+      version: 'version',
+    };
+    const assetFields: Record<string, string> = {
+      assetId: 'id',
+      assetName: 'name',
+      assetSize: 'size',
+    };
+    const checksumFields: Record<string, string> = {
+      checksumAssetId: 'id',
+      checksumAssetName: 'name',
+      checksumAssetSize: 'size',
+    };
+    let advisory: GithubTemplateSourceAdvisory;
+    if (sourceFields.has(field)) {
+      advisory = Object.freeze({
+        ...fixture.advisory,
+        source: Object.freeze({
+          ...fixture.advisory.source,
+          [field]: replacements[field],
+        }),
+      }) as GithubTemplateSourceAdvisory;
+    } else if (field in releaseFields) {
+      advisory = Object.freeze({
+        ...fixture.advisory,
+        release: Object.freeze({
+          ...fixture.advisory.release,
+          [releaseFields[field]!]: replacements[field],
+        }),
+      }) as GithubTemplateSourceAdvisory;
+    } else if (field in assetFields) {
+      advisory = Object.freeze({
+        ...fixture.advisory,
+        release: Object.freeze({
+          ...fixture.advisory.release,
+          asset: Object.freeze({
+            ...fixture.advisory.release.asset,
+            [assetFields[field]!]: replacements[field],
+          }),
+        }),
+      }) as GithubTemplateSourceAdvisory;
+    } else if (field in checksumFields) {
+      advisory = Object.freeze({
+        ...fixture.advisory,
+        release: Object.freeze({
+          ...fixture.advisory.release,
+          checksumAsset: Object.freeze({
+            ...fixture.advisory.release.checksumAsset,
+            [checksumFields[field]!]: replacements[field],
+          }),
+        }),
+      }) as GithubTemplateSourceAdvisory;
+    } else {
+      advisory = Object.freeze({
+        ...fixture.advisory,
+        [field]: replacements[field],
+      }) as GithubTemplateSourceAdvisory;
+    }
 
     await expect(downloadGithubTemplateSource({
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -565,7 +910,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -605,7 +950,7 @@ describe('GitHub template download orchestrator O1', () => {
         projectRoot: fixture.projectRoot,
         source: fixture.source,
         advisory: fixture.advisory,
-        metadata: fixture.metadata,
+        resolver: fixture.resolver,
         asset: fixture.asset,
         cacheRoot: fixture.cacheRoot,
         authenticator: {
@@ -659,7 +1004,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -691,7 +1036,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -719,7 +1064,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -741,7 +1086,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: {
@@ -774,7 +1119,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -807,7 +1152,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -859,7 +1204,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -877,7 +1222,7 @@ describe('GitHub template download orchestrator O1', () => {
   it.each([
     'options',
     'advisory',
-    'metadata',
+    'resolver',
     'asset',
     'authenticator',
     'verifier',
@@ -906,7 +1251,7 @@ describe('GitHub template download orchestrator O1', () => {
         projectRoot: fixture.projectRoot,
         source: fixture.source,
         advisory: fixture.advisory,
-        metadata: fixture.metadata,
+        resolver: fixture.resolver,
         asset: fixture.asset,
         cacheRoot: fixture.cacheRoot,
         authenticator: fixture.authenticator,
@@ -1000,13 +1345,13 @@ describe('GitHub template download orchestrator O1', () => {
       const advisory = Object.freeze({
         ...fixture.advisory,
         declaredDependencies: dependencies,
-      }) as ResolvedGithubTemplateSource;
+      }) as GithubTemplateSourceAdvisory;
 
       await expect(downloadGithubTemplateSource({
         projectRoot: fixture.projectRoot,
         source: fixture.source,
         advisory,
-        metadata: fixture.metadata,
+        resolver: fixture.resolver,
         asset: fixture.asset,
         cacheRoot: fixture.cacheRoot,
         authenticator: fixture.authenticator,
@@ -1024,7 +1369,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
@@ -1049,6 +1394,54 @@ describe('GitHub template download orchestrator O1', () => {
     expect(fixture.assetCalls).toEqual([]);
   });
 
+  it('rejects resolver accessors, extra keys, and the retired metadata option', async () => {
+    const fixture = await makeFixture();
+    let executions = 0;
+    const accessorResolver = Object.defineProperty(
+      {
+        resolveAdvisory: fixture.resolver.resolveAdvisory,
+      },
+      'resolveForDownload',
+      {
+        enumerable: true,
+        get() {
+          executions += 1;
+          throw new Error('must not execute');
+        },
+      },
+    );
+    const extraResolver = {
+      ...fixture.resolver,
+      credential: 'ghp_must_not_cross_boundary',
+    };
+    const base = {
+      projectRoot: fixture.projectRoot,
+      source: fixture.source,
+      advisory: fixture.advisory,
+      asset: fixture.asset,
+      cacheRoot: fixture.cacheRoot,
+      authenticator: fixture.authenticator,
+      verifier: fixture.verifier,
+    };
+
+    for (const resolver of [accessorResolver, extraResolver]) {
+      await expect(downloadGithubTemplateSource({
+        ...base,
+        resolver,
+      } as Parameters<typeof downloadGithubTemplateSource>[0]))
+        .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    }
+    await expect(downloadGithubTemplateSource({
+      ...base,
+      metadata: fixture.metadata,
+    } as unknown as Parameters<typeof downloadGithubTemplateSource>[0]))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    expect(executions).toBe(0);
+    expect(fixture.resolverInputs).toEqual([]);
+    expect(fixture.assetCalls).toEqual([]);
+  });
+
   it.each(['source', 'projectRoot', 'cacheRoot', 'advisory', 'current'] as const)(
     'rejects malformed %s before remote or lease work',
     async (field) => {
@@ -1057,7 +1450,7 @@ describe('GitHub template download orchestrator O1', () => {
         projectRoot: fixture.projectRoot,
         source: fixture.source,
         advisory: fixture.advisory,
-        metadata: fixture.metadata,
+        resolver: fixture.resolver,
         asset: fixture.asset,
         cacheRoot: fixture.cacheRoot,
         authenticator: fixture.authenticator,
@@ -1069,7 +1462,13 @@ describe('GitHub template download orchestrator O1', () => {
         cacheRoot: `${fixture.cacheRoot}/.`,
         advisory: Object.freeze({
           ...fixture.advisory,
-          assetSize: '1',
+          release: Object.freeze({
+            ...fixture.advisory.release,
+            asset: Object.freeze({
+              ...fixture.advisory.release.asset,
+              size: '1',
+            }),
+          }),
         }),
         current: Object.freeze({ owner: 'missing-fields' }),
       };
@@ -1089,13 +1488,15 @@ describe('GitHub template download orchestrator O1', () => {
     },
   );
 
-  it('uses port methods captured before metadata can replace them', async () => {
+  it('uses resolver methods and receiver captured before replacement', async () => {
     const fixture = await makeFixture();
     const authenticator = { ...fixture.authenticator };
     const verifier = { ...fixture.verifier };
     let replaced = false;
-    const metadata: GithubTemplateSourceMetadataPort = {
-      async resolveRefToCommit(input) {
+    const resolver: GithubTemplateSourceResolverPort = {
+      resolveAdvisory: fixture.resolver.resolveAdvisory,
+      async resolveForDownload(input) {
+        expect(this).toBe(resolver);
         if (!replaced) {
           replaced = true;
           authenticator.acquireSigningKey = async () => {
@@ -1104,17 +1505,11 @@ describe('GitHub template download orchestrator O1', () => {
           verifier.verify = async () => {
             throw new Error('replacement verifier');
           };
+          resolver.resolveForDownload = async () => {
+            throw new Error('replacement resolver');
+          };
         }
-        return fixture.metadata.resolveRefToCommit(input);
-      },
-      readFileAtCommit(input) {
-        return fixture.metadata.readFileAtCommit(input);
-      },
-      getReleaseByTag(input) {
-        return fixture.metadata.getReleaseByTag(input);
-      },
-      readReleaseAsset(input) {
-        return fixture.metadata.readReleaseAsset(input);
+        return fixture.resolver.resolveForDownload(input);
       },
     };
 
@@ -1122,7 +1517,7 @@ describe('GitHub template download orchestrator O1', () => {
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory: fixture.advisory,
-      metadata,
+      resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator,
@@ -1142,23 +1537,32 @@ describe('GitHub template download orchestrator O1', () => {
       commit: OTHER_COMMIT,
       descriptorSha256: 'c'.repeat(64),
     };
-    const advisory = await resolveGithubTemplateSource({
-      source: parseProjectTemplateGithubSourceSpec(fixture.source),
-      metadata: fixture.metadata,
-      current,
-    });
+    const advisory = demoteResolvedGithubTemplateSourceToAdvisory(
+      await resolveGithubTemplateSource({
+        source: parseProjectTemplateGithubSourceSpec(fixture.source),
+        metadata: fixture.metadata,
+        current,
+      }),
+    );
     fixture.calls.length = 0;
 
     await expect(downloadGithubTemplateSource({
       projectRoot: fixture.projectRoot,
       source: fixture.source,
       advisory,
-      metadata: fixture.metadata,
+      resolver: fixture.resolver,
       asset: fixture.asset,
       cacheRoot: fixture.cacheRoot,
       authenticator: fixture.authenticator,
       verifier: fixture.verifier,
       current,
     })).resolves.toMatchObject({ status: 'downloaded' });
+    expect(fixture.resolverInputs).toHaveLength(1);
+    expect(Reflect.ownKeys(fixture.resolverInputs[0]!))
+      .toEqual(['source', 'current']);
+    expect(Object.isFrozen(fixture.resolverInputs[0])).toBe(true);
+    expect(Object.isFrozen(fixture.resolverInputs[0]!.current)).toBe(true);
+    expect(fixture.resolverInputs[0]!.current).not.toBe(current);
+    expect(fixture.resolverInputs[0]!.current).toEqual(current);
   });
 });
