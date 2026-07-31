@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import type {
@@ -739,6 +740,324 @@ describe('project-template artifact download D4 retry bridge', () => {
     });
     await value.iterator.return!();
     expect(credential.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts bounded data-only instrumentation symbols on a native Promise', async () => {
+    const credential = controlledCredential();
+    const storage = new AsyncLocalStorage<{ readonly trace: string }>();
+    const promise = storage.run(
+      { trace: 'test' },
+      () => runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>,
+    );
+    const symbolValueTrap = vi.fn(() => {
+      throw new Error('SECRET instrumentation value');
+    });
+    const opaqueValue = new Proxy(Object.freeze({}), {
+      get: symbolValueTrap,
+    });
+    Object.defineProperty(promise, Symbol('instrumentation'), {
+      configurable: true,
+      enumerable: true,
+      value: opaqueValue,
+      writable: true,
+    });
+    expect(Reflect.ownKeys(promise).some(
+      (key) => typeof key === 'symbol',
+    )).toBe(true);
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    value.attempts[0]!.settlement!.chunk(Uint8Array.from([8]));
+
+    await expect(pending).resolves.toEqual({
+      value: Uint8Array.from([8]),
+      done: false,
+    });
+    await value.iterator.return!();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
+    expect(symbolValueTrap).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'rejects an enumerable=%s instrumentation symbol accessor without invoking it',
+    async (enumerable) => {
+      const credential = controlledCredential();
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const trap = vi.fn(() => credential.credential);
+      Object.defineProperty(promise, Symbol('hostile'), {
+        configurable: true,
+        enumerable,
+        get: trap,
+      });
+      const value = harness(1_000_000, {
+        unmockedAcquire: true,
+        acquireCredential: () => promise,
+      });
+
+      await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
+      expect(trap).not.toHaveBeenCalled();
+      expect(value.createAttempt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bounds instrumentation symbols before attaching a reaction', async () => {
+    const credential = controlledCredential();
+    const createPromise = (symbolCount: number) => {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const existing = Reflect.ownKeys(promise).filter(
+        (key) => typeof key === 'symbol',
+      ).length;
+      for (let index = existing; index < symbolCount; index += 1) {
+        Object.defineProperty(promise, Symbol(`instrumentation-${index}`), {
+          configurable: true,
+          value: index,
+        });
+      }
+      return promise;
+    };
+    const accepted = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => createPromise(8),
+    });
+    const pending = accepted.iterator.next();
+    await Promise.resolve();
+    accepted.attempts[0]!.settlement!.chunk(Uint8Array.from([9]));
+    await expect(pending).resolves.toMatchObject({ done: false });
+    await accepted.iterator.return!();
+
+    const rejected = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => createPromise(9),
+    });
+    await expectCode(rejected.iterator.next(), 'BRIDGE_FAILURE');
+    expect(rejected.createAttempt).not.toHaveBeenCalled();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects hostile Promise descriptors without invoking their traps', async () => {
+    const credential = controlledCredential();
+    const candidates: Array<{
+      readonly promise: Promise<DisposableProjectTemplateGhCredential>;
+      readonly trap: ReturnType<typeof vi.fn>;
+    }> = [];
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const trap = vi.fn(() => {
+        throw new Error('SECRET species');
+      });
+      Object.defineProperty(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+        { configurable: true, get: trap },
+      );
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+      )!;
+      const trap = vi.fn();
+      Object.defineProperty(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+        { ...descriptor, set: trap },
+      );
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const trap = vi.fn();
+      Object.defineProperty(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+        { configurable: true, value: Promise },
+      );
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+      )!;
+      const trap = vi.fn();
+      Object.defineProperty(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+        {
+          ...descriptor,
+          get: new Proxy(descriptor.get!, { apply: trap }),
+        },
+      );
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const trap = vi.fn(() => 'function get [Symbol.species]() { [native code] }');
+      const getter = () => Promise;
+      Object.defineProperty(getter, 'toString', { value: trap });
+      Object.defineProperty(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+        { configurable: true, get: getter },
+      );
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+      )!;
+      const trap = vi.fn();
+      Object.defineProperty(
+        Object.getPrototypeOf(promise).constructor,
+        Symbol.species,
+        { ...descriptor, enumerable: true },
+      );
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const trap = vi.fn(() => Promise);
+      Object.defineProperty(Object.getPrototypeOf(promise), 'constructor', {
+        configurable: true,
+        get: trap,
+      });
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const constructor = Object.getPrototypeOf(promise).constructor;
+      const trap = vi.fn();
+      Object.defineProperty(Object.getPrototypeOf(promise), 'constructor', {
+        configurable: true,
+        enumerable: false,
+        value: constructor,
+        writable: false,
+      });
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const trap = vi.fn(() => Promise);
+      Object.defineProperty(promise, Symbol('hostile'), {
+        configurable: true,
+        get: trap,
+      });
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const trap = vi.fn();
+      Object.defineProperty(promise, 'then', {
+        configurable: true,
+        value: trap,
+      });
+      candidates.push({ promise, trap });
+    }
+    {
+      const promise = runInNewContext(
+        'Promise.resolve(credential)',
+        { credential: credential.credential },
+      ) as Promise<DisposableProjectTemplateGhCredential>;
+      const trap = vi.fn(() => 'Promise');
+      Object.defineProperty(
+        Object.getPrototypeOf(promise),
+        Symbol.toStringTag,
+        { configurable: true, get: trap },
+      );
+      candidates.push({ promise, trap });
+    }
+
+    for (const { promise, trap } of candidates) {
+      const value = harness(1_000_000, {
+        unmockedAcquire: true,
+        acquireCredential: () => promise,
+      });
+
+      await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
+      expect(trap).not.toHaveBeenCalled();
+      expect(value.createAttempt).not.toHaveBeenCalled();
+    }
+    expect(credential.dispose).not.toHaveBeenCalled();
+  });
+
+  it('disposes a late cross-realm credential after owner return', async () => {
+    const credential = controlledCredential();
+    const context = {} as {
+      promise: Promise<DisposableProjectTemplateGhCredential>;
+      resolveCredential: (
+        credential: DisposableProjectTemplateGhCredential,
+      ) => void;
+    };
+    runInNewContext(`
+      globalThis.promise = new Promise((resolve) => {
+        globalThis.resolveCredential = resolve;
+      });
+    `, context);
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => context.promise,
+    });
+    const pending = value.iterator.next();
+
+    await value.iterator.return!();
+    await expect(pending).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+    context.resolveCredential(credential.credential);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
+    expect(value.createAttempt).not.toHaveBeenCalled();
   });
 
   it('rejects a native Promise with an own constructor without reading it', async () => {

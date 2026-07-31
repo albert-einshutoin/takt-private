@@ -35,6 +35,7 @@ const ATTEMPT_TIMEOUT_MS = 120_000;
 const MAX_TRANSACTIONAL_TIMER_ARMS = 8;
 const TIMER_SETUP_MARGIN_MS = 1;
 const RETRY_DELAYS_MS = Object.freeze([0, 250, 1_000] as const);
+const MAX_PROMISE_INSTRUMENTATION_SYMBOLS = 8;
 const NATIVE_PROMISE_THEN = Promise.prototype.then;
 const FUNCTION_TO_STRING = Function.prototype.toString;
 const NATIVE_PROMISE_CONSTRUCTOR_SOURCE = Reflect.apply(
@@ -42,6 +43,16 @@ const NATIVE_PROMISE_CONSTRUCTOR_SOURCE = Reflect.apply(
   Promise,
   [],
 );
+const NATIVE_PROMISE_SPECIES_GETTER_SOURCE = Reflect.apply(
+  FUNCTION_TO_STRING,
+  Object.getOwnPropertyDescriptor(Promise, Symbol.species)?.get,
+  [],
+);
+const NATIVE_PROMISE_METHOD_SOURCES = Object.freeze({
+  then: Reflect.apply(FUNCTION_TO_STRING, Promise.prototype.then, []),
+  catch: Reflect.apply(FUNCTION_TO_STRING, Promise.prototype.catch, []),
+  finally: Reflect.apply(FUNCTION_TO_STRING, Promise.prototype.finally, []),
+});
 const NativeAbortController = AbortController;
 const NativeUint8Array = Uint8Array;
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(
@@ -831,19 +842,46 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
     || value === null
     || types.isProxy(value)
     || !types.isPromise(value)
-    || Reflect.ownKeys(value).length !== 0
   ) return false;
   try {
+    const valueKeys = Reflect.ownKeys(value);
+    const symbolKeys = valueKeys.filter(
+      (key): key is symbol => typeof key === 'symbol',
+    );
+    if (
+      valueKeys.some((key) => typeof key === 'string')
+      || symbolKeys.length > MAX_PROMISE_INSTRUMENTATION_SYMBOLS
+      || symbolKeys.some((key) => {
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        return descriptor === undefined || !('value' in descriptor);
+      })
+    ) return false;
+    // Node's AsyncLocalStorage (and therefore Vitest/OTel instrumentation)
+    // adds own symbol data to genuine native Promises. Promise reaction
+    // semantics never consult those instance symbols, so bounded data-only
+    // entries are compatible; every string key and symbol accessor is rejected
+    // without reading or invoking its value. Data descriptor flags are not
+    // restricted because Node 20 emits enumerable entries and no flag
+    // participates in Promise reaction semantics.
+
     // A dependency may execute in another VM realm, so identity against this
     // realm's Promise.prototype would reject a genuine native Promise. Native
-    // source plus the constructor/prototype cycle rejects subclasses without
-    // consulting mutable then/species hooks; settlement still uses our
+    // source plus pristine descriptors rejects hostile subclass hooks without
+    // invoking mutable then/species properties; settlement still uses our
     // captured intrinsic `then` below.
     const prototype = Object.getPrototypeOf(value) as unknown;
     if (
       typeof prototype !== 'object'
       || prototype === null
       || types.isProxy(prototype)
+    ) return false;
+    const prototypeKeys = Reflect.ownKeys(prototype);
+    if (
+      prototypeKeys.length !== 5
+      || !['constructor', 'then', 'catch', 'finally'].every(
+        (key) => prototypeKeys.includes(key),
+      )
+      || !prototypeKeys.includes(Symbol.toStringTag)
     ) return false;
     const constructorDescriptor = Object.getOwnPropertyDescriptor(
       prototype,
@@ -854,6 +892,9 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
       || !('value' in constructorDescriptor)
       || typeof constructorDescriptor.value !== 'function'
       || types.isProxy(constructorDescriptor.value)
+      || constructorDescriptor.writable !== true
+      || constructorDescriptor.enumerable !== false
+      || constructorDescriptor.configurable !== true
     ) return false;
     const constructor = constructorDescriptor.value as
       (...args: unknown[]) => unknown;
@@ -861,10 +902,57 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
       constructor,
       'prototype',
     );
+    const speciesDescriptor = Object.getOwnPropertyDescriptor(
+      constructor,
+      Symbol.species,
+    );
+    const speciesGetter = speciesDescriptor !== undefined
+      && 'get' in speciesDescriptor
+      ? speciesDescriptor.get
+      : undefined;
+    const tagDescriptor = Object.getOwnPropertyDescriptor(
+      prototype,
+      Symbol.toStringTag,
+    );
+    const methodsArePristine = (
+      ['then', 'catch', 'finally'] as const
+    ).every((name) => {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+      return (
+        descriptor !== undefined
+        && 'value' in descriptor
+        && typeof descriptor.value === 'function'
+        && !types.isProxy(descriptor.value)
+        && descriptor.writable === true
+        && descriptor.enumerable === false
+        && descriptor.configurable === true
+        && Reflect.apply(FUNCTION_TO_STRING, descriptor.value, [])
+          === NATIVE_PROMISE_METHOD_SOURCES[name]
+      );
+    });
     return (
       prototypeDescriptor !== undefined
       && 'value' in prototypeDescriptor
       && prototypeDescriptor.value === prototype
+      && prototypeDescriptor.writable === false
+      && prototypeDescriptor.enumerable === false
+      && prototypeDescriptor.configurable === false
+      && speciesDescriptor !== undefined
+      && 'get' in speciesDescriptor
+      && typeof speciesGetter === 'function'
+      && !types.isProxy(speciesGetter)
+      && speciesDescriptor.set === undefined
+      && speciesDescriptor.enumerable === false
+      && speciesDescriptor.configurable === true
+      && Reflect.apply(FUNCTION_TO_STRING, speciesGetter, [])
+        === NATIVE_PROMISE_SPECIES_GETTER_SOURCE
+      && tagDescriptor !== undefined
+      && 'value' in tagDescriptor
+      && tagDescriptor.value === 'Promise'
+      && tagDescriptor.writable === false
+      && tagDescriptor.enumerable === false
+      && tagDescriptor.configurable === true
+      && methodsArePristine
       && Reflect.apply(FUNCTION_TO_STRING, constructor, [])
         === NATIVE_PROMISE_CONSTRUCTOR_SOURCE
     );
