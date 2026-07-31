@@ -7,6 +7,10 @@ import {
   type ProjectTemplateRepertoireDependencyMetadataChangeCode,
   type ProjectTemplateRepertoireDependencyPlanOptions,
 } from '../src/features/project-template/repertoire-dependency-plan.js';
+import {
+  renderProjectTemplateRepertoireDependencyPlanHuman,
+  renderProjectTemplateRepertoireDependencyPlanJson,
+} from '../src/features/project-template/repertoire-dependency-preview.js';
 
 declare const claim: ProjectTemplateRepertoireDependencyInspectionPlanningClaim;
 
@@ -29,6 +33,12 @@ const metadataChange:
   plan.metadataChanges[0];
 void previousLockSha256;
 void metadataChange;
+const humanPreview: string =
+  renderProjectTemplateRepertoireDependencyPlanHuman(plan);
+const jsonPreview: string =
+  renderProjectTemplateRepertoireDependencyPlanJson(plan);
+void humanPreview;
+void jsonPreview;
 
 // @ts-expect-error A verified inspection is not single-use planning ownership.
 options.inspectionClaim = options.inspectionClaim.inspection;
@@ -36,3 +46,5 @@ options.inspectionClaim = options.inspectionClaim.inspection;
 options.previousLock = { state: 'present' };
 // @ts-expect-error Future schemas require a distinct plan contract.
 plan.schemaVersion = '2.0';
+// @ts-expect-error A planning claim is not a sealed dependency plan.
+renderProjectTemplateRepertoireDependencyPlanHuman(claim);
