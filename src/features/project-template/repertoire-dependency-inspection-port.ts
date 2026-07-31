@@ -22,10 +22,11 @@ const MAX_INSTALLED_VERSION_LENGTH = 128;
 const PRECONDITION_TOKEN_DOMAIN =
   'takt.project-template.repertoire-dependency-inspection-precondition.v1\u0000';
 
+const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_REFLECT_RECEIVER = Reflect;
+const CAPTURED_JSON_RECEIVER = JSON;
+const CAPTURED_ERROR = Error;
 const CAPTURED_ARRAY_IS_ARRAY = Array.isArray;
-const CAPTURED_ARRAY_INCLUDES = Array.prototype.includes;
-const CAPTURED_ARRAY_MAP = Array.prototype.map;
-const CAPTURED_ARRAY_PUSH = Array.prototype.push;
 const CAPTURED_CREATE_HASH = createHash;
 const CAPTURED_JSON_STRINGIFY = JSON.stringify;
 const CAPTURED_NUMBER = Number;
@@ -34,6 +35,7 @@ const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const CAPTURED_STRING = String;
 const CAPTURED_OBJECT_FREEZE = Object.freeze;
 const CAPTURED_OBJECT_CREATE = Object.create;
+const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
   Object.getOwnPropertyDescriptor;
 const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
@@ -58,7 +60,7 @@ const CAPTURED_ABORTED_GETTER = (() => {
     'aborted',
   );
   if (descriptor?.get === undefined) {
-    throw new Error('AbortSignal aborted intrinsic is unavailable');
+    throw new CAPTURED_ERROR('AbortSignal aborted intrinsic is unavailable');
   }
   return descriptor.get;
 })();
@@ -192,7 +194,7 @@ const PLANNING_CLAIM_AUTHORITIES =
 function freeze<T>(value: T): Readonly<T> {
   return CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_FREEZE,
-    Object,
+    CAPTURED_OBJECT_RECEIVER,
     [value],
   ) as Readonly<T>;
 }
@@ -272,6 +274,76 @@ ProjectTemplateRepertoireDependencyInspectionError {
 
 type DescriptorMap = Record<PropertyKey, PropertyDescriptor | undefined>;
 
+function shapeFailure(): Error {
+  // Why: validation sentinels must not resolve the mutable global Error
+  // binding after initialization, where an accessor could reenter inspection.
+  return new CAPTURED_ERROR();
+}
+
+function isAllowedKey(
+  allowedKeys: readonly string[],
+  key: string,
+): boolean {
+  for (let index = 0; index < allowedKeys.length; index += 1) {
+    if (allowedKeys[index] === key) return true;
+  }
+  return false;
+}
+
+function defineExactDataProperty(
+  target: object,
+  key: PropertyKey,
+  value: unknown,
+  configurable: boolean,
+  enumerable: boolean,
+  writable: boolean,
+): void {
+  const descriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_CREATE,
+    CAPTURED_OBJECT_RECEIVER,
+    [null],
+  ) as PropertyDescriptor;
+  // Why: a null-prototype descriptor avoids inherited get/set hooks while
+  // defining an own array index instead of invoking an inherited setter.
+  descriptor.configurable = configurable;
+  descriptor.enumerable = enumerable;
+  descriptor.value = value;
+  descriptor.writable = writable;
+  CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_DEFINE_PROPERTY,
+    CAPTURED_OBJECT_RECEIVER,
+    [target, key, descriptor],
+  );
+}
+
+function createExactArray<T>(length: number): T[] {
+  const result: T[] = [];
+  defineExactDataProperty(
+    result,
+    'length',
+    length,
+    false,
+    false,
+    true,
+  );
+  return result;
+}
+
+function defineExactArrayValue(
+  target: unknown[],
+  index: number,
+  value: unknown,
+): void {
+  defineExactDataProperty(
+    target,
+    CAPTURED_STRING(index),
+    value,
+    true,
+    true,
+    true,
+  );
+}
+
 function exactOwnDataRecord(
   value: unknown,
   allowedKeys: readonly string[],
@@ -281,28 +353,28 @@ function exactOwnDataRecord(
     || value === null
     || CAPTURED_TYPES_IS_PROXY(value)
     || CAPTURED_ARRAY_IS_ARRAY(value)
-  ) throw new Error();
+  ) throw shapeFailure();
   const prototype = CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_GET_PROTOTYPE_OF,
-    Object,
+    CAPTURED_OBJECT_RECEIVER,
     [value],
   ) as object | null;
   if (prototype !== CAPTURED_OBJECT_PROTOTYPE && prototype !== null) {
-    throw new Error();
+    throw shapeFailure();
   }
   const descriptors = CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
-    Object,
+    CAPTURED_OBJECT_RECEIVER,
     [value],
   ) as unknown as DescriptorMap;
   const keys = CAPTURED_REFLECT_APPLY(
     CAPTURED_REFLECT_OWN_KEYS,
-    Reflect,
+    CAPTURED_REFLECT_RECEIVER,
     [descriptors],
   ) as PropertyKey[];
   const snapshot = CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_CREATE,
-    Object,
+    CAPTURED_OBJECT_RECEIVER,
     [null],
   ) as Record<string, unknown>;
   // Why: `for...of` would consult a mutable Array iterator after module init,
@@ -312,14 +384,10 @@ function exactOwnDataRecord(
     const descriptor = descriptors[key];
     if (
       typeof key !== 'string'
-      || !CAPTURED_REFLECT_APPLY(
-        CAPTURED_ARRAY_INCLUDES,
-        allowedKeys,
-        [key],
-      )
+      || !isAllowedKey(allowedKeys, key)
       || descriptor === undefined
       || !('value' in descriptor)
-    ) throw new Error();
+    ) throw shapeFailure();
     snapshot[key] = descriptor.value;
   }
   return snapshot;
@@ -335,15 +403,15 @@ function exactOwnDataArray(
     || CAPTURED_TYPES_IS_PROXY(value)
     || CAPTURED_REFLECT_APPLY(
       CAPTURED_OBJECT_GET_PROTOTYPE_OF,
-      Object,
+      CAPTURED_OBJECT_RECEIVER,
       [value],
     ) !== CAPTURED_ARRAY_PROTOTYPE
-  ) throw new Error();
+  ) throw shapeFailure();
   // Why: expected-length and bounded-capability failures must precede an
   // attacker-sized descriptor enumeration.
   const lengthDescriptor = CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
-    Object,
+    CAPTURED_OBJECT_RECEIVER,
     [value, 'length'],
   ) as PropertyDescriptor | undefined;
   if (
@@ -359,11 +427,11 @@ function exactOwnDataArray(
       maxLength !== undefined
       && lengthDescriptor.value > maxLength
     )
-  ) throw new Error();
+  ) throw shapeFailure();
   const length = lengthDescriptor.value as number;
   const descriptors = CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
-    Object,
+    CAPTURED_OBJECT_RECEIVER,
     [value],
   ) as unknown as DescriptorMap;
   const snapshottedLengthDescriptor = descriptors['length'];
@@ -371,24 +439,20 @@ function exactOwnDataArray(
     snapshottedLengthDescriptor === undefined
     || !('value' in snapshottedLengthDescriptor)
     || snapshottedLengthDescriptor.value !== length
-  ) throw new Error();
+  ) throw shapeFailure();
   const keys = CAPTURED_REFLECT_APPLY(
     CAPTURED_REFLECT_OWN_KEYS,
-    Reflect,
+    CAPTURED_REFLECT_RECEIVER,
     [descriptors],
   ) as PropertyKey[];
-  if (keys.length !== length + 1) throw new Error();
-  const result: unknown[] = [];
+  if (keys.length !== length + 1) throw shapeFailure();
+  const result = createExactArray<unknown>(length);
   for (let index = 0; index < length; index += 1) {
     const descriptor = descriptors[CAPTURED_STRING(index)];
     if (descriptor === undefined || !('value' in descriptor)) {
-      throw new Error();
+      throw shapeFailure();
     }
-    CAPTURED_REFLECT_APPLY(
-      CAPTURED_ARRAY_PUSH,
-      result,
-      [descriptor.value],
-    );
+    defineExactArrayValue(result, index, descriptor.value);
   }
   for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
     const key = keys[keyIndex]!;
@@ -399,7 +463,7 @@ function exactOwnDataArray(
         || !regexpTest(ARRAY_INDEX_PATTERN, key)
         || CAPTURED_NUMBER(key) >= length
       )
-    ) throw new Error();
+    ) throw shapeFailure();
   }
   return result;
 }
@@ -412,18 +476,18 @@ function snapshotSignal(value: unknown): AbortSignal | undefined {
     || CAPTURED_TYPES_IS_PROXY(value)
     || CAPTURED_REFLECT_APPLY(
       CAPTURED_OBJECT_GET_PROTOTYPE_OF,
-      Object,
+      CAPTURED_OBJECT_RECEIVER,
       [value],
     ) !== CAPTURED_ABORT_SIGNAL_PROTOTYPE
-  ) throw new Error();
+  ) throw shapeFailure();
   const descriptors = CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
-    Object,
+    CAPTURED_OBJECT_RECEIVER,
     [value],
   ) as unknown as DescriptorMap;
   const keys = CAPTURED_REFLECT_APPLY(
     CAPTURED_REFLECT_OWN_KEYS,
-    Reflect,
+    CAPTURED_REFLECT_RECEIVER,
     [descriptors],
   ) as PropertyKey[];
   // Node carries private symbol-backed AbortSignal slots. Permit only symbol
@@ -435,7 +499,7 @@ function snapshotSignal(value: unknown): AbortSignal | undefined {
       typeof key !== 'symbol'
       || descriptor === undefined
       || !('value' in descriptor)
-    ) throw new Error();
+    ) throw shapeFailure();
   }
   CAPTURED_REFLECT_APPLY(CAPTURED_ABORTED_GETTER, value, []);
   return value as AbortSignal;
@@ -491,19 +555,28 @@ function snapshotDependencies(
     value,
     'request.dependencies',
   );
-  return freeze(CAPTURED_REFLECT_APPLY(
-    CAPTURED_ARRAY_MAP,
-    parsed,
-    [(dependency: ProjectTemplateRepertoireDependencyV1) => freeze({
+  const dependencies =
+    createExactArray<ProjectTemplateRepertoireDependencyV1>(parsed.length);
+  for (let index = 0; index < parsed.length; index += 1) {
+    const dependency = parsed[index]!;
+    const capabilities =
+      createExactArray<ProjectTemplateRepertoireCapabilityV1>(
+        dependency.capabilities.length,
+      );
+    if (dependency.capabilities.length === 1) {
+      defineExactArrayValue(capabilities, 0, 'edit');
+    }
+    defineExactArrayValue(dependencies, index, freeze({
       scope: dependency.scope,
       version: dependency.version,
       source: dependency.source,
       commit: dependency.commit,
-      capabilities: freeze(
-        dependency.capabilities.length === 0 ? [] : ['edit'],
-      ),
-    })],
-  )) as readonly ProjectTemplateRepertoireDependencyV1[];
+      capabilities: freeze(capabilities),
+    }));
+  }
+  return freeze(
+    dependencies,
+  ) as readonly ProjectTemplateRepertoireDependencyV1[];
 }
 
 function snapshotRequest(
@@ -524,7 +597,7 @@ function snapshotRequest(
     || typeof request['deadlineMs'] !== 'number'
     || !CAPTURED_NUMBER_IS_FINITE(request['deadlineMs'])
     || request['deadlineMs'] < 0
-  ) throw new Error();
+  ) throw shapeFailure();
   const signal = snapshotSignal(request['signal']);
   const dependencies = snapshotDependencies(request['dependencies']);
   return freeze({
@@ -544,7 +617,7 @@ function snapshotPort(
   if (
     typeof inspect !== 'function'
     || CAPTURED_TYPES_IS_PROXY(inspect)
-  ) throw new Error();
+  ) throw shapeFailure();
   return freeze({
     receiver: value as object,
     inspect: inspect as
@@ -572,7 +645,7 @@ function snapshotCapabilities(
   if (
     capabilities.length > 1
     || (capabilities.length === 1 && capabilities[0] !== 'edit')
-  ) throw new Error();
+  ) throw shapeFailure();
   return freeze(
     capabilities as ProjectTemplateRepertoireCapabilityV1[],
   );
@@ -602,7 +675,7 @@ Extract<ProjectTemplateRepertoireDependencyObservation, {
     || installed['version'].length > MAX_INSTALLED_VERSION_LENGTH
     || !regexpTest(SEMVER_PATTERN, installed['version'])
     || !regexpTest(INSTALLED_SOURCE_PATTERN, installed['source'])
-  ) throw new Error();
+  ) throw shapeFailure();
   return freeze({
     source: installed['source'] as `github:${string}/${string}`,
     ref: installed['ref'],
@@ -622,7 +695,7 @@ function snapshotObservation(
     'reason',
     'installed',
   ]);
-  if (envelope['scope'] !== expectedScope) throw new Error();
+  if (envelope['scope'] !== expectedScope) throw shapeFailure();
   if (envelope['state'] === 'missing') {
     const missing = exactOwnDataRecord(value, ['scope', 'state']);
     return freeze({
@@ -636,7 +709,7 @@ function snapshotObservation(
       'state',
       'reason',
     ]);
-    if (invalid['reason'] !== 'INVALID_INSTALLATION') throw new Error();
+    if (invalid['reason'] !== 'INVALID_INSTALLATION') throw shapeFailure();
     return freeze({
       scope: invalid['scope'] as `@${string}/${string}`,
       state: 'invalid',
@@ -655,7 +728,7 @@ function snapshotObservation(
       installed: snapshotInstalled(installed['installed']),
     });
   }
-  throw new Error();
+  throw shapeFailure();
 }
 
 function snapshotRawResult(
@@ -677,7 +750,7 @@ function snapshotRawResult(
         && value !== null
         && CAPTURED_TYPES_IS_PROMISE(value)
       )
-    ) throw new Error();
+    ) throw shapeFailure();
     const raw = exactOwnDataRecord(value, [
       'witnessSha256',
       'observations',
@@ -685,24 +758,26 @@ function snapshotRawResult(
     if (
       typeof raw['witnessSha256'] !== 'string'
       || !regexpTest(SHA256_PATTERN, raw['witnessSha256'])
-    ) throw new Error();
+    ) throw shapeFailure();
     const rawObservations = exactOwnDataArray(
       raw['observations'],
       dependencies.length,
       dependencies.length,
     );
     const observations =
-      CAPTURED_REFLECT_APPLY(
-        CAPTURED_ARRAY_MAP,
-        rawObservations,
-        [(
-          observation: unknown,
-          index: number,
-        ) => snapshotObservation(
-          observation,
+      createExactArray<ProjectTemplateRepertoireDependencyObservation>(
+        rawObservations.length,
+      );
+    for (let index = 0; index < rawObservations.length; index += 1) {
+      defineExactArrayValue(
+        observations,
+        index,
+        snapshotObservation(
+          rawObservations[index],
           dependencies[index]!.scope,
-        )],
-      ) as ProjectTemplateRepertoireDependencyObservation[];
+        ),
+      );
+    }
     return freeze({
       witnessSha256: raw['witnessSha256'],
       observations: freeze(observations),
@@ -725,7 +800,7 @@ function sha256(value: string): string {
 function canonicalString(value: string): string {
   const json = CAPTURED_REFLECT_APPLY(
     CAPTURED_JSON_STRINGIFY,
-    JSON,
+    CAPTURED_JSON_RECEIVER,
     [value],
   ) as string | undefined;
   if (json === undefined) throw bridgeFailure();

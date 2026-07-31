@@ -167,6 +167,102 @@ describe('project template source descriptor', () => {
     });
   });
 
+  it('uses captured receivers for shared dependency parsing', () => {
+    const intrinsicObject = Object;
+    const intrinsicReflect = Reflect;
+    const defineProperty = intrinsicObject.defineProperty;
+    const objectDescriptor = intrinsicObject.getOwnPropertyDescriptor(
+      globalThis,
+      'Object',
+    )!;
+    const reflectDescriptor = intrinsicObject.getOwnPropertyDescriptor(
+      globalThis,
+      'Reflect',
+    )!;
+    const dependencies = validDescriptor()['repertoireDependencies'];
+    let objectCalls = 0;
+    let reflectCalls = 0;
+    let reentryCalls = 0;
+    let attemptedReentry = false;
+    let parsed;
+    let failure: unknown;
+    const attemptReentry = () => {
+      if (attemptedReentry) return;
+      attemptedReentry = true;
+      reentryCalls += 1;
+      try {
+        parseProjectTemplateRepertoireDependencies([]);
+      } catch {
+        // Calling the nested parser boundary is itself the violation.
+      }
+    };
+    const objectGetter = () => {
+      objectCalls += 1;
+      attemptReentry();
+      return intrinsicObject;
+    };
+    const reflectGetter = () => {
+      reflectCalls += 1;
+      attemptReentry();
+      return intrinsicReflect;
+    };
+    const poisonedObjectDescriptor = {
+      configurable: true,
+      get: objectGetter,
+    };
+    const poisonedReflectDescriptor = {
+      configurable: true,
+      get: reflectGetter,
+    };
+
+    try {
+      defineProperty(globalThis, 'Object', poisonedObjectDescriptor);
+      defineProperty(globalThis, 'Reflect', poisonedReflectDescriptor);
+      try {
+        parsed = parseProjectTemplateRepertoireDependencies(dependencies);
+      } catch (error) {
+        failure = error;
+      }
+    } finally {
+      defineProperty(globalThis, 'Object', objectDescriptor);
+      defineProperty(globalThis, 'Reflect', reflectDescriptor);
+    }
+
+    expect(objectCalls).toBe(0);
+    expect(reflectCalls).toBe(0);
+    expect(reentryCalls).toBe(0);
+    expect(failure).toBeUndefined();
+    expect(parsed?.[0]?.scope).toBe('@acme/alpha');
+  });
+
+  it('rejects a hostile dependency field without coercing it', () => {
+    const dependencies = validDescriptor()['repertoireDependencies'];
+    let coercionCalls = 0;
+    let reentryCalls = 0;
+    let attemptedReentry = false;
+    const hostileField = {
+      [Symbol.toPrimitive]() {
+        coercionCalls += 1;
+        if (!attemptedReentry) {
+          attemptedReentry = true;
+          reentryCalls += 1;
+          parseProjectTemplateRepertoireDependencies([]);
+        }
+        return 'request.dependencies';
+      },
+    };
+
+    expect(() => parseProjectTemplateRepertoireDependencies(
+      dependencies,
+      hostileField as never,
+    )).toThrow(expect.objectContaining({
+      name: 'ProjectTemplateValidationError',
+      code: 'INVALID_SOURCE',
+    }));
+    expect(coercionCalls).toBe(0);
+    expect(reentryCalls).toBe(0);
+  });
+
   it('rejects an oversized dependency array before descriptor enumeration', async () => {
     const oversized: unknown[] = [];
     oversized.length = 1_000_000_000;

@@ -42,6 +42,8 @@ const DEPENDENCY_SOURCE_PATTERN = new RegExp(
 );
 const FORBIDDEN_GITHUB_REPOSITORY_PATTERN = /^(?:\.{1,2}|.*\.git)$/;
 const ARRAY_INDEX_PATTERN = /^(0|[1-9]\d*)$/;
+const INTRINSIC_OBJECT_RECEIVER = Object;
+const INTRINSIC_REFLECT_RECEIVER = Reflect;
 const INTRINSIC_ARRAY_IS_ARRAY = Array.isArray;
 const INTRINSIC_ARRAY_PROTOTYPE = Array.prototype;
 const INTRINSIC_NUMBER = Number;
@@ -232,6 +234,20 @@ export function parseProjectTemplateRepertoireDependencies(
   value: unknown,
   field = 'sourceDescriptor.repertoireDependencies',
 ): ProjectTemplateRepertoireDependencyV1[] {
+  // Why: `field` reaches validation messages. Restricting it to internal
+  // canonical paths prevents an untrusted coercion hook from reentering the
+  // parser while an error is being constructed.
+  if (
+    field !== 'sourceDescriptor.repertoireDependencies'
+    && field !== 'repertoireDependencyLock.dependencies'
+    && field !== 'request.dependencies'
+  ) {
+    throw new ProjectTemplateValidationError(
+      'INVALID_SOURCE',
+      'repertoire dependency field is invalid',
+      'sourceDescriptor.repertoireDependencies',
+    );
+  }
   const rawDependencies = snapshotDependencyArray(
     value,
     field,
@@ -275,7 +291,7 @@ function intrinsicRegExpExec(
 function dependencyDescriptors(value: object): DependencyDescriptorMap {
   return INTRINSIC_REFLECT_APPLY(
     INTRINSIC_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
-    Object,
+    INTRINSIC_OBJECT_RECEIVER,
     [value],
   ) as unknown as DependencyDescriptorMap;
 }
@@ -286,7 +302,7 @@ function dependencyOwnPropertyDescriptor(
 ): PropertyDescriptor | undefined {
   return INTRINSIC_REFLECT_APPLY(
     INTRINSIC_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
-    Object,
+    INTRINSIC_OBJECT_RECEIVER,
     [value, key],
   ) as PropertyDescriptor | undefined;
 }
@@ -296,7 +312,7 @@ function dependencyOwnKeys(
 ): PropertyKey[] {
   return INTRINSIC_REFLECT_APPLY(
     INTRINSIC_REFLECT_OWN_KEYS,
-    Reflect,
+    INTRINSIC_REFLECT_RECEIVER,
     [descriptors],
   ) as PropertyKey[];
 }
@@ -308,7 +324,7 @@ function defineDependencyDataProperty(
 ): void {
   const descriptor = INTRINSIC_REFLECT_APPLY(
     INTRINSIC_OBJECT_CREATE,
-    Object,
+    INTRINSIC_OBJECT_RECEIVER,
     [null],
   ) as PropertyDescriptor;
   // Why: ToPropertyDescriptor reads all six descriptor field names. A normal
@@ -320,7 +336,7 @@ function defineDependencyDataProperty(
   descriptor.writable = true;
   INTRINSIC_REFLECT_APPLY(
     INTRINSIC_OBJECT_DEFINE_PROPERTY,
-    Object,
+    INTRINSIC_OBJECT_RECEIVER,
     [target, key, descriptor],
   );
 }
@@ -347,7 +363,7 @@ function snapshotDependencyArray(
     !INTRINSIC_ARRAY_IS_ARRAY(value)
     || INTRINSIC_REFLECT_APPLY(
       INTRINSIC_OBJECT_GET_PROTOTYPE_OF,
-      Object,
+      INTRINSIC_OBJECT_RECEIVER,
       [value],
     ) !== INTRINSIC_ARRAY_PROTOTYPE
   ) {
@@ -446,7 +462,7 @@ function snapshotDependencyRecord(
   }
   const prototype = INTRINSIC_REFLECT_APPLY(
     INTRINSIC_OBJECT_GET_PROTOTYPE_OF,
-    Object,
+    INTRINSIC_OBJECT_RECEIVER,
     [value],
   ) as object | null;
   if (
@@ -462,7 +478,7 @@ function snapshotDependencyRecord(
   const keys = dependencyOwnKeys(descriptors);
   const snapshot = INTRINSIC_REFLECT_APPLY(
     INTRINSIC_OBJECT_CREATE,
-    Object,
+    INTRINSIC_OBJECT_RECEIVER,
     [null],
   ) as Record<string, unknown>;
   for (let index = 0; index < keys.length; index += 1) {

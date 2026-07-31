@@ -284,6 +284,304 @@ describe('project template repertoire dependency inspection authority G2', () =>
     expect(snapshot.observations[0]?.scope).toBe('@acme/repertoire');
   });
 
+  it('snapshots inspection arrays without species or inherited index hooks', () => {
+    const defineProperty = Object.defineProperty;
+    const originalConstructor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      'constructor',
+    )!;
+    const originalMap = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      'map',
+    )!;
+    const originalPush = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      'push',
+    )!;
+    const originalZero = Object.getOwnPropertyDescriptor(Array.prototype, '0');
+    const originalOne = Object.getOwnPropertyDescriptor(Array.prototype, '1');
+    const validOptions = {
+      request: request() as never,
+      port: portReturning(rawResult()),
+    };
+    const equivalentOptions = {
+      request: request() as never,
+      port: portReturning(rawResult()),
+    };
+    const invalidOptions = {
+      request: request({ manifestSha256: 'A'.repeat(64) }) as never,
+      port: portReturning(rawResult()),
+    };
+    const reentryOptions = {
+      request: request({ dependencies: [] }) as never,
+      port: portReturning(rawResult([])),
+    };
+    let constructorCalls = 0;
+    let indexSetterCalls = 0;
+    let mapCalls = 0;
+    let pushCalls = 0;
+    let reentryCalls = 0;
+    let attemptedReentry = false;
+    let reentryInspection:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let first:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let second:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let validFailure: unknown;
+    let invalidFailure: unknown;
+
+    const attemptReentry = () => {
+      if (attemptedReentry) return;
+      attemptedReentry = true;
+      reentryCalls += 1;
+      try {
+        reentryInspection =
+          inspectProjectTemplateRepertoireDependencies(reentryOptions);
+      } catch {
+        // Invoking the nested authority boundary is itself the violation.
+      }
+    };
+    const constructorGetter = () => {
+      constructorCalls += 1;
+      attemptReentry();
+      return Array;
+    };
+    const indexSetter = (_value: unknown) => {
+      indexSetterCalls += 1;
+      attemptReentry();
+    };
+    const poisonedMap = function poisonedMap(): never {
+      mapCalls += 1;
+      attemptReentry();
+      throw new Error('poisoned map called');
+    };
+    const poisonedPush = function poisonedPush(): never {
+      pushCalls += 1;
+      attemptReentry();
+      throw new Error('poisoned push called');
+    };
+
+    try {
+      defineProperty(Array.prototype, 'constructor', {
+        configurable: true,
+        get: constructorGetter,
+      });
+      defineProperty(Array.prototype, '0', {
+        configurable: true,
+        set: indexSetter,
+      });
+      defineProperty(Array.prototype, '1', {
+        configurable: true,
+        set: indexSetter,
+      });
+      defineProperty(Array.prototype, 'map', {
+        ...originalMap,
+        value: poisonedMap,
+      });
+      defineProperty(Array.prototype, 'push', {
+        ...originalPush,
+        value: poisonedPush,
+      });
+      try {
+        first = inspectProjectTemplateRepertoireDependencies(validOptions);
+        second =
+          inspectProjectTemplateRepertoireDependencies(equivalentOptions);
+      } catch (error) {
+        validFailure = error;
+      }
+      try {
+        inspectProjectTemplateRepertoireDependencies(invalidOptions);
+      } catch (error) {
+        invalidFailure = error;
+      }
+    } finally {
+      defineProperty(Array.prototype, 'constructor', originalConstructor);
+      defineProperty(Array.prototype, 'map', originalMap);
+      defineProperty(Array.prototype, 'push', originalPush);
+      if (originalZero === undefined) {
+        Reflect.deleteProperty(Array.prototype, '0');
+      } else {
+        defineProperty(Array.prototype, '0', originalZero);
+      }
+      if (originalOne === undefined) {
+        Reflect.deleteProperty(Array.prototype, '1');
+      } else {
+        defineProperty(Array.prototype, '1', originalOne);
+      }
+    }
+
+    const reentryMinted = reentryInspection !== undefined;
+    if (reentryInspection !== undefined) {
+      disposeProjectTemplateRepertoireDependencyInspection(
+        reentryInspection,
+      );
+    }
+    expect(constructorCalls).toBe(0);
+    expect(indexSetterCalls).toBe(0);
+    expect(mapCalls).toBe(0);
+    expect(pushCalls).toBe(0);
+    expect(reentryCalls).toBe(0);
+    expect(reentryMinted).toBe(false);
+    expect(validFailure).toBeUndefined();
+    expect(invalidFailure).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(first?.preconditionToken).toBe(second?.preconditionToken);
+    const claim =
+      claimProjectTemplateRepertoireDependencyInspectionForPlanning(first);
+    const snapshot =
+      consumeProjectTemplateRepertoireDependencyInspectionPlanningClaim(
+        claim,
+      );
+    expect(snapshot.observations[0]?.scope).toBe('@acme/repertoire');
+    disposeProjectTemplateRepertoireDependencyInspection(second);
+  });
+
+  it('does not resolve mutable global receivers or Error after initialization', () => {
+    const intrinsicObject = Object;
+    const intrinsicReflect = Reflect;
+    const intrinsicJson = JSON;
+    const intrinsicError = Error;
+    const defineProperty = intrinsicObject.defineProperty;
+    const objectDescriptor = intrinsicObject.getOwnPropertyDescriptor(
+      globalThis,
+      'Object',
+    )!;
+    const reflectDescriptor = intrinsicObject.getOwnPropertyDescriptor(
+      globalThis,
+      'Reflect',
+    )!;
+    const jsonDescriptor = intrinsicObject.getOwnPropertyDescriptor(
+      globalThis,
+      'JSON',
+    )!;
+    const errorDescriptor = intrinsicObject.getOwnPropertyDescriptor(
+      globalThis,
+      'Error',
+    )!;
+    const validOptions = {
+      request: request() as never,
+      port: portReturning(rawResult()),
+    };
+    const invalidOptions = {
+      request: request() as never,
+      port: portReturning(rawResult()),
+      unexpected: true,
+    };
+    const reentryOptions = {
+      request: request({ dependencies: [] }) as never,
+      port: portReturning(rawResult([])),
+    };
+    let objectCalls = 0;
+    let reflectCalls = 0;
+    let jsonCalls = 0;
+    let errorCalls = 0;
+    let reentryCalls = 0;
+    let attemptedReentry = false;
+    let reentryInspection:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let verified:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let validFailure: unknown;
+    let invalidFailure: unknown;
+
+    const attemptReentry = () => {
+      if (attemptedReentry) return;
+      attemptedReentry = true;
+      reentryCalls += 1;
+      try {
+        reentryInspection =
+          inspectProjectTemplateRepertoireDependencies(reentryOptions);
+      } catch {
+        // Invoking the nested authority boundary is itself the violation.
+      }
+    };
+    const objectGetter = () => {
+      objectCalls += 1;
+      attemptReentry();
+      return intrinsicObject;
+    };
+    const reflectGetter = () => {
+      reflectCalls += 1;
+      attemptReentry();
+      return intrinsicReflect;
+    };
+    const jsonGetter = () => {
+      jsonCalls += 1;
+      attemptReentry();
+      return intrinsicJson;
+    };
+    const errorGetter = () => {
+      errorCalls += 1;
+      attemptReentry();
+      return intrinsicError;
+    };
+    const poisonedObjectDescriptor = {
+      configurable: true,
+      get: objectGetter,
+    };
+    const poisonedReflectDescriptor = {
+      configurable: true,
+      get: reflectGetter,
+    };
+    const poisonedJsonDescriptor = {
+      configurable: true,
+      get: jsonGetter,
+    };
+    const poisonedErrorDescriptor = {
+      configurable: true,
+      get: errorGetter,
+    };
+
+    try {
+      defineProperty(globalThis, 'Object', poisonedObjectDescriptor);
+      defineProperty(globalThis, 'Reflect', poisonedReflectDescriptor);
+      defineProperty(globalThis, 'JSON', poisonedJsonDescriptor);
+      defineProperty(globalThis, 'Error', poisonedErrorDescriptor);
+      try {
+        verified = inspectProjectTemplateRepertoireDependencies(validOptions);
+      } catch (error) {
+        validFailure = error;
+      }
+      try {
+        inspectProjectTemplateRepertoireDependencies(invalidOptions as never);
+      } catch (error) {
+        invalidFailure = error;
+      }
+    } finally {
+      defineProperty(globalThis, 'Object', objectDescriptor);
+      defineProperty(globalThis, 'Reflect', reflectDescriptor);
+      defineProperty(globalThis, 'JSON', jsonDescriptor);
+      defineProperty(globalThis, 'Error', errorDescriptor);
+    }
+
+    const reentryMinted = reentryInspection !== undefined;
+    if (reentryInspection !== undefined) {
+      disposeProjectTemplateRepertoireDependencyInspection(
+        reentryInspection,
+      );
+    }
+    expect(objectCalls).toBe(0);
+    expect(reflectCalls).toBe(0);
+    expect(jsonCalls).toBe(0);
+    expect(errorCalls).toBe(0);
+    expect(reentryCalls).toBe(0);
+    expect(reentryMinted).toBe(false);
+    expect(validFailure).toBeUndefined();
+    expect(invalidFailure).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    const claim =
+      claimProjectTemplateRepertoireDependencyInspectionForPlanning(verified);
+    const snapshot =
+      consumeProjectTemplateRepertoireDependencyInspectionPlanningClaim(
+        claim,
+      );
+    expect(snapshot.observations[0]?.scope).toBe('@acme/repertoire');
+  });
+
   it('cannot hide an unexpected key through a poisoned Array iterator', () => {
     const originalIterator = Array.prototype[Symbol.iterator];
     const options = {
