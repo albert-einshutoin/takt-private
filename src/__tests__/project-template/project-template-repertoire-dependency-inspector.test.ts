@@ -155,6 +155,284 @@ describe('project template installed repertoire dependency inspector G3.2', () =
     );
   });
 
+  it.each([
+    ['edit', 'steps:\n  - name: edit\n    edit: true\n'],
+    [
+      'claude allowed tools',
+      'steps:\n  - name: edit\n    provider_options:\n'
+        + '      claude:\n        allowed_tools: [Write]\n',
+    ],
+    [
+      'opencode allowed tools',
+      'steps:\n  - name: edit\n    provider_options:\n'
+        + '      opencode:\n        allowed_tools: [bash]\n',
+    ],
+    [
+      'required permission mode',
+      'steps:\n  - name: edit\n'
+        + '    required_permission_mode: bypassPermissions\n',
+    ],
+    [
+      'parallel inheritance',
+      'steps:\n  - name: parent\n    provider_options:\n'
+        + '      claude:\n        allowed_tools: [Write]\n'
+        + '    parallel:\n      - name: child\n',
+    ],
+    [
+      'promotion provider options',
+      'steps:\n  - name: promote\n    promotion:\n'
+        + '      - at: 2\n        provider_options:\n'
+        + '          claude:\n            allowed_tools: [Write]\n',
+    ],
+    [
+      'workflow call overrides',
+      'steps:\n  - name: child\n    kind: workflow_call\n'
+        + '    call: child\n    overrides:\n      provider_options:\n'
+        + '        claude:\n          allowed_tools: [Write]\n',
+    ],
+    [
+      'workflow provider options',
+      'workflow_config:\n  provider_options:\n'
+        + '    claude:\n      allowed_tools: [Write]\n'
+        + 'steps:\n  - name: inherited\n',
+    ],
+  ])('binds installed edit capability for %s', (_label, workflow) => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    mkdirSync(join(packageDir, 'workflows'));
+    writeFileSync(join(packageDir, 'workflows', 'meaning.yaml'), workflow);
+
+    expect(raw(repertoireRoot).observations[0]).toMatchObject({
+      state: 'installed',
+      installed: { capabilities: ['edit'] },
+    });
+  });
+
+  it('keeps an installed package without permission semantics read-only', () => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    mkdirSync(join(packageDir, 'workflows'));
+    writeFileSync(
+      join(packageDir, 'workflows', 'readonly.yaml'),
+      'steps:\n  - name: read\n    edit: false\n',
+    );
+
+    expect(raw(repertoireRoot).observations[0]).toMatchObject({
+      state: 'installed',
+      installed: { capabilities: [] },
+    });
+  });
+
+  it('rejects malformed capability YAML instead of silently skipping it', () => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    mkdirSync(join(packageDir, 'workflows'));
+    writeFileSync(
+      join(packageDir, 'workflows', 'malformed.yaml'),
+      'steps: {}\n',
+    );
+
+    expect(raw(repertoireRoot).observations).toEqual([{
+      scope: '@acme/repertoire',
+      state: 'invalid',
+      reason: 'INVALID_INSTALLATION',
+    }]);
+  });
+
+  it('uses package, project, global, then builtin provider precedence with yaml before yml', () => {
+    const container = root();
+    const repertoireRoot = join(container, 'repertoire');
+    const projectRoot = join(container, 'project');
+    const globalRoot = join(container, 'global');
+    mkdirSync(projectRoot, { recursive: true });
+    const packageDir = install(repertoireRoot);
+    mkdirSync(join(packageDir, 'workflows'));
+    writeFileSync(
+      join(packageDir, 'workflows', 'meaning.yaml'),
+      'steps:\n  - provider_options:\n      extends: edit\n',
+    );
+    const packageProviders = join(packageDir, 'provider-options');
+    const projectProviders = join(projectRoot, '.takt', 'provider-options');
+    const globalProviders = join(globalRoot, 'provider-options');
+    mkdirSync(packageProviders, { recursive: true });
+    mkdirSync(projectProviders, { recursive: true });
+    mkdirSync(globalProviders, { recursive: true });
+    writeFileSync(join(packageProviders, 'edit.yaml'), '{}\n');
+    writeFileSync(
+      join(packageProviders, 'edit.yml'),
+      'claude:\n  allowed_tools: [Write]\n',
+    );
+    writeFileSync(
+      join(projectProviders, 'edit.yaml'),
+      'claude:\n  allowed_tools: [Write]\n',
+    );
+    writeFileSync(
+      join(globalProviders, 'edit.yaml'),
+      'claude:\n  allowed_tools: [Write]\n',
+    );
+    const originalConfigDir = process.env.TAKT_CONFIG_DIR;
+    process.env.TAKT_CONFIG_DIR = globalRoot;
+    try {
+      const port = createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+        projectRoot,
+        language: 'ja',
+        repertoireRoot,
+      });
+      expect(port.inspect(request())).toMatchObject({
+        observations: [{
+          state: 'installed',
+          installed: { capabilities: [] },
+        }],
+      });
+      rmSync(join(packageProviders, 'edit.yaml'));
+      rmSync(join(packageProviders, 'edit.yml'));
+      expect(port.inspect(request())).toMatchObject({
+        observations: [{
+          installed: { capabilities: ['edit'] },
+        }],
+      });
+    } finally {
+      if (originalConfigDir === undefined) delete process.env.TAKT_CONFIG_DIR;
+      else process.env.TAKT_CONFIG_DIR = originalConfigDir;
+    }
+  });
+
+  it('resolves current and preapproved other scoped provider snapshots', () => {
+    const repertoireRoot = root();
+    const current = install(repertoireRoot, '@acme/repertoire');
+    const other = install(repertoireRoot, '@other/tools');
+    mkdirSync(join(current, 'workflows'));
+    mkdirSync(join(current, 'provider-options'));
+    mkdirSync(join(other, 'provider-options'));
+    writeFileSync(
+      join(current, 'workflows', 'scoped.yaml'),
+      'steps:\n'
+        + '  - provider_options:\n'
+        + '      extends: "@acme/repertoire/self"\n'
+        + '  - provider_options:\n'
+        + '      extends: "@other/tools/edit"\n',
+    );
+    writeFileSync(join(current, 'provider-options', 'self.yaml'), '{}\n');
+    writeFileSync(
+      join(other, 'provider-options', 'edit.yml'),
+      'opencode:\n  allowed_tools: [bash]\n',
+    );
+
+    const result = raw(repertoireRoot, [
+      dependency('@acme/repertoire'),
+      dependency('@other/tools'),
+    ]);
+    expect(result.observations[0]).toMatchObject({
+      installed: { capabilities: ['edit'] },
+    });
+  });
+
+  it('authorizes exact workflow-relative provider subdir and sibling DFS', () => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    const workflowDir = join(packageDir, 'workflows', 'nested');
+    const providerDir = join(workflowDir, 'provider-options');
+    mkdirSync(providerDir, { recursive: true });
+    writeFileSync(
+      join(workflowDir, 'meaning.yaml'),
+      'steps:\n  - provider_options:\n'
+        + '      extends: ./provider-options/first.yaml\n',
+    );
+    writeFileSync(
+      join(providerDir, 'first.yaml'),
+      'extends: ./second.yml\n',
+    );
+    writeFileSync(
+      join(providerDir, 'second.yml'),
+      'claude:\n  allowed_tools: [Write]\n',
+    );
+
+    expect(raw(repertoireRoot).observations[0]).toMatchObject({
+      installed: { capabilities: ['edit'] },
+    });
+  });
+
+  it.each([
+    [
+      'missing',
+      [['meaning.yaml', 'steps:\n  - provider_options:\n      extends: ./provider-options/missing.yaml\n']],
+    ],
+    [
+      'cycle',
+      [
+        ['meaning.yaml', 'steps:\n  - provider_options:\n      extends: ./provider-options/first.yaml\n'],
+        ['provider-options/first.yaml', 'extends: ./second.yaml\n'],
+        ['provider-options/second.yaml', 'extends: ./first.yaml\n'],
+      ],
+    ],
+    [
+      'escape',
+      [['meaning.yaml', 'steps:\n  - provider_options:\n      extends: ../provider-options/edit.yaml\n']],
+    ],
+  ])('rejects %s workflow-relative provider authority', (_label, files) => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    const workflowDir = join(packageDir, 'workflows');
+    for (const [relativePath, content] of files) {
+      const path = join(workflowDir, relativePath);
+      mkdirSync(join(path, '..'), { recursive: true });
+      writeFileSync(path, content);
+    }
+    expect(raw(repertoireRoot).observations).toEqual([{
+      scope: '@acme/repertoire',
+      state: 'invalid',
+      reason: 'INVALID_INSTALLATION',
+    }]);
+  });
+
+  it('revalidates capability files after the final after-scope seam', () => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    const workflowPath = join(packageDir, 'workflows', 'meaning.yaml');
+    mkdirSync(join(packageDir, 'workflows'));
+    writeFileSync(workflowPath, 'steps:\n  - edit: true\n');
+    const callbacks: string[] = [];
+    const port = createProjectTemplateInstalledRepertoireDependencyInspectionPort(
+      { projectRoot: repertoireRoot, language: 'ja', repertoireRoot },
+      (phase) => {
+        callbacks.push(phase);
+        if (phase === 'after-scope') {
+          writeFileSync(workflowPath, 'steps:\n  - edit: false\n');
+        }
+      },
+    );
+
+    expect(port.inspect(request())).toMatchObject({
+      observations: [{ state: 'invalid', reason: 'INVALID_INSTALLATION' }],
+    });
+    expect(callbacks.at(-1)).toBe('after-scope');
+  });
+
+  it('fails nested inspection on the same port without corrupting the outer run', () => {
+    const repertoireRoot = root();
+    install(repertoireRoot);
+    let nested: unknown;
+    let port: ReturnType<
+      typeof createProjectTemplateInstalledRepertoireDependencyInspectionPort
+    >;
+    port = createProjectTemplateInstalledRepertoireDependencyInspectionPort(
+      { projectRoot: repertoireRoot, language: 'ja', repertoireRoot },
+      (phase) => {
+        if (phase !== 'after-manifest' || nested !== undefined) return;
+        try {
+          port.inspect(request());
+        } catch (error) {
+          nested = error;
+        }
+      },
+    );
+
+    expect(port.inspect(request())).toMatchObject({
+      observations: [{ state: 'installed' }],
+    });
+    expect(nested).toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
   it('accepts canonical refs with and without the v prefix', () => {
     const repertoireRoot = root();
     install(repertoireRoot, '@acme/one', { ref: 'v1.2.3' });
@@ -508,7 +786,7 @@ describe('project template installed repertoire dependency inspector G3.2', () =
     expect(String(failure)).not.toContain('secret');
   });
 
-  it('does not invoke post-init collection, string, regexp, or Dir hooks', () => {
+  it('confines post-init prototype use to the trusted detect classifier', () => {
     const repertoireRoot = root();
     install(repertoireRoot);
     const port =
@@ -594,10 +872,20 @@ describe('project template installed repertoire dependency inspector G3.2', () =
       Object.getOwnPropertyDescriptor = originalDescriptor;
       Reflect.ownKeys = originalOwnKeys;
     }
-    expect({ calls, called }).toEqual({ calls: 0, called: [] });
+    // detectEditWorkflows and its trusted YAML/config dependencies retain
+    // mutable-realm semantics. The inspector/snapshot boundary must still
+    // return only the closed observation and must not mint filesystem access.
+    expect(calls).toBeGreaterThan(0);
+    expect(called.every((name) => (
+      name === 'push' || name === 'slice' || name === 'indexOf'
+    ))).toBe(true);
     expect(result).toMatchObject({
-      observations: [{ state: 'installed' }],
+      observations: [{
+        state: 'invalid',
+        reason: 'INVALID_INSTALLATION',
+      }],
     });
+    expect(JSON.stringify(result)).not.toContain(repertoireRoot);
   });
 
   it('does not expose private provenance buffers to typed-array hooks', () => {

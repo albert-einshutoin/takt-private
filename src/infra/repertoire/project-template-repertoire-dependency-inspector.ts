@@ -23,10 +23,21 @@ import {
   MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES,
 } from '../../features/project-template/source-descriptor.js';
 import {
+  detectEditWorkflows,
+} from '../../features/repertoire/pack-summary.js';
+import {
   TAKT_REPERTOIRE_LOCK_FILENAME,
   TAKT_REPERTOIRE_MANIFEST_FILENAME,
 } from '../../features/repertoire/constants.js';
-import { getRepertoireDir } from '../config/paths.js';
+import {
+  getBuiltinProviderOptionsDir,
+  getGlobalProviderOptionsDir,
+  getProjectProviderOptionsDir,
+  getRepertoireDir,
+} from '../config/paths.js';
+import type {
+  ScopedProviderOptionsCandidateDirs,
+} from '../config/loaders/providerOptionsLookupDirectories.js';
 import {
   createProjectTemplateRepertoireSafeReadContext,
   readProjectTemplateRepertoireDirectory,
@@ -36,6 +47,18 @@ import {
 import {
   parseProjectTemplateRepertoireStrictLock,
 } from './project-template-repertoire-strict-lock.js';
+import {
+  authorizeProjectTemplateRepertoireRelativeProviderCandidates,
+  captureProjectTemplateRepertoireCapabilitySnapshot,
+  getProjectTemplateRepertoireCapabilityAccessWitnessFragment,
+  getProjectTemplateRepertoireCapabilityFileAccess,
+  getProjectTemplateRepertoireCapabilitySnapshotErrorCode,
+  getProjectTemplateRepertoireAuthorizedRelativeProviderFiles,
+  PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT,
+  revalidateProjectTemplateRepertoireCapabilitySnapshot,
+  type ProjectTemplateRepertoireCapabilityApprovedLayer,
+  type ProjectTemplateRepertoireCapabilitySnapshot,
+} from './project-template-repertoire-capability-snapshot.js';
 
 const WITNESS_DOMAIN =
   'takt.project-template.installed-repertoire-inspection.v1\u0000';
@@ -72,6 +95,7 @@ const CAPTURED_STRING = String;
 const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
 const CAPTURED_STRING_INDEX_OF = String.prototype.indexOf;
 const CAPTURED_STRING_SLICE = String.prototype.slice;
+const CAPTURED_STRING_STARTS_WITH = String.prototype.startsWith;
 const CAPTURED_TYPES_IS_PROXY = types.isProxy;
 const CAPTURED_GET_REPERTOIRE_DIR = getRepertoireDir;
 const CAPTURED_IS_ABSOLUTE = isAbsolute;
@@ -134,6 +158,8 @@ interface InspectorState {
   readonly projectRootSha256: string;
   readonly language: Language;
   readonly repertoireRoot: string;
+  readonly baseCapabilityLayers:
+    readonly ProjectTemplateRepertoireCapabilityApprovedLayer[];
   readonly ioSeam?: ProjectTemplateInstalledRepertoireInspectionIoSeam;
 }
 
@@ -522,6 +548,20 @@ function exactContext(
     projectRootSha256: sha256(projectRoot),
     language,
     repertoireRoot,
+    baseCapabilityLayers: freeze([
+      freeze({
+        role: 'project' as const,
+        root: getProjectProviderOptionsDir(projectRoot),
+      }),
+      freeze({
+        role: 'global' as const,
+        root: getGlobalProviderOptionsDir(),
+      }),
+      freeze({
+        role: 'builtin' as const,
+        root: getBuiltinProviderOptionsDir(language),
+      }),
+    ]),
   });
 }
 
@@ -701,6 +741,178 @@ function missing(
   };
 }
 
+function capabilityLayers(
+  state: InspectorState,
+  current: ScopeParts,
+  scopes: readonly ScopeParts[],
+): readonly ProjectTemplateRepertoireCapabilityApprovedLayer[] {
+  const layers: ProjectTemplateRepertoireCapabilityApprovedLayer[] = [];
+  for (let index = 0; index < state.baseCapabilityLayers.length; index += 1) {
+    append(layers, state.baseCapabilityLayers[index]!);
+  }
+  for (let index = 0; index < scopes.length; index += 1) {
+    const scope = scopes[index]!;
+    if (scope.scope === current.scope) continue;
+    append(layers, freeze({
+      role: 'scoped' as const,
+      root: appendPath(
+        appendPath(
+          appendPath(state.repertoireRoot, scope.ownerSegment),
+          scope.packageSegment,
+        ),
+        'provider-options',
+      ),
+      scope: scope.scope,
+    }));
+  }
+  return freeze(layers);
+}
+
+function capabilityScopedCandidateDirs(
+  snapshot: ProjectTemplateRepertoireCapabilitySnapshot,
+): ScopedProviderOptionsCandidateDirs {
+  const values = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_CREATE,
+    CAPTURED_OBJECT_RECEIVER,
+    [null],
+  ) as Record<string, readonly string[]>;
+  defineOwn(
+    values,
+    CAPTURED_REFLECT_APPLY(CAPTURED_STRING_SLICE, snapshot.scope, [1]),
+    freeze([`${PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT}/provider-options`]),
+  );
+  for (
+    let index = 0;
+    index < snapshot.scopedProviderOptionsCandidateDirs.length;
+    index += 1
+  ) {
+    const entry = snapshot.scopedProviderOptionsCandidateDirs[index]!;
+    defineOwn(
+      values,
+      CAPTURED_REFLECT_APPLY(CAPTURED_STRING_SLICE, entry.scope, [1]),
+      freeze([entry.candidateDir]),
+    );
+  }
+  return freeze({
+    get(key: string): readonly string[] | undefined {
+      return values[key];
+    },
+  }) as unknown as ScopedProviderOptionsCandidateDirs;
+}
+
+function detectInstalledCapabilities(
+  state: InspectorState,
+  snapshot: ProjectTemplateRepertoireCapabilitySnapshot,
+): { readonly capabilities: readonly [] | readonly ['edit']; readonly witness: string } {
+  authorizeProjectTemplateRepertoireRelativeProviderCandidates(snapshot);
+  const workflows: Array<{
+    readonly name: string;
+    readonly content: string;
+    readonly relativePath: string;
+  }> = [];
+  const workflowWitness: string[] = [];
+  for (let index = 0; index < snapshot.workflowFiles.length; index += 1) {
+    const file = snapshot.workflowFiles[index]!;
+    const name = CAPTURED_REFLECT_APPLY(
+      CAPTURED_STRING_SLICE,
+      file.relativePath,
+      ['workflows/'.length],
+    ) as string;
+    append(workflows, freeze({
+      name,
+      content: file.text,
+      relativePath: file.relativePath,
+    }));
+    append(workflowWitness, file.sha256);
+  }
+  const packageProviders: Array<{
+    readonly name: string;
+    readonly content: string;
+    readonly relativePath: string;
+  }> = [];
+  for (let index = 0; index < snapshot.providerOptionsFiles.length; index += 1) {
+    const file = snapshot.providerOptionsFiles[index]!;
+    if (
+      file.role !== 'package'
+      || !CAPTURED_REFLECT_APPLY(
+        CAPTURED_STRING_STARTS_WITH,
+        file.relativePath,
+        ['provider-options/'],
+      )
+    ) continue;
+    append(packageProviders, freeze({
+      name: CAPTURED_REFLECT_APPLY(
+        CAPTURED_STRING_SLICE,
+        file.relativePath,
+        ['provider-options/'.length],
+      ) as string,
+      content: file.text,
+      relativePath: file.relativePath,
+    }));
+  }
+  const authorizedRelativeProviders =
+    getProjectTemplateRepertoireAuthorizedRelativeProviderFiles(snapshot);
+  for (
+    let index = 0;
+    index < authorizedRelativeProviders.length;
+    index += 1
+  ) {
+    const file = authorizedRelativeProviders[index]!;
+    append(packageProviders, freeze({
+      name: file.relativePath,
+      content: file.text,
+      relativePath: file.relativePath,
+    }));
+  }
+  const candidateDirs: string[] = [];
+  for (
+    let index = 1;
+    index < snapshot.providerOptionsCandidateDirs.length;
+    index += 1
+  ) append(candidateDirs, snapshot.providerOptionsCandidateDirs[index]!);
+  const detected = detectEditWorkflows(
+    freeze(workflows) as unknown as Parameters<typeof detectEditWorkflows>[0],
+    freeze(packageProviders) as unknown as NonNullable<
+      Parameters<typeof detectEditWorkflows>[1]
+    >,
+    freeze({
+      providerOptionsCandidateDirs: freeze(candidateDirs),
+      providerOptionsScopedCandidateDirs:
+        capabilityScopedCandidateDirs(snapshot),
+      fileAccess: getProjectTemplateRepertoireCapabilityFileAccess(snapshot),
+      context: freeze({
+        projectDir: '/__takt_capability_snapshot__/project',
+        lang: state.language,
+        workflowDir:
+          `${PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT}/workflows`,
+        repertoireDir: '/__takt_capability_snapshot__/repertoire',
+      }),
+    }),
+  );
+  if (!CAPTURED_ARRAY_IS_ARRAY(detected)) throw INTERNAL_FAILURE;
+  const resultWitness: string[] = [];
+  for (let index = 0; index < detected.length; index += 1) {
+    const result = detected[index]!;
+    append(resultWitness, sha256(
+      `${result.name}:${result.hasEdit}:`
+      + `${joinArray(result.allowedTools, '\u0000')}:`
+      + joinArray(result.requiredPermissionModes, '\u0000'),
+    ));
+  }
+  const capabilities = detected.length === 0
+    ? freeze([]) as readonly []
+    : freeze(['edit']) as readonly ['edit'];
+  return freeze({
+    capabilities,
+    witness: sha256(
+      `${snapshot.privateWitnessFragment}:`
+      + `${getProjectTemplateRepertoireCapabilityAccessWitnessFragment(snapshot)}:`
+      + `${joinArray(workflowWitness, '\u0000')}:`
+      + joinArray(resultWitness, '\u0000'),
+    ),
+  });
+}
+
 function inspectScope(
   state: InspectorState,
   request: InspectionInput,
@@ -708,6 +920,7 @@ function inspectScope(
   typeof createProjectTemplateRepertoireSafeReadContext
   >,
   scope: ScopeParts,
+  scopes: readonly ScopeParts[],
 ): ScopeInspection {
   invokeSeam(state, request, 'before-scope', scope.scope, scope.packageRelativePath);
   invokeSeam(state, request, 'before-parent', scope.scope, scope.ownerSegment);
@@ -846,6 +1059,20 @@ function inspectScope(
       scope.scope,
       manifestRelativePath,
     );
+    const capabilitySnapshot =
+      captureProjectTemplateRepertoireCapabilitySnapshot({
+        repertoireContext: safeContext,
+        packageRelativePath: scope.packageRelativePath,
+        scope: scope.scope,
+        approvedLayers: capabilityLayers(state, scope, scopes),
+        signal: request.signal,
+        deadlineMs: request.deadlineMs,
+        requestFileCount: 2,
+      });
+    const detectedCapabilities = detectInstalledCapabilities(
+      state,
+      capabilitySnapshot,
+    );
     invokeSeam(
       state,
       request,
@@ -857,6 +1084,11 @@ function inspectScope(
     // chain without another inspector seam. Individual safe reads retain their
     // own no-follow and post-close checks, while this chain prevents mixing
     // old file bytes with a later directory snapshot.
+    checkpoint(request);
+    revalidateProjectTemplateRepertoireCapabilitySnapshot(
+      capabilitySnapshot,
+      { signal: request.signal, deadlineMs: request.deadlineMs },
+    );
     checkpoint(request);
     const lockAfter = readProjectTemplateRepertoireFile(
       safeContext,
@@ -893,10 +1125,7 @@ function inspectScope(
         !== joinArray(owner.entries, '\u0000')
     ) return invalid(request, scope, 'coherence');
     checkpoint(request);
-    // Interim G3.2 contract: G3.3 replaces this empty set with strictly
-    // parsed manifest capabilities. This infra-private port is not exported
-    // from a package/public barrel.
-    const capabilities = freeze([]) as readonly [];
+    const capabilities = detectedCapabilities.capabilities;
     return {
       observation: freeze({
         scope: scope.scope,
@@ -913,12 +1142,15 @@ function inspectScope(
         + `${witnessIdentity(packageDirectory.witness)}:`
         + `${witnessIdentity(lockRead.witness)}:`
         + `${witnessIdentity(manifestRead.witness)}:`
-        + `${sha256(lockRead.content)}:${sha256(manifestRead.content)}`,
+        + `${sha256(lockRead.content)}:${sha256(manifestRead.content)}:`
+        + detectedCapabilities.witness,
     };
   } catch (error) {
-    if (
-      isStopFailure(error)
-    ) throw error;
+    if (isStopFailure(error)) throw error;
+    const capabilityCode =
+      getProjectTemplateRepertoireCapabilitySnapshotErrorCode(error);
+    if (capabilityCode === 'ABORTED') throw fixedFailure('ABORTED');
+    if (capabilityCode === 'TIMEOUT') throw fixedFailure('TIMEOUT');
     return invalid(request, scope, 'io');
   }
 }
@@ -1027,7 +1259,7 @@ function inspectRequest(
     const scope = scopes[index]!;
     const inspected = safeContext === undefined
       ? invalid(input, scope, 'root')
-      : inspectScope(state, input, safeContext, scope);
+      : inspectScope(state, input, safeContext, scope, scopes);
     append(observations, inspected.observation);
     append(
       witnessParts,
@@ -1058,10 +1290,14 @@ export function createProjectTemplateInstalledRepertoireDependencyInspectionPort
     projectRootSha256: snapshotted.projectRootSha256,
     language: snapshotted.language,
     repertoireRoot: snapshotted.repertoireRoot,
+    baseCapabilityLayers: snapshotted.baseCapabilityLayers,
     ioSeam,
   });
+  let inspectionActive = false;
   const inspect = (request: ProjectTemplateRepertoireDependencyInspectionRequest):
   unknown => {
+    if (inspectionActive) throw fixedFailure('INVALID_ARGUMENT');
+    inspectionActive = true;
     try {
       return inspectRequest(state, request);
     } catch (error) {
@@ -1069,6 +1305,8 @@ export function createProjectTemplateInstalledRepertoireDependencyInspectionPort
         isStopFailure(error)
       ) throw error;
       throw fixedFailure('INVALID_ARGUMENT');
+    } finally {
+      inspectionActive = false;
     }
   };
   return freeze({ inspect });

@@ -38,6 +38,7 @@ describe('project template repertoire capability YAML G3.3.1', () => {
     expect(result).toEqual({
       text: yaml,
       sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      providerExtends: [],
     });
     expect(Object.isFrozen(result)).toBe(true);
   });
@@ -51,6 +52,35 @@ describe('project template repertoire capability YAML G3.3.1', () => {
       bytes(yaml),
       'provider-options',
     )).toMatchObject({ text: yaml });
+  });
+
+  it('collects workflow and provider extends as frozen private metadata', () => {
+    const workflow = parseProjectTemplateRepertoireCapabilityYaml(bytes([
+      'workflow_config:',
+      '  provider_options:',
+      '    extends: workflow-base',
+      'steps:',
+      '  - provider_options:',
+      '      extends: ./provider-options/step.yaml',
+      '    parallel:',
+      '      - overrides:',
+      '          provider_options:',
+      '            extends: "@other/tools/edit"',
+      '',
+    ].join('\n')), 'workflow');
+    const provider = parseProjectTemplateRepertoireCapabilityYaml(
+      bytes('extends: ../shared/base.yml\n'),
+      'provider-options',
+    );
+
+    expect(workflow.providerExtends).toEqual([
+      'workflow-base',
+      './provider-options/step.yaml',
+      '@other/tools/edit',
+    ]);
+    expect(provider.providerExtends).toEqual(['../shared/base.yml']);
+    expect(Object.isFrozen(workflow.providerExtends)).toBe(true);
+    expect(Object.isFrozen(provider.providerExtends)).toBe(true);
   });
 
   it.each([

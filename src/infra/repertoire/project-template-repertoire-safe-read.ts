@@ -188,6 +188,7 @@ interface Identity {
 interface SafeReadState {
   readonly root: string;
   readonly rootIdentity: Identity;
+  readonly layoutSegments: readonly string[];
   readonly raceHook?: ProjectTemplateRepertoireSafeReadRaceHook;
 }
 
@@ -269,6 +270,20 @@ function defineOwn(
     CAPTURED_OBJECT_RECEIVER,
     [target, key, descriptor],
   );
+}
+
+function combineSegments(
+  left: readonly string[],
+  right: readonly string[],
+): readonly string[] {
+  const combined: string[] = [];
+  for (let index = 0; index < left.length; index += 1) {
+    defineOwn(combined, combined.length, left[index]!);
+  }
+  for (let index = 0; index < right.length; index += 1) {
+    defineOwn(combined, combined.length, right[index]!);
+  }
+  return freeze(combined);
 }
 
 function identity(stat: Stats): Identity {
@@ -613,6 +628,7 @@ export function createProjectTemplateRepertoireSafeReadContext(
   const state = freeze({
     root: canonicalRoot,
     rootIdentity: identity(rootStat),
+    layoutSegments: freeze([]) as readonly string[],
     raceHook,
   });
   CAPTURED_REFLECT_APPLY(
@@ -662,6 +678,7 @@ export function narrowProjectTemplateRepertoireSafeReadContext(
     [narrowed, freeze({
       root: absolutePath,
       rootIdentity,
+      layoutSegments: combineSegments(state.layoutSegments, segments),
       raceHook: state.raceHook,
     })],
   );
@@ -686,6 +703,7 @@ export function detachProjectTemplateRepertoireSafeReadContextCallbacks(
     [detached, freeze({
       root: state.root,
       rootIdentity: state.rootIdentity,
+      layoutSegments: state.layoutSegments,
     })],
   );
   return detached;
@@ -909,6 +927,7 @@ function readDirectoryAt(
   segments: readonly string[],
 ): ProjectTemplateRepertoireSafeDirectoryRead {
   const state = requireContext(context);
+  const layoutSegments = combineSegments(state.layoutSegments, segments);
   requireStableRoot(state);
   const absolutePath = requireCanonicalPath(state, segments, true);
   invokePhase(state, relativePath, 'before-lstat');
@@ -948,7 +967,10 @@ function readDirectoryAt(
         [],
       ) as ReturnType<Dir['readSync']>;
       if (entry === null) break;
-      const normalizedName = validateDirectoryEntryName(segments, entry.name);
+      const normalizedName = validateDirectoryEntryName(
+        layoutSegments,
+        entry.name,
+      );
       for (let index = 0; index < normalized.length; index += 1) {
         if (normalized[index] === normalizedName) {
           throw failure('UNSAFE_ENTRY');

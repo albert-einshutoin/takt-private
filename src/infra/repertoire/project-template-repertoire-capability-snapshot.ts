@@ -53,6 +53,7 @@ const CAPTURED_ARRAY_JOIN = Array.prototype.join;
 const CAPTURED_ARRAY_SORT = Array.prototype.sort;
 const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
 const CAPTURED_STRING_INCLUDES = String.prototype.includes;
+const CAPTURED_STRING_CHAR_CODE_AT = String.prototype.charCodeAt;
 const CAPTURED_STRING_SPLIT = String.prototype.split;
 const CAPTURED_STRING_STARTS_WITH = String.prototype.startsWith;
 const CAPTURED_TYPES_IS_PROXY = types.isProxy;
@@ -126,6 +127,12 @@ export interface ProjectTemplateRepertoireCapabilitySnapshotFile {
   readonly relativePath: string;
   readonly virtualPath: string;
   /** Private input text. Never include in public ports or failures. */
+  readonly text: string;
+  readonly sha256: string;
+}
+
+export interface ProjectTemplateRepertoireAuthorizedRelativeProviderFile {
+  readonly relativePath: string;
   readonly text: string;
   readonly sha256: string;
 }
@@ -241,8 +248,10 @@ interface CapturedFile {
   readonly context: ProjectTemplateRepertoireSafeReadContext;
   readonly fileClass: 'workflow' | 'provider';
   readonly relativePath: string;
+  readonly virtualPath: string;
   readonly text: string;
   readonly sha256: string;
+  readonly providerExtends: readonly string[];
   readonly witness: ProjectTemplateRepertoireRelativeWitness;
 }
 
@@ -251,6 +260,11 @@ interface SnapshotState {
   readonly files: readonly CapturedFile[];
   readonly providerRegistry: Readonly<Record<string, string>>;
   readonly providerPrefixes: readonly string[];
+  readonly workflowProviderCandidates: Readonly<Record<string, CapturedFile>>;
+  readonly authorizedProviderRegistry: Record<string, string>;
+  readonly authorizedProviderDirectories: Record<string, true>;
+  readonly authorizedProviderFiles: CapturedFile[];
+  readonly accessLog: string[];
   readonly fileAccess: ProviderOptionsFileAccess;
   readonly missingRoots: readonly CapturedMissingRoot[];
 }
@@ -272,6 +286,7 @@ interface CaptureState {
   readonly providerFiles: ProjectTemplateRepertoireCapabilitySnapshotFile[];
   readonly providerRegistry: Record<string, string>;
   readonly providerPrefixes: string[];
+  readonly workflowProviderCandidates: Record<string, CapturedFile>;
   readonly witnessParts: string[];
   readonly missingRoots: CapturedMissingRoot[];
 }
@@ -632,6 +647,14 @@ function isFailure(value: unknown): boolean {
     ) === true;
 }
 
+export function getProjectTemplateRepertoireCapabilitySnapshotErrorCode(
+  value: unknown,
+): ProjectTemplateRepertoireCapabilitySnapshotErrorCode | undefined {
+  return isFailure(value)
+    ? (value as ProjectTemplateRepertoireCapabilitySnapshotError).code
+    : undefined;
+}
+
 function checkpoint(control: Control): void {
   if (control.signal !== undefined) {
     let aborted: boolean;
@@ -903,10 +926,19 @@ function captureFile(
     context: revalidationContext,
     fileClass: kind === 'workflow' ? 'workflow' : 'provider',
     relativePath,
+    virtualPath,
     text: parsed.text,
     sha256: parsed.sha256,
+    providerExtends: parsed.providerExtends,
     witness: read.witness,
   }) as CapturedFile);
+  if (kind === 'provider-options' && !providerAuthority) {
+    defineOwn(
+      state.workflowProviderCandidates,
+      virtualPath,
+      state.files[state.files.length - 1]!,
+    );
+  }
   append(state.witnessParts, `f:${role}:${relativePath}:`
     + `${witnessIdentity(read.witness)}:${parsed.sha256}`);
 }
@@ -1055,12 +1087,25 @@ function orderedLayers(
 function makeFileAccess(
   providerRegistry: Readonly<Record<string, string>>,
   providerPrefixes: readonly string[],
+  authorizedProviderRegistry: Record<string, string>,
+  authorizedProviderDirectories: Record<string, true>,
+  accessLog: string[],
   control: Control,
 ): ProviderOptionsFileAccess {
   // Why: the runtime resolver accepts a filesystem-like interface. Restricting
   // it to captured virtual directories makes accidental node-fs fallback and
   // reads outside approved roots structurally impossible.
-  function requireKnown(path: string): void {
+  function hasOwnValue(record: object, path: string): boolean {
+    return CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_HAS_OWN,
+      CAPTURED_OBJECT_RECEIVER,
+      [record, path],
+    ) as boolean;
+  }
+  function requireKnown(
+    path: string,
+    operation: 'exists' | 'read' | 'realpath' | 'symlink',
+  ): void {
     checkpoint(control);
     if (
       typeof path !== 'string'
@@ -1083,6 +1128,17 @@ function makeFileAccess(
         || segments[index] === '..'
       ) throw failure('OUTSIDE_REGISTRY');
     }
+    if (
+      hasOwnValue(authorizedProviderRegistry, path)
+      || (
+        operation === 'realpath'
+        && hasOwnValue(authorizedProviderDirectories, path)
+      )
+    ) {
+      append(accessLog, `${operation}:${sha256(path)}`);
+      checkpoint(control);
+      return;
+    }
     for (let index = 0; index < providerPrefixes.length; index += 1) {
       const prefix = providerPrefixes[index]!;
       if (path === prefix || CAPTURED_REFLECT_APPLY(
@@ -1090,6 +1146,7 @@ function makeFileAccess(
         path,
         [`${prefix}/`],
       )) {
+        append(accessLog, `${operation}:${sha256(path)}`);
         checkpoint(control);
         return;
       }
@@ -1098,21 +1155,24 @@ function makeFileAccess(
   }
   return freeze({
     exists(path: string): boolean {
-      requireKnown(path);
-      return providerRegistry[path] !== undefined;
+      requireKnown(path, 'exists');
+      return hasOwnValue(authorizedProviderRegistry, path)
+        || hasOwnValue(providerRegistry, path);
     },
     readText(path: string): string {
-      requireKnown(path);
-      const value = providerRegistry[path];
+      requireKnown(path, 'read');
+      const value = hasOwnValue(authorizedProviderRegistry, path)
+        ? authorizedProviderRegistry[path]
+        : providerRegistry[path];
       if (value === undefined) throw failure('MISSING');
       return value;
     },
     realpath(path: string): string {
-      requireKnown(path);
+      requireKnown(path, 'realpath');
       return path;
     },
     isSymlink(path: string): boolean {
-      requireKnown(path);
+      requireKnown(path, 'symlink');
       return false;
     },
   });
@@ -1152,6 +1212,11 @@ function captureSnapshotUnchecked(
       [null],
     ) as Record<string, string>,
     providerPrefixes: [],
+    workflowProviderCandidates: CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_CREATE,
+      CAPTURED_OBJECT_RECEIVER,
+      [null],
+    ) as Record<string, CapturedFile>,
     witnessParts: [],
     missingRoots: [],
   };
@@ -1271,9 +1336,25 @@ function captureSnapshotUnchecked(
     CAPTURED_REFLECT_APPLY(CAPTURED_ARRAY_SORT, state.witnessParts, []);
     const providerRegistry = freeze(state.providerRegistry);
     const providerPrefixes = freeze(state.providerPrefixes);
+    const workflowProviderCandidates = freeze(state.workflowProviderCandidates);
+    const authorizedProviderRegistry = CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_CREATE,
+      CAPTURED_OBJECT_RECEIVER,
+      [null],
+    ) as Record<string, string>;
+    const authorizedProviderDirectories = CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_CREATE,
+      CAPTURED_OBJECT_RECEIVER,
+      [null],
+    ) as Record<string, true>;
+    const authorizedProviderFiles: CapturedFile[] = [];
+    const accessLog: string[] = [];
     const fileAccess = makeFileAccess(
       providerRegistry,
       providerPrefixes,
+      authorizedProviderRegistry,
+      authorizedProviderDirectories,
+      accessLog,
       state.control,
     );
     const frozenScopedDirs: {
@@ -1300,6 +1381,11 @@ function captureSnapshotUnchecked(
         files: freeze(state.files),
         providerRegistry,
         providerPrefixes,
+        workflowProviderCandidates,
+        authorizedProviderRegistry,
+        authorizedProviderDirectories,
+        authorizedProviderFiles,
+        accessLog,
         fileAccess,
         missingRoots: freeze(state.missingRoots),
       })],
@@ -1336,6 +1422,168 @@ export function getProjectTemplateRepertoireCapabilityFileAccess(
   ) as SnapshotState | undefined;
   if (state === undefined) throw failure('INVALID_ARGUMENT');
   return state.fileAccess;
+}
+
+function isPathLikeProviderReference(ref: string): boolean {
+  if (ref[0] === '@') return false;
+  return CAPTURED_REFLECT_APPLY(CAPTURED_STRING_STARTS_WITH, ref, ['./'])
+    || CAPTURED_REFLECT_APPLY(CAPTURED_STRING_STARTS_WITH, ref, ['../'])
+    || CAPTURED_REFLECT_APPLY(CAPTURED_STRING_INCLUDES, ref, ['/'])
+    || CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, YAML_EXTENSION, [ref]);
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = CAPTURED_REFLECT_APPLY(
+      CAPTURED_STRING_CHAR_CODE_AT,
+      value,
+      [index],
+    ) as number;
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/**
+ * Grants only workflow-relative provider files named by strict snapshot
+ * metadata. Named and scoped references remain confined to the closed base
+ * registry and are resolved by the existing provider-options resolver.
+ */
+export function authorizeProjectTemplateRepertoireRelativeProviderCandidates(
+  snapshot: ProjectTemplateRepertoireCapabilitySnapshot,
+): void {
+  const state = CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_GET,
+    SNAPSHOT_STATES,
+    [snapshot],
+  ) as SnapshotState | undefined;
+  if (state === undefined) throw failure('INVALID_ARGUMENT');
+  const capturedState = state;
+  const packageWorkflowRoot =
+    `${PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT}/workflows`;
+
+  function authorizeReference(
+    source: CapturedFile,
+    rootDirectory: string,
+    ref: string,
+    visiting: Record<string, true>,
+    depth: number,
+  ): void {
+    if (!isPathLikeProviderReference(ref)) return;
+    if (
+      depth > MAX_DEPTH
+      || CAPTURED_REFLECT_APPLY(CAPTURED_IS_ABSOLUTE, undefined, [ref])
+      || CAPTURED_REFLECT_APPLY(CAPTURED_STRING_INCLUDES, ref, ['\\'])
+      || hasControlCharacter(ref)
+    ) throw failure('INVALID_CAPABILITY');
+    const target = CAPTURED_REFLECT_APPLY(
+      CAPTURED_RESOLVE,
+      undefined,
+      [CAPTURED_REFLECT_APPLY(CAPTURED_DIRNAME, undefined, [source.virtualPath]), ref],
+    ) as string;
+    if (!CAPTURED_REFLECT_APPLY(
+      CAPTURED_STRING_STARTS_WITH,
+      target,
+      [`${rootDirectory}/`],
+    )) throw failure('INVALID_CAPABILITY');
+    const candidate = capturedState.workflowProviderCandidates[target];
+    if (candidate === undefined || candidate.fileClass !== 'provider') {
+      throw failure('INVALID_CAPABILITY');
+    }
+    if (visiting[target] === true) throw failure('INVALID_CAPABILITY');
+    defineOwn(visiting, target, true);
+    if (!CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_HAS_OWN,
+      CAPTURED_OBJECT_RECEIVER,
+      [capturedState.authorizedProviderRegistry, target],
+    )) append(capturedState.authorizedProviderFiles, candidate);
+    defineOwn(capturedState.authorizedProviderRegistry, target, candidate.text);
+    defineOwn(capturedState.authorizedProviderDirectories, rootDirectory, true);
+    append(capturedState.accessLog, `authorize:${sha256(target)}`);
+    for (
+      let index = 0;
+      index < candidate.providerExtends.length;
+      index += 1
+    ) {
+      authorizeReference(
+        candidate,
+        rootDirectory,
+        candidate.providerExtends[index]!,
+        visiting,
+        depth + 1,
+      );
+    }
+    delete visiting[target];
+  }
+
+  for (let index = 0; index < state.files.length; index += 1) {
+    const workflow = state.files[index]!;
+    if (workflow.fileClass !== 'workflow') continue;
+    const workflowDirectory = CAPTURED_REFLECT_APPLY(
+      CAPTURED_DIRNAME,
+      undefined,
+      [workflow.virtualPath],
+    ) as string;
+    if (
+      workflowDirectory !== packageWorkflowRoot
+      && !CAPTURED_REFLECT_APPLY(
+        CAPTURED_STRING_STARTS_WITH,
+        workflowDirectory,
+        [`${packageWorkflowRoot}/`],
+      )
+    ) throw failure('INVALID_CAPABILITY');
+    for (
+      let refIndex = 0;
+      refIndex < workflow.providerExtends.length;
+      refIndex += 1
+    ) {
+      const visiting = CAPTURED_REFLECT_APPLY(
+        CAPTURED_OBJECT_CREATE,
+        CAPTURED_OBJECT_RECEIVER,
+        [null],
+      ) as Record<string, true>;
+      authorizeReference(
+        workflow,
+        workflowDirectory,
+        workflow.providerExtends[refIndex]!,
+        visiting,
+        0,
+      );
+    }
+  }
+}
+
+export function getProjectTemplateRepertoireAuthorizedRelativeProviderFiles(
+  snapshot: ProjectTemplateRepertoireCapabilitySnapshot,
+): readonly ProjectTemplateRepertoireAuthorizedRelativeProviderFile[] {
+  const state = CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_GET,
+    SNAPSHOT_STATES,
+    [snapshot],
+  ) as SnapshotState | undefined;
+  if (state === undefined) throw failure('INVALID_ARGUMENT');
+  const files: ProjectTemplateRepertoireAuthorizedRelativeProviderFile[] = [];
+  for (let index = 0; index < state.authorizedProviderFiles.length; index += 1) {
+    const file = state.authorizedProviderFiles[index]!;
+    append(files, freeze({
+      relativePath: file.relativePath,
+      text: file.text,
+      sha256: file.sha256,
+    }));
+  }
+  return freeze(files);
+}
+
+export function getProjectTemplateRepertoireCapabilityAccessWitnessFragment(
+  snapshot: ProjectTemplateRepertoireCapabilitySnapshot,
+): string {
+  const state = CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_GET,
+    SNAPSHOT_STATES,
+    [snapshot],
+  ) as SnapshotState | undefined;
+  if (state === undefined) throw failure('INVALID_ARGUMENT');
+  return sha256(join(state.accessLog, '\n'));
 }
 
 export function revalidateProjectTemplateRepertoireCapabilitySnapshot(

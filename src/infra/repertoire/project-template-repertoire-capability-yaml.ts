@@ -94,6 +94,8 @@ export interface ProjectTemplateRepertoireCapabilityYaml {
   /** Private canonical input snapshot. Never expose through a public port. */
   readonly text: string;
   readonly sha256: string;
+  /** Strictly validated extends requirements for controlled snapshot access. */
+  readonly providerExtends: readonly string[];
 }
 
 function validateErrorCode(
@@ -166,6 +168,10 @@ function freeze<T>(value: T): Readonly<T> {
     CAPTURED_OBJECT_RECEIVER,
     [value],
   ) as Readonly<T>;
+}
+
+function append<T>(values: T[], value: T): void {
+  defineOwn(values, values.length, value);
 }
 
 function exactByteLength(value: unknown): number {
@@ -399,13 +405,13 @@ function requireSequenceOfMaps(node: unknown): void {
   }
 }
 
-function validateWorkflowShape(node: unknown): void {
+function validateWorkflowShape(node: unknown, providerExtends: string[]): void {
   if (node === null || nodeKind(node) === 'scalar') return;
   if (nodeKind(node) === 'seq') {
     const items = ownData(node, 'items', true);
     const length = arrayLength(items);
     for (let index = 0; index < length; index += 1) {
-      validateWorkflowShape(arrayItem(items, index));
+      validateWorkflowShape(arrayItem(items, index), providerExtends);
     }
     return;
   }
@@ -427,18 +433,21 @@ function validateWorkflowShape(node: unknown): void {
         throw failure('INVALID_CAPABILITY_YAML');
       }
     } else if (key === 'provider_options') {
-      requireMap(value);
+      validateProviderOptionsShape(requireMap(value), providerExtends);
       continue;
     } else if (key === 'steps' || key === 'parallel' || key === 'promotion') {
       requireSequenceOfMaps(value);
     } else if (key === 'overrides') {
       requireMap(value);
     }
-    validateWorkflowShape(value);
+    validateWorkflowShape(value, providerExtends);
   }
 }
 
-function validateProviderOptionsShape(root: object): void {
+function validateProviderOptionsShape(
+  root: object,
+  providerExtends: string[],
+): void {
   const items = ownData(root, 'items', true);
   const length = arrayLength(items);
   for (let index = 0; index < length; index += 1) {
@@ -450,6 +459,7 @@ function validateProviderOptionsShape(root: object): void {
       value === undefined
       || CAPTURED_REFLECT_APPLY(CAPTURED_STRING_TRIM, value, []) === ''
     ) throw failure('INVALID_CAPABILITY_YAML');
+    append(providerExtends, value);
   }
 }
 
@@ -489,9 +499,14 @@ export function parseProjectTemplateRepertoireCapabilityYaml(
     const contents = ownData(document, 'contents', true);
     rejectUnsafeNode(contents, 0, { nodes: 0 });
     const root = requireMap(contents);
-    if (kind === 'workflow') validateWorkflowShape(root);
-    else validateProviderOptionsShape(root);
-    return freeze({ text, sha256: digest }) as
+    const providerExtends: string[] = [];
+    if (kind === 'workflow') validateWorkflowShape(root, providerExtends);
+    else validateProviderOptionsShape(root, providerExtends);
+    return freeze({
+      text,
+      sha256: digest,
+      providerExtends: freeze(providerExtends),
+    }) as
       ProjectTemplateRepertoireCapabilityYaml;
   } catch (error) {
     if (isFailure(error)) throw error;

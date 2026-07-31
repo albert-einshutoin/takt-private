@@ -9,7 +9,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  authorizeProjectTemplateRepertoireRelativeProviderCandidates,
   captureProjectTemplateRepertoireCapabilitySnapshot,
+  getProjectTemplateRepertoireAuthorizedRelativeProviderFiles,
+  getProjectTemplateRepertoireCapabilityAccessWitnessFragment,
   getProjectTemplateRepertoireCapabilityFileAccess,
   PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT,
   revalidateProjectTemplateRepertoireCapabilitySnapshot,
@@ -677,6 +680,54 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
     )).toBe('{}\n');
     expect(() => access.readText(
       `${PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT}/workflows/secret.yaml`,
+    )).toThrow(expect.objectContaining({ code: 'OUTSIDE_REGISTRY' }));
+  });
+
+  it('authorizes only strict workflow-relative provider references and records access', () => {
+    const repertoire = root();
+    const pkg = join(repertoire, '@acme', 'review');
+    write(
+      join(pkg, 'workflows', 'nested', 'meaning.yaml'),
+      'steps:\n  - provider_options:\n'
+        + '      extends: ./provider-options/edit.yaml\n',
+    );
+    write(
+      join(pkg, 'workflows', 'nested', 'provider-options', 'edit.yaml'),
+      'claude:\n  allowed_tools: [Write]\n',
+    );
+    write(
+      join(pkg, 'workflows', 'unreferenced', 'provider-options', 'secret.yaml'),
+      '{}\n',
+    );
+    const snapshot = captureProjectTemplateRepertoireCapabilitySnapshot({
+      repertoireContext: createProjectTemplateRepertoireSafeReadContext(
+        repertoire,
+      ),
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review',
+      deadlineMs: FUTURE_DEADLINE_MS,
+    });
+    const before = getProjectTemplateRepertoireCapabilityAccessWitnessFragment(
+      snapshot,
+    );
+    authorizeProjectTemplateRepertoireRelativeProviderCandidates(snapshot);
+    const authorized =
+      getProjectTemplateRepertoireAuthorizedRelativeProviderFiles(snapshot);
+    expect(authorized.map((file) => file.relativePath)).toEqual([
+      'workflows/nested/provider-options/edit.yaml',
+    ]);
+    expect(Object.isFrozen(authorized)).toBe(true);
+    const access = getProjectTemplateRepertoireCapabilityFileAccess(snapshot);
+    const path = `${PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT}`
+      + '/workflows/nested/provider-options/edit.yaml';
+    expect(access.exists(path)).toBe(true);
+    expect(access.readText(path)).toContain('allowed_tools');
+    expect(getProjectTemplateRepertoireCapabilityAccessWitnessFragment(
+      snapshot,
+    )).not.toBe(before);
+    expect(() => access.readText(
+      `${PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT}`
+        + '/workflows/unreferenced/provider-options/secret.yaml',
     )).toThrow(expect.objectContaining({ code: 'OUTSIDE_REGISTRY' }));
   });
 });
