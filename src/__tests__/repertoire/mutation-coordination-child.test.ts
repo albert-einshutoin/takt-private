@@ -50,10 +50,13 @@ it('runs one real add or remove command behind the filesystem lease', async () =
   }
 
   const readyPath = requiredEnvironment('readyPath');
-  mockConfirm.mockImplementation(async () => {
-    writeFileSync(readyPath, 'ready\n', { mode: 0o600, flag: 'wx' });
-    return true;
-  });
+  mockConfirm.mockResolvedValue(true);
+  const mutationOptions = {
+    timeoutMs: 10_000,
+    onLeaseAttempted: () => {
+      writeFileSync(readyPath, 'attempted\n', { mode: 0o600, flag: 'wx' });
+    },
+  };
   mockExecFileSync.mockImplementation((command: string, args: string[]) => {
     if (command === 'gh' && args[0] === '--version') return Buffer.from('gh version 2.0.0');
     if (command === 'gh' && args[0] === 'api') return Buffer.from('tarball');
@@ -67,12 +70,12 @@ it('runs one real add or remove command behind the filesystem lease', async () =
 
   if (childEnvironment.action === 'add') {
     const { repertoireAddCommand } = await import('../../commands/repertoire/add.js');
-    await repertoireAddCommand('github:owner/repo@main', { timeoutMs: 10_000 });
+    await repertoireAddCommand('github:owner/repo@main', mutationOptions);
     return;
   }
   if (childEnvironment.action === 'remove') {
     const { repertoireRemoveCommand } = await import('../../commands/repertoire/remove.js');
-    await repertoireRemoveCommand('@owner/repo', { timeoutMs: 10_000 });
+    await repertoireRemoveCommand('@owner/repo', mutationOptions);
     return;
   }
   throw new Error('TAKT_REPERTOIRE_MUTATION_ACTION must be add or remove');

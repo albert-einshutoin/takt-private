@@ -155,7 +155,6 @@ describeContract(
       const child = spawnMutationChild(globalConfigDir, readyPath, 'add');
 
       await waitForPath(readyPath, 5_000);
-      await delay(100);
       expect(existsSync(packageDir)).toBe(false);
       expect(packageResiduals(globalConfigDir)).toEqual([]);
 
@@ -176,7 +175,6 @@ describeContract(
       const child = spawnMutationChild(globalConfigDir, readyPath, 'remove');
 
       await waitForPath(readyPath, 5_000);
-      await delay(100);
       expect(readFileSync(join(packageDir, 'sentinel'), 'utf8')).toBe('installed\n');
       expect(packageResiduals(globalConfigDir)).toEqual([]);
 
