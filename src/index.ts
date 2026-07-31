@@ -122,6 +122,12 @@ export {
   ProjectTemplateValidationError,
   TaktpackError,
 } from './features/project-template/index.js';
+export {
+  createProjectTemplateGithubArchiveAssetPort,
+} from './infra/github/project-template-github-archive-asset-port.js';
+export type {
+  ProjectTemplateGithubArchiveAssetPortDependencies,
+} from './infra/github/project-template-github-archive-asset-port.js';
 export type {
   ProjectTemplateManifestV1,
   ProjectTemplateGithubRefSourceSpec,
