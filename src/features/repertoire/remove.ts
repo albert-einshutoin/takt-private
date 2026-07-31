@@ -1,16 +1,36 @@
-/**
- * Repertoire package removal helpers.
- *
- * Provides:
- * - findScopeReferences: scan YAML files for @scope references (for pre-removal warning)
- * - shouldRemoveOwnerDir: determine if the @owner directory should be deleted
- */
+/** Repertoire reference scanning and owner-directory helpers. */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { createLogger } from '../../shared/utils/debug.js';
 
 const log = createLogger('repertoire-remove');
+
+// Reference scanning is an authorization boundary for package removal. Capture
+// mutable intrinsics before plugins can poison their prototypes at runtime.
+const safeReflectApply = Reflect.apply.bind(Reflect);
+const safeStringIncludesMethod = String.prototype.includes;
+const safeStringEndsWithMethod = String.prototype.endsWith;
+const safeArrayPushMethod = Array.prototype.push;
+const safeSetHasMethod = Set.prototype.has;
+const safeSetAddMethod = Set.prototype.add;
+const safeNumber = Number;
+const safeStringIncludes = (value: string, search: string): boolean => (
+  safeReflectApply(safeStringIncludesMethod, value, [search]) as boolean
+);
+const safeStringEndsWith = (value: string, search: string): boolean => (
+  safeReflectApply(safeStringEndsWithMethod, value, [search]) as boolean
+);
+const safeArrayPush = <T>(values: T[], value: T): void => {
+  safeReflectApply(safeArrayPushMethod, values, [value]);
+};
+const safeSetHas = (values: Set<string>, value: string): boolean => (
+  safeReflectApply(safeSetHasMethod, values, [value]) as boolean
+);
+const safeSetAdd = (values: Set<string>, value: string): void => {
+  safeReflectApply(safeSetAddMethod, values, [value]);
+};
 
 export class RepertoireReferenceScanError extends Error {
   readonly code = 'REFERENCE_SCAN_FAILED' as const;
@@ -22,139 +42,168 @@ export class RepertoireReferenceScanError extends Error {
 }
 
 export interface ScopeReference {
-  /** Absolute path to the file containing the @scope reference. */
   filePath: string;
+  /** Fresh file identity and bytes proof used by removal authorization. */
+  dev?: number;
+  ino?: number;
+  contentDigest?: string;
 }
 
-/**
- * Recursively scan a directory for YAML files containing the given @scope substring.
- */
-function scanYamlFilesInDir(
-  dir: string,
-  scope: string,
-  results: ScopeReference[],
-  failClosed: boolean,
-): void {
-  if (!existsSync(dir)) return;
-
-  for (const entry of readdirSync(dir)) {
-    const filePath = join(dir, entry);
-    let stats: ReturnType<typeof statSync>;
-    try {
-      stats = statSync(filePath);
-    } catch (err) {
-      log.debug('Failed to stat file', { filePath, err });
-      if (failClosed) throw new RepertoireReferenceScanError();
-      continue;
-    }
-
-    if (stats.isDirectory()) {
-      scanYamlFilesInDir(filePath, scope, results, failClosed);
-      continue;
-    }
-
-    if (!entry.endsWith('.yaml') && !entry.endsWith('.yml')) continue;
-
-    let content: string;
-    try {
-      content = readFileSync(filePath, 'utf-8');
-    } catch (err) {
-      log.debug('Failed to read file', { filePath, err });
-      if (failClosed) throw new RepertoireReferenceScanError();
-      continue;
-    }
-
-    if (content.includes(scope)) {
-      results.push({ filePath });
-    }
-  }
-}
-
-/**
- * Configuration for scope reference scanning.
- *
- * Separates the two kinds of scan targets to enable precise control over
- * which paths are scanned, avoiding unintended paths from root-based derivation.
- */
 export interface ScanConfig {
-  /** Directories to recursively scan for YAML files containing the scope substring. */
   workflowDirs: string[];
-  /** Directories to recursively scan for provider_options YAML files containing the scope substring. */
   providerOptionsDirs: string[];
-  /** Individual YAML files to check for the scope substring (e.g. workflow-categories.yaml). */
   categoriesFiles: string[];
-  /** Abort on an unreadable discovered path rather than return partial evidence. */
   failClosed?: boolean;
 }
 
-/**
- * Find all files that reference a given @scope package.
- *
- * Scans the 3 spec-defined locations:
- * 1. workflowDirs entries recursively (e.g. ~/.takt/workflows, .takt/workflows)
- * 2. providerOptionsDirs entries recursively (e.g. ~/.takt/provider-options, .takt/provider-options)
- * 3. categoriesFiles entries individually (e.g. ~/.takt/preferences/workflow-categories.yaml)
- *
- * @param scope  - e.g. "@nrslib/takt-fullstack"
- * @param config - explicit scan targets (workflowDirs + providerOptionsDirs + categoriesFiles)
- */
 export function findScopeReferences(scope: string, config: ScanConfig): ScopeReference[] {
   const results: ScopeReference[] = [];
   const scannedDirs = new Set<string>();
   const failClosed = config.failClosed ?? false;
 
-  for (const dir of config.workflowDirs) {
-    if (!scannedDirs.has(dir)) {
-      scanYamlFilesInDir(dir, scope, results, failClosed);
-      scannedDirs.add(dir);
-    }
+  scanConfiguredDirectories(config.workflowDirs, scope, results, scannedDirs, failClosed);
+  scanConfiguredDirectories(config.providerOptionsDirs, scope, results, scannedDirs, failClosed);
+  for (let index = 0; index < config.categoriesFiles.length; index += 1) {
+    const filePath = config.categoriesFiles[index]!;
+    if (!checkedExists(filePath, failClosed)) continue;
+    scanReferenceFile(filePath, scope, results, failClosed);
   }
-
-  for (const dir of config.providerOptionsDirs) {
-    if (!scannedDirs.has(dir)) {
-      scanYamlFilesInDir(dir, scope, results, failClosed);
-      scannedDirs.add(dir);
-    }
-  }
-
-  for (const filePath of config.categoriesFiles) {
-    if (!existsSync(filePath)) continue;
-    try {
-      const content = readFileSync(filePath, 'utf-8');
-      if (content.includes(scope)) {
-        results.push({ filePath });
-      }
-    } catch (err) {
-      log.debug('Failed to read categories file', { filePath, err });
-      if (failClosed) throw new RepertoireReferenceScanError();
-    }
-  }
-
   return results;
 }
 
-/**
- * Determine whether the @owner directory can be removed after deleting a repo.
- *
- * Returns true if the owner directory would have no remaining subdirectories
- * once the given repo is removed.
- *
- * @param ownerDir         - absolute path to the @owner directory
- * @param repoBeingRemoved - repo name that will be deleted (excluded from check)
- */
+function scanConfiguredDirectories(
+  directories: string[],
+  scope: string,
+  results: ScopeReference[],
+  scannedDirs: Set<string>,
+  failClosed: boolean,
+): void {
+  for (let index = 0; index < directories.length; index += 1) {
+    const directory = directories[index]!;
+    if (safeSetHas(scannedDirs, directory)) continue;
+    scanYamlFilesInDir(directory, scope, results, failClosed);
+    safeSetAdd(scannedDirs, directory);
+  }
+}
+
+function scanYamlFilesInDir(
+  directory: string,
+  scope: string,
+  results: ScopeReference[],
+  failClosed: boolean,
+): void {
+  if (!checkedExists(directory, failClosed)) return;
+  const entries = checkedReadDirectory(directory, failClosed);
+  if (entries === undefined) return;
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    const filePath = join(directory, entry);
+    const stats = checkedLstat(filePath, failClosed);
+    if (stats === undefined) continue;
+    if (stats.isDirectory() && !stats.isSymbolicLink()) {
+      scanYamlFilesInDir(filePath, scope, results, failClosed);
+      continue;
+    }
+    if (
+      !safeStringEndsWith(entry, '.yaml')
+      && !safeStringEndsWith(entry, '.yml')
+    ) continue;
+    scanReferenceFile(filePath, scope, results, failClosed, stats);
+  }
+}
+
+function scanReferenceFile(
+  filePath: string,
+  scope: string,
+  results: ScopeReference[],
+  failClosed: boolean,
+  initial = checkedLstat(filePath, failClosed),
+): void {
+  if (initial === undefined) return;
+  if (!initial.isFile() || initial.isSymbolicLink() || initial.nlink !== 1) {
+    handleScanFailure(failClosed);
+    return;
+  }
+  let content: string;
+  try {
+    content = readFileSync(filePath, 'utf8');
+  } catch {
+    handleScanFailure(failClosed);
+    return;
+  }
+  const fresh = checkedLstat(filePath, failClosed);
+  if (
+    fresh === undefined
+    || !fresh.isFile()
+    || fresh.isSymbolicLink()
+    || fresh.nlink !== 1
+    || fresh.dev !== initial.dev
+    || fresh.ino !== initial.ino
+    || fresh.size !== initial.size
+    || fresh.mtimeMs !== initial.mtimeMs
+    || fresh.ctimeMs !== initial.ctimeMs
+  ) {
+    handleScanFailure(failClosed);
+    return;
+  }
+  if (safeStringIncludes(content, scope)) {
+    safeArrayPush(results, {
+      filePath,
+      dev: safeNumber(fresh.dev),
+      ino: safeNumber(fresh.ino),
+      contentDigest: createHash('sha256').update(content).digest('hex'),
+    });
+  }
+}
+
+function checkedExists(path: string, failClosed: boolean): boolean {
+  try {
+    return existsSync(path);
+  } catch {
+    handleScanFailure(failClosed);
+    return false;
+  }
+}
+
+function checkedReadDirectory(path: string, failClosed: boolean): string[] | undefined {
+  try {
+    return readdirSync(path);
+  } catch {
+    handleScanFailure(failClosed);
+    return undefined;
+  }
+}
+
+function checkedLstat(
+  path: string,
+  failClosed: boolean,
+): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path);
+  } catch {
+    handleScanFailure(failClosed);
+    return undefined;
+  }
+}
+
+function handleScanFailure(failClosed: boolean): void {
+  // Never disclose path, raw error, or cause through authorization diagnostics.
+  log.debug('Repertoire reference scan failed');
+  if (failClosed) throw new RepertoireReferenceScanError();
+}
+
 export function shouldRemoveOwnerDir(ownerDir: string, repoBeingRemoved: string): boolean {
   if (!existsSync(ownerDir)) return false;
-
-  const remaining = readdirSync(ownerDir).filter((entry) => {
-    if (entry === repoBeingRemoved) return false;
-    const entryPath = join(ownerDir, entry);
+  const entries = readdirSync(ownerDir);
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    if (entry === repoBeingRemoved) continue;
     try {
-      return statSync(entryPath).isDirectory();
-    } catch (err) {
-      log.debug('Failed to stat entry', { entryPath, err });
-      return false;
+      if (statSync(join(ownerDir, entry)).isDirectory()) return false;
+    } catch {
+      log.debug('Repertoire owner inspection failed');
     }
-  });
-
-  return remaining.length === 0;
+  }
+  return true;
 }

@@ -182,11 +182,74 @@ describe('repertoire reference integrity: fail-closed authorization', () => {
   it('rejects a partial scan when a discovered path cannot be inspected', () => {
     const workflowsDir = join(tempDir, 'workflows');
     mkdirSync(workflowsDir, { recursive: true });
-    symlinkSync('loop', join(workflowsDir, 'loop'));
+    symlinkSync('loop.yaml', join(workflowsDir, 'loop.yaml'));
 
     expect(() => findScopeReferences('@owner/repo', {
       ...makeScanConfig(tempDir),
       failClosed: true,
     })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
+  });
+
+  it('normalizes readdir failures without exposing path or raw cause', () => {
+    const notDirectory = join(tempDir, 'not-a-directory');
+    writeFileSync(notDirectory, 'secret-path-content');
+
+    let caught: unknown;
+    try {
+      findScopeReferences('@owner/repo', {
+        workflowDirs: [notDirectory],
+        providerOptionsDirs: [],
+        categoriesFiles: [],
+        failClosed: true,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      code: 'REFERENCE_SCAN_FAILED',
+      message: 'Repertoire reference scan could not be completed safely',
+    });
+    expect(caught).not.toHaveProperty('cause');
+    expect(JSON.stringify(caught)).not.toContain(notDirectory);
+  });
+
+  it('detects references after mutable String and Array intrinsics are poisoned', () => {
+    const workflowsDir = join(tempDir, 'workflows');
+    const workflowFile = join(workflowsDir, 'flow.yaml');
+    mkdirSync(workflowsDir, { recursive: true });
+    writeFileSync(workflowFile, 'persona: "@owner/repo/coder"');
+    const originalIncludes = String.prototype.includes;
+    const originalEndsWith = String.prototype.endsWith;
+    const originalPush = Array.prototype.push;
+    let refs: ReturnType<typeof findScopeReferences>;
+    try {
+      String.prototype.includes = () => false;
+      String.prototype.endsWith = () => false;
+      Array.prototype.push = function poisonedPush(...items: unknown[]) {
+        if (typeof items[0] === 'object' && items[0] !== null && 'filePath' in items[0]) {
+          return this.length;
+        }
+        return originalPush.apply(this, items);
+      };
+      refs = findScopeReferences('@owner/repo', {
+        workflowDirs: [workflowsDir],
+        providerOptionsDirs: [],
+        categoriesFiles: [],
+        failClosed: true,
+      });
+    } finally {
+      String.prototype.includes = originalIncludes;
+      String.prototype.endsWith = originalEndsWith;
+      Array.prototype.push = originalPush;
+    }
+
+    expect(refs!).toHaveLength(1);
+    expect(refs![0]).toMatchObject({
+      filePath: workflowFile,
+      dev: expect.any(Number),
+      ino: expect.any(Number),
+      contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
   });
 });
