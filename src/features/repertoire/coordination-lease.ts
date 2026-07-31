@@ -14,13 +14,14 @@ import {
   type BigIntStats,
   type Stats,
 } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const COORDINATION_DIRECTORY_NAME = '.takt-repertoire-coordination';
 const READERS_DIRECTORY_NAME = 'readers';
 const RELEASED_DIRECTORY_NAME = 'released';
+const RELEASED_ARTIFACT_FILENAME = 'lease.released';
 const WRITER_INTENT_FILENAME = 'writer.intent';
 const LEASE_VERSION = 1;
 const MAX_LEASE_BYTES = 4_096;
@@ -31,11 +32,22 @@ const RETRY_DELAY_MS = 10;
 const MAX_SNAPSHOT_ATTEMPTS = 8;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
+const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+const FILE_READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
+const FILE_WRITE_EXCLUSIVE_FLAGS = constants.O_WRONLY
+  | constants.O_CREAT
+  | constants.O_EXCL
+  | constants.O_NOFOLLOW;
+const FILE_TYPE_MASK = constants.S_IFMT;
+const FILE_TYPE_DIRECTORY = constants.S_IFDIR;
+const FILE_TYPE_REGULAR = constants.S_IFREG;
+const FILE_TYPE_SYMLINK = constants.S_IFLNK;
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_REGEX = new RegExp(`^${UUID_PATTERN}$`);
+const HEX_256_REGEX = /^[0-9a-f]{64}$/;
 const READER_FILENAME_PATTERN = new RegExp(`^(\\d+)\\.(${UUID_PATTERN})\\.lease$`);
-const RELEASED_FILENAME_PATTERN = new RegExp(
-  `^(\\d+)\\.(${UUID_PATTERN})\\.(read|write)\\.released$`,
+const RELEASED_CONTAINER_PATTERN = new RegExp(
+  `^([0-9a-f]{64})\\.(\\d+)\\.(${UUID_PATTERN})\\.(read|write)\\.released$`,
 );
 
 // Filesystem coordination is security-sensitive and may run beside plugins.
@@ -43,15 +55,54 @@ const RELEASED_FILENAME_PATTERN = new RegExp(
 // monkey-patching can redirect validation or leak filesystem details.
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeArrayIsArray = Array.isArray.bind(Array);
+const safeArrayFindMethod = Array.prototype.find;
+const safeArrayIncludesMethod = Array.prototype.includes;
+const safeArrayJoinMethod = Array.prototype.join;
+const safeArrayPushMethod = Array.prototype.push;
+const safeArraySomeMethod = Array.prototype.some;
 const safeArraySortMethod = Array.prototype.sort;
+const safeArrayFind = <T>(value: T[], predicate: (item: T) => boolean): T | undefined => (
+  safeReflectApply(safeArrayFindMethod, value, [predicate]) as T | undefined
+);
+const safeArrayIncludes = <T>(value: T[], item: T): boolean => (
+  safeReflectApply(safeArrayIncludesMethod, value, [item]) as boolean
+);
+const safeArrayJoin = (value: unknown[], separator: string): string => (
+  safeReflectApply(safeArrayJoinMethod, value, [separator]) as string
+);
+const safeArrayPush = <T>(value: T[], item: T): number => (
+  safeReflectApply(safeArrayPushMethod, value, [item]) as number
+);
+const safeArraySome = <T>(value: T[], predicate: (item: T, index: number) => boolean): boolean => (
+  safeReflectApply(safeArraySomeMethod, value, [predicate]) as boolean
+);
 const safeArraySort = <T>(value: T[]): T[] => (
   safeReflectApply(safeArraySortMethod, value, []) as T[]
 );
 const safeBufferAlloc = Buffer.alloc.bind(Buffer);
+const safeBufferSubarrayMethod = Buffer.prototype.subarray;
+const safeBufferToStringMethod = Buffer.prototype.toString;
+const safeBufferToString = (value: Buffer, encoding: BufferEncoding): string => (
+  safeReflectApply(safeBufferToStringMethod, value, [encoding]) as string
+);
+const safeBufferSubarray = (value: Buffer, start: number, end: number): Buffer => (
+  safeReflectApply(safeBufferSubarrayMethod, value, [start, end]) as Buffer
+);
 const safeDateNow = Date.now.bind(Date);
 const SafeDate = Date;
+const safeDateToISOStringMethod = Date.prototype.toISOString;
+const safeDateToISOString = (value: Date): string => (
+  safeReflectApply(safeDateToISOStringMethod, value, []) as string
+);
 const safeJsonParse = JSON.parse.bind(JSON);
 const safeJsonStringify = JSON.stringify.bind(JSON);
+const safeMathMin = Math.min.bind(Math);
+const safeBigInt = BigInt;
+const safeNumber = Number;
+const safeNumberIsSafeInteger = Number.isSafeInteger.bind(Number);
+const BIGINT_FILE_TYPE_MASK = safeBigInt(FILE_TYPE_MASK);
+const BIGINT_FILE_TYPE_DIRECTORY = safeBigInt(FILE_TYPE_DIRECTORY);
+const BIGINT_FILE_TYPE_SYMLINK = safeBigInt(FILE_TYPE_SYMLINK);
 const safeObjectDefineProperty = Object.defineProperty.bind(Object);
 const safeObjectFreeze = Object.freeze.bind(Object);
 const safeObjectKeys = Object.keys.bind(Object);
@@ -65,9 +116,13 @@ const safeRegExpTest = (
   expression: RegExp,
   value: string,
 ): boolean => safeReflectApply(safeRegExpTestMethod, expression, [value]);
+const safeRandomBytes = randomBytes;
+const safeRandomUUID = randomUUID;
 const safeGetUid = typeof process.getuid === 'function'
   ? process.getuid.bind(process)
   : undefined;
+const safePid = process.pid;
+const safePlatform = process.platform;
 
 export const REPERTOIRE_COORDINATION_LOCK_ORDER = safeObjectFreeze([
   'global-repertoire',
@@ -139,6 +194,7 @@ type CoordinationPaths = {
 type CoordinationSnapshot = {
   digest: string;
   readers: LeaseEvidence[];
+  released: LeaseEvidence[];
   writer: LeaseEvidence | undefined;
   releasedCount: number;
 };
@@ -307,8 +363,8 @@ function assertPrivateDirectory(path: string): void {
   const stat = lstatSync(path);
   const expectedUid = currentUid();
   if (
-    !stat.isDirectory()
-    || stat.isSymbolicLink()
+    !isDirectoryMode(stat.mode)
+    || isSymlinkMode(stat.mode)
     || (stat.mode & 0o777) !== PRIVATE_DIRECTORY_MODE
     || (expectedUid !== null && stat.uid !== expectedUid)
   ) {
@@ -320,10 +376,10 @@ function createLeaseRecord(mode: RepertoireCoordinationMode): LeaseRecord {
   return {
     version: LEASE_VERSION,
     mode,
-    token: randomUUID(),
-    pid: process.pid,
+    token: safeRandomUUID(),
+    pid: safePid,
     uid: currentUid(),
-    createdAt: new SafeDate(safeDateNow()).toISOString(),
+    createdAt: safeDateToISOString(new SafeDate(safeDateNow())),
   };
 }
 
@@ -337,7 +393,7 @@ function createLeaseFile(
   try {
     fd = openSync(
       path,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      FILE_WRITE_EXCLUSIVE_FLAGS,
       PRIVATE_FILE_MODE,
     );
     fchmodSync(fd, PRIVATE_FILE_MODE);
@@ -354,12 +410,12 @@ function createLeaseFile(
 
 function readExactPrivateLease(
   path: string,
-  expectedMode: RepertoireCoordinationMode,
+  expectedMode?: RepertoireCoordinationMode,
 ): LeaseEvidence {
   let fd: number | undefined;
   try {
     const before = lstatSync(path);
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openSync(path, FILE_READ_FLAGS);
     const opened = fstatSync(fd);
     const after = lstatSync(path);
     assertSamePrivateFile(before, opened, after);
@@ -378,11 +434,11 @@ function readExactPrivateLease(
 function assertSamePrivateFile(before: Stats, opened: Stats, after: Stats): void {
   const expectedUid = currentUid();
   if (
-    !before.isFile()
-    || !opened.isFile()
-    || !after.isFile()
-    || before.isSymbolicLink()
-    || after.isSymbolicLink()
+    !isFileMode(before.mode)
+    || !isFileMode(opened.mode)
+    || !isFileMode(after.mode)
+    || isSymlinkMode(before.mode)
+    || isSymlinkMode(after.mode)
     || before.dev !== opened.dev
     || before.ino !== opened.ino
     || after.dev !== opened.dev
@@ -395,7 +451,7 @@ function assertSamePrivateFile(before: Stats, opened: Stats, after: Stats): void
   }
 }
 
-function parseLeaseRecord(raw: string, expectedMode: RepertoireCoordinationMode): LeaseRecord {
+function parseLeaseRecord(raw: string, expectedMode?: RepertoireCoordinationMode): LeaseRecord {
   let value: unknown;
   try {
     value = safeJsonParse(raw);
@@ -411,14 +467,15 @@ function parseLeaseRecord(raw: string, expectedMode: RepertoireCoordinationMode)
   const uid = value['uid'];
   if (
     keys.length !== expectedKeys.length
-    || keys.some((key, index) => key !== expectedKeys[index])
+    || safeArraySome(keys, (key, index) => key !== expectedKeys[index])
     || value['version'] !== LEASE_VERSION
-    || value['mode'] !== expectedMode
-    || !Number.isSafeInteger(value['pid'])
+    || (value['mode'] !== 'read' && value['mode'] !== 'write')
+    || (expectedMode !== undefined && value['mode'] !== expectedMode)
+    || !safeNumberIsSafeInteger(value['pid'])
     || (value['pid'] as number) <= 0
     || typeof token !== 'string'
     || !safeRegExpTest(UUID_REGEX, token)
-    || (uid !== null && (!Number.isSafeInteger(uid) || (uid as number) < 0))
+    || (uid !== null && (!safeNumberIsSafeInteger(uid) || (uid as number) < 0))
     || uid !== currentUid()
     || typeof createdAt !== 'string'
     || !isCanonicalTimestamp(createdAt)
@@ -429,11 +486,14 @@ function parseLeaseRecord(raw: string, expectedMode: RepertoireCoordinationMode)
   return value as LeaseRecord;
 }
 
-function scanStableState(paths: CoordinationPaths): CoordinationSnapshot {
+function scanStableState(
+  paths: CoordinationPaths,
+  enforceHardLimit = true,
+): CoordinationSnapshot {
   let previous: CoordinationSnapshot | undefined;
   for (let attempt = 0; attempt < MAX_SNAPSHOT_ATTEMPTS; attempt += 1) {
     try {
-      const current = scanStateOnce(paths);
+      const current = scanStateOnce(paths, enforceHardLimit);
       if (previous?.digest === current.digest) return current;
       previous = current;
     } catch (error) {
@@ -444,7 +504,10 @@ function scanStableState(paths: CoordinationPaths): CoordinationSnapshot {
   throw new RepertoireCoordinationError('UNSAFE_STATE');
 }
 
-function scanStateOnce(paths: CoordinationPaths): CoordinationSnapshot {
+function scanStateOnce(
+  paths: CoordinationPaths,
+  enforceHardLimit: boolean,
+): CoordinationSnapshot {
   const rootBefore = readDirectoryIdentity(paths.root);
   const rootEntries = sortedDirectoryEntries(paths.root);
   for (const entry of rootEntries) {
@@ -456,28 +519,32 @@ function scanStateOnce(paths: CoordinationPaths): CoordinationSnapshot {
       throw new RepertoireCoordinationError('UNSAFE_STATE');
     }
   }
-  if (!rootEntries.includes(READERS_DIRECTORY_NAME) || !rootEntries.includes(RELEASED_DIRECTORY_NAME)) {
+  if (
+    !safeArrayIncludes(rootEntries, READERS_DIRECTORY_NAME)
+    || !safeArrayIncludes(rootEntries, RELEASED_DIRECTORY_NAME)
+  ) {
     throw new RepertoireCoordinationError('UNSAFE_STATE');
   }
 
   const readers = scanReaders(paths.readers);
-  const released = scanReleased(paths.released);
-  const writer = rootEntries.includes(WRITER_INTENT_FILENAME)
+  const released = scanReleased(paths.released, enforceHardLimit);
+  const writer = safeArrayIncludes(rootEntries, WRITER_INTENT_FILENAME)
     ? readListedLease(paths.writerIntent, 'write')
     : undefined;
   const rootAfter = readDirectoryIdentity(paths.root);
   if (rootBefore !== rootAfter) throw SNAPSHOT_CHANGED;
 
-  const digest = [
+  const digest = safeArrayJoin([
     rootBefore,
-    rootEntries.join(','),
+    safeArrayJoin(rootEntries, ','),
     readers.digest,
     released.digest,
     writer?.digest ?? '-',
-  ].join('|');
+  ], '|');
   return {
     digest,
     readers: readers.evidence,
+    released: released.evidence,
     writer,
     releasedCount: released.count,
   };
@@ -498,34 +565,60 @@ function scanReaders(directory: string): { digest: string; evidence: LeaseEviden
     if (`${lease.record.pid}` !== match[1] || lease.record.token !== match[2]) {
       throw new RepertoireCoordinationError('UNSAFE_STATE');
     }
-    evidence.push(lease);
-    digests.push(`${filename}:${lease.digest}`);
+    safeArrayPush(evidence, lease);
+    safeArrayPush(digests, `${filename}:${lease.digest}`);
   }
   const after = readDirectoryIdentity(directory);
   if (before !== after) throw SNAPSHOT_CHANGED;
-  return { digest: `${before}:${digests.join(',')}`, evidence };
+  return { digest: `${before}:${safeArrayJoin(digests, ',')}`, evidence };
 }
 
-function scanReleased(directory: string): { digest: string; count: number } {
+function scanReleased(
+  directory: string,
+  enforceHardLimit: boolean,
+): { digest: string; count: number; evidence: LeaseEvidence[] } {
   const before = readDirectoryIdentity(directory);
   const entries = sortedDirectoryEntries(directory);
+  if (enforceHardLimit && entries.length > TOMBSTONE_HARD_LIMIT) {
+    throw new RepertoireCoordinationError('RECOVERY_REQUIRED');
+  }
   const digests: string[] = [];
-  for (const filename of entries) {
-    const match = safeRegExpExec(RELEASED_FILENAME_PATTERN, filename);
+  const evidence: LeaseEvidence[] = [];
+  for (const containerName of entries) {
+    const match = safeRegExpExec(RELEASED_CONTAINER_PATTERN, containerName);
     if (!match) throw new RepertoireCoordinationError('UNSAFE_STATE');
-    const mode = match[3] as RepertoireCoordinationMode;
-    const lease = readListedLease(join(directory, filename), mode);
-    if (`${lease.record.pid}` !== match[1] || lease.record.token !== match[2]) {
+    const container = join(directory, containerName);
+    const containerBefore = readDirectoryIdentity(container);
+    const artifacts = sortedDirectoryEntries(container);
+    if (
+      artifacts.length !== 1
+      || artifacts[0] !== RELEASED_ARTIFACT_FILENAME
+    ) {
       throw new RepertoireCoordinationError('UNSAFE_STATE');
     }
-    digests.push(`${filename}:${lease.digest}`);
+    const lease = readListedLease(join(container, RELEASED_ARTIFACT_FILENAME));
+    if (
+      `${lease.record.pid}` !== match[2]
+      || lease.record.token !== match[3]
+      || lease.record.mode !== match[4]
+    ) {
+      throw new RepertoireCoordinationError('UNSAFE_STATE');
+    }
+    const containerAfter = readDirectoryIdentity(container);
+    if (containerBefore !== containerAfter) throw SNAPSHOT_CHANGED;
+    safeArrayPush(evidence, lease);
+    safeArrayPush(digests, `${containerName}:${containerBefore}:${lease.digest}`);
   }
   const after = readDirectoryIdentity(directory);
   if (before !== after) throw SNAPSHOT_CHANGED;
-  return { digest: `${before}:${digests.join(',')}`, count: entries.length };
+  return {
+    digest: `${before}:${safeArrayJoin(digests, ',')}`,
+    count: entries.length,
+    evidence,
+  };
 }
 
-function readListedLease(path: string, mode: RepertoireCoordinationMode): LeaseEvidence {
+function readListedLease(path: string, mode?: RepertoireCoordinationMode): LeaseEvidence {
   try {
     return readExactPrivateLease(path, mode);
   } catch (error) {
@@ -541,26 +634,46 @@ function sortedDirectoryEntries(path: string): string[] {
 function readDirectoryIdentity(path: string): string {
   const stat = lstatSync(path, { bigint: true });
   assertPrivateBigIntDirectory(stat);
-  return [
+  return safeArrayJoin([
     stat.dev,
     stat.ino,
     stat.mode,
     stat.uid,
     stat.mtimeNs,
     stat.ctimeNs,
-  ].join(':');
+  ], ':');
 }
 
 function assertPrivateBigIntDirectory(stat: BigIntStats): void {
   const expectedUid = currentUid();
   if (
-    !stat.isDirectory()
-    || stat.isSymbolicLink()
-    || (stat.mode & 0o777n) !== BigInt(PRIVATE_DIRECTORY_MODE)
-    || (expectedUid !== null && stat.uid !== BigInt(expectedUid))
+    !isBigIntDirectoryMode(stat.mode)
+    || isBigIntSymlinkMode(stat.mode)
+    || (stat.mode & 0o777n) !== safeBigInt(PRIVATE_DIRECTORY_MODE)
+    || (expectedUid !== null && stat.uid !== safeBigInt(expectedUid))
   ) {
     throw new RepertoireCoordinationError('UNSAFE_STATE');
   }
+}
+
+function isDirectoryMode(mode: number): boolean {
+  return (mode & FILE_TYPE_MASK) === FILE_TYPE_DIRECTORY;
+}
+
+function isFileMode(mode: number): boolean {
+  return (mode & FILE_TYPE_MASK) === FILE_TYPE_REGULAR;
+}
+
+function isSymlinkMode(mode: number): boolean {
+  return (mode & FILE_TYPE_MASK) === FILE_TYPE_SYMLINK;
+}
+
+function isBigIntDirectoryMode(mode: bigint): boolean {
+  return (mode & BIGINT_FILE_TYPE_MASK) === BIGINT_FILE_TYPE_DIRECTORY;
+}
+
+function isBigIntSymlinkMode(mode: bigint): boolean {
+  return (mode & BIGINT_FILE_TYPE_MASK) === BIGINT_FILE_TYPE_SYMLINK;
 }
 
 function assertPublishedLease(
@@ -568,7 +681,7 @@ function assertPublishedLease(
   record: LeaseRecord,
   identity: FileIdentity,
 ): void {
-  const own = leases.find((lease) => sameOwnerAndIdentity(lease, record, identity));
+  const own = safeArrayFind(leases, (lease) => sameOwnerAndIdentity(lease, record, identity));
   if (own === undefined) throw new RepertoireCoordinationError('UNSAFE_STATE');
 }
 
@@ -594,16 +707,40 @@ function releaseOwnedLease(
   identity: FileIdentity,
   parentDirectory: string,
 ): void {
-  const releasedPath = join(
-    paths.released,
-    `${expected.pid}.${expected.token}.${expected.mode}.released`,
-  );
+  const nonce = safeBufferToString(safeRandomBytes(32), 'hex');
+  if (!safeRegExpTest(HEX_256_REGEX, nonce)) {
+    throw new RepertoireCoordinationError('UNSAFE_STATE');
+  }
+  const containerName = `${nonce}.${expected.pid}.${expected.token}.${expected.mode}.released`;
+  const container = join(paths.released, containerName);
+  try {
+    mkdirSync(container, { mode: PRIVATE_DIRECTORY_MODE });
+  } catch (error) {
+    // A nonce collision is never retried: preserving the existing container is
+    // more important than making release appear successful under a compromised
+    // entropy source.
+    if (isAlreadyExistsError(error)) {
+      throw new RepertoireCoordinationError('UNSAFE_STATE');
+    }
+    throw error;
+  }
+  enforcePrivateDirectoryMode(container);
+  assertPrivateDirectory(container);
+  syncDirectory(paths.released);
+  const releasedPath = join(container, RELEASED_ARTIFACT_FILENAME);
+
   // rename is the release linearization point. There is intentionally no
   // ownership check before it: a check-then-unlink sequence can delete a
-  // foreign claim installed between those operations.
+  // foreign claim installed between those operations. The 256-bit container
+  // is created immediately beforehand with O_EXCL-like mkdir semantics, so
+  // ordinary protocol participants cannot pre-publish its fixed artifact.
+  // A malicious same-UID process can still mutate a 0700 directory after it is
+  // published; the post-rename identity check and full scan fail closed but
+  // cannot provide a stronger OS isolation boundary than the shared UID.
   renameSync(path, releasedPath);
   syncDirectory(parentDirectory);
-  if (parentDirectory !== paths.released) syncDirectory(paths.released);
+  syncDirectory(container);
+  syncDirectory(paths.released);
 
   const released = readExactPrivateLease(releasedPath, expected.mode);
   if (!sameOwnerAndIdentity(released, expected, identity)) {
@@ -611,6 +748,8 @@ function releaseOwnedLease(
     // delete it here; all future acquisitions will fail closed while scanning.
     throw new RepertoireCoordinationError('UNSAFE_STATE');
   }
+  const published = scanStableState(paths, false);
+  assertPublishedLease(published.released, expected, identity);
 }
 
 function sameOwnerAndIdentity(
@@ -648,7 +787,7 @@ function enforceTombstoneLimits(
 }
 
 function readStableBoundedFile(fd: number, opened: Stats, path: string): string {
-  const buffer = safeBufferAlloc(Number(opened.size) + 1);
+  const buffer = safeBufferAlloc(safeNumber(opened.size) + 1);
   let offset = 0;
   while (offset < buffer.length) {
     const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, offset);
@@ -669,11 +808,14 @@ function readStableBoundedFile(fd: number, opened: Stats, path: string): string 
   ) {
     throw new RepertoireCoordinationError('UNSAFE_STATE');
   }
-  return buffer.subarray(0, offset).toString('utf8');
+  return safeBufferToString(safeBufferSubarray(buffer, 0, offset), 'utf8');
 }
 
 function fileIdentityDigest(stat: Stats): string {
-  return [stat.dev, stat.ino, stat.size, stat.mode, stat.uid, stat.mtimeMs, stat.ctimeMs].join(':');
+  return safeArrayJoin(
+    [stat.dev, stat.ino, stat.size, stat.mode, stat.uid, stat.mtimeMs, stat.ctimeMs],
+    ':',
+  );
 }
 
 async function waitForRetry(deadline: number, signal: AbortSignal | undefined): Promise<void> {
@@ -681,7 +823,7 @@ async function waitForRetry(deadline: number, signal: AbortSignal | undefined): 
   const remaining = deadline - safeDateNow();
   if (remaining <= 0) throw new RepertoireCoordinationError('TIMEOUT');
   try {
-    await delay(Math.min(RETRY_DELAY_MS, remaining), undefined, { signal });
+    await delay(safeMathMin(RETRY_DELAY_MS, remaining), undefined, { signal });
   } catch {
     if (signal?.aborted) throw new RepertoireCoordinationError('ABORTED');
     throw new RepertoireCoordinationError('UNSAFE_STATE');
@@ -691,10 +833,10 @@ async function waitForRetry(deadline: number, signal: AbortSignal | undefined): 
 }
 
 function syncDirectory(path: string): void {
-  if (process.platform === 'win32') return;
+  if (safePlatform === 'win32') return;
   let fd: number | undefined;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    fd = openSync(path, DIRECTORY_OPEN_FLAGS);
     fsyncSync(fd);
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -704,7 +846,7 @@ function syncDirectory(path: string): void {
 function enforcePrivateDirectoryMode(path: string): void {
   let fd: number | undefined;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    fd = openSync(path, DIRECTORY_OPEN_FLAGS);
     fchmodSync(fd, PRIVATE_DIRECTORY_MODE);
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -720,7 +862,7 @@ function validateOptions(options: AcquireRepertoireCoordinationLeaseOptions): vo
   }
   if (
     options.timeoutMs !== undefined
-    && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 0)
+    && (!safeNumberIsSafeInteger(options.timeoutMs) || options.timeoutMs < 0)
   ) {
     throw new RepertoireCoordinationError('UNSAFE_STATE');
   }
@@ -736,7 +878,7 @@ function currentUid(): number | null {
 
 function isCanonicalTimestamp(value: string): boolean {
   try {
-    return new SafeDate(value).toISOString() === value;
+    return safeDateToISOString(new SafeDate(value)) === value;
   } catch {
     return false;
   }

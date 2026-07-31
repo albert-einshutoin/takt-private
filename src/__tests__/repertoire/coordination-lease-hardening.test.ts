@@ -1,6 +1,7 @@
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -34,7 +35,24 @@ const fsFault = vi.hoisted(() => ({
   afterLeaseWrite: undefined as (() => void) | undefined,
   actualRenameSync: undefined as typeof import('node:fs').renameSync | undefined,
   actualWriteFileSync: undefined as typeof import('node:fs').writeFileSync | undefined,
+  readCalls: 0,
 }));
+
+const cryptoFault = vi.hoisted(() => ({
+  nextRandomBytes: undefined as Buffer | undefined,
+}));
+
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return {
+    ...actual,
+    randomBytes(size: number) {
+      const forced = cryptoFault.nextRandomBytes;
+      cryptoFault.nextRandomBytes = undefined;
+      return forced ?? actual.randomBytes(size);
+    },
+  };
+});
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -101,6 +119,7 @@ vi.mock('node:fs', async (importOriginal) => {
       return actual.fstatSync(...args);
     },
     readSync(...args: Parameters<typeof actual.readSync>) {
+      fsFault.readCalls += 1;
       fail('readSync');
       return actual.readSync(...args);
     },
@@ -132,6 +151,8 @@ afterEach(() => {
   fsFault.beforeReleaseMutation = undefined;
   fsFault.afterReaddir = undefined;
   fsFault.afterLeaseWrite = undefined;
+  fsFault.readCalls = 0;
+  cryptoFault.nextRandomBytes = undefined;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -139,11 +160,15 @@ describe('repertoire coordination hardening', () => {
   it('uses module-captured intrinsics when a waiting writer times out after hook0 poison', async () => {
     const root = makeRoot();
     const owner = await acquire(root, 'write');
+    const activePath = findActiveLeasePath(root, 'write');
+    const active = JSON.parse(readFileSync(activePath, 'utf8')) as Record<string, unknown>;
+    const writerToken = String(active['token']);
     const originals = capturePoisonedIntrinsicDescriptors();
-    const poison = vi.fn(() => {
-      throw new Error('post-init intrinsic poison');
-    });
-    fsFault.hook0 = () => poisonIntrinsics(poison);
+    const observed: IntrinsicObservation[] = [];
+    const observe = (observation: IntrinsicObservation) => {
+      observed[observed.length] = observation;
+    };
+    fsFault.hook0 = () => poisonIntrinsics(observe);
 
     let caught: unknown;
     try {
@@ -153,7 +178,33 @@ describe('repertoire coordination hardening', () => {
     }
 
     expect(caught).toMatchObject({ code: 'TIMEOUT' });
-    expect(poison).not.toHaveBeenCalled();
+    expect(containsToken(observed, writerToken)).toBe(false);
+    owner.release();
+  });
+
+  it('denies a reader without exposing its writer token to hostile post-init intrinsics', async () => {
+    const root = makeRoot();
+    const owner = await acquire(root, 'write');
+    const activePath = findActiveLeasePath(root, 'write');
+    const active = JSON.parse(readFileSync(activePath, 'utf8')) as Record<string, unknown>;
+    const writerToken = String(active['token']);
+    const originals = capturePoisonedIntrinsicDescriptors();
+    const observed: IntrinsicObservation[] = [];
+    const observe = (observation: IntrinsicObservation) => {
+      observed[observed.length] = observation;
+    };
+    fsFault.hook0 = () => poisonIntrinsics(observe);
+
+    let caught: unknown;
+    try {
+      caught = await acquire(root, 'read', 40).catch((error: unknown) => error);
+    } finally {
+      restorePoisonedIntrinsics(originals);
+    }
+
+    expect(caught).toMatchObject({ code: 'WRITER_PENDING' });
+    expect(containsToken(observed, writerToken)).toBe(false);
+    expect(String(caught)).not.toContain(writerToken);
     owner.release();
   });
 
@@ -243,6 +294,65 @@ describe('repertoire coordination hardening', () => {
 
     await expect(acquire(root, 'write', 50))
       .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+  });
+
+  it('preserves a foreign legacy predictable destination and blocks future acquisition', async () => {
+    const root = makeRoot();
+    const lease = await acquire(root, 'write');
+    const activePath = findActiveLeasePath(root, 'write');
+    const active = JSON.parse(readFileSync(activePath, 'utf8')) as Record<string, unknown>;
+    const legacyPath = join(
+      root,
+      '.takt-repertoire-coordination',
+      'released',
+      `${String(active['pid'])}.${String(active['token'])}.write.released`,
+    );
+    const foreign = 'foreign legacy destination\n';
+    writeFileSync(legacyPath, foreign, { mode: 0o600 });
+
+    expect(() => lease.release()).toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
+    expect(readFileSync(legacyPath, 'utf8')).toBe(foreign);
+    await expect(acquire(root, 'write', 50))
+      .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+  });
+
+  it('preserves a foreign container on forced release nonce collision', async () => {
+    const root = makeRoot();
+    const lease = await acquire(root, 'write');
+    const activePath = findActiveLeasePath(root, 'write');
+    const active = JSON.parse(readFileSync(activePath, 'utf8')) as Record<string, unknown>;
+    const nonce = 'ab'.repeat(32);
+    const container = join(
+      root,
+      '.takt-repertoire-coordination',
+      'released',
+      `${nonce}.${String(active['pid'])}.${String(active['token'])}.write.released`,
+    );
+    mkdirSync(container, { mode: 0o700 });
+    const foreignPath = join(container, 'foreign-artifact');
+    const foreign = 'foreign collision destination\n';
+    writeFileSync(foreignPath, foreign, { mode: 0o600 });
+    cryptoFault.nextRandomBytes = Buffer.from(nonce, 'hex');
+
+    expect(() => lease.release()).toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
+    expect(readFileSync(foreignPath, 'utf8')).toBe(foreign);
+    await expect(acquire(root, 'write', 50))
+      .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+  });
+
+  it('returns recovery before opening any released child when the hard limit is exceeded', async () => {
+    const root = makeRoot();
+    const initial = await acquire(root, 'write');
+    initial.release();
+    const released = join(root, '.takt-repertoire-coordination', 'released');
+    for (let index = 0; index < 4_096; index += 1) {
+      mkdirSync(join(released, index.toString(16).padStart(64, '0')), { mode: 0o700 });
+    }
+    fsFault.readCalls = 0;
+
+    await expect(acquire(root, 'write', 50))
+      .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+    expect(fsFault.readCalls).toBe(0);
   });
 
   it.each([
@@ -365,7 +475,9 @@ function allFiles(root: string): string[] {
 }
 
 function releasedFiles(root: string): string[] {
-  return allFiles(root).filter((path) => basename(join(path, '..')) === 'released');
+  const released = join(root, '.takt-repertoire-coordination', 'released');
+  if (!existsSync(released)) return [];
+  return allFiles(released).filter((path) => basename(path) === 'lease.released');
 }
 
 async function seedReleasedTombstones(root: string, count: number): Promise<void> {
@@ -374,12 +486,18 @@ async function seedReleasedTombstones(root: string, count: number): Promise<void
   const [seedPath] = releasedFiles(root);
   expect(seedPath).toBeDefined();
   const seed = JSON.parse(readFileSync(seedPath!, 'utf8')) as Record<string, unknown>;
-  const releasedDirectory = join(seedPath!, '..');
+  const releasedDirectory = join(seedPath!, '..', '..');
   for (let index = 1; index < count; index += 1) {
     const token = randomUUID();
     const record: Record<string, unknown> = { ...seed, token };
+    const nonce = index.toString(16).padStart(64, '0');
+    const container = join(
+      releasedDirectory,
+      `${nonce}.${String(record['pid'])}.${token}.write.released`,
+    );
+    mkdirSync(container, { mode: 0o700 });
     writeFileSync(
-      join(releasedDirectory, `${String(record['pid'])}.${token}.write.released`),
+      join(container, 'lease.released'),
       `${JSON.stringify(record)}\n`,
       { mode: 0o600 },
     );
@@ -404,12 +522,22 @@ type PoisonedIntrinsicDescriptors = ReturnType<typeof capturePoisonedIntrinsicDe
 
 function capturePoisonedIntrinsicDescriptors() {
   return {
+    arrayFind: Object.getOwnPropertyDescriptor(Array.prototype, 'find')!,
+    arrayIncludes: Object.getOwnPropertyDescriptor(Array.prototype, 'includes')!,
     arrayIsArray: Object.getOwnPropertyDescriptor(Array, 'isArray')!,
+    arrayJoin: Object.getOwnPropertyDescriptor(Array.prototype, 'join')!,
+    arrayPush: Object.getOwnPropertyDescriptor(Array.prototype, 'push')!,
+    arraySome: Object.getOwnPropertyDescriptor(Array.prototype, 'some')!,
     arraySort: Object.getOwnPropertyDescriptor(Array.prototype, 'sort')!,
     bufferAlloc: Object.getOwnPropertyDescriptor(Buffer, 'alloc')!,
+    bufferSubarray: Object.getOwnPropertyDescriptor(Buffer.prototype, 'subarray')!,
+    bufferToString: Object.getOwnPropertyDescriptor(Buffer.prototype, 'toString')!,
     dateNow: Object.getOwnPropertyDescriptor(Date, 'now')!,
+    dateToISOString: Object.getOwnPropertyDescriptor(Date.prototype, 'toISOString')!,
     jsonParse: Object.getOwnPropertyDescriptor(JSON, 'parse')!,
     jsonStringify: Object.getOwnPropertyDescriptor(JSON, 'stringify')!,
+    mathMin: Object.getOwnPropertyDescriptor(Math, 'min')!,
+    numberIsSafeInteger: Object.getOwnPropertyDescriptor(Number, 'isSafeInteger')!,
     objectFreeze: Object.getOwnPropertyDescriptor(Object, 'freeze')!,
     objectKeys: Object.getOwnPropertyDescriptor(Object, 'keys')!,
     regexpTest: Object.getOwnPropertyDescriptor(RegExp.prototype, 'test')!,
@@ -417,28 +545,74 @@ function capturePoisonedIntrinsicDescriptors() {
   };
 }
 
-function poisonIntrinsics(poison: () => never): void {
-  Object.defineProperty(Array, 'isArray', { configurable: true, value: poison });
-  Object.defineProperty(Array.prototype, 'sort', { configurable: true, value: poison });
-  Object.defineProperty(Buffer, 'alloc', { configurable: true, value: poison });
-  Object.defineProperty(Date, 'now', { configurable: true, value: poison });
-  Object.defineProperty(JSON, 'parse', { configurable: true, value: poison });
-  Object.defineProperty(JSON, 'stringify', { configurable: true, value: poison });
-  Object.defineProperty(Object, 'freeze', { configurable: true, value: poison });
-  Object.defineProperty(Object, 'keys', { configurable: true, value: poison });
-  Object.defineProperty(RegExp.prototype, 'test', { configurable: true, value: poison });
+type IntrinsicObservation = {
+  name: string;
+  receiver: unknown;
+  args: unknown[];
+};
+
+function poisonIntrinsics(observe: (observation: IntrinsicObservation) => void): void {
+  const originals = capturePoisonedIntrinsicDescriptors();
+  const reflectApply = Reflect.apply.bind(Reflect);
+  const trap = (name: string, descriptor: PropertyDescriptor) => function trapIntrinsic(
+    this: unknown,
+    ...args: unknown[]
+  ): unknown {
+    observe({ name, receiver: this, args });
+    return reflectApply(descriptor.value as (...values: unknown[]) => unknown, this, args);
+  };
+  Object.defineProperty(Array.prototype, 'find', { configurable: true, value: trap('Array.find', originals.arrayFind) });
+  Object.defineProperty(Array.prototype, 'includes', { configurable: true, value: trap('Array.includes', originals.arrayIncludes) });
+  Object.defineProperty(Array, 'isArray', { configurable: true, value: trap('Array.isArray', originals.arrayIsArray) });
+  Object.defineProperty(Array.prototype, 'join', { configurable: true, value: trap('Array.join', originals.arrayJoin) });
+  Object.defineProperty(Array.prototype, 'push', { configurable: true, value: trap('Array.push', originals.arrayPush) });
+  Object.defineProperty(Array.prototype, 'some', { configurable: true, value: trap('Array.some', originals.arraySome) });
+  Object.defineProperty(Array.prototype, 'sort', { configurable: true, value: trap('Array.sort', originals.arraySort) });
+  Object.defineProperty(Buffer, 'alloc', { configurable: true, value: trap('Buffer.alloc', originals.bufferAlloc) });
+  Object.defineProperty(Buffer.prototype, 'subarray', { configurable: true, value: trap('Buffer.subarray', originals.bufferSubarray) });
+  Object.defineProperty(Buffer.prototype, 'toString', { configurable: true, value: trap('Buffer.toString', originals.bufferToString) });
+  Object.defineProperty(Date, 'now', { configurable: true, value: trap('Date.now', originals.dateNow) });
+  Object.defineProperty(Date.prototype, 'toISOString', { configurable: true, value: trap('Date.toISOString', originals.dateToISOString) });
+  Object.defineProperty(JSON, 'parse', { configurable: true, value: trap('JSON.parse', originals.jsonParse) });
+  Object.defineProperty(JSON, 'stringify', { configurable: true, value: trap('JSON.stringify', originals.jsonStringify) });
+  Object.defineProperty(Math, 'min', { configurable: true, value: trap('Math.min', originals.mathMin) });
+  Object.defineProperty(Number, 'isSafeInteger', { configurable: true, value: trap('Number.isSafeInteger', originals.numberIsSafeInteger) });
+  Object.defineProperty(Object, 'freeze', { configurable: true, value: trap('Object.freeze', originals.objectFreeze) });
+  Object.defineProperty(Object, 'keys', { configurable: true, value: trap('Object.keys', originals.objectKeys) });
+  Object.defineProperty(RegExp.prototype, 'test', { configurable: true, value: trap('RegExp.test', originals.regexpTest) });
   if (Object.getOwnPropertyDescriptor(process, 'getuid')) {
-    Object.defineProperty(process, 'getuid', { configurable: true, value: poison });
+    Object.defineProperty(process, 'getuid', { configurable: true, value: trap('process.getuid', originals.processGetuid!) });
   }
 }
 
+function containsToken(value: unknown, token: string, seen = new WeakSet<object>()): boolean {
+  if (typeof value === 'string') return value.includes(token);
+  if ((typeof value !== 'object' && typeof value !== 'function') || value === null) return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  for (const child of Object.values(value)) {
+    if (containsToken(child, token, seen)) return true;
+  }
+  return false;
+}
+
 function restorePoisonedIntrinsics(descriptors: PoisonedIntrinsicDescriptors): void {
+  Object.defineProperty(Array.prototype, 'find', descriptors.arrayFind);
+  Object.defineProperty(Array.prototype, 'includes', descriptors.arrayIncludes);
   Object.defineProperty(Array, 'isArray', descriptors.arrayIsArray);
+  Object.defineProperty(Array.prototype, 'join', descriptors.arrayJoin);
+  Object.defineProperty(Array.prototype, 'push', descriptors.arrayPush);
+  Object.defineProperty(Array.prototype, 'some', descriptors.arraySome);
   Object.defineProperty(Array.prototype, 'sort', descriptors.arraySort);
   Object.defineProperty(Buffer, 'alloc', descriptors.bufferAlloc);
+  Object.defineProperty(Buffer.prototype, 'subarray', descriptors.bufferSubarray);
+  Object.defineProperty(Buffer.prototype, 'toString', descriptors.bufferToString);
   Object.defineProperty(Date, 'now', descriptors.dateNow);
+  Object.defineProperty(Date.prototype, 'toISOString', descriptors.dateToISOString);
   Object.defineProperty(JSON, 'parse', descriptors.jsonParse);
   Object.defineProperty(JSON, 'stringify', descriptors.jsonStringify);
+  Object.defineProperty(Math, 'min', descriptors.mathMin);
+  Object.defineProperty(Number, 'isSafeInteger', descriptors.numberIsSafeInteger);
   Object.defineProperty(Object, 'freeze', descriptors.objectFreeze);
   Object.defineProperty(Object, 'keys', descriptors.objectKeys);
   Object.defineProperty(RegExp.prototype, 'test', descriptors.regexpTest);
