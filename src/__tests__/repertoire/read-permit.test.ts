@@ -16,7 +16,9 @@ import {
   assertActiveRepertoireReadPermit,
   prepareRepertoireRead,
   withRepertoireReadPermit,
+  type PrepareRepertoireReadOptions,
   type RepertoireReadPermit,
+  type RepertoireReadPermitOptions,
 } from '../../features/repertoire/read-permit.js';
 
 describe('repertoire read permit private boundary', () => {
@@ -31,7 +33,7 @@ describe('repertoire read permit private boundary', () => {
     const otherRoot = makeRoot(roots);
     let escaped: RepertoireReadPermit | undefined;
 
-    await withRepertoireReadPermit({ globalConfigDir: root }, (permit) => {
+    await withRepertoireReadPermit({ globalConfigDir: root, operation: (permit) => {
       escaped = permit;
       expect(Reflect.ownKeys(permit)).toEqual([]);
       expect(Object.getPrototypeOf(permit)).toBeNull();
@@ -40,7 +42,7 @@ describe('repertoire read permit private boundary', () => {
       expect(() => assertActiveRepertoireReadPermit(permit, otherRoot)).toThrow(
         expect.objectContaining({ code: 'UNSAFE_STATE' }),
       );
-    });
+    } });
 
     expect(() => assertActiveRepertoireReadPermit(escaped, root)).toThrow(
       expect.objectContaining({ code: 'UNSAFE_STATE' }),
@@ -49,7 +51,7 @@ describe('repertoire read permit private boundary', () => {
 
   it('rejects forged, cloned, and cross-realm objects', async () => {
     const root = makeRoot(roots);
-    await withRepertoireReadPermit({ globalConfigDir: root }, (permit) => {
+    await withRepertoireReadPermit({ globalConfigDir: root, operation: (permit) => {
       for (const candidate of [
         {},
         { ...permit },
@@ -59,19 +61,19 @@ describe('repertoire read permit private boundary', () => {
           expect.objectContaining({ code: 'UNSAFE_STATE' }),
         );
       }
-    });
+    } });
   });
 
   it('keeps async callback authority and its reader lease active until settlement', async () => {
     const root = makeRoot(roots);
     const gate = deferred<void>();
     const entered = deferred<void>();
-    const running = withRepertoireReadPermit({ globalConfigDir: root }, async (permit) => {
+    const running = withRepertoireReadPermit({ globalConfigDir: root, operation: async (permit) => {
       entered.resolve();
       await gate.promise;
       assertActiveRepertoireReadPermit(permit, root);
       return 'done';
-    });
+    } });
 
     await entered.promise;
     expect(activeReaderFiles(root)).toHaveLength(1);
@@ -84,7 +86,7 @@ describe('repertoire read permit private boundary', () => {
     const root = makeRoot(roots);
     const gate = deferred<void>();
     const prepared = deferred<void>();
-    const running = prepareRepertoireRead({ globalConfigDir: root }, (permit) => {
+    const running = prepareRepertoireRead({ globalConfigDir: root, operation: (permit) => {
       assertActiveRepertoireReadPermit(permit, root);
       prepared.resolve();
       return (async () => {
@@ -92,7 +94,7 @@ describe('repertoire read permit private boundary', () => {
         assertActiveRepertoireReadPermit(permit, root);
         return 'unreachable';
       })();
-    });
+    } });
 
     await prepared.promise;
     expect(activeReaderFiles(root)).toEqual([]);
@@ -103,21 +105,21 @@ describe('repertoire read permit private boundary', () => {
   it('preserves callback throws and rejections after releasing the lease', async () => {
     const root = makeRoot(roots);
     const thrown = new Error('callback throw');
-    await expect(withRepertoireReadPermit({ globalConfigDir: root }, () => {
+    await expect(withRepertoireReadPermit({ globalConfigDir: root, operation: () => {
       throw thrown;
-    })).rejects.toBe(thrown);
+    } })).rejects.toBe(thrown);
     expect(activeReaderFiles(root)).toEqual([]);
 
     const rejected = new Error('callback reject');
-    await expect(withRepertoireReadPermit({ globalConfigDir: root }, async () => {
+    await expect(withRepertoireReadPermit({ globalConfigDir: root, operation: async () => {
       throw rejected;
-    })).rejects.toBe(rejected);
+    } })).rejects.toBe(rejected);
     expect(activeReaderFiles(root)).toEqual([]);
 
     const preparation = new Error('preparation throw');
-    await expect(prepareRepertoireRead({ globalConfigDir: root }, () => {
+    await expect(prepareRepertoireRead({ globalConfigDir: root, operation: () => {
       throw preparation;
-    })).rejects.toBe(preparation);
+    } })).rejects.toBe(preparation);
     expect(activeReaderFiles(root)).toEqual([]);
   });
 
@@ -125,9 +127,9 @@ describe('repertoire read permit private boundary', () => {
     const root = makeRoot(roots);
     chmodSync(root, 0o755);
     let calls = 0;
-    await expect(withRepertoireReadPermit({ globalConfigDir: root }, () => {
+    await expect(withRepertoireReadPermit({ globalConfigDir: root, operation: () => {
       calls += 1;
-    })).rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+    } })).rejects.toMatchObject({ code: 'UNSAFE_STATE' });
     expect(calls).toBe(0);
   });
 
@@ -135,10 +137,10 @@ describe('repertoire read permit private boundary', () => {
     const root = makeRoot(roots);
     let caught: unknown;
     try {
-      await withRepertoireReadPermit({ globalConfigDir: root }, () => {
+      await withRepertoireReadPermit({ globalConfigDir: root, operation: () => {
         const [claim] = activeReaderFiles(root);
         writeFileSync(claim!, `${readFileSync(claim!, 'utf8')} /secret/release`);
-      });
+      } });
     } catch (error) {
       caught = error;
     }
@@ -150,11 +152,11 @@ describe('repertoire read permit private boundary', () => {
   it('does not replace a callback failure with a simultaneous release failure', async () => {
     const root = makeRoot(roots);
     const primary = new Error('primary callback failure');
-    await expect(withRepertoireReadPermit({ globalConfigDir: root }, () => {
+    await expect(withRepertoireReadPermit({ globalConfigDir: root, operation: () => {
       const [claim] = activeReaderFiles(root);
       writeFileSync(claim!, `${readFileSync(claim!, 'utf8')} corrupt`);
       throw primary;
-    })).rejects.toBe(primary);
+    } })).rejects.toBe(primary);
   });
 
   it('honors writer exclusion before minting a permit', async () => {
@@ -166,9 +168,9 @@ describe('repertoire read permit private boundary', () => {
     });
     let calls = 0;
     try {
-      await expect(withRepertoireReadPermit({ globalConfigDir: root }, () => {
+      await expect(withRepertoireReadPermit({ globalConfigDir: root, operation: () => {
         calls += 1;
-      })).rejects.toMatchObject({ code: 'WRITER_PENDING' });
+      } })).rejects.toMatchObject({ code: 'WRITER_PENDING' });
       expect(calls).toBe(0);
     } finally {
       writer.release();
@@ -192,14 +194,146 @@ describe('repertoire read permit private boundary', () => {
       WeakMap.prototype.get = () => { throw new Error('poisoned get'); };
       WeakMap.prototype.set = () => { throw new Error('poisoned set'); };
       Object.freeze = () => { throw new Error('poisoned freeze'); };
-      await withRepertoireReadPermit({ globalConfigDir: root }, (permit) => {
+      await withRepertoireReadPermit({ globalConfigDir: root, operation: (permit) => {
         assertActiveRepertoireReadPermit(permit, root);
-      });
+      } });
     } finally {
       WeakMap.prototype.get = originalGet;
       WeakMap.prototype.set = originalSet;
       Object.freeze = originalFreeze;
     }
+  });
+
+  it.each(['with', 'prepare'] as const)(
+    'rejects accessor options before I/O or callback execution for %s',
+    async (variant) => {
+      const rootA = makeRoot(roots);
+      const rootB = makeRoot(roots);
+      const writer = await acquireRepertoireCoordinationLease({
+        globalConfigDir: rootB,
+        mode: 'write',
+      });
+      let reads = 0;
+      let calls = 0;
+      const options = Object.defineProperties({}, {
+        globalConfigDir: {
+          enumerable: true,
+          get: () => {
+            reads += 1;
+            return reads === 1 ? rootA : rootB;
+          },
+        },
+        operation: {
+          enumerable: true,
+          value: () => {
+            calls += 1;
+            return Promise.resolve();
+          },
+        },
+      });
+      try {
+        await expect(invokeVariant(variant, options)).rejects.toMatchObject({
+          code: 'UNSAFE_STATE',
+        });
+        expect(reads).toBe(0);
+        expect(calls).toBe(0);
+        expect(activeReaderFiles(rootA)).toEqual([]);
+      } finally {
+        writer.release();
+      }
+    },
+  );
+
+  it.each(['with', 'prepare'] as const)(
+    'rejects Proxy options before property access for %s',
+    async (variant) => {
+      const root = makeRoot(roots);
+      let reads = 0;
+      let calls = 0;
+      const options = new Proxy({
+        globalConfigDir: root,
+        operation: () => {
+          calls += 1;
+          return Promise.resolve();
+        },
+      }, {
+        get(target, key, receiver) {
+          reads += 1;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      await expect(invokeVariant(variant, options)).rejects.toMatchObject({
+        code: 'UNSAFE_STATE',
+      });
+      expect(reads).toBe(0);
+      expect(calls).toBe(0);
+      expect(activeReaderFiles(root)).toEqual([]);
+    },
+  );
+
+  it.each(['with', 'prepare'] as const)(
+    'uses one pre-await snapshot despite mutation for %s',
+    async (variant) => {
+      const rootA = makeRoot(roots);
+      const rootB = makeRoot(roots);
+      const writer = await acquireRepertoireCoordinationLease({
+        globalConfigDir: rootB,
+        mode: 'write',
+      });
+      const originalController = new AbortController();
+      const replacementController = new AbortController();
+      replacementController.abort();
+      let originalCalls = 0;
+      let replacementCalls = 0;
+      const options = {
+        globalConfigDir: rootA,
+        signal: originalController.signal,
+        timeoutMs: 500,
+        operation: (permit: RepertoireReadPermit) => {
+          originalCalls += 1;
+          assertActiveRepertoireReadPermit(permit, rootA);
+          return Promise.resolve('original');
+        },
+      };
+      try {
+        const running = invokeVariant(variant, options);
+        options.globalConfigDir = rootB;
+        options.signal = replacementController.signal;
+        options.timeoutMs = 0;
+        options.operation = () => {
+          replacementCalls += 1;
+          return Promise.resolve('replacement');
+        };
+        await expect(running).resolves.toBe('original');
+        expect(originalCalls).toBe(1);
+        expect(replacementCalls).toBe(0);
+      } finally {
+        writer.release();
+      }
+    },
+  );
+
+  it('rejects inherited and extra option fields before I/O', async () => {
+    const root = makeRoot(roots);
+    const inherited = Object.create({ globalConfigDir: root }) as Record<string, unknown>;
+    inherited['operation'] = () => Promise.resolve();
+    await expect(invokeVariant('with', inherited)).rejects.toMatchObject({
+      code: 'UNSAFE_STATE',
+    });
+    await expect(invokeVariant('with', {
+      globalConfigDir: root,
+      operation: () => Promise.resolve(),
+      extra: '/secret/field',
+    })).rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+    const accessor = {
+      globalConfigDir: root,
+      operation: () => Promise.resolve(),
+    } as Record<string, unknown>;
+    Object.defineProperty(accessor, 'signal', { get: undefined, set: undefined });
+    await expect(invokeVariant('with', accessor)).rejects.toMatchObject({
+      code: 'UNSAFE_STATE',
+    });
+    expect(activeReaderFiles(root)).toEqual([]);
   });
 });
 
@@ -229,4 +363,10 @@ function deferred<T>(): {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function invokeVariant(variant: 'with' | 'prepare', options: unknown): Promise<unknown> {
+  return variant === 'with'
+    ? withRepertoireReadPermit(options as RepertoireReadPermitOptions<unknown>)
+    : prepareRepertoireRead(options as PrepareRepertoireReadOptions<unknown>);
 }

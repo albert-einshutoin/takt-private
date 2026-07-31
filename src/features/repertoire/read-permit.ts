@@ -5,6 +5,7 @@ import {
   type AcquireRepertoireCoordinationLeaseOptions,
   type RepertoireCoordinationLease,
 } from './coordination-lease.js';
+import { types as utilTypes } from 'node:util';
 
 declare const repertoireReadPermitBrand: unique symbol;
 
@@ -13,10 +14,18 @@ export type RepertoireReadPermit = {
   readonly [repertoireReadPermitBrand]: true;
 };
 
-export type RepertoireReadPermitOptions = Omit<
+type RepertoireReadPermitBaseOptions = Omit<
   AcquireRepertoireCoordinationLeaseOptions,
   'mode'
 >;
+
+export type RepertoireReadPermitOptions<T> = RepertoireReadPermitBaseOptions & {
+  operation: (permit: RepertoireReadPermit) => T | PromiseLike<T>;
+};
+
+export type PrepareRepertoireReadOptions<T> = RepertoireReadPermitBaseOptions & {
+  operation: (permit: RepertoireReadPermit) => PromiseLike<T>;
+};
 
 type PermitState = {
   active: boolean;
@@ -25,11 +34,24 @@ type PermitState = {
 
 type CapturedFailure = { error: unknown };
 
+type OptionsSnapshot<T> = {
+  globalConfigDir: string;
+  operation: (permit: RepertoireReadPermit) => T;
+  signal: AbortSignal | undefined;
+  timeoutMs: number | undefined;
+};
+
 // This module is a private authority boundary. Capture every mutable intrinsic
 // used to mint or validate authority before plugins can replace its behavior.
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeObjectCreate = Object.create.bind(Object);
 const safeObjectFreeze = Object.freeze.bind(Object);
+const safeObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor.bind(Object);
+const safeObjectGetPrototypeOf = Object.getPrototypeOf.bind(Object);
+const safeObjectHasOwn = Object.hasOwn.bind(Object);
+const safeReflectOwnKeys = Reflect.ownKeys.bind(Reflect);
+const safeIsProxy = utilTypes.isProxy.bind(utilTypes);
+const localObjectPrototype = Object.prototype;
 const SafeWeakMap = WeakMap;
 const safeWeakMapGetMethod = WeakMap.prototype.get;
 const safeWeakMapSetMethod = WeakMap.prototype.set;
@@ -43,16 +65,16 @@ export const REPERTOIRE_READ_PERMIT_LOCK_ORDER = REPERTOIRE_COORDINATION_LOCK_OR
  * callback settles. The permit is revoked before lease release begins.
  */
 export async function withRepertoireReadPermit<T>(
-  options: RepertoireReadPermitOptions,
-  callback: (permit: RepertoireReadPermit) => T | PromiseLike<T>,
+  options: RepertoireReadPermitOptions<T>,
 ): Promise<T> {
-  const lease = await acquireReadLease(options);
-  const { permit, state } = mintPermit(options.globalConfigDir);
+  const snapshot = snapshotOptions<T | PromiseLike<T>>(options);
+  const lease = await acquireReadLease(snapshot);
+  const { permit, state } = mintPermit(snapshot.globalConfigDir);
   let result!: T;
   let primaryFailure: CapturedFailure | undefined;
 
   try {
-    result = await callback(permit);
+    result = await snapshot.operation(permit);
   } catch (error) {
     primaryFailure = { error };
   }
@@ -70,16 +92,16 @@ export async function withRepertoireReadPermit<T>(
  * suspension therefore cannot reuse the permit.
  */
 export async function prepareRepertoireRead<T>(
-  options: RepertoireReadPermitOptions,
-  prepare: (permit: RepertoireReadPermit) => PromiseLike<T>,
+  options: PrepareRepertoireReadOptions<T>,
 ): Promise<T> {
-  const lease = await acquireReadLease(options);
-  const { permit, state } = mintPermit(options.globalConfigDir);
+  const snapshot = snapshotOptions<PromiseLike<T>>(options);
+  const lease = await acquireReadLease(snapshot);
+  const { permit, state } = mintPermit(snapshot.globalConfigDir);
   let prepared!: PromiseLike<T>;
   let primaryFailure: CapturedFailure | undefined;
 
   try {
-    prepared = prepare(permit);
+    prepared = snapshot.operation(permit);
   } catch (error) {
     primaryFailure = { error };
   }
@@ -106,9 +128,72 @@ export function assertActiveRepertoireReadPermit(
 }
 
 async function acquireReadLease(
-  options: RepertoireReadPermitOptions,
+  options: Pick<OptionsSnapshot<unknown>, 'globalConfigDir' | 'signal' | 'timeoutMs'>,
 ): Promise<RepertoireCoordinationLease> {
-  return await safeAcquireCoordinationLease({ ...options, mode: 'read' });
+  return await safeAcquireCoordinationLease({
+    globalConfigDir: options.globalConfigDir,
+    mode: 'read',
+    signal: options.signal,
+    timeoutMs: options.timeoutMs,
+  });
+}
+
+function snapshotOptions<T>(options: unknown): OptionsSnapshot<T> {
+  if (
+    typeof options !== 'object'
+    || options === null
+    || safeIsProxy(options)
+    || !isPlainOptionsObject(options)
+  ) throw invalidPermit();
+  const keys = safeReflectOwnKeys(options);
+  if (keys.length < 2 || keys.length > 4) throw invalidPermit();
+
+  let globalConfigDir: unknown;
+  let operation: unknown;
+  let signal: unknown;
+  let timeoutMs: unknown;
+  let hasGlobalConfigDir = false;
+  let hasOperation = false;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (typeof key !== 'string') throw invalidPermit();
+    const descriptor = safeObjectGetOwnPropertyDescriptor(options, key);
+    if (descriptor === undefined || !safeObjectHasOwn(descriptor, 'value')) {
+      throw invalidPermit();
+    }
+    switch (key) {
+      case 'globalConfigDir':
+        hasGlobalConfigDir = true;
+        globalConfigDir = descriptor.value;
+        break;
+      case 'operation':
+        hasOperation = true;
+        operation = descriptor.value;
+        break;
+      case 'signal':
+        signal = descriptor.value;
+        break;
+      case 'timeoutMs':
+        timeoutMs = descriptor.value;
+        break;
+      default:
+        throw invalidPermit();
+    }
+  }
+  if (!hasGlobalConfigDir || typeof globalConfigDir !== 'string') throw invalidPermit();
+  if (!hasOperation || typeof operation !== 'function') throw invalidPermit();
+  return safeObjectFreeze(safeObjectCreate(null, {
+    globalConfigDir: { value: globalConfigDir },
+    operation: { value: operation },
+    signal: { value: signal },
+    timeoutMs: { value: timeoutMs },
+  })) as OptionsSnapshot<T>;
+}
+
+function isPlainOptionsObject(value: unknown): value is object {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype = safeObjectGetPrototypeOf(value);
+  return prototype === localObjectPrototype || prototype === null;
 }
 
 function mintPermit(root: string): {
