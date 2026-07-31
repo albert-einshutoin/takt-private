@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicReplace } from '../../features/repertoire/atomic-update.js';
+import { captureDirectoryTreeProof } from '../../features/repertoire/filesystem-proof.js';
+import { detachToMaintenance } from '../../features/repertoire/maintenance-transaction.js';
 
 describe('atomicReplace durable publication', () => {
   const roots: string[] = [];
@@ -70,5 +72,33 @@ describe('atomicReplace durable publication', () => {
       },
     })).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
     expect(existsSync(join(packageDir, '.takt-install-complete'))).toBe(false);
+  });
+
+  it('allows add after completed maintenance history is copied to a new root', async () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'takt-atomic-portable-a-'));
+    const destinationRoot = mkdtempSync(join(tmpdir(), 'takt-atomic-portable-b-'));
+    roots.push(sourceRoot, destinationRoot);
+    const oldPackage = join(sourceRoot, 'repertoire', '@owner', 'old');
+    mkdirSync(oldPackage, { recursive: true });
+    writeFileSync(join(oldPackage, 'old.yaml'), 'old');
+    detachToMaintenance({
+      globalConfigDir: sourceRoot,
+      sourceDir: oldPackage,
+      containmentRoot: sourceRoot,
+      expected: captureDirectoryTreeProof(oldPackage, sourceRoot),
+      kind: 'payload',
+    });
+    cpSync(
+      join(sourceRoot, '.repertoire-maintenance'),
+      join(destinationRoot, '.repertoire-maintenance'),
+      { recursive: true },
+    );
+    const packageDir = join(destinationRoot, 'repertoire', '@owner', 'new');
+    await expect(atomicReplace({
+      globalConfigDir: destinationRoot,
+      packageDir,
+      install: async (reserved) => writeFileSync(join(reserved, 'new.yaml'), 'new'),
+    })).resolves.not.toThrow();
+    expect(existsSync(join(packageDir, '.takt-install-complete'))).toBe(true);
   });
 });

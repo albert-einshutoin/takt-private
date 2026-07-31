@@ -152,6 +152,17 @@ describe('detachToMaintenance', () => {
     expect(copied.complete).toHaveLength(1);
     expect(copied.incomplete).toEqual([]);
 
+    const removable = join(destinationRoot, 'repertoire', '@owner', 'removable');
+    mkdirSync(removable, { recursive: true });
+    writeFileSync(join(removable, 'workflow.yaml'), 'name: removable');
+    expect(() => detachToMaintenance({
+      globalConfigDir: destinationRoot,
+      sourceDir: removable,
+      containmentRoot: destinationRoot,
+      expected: captureDirectoryTreeProof(removable, destinationRoot),
+      kind: 'payload',
+    })).not.toThrow();
+
     writeFileSync(join(copied.complete[0]!, 'payload', 'nested', 'workflow.yaml'), 'tampered');
     expect(classifyMaintenanceTransactions(destinationRoot).incomplete).toHaveLength(1);
   });

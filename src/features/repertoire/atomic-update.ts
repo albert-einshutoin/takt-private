@@ -9,6 +9,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  renameSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -116,14 +117,16 @@ function readOptionalTree(path: string, containmentRoot: string): TreeProof | un
 }
 
 function writeCompletionWitness(packageDir: string): void {
-  const path = `${packageDir}/.takt-install-complete`;
-  writeFileSync(path, 'complete\n', { flag: 'wx', mode: PRIVATE_FILE_MODE });
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const pending = `${packageDir}/.takt-install-complete.pending`;
+  const complete = `${packageDir}/.takt-install-complete`;
+  writeFileSync(pending, 'complete\n', { flag: 'wx', mode: PRIVATE_FILE_MODE });
+  const fd = openSync(pending, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
+  renameSync(pending, complete);
 }
 
 function syncInstalledTree(directory: string): void {
