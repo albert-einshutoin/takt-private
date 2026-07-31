@@ -9,6 +9,12 @@ import { isPathInside } from '../../../shared/utils/index.js';
 import { mergeProviderOptions, normalizeProviderOptions } from '../providerOptions.js';
 import type { FacetResolutionContext } from './workflowPackageScope.js';
 import {
+  readResourceText,
+  resourceExists,
+  resourceIsSymlink,
+  resourceRealpath,
+} from './repertoireResourceReadAccess.js';
+import {
   buildProviderOptionsLookupDirs,
   resolveProviderOptionsByName,
   resolveProviderOptionsScopeRef,
@@ -201,6 +207,23 @@ export function resolveWorkflowProviderOptionsWithHost(
   workflowDir: string,
   host: WorkflowProviderOptionsResolutionHost,
 ): StepProviderOptions | undefined {
+  const fallback = host.fileAccess ?? nodeFileAccess;
+  const fileAccess: ProviderOptionsFileAccess = host.context?.repertoireDir
+    ? {
+        exists: (path) => isRepertoirePath(path, host.context!)
+          ? resourceExists(path, host.context)
+          : fallback.exists(path),
+        readText: (path) => isRepertoirePath(path, host.context!)
+          ? readResourceText(path, host.context)
+          : fallback.readText(path),
+        realpath: (path) => isRepertoirePath(path, host.context!)
+          ? resourceRealpath(path, host.context)
+          : fallback.realpath(path),
+        isSymlink: (path) => isRepertoirePath(path, host.context!)
+          ? resourceIsSymlink(path, host.context)
+          : (fallback.isSymlink?.(path) ?? false),
+      }
+    : fallback;
   return resolveWorkflowProviderOptionsFromDir(
     raw,
     workflowDir,
@@ -210,9 +233,14 @@ export function resolveWorkflowProviderOptionsWithHost(
       candidateDirs: host.candidateDirs,
       scopedCandidateDirs: host.scopedCandidateDirs,
     },
-    host.fileAccess ?? nodeFileAccess,
+    fileAccess,
     new Set<string>(),
   );
+}
+
+function isRepertoirePath(path: string, context: FacetResolutionContext): boolean {
+  return context.repertoireReadAccess?.contains(path) === true
+    || (context.repertoireDir !== undefined && isPathInside(resolve(context.repertoireDir), resolve(path)));
 }
 
 function resolveWorkflowProviderOptionsFromDir(

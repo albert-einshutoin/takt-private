@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getGlobalConfigDir, getProjectConfigDir } from '../paths.js';
 import { getLanguageResourcesDir } from '../../resources/index.js';
 import type { FacetResolutionContext } from './workflowPackageScope.js';
 import { getPackageFromWorkflowDir, getWorkflowBaseDir } from './workflowPackageScope.js';
+import { readResourceText, resourceExists } from './repertoireResourceReadAccess.js';
 
 const PARTIAL_DIR_SEGMENTS = ['partials', 'instructions'] as const;
 const PARTIAL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -58,11 +58,11 @@ export function resolveInstructionPartialByName(
 
   for (const dir of buildInstructionPartialCandidateDirs(context)) {
     const sourcePath = join(dir, `${name}.md`);
-    if (existsSync(sourcePath)) {
+    if (resourceExists(sourcePath, context)) {
       return {
         name,
         sourcePath,
-        content: readFileSync(sourcePath, 'utf-8'),
+        content: readResourceText(sourcePath, context),
       };
     }
   }

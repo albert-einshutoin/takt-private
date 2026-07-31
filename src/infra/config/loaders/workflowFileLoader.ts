@@ -9,7 +9,7 @@ import { getCachedGlobalParsedConfigState } from '../global/globalConfigCore.js'
 import { loadProjectConfig } from '../project/projectConfig.js';
 import { getProjectConfigPath } from '../project/projectConfigPaths.js';
 import { getCachedProjectParsedConfig } from '../resolutionCache.js';
-import type { FacetResolutionContext } from './resource-resolver.js';
+import type { FacetResolutionContext, RepertoireResourceReadAccess } from './workflowPackageScope.js';
 import { normalizeWorkflowConfig } from './workflowParser.js';
 import {
   resolveWorkflowArpeggioPolicy,
@@ -35,6 +35,7 @@ interface LoadWorkflowFromFileOptions {
   trustInfo?: WorkflowTrustInfo;
   callableArgs?: Record<string, string | string[]>;
   callableArgPolicy?: WorkflowCallArgResolutionPolicy;
+  repertoireReadAccess?: RepertoireResourceReadAccess;
 }
 
 type WorkflowLoadMode = 'runtime' | 'discovery';
@@ -59,6 +60,7 @@ function loadWorkflowFromFileInternal(
     projectDir,
     workflowDir,
     repertoireDir: getRepertoireDir(),
+    repertoireReadAccess: options?.repertoireReadAccess,
   };
 
   const projectConfig = loadProjectConfig(projectDir);

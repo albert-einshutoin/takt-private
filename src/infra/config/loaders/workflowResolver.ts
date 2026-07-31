@@ -43,6 +43,7 @@ import {
   assertActiveRepertoireReadPermit,
   withImmediateRepertoireReadPermit,
 } from '../../../features/repertoire/read-permit.js';
+import { createRepertoireResourceReadAccess } from './repertoireResourceReadAccess.js';
 
 const safeObjectCreate = Object.create.bind(Object);
 const safeObjectFreeze = Object.freeze.bind(Object);
@@ -95,6 +96,7 @@ function loadWorkflowFromLookupDirs(
   lookupCwd: string,
   callableArgs?: Record<string, string | string[]>,
   parentTrustInfo?: WorkflowTrustInfo,
+  readContext?: InternalWorkflowReadContext,
 ): WorkflowConfig | null {
   const match = findWorkflowInLookupDirs(name, lookupDirs);
   if (!match) {
@@ -107,6 +109,7 @@ function loadWorkflowFromLookupDirs(
     source: match.source,
     callableArgs,
     parentTrustInfo,
+    repertoireReadAccess: readContext ? createRepertoireResourceReadAccess(readContext) : undefined,
   });
 }
 
@@ -134,9 +137,17 @@ function loadWorkflowFromPath(
   lookupCwd: string,
   callableArgs?: Record<string, string | string[]>,
   parentTrustInfo?: WorkflowTrustInfo,
+  readContext?: InternalWorkflowReadContext,
 ): WorkflowConfig | null {
   const resolvedPath = resolvePath(filePath, basePath);
-  return loadWorkflowFromResolvedPath(resolvedPath, projectCwd, lookupCwd, callableArgs, parentTrustInfo);
+  return loadWorkflowFromResolvedPath(
+    resolvedPath,
+    projectCwd,
+    lookupCwd,
+    callableArgs,
+    parentTrustInfo,
+    readContext,
+  );
 }
 
 function loadWorkflowFromResolvedPath(
@@ -145,6 +156,7 @@ function loadWorkflowFromResolvedPath(
   lookupCwd = projectCwd,
   callableArgs?: Record<string, string | string[]>,
   parentTrustInfo?: WorkflowTrustInfo,
+  readContext?: InternalWorkflowReadContext,
 ): WorkflowConfig | null {
   if (!existsSync(resolvedPath)) {
     return null;
@@ -155,6 +167,7 @@ function loadWorkflowFromResolvedPath(
     lookupCwd,
     callableArgs,
     parentTrustInfo,
+    repertoireReadAccess: readContext ? createRepertoireResourceReadAccess(readContext) : undefined,
   });
 }
 
@@ -191,6 +204,7 @@ function loadWorkflowForDiscovery(
     lookupCwd: cwd,
     source: entry.source,
     loadMode: 'discovery' as const,
+    repertoireReadAccess: readContext ? createRepertoireResourceReadAccess(readContext) : undefined,
   };
   return entry.source === 'repertoire' && readContext !== undefined
     ? loadWorkflowApprovedTextWithResolutionOptions(
@@ -211,6 +225,7 @@ function loadWorkflowForRuntime(
     projectCwd: cwd,
     lookupCwd: cwd,
     source: entry.source,
+    repertoireReadAccess: readContext ? createRepertoireResourceReadAccess(readContext) : undefined,
   };
   return entry.source === 'repertoire' && readContext !== undefined
     ? loadWorkflowApprovedTextWithResolutionOptions(
@@ -269,13 +284,7 @@ function loadValidatedStandaloneWorkflowEntry(
 }
 
 export function loadWorkflow(name: string, projectCwd: string): WorkflowConfig | null {
-  const workflow = loadWorkflowFromLookupDirs(
-    name,
-    getNamedWorkflowLookupDirs(projectCwd),
-    projectCwd,
-    projectCwd,
-  );
-  return finalizeLoadedWorkflow(workflow, projectCwd, projectCwd);
+  return loadIdentifierWithPermitOnRepertoireAccess(name, projectCwd);
 }
 
 export function isWorkflowPath(identifier: string): boolean {
@@ -331,6 +340,7 @@ function loadRepertoireWorkflowByRef(
       source: 'repertoire',
       callableArgs,
       parentTrustInfo,
+      repertoireReadAccess: createRepertoireResourceReadAccess(readContext),
     })
     : null;
 }
@@ -388,6 +398,7 @@ function loadWorkflowByIdentifierInternal(
         lookupCwd,
         options?.callableArgs,
         options?.parentTrustInfo,
+        options?.repertoireReadContext,
       )
       : loadWorkflowFromLookupDirs(
         identifier,
@@ -396,6 +407,7 @@ function loadWorkflowByIdentifierInternal(
         lookupCwd,
         options?.callableArgs,
         options?.parentTrustInfo,
+        options?.repertoireReadContext,
       );
 
   return finalizeLoadedWorkflow(
@@ -413,14 +425,10 @@ export function loadWorkflowByIdentifier(
   projectCwd: string,
   options?: WorkflowLookupOptions,
 ): WorkflowConfig | null {
-  if (isScopeRef(identifier)) {
-    return loadRepertoireIdentifierWithImmediatePermit(
-      identifier,
-      projectCwd,
-      snapshotPublicWorkflowLookupOptions(options),
-    );
-  }
-  return loadWorkflowByIdentifierInternal(identifier, projectCwd, options);
+  const snapshot = snapshotPublicWorkflowLookupOptions(options);
+  return isScopeRef(identifier)
+    ? loadIdentifierWithImmediatePermit(identifier, projectCwd, snapshot)
+    : loadIdentifierWithPermitOnRepertoireAccess(identifier, projectCwd, snapshot);
 }
 
 export function loadWorkflowByIdentifierForWorkflowCall(
@@ -428,16 +436,31 @@ export function loadWorkflowByIdentifierForWorkflowCall(
   projectCwd: string,
   options: InternalWorkflowLookupOptions,
 ): WorkflowConfig | null {
-  if (isScopeRef(identifier) && options.repertoireReadContext === undefined) {
-    return loadRepertoireIdentifierWithImmediatePermit(identifier, projectCwd, options);
+  if (options.repertoireReadContext === undefined) {
+    return isScopeRef(identifier)
+      ? loadIdentifierWithImmediatePermit(identifier, projectCwd, options)
+      : loadIdentifierWithPermitOnRepertoireAccess(identifier, projectCwd, options);
   }
   return loadWorkflowByIdentifierInternal(identifier, projectCwd, options);
 }
 
-function loadRepertoireIdentifierWithImmediatePermit(
+function loadIdentifierWithPermitOnRepertoireAccess(
   identifier: string,
   projectCwd: string,
-  options: InternalWorkflowLookupOptions | WorkflowLookupOptions | undefined,
+  options?: InternalWorkflowLookupOptions | WorkflowLookupOptions,
+): WorkflowConfig | null {
+  try {
+    return loadWorkflowByIdentifierInternal(identifier, projectCwd, options);
+  } catch (error) {
+    if (!(error instanceof WorkflowDiscoveryReadError)) throw error;
+    return loadIdentifierWithImmediatePermit(identifier, projectCwd, options);
+  }
+}
+
+function loadIdentifierWithImmediatePermit(
+  identifier: string,
+  projectCwd: string,
+  options?: InternalWorkflowLookupOptions | WorkflowLookupOptions,
 ): WorkflowConfig | null {
   const globalConfigDir = getGlobalConfigDir();
   return withImmediateRepertoireReadPermit({

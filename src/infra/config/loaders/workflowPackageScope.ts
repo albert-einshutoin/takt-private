@@ -13,6 +13,16 @@ export interface FacetResolutionContext {
   lang: Language;
   workflowDir?: string;
   repertoireDir?: string;
+  /** @internal Root-bound filesystem capability; never exposes the underlying permit. */
+  repertoireReadAccess?: RepertoireResourceReadAccess;
+}
+
+export interface RepertoireResourceReadAccess {
+  contains(path: string): boolean;
+  exists(path: string): boolean;
+  isSymlink(path: string): boolean;
+  readText(path: string): string;
+  realpath(path: string): string;
 }
 
 function normalizeWorkflowBaseDir(workflowDir: string): string {

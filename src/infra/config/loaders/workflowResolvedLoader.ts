@@ -11,6 +11,7 @@ import {
   type WorkflowTrustInfo,
   type WorkflowTrustSource,
 } from './workflowTrustSource.js';
+import type { RepertoireResourceReadAccess } from './workflowPackageScope.js';
 
 type WorkflowLoadMode = 'runtime' | 'discovery';
 
@@ -21,6 +22,7 @@ export interface WorkflowResolvedLoaderOptions {
   parentTrustInfo?: WorkflowTrustInfo;
   projectCwd: string;
   source?: WorkflowTrustSource;
+  repertoireReadAccess?: RepertoireResourceReadAccess;
 }
 
 function buildWorkflowCallArgPolicy(
@@ -53,6 +55,7 @@ export function loadWorkflowFileWithResolutionOptions(
     trustInfo,
     callableArgs: options.callableArgs,
     callableArgPolicy: buildWorkflowCallArgPolicy(options.parentTrustInfo, trustInfo),
+    repertoireReadAccess: options.repertoireReadAccess,
   });
 
   return workflow;
@@ -77,5 +80,6 @@ export function loadWorkflowApprovedTextWithResolutionOptions(
     trustInfo,
     callableArgs: options.callableArgs,
     callableArgPolicy: buildWorkflowCallArgPolicy(options.parentTrustInfo, trustInfo),
+    repertoireReadAccess: options.repertoireReadAccess,
   });
 }

@@ -17,6 +17,7 @@ import {
 } from '../../../features/repertoire/read-permit.js';
 import { WorkflowDiscoveryReadError } from './workflowDiscoveryError.js';
 import { readApprovedRepertoireWorkflowText } from './workflowRepertoireSafeReader.js';
+import { createRepertoireResourceReadAccess } from './repertoireResourceReadAccess.js';
 
 const log = createLogger('workflow-discovery');
 
@@ -24,6 +25,7 @@ export { WorkflowDiscoveryReadError } from './workflowDiscoveryError.js';
 
 /** @internal Authority threaded only while repertoire material is read. */
 export interface InternalWorkflowReadContext {
+  readonly assertRead: () => void;
   readonly globalConfigDir: string;
   readonly permit: RepertoireReadPermit;
   readonly repertoireDir: string;
@@ -138,6 +140,7 @@ function loadWorkflowEntry(
     lookupCwd: cwd,
     source: entry.source,
     loadMode: 'discovery' as const,
+    repertoireReadAccess: readContext ? createRepertoireResourceReadAccess(readContext) : undefined,
   };
   return entry.source === 'repertoire' && readContext !== undefined
     ? loadWorkflowApprovedTextWithResolutionOptions(
@@ -449,7 +452,7 @@ export function createInternalWorkflowReadContext(
       || !sameIdentity(repertoireBefore, repertoireAfter)
     ) throw discoveryReadFailed();
   }
-  return { globalConfigDir, permit, repertoireDir, repertoireRealPath };
+  return { assertRead: assertAuthority, globalConfigDir, permit, repertoireDir, repertoireRealPath };
 }
 
 function statOrMissing(path: string): Stats | undefined {
