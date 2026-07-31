@@ -83,7 +83,14 @@ export class ProjectTemplateRepertoireDependencyInspectionError extends Error {
     message: string,
   ) {
     super(message);
-    this.name = 'ProjectTemplateRepertoireDependencyInspectionError';
+    defineExactDataProperty(
+      this,
+      'name',
+      'ProjectTemplateRepertoireDependencyInspectionError',
+      true,
+      true,
+      true,
+    );
   }
 }
 

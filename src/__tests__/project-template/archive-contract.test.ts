@@ -43,7 +43,49 @@ describe('taktpack v1 archive contract', () => {
   });
 
   it('provides stable machine-readable archive error codes', () => {
-    const error = new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'not a regular file', 'entry.type');
+    const nameDescriptor = Object.getOwnPropertyDescriptor(
+      TaktpackError.prototype,
+      'name',
+    );
+    let setterCalls = 0;
+    let reentryCalls = 0;
+    let attemptedReentry = false;
+    let nestedError: TaktpackError | undefined;
+    let error: TaktpackError | undefined;
+    try {
+      Object.defineProperty(TaktpackError.prototype, 'name', {
+        configurable: true,
+        set() {
+          setterCalls += 1;
+          if (attemptedReentry) return;
+          attemptedReentry = true;
+          reentryCalls += 1;
+          nestedError = new TaktpackError(
+            'INVALID_PACK',
+            'nested archive error',
+          );
+        },
+      });
+      error = new TaktpackError(
+        'UNSAFE_ARCHIVE_ENTRY',
+        'not a regular file',
+        'entry.type',
+      );
+    } finally {
+      if (nameDescriptor === undefined) {
+        Reflect.deleteProperty(TaktpackError.prototype, 'name');
+      } else {
+        Object.defineProperty(
+          TaktpackError.prototype,
+          'name',
+          nameDescriptor,
+        );
+      }
+    }
+    expect(setterCalls).toBe(0);
+    expect(reentryCalls).toBe(0);
+    expect(nestedError).toBeUndefined();
+    expect(Object.hasOwn(error!, 'name')).toBe(true);
     expect(error).toMatchObject({
       name: 'TaktpackError',
       code: 'UNSAFE_ARCHIVE_ENTRY',

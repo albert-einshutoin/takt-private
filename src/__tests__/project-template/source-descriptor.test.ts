@@ -237,9 +237,16 @@ describe('project template source descriptor', () => {
 
   it('rejects a hostile dependency field without coercing it', () => {
     const dependencies = validDescriptor()['repertoireDependencies'];
+    const defineProperty = Object.defineProperty;
+    const nameDescriptor = Object.getOwnPropertyDescriptor(
+      ProjectTemplateValidationError.prototype,
+      'name',
+    );
     let coercionCalls = 0;
+    let nameSetterCalls = 0;
     let reentryCalls = 0;
     let attemptedReentry = false;
+    let failure: unknown;
     const hostileField = {
       [Symbol.toPrimitive]() {
         coercionCalls += 1;
@@ -251,16 +258,51 @@ describe('project template source descriptor', () => {
         return 'request.dependencies';
       },
     };
+    const nameSetter = (_value: unknown) => {
+      nameSetterCalls += 1;
+      if (attemptedReentry) return;
+      attemptedReentry = true;
+      reentryCalls += 1;
+      parseProjectTemplateRepertoireDependencies([]);
+    };
 
-    expect(() => parseProjectTemplateRepertoireDependencies(
-      dependencies,
-      hostileField as never,
-    )).toThrow(expect.objectContaining({
+    try {
+      defineProperty(ProjectTemplateValidationError.prototype, 'name', {
+        configurable: true,
+        set: nameSetter,
+      });
+      try {
+        parseProjectTemplateRepertoireDependencies(
+          dependencies,
+          hostileField as never,
+        );
+      } catch (error) {
+        failure = error;
+      }
+    } finally {
+      if (nameDescriptor === undefined) {
+        Reflect.deleteProperty(
+          ProjectTemplateValidationError.prototype,
+          'name',
+        );
+      } else {
+        defineProperty(
+          ProjectTemplateValidationError.prototype,
+          'name',
+          nameDescriptor,
+        );
+      }
+    }
+
+    expect(coercionCalls).toBe(0);
+    expect(nameSetterCalls).toBe(0);
+    expect(reentryCalls).toBe(0);
+    expect(Object.hasOwn(failure as object, 'name')).toBe(true);
+    expect(failure).toMatchObject({
       name: 'ProjectTemplateValidationError',
       code: 'INVALID_SOURCE',
-    }));
-    expect(coercionCalls).toBe(0);
-    expect(reentryCalls).toBe(0);
+      field: 'sourceDescriptor.repertoireDependencies',
+    });
   });
 
   it('rejects an oversized dependency array before descriptor enumeration', async () => {

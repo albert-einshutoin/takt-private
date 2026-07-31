@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
+import { ProjectTemplateValidationError } from '../../features/project-template/errors.js';
 import {
   claimProjectTemplateRepertoireDependencyInspectionForPlanning,
   consumeProjectTemplateRepertoireDependencyInspectionPlanningClaim,
   disposeProjectTemplateRepertoireDependencyInspection,
   disposeProjectTemplateRepertoireDependencyInspectionPlanningClaim,
   inspectProjectTemplateRepertoireDependencies,
-  type ProjectTemplateRepertoireDependencyInspectionError,
+  ProjectTemplateRepertoireDependencyInspectionError,
   type ProjectTemplateRepertoireDependencyInspectionPort,
 } from '../../features/project-template/repertoire-dependency-inspection-port.js';
 
@@ -580,6 +581,168 @@ describe('project template repertoire dependency inspection authority G2', () =>
         claim,
       );
     expect(snapshot.observations[0]?.scope).toBe('@acme/repertoire');
+  });
+
+  it('defines public error names without prototype setter reentry', () => {
+    const defineProperty = Object.defineProperty;
+    const inspectionNameDescriptor = Object.getOwnPropertyDescriptor(
+      ProjectTemplateRepertoireDependencyInspectionError.prototype,
+      'name',
+    );
+    const validationNameDescriptor = Object.getOwnPropertyDescriptor(
+      ProjectTemplateValidationError.prototype,
+      'name',
+    );
+    const invalidDependencyOptions = {
+      request: request({
+        dependencies: [dependency('@acme/repertoire', 'short')],
+      }) as never,
+      port: portReturning(rawResult()),
+    };
+    const reentryOptions = {
+      request: request({ dependencies: [] }) as never,
+      port: portReturning(rawResult([])),
+    };
+    let inspectionSetterCalls = 0;
+    let validationSetterCalls = 0;
+    let inspectionReentryCalls = 0;
+    let validationReentryCalls = 0;
+    let attemptedInspectionReentry = false;
+    let attemptedValidationReentry = false;
+    let inspectionReentry:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let validationReentry:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let invalidOptionsFailure: unknown;
+    let invalidDependencyFailure: unknown;
+    let directInspectionError:
+      ProjectTemplateRepertoireDependencyInspectionError | undefined;
+    let directValidationError: ProjectTemplateValidationError | undefined;
+
+    const inspectionNameSetter = (_value: unknown) => {
+      inspectionSetterCalls += 1;
+      if (attemptedInspectionReentry) return;
+      attemptedInspectionReentry = true;
+      inspectionReentryCalls += 1;
+      try {
+        inspectionReentry =
+          inspectProjectTemplateRepertoireDependencies(reentryOptions);
+      } catch {
+        // Invoking the nested authority boundary is itself the violation.
+      }
+    };
+    const validationNameSetter = (_value: unknown) => {
+      validationSetterCalls += 1;
+      if (attemptedValidationReentry) return;
+      attemptedValidationReentry = true;
+      validationReentryCalls += 1;
+      try {
+        validationReentry =
+          inspectProjectTemplateRepertoireDependencies(reentryOptions);
+      } catch {
+        // Invoking the nested authority boundary is itself the violation.
+      }
+    };
+
+    try {
+      defineProperty(
+        ProjectTemplateRepertoireDependencyInspectionError.prototype,
+        'name',
+        { configurable: true, set: inspectionNameSetter },
+      );
+      defineProperty(
+        ProjectTemplateValidationError.prototype,
+        'name',
+        { configurable: true, set: validationNameSetter },
+      );
+      try {
+        inspectProjectTemplateRepertoireDependencies({} as never);
+      } catch (error) {
+        invalidOptionsFailure = error;
+      }
+      try {
+        inspectProjectTemplateRepertoireDependencies(
+          invalidDependencyOptions,
+        );
+      } catch (error) {
+        invalidDependencyFailure = error;
+      }
+      directInspectionError =
+        new ProjectTemplateRepertoireDependencyInspectionError(
+          'INVALID_ARGUMENT',
+          'invalid inspection',
+        );
+      directValidationError = new ProjectTemplateValidationError(
+        'INVALID_SOURCE',
+        'invalid source',
+        'request.dependencies',
+      );
+    } finally {
+      if (inspectionNameDescriptor === undefined) {
+        Reflect.deleteProperty(
+          ProjectTemplateRepertoireDependencyInspectionError.prototype,
+          'name',
+        );
+      } else {
+        defineProperty(
+          ProjectTemplateRepertoireDependencyInspectionError.prototype,
+          'name',
+          inspectionNameDescriptor,
+        );
+      }
+      if (validationNameDescriptor === undefined) {
+        Reflect.deleteProperty(
+          ProjectTemplateValidationError.prototype,
+          'name',
+        );
+      } else {
+        defineProperty(
+          ProjectTemplateValidationError.prototype,
+          'name',
+          validationNameDescriptor,
+        );
+      }
+    }
+
+    const inspectionReentryMinted = inspectionReentry !== undefined;
+    const validationReentryMinted = validationReentry !== undefined;
+    if (inspectionReentry !== undefined) {
+      disposeProjectTemplateRepertoireDependencyInspection(
+        inspectionReentry,
+      );
+    }
+    if (validationReentry !== undefined) {
+      disposeProjectTemplateRepertoireDependencyInspection(
+        validationReentry,
+      );
+    }
+    expect(inspectionSetterCalls).toBe(0);
+    expect(validationSetterCalls).toBe(0);
+    expect(inspectionReentryCalls).toBe(0);
+    expect(validationReentryCalls).toBe(0);
+    expect(inspectionReentryMinted).toBe(false);
+    expect(validationReentryMinted).toBe(false);
+    expect(invalidOptionsFailure).toMatchObject({
+      name: 'ProjectTemplateRepertoireDependencyInspectionError',
+      code: 'INVALID_ARGUMENT',
+    });
+    expect(invalidDependencyFailure).toMatchObject({
+      name: 'ProjectTemplateRepertoireDependencyInspectionError',
+      code: 'INVALID_ARGUMENT',
+    });
+    expect(Object.hasOwn(directInspectionError!, 'name')).toBe(true);
+    expect(directInspectionError).toMatchObject({
+      name: 'ProjectTemplateRepertoireDependencyInspectionError',
+      code: 'INVALID_ARGUMENT',
+    });
+    expect(Object.hasOwn(directValidationError!, 'name')).toBe(true);
+    expect(directValidationError).toMatchObject({
+      name: 'ProjectTemplateValidationError',
+      code: 'INVALID_SOURCE',
+      field: 'request.dependencies',
+    });
   });
 
   it('cannot hide an unexpected key through a poisoned Array iterator', () => {
