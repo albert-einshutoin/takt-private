@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  Dir,
   Stats,
   closeSync,
   constants,
@@ -7,7 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readdirSync,
+  opendirSync,
   renameSync,
   writeFileSync,
 } from 'node:fs';
@@ -29,6 +30,9 @@ const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeBufferToStringMethod = Buffer.prototype.toString;
 const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
 const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
+const safeDirReadSyncMethod = Dir.prototype.readSync;
+const safeDirCloseSyncMethod = Dir.prototype.closeSync;
+const safeOpenDirectorySync = opendirSync.bind(undefined);
 const safeArrayIsArray = Array.isArray.bind(Array);
 const safeArraySortMethod = Array.prototype.sort;
 const safeArrayPushMethod = Array.prototype.push;
@@ -38,6 +42,8 @@ const safeJsonParse = JSON.parse.bind(JSON);
 const safeJsonStringify = JSON.stringify.bind(JSON);
 const safeBufferFrom = Buffer.from.bind(Buffer);
 const safeNumberIsSafeInteger = Number.isSafeInteger.bind(Number);
+const safeMathMin = Math.min.bind(Math);
+const MAX_TRANSACTION_CHILDREN = 8;
 
 export class RepertoireMaintenanceError extends Error {
   readonly code = 'RECOVERY_REQUIRED' as const;
@@ -73,6 +79,10 @@ type ClassificationOptions = {
   onPayloadOpen?: () => void;
   /** Test-only proof of metadata short-circuit read counts. */
   onMetadataRead?: () => void;
+  /** Test-only observation of bounded directory entry reads. */
+  onDirectoryEntryRead?: () => void;
+  /** Test-only observation after the captured closeSync succeeds. */
+  onDirectoryClose?: () => void;
 };
 type PreparedTransaction = {
   transaction: string;
@@ -151,20 +161,25 @@ export function classifyMaintenanceTransactions(
 ): MaintenanceClassification {
   try {
     const transactionsRoot = transactionRoot(globalConfigDir);
-    let entries: string[];
-    try {
-      entries = readdirSync(transactionsRoot);
-    } catch (error) {
-      if (isMissing(error)) return { complete: [], incomplete: [] };
-      throw error;
-    }
     const limits = {
       transactions: options.limits?.transactions ?? MAX_MAINTENANCE_TRANSACTIONS,
       entries: options.limits?.entries ?? MAX_MAINTENANCE_AGGREGATE_ENTRIES,
       bytes: options.limits?.bytes ?? MAX_MAINTENANCE_AGGREGATE_BYTES,
       metadataBytes: options.limits?.metadataBytes ?? MAX_MAINTENANCE_METADATA_BYTES,
     };
-    if (entries.length > limits.transactions) throw maintenanceRequired();
+    let entries: string[];
+    try {
+      entries = readDirectoryBounded(
+        transactionsRoot,
+        limits.transactions,
+        options.onDirectoryEntryRead,
+        options.onDirectoryClose,
+        maintenanceRequired,
+      );
+    } catch (error) {
+      if (isMissing(error)) return { complete: [], incomplete: [] };
+      throw error;
+    }
     safeReflectApply(safeArraySortMethod, entries, []);
     const result: MaintenanceClassification = { complete: [], incomplete: [] };
     const prepared: PreparedTransaction[] = [];
@@ -177,7 +192,13 @@ export function classifyMaintenanceTransactions(
       if (!isDirectory(stat) || isSymbolicLink(stat)) throw recoveryRequired();
       const item: PreparedTransaction = { transaction };
       try {
-        item.transactionEntries = readdirSync(transaction);
+        item.transactionEntries = readDirectoryBounded(
+          transaction,
+          MAX_TRANSACTION_CHILDREN,
+          options.onDirectoryEntryRead,
+          options.onDirectoryClose,
+          recoveryRequired,
+        );
         safeReflectApply(safeArraySortMethod, item.transactionEntries, []);
         item.intent = readApprovedRegularFile(join(transaction, 'intent.json'), transaction);
         options.onMetadataRead?.();
@@ -224,6 +245,8 @@ export function classifyMaintenanceTransactions(
           ? capturePortableTreeSummary(join(item.transaction, kind), {
             aggregate: actualBudget,
             limits,
+            onDirectoryEntryRead: options.onDirectoryEntryRead,
+            onDirectoryClose: options.onDirectoryClose,
           })
           : undefined;
         complete = sameEntries(item.transactionEntries!, expectedEntries)
@@ -463,14 +486,26 @@ function capturePortableTreeSummary(
   aggregateOptions?: {
     aggregate: { entries: number; bytes: number };
     limits: { entries: number; bytes: number };
+    onDirectoryEntryRead?: () => void;
+    onDirectoryClose?: () => void;
   },
 ): PortableTreeSummary {
   const remaining = aggregateOptions === undefined ? undefined : {
     entries: aggregateOptions.limits.entries - aggregateOptions.aggregate.entries,
     bytes: aggregateOptions.limits.bytes - aggregateOptions.aggregate.bytes,
   };
-  const first = capturePortableTreeSummaryOnce(root, remaining);
-  const second = capturePortableTreeSummaryOnce(root, remaining);
+  const first = capturePortableTreeSummaryOnce(
+    root,
+    remaining,
+    aggregateOptions?.onDirectoryEntryRead,
+    aggregateOptions?.onDirectoryClose,
+  );
+  const second = capturePortableTreeSummaryOnce(
+    root,
+    remaining,
+    aggregateOptions?.onDirectoryEntryRead,
+    aggregateOptions?.onDirectoryClose,
+  );
   if (!samePortableSummary(first, second)) throw recoveryRequired();
   if (aggregateOptions !== undefined) {
     aggregateOptions.aggregate.entries += second.entries;
@@ -486,10 +521,21 @@ function capturePortableTreeSummary(
 function capturePortableTreeSummaryOnce(
   root: string,
   capacity?: { entries: number; bytes: number },
+  onDirectoryEntryRead?: () => void,
+  onDirectoryClose?: () => void,
 ): PortableTreeSummary {
   const records: string[] = ['d:.'];
   const budget = { entries: 0, bytes: 0 };
-  visitPortableTree(root, root, records, budget, 0, capacity);
+  visitPortableTree(
+    root,
+    root,
+    records,
+    budget,
+    0,
+    capacity,
+    onDirectoryEntryRead,
+    onDirectoryClose,
+  );
   return {
     digest: createHash('sha256').update(
       safeReflectApply(safeArrayJoinMethod, records, ['\0']) as string,
@@ -506,9 +552,23 @@ function visitPortableTree(
   budget: { entries: number; bytes: number },
   depth: number,
   capacity?: { entries: number; bytes: number },
+  onDirectoryEntryRead?: () => void,
+  onDirectoryClose?: () => void,
 ): void {
   if (depth > 32) throw recoveryRequired();
-  const before = readdirSync(directory);
+  const treeRemaining = 4_096 - budget.entries;
+  const capacityRemaining = capacity?.entries ?? treeRemaining;
+  const remaining = safeMathMin(treeRemaining, capacityRemaining);
+  const overflow = capacity !== undefined && capacityRemaining <= treeRemaining
+    ? maintenanceRequired
+    : recoveryRequired;
+  const before = readDirectoryBounded(
+    directory,
+    remaining,
+    onDirectoryEntryRead,
+    onDirectoryClose,
+    overflow,
+  );
   safeReflectApply(safeArraySortMethod, before, []);
   for (let index = 0; index < before.length; index += 1) {
     budget.entries += 1;
@@ -520,7 +580,16 @@ function visitPortableTree(
     const relativePath = relative(root, path);
     if (isDirectory(stat)) {
       safeReflectApply(safeArrayPushMethod, records, [`d:${relativePath}`]);
-      visitPortableTree(root, path, records, budget, depth + 1, capacity);
+      visitPortableTree(
+        root,
+        path,
+        records,
+        budget,
+        depth + 1,
+        capacity,
+        onDirectoryEntryRead,
+        onDirectoryClose,
+      );
       continue;
     }
     const approved = readApprovedRegularFile(path, root);
@@ -531,13 +600,45 @@ function visitPortableTree(
       `f:${relativePath}:${approved.bytes.length}:${approved.proof.digest}`,
     ]);
   }
-  const after = readdirSync(directory);
+  const after = readDirectoryBounded(
+    directory,
+    before.length,
+    onDirectoryEntryRead,
+    onDirectoryClose,
+    overflow,
+  );
   safeReflectApply(safeArraySortMethod, after, []);
   if (!sameEntries(before, after)) throw recoveryRequired();
 }
 
 function samePortableSummary(left: PortableTreeSummary, right: PortableTreeSummary): boolean {
   return left.digest === right.digest && left.entries === right.entries && left.bytes === right.bytes;
+}
+
+function readDirectoryBounded(
+  path: string,
+  maximumEntries: number,
+  onEntryRead: (() => void) | undefined,
+  onClose: (() => void) | undefined,
+  overflow: () => Error,
+): string[] {
+  let directory: Dir | undefined;
+  try {
+    directory = safeOpenDirectorySync(path);
+    const entries: string[] = [];
+    while (true) {
+      const entry = safeReflectApply(safeDirReadSyncMethod, directory, []);
+      if (entry === null) return entries;
+      onEntryRead?.();
+      safeReflectApply(safeArrayPushMethod, entries, [entry.name]);
+      if (entries.length > maximumEntries) throw overflow();
+    }
+  } finally {
+    if (directory !== undefined) {
+      safeReflectApply(safeDirCloseSyncMethod, directory, []);
+      onClose?.();
+    }
+  }
 }
 
 function digestBytes(bytes: Buffer): string {

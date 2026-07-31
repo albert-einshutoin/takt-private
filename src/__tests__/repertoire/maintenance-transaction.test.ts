@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { Dir, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureDirectoryTreeProof } from '../../features/repertoire/filesystem-proof.js';
@@ -149,6 +149,73 @@ describe('detachToMaintenance', () => {
       code: 'MAINTENANCE_REQUIRED',
       message: 'Repertoire maintenance cleanup is required',
     }));
+  });
+
+  it('reads only transaction budget plus one from a huge foreign listing', () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-enumeration-'));
+    roots.push(root);
+    const transactions = join(root, '.repertoire-maintenance', 'transactions');
+    mkdirSync(transactions, { recursive: true });
+    for (let index = 0; index < 100; index += 1) {
+      mkdirSync(join(transactions, index.toString().padStart(64, '0')));
+    }
+    let reads = 0;
+    expect(() => classifyMaintenanceTransactions(root, {
+      limits: { transactions: 8 },
+      onDirectoryEntryRead: () => { reads += 1; },
+    })).toThrow(expect.objectContaining({ code: 'MAINTENANCE_REQUIRED' }));
+    expect(reads).toBe(9);
+  });
+
+  it('bounds portable payload enumeration before allocating a huge listing', () => {
+    const { root, transaction } = createCompletedTransaction(roots);
+    const payload = join(transaction, 'payload');
+    for (let index = 0; index < 100; index += 1) {
+      writeFileSync(join(payload, `foreign-${index}.yaml`), 'foreign');
+    }
+    let reads = 0;
+    expect(() => classifyMaintenanceTransactions(root, {
+      limits: { entries: 8 },
+      onDirectoryEntryRead: () => { reads += 1; },
+    })).toThrow(expect.objectContaining({ code: 'MAINTENANCE_REQUIRED' }));
+    // transaction root(1) + metadata children(4) + payload budget+1(9)
+    expect(reads).toBe(14);
+  });
+
+  it('uses captured Dir hooks with the original receiver after hook0 poisoning', () => {
+    const { root } = createCompletedTransaction(roots);
+    const originalRead = Dir.prototype.readSync;
+    const originalClose = Dir.prototype.closeSync;
+    try {
+      Dir.prototype.readSync = () => { throw new Error('poisoned read'); };
+      Dir.prototype.closeSync = () => { throw new Error('poisoned close'); };
+      expect(classifyMaintenanceTransactions(root).complete).toHaveLength(1);
+    } finally {
+      Dir.prototype.readSync = originalRead;
+      Dir.prototype.closeSync = originalClose;
+    }
+  });
+
+  it('closes a directory and redacts an entry callback failure', () => {
+    const { root } = createCompletedTransaction(roots);
+    let closes = 0;
+    let caught: unknown;
+    try {
+      classifyMaintenanceTransactions(root, {
+        onDirectoryEntryRead: () => {
+          throw Object.assign(new Error('/secret/entry'), { code: 'EIO' });
+        },
+        onDirectoryClose: () => { closes += 1; },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(closes).toBe(1);
+    expect(caught).toMatchObject({
+      code: 'RECOVERY_REQUIRED',
+      message: 'Repertoire package recovery is required',
+    });
+    expect(caught).not.toHaveProperty('cause');
   });
 
   it('reclassifies a completed transaction when foreign payload bytes appear', () => {
