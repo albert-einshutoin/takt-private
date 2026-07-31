@@ -17,10 +17,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { findScopeReferences } from '../features/repertoire/remove.js';
+import { REFERENCE_MAX_SINGLE_FILE_BYTES } from '../features/repertoire/remove.js';
 import { makeScanConfig } from './helpers/repertoire-test-helpers.js';
 
 describe('repertoire reference integrity: detection', () => {
@@ -251,5 +252,36 @@ describe('repertoire reference integrity: fail-closed authorization', () => {
       ino: expect.any(Number),
       contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
+  });
+
+  it('fails closed when a reference file exceeds the bounded read budget', () => {
+    const workflowsDir = join(tempDir, 'workflows');
+    mkdirSync(workflowsDir);
+    writeFileSync(
+      join(workflowsDir, 'large.yaml'),
+      Buffer.alloc(REFERENCE_MAX_SINGLE_FILE_BYTES + 1),
+    );
+    expect(() => findScopeReferences('@owner/repo', {
+      workflowDirs: [workflowsDir],
+      providerOptionsDirs: [],
+      categoriesFiles: [],
+      failClosed: true,
+    })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
+  });
+
+  it.runIf(process.getuid?.() !== 0)('treats EACCES as failure rather than absence', () => {
+    const denied = join(tempDir, 'denied');
+    mkdirSync(denied);
+    chmodSync(denied, 0o000);
+    try {
+      expect(() => findScopeReferences('@owner/repo', {
+        workflowDirs: [join(denied, 'workflows')],
+        providerOptionsDirs: [],
+        categoriesFiles: [],
+        failClosed: true,
+      })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
+    } finally {
+      chmodSync(denied, 0o700);
+    }
   });
 });
