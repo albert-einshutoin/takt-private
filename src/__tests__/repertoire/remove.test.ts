@@ -394,4 +394,18 @@ describe('repertoireRemoveCommand — scan configuration', () => {
 
     expect(success).not.toHaveBeenCalled();
   });
+
+  it('redacts owner cleanup filesystem failures', async () => {
+    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(readdirSync).mockReturnValue([]);
+    vi.mocked(rmdirSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('/secret/owner'), { code: 'EACCES' });
+    });
+    await expect(repertoireRemoveCommand('@owner/repo')).rejects.toEqual(
+      expect.objectContaining({
+        code: 'RECOVERY_REQUIRED',
+        message: 'Repertoire package recovery is required',
+      }),
+    );
+  });
 });

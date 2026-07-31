@@ -44,6 +44,10 @@ import { collectCopyTargets } from '../../features/repertoire/file-filter.js';
 import { parseTarVerboseListing } from '../../features/repertoire/tar-parser.js';
 import { resolveRef } from '../../features/repertoire/github-ref-resolver.js';
 import { atomicReplace } from '../../features/repertoire/atomic-update.js';
+import {
+  normalizeRepertoireMutationError,
+  RepertoireMutationError,
+} from '../../features/repertoire/mutation-error.js';
 import { acquireRepertoireCoordinationLease } from '../../features/repertoire/coordination-lease.js';
 import {
   captureDirectoryTreeProof,
@@ -151,11 +155,17 @@ export async function repertoireAddCommand(
 
   const ref = resolveRef(specRef, owner, repo, execGh);
 
-  const tmpBase = mkdtempSync(join(ensureCurrentTmpDirExists(), 'takt-import-'));
+  let tmpBase: string;
+  try {
+    tmpBase = mkdtempSync(join(ensureCurrentTmpDirExists(), 'takt-import-'));
+  } catch {
+    throw new RepertoireMutationError();
+  }
   const tmpTarPath = join(tmpBase, 'archive.tar.gz');
   const tmpExtractDir = join(tmpBase, 'extract');
   const tmpIncludeFile = join(tmpBase, 'include.txt');
 
+  let primaryFailure: unknown;
   try {
     mkdirSync(tmpExtractDir, { recursive: true });
 
@@ -397,9 +407,21 @@ export async function repertoireAddCommand(
     }
 
     success(`✅ ${owner}/${repo} @${ref} をインストールしました`);
+  } catch (error) {
+    primaryFailure = normalizeRepertoireMutationError(error);
+    throw primaryFailure;
   } finally {
-    if (existsSync(tmpBase)) rmSync(tmpBase, { recursive: true, force: true });
+    try {
+      if (existsSync(tmpBase)) rmSync(tmpBase, { recursive: true, force: true });
+    } catch {
+      // Cleanup must not mask the primary recovery/validation result.
+      if (primaryFailure === undefined) failCleanup();
+    }
   }
+}
+
+function failCleanup(): never {
+  throw new RepertoireMutationError();
 }
 
 function capturePackageState(packageDir: string, repertoireDir: string): PackageState {

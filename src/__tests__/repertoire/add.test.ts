@@ -435,4 +435,25 @@ describe('repertoireAddCommand temporary directory handling', () => {
     expect(mockAtomicReplace).toHaveBeenCalledOnce();
     expect(success).not.toHaveBeenCalled();
   });
+
+  it('redacts temporary cleanup filesystem failures', async () => {
+    mockRmSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error(`${secureTempDir}/secret token`), { code: 'EACCES' });
+    });
+    await expect(repertoireAddCommand('github:owner/repo@main')).rejects.toEqual(
+      expect.objectContaining({
+        code: 'RECOVERY_REQUIRED',
+        message: 'Repertoire package recovery is required',
+      }),
+    );
+  });
+
+  it('does not let cleanup failure mask the primary recovery result', async () => {
+    const primary = Object.assign(new Error('primary recovery'), { code: 'RECOVERY_REQUIRED' });
+    mockAtomicReplace.mockRejectedValueOnce(primary);
+    mockRmSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error('cleanup path'), { code: 'EACCES' });
+    });
+    await expect(repertoireAddCommand('github:owner/repo@main')).rejects.toBe(primary);
+  });
 });

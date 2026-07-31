@@ -30,6 +30,7 @@ import {
 } from '../../features/repertoire/filesystem-proof.js';
 import { findScopeReferences, type ScanConfig, type ScopeReference } from '../../features/repertoire/remove.js';
 import { detachToMaintenance } from '../../features/repertoire/maintenance-transaction.js';
+import { normalizeRepertoireMutationError } from '../../features/repertoire/mutation-error.js';
 import { confirm } from '../../shared/prompt/index.js';
 import { info, success } from '../../shared/ui/index.js';
 
@@ -69,6 +70,17 @@ type PackageIdentity = TreeProof;
 export async function repertoireRemoveCommand(
   scope: string,
   mutationOptions: RepertoireMutationOptions = {},
+): Promise<void> {
+  try {
+    await repertoireRemoveCommandInner(scope, mutationOptions);
+  } catch (error) {
+    throw normalizeRepertoireMutationError(error);
+  }
+}
+
+async function repertoireRemoveCommandInner(
+  scope: string,
+  mutationOptions: RepertoireMutationOptions,
 ): Promise<void> {
   const { owner, repo } = parseScope(scope);
   const repertoireDir = getRepertoireDir();
