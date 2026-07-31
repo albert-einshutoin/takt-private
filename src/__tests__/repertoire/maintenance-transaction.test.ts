@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureDirectoryTreeProof } from '../../features/repertoire/filesystem-proof.js';
 import {
+  RepertoireMaintenanceCapacityError,
+  RepertoireMaintenanceError,
   assertMaintenanceTransactionsReady,
   classifyMaintenanceTransactions,
   detachToMaintenance,
@@ -160,10 +162,20 @@ describe('detachToMaintenance', () => {
       mkdirSync(join(transactions, index.toString().padStart(64, '0')));
     }
     let reads = 0;
-    expect(() => classifyMaintenanceTransactions(root, {
-      limits: { transactions: 8 },
-      onDirectoryEntryRead: () => { reads += 1; },
-    })).toThrow(expect.objectContaining({ code: 'MAINTENANCE_REQUIRED' }));
+    let caught: unknown;
+    try {
+      classifyMaintenanceTransactions(root, {
+        limits: { transactions: 8 },
+        onDirectoryEntryRead: () => { reads += 1; },
+        onDirectoryClose: () => {
+          throw Object.assign(new Error('/secret/close'), { code: 'EIO' });
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(RepertoireMaintenanceCapacityError);
+    expect(caught).toMatchObject({ code: 'MAINTENANCE_REQUIRED' });
     expect(reads).toBe(9);
   });
 
@@ -196,7 +208,7 @@ describe('detachToMaintenance', () => {
     }
   });
 
-  it('closes a directory and redacts an entry callback failure', () => {
+  it('preserves the primary callback error when closing also fails', () => {
     const { root } = createCompletedTransaction(roots);
     let closes = 0;
     let caught: unknown;
@@ -205,12 +217,32 @@ describe('detachToMaintenance', () => {
         onDirectoryEntryRead: () => {
           throw Object.assign(new Error('/secret/entry'), { code: 'EIO' });
         },
-        onDirectoryClose: () => { closes += 1; },
+        onDirectoryClose: () => {
+          closes += 1;
+          throw new RepertoireMaintenanceCapacityError();
+        },
       });
     } catch (error) {
       caught = error;
     }
     expect(closes).toBe(1);
+    expect(caught).toBeInstanceOf(RepertoireMaintenanceError);
+    expect(caught).not.toBeInstanceOf(RepertoireMaintenanceCapacityError);
+    expect(caught).not.toHaveProperty('cause');
+  });
+
+  it('redacts a close-only directory failure', () => {
+    const { root } = createCompletedTransaction(roots);
+    let caught: unknown;
+    try {
+      classifyMaintenanceTransactions(root, {
+        onDirectoryClose: () => {
+          throw Object.assign(new Error('/secret/close'), { code: 'EIO' });
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
     expect(caught).toMatchObject({
       code: 'RECOVERY_REQUIRED',
       message: 'Repertoire package recovery is required',

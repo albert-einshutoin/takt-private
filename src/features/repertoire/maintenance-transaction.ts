@@ -623,22 +623,34 @@ function readDirectoryBounded(
   overflow: () => Error,
 ): string[] {
   let directory: Dir | undefined;
+  const entries: string[] = [];
+  let primaryFailure: { error: unknown } | undefined;
+  let closeFailure: { error: unknown } | undefined;
   try {
     directory = safeOpenDirectorySync(path);
-    const entries: string[] = [];
     while (true) {
       const entry = safeReflectApply(safeDirReadSyncMethod, directory, []);
-      if (entry === null) return entries;
+      if (entry === null) break;
       onEntryRead?.();
       safeReflectApply(safeArrayPushMethod, entries, [entry.name]);
       if (entries.length > maximumEntries) throw overflow();
     }
+  } catch (error) {
+    primaryFailure = { error };
   } finally {
     if (directory !== undefined) {
-      safeReflectApply(safeDirCloseSyncMethod, directory, []);
-      onClose?.();
+      try {
+        safeReflectApply(safeDirCloseSyncMethod, directory, []);
+        onClose?.();
+      } catch (error) {
+        closeFailure = { error };
+      }
     }
   }
+  // A cleanup fault must never replace the classification that caused cleanup.
+  if (primaryFailure !== undefined) throw primaryFailure.error;
+  if (closeFailure !== undefined) throw closeFailure.error;
+  return entries;
 }
 
 function digestBytes(bytes: Buffer): string {
