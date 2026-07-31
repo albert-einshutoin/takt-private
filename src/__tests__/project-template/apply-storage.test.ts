@@ -103,30 +103,60 @@ describe('project template apply storage', () => {
       .rejects.toThrow();
   });
 
-  it('writes exact approval claim bytes without mutable serialization hooks', async () => {
+  it('writes exact approval, burn, and disposition bytes without mutable hooks', async () => {
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
-    const approvalId = 'approval-claim-audit';
-    const claim = {
+    const recordId = 'approval-record-audit';
+    const burnId = 'approval-burn-audit';
+    const dispositionId = 'approval-disposition-audit';
+    const record = {
       schemaVersion: '1.0',
-      approvalId,
+      approvalId: recordId,
+      nonce: '00000000-0000-0000-0000-000000000000',
+    };
+    const burnClaim = {
+      schemaVersion: '1.0',
+      approvalId: burnId,
+      context: 'project-template-apply-preview-review',
+      state: 'burned',
+      burnedAt: '2026-08-01T00:00:00.000Z',
+    };
+    const dispositionClaim = {
+      schemaVersion: '1.0',
+      approvalId: dispositionId,
       nonce: '00000000-0000-0000-0000-000000000001',
       disposition: 'consumed',
       claimedAt: '2026-08-01T00:00:00.000Z',
     };
-    const expected = `${canonicalizeTaktpackJson(claim)}\n`;
+    const expected = {
+      record: `${canonicalizeTaktpackJson(record)}\n`,
+      burn: `${canonicalizeTaktpackJson(burnClaim)}\n`,
+      disposition: `${canonicalizeTaktpackJson(dispositionClaim)}\n`,
+    };
+    const bufferPrototype = Buffer.prototype as Buffer & {
+      utf8Write(value: string, offset?: number, length?: number): number;
+    };
     const originals = {
       bufferFrom: Buffer.from,
+      utf8Write: bufferPrototype.utf8Write,
       stringify: JSON.stringify,
       descriptors: Object.getOwnPropertyDescriptors,
       isArray: Array.isArray,
     };
-    const hooks = { buffer: 0, json: 0, object: 0, array: 0 };
+    const hooks = { buffer: 0, utf8Write: 0, json: 0, object: 0, array: 0 };
     Object.defineProperty(Buffer, 'from', {
       configurable: true,
       writable: true,
       value: () => {
         hooks.buffer += 1;
         return originals.bufferFrom.call(Buffer, '{"forged":true}\n');
+      },
+    });
+    Object.defineProperty(Buffer.prototype, 'utf8Write', {
+      configurable: true,
+      writable: true,
+      value(this: Buffer, value: string, offset?: number, length?: number) {
+        hooks.utf8Write += 1;
+        return originals.utf8Write.call(this, value, offset, length);
       },
     });
     Object.defineProperty(JSON, 'stringify', {
@@ -154,12 +184,31 @@ describe('project template apply storage', () => {
       },
     });
     try {
-      await consumeProjectTemplateApprovalRecord({ storage, approvalId, claim });
+      await writeProjectTemplateApprovalRecord({
+        storage,
+        approvalId: recordId,
+        record,
+      });
+      await consumeProjectTemplateApprovalRecord({
+        storage,
+        approvalId: burnId,
+        claim: burnClaim,
+      });
+      await consumeProjectTemplateApprovalRecord({
+        storage,
+        approvalId: dispositionId,
+        claim: dispositionClaim,
+      });
     } finally {
       Object.defineProperty(Buffer, 'from', {
         configurable: true,
         writable: true,
         value: originals.bufferFrom,
+      });
+      Object.defineProperty(Buffer.prototype, 'utf8Write', {
+        configurable: true,
+        writable: true,
+        value: originals.utf8Write,
       });
       Object.defineProperty(JSON, 'stringify', {
         configurable: true,
@@ -180,10 +229,26 @@ describe('project template apply storage', () => {
 
     expect(readFileSync(join(
       storage.controlRoot,
+      'approvals',
+      `${recordId}.json`,
+    ), 'utf8')).toBe(expected.record);
+    expect(readFileSync(join(
+      storage.controlRoot,
       'approval-claims',
-      `${approvalId}.json`,
-    ), 'utf8')).toBe(expected);
-    expect(hooks).toEqual({ buffer: 0, json: 0, object: 0, array: 0 });
+      `${burnId}.json`,
+    ), 'utf8')).toBe(expected.burn);
+    expect(readFileSync(join(
+      storage.controlRoot,
+      'approval-claims',
+      `${dispositionId}.json`,
+    ), 'utf8')).toBe(expected.disposition);
+    expect(hooks).toEqual({
+      buffer: 0,
+      utf8Write: 0,
+      json: 0,
+      object: 0,
+      array: 0,
+    });
   });
 
   it('creates a private repo-local control root on the target filesystem', async () => {

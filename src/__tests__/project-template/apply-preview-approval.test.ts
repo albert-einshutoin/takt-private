@@ -1323,4 +1323,32 @@ describe('project template revocable preview approval authority G6.2', () => {
     expect(results).toEqual(fields.map(() => false));
     expect(coercionHooks).toBe(0);
   });
+
+  it('rejects a BOM-prefixed otherwise valid durable approval record', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const path = join(
+      storage.controlRoot,
+      'approvals',
+      `${evidence.approvalId}.json`,
+    );
+    const record = readFileSync(path);
+    writeFileSync(path, Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      record,
+    ]), { mode: 0o600 });
+
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'conflict',
+      evidence,
+    })).resolves.toBe(false);
+  });
 });
