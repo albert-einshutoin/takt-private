@@ -164,7 +164,7 @@ export function mockDetectMatchedRuleSequence(matches: (RuleMatch | undefined)[]
  */
 export function createTestTmpDir(): string {
   const tmpDir = join(tmpdir(), `takt-engine-test-${randomUUID()}`);
-  mkdirSync(tmpDir, { recursive: true });
+  mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
   mkdirSync(join(tmpDir, '.takt', 'runs', 'test-report-dir', 'reports'), { recursive: true });
   mkdirSync(join(tmpDir, '.takt', 'runs', 'test-report-dir', 'context', 'knowledge'), { recursive: true });
   mkdirSync(join(tmpDir, '.takt', 'runs', 'test-report-dir', 'context', 'policy'), { recursive: true });

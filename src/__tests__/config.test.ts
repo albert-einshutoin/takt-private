@@ -52,7 +52,7 @@ let originalTaktConfigDirForFile: string | undefined;
 beforeEach(() => {
   originalTaktConfigDirForFile = process.env.TAKT_CONFIG_DIR;
   isolatedGlobalConfigDir = join(tmpdir(), `takt-config-test-global-${randomUUID()}`);
-  mkdirSync(isolatedGlobalConfigDir, { recursive: true });
+  mkdirSync(isolatedGlobalConfigDir, { recursive: true, mode: 0o700 });
   process.env.TAKT_CONFIG_DIR = isolatedGlobalConfigDir;
   writeFileSync(join(isolatedGlobalConfigDir, 'config.yaml'), 'language: en\n', 'utf-8');
   invalidateGlobalConfigCache();
