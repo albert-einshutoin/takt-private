@@ -125,6 +125,10 @@ vi.mock('../../features/repertoire/coordination-lease.js', () => ({
 
 vi.mock('../../features/repertoire/filesystem-proof.js', () => ({
   captureRegularFileProof: mockCaptureRegularFileProof,
+  readApprovedRegularFile: (path: string) => ({
+    proof: mockCaptureRegularFileProof(path),
+    bytes: Buffer.from('approved'),
+  }),
   captureDirectoryTreeProof: mockCaptureDirectoryTreeProof,
   captureNearestParentProof: mockCaptureNearestParentProof,
   sameFileProof: (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right),

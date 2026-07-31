@@ -7,7 +7,6 @@
  */
 
 import {
-  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -49,10 +48,12 @@ import {
   captureDirectoryTreeProof,
   captureNearestParentProof,
   captureRegularFileProof,
+  readApprovedRegularFile,
   sameFileProof,
   sameParentProof,
   sameTreeProof,
   type FileProof,
+  type ApprovedFile,
   type ParentProof,
   type TreeProof,
 } from '../../features/repertoire/filesystem-proof.js';
@@ -362,19 +363,25 @@ export async function repertoireAddCommand(
             if (!sameTargetSet(targets, collectCopyTargets(packageRoot))) {
               throw new Error('Downloaded package target set changed before copy');
             }
-            if (!sameFileProof(
-              sourceProofs[index + 1]!,
-              captureRegularFileProof(target.absolutePath, tmpExtractDir),
-            )) throw new Error('Downloaded package source changed before copy');
+            const approved = readApprovedRegularFile(target.absolutePath, tmpExtractDir);
+            if (!sameFileProof(sourceProofs[index + 1]!.proof, approved.proof)) {
+              throw new Error('Downloaded package source changed before copy');
+            }
             const destFile = join(stagingDir, target.relativePath);
             mkdirSync(dirname(destFile), { recursive: true });
-            copyFileSync(target.absolutePath, destFile);
+            writeFileSync(destFile, approved.bytes, { flag: 'wx', mode: 0o600 });
+            assertPublishedBytes(approved.proof, captureRegularFileProof(destFile, stagingDir));
           }
-          if (!sameFileProof(
-            sourceProofs[0]!,
-            captureRegularFileProof(packConfigPath, tmpExtractDir),
-          )) throw new Error('Downloaded package manifest changed before copy');
-          copyFileSync(packConfigPath, join(stagingDir, TAKT_REPERTOIRE_MANIFEST_FILENAME));
+          const approvedManifest = readApprovedRegularFile(packConfigPath, tmpExtractDir);
+          if (!sameFileProof(sourceProofs[0]!.proof, approvedManifest.proof)) {
+            throw new Error('Downloaded package manifest changed before copy');
+          }
+          const stagedManifest = join(stagingDir, TAKT_REPERTOIRE_MANIFEST_FILENAME);
+          writeFileSync(stagedManifest, approvedManifest.bytes, { flag: 'wx', mode: 0o600 });
+          assertPublishedBytes(
+            approvedManifest.proof,
+            captureRegularFileProof(stagedManifest, stagingDir),
+          );
 
           const lock = generateLockFile({
             source: `github:${owner}/${repo}`,
@@ -436,20 +443,28 @@ function captureSourceProofs(
   manifestPath: string,
   targets: Array<{ absolutePath: string }>,
   containmentRoot: string,
-): FileProof[] {
-  const proofs: FileProof[] = [captureRegularFileProof(manifestPath, containmentRoot)];
+): ApprovedFile[] {
+  const proofs: ApprovedFile[] = [readApprovedRegularFile(manifestPath, containmentRoot)];
   for (let index = 0; index < targets.length; index += 1) {
-    proofs[index + 1] = captureRegularFileProof(targets[index]!.absolutePath, containmentRoot);
+    proofs[index + 1] = readApprovedRegularFile(targets[index]!.absolutePath, containmentRoot);
   }
   return proofs;
 }
 
-function sameSourceProofs(left: FileProof[], right: FileProof[]): boolean {
+function sameSourceProofs(left: ApprovedFile[], right: ApprovedFile[]): boolean {
   if (left.length !== right.length) return false;
   for (let index = 0; index < left.length; index += 1) {
-    if (!sameFileProof(left[index]!, right[index]!)) return false;
+    if (!sameFileProof(left[index]!.proof, right[index]!.proof)) return false;
   }
   return true;
+}
+
+function assertPublishedBytes(source: FileProof, destination: FileProof): void {
+  if (source.size !== destination.size || source.digest !== destination.digest) {
+    throw Object.assign(new Error('Staged package bytes could not be verified'), {
+      code: 'RECOVERY_REQUIRED' as const,
+    });
+  }
 }
 
 function sameTargetSet(
