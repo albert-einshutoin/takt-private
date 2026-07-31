@@ -511,14 +511,14 @@ ${stepFields}`);
     })).toThrow(expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }));
   });
 
-  it('rejects a valid capability rebound to another root before injected callbacks', () => {
+  it('preserves injected inspection provenance when a valid capability belongs to another custom root', () => {
     createProjectWorkflowWithScopedResources();
     const otherRepertoire = join(projectDir, 'other-repertoire');
     const workflowDir = join(otherRepertoire, '@other', 'repo', 'workflows');
     mkdirSync(workflowDir, { recursive: true });
     let callbacks = 0;
 
-    expect(() => withImmediateRepertoireReadPermit({
+    const result = withImmediateRepertoireReadPermit({
       globalConfigDir: configDir,
       operation: (permit) => {
         const access = createRepertoireResourceReadAccess(
@@ -536,15 +536,16 @@ ${stepFields}`);
               repertoireReadAccess: access,
             },
             fileAccess: {
-              exists: () => { callbacks += 1; return false; },
-              readText: () => { callbacks += 1; return ''; },
+              exists: () => { callbacks += 1; return true; },
+              readText: () => { callbacks += 1; return 'codex:\n  network_access: false\n'; },
               realpath: (path) => { callbacks += 1; return path; },
             },
           },
         );
       },
-    })).toThrow(expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }));
-    expect(callbacks).toBe(0);
+    });
+    expect(result).toEqual({ codex: { networkAccess: false } });
+    expect(callbacks).toBe(5);
   });
 
   it('normalizes filesystem discovery failures without path or cause leakage', () => {
