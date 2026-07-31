@@ -16,6 +16,7 @@ import {
   assertActiveRepertoireReadPermit,
   prepareRepertoireRead,
   withRepertoireReadPermit,
+  withImmediateRepertoireReadPermit,
   type PrepareRepertoireReadOptions,
   type RepertoireReadPermit,
   type RepertoireReadPermitOptions,
@@ -333,6 +334,16 @@ describe('repertoire read permit private boundary', () => {
     await expect(invokeVariant('with', accessor)).rejects.toMatchObject({
       code: 'UNSAFE_STATE',
     });
+    expect(activeReaderFiles(root)).toEqual([]);
+  });
+
+  it('rejects timeoutMs on the no-wait immediate contract before I/O', () => {
+    const root = makeRoot(roots);
+    expect(() => withImmediateRepertoireReadPermit({
+      globalConfigDir: root,
+      operation: () => 'unreachable',
+      timeoutMs: 1,
+    } as never)).toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
     expect(activeReaderFiles(root)).toEqual([]);
   });
 });

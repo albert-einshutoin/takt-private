@@ -135,7 +135,7 @@ export async function prepareRepertoireRead<T>(
 export function withImmediateRepertoireReadPermit<T>(
   options: ImmediateRepertoireReadPermitOptions<T>,
 ): T {
-  const snapshot = snapshotOptions<T>(options);
+  const snapshot = snapshotOptions<T>(options, false);
   let lease: RepertoireCoordinationLease;
   try {
     lease = safeAcquireImmediateReadLease({
@@ -188,7 +188,7 @@ async function acquireReadLease(
   });
 }
 
-function snapshotOptions<T>(options: unknown): OptionsSnapshot<T> {
+function snapshotOptions<T>(options: unknown, allowTimeoutMs = true): OptionsSnapshot<T> {
   if (
     typeof options !== 'object'
     || options === null
@@ -224,6 +224,7 @@ function snapshotOptions<T>(options: unknown): OptionsSnapshot<T> {
         signal = descriptor.value;
         break;
       case 'timeoutMs':
+        if (!allowTimeoutMs) throw invalidPermit();
         timeoutMs = descriptor.value;
         break;
       default:
