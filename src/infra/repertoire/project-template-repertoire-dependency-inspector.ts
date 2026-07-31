@@ -40,8 +40,12 @@ import type {
 } from '../config/loaders/providerOptionsLookupDirectories.js';
 import {
   createProjectTemplateRepertoireSafeReadContext,
+  detachProjectTemplateRepertoireSafeReadContextCallbacks,
   readProjectTemplateRepertoireDirectory,
   readProjectTemplateRepertoireFile,
+  type ProjectTemplateRepertoireSafeDirectoryRead,
+  type ProjectTemplateRepertoireSafeFileRead,
+  type ProjectTemplateRepertoireSafeReadContext,
   type ProjectTemplateRepertoireRelativeWitness,
 } from './project-template-repertoire-safe-read.js';
 import {
@@ -180,6 +184,17 @@ interface ScopeInspection {
     readonly commit: string;
     readonly capabilities: readonly [] | readonly ['edit'];
     readonly capabilitySnapshot: ProjectTemplateRepertoireCapabilitySnapshot;
+    readonly provenance: {
+      readonly safeContext: ProjectTemplateRepertoireSafeReadContext;
+      readonly lockRelativePath: string;
+      readonly manifestRelativePath: string;
+      readonly packageRelativePath: string;
+      readonly ownerRelativePath: string;
+      readonly lock: ProjectTemplateRepertoireSafeFileRead;
+      readonly manifest: ProjectTemplateRepertoireSafeFileRead;
+      readonly packageDirectory: ProjectTemplateRepertoireSafeDirectoryRead;
+      readonly ownerDirectory: ProjectTemplateRepertoireSafeDirectoryRead;
+    };
   };
   readonly privateWitness: string;
 }
@@ -514,6 +529,14 @@ function sameFileEvidence(
   return witnessIdentity(before.witness) === witnessIdentity(after.witness)
     && sha256(before.content) === sha256(after.content)
     && sameBytes(before.content, after.content);
+}
+
+function sameDirectoryEvidence(
+  before: ProjectTemplateRepertoireSafeDirectoryRead,
+  after: ProjectTemplateRepertoireSafeDirectoryRead,
+): boolean {
+  return witnessIdentity(before.witness) === witnessIdentity(after.witness)
+    && joinArray(before.entries, '\u0000') === joinArray(after.entries, '\u0000');
 }
 
 function isDirectory(stat: Stats): boolean {
@@ -1434,14 +1457,8 @@ function inspectScope(
     if (
       !sameFileEvidence(lockRead, lockAfter)
       || !sameFileEvidence(manifestRead, manifestAfter)
-      || witnessIdentity(packageAfter.witness)
-        !== witnessIdentity(packageDirectory.witness)
-      || joinArray(packageAfter.entries, '\u0000')
-        !== joinArray(packageDirectory.entries, '\u0000')
-      || witnessIdentity(ownerAfter.witness)
-        !== witnessIdentity(owner.witness)
-      || joinArray(ownerAfter.entries, '\u0000')
-        !== joinArray(owner.entries, '\u0000')
+      || !sameDirectoryEvidence(packageDirectory, packageAfter)
+      || !sameDirectoryEvidence(owner, ownerAfter)
     ) return invalid(request, scope, 'coherence');
     checkpoint(request);
     return {
@@ -1453,6 +1470,18 @@ function inspectScope(
         commit: lock.commit,
         capabilities: detectedCapabilities.capabilities,
         capabilitySnapshot,
+        provenance: freeze({
+          safeContext:
+            detachProjectTemplateRepertoireSafeReadContextCallbacks(safeContext),
+          lockRelativePath,
+          manifestRelativePath,
+          packageRelativePath: scope.packageRelativePath,
+          ownerRelativePath: scope.ownerSegment,
+          lock: lockRead,
+          manifest: manifestRead,
+          packageDirectory,
+          ownerDirectory: owner,
+        }),
       }),
       privateWitness: 'installed:'
         + `${witnessIdentity(packageDirectory.witness)}:`
@@ -1485,6 +1514,56 @@ function materializeInstalled(
       capabilities: installed.capabilities,
     }),
   });
+}
+
+function revalidateProvisionalInstalledScope(
+  installed: NonNullable<ScopeInspection['installed']>,
+  request: InspectionInput,
+): string | undefined {
+  const provenance = installed.provenance;
+  checkpoint(request);
+  revalidateProjectTemplateRepertoireCapabilitySnapshot(
+    installed.capabilitySnapshot,
+    { signal: request.signal, deadlineMs: request.deadlineMs },
+  );
+  checkpoint(request);
+  const lockAfter = readProjectTemplateRepertoireFile(
+    provenance.safeContext,
+    provenance.lockRelativePath,
+    'lock',
+  );
+  checkpoint(request);
+  const manifestAfter = readProjectTemplateRepertoireFile(
+    provenance.safeContext,
+    provenance.manifestRelativePath,
+    'manifest',
+  );
+  checkpoint(request);
+  const packageAfter = readProjectTemplateRepertoireDirectory(
+    provenance.safeContext,
+    provenance.packageRelativePath,
+  );
+  checkpoint(request);
+  const ownerAfter = readProjectTemplateRepertoireDirectory(
+    provenance.safeContext,
+    provenance.ownerRelativePath,
+  );
+  checkpoint(request);
+  const lockStable = sameFileEvidence(provenance.lock, lockAfter);
+  const manifestStable = sameFileEvidence(provenance.manifest, manifestAfter);
+  const packageStable = sameDirectoryEvidence(
+    provenance.packageDirectory,
+    packageAfter,
+  );
+  const ownerStable = sameDirectoryEvidence(provenance.ownerDirectory, ownerAfter);
+  if (lockStable && manifestStable && packageStable && ownerStable) {
+    return undefined;
+  }
+  return sha256(
+    `lock:${lockStable}:manifest:${manifestStable}:`
+    + `package:${packageStable}:owner:${ownerStable}:`
+    + installed.capabilitySnapshot.privateWitnessFragment,
+  );
 }
 
 function finalizeInspection(
@@ -1596,20 +1675,19 @@ function inspectRequest(
     append(inspections, inspected);
   }
 
-  // Why: scoped provider graphs are shared across dependency observations.
-  // Retaining every snapshot until all seams finish prevents a later scope
-  // callback from leaving an earlier installed capability silently stale.
+  // Why: scoped provider graphs and provenance are shared across dependency
+  // observations. Retaining detached evidence until every seam finishes keeps
+  // a later callback from leaving an earlier installed result silently stale.
   let coherenceFailure: string | undefined;
   for (let index = 0; index < inspections.length; index += 1) {
     const installed = inspections[index]!.installed;
     if (installed === undefined) continue;
     try {
-      checkpoint(input);
-      revalidateProjectTemplateRepertoireCapabilitySnapshot(
-        installed.capabilitySnapshot,
-        { signal: input.signal, deadlineMs: input.deadlineMs },
-      );
-      checkpoint(input);
+      const drift = revalidateProvisionalInstalledScope(installed, input);
+      if (drift !== undefined) {
+        coherenceFailure = sha256(`scope:${index}:PROVENANCE:${drift}`);
+        break;
+      }
     } catch (error) {
       if (isStopFailure(error)) throw error;
       const code = getProjectTemplateRepertoireCapabilitySnapshotErrorCode(error);

@@ -468,6 +468,90 @@ describe('project template installed repertoire dependency inspector G3.2', () =
     },
   );
 
+  it.each([
+    ['A then B', '@acme/a', '@acme/b', 'lock', 'lock'],
+    ['A then B', '@acme/a', '@acme/b', 'manifest', 'manifest'],
+    ['A then B', '@acme/a', '@acme/b', 'package entries', 'package'],
+    ['A then B', '@acme/a', '@acme/b', 'owner entries', 'owner'],
+    ['B then A', '@acme/first-b', '@acme/second-a', 'lock', 'lock'],
+    ['B then A', '@acme/first-b', '@acme/second-a', 'manifest', 'manifest'],
+    ['B then A', '@acme/first-b', '@acme/second-a', 'package entries', 'package'],
+    ['B then A', '@acme/first-b', '@acme/second-a', 'owner entries', 'owner'],
+  ] as const)(
+    'invalidates all %s observations when earlier %s provenance drifts',
+    (_orderLabel, earlierScope, laterScope, _driftLabel, driftKind) => {
+      const repertoireRoot = root();
+      const earlier = install(repertoireRoot, earlierScope);
+      install(repertoireRoot, laterScope);
+      const changedCommit = 'abcdef0123456789abcdef0123456789abcdef01';
+      let mutate = true;
+      let callbacks = 0;
+      const port = createProjectTemplateInstalledRepertoireDependencyInspectionPort(
+        { projectRoot: repertoireRoot, language: 'ja', repertoireRoot },
+        (phase, scope) => {
+          callbacks += 1;
+          if (phase !== 'before-scope' || scope !== laterScope || !mutate) return;
+          mutate = false;
+          if (driftKind === 'lock') {
+            writeFileSync(
+              join(earlier, '.takt-repertoire-lock.yaml'),
+              `source: github:${earlierScope.slice(1)}\n`
+                + 'ref: v1.2.3\n'
+                + `commit: ${changedCommit}\n`
+                + 'imported_at: 2026-07-31T00:00:00.000Z\n',
+            );
+          } else if (driftKind === 'manifest') {
+            writeFileSync(
+              join(earlier, 'takt-repertoire.yaml'),
+              'name: changed-after-earlier-scope\n',
+            );
+          } else if (driftKind === 'package') {
+            writeFileSync(join(earlier, 'new-entry.txt'), 'changed\n');
+          } else {
+            mkdirSync(join(repertoireRoot, earlierScope.split('/')[0]!, 'new-package'));
+          }
+        },
+      );
+      const dependencies = [
+        dependency(earlierScope),
+        dependency(laterScope),
+      ];
+      const beforeDescriptors = openDescriptorCount();
+
+      const drifted = port.inspect(request(dependencies)) as {
+        witnessSha256: string;
+        observations: unknown[];
+      };
+      expect(drifted.observations).toEqual([
+        { scope: earlierScope, state: 'invalid', reason: 'INVALID_INSTALLATION' },
+        { scope: laterScope, state: 'invalid', reason: 'INVALID_INSTALLATION' },
+      ]);
+      expect(JSON.stringify(drifted)).not.toContain(repertoireRoot);
+      expect(JSON.stringify(drifted)).not.toContain('changed-after-earlier-scope');
+      expect(callbacks).toBe(16);
+
+      const current = port.inspect(request(dependencies)) as {
+        witnessSha256: string;
+        observations: Array<{
+          scope: string;
+          state: string;
+          installed?: { commit: string };
+        }>;
+      };
+      expect(current.observations.every(({ state }) => state === 'installed'))
+        .toBe(true);
+      expect(current.observations[0]!.installed!.commit).toBe(
+        driftKind === 'lock' ? changedCommit : COMMIT,
+      );
+      expect(current.witnessSha256).not.toBe(drifted.witnessSha256);
+      expect(callbacks).toBe(32);
+      const afterDescriptors = openDescriptorCount();
+      if (beforeDescriptors !== undefined && afterDescriptors !== undefined) {
+        expect(afterDescriptors).toBe(beforeDescriptors);
+      }
+    },
+  );
+
   it('fails nested inspection on the same port without corrupting the outer run', () => {
     const repertoireRoot = root();
     install(repertoireRoot);
