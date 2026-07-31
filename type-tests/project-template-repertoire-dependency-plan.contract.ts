@@ -4,6 +4,7 @@ import type {
 import {
   createProjectTemplateRepertoireDependencyPlan,
   type ProjectTemplateRepertoireDependencyPlan,
+  type ProjectTemplateRepertoireDependencyMetadataChangeCode,
   type ProjectTemplateRepertoireDependencyPlanOptions,
 } from '../src/features/project-template/repertoire-dependency-plan.js';
 
@@ -22,6 +23,12 @@ const options: ProjectTemplateRepertoireDependencyPlanOptions = {
 const plan: ProjectTemplateRepertoireDependencyPlan =
   createProjectTemplateRepertoireDependencyPlan(options);
 void plan.planId;
+const previousLockSha256: string | undefined = plan.previousLockSha256;
+const metadataChange:
+  ProjectTemplateRepertoireDependencyMetadataChangeCode | undefined =
+  plan.metadataChanges[0];
+void previousLockSha256;
+void metadataChange;
 
 // @ts-expect-error A verified inspection is not single-use planning ownership.
 options.inspectionClaim = options.inspectionClaim.inspection;

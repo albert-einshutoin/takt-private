@@ -6,6 +6,7 @@ import {
   ProjectTemplateRepertoireDependencyInspectionError,
 } from '../../features/project-template/repertoire-dependency-inspection-port.js';
 import {
+  calculateProjectTemplateRepertoireDependencyLockSha256,
   serializeProjectTemplateRepertoireDependencyLock,
 } from '../../features/project-template/repertoire-dependency-lock.js';
 import {
@@ -112,7 +113,7 @@ describe('project template repertoire dependency plan G4.2', () => {
       globalConflicts: [],
       reviewRequired: true,
       hardConflict: false,
-      defaultApplyPossible: true,
+      defaultApplyPossible: false,
       dependencies: [{
         scope: '@acme/repertoire',
         action: 'add',
@@ -289,12 +290,44 @@ describe('project template repertoire dependency plan G4.2', () => {
     ['malformed', '{'],
     ['future schema', '{\n  "schemaVersion": "2.0",\n  "sourceDescriptorSha256": "' + SOURCE_SHA + '",\n  "manifestSha256": "' + MANIFEST_SHA + '",\n  "dependencies": []\n}'],
     ['noncanonical', JSON.stringify(lock())],
-    ['oversize', ' '.repeat(256 * 1024 + 1)],
   ])('seals %s previous content without parser details', (_name, content) => {
     const plan = create(lock(), { state: 'present', content });
     expect(plan.previousLockState).toBe('invalid');
     expect(plan.globalConflicts).toEqual(['PREVIOUS_LOCK_INVALID']);
     expect(plan.summary.conflicts).toBe(1);
+  });
+
+  it('rejects oversized previous bytes before consuming authority', () => {
+    const incoming = lock();
+    const planningClaim = claim(incoming);
+    expect(() => createProjectTemplateRepertoireDependencyPlan({
+      inspectionClaim: planningClaim,
+      incomingLock: incoming,
+      previousLock: {
+        state: 'present',
+        content: ' '.repeat(256 * 1024 + 1),
+      },
+    })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
+    expect(createProjectTemplateRepertoireDependencyPlan({
+      inspectionClaim: planningClaim,
+      incomingLock: incoming,
+      previousLock: { state: 'absent' },
+    }).schemaVersion).toBe('1.0');
+  });
+
+  it('rejects an invalid previous raw type before consuming authority', () => {
+    const incoming = lock();
+    const planningClaim = claim(incoming);
+    expect(() => createProjectTemplateRepertoireDependencyPlan({
+      inspectionClaim: planningClaim,
+      incomingLock: incoming,
+      previousLock: { state: 'present', content: { secret: true } as never },
+    })).toThrow();
+    expect(createProjectTemplateRepertoireDependencyPlan({
+      inspectionClaim: planningClaim,
+      incomingLock: incoming,
+      previousLock: { state: 'absent' },
+    }).schemaVersion).toBe('1.0');
   });
 
   it('accepts a pristine Uint8Array canonical previous lock snapshot', () => {
@@ -303,8 +336,12 @@ describe('project template repertoire dependency plan G4.2', () => {
       serializeProjectTemplateRepertoireDependencyLock(incoming),
     );
     const plan = create(incoming, { state: 'present', content: bytes });
+    const expectedDigest = calculateProjectTemplateRepertoireDependencyLockSha256(
+      incoming,
+    );
     bytes.fill(0);
     expect(plan.previousLockState).toBe('valid');
+    expect(plan.previousLockSha256).toBe(expectedDigest);
     expect(plan.dependencies[0]?.action).toBe('keep');
   });
 
@@ -439,6 +476,133 @@ describe('project template repertoire dependency plan G4.2', () => {
       Array.prototype[Symbol.iterator] = iterator;
     }
     expect(calls).toBe(0);
+  });
+
+  it('keeps a valid previous lock valid under post-init JSON poison', () => {
+    const incoming = lock();
+    const content = serializeProjectTemplateRepertoireDependencyLock(incoming);
+    const planningClaim = claim(incoming);
+    const parse = JSON.parse;
+    const stringify = JSON.stringify;
+    try {
+      JSON.parse = (() => { throw new Error('poisoned parse'); }) as typeof JSON.parse;
+      JSON.stringify = (() => { throw new Error('poisoned stringify'); }) as typeof JSON.stringify;
+      const plan = createProjectTemplateRepertoireDependencyPlan({
+        inspectionClaim: planningClaim,
+        incomingLock: incoming,
+        previousLock: { state: 'present', content },
+      });
+      expect(plan.previousLockState).toBe('valid');
+      expect(plan.dependencies[0]?.action).toBe('keep');
+    } finally {
+      JSON.parse = parse;
+      JSON.stringify = stringify;
+    }
+  });
+
+  it('consumes the claim before semantic JSON parsing can reenter', async () => {
+    const parse = JSON.parse;
+    let nestedFailure: unknown;
+    let nestedOperation: (() => unknown) | undefined;
+    try {
+      JSON.parse = ((text: string) => {
+        if (nestedOperation !== undefined) {
+          const operation = nestedOperation;
+          nestedOperation = undefined;
+          try {
+            operation();
+          } catch (error) {
+            nestedFailure = error;
+          }
+        }
+        return parse(text) as unknown;
+      }) as typeof JSON.parse;
+      vi.resetModules();
+      const inspectionModule = await import(
+        '../../features/project-template/repertoire-dependency-inspection-port.js'
+      );
+      const planModule = await import(
+        '../../features/project-template/repertoire-dependency-plan.js'
+      );
+      const incoming = lock();
+      const verified = inspectionModule.inspectProjectTemplateRepertoireDependencies({
+        request: {
+          sourceDescriptorSha256: SOURCE_SHA,
+          manifestSha256: MANIFEST_SHA,
+          dependencies: incoming.dependencies,
+          deadlineMs: Number.MAX_SAFE_INTEGER,
+        },
+        port: {
+          inspect: () => ({
+            witnessSha256: 'd'.repeat(64),
+            observations: [observation()],
+          }),
+        },
+      });
+      const planningClaim =
+        inspectionModule.claimProjectTemplateRepertoireDependencyInspectionForPlanning(
+          verified,
+        );
+      nestedOperation = () =>
+        planModule.createProjectTemplateRepertoireDependencyPlan({
+          inspectionClaim: planningClaim,
+          incomingLock: incoming as never,
+          previousLock: { state: 'absent' },
+        });
+      const outer = planModule.createProjectTemplateRepertoireDependencyPlan({
+        inspectionClaim: planningClaim,
+        incomingLock: incoming as never,
+        previousLock: {
+          state: 'present',
+          content: serializeProjectTemplateRepertoireDependencyLock(incoming),
+        },
+      });
+      expect(outer.previousLockState).toBe('valid');
+      expect(nestedFailure).toMatchObject({ code: 'INVALID_AUTHORITY' });
+    } finally {
+      JSON.parse = parse;
+      vi.resetModules();
+    }
+  });
+
+  it('binds valid previous lock identity and header-only metadata changes', () => {
+    const incoming = lock();
+    const previous = lock([dependency()], {
+      sourceDescriptorSha256: 'e'.repeat(64),
+      manifestSha256: 'f'.repeat(64),
+    });
+    const previousContent = serializeProjectTemplateRepertoireDependencyLock(previous);
+    const plan = create(incoming, { state: 'present', content: previousContent });
+    expect(plan.previousLockSha256).toBe(
+      calculateProjectTemplateRepertoireDependencyLockSha256(previous),
+    );
+    expect(plan.metadataChanges).toEqual([
+      'SOURCE_DESCRIPTOR_SHA256_CHANGED',
+      'MANIFEST_SHA256_CHANGED',
+    ]);
+    expect(plan.dependencies[0]?.action).toBe('keep');
+    expect(plan.summary).toMatchObject({
+      metadataChanges: [
+        'SOURCE_DESCRIPTOR_SHA256_CHANGED',
+        'MANIFEST_SHA256_CHANGED',
+      ],
+      metadataChangeCount: 2,
+      reviewRequired: true,
+      hardConflict: false,
+    });
+    expect(plan.reviewRequired).toBe(true);
+    expect(plan.hardConflict).toBe(false);
+    expect(plan.defaultApplyPossible).toBe(false);
+    expect(plan.nextLock).toEqual(incoming);
+    expect(Object.isFrozen(plan.metadataChanges)).toBe(true);
+    expect(Object.isFrozen(plan.summary.metadataChanges)).toBe(true);
+
+    const sameHeaders = create(incoming, {
+      state: 'present',
+      content: serializeProjectTemplateRepertoireDependencyLock(incoming),
+    });
+    expect(sameHeaders.metadataChanges).toEqual([]);
+    expect(sameHeaders.planId).not.toBe(plan.planId);
   });
 
   it('domain-seals the complete deterministic review body', () => {

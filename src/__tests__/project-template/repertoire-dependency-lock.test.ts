@@ -39,6 +39,52 @@ function validLock(): Record<string, unknown> {
 }
 
 describe('project template repertoire dependency lock', () => {
+  it('uses captured JSON and traversal intrinsics after module initialization', () => {
+    const canonical = serializeProjectTemplateRepertoireDependencyLock({
+      schemaVersion: '1.0',
+      sourceDescriptorSha256: 'a'.repeat(64),
+      manifestSha256: 'b'.repeat(64),
+      dependencies: [],
+    });
+    const parse = JSON.parse;
+    const stringify = JSON.stringify;
+    const descriptors = Object.getOwnPropertyDescriptors;
+    const ownKeys = Reflect.ownKeys;
+    const values = Object.values;
+    const iterator = Array.prototype[Symbol.iterator];
+    let calls = 0;
+    let parsed:
+      ReturnType<typeof parseProjectTemplateRepertoireDependencyLockJson>
+      | undefined;
+    let serialized: string | undefined;
+    try {
+      JSON.parse = (() => { calls += 1; throw new Error('poisoned parse'); }) as typeof JSON.parse;
+      JSON.stringify = (() => { calls += 1; throw new Error('poisoned stringify'); }) as typeof JSON.stringify;
+      Object.getOwnPropertyDescriptors = (() => {
+        calls += 1;
+        throw new Error('poisoned descriptors');
+      }) as typeof Object.getOwnPropertyDescriptors;
+      Reflect.ownKeys = (() => { calls += 1; throw new Error('poisoned ownKeys'); }) as typeof Reflect.ownKeys;
+      Object.values = (() => { calls += 1; throw new Error('poisoned values'); }) as typeof Object.values;
+      Array.prototype[Symbol.iterator] = (() => {
+        calls += 1;
+        throw new Error('poisoned iterator');
+      }) as typeof Array.prototype[typeof Symbol.iterator];
+      parsed = parseProjectTemplateRepertoireDependencyLockJson(canonical);
+      serialized = serializeProjectTemplateRepertoireDependencyLock(parsed);
+    } finally {
+      JSON.parse = parse;
+      JSON.stringify = stringify;
+      Object.getOwnPropertyDescriptors = descriptors;
+      Reflect.ownKeys = ownKeys;
+      Object.values = values;
+      Array.prototype[Symbol.iterator] = iterator;
+    }
+    expect(calls).toBe(0);
+    expect(parsed?.dependencies).toEqual([]);
+    expect(serialized).toBe(canonical);
+  });
+
   it('parses, deeply freezes, canonically serializes, hashes, and snapshots v1', () => {
     expect(PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH)
       .toBe('.takt-template-repertoire-lock.json');
@@ -430,7 +476,7 @@ describe('project template repertoire dependency lock', () => {
     expect(Object.isFrozen(parsed)).toBe(true);
   });
 
-  it('decodes descriptor bytes after caller storage changes identity state', () => {
+  it('does not delegate byte snapshotting to post-init descriptor hooks', () => {
     const json = serializeProjectTemplateRepertoireDependencyLock(validLock());
     const bytes = new TextEncoder().encode(json);
     const originalDescriptors = Object.getOwnPropertyDescriptors;
@@ -448,7 +494,7 @@ describe('project template repertoire dependency lock', () => {
     try {
       expect(parseProjectTemplateRepertoireDependencyLockJson(bytes))
         .toEqual(validLock());
-      expect(mutations).toBe(1);
+      expect(mutations).toBe(0);
     } finally {
       Object.getOwnPropertyDescriptors = originalDescriptors;
     }

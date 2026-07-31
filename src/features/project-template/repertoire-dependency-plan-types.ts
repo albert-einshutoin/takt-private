@@ -61,6 +61,10 @@ export type ProjectTemplateRepertoireDependencyPreviousLockState =
   | 'invalid'
   | 'unavailable';
 
+export type ProjectTemplateRepertoireDependencyMetadataChangeCode =
+  | 'SOURCE_DESCRIPTOR_SHA256_CHANGED'
+  | 'MANIFEST_SHA256_CHANGED';
+
 export interface ProjectTemplateRepertoireDependencyPlanEntry {
   readonly scope: `@${string}/${string}`;
   readonly action: ProjectTemplateRepertoireDependencyPlanAction;
@@ -79,6 +83,9 @@ export interface ProjectTemplateRepertoireDependencyPlanSummary {
     number
   >>;
   readonly conflicts: number;
+  readonly metadataChanges:
+    readonly ProjectTemplateRepertoireDependencyMetadataChangeCode[];
+  readonly metadataChangeCount: number;
   readonly reviewRequired: boolean;
   readonly hardConflict: boolean;
 }
@@ -92,6 +99,9 @@ export interface ProjectTemplateRepertoireDependencyPlan {
   readonly declarationSha256: string;
   readonly previousLockState:
     ProjectTemplateRepertoireDependencyPreviousLockState;
+  readonly previousLockSha256?: string;
+  readonly metadataChanges:
+    readonly ProjectTemplateRepertoireDependencyMetadataChangeCode[];
   readonly globalConflicts:
     readonly ProjectTemplateRepertoireDependencyPlanGlobalConflictCode[];
   readonly dependencies: readonly ProjectTemplateRepertoireDependencyPlanEntry[];

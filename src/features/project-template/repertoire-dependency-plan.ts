@@ -10,6 +10,8 @@ import {
   calculateProjectTemplateRepertoireDependencyDeclarationSha256,
 } from './repertoire-dependency-canonical.js';
 import {
+  calculateProjectTemplateRepertoireDependencyLockSha256,
+  MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_BYTES,
   parseProjectTemplateRepertoireDependencyLockJson,
   type ProjectTemplateRepertoireDependencyLockV1,
 } from './repertoire-dependency-lock.js';
@@ -21,6 +23,7 @@ import {
 import type {
   ProjectTemplateRepertoireDependencyChangeCode,
   ProjectTemplateRepertoireDependencyInstalledConflictCode,
+  ProjectTemplateRepertoireDependencyMetadataChangeCode,
   ProjectTemplateRepertoireDependencyPlan,
   ProjectTemplateRepertoireDependencyPlanAction,
   ProjectTemplateRepertoireDependencyPlanEntry,
@@ -32,6 +35,7 @@ import type {
 export type {
   ProjectTemplateRepertoireDependencyChangeCode,
   ProjectTemplateRepertoireDependencyInstalledConflictCode,
+  ProjectTemplateRepertoireDependencyMetadataChangeCode,
   ProjectTemplateRepertoireDependencyPlan,
   ProjectTemplateRepertoireDependencyPlanAction,
   ProjectTemplateRepertoireDependencyPlanEntry,
@@ -55,6 +59,8 @@ const CAPTURED_JSON_STRINGIFY = JSON.stringify;
 const CAPTURED_OBJECT_CREATE = Object.create;
 const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const CAPTURED_OBJECT_FREEZE = Object.freeze;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor;
 const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
   Object.getOwnPropertyDescriptors;
 const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
@@ -67,18 +73,41 @@ const CAPTURED_STRING_STARTS_WITH = String.prototype.startsWith;
 const CAPTURED_STRING = String;
 const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
 const CAPTURED_TYPES_IS_PROXY = types.isProxy;
+const CAPTURED_BUFFER_RECEIVER = Buffer;
+const CAPTURED_BUFFER_BYTE_LENGTH = Buffer.byteLength;
 const CAPTURED_WEAK_MAP_GET = WeakMap.prototype.get;
 const CAPTURED_WEAK_MAP_SET = WeakMap.prototype.set;
 const HASH_SAMPLE = CAPTURED_CREATE_HASH('sha256');
 const CAPTURED_HASH_UPDATE = HASH_SAMPLE.update;
 const CAPTURED_HASH_DIGEST = HASH_SAMPLE.digest;
 const CAPTURED_UINT8_ARRAY_PROTOTYPE = Uint8Array.prototype;
+const CAPTURED_UINT8_ARRAY = Uint8Array;
+const CAPTURED_TYPED_ARRAY_PROTOTYPE = CAPTURED_REFLECT_APPLY(
+  CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+  CAPTURED_OBJECT_RECEIVER,
+  [CAPTURED_UINT8_ARRAY_PROTOTYPE],
+) as object;
+const CAPTURED_TYPED_ARRAY_BYTE_LENGTH_GETTER = (() => {
+  const descriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    CAPTURED_OBJECT_RECEIVER,
+    [CAPTURED_TYPED_ARRAY_PROTOTYPE, 'byteLength'],
+  ) as PropertyDescriptor | undefined;
+  if (descriptor?.get === undefined) throw new Error('byteLength unavailable');
+  return descriptor.get;
+})();
 
 const PLAN_CANONICAL_BODIES = new WeakMap<object, string>();
 
 interface PreviousSnapshot {
   readonly state: ProjectTemplateRepertoireDependencyPreviousLockState;
   readonly lock?: ProjectTemplateRepertoireDependencyLockV1;
+  readonly lockSha256?: string;
+}
+
+interface PreviousRawSnapshot {
+  readonly state: 'absent' | 'present' | 'unavailable';
+  readonly content?: string | Uint8Array;
 }
 
 function freeze<T>(value: T): Readonly<T> {
@@ -172,7 +201,7 @@ function invalidOptions(field: string): never {
 function snapshotOptions(value: unknown): {
   readonly inspectionClaim: unknown;
   readonly incomingLock: ProjectTemplateRepertoireDependencyLockV1;
-  readonly previous: PreviousSnapshot;
+  readonly previousRaw: PreviousRawSnapshot;
 } {
   const options = exactDataValues(
     value,
@@ -185,7 +214,7 @@ function snapshotOptions(value: unknown): {
   return freeze({
     inspectionClaim: options['inspectionClaim'],
     incomingLock,
-    previous: snapshotPrevious(previousEnvelope),
+    previousRaw: snapshotPreviousRaw(previousEnvelope),
   });
 }
 
@@ -291,36 +320,85 @@ function strictSha256(value: unknown, field: string): string {
   return value;
 }
 
-function snapshotPrevious(value: Record<string, unknown>): PreviousSnapshot {
+function snapshotPreviousRaw(
+  value: Record<string, unknown>,
+): PreviousRawSnapshot {
   if (value['state'] === 'absent') return freeze({ state: 'absent' });
   if (value['state'] === 'unavailable') return freeze({ state: 'unavailable' });
   const content = value['content'];
+  if (typeof content === 'string') {
+    assertPreviousByteLimit(CAPTURED_REFLECT_APPLY(
+      CAPTURED_BUFFER_BYTE_LENGTH,
+      CAPTURED_BUFFER_RECEIVER,
+      [content, 'utf8'],
+    ) as number);
+    return freeze({ state: 'present', content });
+  }
   if (
-    typeof content !== 'string'
-    && (
-      typeof content !== 'object'
-      || content === null
-      || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [content])
-      || CAPTURED_REFLECT_APPLY(
-        CAPTURED_OBJECT_GET_PROTOTYPE_OF,
-        CAPTURED_OBJECT_RECEIVER,
-        [content],
-      ) !== CAPTURED_UINT8_ARRAY_PROTOTYPE
-    )
-  ) {
+    typeof content !== 'object'
+    || content === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [content])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [content],
+    ) !== CAPTURED_UINT8_ARRAY_PROTOTYPE
+  ) invalidOptions('previousLock.content');
+  const byteLength = previousByteLength(content);
+  assertPreviousByteLimit(byteLength);
+  const descriptors = ownDescriptors(content);
+  const keys = ownKeys(descriptors);
+  if (keys.length !== byteLength) invalidOptions('previousLock.content');
+  const snapshot = new CAPTURED_UINT8_ARRAY(byteLength);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    const descriptor = typeof key === 'string' ? descriptors[key] : undefined;
+    if (
+      key !== CAPTURED_STRING(index)
+      || descriptor === undefined
+      || !('value' in descriptor)
+      || typeof descriptor.value !== 'number'
+    ) invalidOptions('previousLock.content');
+    snapshot[index] = descriptor.value;
+  }
+  return freeze({ state: 'present', content: snapshot });
+}
+
+function previousByteLength(value: object): number {
+  try {
+    return CAPTURED_REFLECT_APPLY(
+      CAPTURED_TYPED_ARRAY_BYTE_LENGTH_GETTER,
+      value,
+      [],
+    ) as number;
+  } catch {
     invalidOptions('previousLock.content');
   }
+}
+
+function assertPreviousByteLimit(byteLength: number): void {
+  if (byteLength > MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_BYTES) {
+    throw new ProjectTemplateValidationError(
+      'LIMIT_EXCEEDED',
+      `previousLock.content exceeds the ${MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_BYTES} byte limit`,
+      'previousLock.content',
+    );
+  }
+}
+
+function parsePrevious(raw: PreviousRawSnapshot): PreviousSnapshot {
+  if (raw.state === 'absent') return freeze({ state: 'absent' });
+  if (raw.state === 'unavailable') return freeze({ state: 'unavailable' });
   try {
+    const lock = parseProjectTemplateRepertoireDependencyLockJson(raw.content!);
     return freeze({
       state: 'valid',
-      lock: parseProjectTemplateRepertoireDependencyLockJson(
-        content as string | Uint8Array,
-      ),
+      lock,
+      lockSha256: calculateProjectTemplateRepertoireDependencyLockSha256(lock),
     });
   } catch {
-    // Why: persisted bytes are evidence, not authority. Invalid/future/large
-    // evidence is sealed into review state so callers cannot bypass planning
-    // by choosing between thrown parser details.
+    // Why: semantic parser failures are sealed only after authority transfer;
+    // malformed evidence cannot reenter while the same claim is still active.
     return freeze({ state: 'invalid' });
   }
 }
@@ -588,7 +666,11 @@ function canonicalPlanBody(
     + ',"sourceDescriptorSha256":' + canonicalString(plan.sourceDescriptorSha256)
     + ',"manifestSha256":' + canonicalString(plan.manifestSha256)
     + ',"declarationSha256":' + canonicalString(plan.declarationSha256)
-    + ',"previousLockState":' + canonicalString(plan.previousLockState)
+    + ',"previousLockState":' + canonicalString(plan.previousLockState);
+  if (plan.previousLockSha256 !== undefined) {
+    json += ',"previousLockSha256":' + canonicalString(plan.previousLockSha256);
+  }
+  json += ',"metadataChanges":' + canonicalStringArray(plan.metadataChanges)
     + ',"globalConflicts":' + canonicalStringArray(plan.globalConflicts)
     + ',"dependencies":' + canonicalEntries(plan.dependencies)
     + ',"summary":{"counts":{"add":' + CAPTURED_STRING(counts.add)
@@ -597,6 +679,10 @@ function canonicalPlanBody(
     + ',"remove":' + CAPTURED_STRING(counts.remove)
     + ',"unknown":' + CAPTURED_STRING(counts.unknown)
     + '},"conflicts":' + CAPTURED_STRING(plan.summary.conflicts)
+    + ',"metadataChanges":'
+    + canonicalStringArray(plan.summary.metadataChanges)
+    + ',"metadataChangeCount":'
+    + CAPTURED_STRING(plan.summary.metadataChangeCount)
     + ',"reviewRequired":' + CAPTURED_STRING(plan.summary.reviewRequired)
     + ',"hardConflict":' + CAPTURED_STRING(plan.summary.hardConflict)
     + '},"reviewRequired":' + CAPTURED_STRING(plan.reviewRequired)
@@ -637,6 +723,7 @@ export function createProjectTemplateRepertoireDependencyPlan(
     consumeProjectTemplateRepertoireDependencyInspectionPlanningClaim(
       options.inspectionClaim,
     );
+  const previous = parsePrevious(options.previousRaw);
   const declarationSha256 =
     calculateProjectTemplateRepertoireDependencyDeclarationSha256(
       options.incomingLock.dependencies,
@@ -648,15 +735,27 @@ export function createProjectTemplateRepertoireDependencyPlan(
   const globalConflicts:
     ProjectTemplateRepertoireDependencyPlanGlobalConflictCode[] = [];
   if (!bindingMatches) append(globalConflicts, 'INSPECTION_BINDING_MISMATCH');
-  if (options.previous.state === 'invalid') {
+  if (previous.state === 'invalid') {
     append(globalConflicts, 'PREVIOUS_LOCK_INVALID');
-  } else if (options.previous.state === 'unavailable') {
+  } else if (previous.state === 'unavailable') {
     append(globalConflicts, 'PREVIOUS_LOCK_UNAVAILABLE');
   }
   freeze(globalConflicts);
+  const metadataChanges:
+    ProjectTemplateRepertoireDependencyMetadataChangeCode[] = [];
+  if (previous.lock !== undefined) {
+    if (
+      previous.lock.sourceDescriptorSha256
+      !== options.incomingLock.sourceDescriptorSha256
+    ) append(metadataChanges, 'SOURCE_DESCRIPTOR_SHA256_CHANGED');
+    if (previous.lock.manifestSha256 !== options.incomingLock.manifestSha256) {
+      append(metadataChanges, 'MANIFEST_SHA256_CHANGED');
+    }
+  }
+  freeze(metadataChanges);
   const dependencies = buildEntries(
     options.incomingLock.dependencies,
-    options.previous,
+    previous,
     inspection,
     bindingMatches,
   );
@@ -668,7 +767,8 @@ export function createProjectTemplateRepertoireDependencyPlan(
     unknown: 0,
   };
   let installedConflictCount = 0;
-  let reviewRequired = globalConflicts.length !== 0;
+  let reviewRequired =
+    globalConflicts.length !== 0 || metadataChanges.length !== 0;
   for (let index = 0; index < dependencies.length; index += 1) {
     const entry = dependencies[index]!;
     counts[entry.action] += 1;
@@ -682,6 +782,8 @@ export function createProjectTemplateRepertoireDependencyPlan(
   const summary = freeze({
     counts,
     conflicts: globalConflicts.length + installedConflictCount,
+    metadataChanges,
+    metadataChangeCount: metadataChanges.length,
     reviewRequired,
     hardConflict,
   });
@@ -691,13 +793,17 @@ export function createProjectTemplateRepertoireDependencyPlan(
     sourceDescriptorSha256: options.incomingLock.sourceDescriptorSha256,
     manifestSha256: options.incomingLock.manifestSha256,
     declarationSha256,
-    previousLockState: options.previous.state,
+    previousLockState: previous.state,
+    ...(previous.lockSha256 === undefined
+      ? {}
+      : { previousLockSha256: previous.lockSha256 }),
+    metadataChanges,
     globalConflicts,
     dependencies,
     summary,
     reviewRequired,
     hardConflict,
-    defaultApplyPossible: !hardConflict,
+    defaultApplyPossible: !reviewRequired && !hardConflict,
     ...(!hardConflict ? { nextLock: options.incomingLock } : {}),
   });
   const canonicalBody = canonicalPlanBody(body);
@@ -709,6 +815,10 @@ export function createProjectTemplateRepertoireDependencyPlan(
     manifestSha256: body.manifestSha256,
     declarationSha256: body.declarationSha256,
     previousLockState: body.previousLockState,
+    ...(body.previousLockSha256 === undefined
+      ? {}
+      : { previousLockSha256: body.previousLockSha256 }),
+    metadataChanges: body.metadataChanges,
     globalConflicts: body.globalConflicts,
     dependencies: body.dependencies,
     summary: body.summary,
