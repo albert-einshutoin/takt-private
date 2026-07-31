@@ -2,9 +2,9 @@
  * Tests for atomic package update (overwrite install).
  *
  * Covers:
- * - cleanupResiduals: pre-existing .tmp/ and .bak/ are removed before install
- * - atomicReplace: normal success path (new → .bak → rename)
- * - atomicReplace: validation failure → .tmp/ is removed, existing package preserved
+ * - unknown .tmp/.bak residuals fail closed without deletion
+ * - installation completes in staging before atomic publication
+ * - validation failure removes owned staging and preserves the existing package
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -32,7 +32,7 @@ describe('cleanupResiduals', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('should remove pre-existing .tmp directory', () => {
+  it('fails closed without removing a pre-existing .tmp directory', () => {
     // Given: a .tmp directory remains from a previous failed install
     const packageDir = join(tempDir, 'takt-fullstack');
     const tmpDir = join(tempDir, 'takt-fullstack.tmp');
@@ -40,14 +40,18 @@ describe('cleanupResiduals', () => {
     mkdirSync(tmpDir, { recursive: true });
     writeFileSync(join(tmpDir, 'stale.yaml'), 'stale');
 
-    // When: cleanup is performed
-    cleanupResiduals(packageDir);
+    let caught: unknown;
+    try {
+      cleanupResiduals(packageDir);
+    } catch (error) {
+      caught = error;
+    }
 
-    // Then: .tmp directory is removed
-    expect(existsSync(tmpDir)).toBe(false);
+    expect(caught).toMatchObject({ code: 'RECOVERY_REQUIRED' });
+    expect(existsSync(join(tmpDir, 'stale.yaml'))).toBe(true);
   });
 
-  it('should remove pre-existing .bak directory', () => {
+  it('fails closed without removing a pre-existing .bak directory', () => {
     // Given: a .bak directory remains from a previous failed install
     const packageDir = join(tempDir, 'takt-fullstack');
     const bakDir = join(tempDir, 'takt-fullstack.bak');
@@ -55,11 +59,15 @@ describe('cleanupResiduals', () => {
     mkdirSync(bakDir, { recursive: true });
     writeFileSync(join(bakDir, 'old.yaml'), 'old');
 
-    // When: cleanup is performed
-    cleanupResiduals(packageDir);
+    let caught: unknown;
+    try {
+      cleanupResiduals(packageDir);
+    } catch (error) {
+      caught = error;
+    }
 
-    // Then: .bak directory is removed
-    expect(existsSync(bakDir)).toBe(false);
+    expect(caught).toMatchObject({ code: 'RECOVERY_REQUIRED' });
+    expect(existsSync(join(bakDir, 'old.yaml'))).toBe(true);
   });
 
   it('should succeed even when neither .tmp nor .bak exist', () => {
@@ -72,7 +80,7 @@ describe('cleanupResiduals', () => {
     expect(() => cleanupResiduals(packageDir)).not.toThrow();
   });
 
-  it('should remove both .tmp and .bak when both exist', () => {
+  it('preserves both unknown residuals when both exist', () => {
     // Given: both residuals exist
     const packageDir = join(tempDir, 'takt-fullstack');
     const tmpDirPath = join(tempDir, 'takt-fullstack.tmp');
@@ -81,12 +89,11 @@ describe('cleanupResiduals', () => {
     mkdirSync(tmpDirPath, { recursive: true });
     mkdirSync(bakDir, { recursive: true });
 
-    // When: cleanup is performed
-    cleanupResiduals(packageDir);
+    expect(() => cleanupResiduals(packageDir))
+      .toThrow(expect.objectContaining({ code: 'RECOVERY_REQUIRED' }));
 
-    // Then: both are removed
-    expect(existsSync(tmpDirPath)).toBe(false);
-    expect(existsSync(bakDir)).toBe(false);
+    expect(existsSync(tmpDirPath)).toBe(true);
+    expect(existsSync(bakDir)).toBe(true);
   });
 });
 
@@ -113,9 +120,10 @@ describe('atomicReplace', () => {
 
     const options: AtomicReplaceOptions = {
       packageDir,
-      install: async () => {
-        // Simulate successful install into packageDir
-        writeFileSync(join(packageDir, 'new.yaml'), 'new content');
+      install: async (stagingDir) => {
+        expect(stagingDir).not.toBe(packageDir);
+        expect(existsSync(join(packageDir, 'old.yaml'))).toBe(true);
+        writeFileSync(join(stagingDir, 'new.yaml'), 'new content');
       },
     };
 
@@ -135,7 +143,8 @@ describe('atomicReplace', () => {
 
     const options: AtomicReplaceOptions = {
       packageDir,
-      install: async () => {
+      install: async (stagingDir) => {
+        writeFileSync(join(stagingDir, 'partial.yaml'), 'partial');
         // Simulate validation failure
         throw new Error('Validation failed: empty package');
       },
@@ -148,5 +157,23 @@ describe('atomicReplace', () => {
     expect(existsSync(join(packageDir, 'existing.yaml'))).toBe(true);
     // .tmp directory should be cleaned up
     expect(existsSync(join(tempDir, 'takt-fullstack.tmp'))).toBe(false);
+  });
+
+  it('publishes a fully completed staging tree for a first install', async () => {
+    const packageDir = join(tempDir, 'takt-fullstack');
+    let stagingDirSeen = '';
+
+    await atomicReplace({
+      packageDir,
+      install: async (stagingDir) => {
+        stagingDirSeen = stagingDir;
+        writeFileSync(join(stagingDir, 'manifest.yaml'), 'complete');
+        expect(existsSync(packageDir)).toBe(false);
+      },
+    });
+
+    expect(stagingDirSeen).toBe(`${packageDir}.tmp`);
+    expect(existsSync(join(packageDir, 'manifest.yaml'))).toBe(true);
+    expect(existsSync(stagingDirSeen)).toBe(false);
   });
 });
