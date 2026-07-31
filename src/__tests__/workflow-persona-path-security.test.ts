@@ -46,6 +46,22 @@ describe('workflow persona path security', () => {
     expect(() => loadPersonaPromptFromPath(secretPath, projectDir)).toThrow(/not allowed/i);
   });
 
+  it('should allow an ancestor alias when the trusted base is canonical', () => {
+    const parentDir = createTempDir();
+    tempDirs.push(parentDir);
+    const projectDir = join(parentDir, 'canonical', 'project');
+    const aliasRoot = join(parentDir, 'alias');
+    const agentsDir = join(projectDir, '.takt', 'agents');
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, 'reviewer.md'), 'review safely', 'utf-8');
+    symlinkSync(join(parentDir, 'canonical'), aliasRoot);
+
+    expect(loadPersonaPromptFromPath(
+      join(aliasRoot, 'project', '.takt', 'agents', 'reviewer.md'),
+      projectDir,
+    )).toBe('review safely');
+  });
+
   it('should reject workflow persona paths outside the workflow roots during normalization', () => {
     const projectDir = createTempDir();
     const outsideDir = createTempDir();

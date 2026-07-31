@@ -6,8 +6,8 @@
  * 2. Builtin personas: builtins/{lang}/facets/personas/*.md
  */
 
-import { existsSync, readdirSync } from 'node:fs';
-import { basename, isAbsolute, join, relative } from 'node:path';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import type { CustomAgentConfig } from '../../../core/models/index.js';
 import {
   getGlobalConfigDir,
@@ -63,8 +63,26 @@ function assertAllowedPromptPath(personaPath: string, cwd: string): string {
   if (!allowedBase) {
     throw new Error(`Persona prompt file path is not allowed: ${personaPath}`);
   }
-  return allowedBase;
+  return alignBasePathSpelling(allowedBase, personaPath);
 
+}
+
+function alignBasePathSpelling(allowedBase: string, personaPath: string): string {
+  try {
+    const relativeCanonicalPath = relative(realpathSync(allowedBase), realpathSync(personaPath));
+    if (
+      relativeCanonicalPath === ''
+      || relativeCanonicalPath.startsWith('..')
+      || isAbsolute(relativeCanonicalPath)
+    ) return allowedBase;
+    let alignedBase = personaPath;
+    for (const _segment of relativeCanonicalPath.split(sep)) {
+      alignedBase = dirname(alignedBase);
+    }
+    return alignedBase;
+  } catch {
+    return allowedBase;
+  }
 }
 
 function assertPromptExists(personaPath: string): void {
