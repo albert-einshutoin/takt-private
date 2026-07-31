@@ -282,6 +282,33 @@ compatibility. Inspection returns a structurally distinct
 `{ kind: "project-template-lock-seed", ... }` value, not an approved
 `TemplateLockV1`; approval and formal lock creation remain a later apply step.
 
+## Apply-preview review surface
+
+The public apply-preview runtime surface is intentionally limited to
+`renderProjectTemplateApplyPreviewHuman` and
+`renderProjectTemplateApplyPreviewJson`. Its public types are
+`ProjectTemplateApplyPreview`, `ProjectTemplateApplyPreviewBindings`,
+`ProjectTemplateApplyPreviewCompositionConflictCode`,
+`ProjectTemplateApplyPreviewContentHardConflict`, and
+`ProjectTemplateApplyPreviewApprovalEvidence`. Preview composition, seal
+assertion and hashing, trusted approval issue/consume/revoke operations, raw
+G2/G3/G4 composition surfaces, and approval storage remain private.
+
+A preview is a sealed process-local value. A clone or deserialized lookalike is
+not accepted by either renderer. Both renderers omit precondition tokens; their
+human or JSON output is a review display, not authority. Approval evidence is
+also process-local and opaque. A durable approval record alone is audit state,
+not authority, and copying or reconstructing the evidence object does not grant
+authority.
+
+Private approvals expire after five minutes, are single-use, and may be
+irreversibly revoked before use. A hard-conflicted preview cannot be approved.
+A legacy content-only approval authorizes neither the repertoire-dependency
+plan nor its companion lock. The H integration that will deliver trusted
+previews and confirmation to public clients is not complete; there is currently
+no public approval issuance or consumption route, and consumers must not rely
+on internal deep imports.
+
 ## Atomic apply and rollback boundary
 
 Only a sealed, conflict-free apply plan may enter the mutation boundary.

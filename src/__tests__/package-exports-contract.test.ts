@@ -23,6 +23,11 @@ import type {
   ProjectTemplateGithubSourceCompositionDependencies,
   ProjectTemplateSourceDescriptorPackV1,
   ProjectTemplateSourceDescriptorV1,
+  ProjectTemplateApplyPreview,
+  ProjectTemplateApplyPreviewApprovalEvidence,
+  ProjectTemplateApplyPreviewBindings,
+  ProjectTemplateApplyPreviewCompositionConflictCode,
+  ProjectTemplateApplyPreviewContentHardConflict,
   ResolvedGithubTemplateSource,
   GithubTemplateSourceMetadataPort,
 } from 'takt';
@@ -261,6 +266,86 @@ describe('package exports contract', () => {
       }
     `);
 
+    expect(result).toBe('ERR_PACKAGE_PATH_NOT_EXPORTED');
+  });
+
+  it('publishes only the safe apply-preview review surface', () => {
+    const result = runSelfReferenceImport(`
+      const api = await import('takt');
+      process.stdout.write(JSON.stringify({
+        renderHuman: typeof api.renderProjectTemplateApplyPreviewHuman,
+        renderJson: typeof api.renderProjectTemplateApplyPreviewJson,
+        create: typeof api.createProjectTemplateApplyPreview,
+        assert: typeof api.assertProjectTemplateApplyPreview,
+        hash: typeof api.projectTemplateApplyPreviewReviewSurfaceSha256,
+        issue: typeof api.issueTrustedProjectTemplateApplyPreviewApproval,
+        consume: typeof api.consumeProjectTemplateApplyPreviewApproval,
+        revoke: typeof api.revokeProjectTemplateApplyPreviewApproval,
+        isEvidence: typeof api.isProjectTemplateApplyPreviewApprovalEvidence,
+      }));
+    `);
+    expect(JSON.parse(result)).toEqual({
+      renderHuman: 'function',
+      renderJson: 'function',
+      create: 'undefined',
+      assert: 'undefined',
+      hash: 'undefined',
+      issue: 'undefined',
+      consume: 'undefined',
+      revoke: 'undefined',
+      isEvidence: 'undefined',
+    });
+
+    expectTypeOf<ProjectTemplateApplyPreview>()
+      .toHaveProperty('bindings');
+    expectTypeOf<ProjectTemplateApplyPreviewBindings>()
+      .toHaveProperty('repertoireDependencyPlanId');
+    expectTypeOf<ProjectTemplateApplyPreviewCompositionConflictCode>()
+      .toEqualTypeOf<'MANIFEST_BINDING_MISMATCH'>();
+    expectTypeOf<ProjectTemplateApplyPreviewContentHardConflict>()
+      .toHaveProperty('code');
+    expectTypeOf<ProjectTemplateApplyPreviewApprovalEvidence>()
+      .toHaveProperty('approvalId');
+
+    const declarationEntry = readFileSync(
+      join(packageRoot, 'dist', 'index.d.ts'),
+      'utf8',
+    );
+    for (const exported of [
+      'renderProjectTemplateApplyPreviewHuman',
+      'renderProjectTemplateApplyPreviewJson',
+      'ProjectTemplateApplyPreview',
+      'ProjectTemplateApplyPreviewBindings',
+      'ProjectTemplateApplyPreviewCompositionConflictCode',
+      'ProjectTemplateApplyPreviewContentHardConflict',
+      'ProjectTemplateApplyPreviewApprovalEvidence',
+    ]) expect(declarationEntry).toContain(exported);
+    for (const forbidden of [
+      'createProjectTemplateApplyPreview',
+      'assertProjectTemplateApplyPreview',
+      'projectTemplateApplyPreviewReviewSurfaceSha256',
+      'issueTrustedProjectTemplateApplyPreviewApproval',
+      'consumeProjectTemplateApplyPreviewApproval',
+      'revokeProjectTemplateApplyPreviewApproval',
+      'isProjectTemplateApplyPreviewApprovalEvidence',
+      'ProjectTemplateApplyPreviewOptions',
+      'ProjectTemplateApplyStorage',
+    ]) expect(declarationEntry).not.toContain(forbidden);
+  });
+
+  it.each([
+    'apply-preview.js',
+    'apply-preview-approval.js',
+    'apply-storage.js',
+  ])('blocks internal project-template %s deep imports', (moduleName) => {
+    const result = runSelfReferenceImport(`
+      try {
+        await import('takt/dist/features/project-template/${moduleName}');
+        process.stdout.write('unexpected-success');
+      } catch (error) {
+        process.stdout.write(error?.code ?? error?.name ?? 'unknown-error');
+      }
+    `);
     expect(result).toBe('ERR_PACKAGE_PATH_NOT_EXPORTED');
   });
 

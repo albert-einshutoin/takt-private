@@ -236,6 +236,30 @@ manifest/lock seed照合とclassifierによるsecret・absolute path・binary・
 異なる`{ kind: "project-template-lock-seed", ... }`を返します。承認と正式lock作成は
 後続のapply段階の責務です。
 
+## apply-preview review surface
+
+公開するapply-previewのruntime surfaceは、
+`renderProjectTemplateApplyPreviewHuman`と
+`renderProjectTemplateApplyPreviewJson`だけです。公開型は
+`ProjectTemplateApplyPreview`、`ProjectTemplateApplyPreviewBindings`、
+`ProjectTemplateApplyPreviewCompositionConflictCode`、
+`ProjectTemplateApplyPreviewContentHardConflict`、
+`ProjectTemplateApplyPreviewApprovalEvidence`の5つです。previewの合成、seal検証、
+hash計算、trusted approvalのissue/consume/revoke、rawなG2/G3/G4 composition
+surface、approval storageはprivateのままです。
+
+previewはsealされたprocess-local valueです。cloneやdeserializeしたlookalikeは、
+どちらのrendererも受け付けません。両rendererはprecondition tokenを表示せず、
+human/JSON出力はreview表示であって変更権限ではありません。approval evidenceも
+process-localかつopaqueです。durable approval recordは監査stateにすぎず、それ単体は
+権限ではありません。evidence objectをcopy・再構築しても権限を取得できません。
+
+private approvalのTTLは5分で、single-useかつ使用前に不可逆にrevokeできます。
+hard conflictを含むpreviewは承認できません。legacyのcontent-only approvalは、
+repertoire-dependency planもそのcompanion lockも承認しません。trusted previewと
+confirmationをpublic clientへ渡すH integrationは未完成です。現時点ではpublicな
+approval issue/consume経路はなく、consumerはinternal deep importへ依存してはいけません。
+
 ## atomic applyとrollbackの境界
 
 変更境界へ進めるのは、seal検証済みで競合のないapply planだけです。ただしplan sealは

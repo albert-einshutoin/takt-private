@@ -4,15 +4,18 @@ import type {
   ProjectTemplateRepertoireDependencyPlan,
 } from './repertoire-dependency-plan.js';
 
+/** @internal Inputs accepted only by the private preview-composition boundary. */
 export interface ProjectTemplateApplyPreviewOptions {
   readonly contentPlan: ProjectTemplateApplyPlan;
   readonly repertoireDependencyPlan:
     ProjectTemplateRepertoireDependencyPlan;
 }
 
+/** A cross-plan composition failure safe to show on a review surface. */
 export type ProjectTemplateApplyPreviewCompositionConflictCode =
   'MANIFEST_BINDING_MISMATCH';
 
+/** A content blocker safe to show without exposing file contents or tokens. */
 export type ProjectTemplateApplyPreviewContentHardConflict =
   | {
     readonly code: 'INCOMING_COMPATIBILITY_INCOMPATIBLE';
@@ -23,6 +26,11 @@ export type ProjectTemplateApplyPreviewContentHardConflict =
     readonly reasonCode: ProjectTemplateApplyReasonCode;
   };
 
+/**
+ * Stable identifiers binding one process-local preview to its content and
+ * repertoire-dependency plans. Renderers intentionally do not display the
+ * precondition-token fields.
+ */
 export interface ProjectTemplateApplyPreviewBindings {
   readonly contentPlanId: string;
   readonly contentPreconditionToken: string;
@@ -36,6 +44,10 @@ export interface ProjectTemplateApplyPreviewBindings {
   readonly previousRepertoireLockSha256?: string;
 }
 
+/**
+ * A process-local, sealed review value. Copies and deserialized lookalikes are
+ * not accepted by the public renderers.
+ */
 export interface ProjectTemplateApplyPreview {
   readonly schemaVersion: '1.0';
   readonly previewId: string;

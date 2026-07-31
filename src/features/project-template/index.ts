@@ -116,6 +116,19 @@ export {
   prepareProjectTemplateApplyPlan,
 } from './apply-plan.js';
 export {
+  renderProjectTemplateApplyPreviewHuman,
+  renderProjectTemplateApplyPreviewJson,
+} from './apply-preview.js';
+export type {
+  ProjectTemplateApplyPreview,
+  ProjectTemplateApplyPreviewBindings,
+  ProjectTemplateApplyPreviewCompositionConflictCode,
+  ProjectTemplateApplyPreviewContentHardConflict,
+} from './apply-preview-types.js';
+export type {
+  ProjectTemplateApplyPreviewApprovalEvidence,
+} from './apply-preview-approval.js';
+export {
   inspectProjectTemplateApplyGuard,
 } from './apply-guard.js';
 export type {

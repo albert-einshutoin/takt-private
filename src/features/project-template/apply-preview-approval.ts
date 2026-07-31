@@ -48,6 +48,10 @@ const CAPTURED_HASH_DIGEST = HASH_SAMPLE.digest;
 
 declare const APPROVAL_EVIDENCE_BRAND: unique symbol;
 
+/**
+ * Opaque process-local approval evidence. A matching durable record, literal,
+ * clone, or deserialized object is not authority without the private brand.
+ */
 export interface ProjectTemplateApplyPreviewApprovalEvidence {
   readonly schemaVersion: '1.0';
   readonly approvalId: string;
@@ -461,6 +465,7 @@ function authorityFor(
     : undefined;
 }
 
+/** @internal Tests membership in the private process-local authority registry. */
 export function isProjectTemplateApplyPreviewApprovalEvidence(
   value: unknown,
 ): value is ProjectTemplateApplyPreviewApprovalEvidence {
@@ -680,6 +685,7 @@ async function consumeReserved(options: {
   }
 }
 
+/** @internal Atomically consumes a single-use preview approval. */
 export async function consumeProjectTemplateApplyPreviewApproval(
   value: unknown,
 ): Promise<boolean> {
@@ -737,6 +743,7 @@ async function revokeReserved(options: {
   }
 }
 
+/** @internal Irreversibly revokes an active preview approval. */
 export async function revokeProjectTemplateApplyPreviewApproval(
   value: unknown,
 ): Promise<boolean> {

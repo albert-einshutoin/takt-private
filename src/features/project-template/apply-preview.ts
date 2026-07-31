@@ -449,7 +449,7 @@ function humanPreview(
   return CAPTURED_REFLECT_APPLY(CAPTURED_ARRAY_JOIN, lines, ['\n']) as string;
 }
 
-/** Composes content and repertoire review surfaces without granting apply authority. */
+/** @internal Composes trusted internal plans without granting apply authority. */
 export function createProjectTemplateApplyPreview(
   value: ProjectTemplateApplyPreviewOptions,
 ): ProjectTemplateApplyPreview {
@@ -560,7 +560,7 @@ export function createProjectTemplateApplyPreview(
   return preview;
 }
 
-/** Internal approval binding over the exact canonical surface shown to users. */
+/** @internal Approval binding over the exact canonical surface shown to users. */
 export function projectTemplateApplyPreviewReviewSurfaceSha256(
   value: ProjectTemplateApplyPreview,
 ): string {
@@ -573,7 +573,7 @@ export function projectTemplateApplyPreviewReviewSurfaceSha256(
   return seal.reviewSurfaceSha256;
 }
 
-/** Rejects clones and deserialized review DTOs without traversing them. */
+/** @internal Rejects clones and deserialized review DTOs without traversing them. */
 export function assertProjectTemplateApplyPreview(
   value: unknown,
 ): ProjectTemplateApplyPreview {
@@ -593,6 +593,10 @@ export function assertProjectTemplateApplyPreview(
   return preview;
 }
 
+/**
+ * Renders the trusted process-local preview as a redacted human review. The
+ * output contains no precondition tokens and grants no mutation authority.
+ */
 export function renderProjectTemplateApplyPreviewHuman(
   value: ProjectTemplateApplyPreview,
 ): string {
@@ -605,6 +609,10 @@ export function renderProjectTemplateApplyPreviewHuman(
   return seal.human;
 }
 
+/**
+ * Renders the trusted process-local preview as deterministic redacted JSON.
+ * The output contains no precondition tokens and grants no mutation authority.
+ */
 export function renderProjectTemplateApplyPreviewJson(
   value: ProjectTemplateApplyPreview,
 ): string {
