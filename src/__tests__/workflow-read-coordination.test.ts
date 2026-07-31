@@ -32,6 +32,8 @@ import {
 } from '../infra/config/loaders/workflowLoader.js';
 import { loadPersonaPromptFromPath } from '../infra/config/loaders/agentLoader.js';
 import { resolveFacetByName } from '../infra/config/loaders/resource-resolver.js';
+import { createRepertoireResourceReadAccess } from '../infra/config/loaders/repertoireResourceReadAccess.js';
+import { resolveWorkflowProviderOptionsWithHost } from '../infra/config/loaders/workflowProviderOptionsResolver.js';
 
 const SAMPLE_WORKFLOW = `name: coordinated-workflow
 description: coordinated workflow
@@ -113,6 +115,7 @@ steps:
 
   function createProjectWorkflowWithRepertoireAlias(
     kind: 'facet' | 'partial' | 'persona' | 'provider',
+    aliasKind: 'symlink' | 'hardlink' = 'symlink',
   ): void {
     const workflowDir = join(projectDir, '.takt', 'workflows');
     const targetDir = join(configDir, 'repertoire', '@owner', 'repo', 'alias-targets');
@@ -130,7 +133,9 @@ steps:
     writeFileSync(targetPath, kind === 'provider'
       ? 'codex:\n  network_access: false\n'
       : `repertoire ${kind}`);
-    symlinkSync(targetPath, join(localDir, `alias.${kind === 'provider' ? 'yaml' : 'md'}`));
+    const aliasPath = join(localDir, `alias.${kind === 'provider' ? 'yaml' : 'md'}`);
+    if (aliasKind === 'symlink') symlinkSync(targetPath, aliasPath);
+    else linkSync(targetPath, aliasPath);
     const stepFields = kind === 'facet'
       ? '    instruction: alias\n'
       : kind === 'partial'
@@ -232,6 +237,31 @@ ${stepFields}`);
       expect(() => loadWorkflowByIdentifier(`alias-${kind}`, projectDir)).toThrow(
         expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
       );
+    },
+  );
+
+  it.each(['facet', 'partial', 'persona', 'provider'] as const)(
+    'rejects a project %s hardlink to repertoire bytes even while a writer is active',
+    async (kind) => {
+      createProjectWorkflowWithRepertoireAlias(kind, 'hardlink');
+      const writer = await acquireRepertoireCoordinationLease({
+        globalConfigDir: configDir,
+        mode: 'write',
+      });
+      try {
+        if (kind === 'persona') {
+          const workflow = loadWorkflowByIdentifier(`alias-${kind}`, projectDir);
+          expect(() => loadPersonaPromptFromPath(workflow!.steps[0]!.personaPath!, projectDir)).toThrow(
+            expect.objectContaining({ code: 'WORKFLOW_RESOURCE_READ_FAILED' }),
+          );
+        } else {
+          expect(() => loadWorkflowByIdentifier(`alias-${kind}`, projectDir)).toThrow(
+            expect.objectContaining({ code: 'WORKFLOW_RESOURCE_READ_FAILED' }),
+          );
+        }
+      } finally {
+        writer.release();
+      }
     },
   );
 
@@ -479,6 +509,42 @@ ${stepFields}`);
       repertoireDir: join(configDir, 'repertoire'),
       repertoireReadAccess: forged,
     })).toThrow(expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }));
+  });
+
+  it('rejects a valid capability rebound to another root before injected callbacks', () => {
+    createProjectWorkflowWithScopedResources();
+    const otherRepertoire = join(projectDir, 'other-repertoire');
+    const workflowDir = join(otherRepertoire, '@other', 'repo', 'workflows');
+    mkdirSync(workflowDir, { recursive: true });
+    let callbacks = 0;
+
+    expect(() => withImmediateRepertoireReadPermit({
+      globalConfigDir: configDir,
+      operation: (permit) => {
+        const access = createRepertoireResourceReadAccess(
+          createInternalWorkflowReadContext(configDir, permit),
+        );
+        return resolveWorkflowProviderOptionsWithHost(
+          { extends: 'preset' },
+          workflowDir,
+          {
+            rootDir: workflowDir,
+            context: {
+              lang: 'en',
+              workflowDir,
+              repertoireDir: otherRepertoire,
+              repertoireReadAccess: access,
+            },
+            fileAccess: {
+              exists: () => { callbacks += 1; return false; },
+              readText: () => { callbacks += 1; return ''; },
+              realpath: (path) => { callbacks += 1; return path; },
+            },
+          },
+        );
+      },
+    })).toThrow(expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }));
+    expect(callbacks).toBe(0);
   });
 
   it('normalizes filesystem discovery failures without path or cause leakage', () => {
