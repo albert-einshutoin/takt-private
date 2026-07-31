@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_TAKTPACK_LIMITS } from '../../features/project-template/archive-types.js';
 import { parseProjectTemplateGithubSourceSpec } from '../../features/project-template/github-source-spec.js';
 import {
@@ -156,6 +156,49 @@ describe('resolveGithubTemplateSource', () => {
     consumeResolvedGithubTemplateSourceReceiptClaim(receiptClaim);
     expect(() => consumeResolvedGithubTemplateSourceReceiptClaim(receiptClaim))
       .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+  });
+
+  it('rejects invalid receipt claims without inspecting or consuming the real claim', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+    const receiptClaim = claimResolvedGithubTemplateSourceForReceipt(resolved);
+    const trap = vi.fn(() => {
+      throw new Error('SECRET_SENTINEL');
+    });
+    const proxy = new Proxy(receiptClaim, {
+      get: trap,
+      getOwnPropertyDescriptor: trap,
+      getPrototypeOf: trap,
+      ownKeys: trap,
+    });
+    const candidates = [
+      {
+        resolved: receiptClaim.resolved,
+        descriptor: receiptClaim.descriptor,
+      },
+      { ...receiptClaim },
+      JSON.parse(JSON.stringify(receiptClaim)),
+      proxy,
+    ];
+
+    for (const candidate of candidates) {
+      expect(() => consumeResolvedGithubTemplateSourceReceiptClaim(
+        candidate as typeof receiptClaim,
+      )).toThrow(expect.objectContaining({
+        code: 'INVALID_AUTHORITY',
+        field: 'resolved',
+        message: 'resolved GitHub template source claim is invalid',
+      }));
+    }
+    expect(trap).not.toHaveBeenCalled();
+
+    expect(() => consumeResolvedGithubTemplateSourceReceiptClaim(receiptClaim))
+      .not.toThrow();
+    expect(() => consumeResolvedGithubTemplateSourceReceiptClaim(receiptClaim))
+      .toThrow(expect.objectContaining({
+        code: 'INVALID_AUTHORITY',
+        field: 'resolved',
+        message: 'resolved GitHub template source claim is invalid',
+      }));
   });
 
   it.each([

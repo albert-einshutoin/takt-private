@@ -1,5 +1,6 @@
 import {
   claimResolvedGithubTemplateSourceForDownload,
+  consumeResolvedGithubTemplateSourceReceiptClaim,
   discardResolvedGithubTemplateSourceDownloadClaim,
   handoffResolvedGithubTemplateSourceDownloadClaimForReceipt,
   type ClaimedResolvedGithubTemplateSource,
@@ -14,6 +15,16 @@ const downloadClaim: ClaimedResolvedGithubTemplateSourceForDownload =
 const receiptClaim: ClaimedResolvedGithubTemplateSource =
   handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(downloadClaim);
 void receiptClaim;
+const forgedReceiptClaim = {
+  resolved: receiptClaim.resolved,
+  descriptor: receiptClaim.descriptor,
+};
+// @ts-expect-error Receipt ownership also has an unforgeable nominal brand.
+const nominalReceiptClaim: ClaimedResolvedGithubTemplateSource =
+  forgedReceiptClaim;
+void nominalReceiptClaim;
+// @ts-expect-error Public provenance fields cannot forge receipt ownership.
+consumeResolvedGithubTemplateSourceReceiptClaim(forgedReceiptClaim);
 
 const discardedClaim =
   claimResolvedGithubTemplateSourceForDownload(resolved);

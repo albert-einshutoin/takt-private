@@ -176,6 +176,7 @@ interface ResolvedGithubTemplateSourceAuthority {
 }
 
 declare const resolvedGithubTemplateSourceDownloadClaimBrand: unique symbol;
+declare const resolvedGithubTemplateSourceReceiptClaimBrand: unique symbol;
 
 /** Opaque, process-local ownership of one freshly resolved provenance result. */
 export interface ClaimedResolvedGithubTemplateSourceForDownload {
@@ -186,6 +187,7 @@ export interface ClaimedResolvedGithubTemplateSourceForDownload {
 export interface ClaimedResolvedGithubTemplateSource {
   readonly resolved: ResolvedGithubTemplateSource;
   readonly descriptor: ProjectTemplateSourceDescriptorV1;
+  readonly [resolvedGithubTemplateSourceReceiptClaimBrand]: true;
 }
 
 const RESOLVED_SOURCE_AUTHORITIES = new WeakMap<
@@ -266,10 +268,12 @@ export function claimResolvedGithubTemplateSourceForReceipt(
 function createResolvedReceiptClaim(
   authority: ResolvedGithubTemplateSourceAuthority,
 ): ClaimedResolvedGithubTemplateSource {
+  // The compile-time brand mirrors the runtime WeakMap seal so downstream
+  // code cannot accidentally reconstruct receipt authority from public data.
   const claim = Object.freeze({
     resolved: authority.result,
     descriptor: authority.descriptor,
-  });
+  }) as ClaimedResolvedGithubTemplateSource;
   RESOLVED_SOURCE_CLAIMS.set(claim, authority);
   return claim;
 }
