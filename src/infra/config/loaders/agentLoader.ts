@@ -6,7 +6,7 @@
  * 2. Builtin personas: builtins/{lang}/facets/personas/*.md
  */
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { basename, isAbsolute, join, relative } from 'node:path';
 import type { CustomAgentConfig } from '../../../core/models/index.js';
 import {
@@ -23,6 +23,7 @@ import { resolveConfigValue } from '../resolveConfigValue.js';
 import { withImmediateRepertoireReadPermit } from '../../../features/repertoire/read-permit.js';
 import { createInternalWorkflowReadContext } from './workflowDiscovery.js';
 import { createRepertoireResourceReadAccess } from './repertoireResourceReadAccess.js';
+import { readStableWorkflowResourceText } from './workflowResourceSafeReader.js';
 
 /** Get all allowed base directories for persona prompt files */
 function getAllowedPromptBases(cwd: string): string[] {
@@ -135,7 +136,7 @@ export function loadAgentPrompt(agent: CustomAgentConfig, cwd: string): string {
 
     assertPromptExists(promptFile);
 
-    return readFileSync(agent.promptFile, 'utf-8');
+    return readStableWorkflowResourceText(agent.promptFile);
   }
 
   throw new Error(`Agent ${agent.name} has no prompt defined`);
@@ -146,5 +147,5 @@ export function loadPersonaPromptFromPath(personaPath: string, cwd: string): str
   assertAllowedPromptPath(personaPath, cwd);
   if (isRepertoirePromptPath(personaPath)) return readRepertoirePersonaPrompt(personaPath, true);
   assertPromptExists(personaPath);
-  return readFileSync(personaPath, 'utf-8');
+  return readStableWorkflowResourceText(personaPath);
 }

@@ -1,4 +1,4 @@
-import { Stats, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { Stats, existsSync, lstatSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { InternalWorkflowReadContext } from './workflowDiscovery.js';
 import { WorkflowDiscoveryReadError } from './workflowDiscoveryError.js';
@@ -6,19 +6,30 @@ import type { RepertoireResourceReadAccess } from './workflowPackageScope.js';
 import type { FacetResolutionContext } from './workflowPackageScope.js';
 import { readApprovedRepertoireWorkflowText } from './workflowRepertoireSafeReader.js';
 import { getRepertoireDir } from '../paths.js';
+import { readStableWorkflowResourceText } from './workflowResourceSafeReader.js';
 
 const safeObjectFreeze = Object.freeze.bind(Object);
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
-const safeWeakSetAddMethod = WeakSet.prototype.add;
-const safeWeakSetHasMethod = WeakSet.prototype.has;
-const trustedAccesses = new WeakSet<RepertoireResourceReadAccess>();
+const safeWeakMapGetMethod = WeakMap.prototype.get;
+const safeWeakMapSetMethod = WeakMap.prototype.set;
+
+interface RepertoireAccessAuthority {
+  assertRootIdentity(): void;
+  lexicalRoot: string;
+}
+
+const trustedAccesses = new WeakMap<RepertoireResourceReadAccess, RepertoireAccessAuthority>();
 
 /** @internal Binds all repertoire resource I/O to one already-active workflow read lease. */
 export function createRepertoireResourceReadAccess(
   context: InternalWorkflowReadContext,
 ): RepertoireResourceReadAccess {
   const assertRead = () => context.assertRead();
+  assertRead();
+  const rootIdentity = lstatOrMissing(context.repertoireDir);
+  const lexicalRoot = resolve(context.repertoireDir);
+  const canonicalRoot = rootIdentity ? realpathSync(context.repertoireDir) : undefined;
   const relativePath = (path: string): string => {
     const candidate = relative(context.repertoireDir, path);
     if (candidate.startsWith('..') || isAbsolute(candidate)) throw failed();
@@ -72,8 +83,39 @@ export function createRepertoireResourceReadAccess(
       }
     },
   });
-  safeReflectApply(safeWeakSetAddMethod, trustedAccesses, [access]);
+  const authority = safeObjectFreeze({
+    lexicalRoot,
+    assertRootIdentity: () => {
+      assertRead();
+      try {
+        const current = lstatOrMissing(context.repertoireDir);
+        if (rootIdentity === undefined || canonicalRoot === undefined) {
+          if (current !== undefined) throw failed();
+          return;
+        }
+        if (
+          current === undefined
+          || current.dev !== rootIdentity.dev
+          || current.ino !== rootIdentity.ino
+          || realpathSync(context.repertoireDir) !== canonicalRoot
+        ) throw failed();
+      } catch (error) {
+        if (error instanceof WorkflowDiscoveryReadError) throw error;
+        throw failed();
+      }
+    },
+  });
+  safeReflectApply(safeWeakMapSetMethod, trustedAccesses, [access, authority]);
   return access;
+}
+
+function lstatOrMissing(path: string): Stats | undefined {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
 }
 
 /** Selects the lease-bound adapter only when a candidate actually enters repertoire. */
@@ -127,10 +169,15 @@ export function isRepertoireResourcePath(path: string, context?: FacetResolution
 /** True only for the process-owned root or a capability minted by this module. */
 export function hasCoordinatedRepertoireContext(context?: FacetResolutionContext): boolean {
   if (!context?.repertoireDir) return false;
-  if (resolve(context.repertoireDir) === resolve(getRepertoireDir())) return true;
   const access = context.repertoireReadAccess;
-  return access !== undefined
-    && (safeReflectApply(safeWeakSetHasMethod, trustedAccesses, [access]) as boolean);
+  if (access !== undefined) {
+    const authority = getAccessAuthority(access);
+    if (authority !== undefined) {
+      assertAuthorityMatchesContext(authority, context);
+      return true;
+    }
+  }
+  return resolve(context.repertoireDir) === resolve(getRepertoireDir());
 }
 
 function getRequiredRepertoireAccess(
@@ -140,17 +187,31 @@ function getRequiredRepertoireAccess(
   if (!isRepertoireResourcePath(path, context)) return undefined;
   if (!context?.repertoireDir) return undefined;
   const access = context.repertoireReadAccess;
-  if (
-    access === undefined
-    || !(safeReflectApply(safeWeakSetHasMethod, trustedAccesses, [access]) as boolean)
-    || !access.contains(path)
-  ) {
-    // Custom roots are supported by pure resolver tests and embedding hosts. The
-    // process-owned repertoire root is the only root governed by coordination.
-    if (resolve(context.repertoireDir) === resolve(getRepertoireDir())) throw failed();
-    return undefined;
+  const authority = access ? getAccessAuthority(access) : undefined;
+  if (access !== undefined && authority !== undefined) {
+    assertAuthorityMatchesContext(authority, context);
+    if (!access.contains(path)) throw failed();
+    return access;
   }
-  return access;
+  // Custom roots are supported by pure resolver tests and embedding hosts. The
+  // process-owned repertoire root is the only root governed by coordination.
+  if (resolve(context.repertoireDir) === resolve(getRepertoireDir())) throw failed();
+  return undefined;
+}
+
+function getAccessAuthority(
+  access: RepertoireResourceReadAccess,
+): RepertoireAccessAuthority | undefined {
+  return safeReflectApply(safeWeakMapGetMethod, trustedAccesses, [access]) as
+    RepertoireAccessAuthority | undefined;
+}
+
+function assertAuthorityMatchesContext(
+  authority: RepertoireAccessAuthority,
+  context: FacetResolutionContext,
+): void {
+  if (!context.repertoireDir || resolve(context.repertoireDir) !== authority.lexicalRoot) throw failed();
+  authority.assertRootIdentity();
 }
 
 function isInsideOrEqual(root: string, candidate: string): boolean {
@@ -163,7 +224,7 @@ function lstatExists(path: string): boolean {
 }
 
 function readNodeText(path: string): string {
-  return readFileSync(path, 'utf-8');
+  return readStableWorkflowResourceText(path);
 }
 
 function isMissing(error: unknown): boolean {

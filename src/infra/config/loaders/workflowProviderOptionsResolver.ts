@@ -22,6 +22,7 @@ import {
   resolveProviderOptionsScopeRef,
   type ScopedProviderOptionsCandidateDirs,
 } from './providerOptionsLookupDirectories.js';
+import { readStableWorkflowResourceText } from './workflowResourceSafeReader.js';
 
 type RawWorkflowProviderOptions = Record<string, unknown> & {
   extends?: string;
@@ -54,7 +55,7 @@ export interface WorkflowProviderOptionsResolutionHost extends ProviderOptionsRe
 
 const nodeFileAccess: ProviderOptionsFileAccess = {
   exists: (path) => fs.existsSync(path),
-  readText: (path) => fs.readFileSync(path, 'utf-8'),
+  readText: (path) => readStableWorkflowResourceText(path),
   realpath: (path) => fs.realpathSync(path),
   isSymlink: (path) => fs.lstatSync(path).isSymbolicLink(),
 };
