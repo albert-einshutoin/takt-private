@@ -50,6 +50,17 @@ const MAX_DIFF_INPUT_BYTES = 64 * 1024;
 const MAX_DIFF_LINES = 1_000;
 const MAX_DIFF_OUTPUT_CHARS = 16 * 1024;
 const MAX_LOCAL_TOTAL_BYTES = 32 * 1024 * 1024;
+const APPLY_PLAN_SEALS = new WeakMap<object, {
+  readonly canonicalBody: string;
+  readonly planId: string;
+}>();
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_CREATE_HASH = createHash;
+const CAPTURED_WEAK_MAP_GET = WeakMap.prototype.get;
+const CAPTURED_WEAK_MAP_SET = WeakMap.prototype.set;
+const APPLY_PLAN_HASH_SAMPLE = CAPTURED_CREATE_HASH('sha256');
+const CAPTURED_HASH_UPDATE = APPLY_PLAN_HASH_SAMPLE.update;
+const CAPTURED_HASH_DIGEST = APPLY_PLAN_HASH_SAMPLE.digest;
 const TRACKING_STATUSES = new Set<ProjectTemplateLocalSnapshotEntry['gitTrackingStatus']>([
   'tracked-clean',
   'tracked-modified',
@@ -62,7 +73,57 @@ const TRACKING_STATUSES = new Set<ProjectTemplateLocalSnapshotEntry['gitTracking
 ]);
 
 function sha256(value: string | Uint8Array): string {
-  return createHash('sha256').update(value).digest('hex');
+  const hash = CAPTURED_CREATE_HASH('sha256');
+  CAPTURED_REFLECT_APPLY(CAPTURED_HASH_UPDATE, hash, [value]);
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_HASH_DIGEST,
+    hash,
+    ['hex'],
+  ) as string;
+}
+
+function registerProjectTemplateApplyPlan(
+  plan: ProjectTemplateApplyPlan,
+  canonicalBody: string,
+): ProjectTemplateApplyPlan {
+  CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_SET, APPLY_PLAN_SEALS, [
+    plan,
+    { canonicalBody, planId: plan.planId },
+  ]);
+  return plan;
+}
+
+/** @internal Process-local identity check used only by the G5 composition boundary. */
+export function calculateSealedProjectTemplateApplyPlanId(
+  value: unknown,
+): string {
+  const seal = typeof value === 'object' && value !== null
+    ? CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_GET, APPLY_PLAN_SEALS, [value])
+    : undefined;
+  if (seal === undefined) {
+    throw new ProjectTemplateValidationError(
+      'INVALID_LOCK',
+      'apply preview requires a process-local sealed content plan',
+      'contentPlan',
+    );
+  }
+  return sha256(seal.canonicalBody);
+}
+
+/** @internal Rejects structural clones before reading any public plan field. */
+export function assertSealedProjectTemplateApplyPlan(
+  value: unknown,
+): ProjectTemplateApplyPlan {
+  const calculated = calculateSealedProjectTemplateApplyPlanId(value);
+  const plan = value as ProjectTemplateApplyPlan;
+  if (plan.planId !== calculated) {
+    throw new ProjectTemplateValidationError(
+      'INVALID_LOCK',
+      'content plan identity does not match its sealed body',
+      'contentPlan.planId',
+    );
+  }
+  return plan;
 }
 
 function semanticConfigDocument(
@@ -899,10 +960,12 @@ function resealProjectTemplateApplyPlan(
     entries,
     summary,
   };
-  return deepFreeze({
+  const canonicalBody = canonicalizeTaktpackJson(body);
+  const sealed = deepFreeze({
     ...body,
-    planId: sha256(canonicalizeTaktpackJson(body)),
+    planId: sha256(canonicalBody),
   });
+  return registerProjectTemplateApplyPlan(sealed, canonicalBody);
 }
 
 /**
@@ -1134,8 +1197,10 @@ function createUnresolvedProjectTemplateApplyPlan(
     entries,
     summary,
   };
-  const planId = sha256(canonicalizeTaktpackJson(planBody));
-  return deepFreeze({ ...planBody, planId });
+  const canonicalBody = canonicalizeTaktpackJson(planBody);
+  const planId = sha256(canonicalBody);
+  const sealed = deepFreeze({ ...planBody, planId });
+  return registerProjectTemplateApplyPlan(sealed, canonicalBody);
 }
 
 /**
