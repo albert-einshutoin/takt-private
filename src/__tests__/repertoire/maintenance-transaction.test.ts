@@ -157,6 +157,34 @@ describe('detachToMaintenance', () => {
   });
 
   it.each([
+    ['transactions', { transactions: 0 }],
+    ['entries', { entries: 0 }],
+    ['bytes', { bytes: 0 }],
+  ] as const)('applies aggregate %s preflight before opening any payload', (_label, limits) => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-budget-'));
+    roots.push(root);
+    const packageDir = join(root, 'repertoire', '@owner', 'repo');
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(join(packageDir, 'workflow.yaml'), 'non-empty');
+    detachToMaintenance({
+      globalConfigDir: root,
+      sourceDir: packageDir,
+      containmentRoot: root,
+      expected: captureDirectoryTreeProof(packageDir, root),
+      kind: 'payload',
+    });
+    let payloadReads = 0;
+    expect(() => classifyMaintenanceTransactions(root, {
+      limits,
+      onPayloadOpen: () => { payloadReads += 1; },
+    })).toThrow(expect.objectContaining({
+      code: 'MAINTENANCE_REQUIRED',
+      message: 'Repertoire maintenance cleanup is required',
+    }));
+    expect(payloadReads).toBe(0);
+  });
+
+  it.each([
     'intent-write',
     'intent-file-fsync',
     'intent-parent-fsync',

@@ -21,7 +21,9 @@ import {
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
-const MAX_TRANSACTIONS = 4_096;
+export const MAX_MAINTENANCE_TRANSACTIONS = 4_096;
+export const MAX_MAINTENANCE_AGGREGATE_ENTRIES = 65_536;
+export const MAX_MAINTENANCE_AGGREGATE_BYTES = 1024 * 1024 * 1024;
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeBufferToStringMethod = Buffer.prototype.toString;
 const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
@@ -34,6 +36,7 @@ const safeStringStartsWithMethod = String.prototype.startsWith;
 const safeJsonParse = JSON.parse.bind(JSON);
 const safeJsonStringify = JSON.stringify.bind(JSON);
 const safeBufferFrom = Buffer.from.bind(Buffer);
+const safeNumberIsSafeInteger = Number.isSafeInteger.bind(Number);
 
 export class RepertoireMaintenanceError extends Error {
   readonly code = 'RECOVERY_REQUIRED' as const;
@@ -44,9 +47,34 @@ export class RepertoireMaintenanceError extends Error {
   }
 }
 
+export class RepertoireMaintenanceCapacityError extends Error {
+  readonly code = 'MAINTENANCE_REQUIRED' as const;
+
+  constructor() {
+    super('Repertoire maintenance cleanup is required');
+    this.name = 'RepertoireMaintenanceCapacityError';
+  }
+}
+
 export type MaintenancePayloadKind = 'payload' | 'partial';
 export type MaintenanceClassification = { complete: string[]; incomplete: string[] };
 type PortableTreeSummary = { digest: string; entries: number; bytes: number };
+type ClassificationOptions = {
+  /** Test-only lower limits for exact boundary coverage. */
+  limits?: Partial<{ transactions: number; entries: number; bytes: number }>;
+  /** Test-only proof that aggregate preflight occurs before payload reads. */
+  onPayloadOpen?: () => void;
+};
+type PreparedTransaction = {
+  transaction: string;
+  transactionEntries?: string[];
+  intent?: ReturnType<typeof readApprovedRegularFile>;
+  outcome?: ReturnType<typeof readApprovedRegularFile>;
+  completeRecord?: ReturnType<typeof readApprovedRegularFile>;
+  parsedIntent?: Record<string, unknown>;
+  parsedOutcome?: Record<string, unknown>;
+  parsedComplete?: Record<string, unknown>;
+};
 
 export interface DetachToMaintenanceOptions {
   globalConfigDir: string;
@@ -94,6 +122,7 @@ export function assertMaintenanceTransactionsReady(globalConfigDir: string): voi
 
 export function classifyMaintenanceTransactions(
   globalConfigDir: string,
+  options: ClassificationOptions = {},
 ): MaintenanceClassification {
   try {
     const transactionsRoot = transactionRoot(globalConfigDir);
@@ -104,47 +133,59 @@ export function classifyMaintenanceTransactions(
       if (isMissing(error)) return { complete: [], incomplete: [] };
       throw error;
     }
-    if (entries.length > MAX_TRANSACTIONS) throw recoveryRequired();
+    const limits = {
+      transactions: options.limits?.transactions ?? MAX_MAINTENANCE_TRANSACTIONS,
+      entries: options.limits?.entries ?? MAX_MAINTENANCE_AGGREGATE_ENTRIES,
+      bytes: options.limits?.bytes ?? MAX_MAINTENANCE_AGGREGATE_BYTES,
+    };
+    if (entries.length > limits.transactions) throw maintenanceRequired();
     safeReflectApply(safeArraySortMethod, entries, []);
     const result: MaintenanceClassification = { complete: [], incomplete: [] };
+    const prepared: PreparedTransaction[] = [];
+    let aggregateEntries = 0;
+    let aggregateBytes = 0;
     for (let index = 0; index < entries.length; index += 1) {
       const transaction = join(transactionsRoot, entries[index]!);
       const stat = lstatSync(transaction);
       if (!isDirectory(stat) || isSymbolicLink(stat)) throw recoveryRequired();
+      const item: PreparedTransaction = { transaction };
+      try {
+        item.transactionEntries = readdirSync(transaction);
+        safeReflectApply(safeArraySortMethod, item.transactionEntries, []);
+        item.intent = readApprovedRegularFile(join(transaction, 'intent.json'), transaction);
+        item.outcome = readApprovedRegularFile(join(transaction, 'outcome.json'), transaction);
+        item.completeRecord = readApprovedRegularFile(join(transaction, 'complete'), transaction);
+        item.parsedIntent = parseRecord(item.intent.bytes);
+        item.parsedOutcome = parseRecord(item.outcome.bytes);
+        item.parsedComplete = parseRecord(item.completeRecord.bytes);
+        if (!hasValidPortableMetadata(item)) throw recoveryRequired();
+        aggregateEntries += item.parsedIntent.payloadEntries as number;
+        aggregateBytes += item.parsedIntent.payloadBytes as number;
+      } catch {
+        // Incomplete/corrupt metadata is classified without opening its payload.
+      }
+      safeReflectApply(safeArrayPushMethod, prepared, [item]);
+    }
+    if (aggregateEntries > limits.entries || aggregateBytes > limits.bytes) {
+      throw maintenanceRequired();
+    }
+    for (let index = 0; index < prepared.length; index += 1) {
+      const item = prepared[index]!;
       let complete = false;
       try {
-        const transactionEntries = readdirSync(transaction);
-        safeReflectApply(safeArraySortMethod, transactionEntries, []);
-        const intent = readApprovedRegularFile(join(transaction, 'intent.json'), transaction);
-        const outcome = readApprovedRegularFile(join(transaction, 'outcome.json'), transaction);
-        const completeRecord = readApprovedRegularFile(join(transaction, 'complete'), transaction);
-        const parsedIntent = parseRecord(intent.bytes);
-        const parsedOutcome = parseRecord(outcome.bytes);
-        const parsedComplete = parseRecord(completeRecord.bytes);
+        if (!hasValidPortableMetadata(item)) throw recoveryRequired();
+        const parsedIntent = item.parsedIntent!;
+        const parsedOutcome = item.parsedOutcome!;
         const kind = parsedIntent.kind;
         const expectedEntries = typeof kind === 'string'
           ? ['complete', 'intent.json', kind, 'outcome.json']
           : [];
         safeReflectApply(safeArraySortMethod, expectedEntries, []);
+        options.onPayloadOpen?.();
         const payloadSummary = kind === 'payload' || kind === 'partial'
-          ? capturePortableTreeSummary(join(transaction, kind))
+          ? capturePortableTreeSummary(join(item.transaction, kind))
           : undefined;
-        complete = sameEntries(transactionEntries, expectedEntries)
-          && parsedIntent.version === 1
-          && parsedIntent.nonce === basename(transaction)
-          && parsedOutcome.version === 1
-          && parsedOutcome.phase === 'detached'
-          && parsedOutcome.intentDigest === digestBytes(intent.bytes)
-          && typeof parsedIntent.expectedPortableDigest === 'string'
-          && typeof parsedOutcome.actualPortableDigest === 'string'
-          && parsedOutcome.actualPortableDigest === parsedIntent.expectedPortableDigest
-          && parsedOutcome.payloadEntries === parsedIntent.payloadEntries
-          && parsedOutcome.payloadBytes === parsedIntent.payloadBytes
-          && parsedComplete.version === 1
-          && parsedComplete.phase === 'complete'
-          && parsedComplete.intentDigest === parsedOutcome.intentDigest
-          && parsedComplete.actualPortableDigest === parsedOutcome.actualPortableDigest
-          && parsedComplete.outcomeDigest === digestBytes(outcome.bytes)
+        complete = sameEntries(item.transactionEntries!, expectedEntries)
           && payloadSummary !== undefined
           && payloadSummary.digest === parsedOutcome.actualPortableDigest
           && payloadSummary.entries === parsedOutcome.payloadEntries
@@ -152,11 +193,14 @@ export function classifyMaintenanceTransactions(
       } catch {
         complete = false;
       }
-      safeReflectApply(safeArrayPushMethod, complete ? result.complete : result.incomplete, [transaction]);
+      safeReflectApply(safeArrayPushMethod, complete ? result.complete : result.incomplete, [item.transaction]);
     }
     return result;
   } catch (error) {
-    if (error instanceof RepertoireMaintenanceError) throw error;
+    if (
+      error instanceof RepertoireMaintenanceError
+      || error instanceof RepertoireMaintenanceCapacityError
+    ) throw error;
     throw recoveryRequired();
   }
 }
@@ -307,6 +351,39 @@ function transactionRoot(globalConfigDir: string): string {
   return join(globalConfigDir, '.repertoire-maintenance', 'transactions');
 }
 
+function hasValidPortableMetadata(item: PreparedTransaction): boolean {
+  const intent = item.parsedIntent;
+  const outcome = item.parsedOutcome;
+  const complete = item.parsedComplete;
+  if (
+    intent === undefined || outcome === undefined || complete === undefined
+    || item.intent === undefined || item.outcome === undefined
+  ) return false;
+  const payloadEntries = intent.payloadEntries;
+  const payloadBytes = intent.payloadBytes;
+  return intent.version === 1
+    && intent.nonce === basename(item.transaction)
+    && (intent.kind === 'payload' || intent.kind === 'partial')
+    && typeof intent.expectedPortableDigest === 'string'
+    && safeNumberIsSafeInteger(payloadEntries)
+    && (payloadEntries as number) >= 0
+    && (payloadEntries as number) <= 4_096
+    && safeNumberIsSafeInteger(payloadBytes)
+    && (payloadBytes as number) >= 0
+    && (payloadBytes as number) <= 64 * 1024 * 1024
+    && outcome.version === 1
+    && outcome.phase === 'detached'
+    && outcome.intentDigest === digestBytes(item.intent.bytes)
+    && outcome.actualPortableDigest === intent.expectedPortableDigest
+    && outcome.payloadEntries === payloadEntries
+    && outcome.payloadBytes === payloadBytes
+    && complete.version === 1
+    && complete.phase === 'complete'
+    && complete.intentDigest === outcome.intentDigest
+    && complete.actualPortableDigest === outcome.actualPortableDigest
+    && complete.outcomeDigest === digestBytes(item.outcome.bytes);
+}
+
 function sameEntries(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
   for (let index = 0; index < left.length; index += 1) {
@@ -402,4 +479,8 @@ function isMissing(error: unknown): boolean {
 
 function recoveryRequired(): RepertoireMaintenanceError {
   return new RepertoireMaintenanceError();
+}
+
+function maintenanceRequired(): RepertoireMaintenanceCapacityError {
+  return new RepertoireMaintenanceCapacityError();
 }
