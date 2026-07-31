@@ -193,6 +193,7 @@ describeContract(
 
     it.each([
       ['directory mode', (evidence: LeaseEvidence) => {
+        writeLeasePayload(evidence.path, evidence.payload);
         chmodSync(dirname(evidence.path), 0o755);
       }],
       ['file mode', (evidence: LeaseEvidence) => {
