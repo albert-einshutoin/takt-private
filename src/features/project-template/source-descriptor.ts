@@ -1,14 +1,12 @@
 import { createHash } from 'node:crypto';
 import { TextDecoder, types } from 'node:util';
 import { ProjectTemplateValidationError } from './errors.js';
-import { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
 import {
   assertAllowedKeys,
   MAX_SEMVER_LENGTH,
   MAX_SOURCE_REF_LENGTH,
   MAX_SOURCE_URI_LENGTH,
   parseSha256,
-  requireArray,
   requireRecord,
   requireSemVer,
   requireString,
@@ -36,6 +34,33 @@ const GITHUB_OWNER_PATTERN_SOURCE =
   '(?![a-z0-9-]*--)[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?';
 const GITHUB_REPOSITORY_PATTERN_SOURCE =
   '[a-z0-9._-]{1,100}';
+const DEPENDENCY_SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE);
+const DEPENDENCY_SOURCE_PATTERN = new RegExp(
+  `^github:(${GITHUB_OWNER_PATTERN_SOURCE})`
+  + `/(${GITHUB_REPOSITORY_PATTERN_SOURCE})`
+  + `@((?:refs/tags/)?v?${SEMVER_PATTERN_BODY})$`,
+);
+const FORBIDDEN_GITHUB_REPOSITORY_PATTERN = /^(?:\.{1,2}|.*\.git)$/;
+const ARRAY_INDEX_PATTERN = /^(0|[1-9]\d*)$/;
+const INTRINSIC_ARRAY_IS_ARRAY = Array.isArray;
+const INTRINSIC_ARRAY_PROTOTYPE = Array.prototype;
+const INTRINSIC_NUMBER = Number;
+const INTRINSIC_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
+const INTRINSIC_OBJECT_CREATE = Object.create;
+const INTRINSIC_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const INTRINSIC_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
+  Object.getOwnPropertyDescriptors;
+const INTRINSIC_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
+const INTRINSIC_OBJECT_PROTOTYPE = Object.prototype;
+const INTRINSIC_REFLECT_APPLY = Reflect.apply;
+const INTRINSIC_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const INTRINSIC_REGEXP_EXEC = RegExp.prototype.exec;
+const INTRINSIC_REGEXP_TEST = RegExp.prototype.test;
+const INTRINSIC_STRING = String;
+const INTRINSIC_TYPES_IS_PROXY = types.isProxy;
+
+type DependencyDescriptorMap =
+  Record<PropertyKey, PropertyDescriptor | undefined>;
 
 /**
  * Draft-07 structural contract for editors and offline validation.
@@ -205,16 +230,242 @@ export function parseProjectTemplateRepertoireDependencies(
   value: unknown,
   field = 'sourceDescriptor.repertoireDependencies',
 ): ProjectTemplateRepertoireDependencyV1[] {
-  rejectProxy(value, field);
-  const dependencies = requireArray(
+  const rawDependencies = snapshotDependencyArray(
     value,
     field,
     MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES,
-    'INVALID_SOURCE',
-  ).map((dependency, index) =>
-    parseRepertoireDependency(dependency, index, field));
+  );
+  const dependencies: ProjectTemplateRepertoireDependencyV1[] = [];
+  for (let index = 0; index < rawDependencies.length; index += 1) {
+    defineArrayValue(
+      dependencies,
+      index,
+      parseRepertoireDependency(
+        rawDependencies[index],
+        index,
+        field,
+      ),
+    );
+  }
   assertCanonicalDependencyOrder(dependencies, field);
   return dependencies;
+}
+
+function intrinsicRegExpTest(pattern: RegExp, value: string): boolean {
+  return INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_REGEXP_TEST,
+    pattern,
+    [value],
+  ) as boolean;
+}
+
+function intrinsicRegExpExec(
+  pattern: RegExp,
+  value: string,
+): RegExpExecArray | null {
+  return INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_REGEXP_EXEC,
+    pattern,
+    [value],
+  ) as RegExpExecArray | null;
+}
+
+function dependencyDescriptors(value: object): DependencyDescriptorMap {
+  return INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    Object,
+    [value],
+  ) as unknown as DependencyDescriptorMap;
+}
+
+function dependencyOwnKeys(
+  descriptors: DependencyDescriptorMap,
+): PropertyKey[] {
+  return INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_REFLECT_OWN_KEYS,
+    Reflect,
+    [descriptors],
+  ) as PropertyKey[];
+}
+
+function defineArrayValue(
+  target: unknown[],
+  index: number,
+  value: unknown,
+): void {
+  INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_OBJECT_DEFINE_PROPERTY,
+    Object,
+    [
+      target,
+      INTRINSIC_STRING(index),
+      {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      },
+    ],
+  );
+}
+
+function snapshotDependencyArray(
+  value: unknown,
+  field: string,
+  maxItems: number,
+): unknown[] {
+  rejectProxy(value, field);
+  if (
+    !INTRINSIC_ARRAY_IS_ARRAY(value)
+    || INTRINSIC_REFLECT_APPLY(
+      INTRINSIC_OBJECT_GET_PROTOTYPE_OF,
+      Object,
+      [value],
+    ) !== INTRINSIC_ARRAY_PROTOTYPE
+  ) {
+    invalidSource(field, `${field} must be a plain array`);
+  }
+  const descriptors = dependencyDescriptors(value);
+  const lengthDescriptor = descriptors['length'];
+  if (
+    lengthDescriptor === undefined
+    || !('value' in lengthDescriptor)
+    || !INTRINSIC_NUMBER_IS_SAFE_INTEGER(lengthDescriptor.value)
+    || lengthDescriptor.value < 0
+  ) {
+    nonPlainDependency(field, `${field} must have an intrinsic data length`);
+  }
+  const length = lengthDescriptor.value as number;
+  if (length > maxItems) {
+    throw new ProjectTemplateValidationError(
+      'LIMIT_EXCEEDED',
+      `${field} exceeds the ${maxItems} item limit`,
+      field,
+    );
+  }
+  const keys = dependencyOwnKeys(descriptors);
+  if (keys.length !== length + 1) {
+    nonPlainDependency(
+      field,
+      `${field} must be a dense JSON array without extra properties`,
+    );
+  }
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[INTRINSIC_STRING(index)];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      nonPlainDependency(
+        field,
+        `${field} must be a dense JSON array without extra properties`,
+      );
+    }
+    defineArrayValue(snapshot, index, descriptor.value);
+  }
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    if (
+      key !== 'length'
+      && (
+        typeof key !== 'string'
+        || !intrinsicRegExpTest(ARRAY_INDEX_PATTERN, key)
+        || INTRINSIC_NUMBER(key) >= length
+        || !('value' in descriptors[key]!)
+      )
+    ) {
+      nonPlainDependency(
+        field,
+        `${field} must be a dense JSON array without extra properties`,
+      );
+    }
+  }
+  return snapshot;
+}
+
+function isDependencyKey(key: string): boolean {
+  return (
+    key === 'scope'
+    || key === 'version'
+    || key === 'source'
+    || key === 'commit'
+    || key === 'capabilities'
+  );
+}
+
+function snapshotDependencyRecord(
+  value: unknown,
+  field: string,
+): Record<string, unknown> {
+  rejectProxy(value, field);
+  if (
+    typeof value !== 'object'
+    || value === null
+    || INTRINSIC_ARRAY_IS_ARRAY(value)
+  ) {
+    nonPlainDependency(
+      field,
+      `${field} must be a plain own-property object`,
+    );
+  }
+  const prototype = INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_OBJECT_GET_PROTOTYPE_OF,
+    Object,
+    [value],
+  ) as object | null;
+  if (
+    prototype !== INTRINSIC_OBJECT_PROTOTYPE
+    && prototype !== null
+  ) {
+    nonPlainDependency(
+      field,
+      `${field} must be a plain own-property object`,
+    );
+  }
+  const descriptors = dependencyDescriptors(value);
+  const keys = dependencyOwnKeys(descriptors);
+  const snapshot = INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_OBJECT_CREATE,
+    Object,
+    [null],
+  ) as Record<string, unknown>;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      nonPlainDependency(field, `${field} must not contain accessors`);
+    }
+    if (typeof key !== 'string' || !isDependencyKey(key)) {
+      throw new ProjectTemplateValidationError(
+        'UNKNOWN_KEY',
+        typeof key === 'string'
+          ? `${field}.${key} is not part of schema 1.0`
+          : `${field} contains a non-string own key outside schema 1.0`,
+        typeof key === 'string' ? `${field}.${key}` : field,
+      );
+    }
+    INTRINSIC_REFLECT_APPLY(
+      INTRINSIC_OBJECT_DEFINE_PROPERTY,
+      Object,
+      [
+        snapshot,
+        key,
+        {
+          configurable: true,
+          enumerable: true,
+          value: descriptor.value,
+          writable: true,
+        },
+      ],
+    );
+  }
+  return snapshot;
+}
+
+function nonPlainDependency(field: string, message: string): never {
+  throw new ProjectTemplateValidationError(
+    'NON_PLAIN_OBJECT',
+    message,
+    field,
+  );
 }
 
 /**
@@ -352,60 +603,55 @@ function parseRepertoireDependency(
   dependenciesField: string,
 ): ProjectTemplateRepertoireDependencyV1 {
   const field = `${dependenciesField}[${index}]`;
-  rejectProxy(value, field);
-  const dependency = requireRecord(value, field);
-  assertAllowedKeys(
-    dependency,
-    ['scope', 'version', 'source', 'commit', 'capabilities'],
-    field,
-  );
-
-  const source = requireString(
+  const dependency = snapshotDependencyRecord(value, field);
+  const source = parseDependencyString(
     dependency['source'],
     `${field}.source`,
-    'INVALID_SOURCE',
     MAX_SOURCE_URI_LENGTH,
   );
-  const sourceSpec = parseProjectTemplateGithubSourceSpec(source);
-  if (sourceSpec.kind !== 'github-ref') {
+  const sourceMatch = intrinsicRegExpExec(
+    DEPENDENCY_SOURCE_PATTERN,
+    source,
+  );
+  if (sourceMatch === null) {
     invalidSource(
       `${field}.source`,
-      `${field}.source must use canonical github:owner/repo@ref`,
+      `${field}.source must use canonical lowercase github:owner/repo@ref`,
     );
   }
-  const canonicalSource =
-    `github:${sourceSpec.owner}/${sourceSpec.repo}@${sourceSpec.ref}` as const;
-  if (source !== canonicalSource) {
+  const owner = sourceMatch[1]!;
+  const repo = sourceMatch[2]!;
+  const ref = sourceMatch[3]!;
+  if (intrinsicRegExpTest(FORBIDDEN_GITHUB_REPOSITORY_PATTERN, repo)) {
     invalidSource(
       `${field}.source`,
       `${field}.source must be canonical lowercase github:owner/repo@ref`,
     );
   }
+  const canonicalSource = `github:${owner}/${repo}@${ref}` as const;
 
-  const version = requireSemVer(
+  const version = parseDependencyVersion(
     dependency['version'],
     `${field}.version`,
   );
-  const allowedTagRefs = new Set([
-    version,
-    `v${version}`,
-    `refs/tags/${version}`,
-    `refs/tags/v${version}`,
-  ]);
-  if (!allowedTagRefs.has(sourceSpec.ref)) {
+  if (
+    ref !== version
+    && ref !== `v${version}`
+    && ref !== `refs/tags/${version}`
+    && ref !== `refs/tags/v${version}`
+  ) {
     invalidSource(
       `${field}.source`,
       `${field}.source ref must be an explicit tag matching dependency.version`,
     );
   }
 
-  const scope = requireString(
+  const scope = parseDependencyString(
     dependency['scope'],
     `${field}.scope`,
-    'INVALID_SOURCE',
     MAX_SOURCE_URI_LENGTH,
   );
-  const canonicalScope = `@${sourceSpec.owner}/${sourceSpec.repo}` as const;
+  const canonicalScope = `@${owner}/${repo}` as const;
   if (scope !== canonicalScope) {
     invalidSource(
       `${field}.scope`,
@@ -426,6 +672,42 @@ function parseRepertoireDependency(
       `${field}.capabilities`,
     ),
   };
+}
+
+function parseDependencyString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    invalidSource(field, `${field} must be a non-empty string`);
+  }
+  // Dependency fields are constrained to ASCII by the patterns below, so
+  // code-unit length is also code-point length without invoking an iterator.
+  if (value.length > maxLength) {
+    throw new ProjectTemplateValidationError(
+      'LIMIT_EXCEEDED',
+      `${field} exceeds the ${maxLength} character limit`,
+      field,
+    );
+  }
+  return value;
+}
+
+function parseDependencyVersion(value: unknown, field: string): string {
+  const version = parseDependencyString(
+    value,
+    field,
+    MAX_SEMVER_LENGTH,
+  );
+  if (!intrinsicRegExpTest(DEPENDENCY_SEMVER_PATTERN, version)) {
+    throw new ProjectTemplateValidationError(
+      'INVALID_SEMVER',
+      `${field} must be valid SemVer`,
+      field,
+    );
+  }
+  return version;
 }
 
 function parseReleaseTag(value: unknown, field: string): string {
@@ -482,8 +764,8 @@ function assertDescriptorByteLimit(byteLength: number): void {
 }
 
 function parseDependencyCommit(value: unknown, field: string): string {
-  const commit = requireString(value, field, 'INVALID_SOURCE', 64);
-  if (!COMMIT_PATTERN.test(commit)) {
+  const commit = parseDependencyString(value, field, 64);
+  if (!intrinsicRegExpTest(COMMIT_PATTERN, commit)) {
     invalidSource(
       field,
       `${field} must be exactly 40 lowercase hexadecimal characters`,
@@ -496,24 +778,21 @@ function parseDependencyCapabilities(
   value: unknown,
   field: string,
 ): ProjectTemplateRepertoireCapabilityV1[] {
-  rejectProxy(value, field);
-  const rawCapabilities = requireArray(
+  const rawCapabilities = snapshotDependencyArray(
     value,
     field,
     MAX_DEPENDENCY_CAPABILITIES,
-    'INVALID_SOURCE',
   );
   const capabilities: ProjectTemplateRepertoireCapabilityV1[] = [];
-  const seen = new Set<ProjectTemplateRepertoireCapabilityV1>();
-  for (const capability of rawCapabilities) {
-    if (capability !== 'edit' || seen.has(capability)) {
+  for (let index = 0; index < rawCapabilities.length; index += 1) {
+    const capability = rawCapabilities[index];
+    if (capability !== 'edit' || index !== 0) {
       invalidSource(
         field,
         `${field} supports only unique "edit" capability entries`,
       );
     }
-    seen.add(capability);
-    capabilities.push(capability);
+    defineArrayValue(capabilities, index, capability);
   }
   return capabilities;
 }
@@ -523,7 +802,8 @@ function assertCanonicalDependencyOrder(
   field: string,
 ): void {
   let previousScope: string | undefined;
-  for (const dependency of dependencies) {
+  for (let index = 0; index < dependencies.length; index += 1) {
+    const dependency = dependencies[index]!;
     if (previousScope !== undefined && dependency.scope <= previousScope) {
       const reason = dependency.scope === previousScope
         ? 'duplicate scope'
@@ -541,7 +821,7 @@ function rejectProxy(value: unknown, field: string): void {
   if (
     typeof value === 'object'
     && value !== null
-    && types.isProxy(value)
+    && INTRINSIC_TYPES_IS_PROXY(value)
   ) {
     throw new ProjectTemplateValidationError(
       'NON_PLAIN_OBJECT',

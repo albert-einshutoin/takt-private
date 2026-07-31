@@ -165,6 +165,56 @@ describe('project template repertoire dependency inspection authority G2', () =>
     expect(calls).toBe(1);
   });
 
+  it('does not delegate dependency validation to a poisoned Array.map', () => {
+    const originalMap = Array.prototype.map;
+    const requestValue = request();
+    let mapCalls = 0;
+    let reentryCalls = 0;
+    let reentering = false;
+    let seenScope: string | undefined;
+    let verified;
+    try {
+      Array.prototype.map = function poisonedMap() {
+        mapCalls += 1;
+        // If the shared parser calls a mutable callback boundary, hostile code
+        // can reenter and replace the validated dependency result entirely.
+        if (!reentering) {
+          reentryCalls += 1;
+          reentering = true;
+          try {
+            inspectProjectTemplateRepertoireDependencies({
+              request: request({ dependencies: [] }) as never,
+              port: portReturning(rawResult([])),
+            });
+          } catch {
+            // A reentrant result is irrelevant: invoking the hook is the bug.
+          } finally {
+            reentering = false;
+          }
+        }
+        return [dependency('@evil/forged')];
+      } as typeof Array.prototype.map;
+      verified = inspectProjectTemplateRepertoireDependencies({
+        request: requestValue as never,
+        port: {
+          inspect(input) {
+            seenScope = input.dependencies[0]?.scope;
+            return rawResult([{
+              scope: seenScope,
+              state: 'missing',
+            }]);
+          },
+        },
+      });
+    } finally {
+      Array.prototype.map = originalMap;
+    }
+    expect(mapCalls).toBe(0);
+    expect(reentryCalls).toBe(0);
+    expect(seenScope).toBe('@acme/repertoire');
+    expect(verified?.observations[0]?.scope).toBe('@acme/repertoire');
+  });
+
   it.each([
     ['undefined options', undefined],
     ['array options', []],

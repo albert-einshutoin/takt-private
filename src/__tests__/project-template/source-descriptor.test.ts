@@ -6,6 +6,7 @@ import { parseProjectTemplateManifest } from '../../features/project-template/ma
 import {
   calculateProjectTemplateSourceDescriptorSha256,
   MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
+  parseProjectTemplateRepertoireDependencies,
   parseProjectTemplateSourceDescriptor,
   parseProjectTemplateSourceDescriptorJson,
   PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
@@ -60,6 +61,38 @@ describe('project template source descriptor', () => {
     expect(calculateProjectTemplateSourceDescriptorSha256(parsed)).toBe(
       createHash('sha256').update(serialized, 'utf8').digest('hex'),
     );
+  });
+
+  it('does not depend on mutable Array iterators or Set methods', () => {
+    const dependencies = validDescriptor()['repertoireDependencies'];
+    const originalIterator = Array.prototype[Symbol.iterator];
+    const originalSetHas = Set.prototype.has;
+    const originalSetAdd = Set.prototype.add;
+    let iteratorCalls = 0;
+    let setCalls = 0;
+    let parsed;
+    try {
+      Array.prototype[Symbol.iterator] = function poisonedIterator(): never {
+        iteratorCalls += 1;
+        throw new Error('mutable Array iterator invoked');
+      };
+      Set.prototype.has = function poisonedHas(): never {
+        setCalls += 1;
+        throw new Error('mutable Set.has invoked');
+      };
+      Set.prototype.add = function poisonedAdd(): never {
+        setCalls += 1;
+        throw new Error('mutable Set.add invoked');
+      };
+      parsed = parseProjectTemplateRepertoireDependencies(dependencies);
+    } finally {
+      Array.prototype[Symbol.iterator] = originalIterator;
+      Set.prototype.has = originalSetHas;
+      Set.prototype.add = originalSetAdd;
+    }
+    expect(iteratorCalls).toBe(0);
+    expect(setCalls).toBe(0);
+    expect(parsed).toHaveLength(2);
   });
 
   it.each([
