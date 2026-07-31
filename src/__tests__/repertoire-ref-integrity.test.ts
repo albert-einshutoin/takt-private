@@ -21,7 +21,10 @@ import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync }
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { findScopeReferences } from '../features/repertoire/remove.js';
-import { REFERENCE_MAX_SINGLE_FILE_BYTES } from '../features/repertoire/remove.js';
+import {
+  REFERENCE_MAX_FILES,
+  REFERENCE_MAX_SINGLE_FILE_BYTES,
+} from '../features/repertoire/remove.js';
 import { makeScanConfig } from './helpers/repertoire-test-helpers.js';
 
 describe('repertoire reference integrity: detection', () => {
@@ -261,6 +264,20 @@ describe('repertoire reference integrity: fail-closed authorization', () => {
       join(workflowsDir, 'large.yaml'),
       Buffer.alloc(REFERENCE_MAX_SINGLE_FILE_BYTES + 1),
     );
+    expect(() => findScopeReferences('@owner/repo', {
+      workflowDirs: [workflowsDir],
+      providerOptionsDirs: [],
+      categoriesFiles: [],
+      failClosed: true,
+    })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
+  });
+
+  it('counts non-YAML directory entries against the scan budget', () => {
+    const workflowsDir = join(tempDir, 'workflows-entry-budget');
+    mkdirSync(workflowsDir);
+    for (let index = 0; index <= REFERENCE_MAX_FILES; index += 1) {
+      writeFileSync(join(workflowsDir, `ignored-${index}.txt`), 'x');
+    }
     expect(() => findScopeReferences('@owner/repo', {
       workflowDirs: [workflowsDir],
       providerOptionsDirs: [],

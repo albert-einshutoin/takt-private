@@ -74,6 +74,7 @@ const require = createRequire(import.meta.url);
 const { version: TAKT_VERSION } = require('../../../package.json') as { version: string };
 
 const GH_API_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
+const APPROVED_SOURCE_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeStringStartsWithMethod = String.prototype.startsWith;
 const safeStringIncludesMethod = String.prototype.includes;
@@ -359,9 +360,6 @@ export async function repertoireAddCommand(
         install: async (stagingDir) => {
           for (let index = 0; index < targets.length; index += 1) {
             const target = targets[index]!;
-            if (!sameTargetSet(targets, collectCopyTargets(packageRoot))) {
-              throw new Error('Downloaded package target set changed before copy');
-            }
             const approved = readApprovedRegularFile(target.absolutePath, tmpExtractDir);
             if (!sameFileProof(sourceProofs[index + 1]!.proof, approved.proof)) {
               throw new Error('Downloaded package source changed before copy');
@@ -444,10 +442,19 @@ function captureSourceProofs(
   containmentRoot: string,
 ): ApprovedFile[] {
   const proofs: ApprovedFile[] = [readApprovedRegularFile(manifestPath, containmentRoot)];
+  let totalBytes = proofs[0]!.bytes.length;
   for (let index = 0; index < targets.length; index += 1) {
     proofs[index + 1] = readApprovedRegularFile(targets[index]!.absolutePath, containmentRoot);
+    totalBytes += proofs[index + 1]!.bytes.length;
+    if (totalBytes > APPROVED_SOURCE_MAX_TOTAL_BYTES) throw sourceBudgetExceeded();
   }
   return proofs;
+}
+
+function sourceBudgetExceeded(): Error & { code: 'RECOVERY_REQUIRED' } {
+  return Object.assign(new Error('Downloaded package source exceeds the safe read budget'), {
+    code: 'RECOVERY_REQUIRED' as const,
+  });
 }
 
 function sameSourceProofs(left: ApprovedFile[], right: ApprovedFile[]): boolean {

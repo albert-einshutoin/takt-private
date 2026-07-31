@@ -49,7 +49,7 @@ export interface ScanConfig {
   failClosed?: boolean;
 }
 
-type ScanBudget = { files: number; totalBytes: number };
+type ScanBudget = { entries: number; totalBytes: number };
 
 export function findScopeReferences(scope: string, config: ScanConfig): ScopeReference[] {
   const first = scanOnce(scope, config);
@@ -61,7 +61,7 @@ export function findScopeReferences(scope: string, config: ScanConfig): ScopeRef
 function scanOnce(scope: string, config: ScanConfig): ScopeReference[] {
   const results: ScopeReference[] = [];
   const scannedDirs = new Set<string>();
-  const budget: ScanBudget = { files: 0, totalBytes: 0 };
+  const budget: ScanBudget = { entries: 0, totalBytes: 0 };
   const failClosed = config.failClosed ?? false;
   scanConfigured(config.workflowDirs, scope, results, scannedDirs, budget, failClosed);
   scanConfigured(config.providerOptionsDirs, scope, results, scannedDirs, budget, failClosed);
@@ -105,6 +105,9 @@ function scanDirectory(
   if (!isDirectory(directoryStat) || isSymbolicLink(directoryStat)) return handleFailure(failClosed);
   const before = checkedReadDirectory(directory, failClosed);
   if (before === undefined) return;
+  // Non-YAML names still consume filesystem work and must not bypass limits.
+  budget.entries += before.length;
+  if (budget.entries > REFERENCE_MAX_FILES) return handleFailure(failClosed);
   safeArraySort(before);
   for (let index = 0; index < before.length; index += 1) {
     const entry = before[index]!;
@@ -141,8 +144,6 @@ function scanFile(
   initial: NonNullable<ReturnType<typeof lstatSync>>,
 ): void {
   if (!isFile(initial) || isSymbolicLink(initial) || initial.nlink !== 1) return handleFailure(failClosed);
-  budget.files += 1;
-  if (budget.files > REFERENCE_MAX_FILES) return handleFailure(failClosed);
   try {
     const approved = readApprovedRegularFile(filePath, scanRoot);
     if (approved.bytes.length > REFERENCE_MAX_SINGLE_FILE_BYTES) return handleFailure(failClosed);
