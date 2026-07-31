@@ -129,10 +129,10 @@ export interface ResolveGithubTemplateSourceOptions {
 }
 
 /**
- * Advisory provenance and update evidence only; this is not download
- * authority. Structural typing and Object.freeze do not prevent callers from
- * forging an equivalent object. A downloader must either use a process-local
- * seal or, under the shared mutation lease, re-resolve and exactly match
+ * Advisory provenance and update evidence. Structural typing and
+ * Object.freeze do not make this value download authority: only the original
+ * result can be exchanged for a process-local download claim. Downloaders
+ * must still re-resolve under the shared mutation lease and exactly match
  * canonicalSource, commit, descriptorSha256, releaseId, assetId, and sha256.
  */
 export interface ResolvedGithubTemplateSource {
@@ -168,7 +168,19 @@ export interface ResolvedGithubTemplateSource {
 interface ResolvedGithubTemplateSourceAuthority {
   readonly result: ResolvedGithubTemplateSource;
   readonly descriptor: ProjectTemplateSourceDescriptorV1;
-  state: 'active' | 'consuming' | 'consumed';
+  state:
+    | 'active'
+    | 'download-owned'
+    | 'receipt-consuming'
+    | 'consumed';
+}
+
+declare const resolvedGithubTemplateSourceDownloadClaimBrand: unique symbol;
+
+/** Opaque, process-local ownership of one freshly resolved provenance result. */
+export interface ClaimedResolvedGithubTemplateSourceForDownload {
+  readonly resolved: ResolvedGithubTemplateSource;
+  readonly [resolvedGithubTemplateSourceDownloadClaimBrand]: true;
 }
 
 export interface ClaimedResolvedGithubTemplateSource {
@@ -184,10 +196,14 @@ const RESOLVED_SOURCE_CLAIMS = new WeakMap<
   object,
   ResolvedGithubTemplateSourceAuthority
 >();
+const RESOLVED_SOURCE_DOWNLOAD_CLAIMS = new WeakMap<
+  object,
+  ResolvedGithubTemplateSourceAuthority
+>();
 
-export function claimResolvedGithubTemplateSourceForReceipt(
+export function claimResolvedGithubTemplateSourceForDownload(
   value: unknown,
-): ClaimedResolvedGithubTemplateSource {
+): ClaimedResolvedGithubTemplateSourceForDownload {
   const authority = (
     typeof value === 'object' && value !== null
       ? RESOLVED_SOURCE_AUTHORITIES.get(value)
@@ -198,13 +214,58 @@ export function claimResolvedGithubTemplateSourceForReceipt(
     || authority.result !== value
     || authority.state !== 'active'
   ) {
-    resolutionError(
-      'INVALID_AUTHORITY',
-      'resolved GitHub template source authority is invalid',
-      'resolved',
+    invalidResolvedAuthority('resolved GitHub template source authority');
+  }
+  // The existing authority is deliberately advanced instead of copying its
+  // provenance into a second authority: one state cell makes concurrent
+  // download, discard, and receipt ownership mutually exclusive.
+  authority.state = 'download-owned';
+  const claim = Object.freeze({
+    resolved: authority.result,
+  }) as ClaimedResolvedGithubTemplateSourceForDownload;
+  RESOLVED_SOURCE_DOWNLOAD_CLAIMS.set(claim, authority);
+  return claim;
+}
+
+export function discardResolvedGithubTemplateSourceDownloadClaim(
+  claim: ClaimedResolvedGithubTemplateSourceForDownload,
+): void {
+  const authority = RESOLVED_SOURCE_DOWNLOAD_CLAIMS.get(claim);
+  if (authority === undefined || authority.state !== 'download-owned') {
+    invalidResolvedAuthority(
+      'resolved GitHub template source download claim',
     );
   }
-  authority.state = 'consuming';
+  RESOLVED_SOURCE_DOWNLOAD_CLAIMS.delete(claim);
+  authority.state = 'consumed';
+}
+
+export function handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
+  claim: ClaimedResolvedGithubTemplateSourceForDownload,
+): ClaimedResolvedGithubTemplateSource {
+  const authority = RESOLVED_SOURCE_DOWNLOAD_CLAIMS.get(claim);
+  if (authority === undefined || authority.state !== 'download-owned') {
+    invalidResolvedAuthority(
+      'resolved GitHub template source download claim',
+    );
+  }
+  RESOLVED_SOURCE_DOWNLOAD_CLAIMS.delete(claim);
+  authority.state = 'receipt-consuming';
+  return createResolvedReceiptClaim(authority);
+}
+
+export function claimResolvedGithubTemplateSourceForReceipt(
+  value: unknown,
+): ClaimedResolvedGithubTemplateSource {
+  const downloadClaim = claimResolvedGithubTemplateSourceForDownload(value);
+  return handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
+    downloadClaim,
+  );
+}
+
+function createResolvedReceiptClaim(
+  authority: ResolvedGithubTemplateSourceAuthority,
+): ClaimedResolvedGithubTemplateSource {
   const claim = Object.freeze({
     resolved: authority.result,
     descriptor: authority.descriptor,
@@ -217,15 +278,19 @@ export function consumeResolvedGithubTemplateSourceReceiptClaim(
   claim: ClaimedResolvedGithubTemplateSource,
 ): void {
   const authority = RESOLVED_SOURCE_CLAIMS.get(claim);
-  if (authority === undefined || authority.state !== 'consuming') {
-    resolutionError(
-      'INVALID_AUTHORITY',
-      'resolved GitHub template source claim is invalid',
-      'resolved',
-    );
+  if (authority === undefined || authority.state !== 'receipt-consuming') {
+    invalidResolvedAuthority('resolved GitHub template source claim');
   }
   RESOLVED_SOURCE_CLAIMS.delete(claim);
   authority.state = 'consumed';
+}
+
+function invalidResolvedAuthority(subject: string): never {
+  resolutionError(
+    'INVALID_AUTHORITY',
+    `${subject} is invalid`,
+    'resolved',
+  );
 }
 
 interface ParsedReleaseAsset {

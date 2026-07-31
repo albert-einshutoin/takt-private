@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_TAKTPACK_LIMITS } from '../../features/project-template/archive-types.js';
 import { parseProjectTemplateGithubSourceSpec } from '../../features/project-template/github-source-spec.js';
 import {
+  claimResolvedGithubTemplateSourceForDownload,
+  claimResolvedGithubTemplateSourceForReceipt,
+  consumeResolvedGithubTemplateSourceReceiptClaim,
+  discardResolvedGithubTemplateSourceDownloadClaim,
   GithubTemplateSourceResolutionError,
+  handoffResolvedGithubTemplateSourceDownloadClaimForReceipt,
   resolveGithubTemplateSource,
   type GithubTemplateSourceMetadataPort,
 } from '../../features/project-template/github-update-check.js';
@@ -92,6 +97,67 @@ function createPort(overrides: Partial<GithubTemplateSourceMetadataPort> = {}): 
 }
 
 describe('resolveGithubTemplateSource', () => {
+  it('rejects forged, cloned, and proxied resolved provenance for download', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+    const candidates = [
+      Object.freeze({ ...resolved }),
+      JSON.parse(JSON.stringify(resolved)) as typeof resolved,
+      new Proxy(resolved, {}),
+    ];
+
+    for (const candidate of candidates) {
+      expect(() => claimResolvedGithubTemplateSourceForDownload(candidate))
+        .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    }
+
+    const claim = claimResolvedGithubTemplateSourceForDownload(resolved);
+    expect(claim.resolved).toBe(resolved);
+    discardResolvedGithubTemplateSourceDownloadClaim(claim);
+  });
+
+  it('permits only one concurrent download owner and one discard', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+    const claim = claimResolvedGithubTemplateSourceForDownload(resolved);
+
+    expect(() => claimResolvedGithubTemplateSourceForDownload(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => claimResolvedGithubTemplateSourceForReceipt(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => discardResolvedGithubTemplateSourceDownloadClaim({
+      ...claim,
+    })).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => discardResolvedGithubTemplateSourceDownloadClaim(
+      new Proxy(claim, {}),
+    )).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+
+    discardResolvedGithubTemplateSourceDownloadClaim(claim);
+    expect(() => discardResolvedGithubTemplateSourceDownloadClaim(claim))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => claimResolvedGithubTemplateSourceForDownload(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+  });
+
+  it('hands the sole download owner to a single receipt consumer', async () => {
+    const resolved = await resolveDownloadAuthorityFixture();
+    const downloadClaim =
+      claimResolvedGithubTemplateSourceForDownload(resolved);
+    const receiptClaim =
+      handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
+        downloadClaim,
+      );
+
+    expect(receiptClaim.resolved).toBe(resolved);
+    expect(() => handoffResolvedGithubTemplateSourceDownloadClaimForReceipt(
+      downloadClaim,
+    )).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => discardResolvedGithubTemplateSourceDownloadClaim(
+      downloadClaim,
+    )).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    consumeResolvedGithubTemplateSourceReceiptClaim(receiptClaim);
+    expect(() => consumeResolvedGithubTemplateSourceReceiptClaim(receiptClaim))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+  });
+
   it.each([
     ['extra string key', (source: Record<PropertyKey, unknown>) => {
       source['unexpected'] = true;
@@ -765,6 +831,15 @@ describe('resolveGithubTemplateSource', () => {
     },
   );
 });
+
+async function resolveDownloadAuthorityFixture() {
+  return resolveGithubTemplateSource({
+    source: parseProjectTemplateGithubSourceSpec(
+      'github:acme/template@main',
+    ),
+    metadata: createPort().port,
+  });
+}
 
 async function expectResolutionCode(
   promise: Promise<unknown>,
