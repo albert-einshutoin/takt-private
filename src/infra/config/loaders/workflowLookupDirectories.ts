@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { lstatSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { resolveWorkflowConfigValues } from '../resolveWorkflowConfigValue.js';
 import {
@@ -9,6 +9,7 @@ import {
 } from '../paths.js';
 import { listBuiltinWorkflowNamesForDir, type WorkflowSource } from './workflowDiscovery.js';
 import type { WorkflowTrustSource } from './workflowTrustSource.js';
+import { WorkflowDiscoveryReadError } from './workflowDiscovery.js';
 
 interface WorkflowLookupDir {
   dir: string;
@@ -23,17 +24,51 @@ export interface NamedWorkflowLookupDir {
 }
 
 export function resolveWorkflowFile(workflowsDir: string, name: string): string | null {
-  const resolvedWorkflowsDir = resolve(workflowsDir);
-  for (const ext of ['.yaml', '.yml']) {
-    const filePath = resolve(workflowsDir, `${name}${ext}`);
-    if (!isPathSafe(resolvedWorkflowsDir, filePath)) {
-      continue;
+  return resolveWorkflowFileWithReadGuard(workflowsDir, name, () => {});
+}
+
+/** @internal Executes a root-bound authority check before filesystem reads. */
+export function resolveWorkflowFileWithReadGuard(
+  workflowsDir: string,
+  name: string,
+  beforeRead: () => void,
+  rejectSymlinks = false,
+): string | null {
+  try {
+    const resolvedWorkflowsDir = resolve(workflowsDir);
+    for (const ext of ['.yaml', '.yml']) {
+      const filePath = resolve(workflowsDir, `${name}${ext}`);
+      beforeRead();
+      if (rejectSymlinks) {
+        try {
+          if (lstatSync(filePath).isSymbolicLink()) throw new WorkflowDiscoveryReadError();
+        } catch (error) {
+          if (isMissing(error)) continue;
+          throw error;
+        }
+      }
+      if (!isPathSafe(resolvedWorkflowsDir, filePath)) {
+        continue;
+      }
+      beforeRead();
+      try {
+        statSync(filePath);
+        return filePath;
+      } catch (error) {
+        if (isMissing(error)) continue;
+        throw error;
+      }
     }
-    if (existsSync(filePath)) {
-      return filePath;
-    }
+    return null;
+  } catch (error) {
+    if (error instanceof WorkflowDiscoveryReadError) throw error;
+    throw new WorkflowDiscoveryReadError();
   }
-  return null;
+}
+
+function isMissing(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'ENOENT';
 }
 
 export function findWorkflowInLookupDirs(

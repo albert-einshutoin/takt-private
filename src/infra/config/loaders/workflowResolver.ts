@@ -2,9 +2,9 @@
  * Workflow resolution.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { isScopeRef, parseScopeRef } from 'faceted-prompting';
 import type { WorkflowConfig } from '../../../core/models/index.js';
 import { validateWorkflowCallContracts as validateWorkflowCallContractsImpl } from './workflowCallContractValidator.js';
@@ -15,22 +15,29 @@ import {
   getNamedWorkflowLookupDirs,
   getWorkflowDirs,
   listBuiltinWorkflowNames as listBuiltinWorkflowNamesImpl,
-  resolveWorkflowFile,
+  resolveWorkflowFileWithReadGuard,
   type NamedWorkflowLookupDir,
 } from './workflowLookupDirectories.js';
 import { loadWorkflowFileWithResolutionOptions } from './workflowResolvedLoader.js';
-import { getRepertoireDir } from '../paths.js';
+import { getGlobalConfigDir } from '../paths.js';
 import { type WorkflowTrustInfo } from './workflowTrustSource.js';
 import {
-  collectValidatedWorkflowEntries,
+  collectValidatedWorkflowEntriesWithReadContext,
+  createInternalWorkflowReadContext,
   iterateWorkflowDir,
-  listRepertoireWorkflowEntries,
+  listRepertoireWorkflowEntriesWithReadContext,
   loadAllWorkflowsWithSourcesFromDirs,
   type WorkflowDirEntry,
   type WorkflowDiscoveryConfig,
   type WorkflowDiscoveryWithSource,
   type WorkflowWithSource,
+  type InternalWorkflowReadContext,
+  WorkflowDiscoveryReadError,
 } from './workflowDiscovery.js';
+import {
+  assertActiveRepertoireReadPermit,
+  withImmediateRepertoireReadPermit,
+} from '../../../features/repertoire/read-permit.js';
 
 interface LoadWorkflowsOptions {
   onWarning?: (message: string) => void;
@@ -45,6 +52,7 @@ interface InternalWorkflowLookupOptions extends WorkflowLookupOptions {
   callableArgs?: Record<string, string | string[]>;
   parentTrustInfo?: WorkflowTrustInfo;
   skipWorkflowCallContractValidation?: boolean;
+  repertoireReadContext?: InternalWorkflowReadContext;
 }
 
 export type {
@@ -142,16 +150,28 @@ function finalizeLoadedWorkflow(
   lookupCwd: string,
   skipWorkflowCallContractValidation = false,
   allowPathBasedCalls = true,
+  readContext?: InternalWorkflowReadContext,
 ): WorkflowConfig | null {
   if (!workflow || skipWorkflowCallContractValidation) {
     return workflow;
   }
 
-  validateWorkflowCallContracts(workflow, projectCwd, lookupCwd, { allowPathBasedCalls });
+  validateWorkflowCallContractsInternal(
+    workflow,
+    projectCwd,
+    lookupCwd,
+    { allowPathBasedCalls },
+    readContext,
+  );
   return workflow;
 }
 
-function loadWorkflowForDiscovery(entry: WorkflowDirEntry, cwd: string): WorkflowConfig {
+function loadWorkflowForDiscovery(
+  entry: WorkflowDirEntry,
+  cwd: string,
+  readContext?: InternalWorkflowReadContext,
+): WorkflowConfig {
+  assertEntryRead(entry, readContext);
   return loadWorkflowFileWithResolutionOptions(entry.path, {
     projectCwd: cwd,
     lookupCwd: cwd,
@@ -160,7 +180,12 @@ function loadWorkflowForDiscovery(entry: WorkflowDirEntry, cwd: string): Workflo
   });
 }
 
-function loadWorkflowForRuntime(entry: WorkflowDirEntry, cwd: string): WorkflowConfig {
+function loadWorkflowForRuntime(
+  entry: WorkflowDirEntry,
+  cwd: string,
+  readContext?: InternalWorkflowReadContext,
+): WorkflowConfig {
+  assertEntryRead(entry, readContext);
   return loadWorkflowFileWithResolutionOptions(entry.path, {
     projectCwd: cwd,
     lookupCwd: cwd,
@@ -172,34 +197,47 @@ function validateLoadedWorkflowEntryContracts(
   workflow: WorkflowConfig,
   cwd: string,
   allowPathBasedCalls: boolean,
+  readContext?: InternalWorkflowReadContext,
 ): void {
-  validateWorkflowCallContracts(workflow, cwd, cwd, { allowPathBasedCalls });
+  validateWorkflowCallContractsInternal(workflow, cwd, cwd, { allowPathBasedCalls }, readContext);
 }
 
-function loadValidatedWorkflowEntry(entry: WorkflowDirEntry, cwd: string): WorkflowDiscoveryConfig {
+function loadValidatedWorkflowEntry(
+  entry: WorkflowDirEntry,
+  cwd: string,
+  readContext?: InternalWorkflowReadContext,
+): WorkflowDiscoveryConfig {
   return loadValidatedWorkflowDiscoveryEntry(entry, cwd, {
-    loadWorkflowForDiscovery,
+    loadWorkflowForDiscovery: (candidate, projectCwd) => (
+      loadWorkflowForDiscovery(candidate, projectCwd, readContext)
+    ),
     validateWorkflowCallContracts: (workflow, projectCwd, options) => {
       validateLoadedWorkflowEntryContracts(
         workflow,
         options?.lookupCwd ?? projectCwd,
         options?.allowPathBasedCalls ?? true,
+        readContext,
       );
     },
   });
 }
 
-function loadValidatedWorkflowConfigEntry(entry: WorkflowDirEntry, cwd: string): WorkflowConfig {
-  const workflow = loadWorkflowForRuntime(entry, cwd);
-  validateLoadedWorkflowEntryContracts(workflow, cwd, true);
+function loadValidatedWorkflowConfigEntry(
+  entry: WorkflowDirEntry,
+  cwd: string,
+  readContext?: InternalWorkflowReadContext,
+): WorkflowConfig {
+  const workflow = loadWorkflowForRuntime(entry, cwd, readContext);
+  validateLoadedWorkflowEntryContracts(workflow, cwd, true, readContext);
   return workflow;
 }
 
 function loadValidatedStandaloneWorkflowEntry(
   entry: WorkflowDirEntry,
   cwd: string,
+  readContext?: InternalWorkflowReadContext,
 ): WorkflowDiscoveryConfig {
-  return buildWorkflowDiscoveryConfig(loadValidatedWorkflowConfigEntry(entry, cwd));
+  return buildWorkflowDiscoveryConfig(loadValidatedWorkflowConfigEntry(entry, cwd, readContext));
 }
 
 export function loadWorkflow(name: string, projectCwd: string): WorkflowConfig | null {
@@ -228,10 +266,41 @@ function loadRepertoireWorkflowByRef(
   projectCwd: string,
   callableArgs?: Record<string, string | string[]>,
   parentTrustInfo?: WorkflowTrustInfo,
+  readContext?: InternalWorkflowReadContext,
 ): WorkflowConfig | null {
   const scopeRef = parseScopeRef(identifier);
-  const workflowsDir = join(getRepertoireDir(), `@${scopeRef.owner}`, scopeRef.repo, 'workflows');
-  const filePath = resolveWorkflowFile(workflowsDir, scopeRef.name);
+  if (readContext === undefined) throw new WorkflowDiscoveryReadError();
+  const ownerDir = join(readContext.repertoireDir, `@${scopeRef.owner}`);
+  const packageDir = join(ownerDir, scopeRef.repo);
+  const workflowsDir = join(packageDir, 'workflows');
+  const assertRead = () => assertActiveRepertoireReadPermit(
+    readContext.permit,
+    readContext.globalConfigDir,
+  );
+  if (!assertCanonicalRepertoireDirectory(
+    ownerDir,
+    join(readContext.repertoireRealPath, `@${scopeRef.owner}`),
+    assertRead,
+  )) return null;
+  if (!assertCanonicalRepertoireDirectory(
+    packageDir,
+    join(readContext.repertoireRealPath, `@${scopeRef.owner}`, scopeRef.repo),
+    assertRead,
+  )) return null;
+  if (!assertCanonicalRepertoireDirectory(
+    workflowsDir,
+    join(readContext.repertoireRealPath, `@${scopeRef.owner}`, scopeRef.repo, 'workflows'),
+    assertRead,
+  )) return null;
+  const filePath = resolveWorkflowFileWithReadGuard(workflowsDir, scopeRef.name, assertRead, true);
+  if (filePath) {
+    assertCanonicalRepertoireFile(
+      filePath,
+      join(readContext.repertoireRealPath, `@${scopeRef.owner}`, scopeRef.repo, 'workflows', basename(filePath)),
+      assertRead,
+    );
+    assertRead();
+  }
   return filePath
     ? loadWorkflowFileWithResolutionOptions(filePath, {
       projectCwd,
@@ -249,9 +318,24 @@ export function validateWorkflowCallContracts(
   lookupCwd = projectCwd,
   options?: { allowPathBasedCalls?: boolean },
 ): void {
+  validateWorkflowCallContractsInternal(workflow, projectCwd, lookupCwd, options);
+}
+
+function validateWorkflowCallContractsInternal(
+  workflow: WorkflowConfig,
+  projectCwd: string,
+  lookupCwd = projectCwd,
+  options?: { allowPathBasedCalls?: boolean },
+  readContext?: InternalWorkflowReadContext,
+): void {
   validateWorkflowCallContractsImpl(workflow, projectCwd, {
     isWorkflowPath,
-    loadWorkflowByIdentifierForWorkflowCall,
+    loadWorkflowByIdentifierForWorkflowCall: (identifier, childProjectCwd, childOptions) => (
+      loadWorkflowByIdentifierForWorkflowCall(identifier, childProjectCwd, {
+        ...childOptions,
+        repertoireReadContext: readContext,
+      })
+    ),
   }, {
     lookupCwd,
     allowPathBasedCalls: options?.allowPathBasedCalls,
@@ -266,7 +350,13 @@ function loadWorkflowByIdentifierInternal(
   const lookupCwd = options?.lookupCwd ?? projectCwd;
   const basePath = options?.basePath ?? lookupCwd;
   const workflow = isScopeRef(identifier)
-    ? loadRepertoireWorkflowByRef(identifier, projectCwd, options?.callableArgs, options?.parentTrustInfo)
+    ? loadRepertoireWorkflowByRef(
+      identifier,
+      projectCwd,
+      options?.callableArgs,
+      options?.parentTrustInfo,
+      options?.repertoireReadContext,
+    )
     : isWorkflowPath(identifier)
       ? loadWorkflowFromPath(
         identifier,
@@ -290,6 +380,8 @@ function loadWorkflowByIdentifierInternal(
     projectCwd,
     lookupCwd,
     options?.skipWorkflowCallContractValidation === true,
+    true,
+    options?.repertoireReadContext,
   );
 }
 
@@ -298,6 +390,9 @@ export function loadWorkflowByIdentifier(
   projectCwd: string,
   options?: WorkflowLookupOptions,
 ): WorkflowConfig | null {
+  if (isScopeRef(identifier)) {
+    return loadRepertoireIdentifierWithImmediatePermit(identifier, projectCwd, options);
+  }
   return loadWorkflowByIdentifierInternal(identifier, projectCwd, options);
 }
 
@@ -306,7 +401,25 @@ export function loadWorkflowByIdentifierForWorkflowCall(
   projectCwd: string,
   options: InternalWorkflowLookupOptions,
 ): WorkflowConfig | null {
+  if (isScopeRef(identifier) && options.repertoireReadContext === undefined) {
+    return loadRepertoireIdentifierWithImmediatePermit(identifier, projectCwd, options);
+  }
   return loadWorkflowByIdentifierInternal(identifier, projectCwd, options);
+}
+
+function loadRepertoireIdentifierWithImmediatePermit(
+  identifier: string,
+  projectCwd: string,
+  options: InternalWorkflowLookupOptions | WorkflowLookupOptions | undefined,
+): WorkflowConfig | null {
+  const globalConfigDir = getGlobalConfigDir();
+  return withImmediateRepertoireReadPermit({
+    globalConfigDir,
+    operation: (permit) => loadWorkflowByIdentifierInternal(identifier, projectCwd, {
+      ...options,
+      repertoireReadContext: createInternalWorkflowReadContext(globalConfigDir, permit),
+    }),
+  });
 }
 
 export function loadAllWorkflowsWithSources(
@@ -347,18 +460,114 @@ export function loadAllStandaloneWorkflowsWithSources(
 }
 
 export function listWorkflowEntries(cwd: string, options?: LoadWorkflowsOptions): WorkflowDirEntry[] {
-  const dirs = getWorkflowDirs(cwd);
-  const entries = dirs.flatMap(({ dir, source, disabled }) => Array.from(iterateWorkflowDir(dir, source, disabled)));
-  entries.push(...listRepertoireWorkflowEntries());
-  return collectValidatedWorkflowEntries(entries, cwd, options, loadValidatedWorkflowEntry).map(({ entry }) => entry);
+  return listWorkflowEntriesWithLoader(cwd, options, loadValidatedWorkflowEntry);
 }
 
 export function listStandaloneWorkflowEntries(cwd: string, options?: LoadWorkflowsOptions): WorkflowDirEntry[] {
+  return listWorkflowEntriesWithLoader(cwd, options, loadValidatedStandaloneWorkflowEntry);
+}
+
+function listWorkflowEntriesWithLoader(
+  cwd: string,
+  options: LoadWorkflowsOptions | undefined,
+  loader: typeof loadValidatedWorkflowEntry | typeof loadValidatedStandaloneWorkflowEntry,
+): WorkflowDirEntry[] {
   const dirs = getWorkflowDirs(cwd);
-  const entries = dirs.flatMap(({ dir, source, disabled }) => Array.from(iterateWorkflowDir(dir, source, disabled)));
-  entries.push(...listRepertoireWorkflowEntries());
-  return collectValidatedWorkflowEntries(entries, cwd, options, loadValidatedStandaloneWorkflowEntry)
-    .map(({ entry }) => entry);
+  const globalConfigDir = getGlobalConfigDir();
+  const warnings: string[] = [];
+  const entries = withImmediateRepertoireReadPermit({
+    globalConfigDir,
+    operation: (permit) => {
+      const readContext = createInternalWorkflowReadContext(globalConfigDir, permit);
+      const candidates = dirs.flatMap(({ dir, source, disabled }) => (
+        Array.from(iterateWorkflowDir(dir, source, disabled))
+      ));
+      candidates.push(...listRepertoireWorkflowEntriesWithReadContext(readContext));
+      return collectValidatedWorkflowEntriesWithReadContext(
+        candidates,
+        cwd,
+        { onWarning: (message) => warnings.push(message) },
+        loader,
+        false,
+        readContext,
+      ).map(({ entry }) => entry);
+    },
+  });
+  for (const warning of warnings) options?.onWarning?.(warning);
+  return entries;
+}
+
+function assertEntryRead(
+  entry: WorkflowDirEntry,
+  readContext: InternalWorkflowReadContext | undefined,
+): void {
+  if (entry.source !== 'repertoire') return;
+  if (readContext === undefined) throw new WorkflowDiscoveryReadError();
+  assertActiveRepertoireReadPermit(readContext.permit, readContext.globalConfigDir);
+}
+
+function assertCanonicalRepertoireDirectory(
+  path: string,
+  expectedRealPath: string,
+  assertRead: () => void,
+): boolean {
+  const before = repertoireLstatOrMissing(path, assertRead);
+  if (before === undefined) return false;
+  if (!before.isDirectory() || before.isSymbolicLink()) throw new WorkflowDiscoveryReadError();
+  assertRead();
+  let resolved: string;
+  try {
+    resolved = realpathSync(path);
+  } catch {
+    throw new WorkflowDiscoveryReadError();
+  }
+  const after = repertoireLstatOrMissing(resolved, assertRead);
+  if (
+    after === undefined
+    || resolved !== expectedRealPath
+    || !sameIdentity(before, after)
+  ) throw new WorkflowDiscoveryReadError();
+  return true;
+}
+
+function assertCanonicalRepertoireFile(
+  path: string,
+  expectedRealPath: string,
+  assertRead: () => void,
+): void {
+  const before = repertoireLstatOrMissing(path, assertRead);
+  if (before === undefined || !before.isFile() || before.isSymbolicLink()) {
+    throw new WorkflowDiscoveryReadError();
+  }
+  assertRead();
+  let resolved: string;
+  try {
+    resolved = realpathSync(path);
+  } catch {
+    throw new WorkflowDiscoveryReadError();
+  }
+  if (resolved !== expectedRealPath) throw new WorkflowDiscoveryReadError();
+  const after = repertoireLstatOrMissing(resolved, assertRead);
+  if (after === undefined || !sameIdentity(before, after)) throw new WorkflowDiscoveryReadError();
+}
+
+function repertoireLstatOrMissing(path: string, assertRead: () => void): Stats | undefined {
+  assertRead();
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw new WorkflowDiscoveryReadError();
+  }
+}
+
+function sameIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function isMissing(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'ENOENT';
 }
 
 export function loadAllWorkflows(cwd: string, options?: LoadWorkflowsOptions): Map<string, WorkflowConfig> {
