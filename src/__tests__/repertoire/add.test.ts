@@ -10,10 +10,15 @@ const {
   mockReadFileSync,
   mockWriteFileSync,
   mockRmSync,
+  mockLstatSync,
+  mockRealpathSync,
   mockExecFileSync,
   mockResolveRef,
   mockResolveRepertoireConfigPath,
   mockAtomicReplace,
+  mockCleanupResiduals,
+  mockAcquireCoordinationLease,
+  mockReleaseCoordinationLease,
   secureTempDir,
 } = vi.hoisted(() => ({
   mockMkdtempSync: vi.fn(),
@@ -23,10 +28,15 @@ const {
   mockReadFileSync: vi.fn(),
   mockWriteFileSync: vi.fn(),
   mockRmSync: vi.fn(),
+  mockLstatSync: vi.fn(),
+  mockRealpathSync: vi.fn(),
   mockExecFileSync: vi.fn(),
   mockResolveRef: vi.fn(),
   mockResolveRepertoireConfigPath: vi.fn(),
   mockAtomicReplace: vi.fn(),
+  mockCleanupResiduals: vi.fn(),
+  mockAcquireCoordinationLease: vi.fn(),
+  mockReleaseCoordinationLease: vi.fn(),
   secureTempDir: '/secure/tmp/takt-import-a1b2c3',
 }));
 
@@ -39,6 +49,8 @@ vi.mock('node:fs', () => ({
     readFileSync: mockReadFileSync,
     writeFileSync: mockWriteFileSync,
     rmSync: mockRmSync,
+    lstatSync: mockLstatSync,
+    realpathSync: mockRealpathSync,
   },
   mkdtempSync: mockMkdtempSync,
   mkdirSync: mockMkdirSync,
@@ -47,6 +59,8 @@ vi.mock('node:fs', () => ({
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
   rmSync: mockRmSync,
+  lstatSync: mockLstatSync,
+  realpathSync: mockRealpathSync,
 }));
 
 vi.mock('node:child_process', () => ({
@@ -59,6 +73,7 @@ vi.mock('../../infra/config/paths.js', () => ({
   getProjectProviderOptionsDir: vi.fn(() => '/project/.takt/provider-options'),
   getRepertoireDir: vi.fn(() => '/home/user/.takt/repertoire'),
   getRepertoirePackageDir: vi.fn(() => '/home/user/.takt/repertoire/@owner/repo'),
+  getGlobalConfigDir: vi.fn(() => '/home/user/.takt'),
 }));
 
 vi.mock('../../infra/config/resolveWorkflowConfigValue.js', () => ({
@@ -94,8 +109,12 @@ vi.mock('../../features/repertoire/file-filter.js', () => ({
 }));
 
 vi.mock('../../features/repertoire/atomic-update.js', () => ({
-  cleanupResiduals: vi.fn(),
+  cleanupResiduals: mockCleanupResiduals,
   atomicReplace: mockAtomicReplace,
+}));
+
+vi.mock('../../features/repertoire/coordination-lease.js', () => ({
+  acquireRepertoireCoordinationLease: mockAcquireCoordinationLease,
 }));
 
 vi.mock('../../features/repertoire/pack-summary.js', () => ({
@@ -122,15 +141,26 @@ vi.mock('../../shared/utils/index.js', async (importOriginal) => ({
 import { repertoireAddCommand } from '../../commands/repertoire/add.js';
 import { collectCopyTargets } from '../../features/repertoire/file-filter.js';
 import { detectEditWorkflows } from '../../features/repertoire/pack-summary.js';
+import { cleanupResiduals } from '../../features/repertoire/atomic-update.js';
+import { confirm } from '../../shared/prompt/index.js';
 
 const mockCollectCopyTargets = vi.mocked(collectCopyTargets);
 const mockDetectEditWorkflows = vi.mocked(detectEditWorkflows);
+const mockConfirm = vi.mocked(confirm);
 
 describe('repertoireAddCommand temporary directory handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockMkdtempSync.mockReturnValue(secureTempDir);
-    mockExistsSync.mockImplementation((target: string) => target === secureTempDir);
+    mockExistsSync.mockImplementation((target: string) => (
+      target === secureTempDir || target === '/home/user/.takt/repertoire'
+    ));
+    mockLstatSync.mockReturnValue({ dev: 1, ino: 1, isDirectory: () => true });
+    mockRealpathSync.mockImplementation((target: string) => target);
+    mockAcquireCoordinationLease.mockResolvedValue({
+      mode: 'write',
+      release: mockReleaseCoordinationLease,
+    });
     mockReadFileSync.mockReturnValue('path: .');
     mockResolveRef.mockReturnValue('main');
     mockResolveRepertoireConfigPath.mockReturnValue(join(secureTempDir, 'extract', '.takt', 'takt-repertoire.yaml'));
@@ -236,5 +266,66 @@ describe('repertoireAddCommand temporary directory handling', () => {
         },
       },
     );
+  });
+
+  it('holds no writer lease during network and confirmation, then encloses every package mutation', async () => {
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      expect(mockAcquireCoordinationLease).not.toHaveBeenCalled();
+      if (args[0] === 'api') return Buffer.from('tarball');
+      if (args[0] === 'tvzf') {
+        return 'drwxr-xr-x 0 owner/repo 0 2026-06-01 12:00 owner-repo-deadbeef/\n';
+      }
+      return Buffer.from('');
+    });
+    mockConfirm.mockImplementation(async () => {
+      expect(mockAcquireCoordinationLease).not.toHaveBeenCalled();
+      return true;
+    });
+
+    await repertoireAddCommand('github:owner/repo@main');
+
+    expect(mockAcquireCoordinationLease).toHaveBeenCalledWith({
+      globalConfigDir: '/home/user/.takt',
+      mode: 'write',
+    });
+    expect(mockAcquireCoordinationLease.mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(cleanupResiduals).mock.invocationCallOrder[0]!);
+    expect(vi.mocked(cleanupResiduals).mock.invocationCallOrder[0])
+      .toBeLessThan(mockAtomicReplace.mock.invocationCallOrder[0]!);
+    expect(mockAtomicReplace.mock.invocationCallOrder[0])
+      .toBeLessThan(mockReleaseCoordinationLease.mock.invocationCallOrder[0]!);
+  });
+
+  it.each(['ABORTED', 'TIMEOUT', 'UNSAFE_STATE'])(
+    'performs no package mutation when writer acquisition fails with %s',
+    async (code) => {
+      mockAcquireCoordinationLease.mockRejectedValueOnce(Object.assign(new Error(code), { code }));
+
+      await expect(repertoireAddCommand('github:owner/repo@main')).rejects.toMatchObject({ code });
+
+      expect(mockCleanupResiduals).not.toHaveBeenCalled();
+      expect(mockAtomicReplace).not.toHaveBeenCalled();
+      expect(mockReleaseCoordinationLease).not.toHaveBeenCalled();
+    },
+  );
+
+  it('releases without mutation when package existence changes while waiting for the writer', async () => {
+    let leaseAcquired = false;
+    mockAcquireCoordinationLease.mockImplementationOnce(async () => {
+      leaseAcquired = true;
+      return { mode: 'write', release: mockReleaseCoordinationLease };
+    });
+    mockExistsSync.mockImplementation((target: string) => {
+      if (target === secureTempDir || target === '/home/user/.takt/repertoire') return true;
+      if (target === '/home/user/.takt/repertoire/@owner/repo') return leaseAcquired;
+      return false;
+    });
+
+    await expect(repertoireAddCommand('github:owner/repo@main'))
+      .rejects.toThrow(/changed while waiting/);
+
+    expect(mockCleanupResiduals).not.toHaveBeenCalled();
+    expect(mockAtomicReplace).not.toHaveBeenCalled();
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
 });
