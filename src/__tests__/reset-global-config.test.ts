@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resetGlobalConfigToTemplate } from '../infra/config/global/resetConfig.js';
@@ -43,7 +43,7 @@ describe('resetGlobalConfigToTemplate', () => {
   });
 
   it('should create config from default language template when config does not exist', () => {
-    rmSync(configPath, { force: true });
+    rmSync(taktDir, { recursive: true, force: true });
 
     const result = resetGlobalConfigToTemplate(new Date('2026-02-19T12:00:00Z'));
 
@@ -56,5 +56,14 @@ describe('resetGlobalConfigToTemplate', () => {
     const activeLines = newConfig.split('\n').filter(line => !line.startsWith('#') && line.trim() !== '');
     expect(activeLines.length).toBe(1);
     expect(activeLines[0]).toMatch(/^language: en/);
+    expect(lstatSync(taktDir).mode & 0o777).toBe(0o700);
+  });
+
+  it('should preserve an existing trusted 0755 global config directory', () => {
+    chmodSync(taktDir, 0o755);
+
+    resetGlobalConfigToTemplate(new Date('2026-02-19T12:00:00Z'));
+
+    expect(lstatSync(taktDir).mode & 0o777).toBe(0o755);
   });
 });
