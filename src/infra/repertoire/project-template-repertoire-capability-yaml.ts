@@ -1,17 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { TextDecoder, types } from 'node:util';
-import {
-  isAlias,
-  isMap,
-  isScalar,
-  isSeq,
-  parseDocument,
-  type Node,
-  type Pair,
-  type Scalar,
-  type YAMLMap,
-} from 'yaml';
+import { parseDocument } from 'yaml';
 
 const MAX_CAPABILITY_YAML_BYTES = 1024 * 1024;
 const MAX_CAPABILITY_YAML_NODES = 8192;
@@ -30,10 +20,6 @@ const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
   'buffer',
 )!.get!;
 const CAPTURED_PARSE_DOCUMENT = parseDocument;
-const CAPTURED_IS_ALIAS = isAlias;
-const CAPTURED_IS_MAP = isMap;
-const CAPTURED_IS_SCALAR = isScalar;
-const CAPTURED_IS_SEQ = isSeq;
 const CAPTURED_CREATE_HASH = createHash;
 const HASH_SAMPLE = CAPTURED_CREATE_HASH('sha256');
 const CAPTURED_HASH_UPDATE = HASH_SAMPLE.update;
@@ -42,7 +28,12 @@ const CAPTURED_REFLECT_APPLY = Reflect.apply;
 const CAPTURED_OBJECT_CREATE = Object.create;
 const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const CAPTURED_OBJECT_FREEZE = Object.freeze;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor;
+const CAPTURED_OBJECT_HAS_OWN = Object.hasOwn;
 const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_ARRAY_IS_ARRAY = Array.isArray;
+const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const CAPTURED_BUFFER_ALLOC_UNSAFE_SLOW = Buffer.allocUnsafeSlow;
 const CAPTURED_BUFFER_RECEIVER = Buffer;
 const CAPTURED_TEXT_DECODER_DECODE = TextDecoder.prototype.decode;
@@ -54,6 +45,12 @@ const CAPTURED_TYPES_IS_UINT8_ARRAY = types.isUint8Array;
 const CAPTURED_WEAK_SET_ADD = WeakSet.prototype.add;
 const CAPTURED_WEAK_SET_HAS = WeakSet.prototype.has;
 const CAPABILITY_YAML_ERRORS = new WeakSet<object>();
+const YAML_NODE_TYPE = Symbol.for('yaml.node.type');
+const YAML_ALIAS = Symbol.for('yaml.alias');
+const YAML_MAP = Symbol.for('yaml.map');
+const YAML_PAIR = Symbol.for('yaml.pair');
+const YAML_SCALAR = Symbol.for('yaml.scalar');
+const YAML_SEQ = Symbol.for('yaml.seq');
 let YAML_PARSE_ACTIVE = false;
 
 export type ProjectTemplateRepertoireCapabilityYamlKind =
@@ -270,91 +267,161 @@ interface InspectionBudget {
   nodes: number;
 }
 
-function scalarString(node: Node | null): string | undefined {
-  return node !== null
-    && CAPTURED_IS_SCALAR(node)
-    && typeof (node as Scalar).value === 'string'
-    ? (node as Scalar).value as string
-    : undefined;
+type YamlNodeKind = 'alias' | 'map' | 'pair' | 'scalar' | 'seq';
+
+function ownData(target: unknown, key: PropertyKey, required: boolean): unknown {
+  if (
+    typeof target !== 'object'
+    || target === null
+    || CAPTURED_TYPES_IS_PROXY(target)
+  ) throw failure('INVALID_YAML');
+  const descriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    CAPTURED_OBJECT_RECEIVER,
+    [target, key],
+  ) as PropertyDescriptor | undefined;
+  if (descriptor === undefined) {
+    if (required) throw failure('INVALID_YAML');
+    return undefined;
+  }
+  if (!CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_HAS_OWN,
+    CAPTURED_OBJECT_RECEIVER,
+    [descriptor, 'value'],
+  )) throw failure('INVALID_YAML');
+  return descriptor.value;
+}
+
+function nodeKind(node: unknown): YamlNodeKind {
+  const kind = ownData(node, YAML_NODE_TYPE, true);
+  if (kind === YAML_ALIAS) return 'alias';
+  if (kind === YAML_MAP) return 'map';
+  if (kind === YAML_PAIR) return 'pair';
+  if (kind === YAML_SCALAR) return 'scalar';
+  if (kind === YAML_SEQ) return 'seq';
+  throw failure('INVALID_YAML');
+}
+
+function arrayLength(value: unknown): number {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_TYPES_IS_PROXY(value)
+    || !CAPTURED_ARRAY_IS_ARRAY(value)
+  ) throw failure('INVALID_YAML');
+  const length = ownData(value, 'length', true);
+  if (!CAPTURED_NUMBER_IS_SAFE_INTEGER(length) || (length as number) < 0) {
+    throw failure('INVALID_YAML');
+  }
+  return length as number;
+}
+
+function arrayItem(value: unknown, index: number): unknown {
+  return ownData(value, index, true);
+}
+
+function scalarValue(node: unknown): unknown {
+  if (nodeKind(node) !== 'scalar') throw failure('INVALID_CAPABILITY_YAML');
+  return ownData(node, 'value', true);
+}
+
+function scalarString(node: unknown): string | undefined {
+  if (node === null || nodeKind(node) !== 'scalar') return undefined;
+  const value = ownData(node, 'value', true);
+  return typeof value === 'string' ? value : undefined;
 }
 
 function rejectUnsafeNode(
-  node: Node | null,
+  node: unknown,
   depth: number,
   budget: InspectionBudget,
 ): void {
   if (node === null) return;
   budget.nodes += 1;
+  const kind = nodeKind(node);
+  const anchor = ownData(node, 'anchor', false);
+  const tag = ownData(node, 'tag', false);
   if (
     budget.nodes > MAX_CAPABILITY_YAML_NODES
     || depth > MAX_CAPABILITY_YAML_DEPTH
-    || CAPTURED_IS_ALIAS(node)
-    || typeof node.anchor === 'string'
-    || (
-      typeof node.tag === 'string'
-      && CAPTURED_REFLECT_APPLY(
-        CAPTURED_STRING_CHAR_CODE_AT,
-        node.tag,
-        [0],
-      ) === 0x21
-    )
+    || kind === 'alias'
+    || (anchor !== undefined && anchor !== null)
+    // Why: an own tag is how `yaml` records both standard (`!!str`) and
+    // custom explicit tags; implicit nodes have no own `tag` property.
+    || (tag !== undefined && tag !== null)
   ) throw failure('INVALID_YAML');
-  if (CAPTURED_IS_SCALAR(node)) return;
-  if (CAPTURED_IS_SEQ(node)) {
-    for (let index = 0; index < node.items.length; index += 1) {
-      rejectUnsafeNode(node.items[index] as Node | null, depth + 1, budget);
+  if (kind === 'scalar') {
+    ownData(node, 'value', true);
+    return;
+  }
+  if (kind === 'seq') {
+    const items = ownData(node, 'items', true);
+    const length = arrayLength(items);
+    for (let index = 0; index < length; index += 1) {
+      rejectUnsafeNode(arrayItem(items, index), depth + 1, budget);
     }
     return;
   }
-  if (!CAPTURED_IS_MAP(node)) throw failure('INVALID_YAML');
-  for (let index = 0; index < node.items.length; index += 1) {
+  if (kind !== 'map') throw failure('INVALID_YAML');
+  const items = ownData(node, 'items', true);
+  const length = arrayLength(items);
+  for (let index = 0; index < length; index += 1) {
     budget.nodes += 1;
     if (budget.nodes > MAX_CAPABILITY_YAML_NODES) {
       throw failure('INVALID_YAML');
     }
-    const pair = node.items[index] as Pair<Node, Node>;
-    const key = scalarString(pair.key);
+    const pair = arrayItem(items, index);
+    if (nodeKind(pair) !== 'pair') throw failure('INVALID_YAML');
+    const pairKey = ownData(pair, 'key', true);
+    const pairValue = ownData(pair, 'value', true);
+    const key = scalarString(pairKey);
     if (key === undefined || key === '<<') throw failure('INVALID_YAML');
-    rejectUnsafeNode(pair.key, depth + 1, budget);
-    rejectUnsafeNode(pair.value, depth + 1, budget);
+    rejectUnsafeNode(pairKey, depth + 1, budget);
+    rejectUnsafeNode(pairValue, depth + 1, budget);
   }
 }
 
-function requireMap(node: Node | null): YAMLMap {
-  if (node === null || !CAPTURED_IS_MAP(node)) {
+function requireMap(node: unknown): object {
+  if (node === null || nodeKind(node) !== 'map') {
     throw failure('INVALID_CAPABILITY_YAML');
   }
-  return node;
+  return node as object;
 }
 
-function requireSequenceOfMaps(node: Node | null): void {
-  if (node === null || !CAPTURED_IS_SEQ(node)) {
+function requireSequenceOfMaps(node: unknown): void {
+  if (node === null || nodeKind(node) !== 'seq') {
     throw failure('INVALID_CAPABILITY_YAML');
   }
-  for (let index = 0; index < node.items.length; index += 1) {
-    requireMap(node.items[index] as Node | null);
+  const items = ownData(node, 'items', true);
+  const length = arrayLength(items);
+  for (let index = 0; index < length; index += 1) {
+    requireMap(arrayItem(items, index));
   }
 }
 
-function validateWorkflowShape(node: Node | null): void {
-  if (node === null || CAPTURED_IS_SCALAR(node)) return;
-  if (CAPTURED_IS_SEQ(node)) {
-    for (let index = 0; index < node.items.length; index += 1) {
-      validateWorkflowShape(node.items[index] as Node | null);
+function validateWorkflowShape(node: unknown): void {
+  if (node === null || nodeKind(node) === 'scalar') return;
+  if (nodeKind(node) === 'seq') {
+    const items = ownData(node, 'items', true);
+    const length = arrayLength(items);
+    for (let index = 0; index < length; index += 1) {
+      validateWorkflowShape(arrayItem(items, index));
     }
     return;
   }
   const mapping = requireMap(node);
-  for (let index = 0; index < mapping.items.length; index += 1) {
-    const pair = mapping.items[index] as Pair<Node, Node>;
-    const key = scalarString(pair.key)!;
-    const value = pair.value;
+  const items = ownData(mapping, 'items', true);
+  const length = arrayLength(items);
+  for (let index = 0; index < length; index += 1) {
+    const pair = arrayItem(items, index);
+    if (nodeKind(pair) !== 'pair') throw failure('INVALID_YAML');
+    const key = scalarString(ownData(pair, 'key', true));
+    if (key === undefined) throw failure('INVALID_YAML');
+    const value = ownData(pair, 'value', true);
     if (key === 'edit') {
-      if (
-        value === null
-        || !CAPTURED_IS_SCALAR(value)
-        || typeof (value as Scalar).value !== 'boolean'
-      ) throw failure('INVALID_CAPABILITY_YAML');
+      if (value === null || typeof scalarValue(value) !== 'boolean') {
+        throw failure('INVALID_CAPABILITY_YAML');
+      }
     } else if (key === 'required_permission_mode') {
       if (scalarString(value) === undefined) {
         throw failure('INVALID_CAPABILITY_YAML');
@@ -371,11 +438,14 @@ function validateWorkflowShape(node: Node | null): void {
   }
 }
 
-function validateProviderOptionsShape(root: YAMLMap): void {
-  for (let index = 0; index < root.items.length; index += 1) {
-    const pair = root.items[index] as Pair<Node, Node>;
-    if (scalarString(pair.key) !== 'extends') continue;
-    const value = scalarString(pair.value);
+function validateProviderOptionsShape(root: object): void {
+  const items = ownData(root, 'items', true);
+  const length = arrayLength(items);
+  for (let index = 0; index < length; index += 1) {
+    const pair = arrayItem(items, index);
+    if (nodeKind(pair) !== 'pair') throw failure('INVALID_YAML');
+    if (scalarString(ownData(pair, 'key', true)) !== 'extends') continue;
+    const value = scalarString(ownData(pair, 'value', true));
     if (
       value === undefined
       || CAPTURED_REFLECT_APPLY(CAPTURED_STRING_TRIM, value, []) === ''
@@ -403,27 +473,32 @@ export function parseProjectTemplateRepertoireCapabilityYaml(
   const bytes = copyBoundedBytes(value);
   const text = decodeText(bytes);
   const digest = sha256(bytes);
-  let document: ReturnType<typeof parseDocument>;
   YAML_PARSE_ACTIVE = true;
   try {
-    document = CAPTURED_PARSE_DOCUMENT(text, {
+    const document: unknown = CAPTURED_PARSE_DOCUMENT(text, {
       strict: true,
       uniqueKeys: true,
       prettyErrors: false,
       keepSourceTokens: false,
     });
-  } catch {
+    const errors = ownData(document, 'errors', true);
+    const warnings = ownData(document, 'warnings', true);
+    if (arrayLength(errors) !== 0 || arrayLength(warnings) !== 0) {
+      throw failure('INVALID_YAML');
+    }
+    const contents = ownData(document, 'contents', true);
+    rejectUnsafeNode(contents, 0, { nodes: 0 });
+    const root = requireMap(contents);
+    if (kind === 'workflow') validateWorkflowShape(root);
+    else validateProviderOptionsShape(root);
+    return freeze({ text, sha256: digest }) as
+      ProjectTemplateRepertoireCapabilityYaml;
+  } catch (error) {
+    if (isFailure(error)) throw error;
+    // Why: parser and AST validation are an untrusted error boundary; raw
+    // thrown values may contain source bytes or hostile getter secrets.
     throw failure('INVALID_YAML');
   } finally {
     YAML_PARSE_ACTIVE = false;
   }
-  if (document.errors.length !== 0 || document.warnings.length !== 0) {
-    throw failure('INVALID_YAML');
-  }
-  rejectUnsafeNode(document.contents as Node | null, 0, { nodes: 0 });
-  const root = requireMap(document.contents as Node | null);
-  if (kind === 'workflow') validateWorkflowShape(root);
-  else validateProviderOptionsShape(root);
-  return freeze({ text, sha256: digest }) as
-    ProjectTemplateRepertoireCapabilityYaml;
 }

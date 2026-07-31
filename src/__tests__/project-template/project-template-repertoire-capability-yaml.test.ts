@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
+import { YAMLMap, YAMLSeq } from 'yaml';
 import {
   parseProjectTemplateRepertoireCapabilityYaml,
   ProjectTemplateRepertoireCapabilityYamlError,
@@ -85,6 +86,8 @@ describe('project template repertoire capability YAML G3.3.1', () => {
     ['anchor', 'steps: &shared []\n'],
     ['merge', 'steps:\n  - <<: {}\n'],
     ['custom tag', 'steps: !custom []\n'],
+    ['standard sequence tag', 'steps: !!seq []\n'],
+    ['standard scalar tag', 'name: !!str inspect\nsteps: []\n'],
     ['multi document', 'steps: []\n---\nsteps: []\n'],
     ['non-string key', '? [bad]\n: value\n'],
   ])('rejects unsafe YAML feature: %s', (_label, yaml) => {
@@ -206,6 +209,98 @@ describe('project template repertoire capability YAML G3.3.1', () => {
     expect(failure).toMatchObject({ code: 'INVALID_YAML' });
     expect(String(failure)).not.toContain(secret);
     expect((failure as Error).cause).toBeUndefined();
+    expect(parseProjectTemplateRepertoireCapabilityYaml(
+      bytes('steps: []\n'),
+      'workflow',
+    )).toMatchObject({ text: 'steps: []\n' });
+  });
+
+  it('does not invoke prototype getters that can rewrite invalid root items', () => {
+    const replacement = new YAMLSeq();
+    const original = Object.getOwnPropertyDescriptor(
+      YAMLMap.prototype,
+      'anchor',
+    );
+    let validationGetterCalls = 0;
+    try {
+      Object.defineProperty(YAMLMap.prototype, 'anchor', {
+        configurable: true,
+        get() {
+          if (new Error().stack?.includes('rejectUnsafeNode')) {
+            validationGetterCalls += 1;
+            const items = Object.getOwnPropertyDescriptor(this, 'items')
+              ?.value as unknown[] | undefined;
+            const pair = items?.[0] as { value?: unknown } | undefined;
+            if (pair !== undefined) pair.value = replacement;
+          }
+          return undefined;
+        },
+      });
+      expect(() => parseProjectTemplateRepertoireCapabilityYaml(
+        bytes('steps: invalid\n'),
+        'workflow',
+      )).toThrow(expect.objectContaining({
+        code: 'INVALID_CAPABILITY_YAML',
+      }));
+    } finally {
+      if (original === undefined) delete (YAMLMap.prototype as { anchor?: unknown })
+        .anchor;
+      else Object.defineProperty(YAMLMap.prototype, 'anchor', original);
+    }
+    expect(validationGetterCalls).toBe(0);
+  });
+
+  it('redacts hostile post-parser accessors and releases the guard', () => {
+    const secret = 'secret-post-parser-accessor';
+    const originalPush = Array.prototype.push;
+    let armed = false;
+    try {
+      Array.prototype.push = function guardedPush(...values: unknown[]) {
+        for (const candidate of values) {
+          if (
+            armed
+            || typeof candidate !== 'object'
+            || candidate === null
+          ) continue;
+          const key = Object.getOwnPropertyDescriptor(candidate, 'key')?.value;
+          const keyValue = typeof key === 'object' && key !== null
+            ? Object.getOwnPropertyDescriptor(key, 'value')?.value
+            : undefined;
+          const value = Object.getOwnPropertyDescriptor(candidate, 'value')
+            ?.value;
+          if (keyValue !== 'steps' || value === undefined) continue;
+          armed = true;
+          Object.defineProperty(candidate, 'value', {
+            configurable: true,
+            enumerable: true,
+            get() {
+              const stack = new Error().stack ?? '';
+              if (
+                stack.includes('rejectUnsafeNode')
+                || stack.includes('validateWorkflowShape')
+              ) throw new Error(secret);
+              return value;
+            },
+          });
+        }
+        return Reflect.apply(originalPush, this, values) as number;
+      };
+      let thrown: unknown;
+      try {
+        parseProjectTemplateRepertoireCapabilityYaml(
+          bytes('steps: []\n'),
+          'workflow',
+        );
+      } catch (error) {
+        thrown = error;
+      }
+      expect(armed).toBe(true);
+      expect(thrown).toMatchObject({ code: 'INVALID_YAML' });
+      expect(String(thrown)).not.toContain(secret);
+      expect((thrown as Error).cause).toBeUndefined();
+    } finally {
+      Array.prototype.push = originalPush;
+    }
     expect(parseProjectTemplateRepertoireCapabilityYaml(
       bytes('steps: []\n'),
       'workflow',
