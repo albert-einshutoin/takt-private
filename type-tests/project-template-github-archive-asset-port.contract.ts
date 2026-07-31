@@ -68,3 +68,75 @@ const extraDependency: ProjectTemplateGithubArchiveAssetPortDependencies = {
   unexpected: true,
 };
 void extraDependency;
+
+const badAcquireReturn: ProjectTemplateGithubArchiveAssetPortDependencies = {
+  now: () => 1,
+  setTimer: () => ({}),
+  clearTimer: () => undefined,
+  // @ts-expect-error Credential acquisition is always asynchronous.
+  acquireCredential: () => Object.freeze({
+    dispose: () => undefined,
+  }),
+  createAttempt: () => {
+    throw new Error('unreachable');
+  },
+};
+void badAcquireReturn;
+
+const badAcquireOptions: ProjectTemplateGithubArchiveAssetPortDependencies = {
+  now: () => 1,
+  setTimer: () => ({}),
+  clearTimer: () => undefined,
+  // @ts-expect-error Authentication options cannot be narrowed to a string.
+  acquireCredential: (_options: string) => Promise.resolve(Object.freeze({
+    dispose: () => undefined,
+  })),
+  createAttempt: () => {
+    throw new Error('unreachable');
+  },
+};
+void badAcquireOptions;
+
+const badCreateCredential:
+ProjectTemplateGithubArchiveAssetPortDependencies = {
+  now: () => 1,
+  setTimer: () => ({}),
+  clearTimer: () => undefined,
+  acquireCredential: async () => Object.freeze({
+    dispose: () => undefined,
+  }),
+  // @ts-expect-error Attempt factories must accept the disposable credential.
+  createAttempt: (_credential: string) => {
+    throw new Error('unreachable');
+  },
+};
+void badCreateCredential;
+
+const badCreateInput: ProjectTemplateGithubArchiveAssetPortDependencies = {
+  now: () => 1,
+  setTimer: () => ({}),
+  clearTimer: () => undefined,
+  acquireCredential: async () => Object.freeze({
+    dispose: () => undefined,
+  }),
+  // @ts-expect-error Attempt factories must accept the exact archive input.
+  createAttempt: (_credential, _input: string) => {
+    throw new Error('unreachable');
+  },
+};
+void badCreateInput;
+
+const badCreateReturn: ProjectTemplateGithubArchiveAssetPortDependencies = {
+  now: () => 1,
+  setTimer: () => ({}),
+  clearTimer: () => undefined,
+  acquireCredential: async () => Object.freeze({
+    dispose: () => undefined,
+  }),
+  // @ts-expect-error Inner attempts are nominal capabilities, not structures.
+  createAttempt: () => Object.freeze({
+    pull: () => undefined,
+    dispose: () => undefined,
+  }),
+};
+void badCreateReturn;

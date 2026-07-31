@@ -22,6 +22,12 @@ const INPUT = Object.freeze({
   maxBytes: 1024,
 } satisfies GithubTemplateArchiveAssetInput);
 
+interface TimerControl {
+  readonly callback: () => void;
+  readonly delayMs: number;
+  clearCount: number;
+}
+
 describe('project-template GitHub archive asset port D5 composition', () => {
   it('remains fully cold through factory, open, and iterator creation', () => {
     const dependencies = controlledDependencies();
@@ -243,6 +249,137 @@ describe('project-template GitHub archive asset port D5 composition', () => {
     },
   );
 
+  it('keeps D1 ABORTED authoritative and clears both active timers once', async () => {
+    const controller = new AbortController();
+    const value = lifecycleHarness({
+      deadlineMs: 200_000,
+      signal: controller.signal,
+    });
+    const pending = value.iterator.next();
+    await Promise.resolve();
+
+    expect(value.timers.map(({ delayMs }) => delayMs)).toEqual([
+      199_899,
+      119_999,
+    ]);
+    controller.abort('SECRET_SENTINEL');
+    const error = await pending.catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({ code: 'ABORTED' });
+    expect(String(error)).not.toContain('SECRET_SENTINEL');
+    expect(value.timers.map(({ clearCount }) => clearCount)).toEqual([1, 1]);
+    expect(value.attemptDispose).toHaveBeenCalledTimes(1);
+    expect(value.credentialDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the shared D1 deadline authoritative over an active attempt', async () => {
+    const value = lifecycleHarness({ deadlineMs: 10_000 });
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    expect(value.timers).toHaveLength(1);
+
+    value.setNow(10_000);
+    value.timers[0]!.callback();
+    const error = await pending.catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({ code: 'TIMEOUT' });
+    expect(value.attemptDispose).toHaveBeenCalledTimes(1);
+    expect(value.credentialDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes a credential that arrives after D1 ABORTED exactly once', async () => {
+    const controller = new AbortController();
+    const value = lifecycleHarness({
+      deadlineMs: 200_000,
+      signal: controller.signal,
+      deferCredential: true,
+    });
+    const pending = value.iterator.next();
+
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(value.timers.map(({ delayMs }) => delayMs)).toEqual([
+      199_899,
+      119_999,
+    ]);
+    expect(value.timers.map(({ clearCount }) => clearCount)).toEqual([1, 1]);
+    value.resolveCredential();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(value.createAttempt).not.toHaveBeenCalled();
+    expect(value.attemptDispose).not.toHaveBeenCalled();
+    expect(value.credentialDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['now', 'createAttempt'] as const)(
+    'redacts a throwing %s dependency at the public boundary',
+    async (hook) => {
+      const dependencies = controlledDependencies();
+      const throwing = () => {
+        throw new Error('SECRET_SENTINEL');
+      };
+      const iterator = createProjectTemplateGithubArchiveAssetPort(
+        Object.freeze({ deadlineMs: 10_000 }),
+        Object.freeze({
+          ...dependencies.value,
+          [hook]: throwing,
+        }),
+      ).openReleaseAsset(INPUT)[Symbol.asyncIterator]();
+
+      const error = await iterator.next().catch((reason: unknown) => reason);
+
+      expect(error).toMatchObject({ code: 'BRIDGE_FAILURE' });
+      expect(String(error)).not.toContain('SECRET_SENTINEL');
+    },
+  );
+
+  it('redacts a D4 setTimer failure after D1 arms its timer', async () => {
+    const dependencies = controlledDependencies();
+    const setTimer = vi.fn()
+      .mockReturnValueOnce(Object.freeze({ d1: true }))
+      .mockImplementationOnce(() => {
+        throw new Error('SECRET_SENTINEL');
+      });
+    const iterator = createProjectTemplateGithubArchiveAssetPort(
+      Object.freeze({ deadlineMs: 200_000 }),
+      Object.freeze({ ...dependencies.value, setTimer }),
+    ).openReleaseAsset(INPUT)[Symbol.asyncIterator]();
+
+    const error = await iterator.next().catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({ code: 'BRIDGE_FAILURE' });
+    expect(String(error)).not.toContain('SECRET_SENTINEL');
+    expect(setTimer).toHaveBeenCalledTimes(2);
+  });
+
+  it('redacts a throwing clearTimer dependency during active abort', async () => {
+    const controller = new AbortController();
+    const dependencies = controlledDependencies();
+    const clearTimer = vi.fn(() => {
+      throw new Error('SECRET_SENTINEL');
+    });
+    const iterator = createProjectTemplateGithubArchiveAssetPort(
+      Object.freeze({ deadlineMs: 200_000 }),
+      Object.freeze({
+        ...dependencies.value,
+        clearTimer,
+        acquireCredential: () => new Promise(() => {}),
+      }),
+    ).openReleaseAsset({
+      ...INPUT,
+      signal: controller.signal,
+    })[Symbol.asyncIterator]();
+    const pending = iterator.next();
+
+    controller.abort();
+    const error = await pending.catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({ code: 'ABORTED' });
+    expect(String(error)).not.toContain('SECRET_SENTINEL');
+    expect(clearTimer).toHaveBeenCalledTimes(2);
+  });
+
   it('creates the default port without activating authentication or timers', () => {
     const port = createProjectTemplateGithubArchiveAssetPort(
       Object.freeze({ deadlineMs: 10_000 }),
@@ -251,6 +388,78 @@ describe('project-template GitHub archive asset port D5 composition', () => {
     expect(() => port.openReleaseAsset(INPUT)).not.toThrow();
   });
 });
+
+function lifecycleHarness(options: {
+  readonly deadlineMs: number;
+  readonly signal?: AbortSignal;
+  readonly deferCredential?: boolean;
+}): {
+  readonly iterator: AsyncIterator<Uint8Array>;
+  readonly timers: TimerControl[];
+  readonly createAttempt: ReturnType<typeof vi.fn>;
+  readonly attemptDispose: ReturnType<typeof vi.fn>;
+  readonly credentialDispose: ReturnType<typeof vi.fn>;
+  readonly resolveCredential: () => void;
+  readonly setNow: (value: number) => void;
+} {
+  let now = 100;
+  let resolveCredential: (
+    value: DisposableProjectTemplateGhCredential,
+  ) => void = () => undefined;
+  const timers: TimerControl[] = [];
+  const credentialDispose = vi.fn(() => undefined);
+  const credential = Object.freeze({
+    dispose: credentialDispose,
+  }) satisfies DisposableProjectTemplateGhCredential;
+  const attemptDispose = vi.fn(() => undefined);
+  const attempt = Object.freeze({
+    pull(): undefined {
+      return undefined;
+    },
+    dispose: attemptDispose,
+  }) as unknown as ProjectTemplateArtifactSingleAttempt;
+  const createAttempt = vi.fn(() => attempt);
+  const dependencies =
+    Object.freeze<ProjectTemplateGithubArchiveAssetPortDependencies>({
+      now: () => now,
+      setTimer: (callback, delayMs) => {
+        const timer = { callback, delayMs, clearCount: 0 };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimer: (handle) => {
+        (handle as TimerControl).clearCount += 1;
+        return undefined;
+      },
+      acquireCredential: () => (
+        options.deferCredential === true
+          ? new Promise((resolve) => {
+            resolveCredential = resolve;
+          })
+          : Promise.resolve(credential)
+      ),
+      createAttempt,
+    });
+  const input = Object.freeze({
+    ...INPUT,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  const iterator = createProjectTemplateGithubArchiveAssetPort(
+    Object.freeze({ deadlineMs: options.deadlineMs }),
+    dependencies,
+  ).openReleaseAsset(input)[Symbol.asyncIterator]();
+  return {
+    iterator,
+    timers,
+    createAttempt,
+    attemptDispose,
+    credentialDispose,
+    resolveCredential: () => resolveCredential(credential),
+    setNow(value) {
+      now = value;
+    },
+  };
+}
 
 function controlledDependencies(): {
   readonly value: ProjectTemplateGithubArchiveAssetPortDependencies;
