@@ -533,7 +533,7 @@ function parseApprovalRecord(
     record.schemaVersion !== '1.0'
     || typeof record.approvalId !== 'string'
     || typeof record.nonce !== 'string'
-    || (record.decision !== 'approved' && record.decision !== 'rejected')
+    || record.decision !== 'approved'
     || record.context !== APPROVAL_CONTEXT
     || typeof record.projectIdentity !== 'string'
     || typeof record.previewId !== 'string'

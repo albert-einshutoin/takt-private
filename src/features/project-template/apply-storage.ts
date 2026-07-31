@@ -14,6 +14,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { TextDecoder } from 'node:util';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import {
   isProjectTemplatePrivateDirectoryMode,
@@ -39,10 +40,11 @@ const MAX_APPROVAL_BYTES = 64 * 1024;
 const CONTROL_GITIGNORE_CONTENT = Buffer.from(PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT);
 const CAPTURED_BUFFER_FROM = Buffer.from;
 const CAPTURED_BUFFER_RECEIVER = Buffer;
-const CAPTURED_BUFFER_TO_STRING = Buffer.prototype.toString;
 const CAPTURED_JSON_PARSE = JSON.parse;
 const CAPTURED_JSON_RECEIVER = JSON;
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const APPROVAL_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
+const CAPTURED_TEXT_DECODER_DECODE = TextDecoder.prototype.decode;
 
 export type ProjectTemplateApplyStorageIoOperation =
   | 'lstat'
@@ -238,13 +240,13 @@ export async function readProjectTemplateApprovalRecord(options: {
     CAPTURED_JSON_PARSE,
     CAPTURED_JSON_RECEIVER,
     [CAPTURED_REFLECT_APPLY(
-      CAPTURED_BUFFER_TO_STRING,
-      await options.storage.io.readPrivateFile(
+      CAPTURED_TEXT_DECODER_DECODE,
+      APPROVAL_UTF8_DECODER,
+      [await options.storage.io.readPrivateFile(
         approvalPath,
         MAX_APPROVAL_BYTES,
         options.storage.device,
-      ),
-      ['utf8'],
+      )],
     )],
   ) as unknown;
 }

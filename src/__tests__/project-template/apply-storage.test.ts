@@ -23,10 +23,12 @@ import {
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
   pruneProjectTemplateBackupGenerations,
+  readProjectTemplateApprovalRecord,
   readProjectTemplateBackupManifest,
   removeProjectTemplateBackupGeneration,
   removeProjectTemplateStagingTransaction,
   writeProjectTemplateApplyJournal,
+  writeProjectTemplateApprovalRecord,
   writeProjectTemplateBackupManifest,
   writeProjectTemplateStagingFile,
   type ProjectTemplateApplyJournal,
@@ -81,6 +83,26 @@ afterEach(() => {
 });
 
 describe('project template apply storage', () => {
+  it('rejects non-UTF-8 approval bytes instead of replacement-decoding them', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    const approvalId = 'approval-invalid-utf8';
+    await writeProjectTemplateApprovalRecord({
+      storage,
+      approvalId,
+      record: { schemaVersion: '1.0' },
+    });
+    writeFileSync(join(
+      storage.controlRoot,
+      'approvals',
+      `${approvalId}.json`,
+    ), Buffer.from([
+      0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d, 0x0a,
+    ]), { mode: 0o600 });
+
+    await expect(readProjectTemplateApprovalRecord({ storage, approvalId }))
+      .rejects.toThrow();
+  });
+
   it('writes exact approval claim bytes without mutable serialization hooks', async () => {
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
     const approvalId = 'approval-claim-audit';

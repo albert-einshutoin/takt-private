@@ -1192,8 +1192,13 @@ describe('project template revocable preview approval authority G6.2', () => {
     );
     const originalParse = JSON.parse;
     const originalToString = Buffer.prototype.toString;
+    const bufferPrototype = Buffer.prototype as Buffer & {
+      utf8Slice(start?: number, end?: number): string;
+    };
+    const originalUtf8Slice = bufferPrototype.utf8Slice;
     let parseHooks = 0;
     let bufferHooks = 0;
+    let utf8SliceHooks = 0;
     Object.defineProperty(JSON, 'parse', {
       configurable: true,
       writable: true,
@@ -1208,6 +1213,17 @@ describe('project template revocable preview approval authority G6.2', () => {
       value(this: Buffer, encoding?: BufferEncoding) {
         bufferHooks += 1;
         const actual = originalToString.call(this, encoding);
+        return actual.includes('tampered')
+          ? JSON.stringify(tamperedOriginal)
+          : JSON.stringify(regularOriginal);
+      },
+    });
+    Object.defineProperty(Buffer.prototype, 'utf8Slice', {
+      configurable: true,
+      writable: true,
+      value(this: Buffer, start?: number, end?: number) {
+        utf8SliceHooks += 1;
+        const actual = originalUtf8Slice.call(this, start, end);
         return actual.includes('tampered')
           ? JSON.stringify(tamperedOriginal)
           : JSON.stringify(regularOriginal);
@@ -1239,10 +1255,19 @@ describe('project template revocable preview approval authority G6.2', () => {
         writable: true,
         value: originalToString,
       });
+      Object.defineProperty(Buffer.prototype, 'utf8Slice', {
+        configurable: true,
+        writable: true,
+        value: originalUtf8Slice,
+      });
     }
 
     expect({ tampered, regular }).toEqual({ tampered: false, regular: true });
-    expect({ parseHooks, bufferHooks }).toEqual({ parseHooks: 0, bufferHooks: 0 });
+    expect({ parseHooks, bufferHooks, utf8SliceHooks }).toEqual({
+      parseHooks: 0,
+      bufferHooks: 0,
+      utf8SliceHooks: 0,
+    });
   });
 
   it('validates every durable record field before object coercion', async () => {
