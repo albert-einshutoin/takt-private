@@ -752,13 +752,16 @@ describe('project-template artifact download D4 retry bridge', () => {
         { credential: credential.credential },
       ) as Promise<DisposableProjectTemplateGhCredential>,
     );
-    expect(Reflect.ownKeys(promise).filter(
+    const instrumentationDescriptions = Reflect.ownKeys(promise).filter(
       (key) => typeof key === 'symbol',
-    ).map((key) => key.description)).toEqual([
-      'async_id_symbol',
-      'trigger_async_id_symbol',
-      'kResourceStore',
-    ]);
+    ).map((key) => key.description);
+    if (instrumentationDescriptions.length > 0) {
+      expect(instrumentationDescriptions).toEqual([
+        'async_id_symbol',
+        'trigger_async_id_symbol',
+        'kResourceStore',
+      ]);
+    }
     const value = harness(1_000_000, {
       unmockedAcquire: true,
       acquireCredential: () => promise,
@@ -788,7 +791,12 @@ describe('project-template artifact download D4 retry bridge', () => {
       (key): key is symbol => (
         typeof key === 'symbol' && key.description === 'kResourceStore'
       ),
-    )!;
+    );
+    if (resourceStore === undefined) {
+      // Node 22+ no longer exposes ALS data as own Promise symbols.
+      storage.disable();
+      return;
+    }
     const storeTrap = vi.fn(() => {
       throw new Error('SECRET resource store');
     });
@@ -832,7 +840,12 @@ describe('project-template artifact download D4 retry bridge', () => {
         (key): key is symbol => (
           typeof key === 'symbol' && key.description === description
         ),
-      )!;
+      );
+      if (symbol === undefined) {
+        // Node 22+ no longer exposes the Node 20 instrumentation boundary.
+        storage.disable();
+        return;
+      }
       const valueTrap = vi.fn(() => {
         throw new Error('SECRET async instrumentation value');
       });
@@ -911,7 +924,7 @@ describe('project-template artifact download D4 retry bridge', () => {
     },
   );
 
-  it('rejects a duplicate instrumentation symbol description', async () => {
+  it('rejects a forged resource-store symbol identity', async () => {
     const credential = controlledCredential();
     const storage = new AsyncLocalStorage<object>();
     const promise = storage.run(
@@ -930,6 +943,43 @@ describe('project-template artifact download D4 retry bridge', () => {
     await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
     expect(value.createAttempt).not.toHaveBeenCalled();
     storage.disable();
+  });
+
+  it('accepts multiple genuine AsyncLocalStorage resource stores', async () => {
+    const credential = controlledCredential();
+    const outerStorage = new AsyncLocalStorage<object>();
+    const innerStorage = new AsyncLocalStorage<object>();
+    const promise = outerStorage.run(
+      Object.freeze({ trace: 'outer' }),
+      () => innerStorage.run(
+        Object.freeze({ trace: 'inner' }),
+        () => Promise.resolve(credential.credential),
+      ),
+    );
+    const instrumentationDescriptions = Reflect.ownKeys(promise).filter(
+      (key) => typeof key === 'symbol',
+    ).map((key) => key.description);
+    if (instrumentationDescriptions.length > 0) {
+      expect(instrumentationDescriptions).toEqual([
+        'async_id_symbol',
+        'trigger_async_id_symbol',
+        'kResourceStore',
+        'kResourceStore',
+      ]);
+    }
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    value.attempts[0]!.settlement!.chunk(Uint8Array.from([9]));
+    await expect(pending).resolves.toMatchObject({ done: false });
+    await value.iterator.return!();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
+    outerStorage.disable();
+    innerStorage.disable();
   });
 
   it('rejects hostile Promise descriptors without invoking their traps', async () => {

@@ -869,16 +869,13 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (descriptor === undefined || !('value' in descriptor)) return true;
         const description = key.description;
-        if (
-          description === undefined
-          || symbolDescriptions.has(description)
-        ) return true;
-        symbolDescriptions.add(description);
         if (description === 'kResourceStore') return false;
         if (
           description !== 'async_id_symbol'
           && description !== 'trigger_async_id_symbol'
         ) return true;
+        if (symbolDescriptions.has(description)) return true;
+        symbolDescriptions.add(description);
         const instrumentationId = descriptor.value;
         return (
           typeof instrumentationId !== 'number'
@@ -896,12 +893,13 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
     // consumes the async IDs while attaching/running reactions, so accepting
     // arbitrary values here could execute a hostile Proxy inside async_hooks.
     // IDs therefore stay finite safe integers, while the opaque resource store
-    // is deliberately never inspected. Unknown, duplicate, and accessor
-    // symbols fail closed before a reaction is attached. A fresh captured-
-    // intrinsic Promise identifies Node's process-local symbol identities, so
-    // a user-created Symbol with a trusted-looking description is rejected.
-    // Descriptor flags are unrestricted because Node 20 emits enumerable,
-    // writable entries.
+    // is deliberately never inspected. Multiple AsyncLocalStorage instances
+    // legitimately add distinct kResourceStore symbols, while async/trigger
+    // IDs remain unique. Unknown IDs and accessors fail closed before a
+    // reaction is attached. A fresh captured-intrinsic Promise identifies
+    // Node's process-local symbol identities, so a user-created Symbol with a
+    // trusted-looking description is rejected. Descriptor flags are
+    // unrestricted because Node 20 emits enumerable, writable entries.
 
     // A dependency may execute in another VM realm, so identity against this
     // realm's Promise.prototype would reject a genuine native Promise. Native
