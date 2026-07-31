@@ -780,6 +780,27 @@ describe('project-template artifact download D4 retry bridge', () => {
     storage.disable();
   });
 
+  it('accepts an ALS Promise after its storage is disabled', async () => {
+    const credential = controlledCredential();
+    const storage = new AsyncLocalStorage<object>();
+    const promise = storage.run(
+      Object.freeze({ trace: 'test' }),
+      () => Promise.resolve(credential.credential),
+    );
+    storage.disable();
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    value.attempts[0]!.settlement!.chunk(Uint8Array.from([8]));
+    await expect(pending).resolves.toMatchObject({ done: false });
+    await value.iterator.return!();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
+  });
+
   it('does not inspect the AsyncLocalStorage resource store during settlement', async () => {
     const credential = controlledCredential();
     const storage = new AsyncLocalStorage<object>();
@@ -899,41 +920,45 @@ describe('project-template artifact download D4 retry bridge', () => {
     },
   );
 
-  it.each([
-    Symbol('unknown'),
-    Symbol('async_id_symbol'),
-    Symbol('trigger_async_id_symbol'),
-    Symbol('kResourceStore'),
-  ])(
-    'rejects an unknown instrumentation symbol identity',
-    async (symbol) => {
-      const credential = controlledCredential();
-      const promise = Promise.resolve(credential.credential);
-      Object.defineProperty(promise, symbol, {
-        configurable: true,
-        value: 1,
-      });
-      const value = harness(1_000_000, {
-        unmockedAcquire: true,
-        acquireCredential: () => promise,
-      });
-
-      await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
-      expect(value.createAttempt).not.toHaveBeenCalled();
-      expect(credential.dispose).not.toHaveBeenCalled();
-    },
-  );
-
-  it('rejects a forged resource-store symbol identity', async () => {
+  it('accepts harmless forged allowlisted symbols without reading stores', async () => {
     const credential = controlledCredential();
-    const storage = new AsyncLocalStorage<object>();
-    const promise = storage.run(
-      Object.freeze({ trace: 'test' }),
-      () => Promise.resolve(credential.credential),
-    );
-    Object.defineProperty(promise, Symbol('kResourceStore'), {
+    const promise = Promise.resolve(credential.credential);
+    const storeTrap = vi.fn(() => {
+      throw new Error('SECRET forged resource store');
+    });
+    for (const [description, symbolValue] of [
+      ['async_id_symbol', 1],
+      ['trigger_async_id_symbol', 0],
+      [
+        'kResourceStore',
+        new Proxy(Object.freeze({}), { get: storeTrap }),
+      ],
+    ] as const) {
+      Object.defineProperty(promise, Symbol(description), {
+        configurable: true,
+        value: symbolValue,
+      });
+    }
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    value.attempts[0]!.settlement!.chunk(Uint8Array.from([9]));
+    await expect(pending).resolves.toMatchObject({ done: false });
+    await value.iterator.return!();
+    expect(storeTrap).not.toHaveBeenCalled();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an unknown instrumentation symbol', async () => {
+    const credential = controlledCredential();
+    const promise = Promise.resolve(credential.credential);
+    Object.defineProperty(promise, Symbol('unknown'), {
       configurable: true,
-      value: Object.freeze({}),
+      value: 1,
     });
     const value = harness(1_000_000, {
       unmockedAcquire: true,
@@ -942,7 +967,47 @@ describe('project-template artifact download D4 retry bridge', () => {
 
     await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
     expect(value.createAttempt).not.toHaveBeenCalled();
-    storage.disable();
+    expect(credential.dispose).not.toHaveBeenCalled();
+  });
+
+  it('uses the captured intrinsic Symbol description getter', async () => {
+    const credential = controlledCredential();
+    const promise = Promise.resolve(credential.credential);
+    Object.defineProperty(promise, Symbol('async_id_symbol'), {
+      configurable: true,
+      value: 1,
+    });
+    const originalDescription = Object.getOwnPropertyDescriptor(
+      Symbol.prototype,
+      'description',
+    )!;
+    const descriptionTrap = vi.fn(() => {
+      throw new Error('SECRET symbol description');
+    });
+    Object.defineProperty(Symbol.prototype, 'description', {
+      ...originalDescription,
+      get: descriptionTrap,
+    });
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    try {
+      const pending = value.iterator.next();
+      await Promise.resolve();
+      value.attempts[0]!.settlement!.chunk(Uint8Array.from([9]));
+      await expect(pending).resolves.toMatchObject({ done: false });
+      await value.iterator.return!();
+    } finally {
+      Object.defineProperty(
+        Symbol.prototype,
+        'description',
+        originalDescription,
+      );
+    }
+    expect(descriptionTrap).not.toHaveBeenCalled();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('accepts multiple genuine AsyncLocalStorage resource stores', async () => {

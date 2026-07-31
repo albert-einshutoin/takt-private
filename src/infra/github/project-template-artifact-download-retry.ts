@@ -36,10 +36,12 @@ const MAX_TRANSACTIONAL_TIMER_ARMS = 8;
 const TIMER_SETUP_MARGIN_MS = 1;
 const RETRY_DELAYS_MS = Object.freeze([0, 250, 1_000] as const);
 const MAX_PROMISE_INSTRUMENTATION_SYMBOLS = 8;
-const NativePromise = Promise;
-const NATIVE_PROMISE_RESOLVE = Promise.resolve;
 const NATIVE_PROMISE_THEN = Promise.prototype.then;
 const FUNCTION_TO_STRING = Function.prototype.toString;
+const SYMBOL_DESCRIPTION_GETTER = Object.getOwnPropertyDescriptor(
+  Symbol.prototype,
+  'description',
+)?.get;
 const NATIVE_PROMISE_CONSTRUCTOR_SOURCE = Reflect.apply(
   FUNCTION_TO_STRING,
   Promise,
@@ -846,29 +848,23 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
     || !types.isPromise(value)
   ) return false;
   try {
+    if (SYMBOL_DESCRIPTION_GETTER === undefined) return false;
     const valueKeys = Reflect.ownKeys(value);
     const symbolKeys = valueKeys.filter(
       (key): key is symbol => typeof key === 'symbol',
-    );
-    const instrumentationProbe = Reflect.apply(
-      NATIVE_PROMISE_RESOLVE,
-      NativePromise,
-      [undefined],
-    );
-    const nativeInstrumentationSymbols = new Set(
-      Reflect.ownKeys(instrumentationProbe).filter(
-        (key): key is symbol => typeof key === 'symbol',
-      ),
     );
     const symbolDescriptions = new Set<string>();
     if (
       valueKeys.some((key) => typeof key === 'string')
       || symbolKeys.length > MAX_PROMISE_INSTRUMENTATION_SYMBOLS
       || symbolKeys.some((key) => {
-        if (!nativeInstrumentationSymbols.has(key)) return true;
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (descriptor === undefined || !('value' in descriptor)) return true;
-        const description = key.description;
+        const description = Reflect.apply(
+          SYMBOL_DESCRIPTION_GETTER,
+          key,
+          [],
+        ) as unknown;
         if (description === 'kResourceStore') return false;
         if (
           description !== 'async_id_symbol'
@@ -896,10 +892,13 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
     // is deliberately never inspected. Multiple AsyncLocalStorage instances
     // legitimately add distinct kResourceStore symbols, while async/trigger
     // IDs remain unique. Unknown IDs and accessors fail closed before a
-    // reaction is attached. A fresh captured-intrinsic Promise identifies
-    // Node's process-local symbol identities, so a user-created Symbol with a
-    // trusted-looking description is rejected. Descriptor flags are
-    // unrestricted because Node 20 emits enumerable, writable entries.
+    // reaction is attached. A forged allowlisted Symbol identity is harmless:
+    // Node never consumes it, while a stale genuine identity is still safe
+    // because async IDs are checked non-coercively and resource-store values
+    // are never read. The captured intrinsic description getter prevents
+    // mutable Symbol.prototype access from widening the allowlist. Descriptor
+    // flags are unrestricted because Node 20 emits enumerable, writable
+    // entries.
 
     // A dependency may execute in another VM realm, so identity against this
     // realm's Promise.prototype would reject a genuine native Promise. Native
