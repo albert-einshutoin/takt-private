@@ -10,6 +10,7 @@ import { mergeProviderOptions, normalizeProviderOptions } from '../providerOptio
 import type { FacetResolutionContext } from './workflowPackageScope.js';
 import {
   readResourceText,
+  hasCoordinatedRepertoireContext,
   isRepertoireResourcePath,
   resourceExists,
   resourceIsSymlink,
@@ -209,7 +210,7 @@ export function resolveWorkflowProviderOptionsWithHost(
   host: WorkflowProviderOptionsResolutionHost,
 ): StepProviderOptions | undefined {
   const fallback = host.fileAccess ?? nodeFileAccess;
-  const fileAccess: ProviderOptionsFileAccess = host.context?.repertoireDir
+  const fileAccess: ProviderOptionsFileAccess = hasCoordinatedRepertoireContext(host.context)
     ? {
         exists: (path) => isRepertoireResourcePath(path, host.context)
           ? resourceExists(path, host.context)

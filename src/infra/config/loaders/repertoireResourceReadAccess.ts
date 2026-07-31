@@ -107,7 +107,11 @@ export function isRepertoireResourcePath(path: string, context?: FacetResolution
   const repertoireDir = resolve(context.repertoireDir);
   const candidatePath = resolve(path);
   if (isInsideOrEqual(repertoireDir, candidatePath)) return true;
-  if (repertoireDir !== resolve(getRepertoireDir()) || !existsSync(path)) return false;
+  if (
+    repertoireDir !== resolve(getRepertoireDir())
+    || !existsSync(repertoireDir)
+    || !existsSync(path)
+  ) return false;
   let canonicalPath: string;
   let canonicalRepertoireDir: string;
   try {
@@ -118,6 +122,15 @@ export function isRepertoireResourcePath(path: string, context?: FacetResolution
   }
   if (isInsideOrEqual(canonicalRepertoireDir, canonicalPath)) throw failed();
   return false;
+}
+
+/** True only for the process-owned root or a capability minted by this module. */
+export function hasCoordinatedRepertoireContext(context?: FacetResolutionContext): boolean {
+  if (!context?.repertoireDir) return false;
+  if (resolve(context.repertoireDir) === resolve(getRepertoireDir())) return true;
+  const access = context.repertoireReadAccess;
+  return access !== undefined
+    && (safeReflectApply(safeWeakSetHasMethod, trustedAccesses, [access]) as boolean);
 }
 
 function getRequiredRepertoireAccess(
