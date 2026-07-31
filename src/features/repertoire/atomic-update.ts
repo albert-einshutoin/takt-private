@@ -8,6 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -22,6 +23,8 @@ const PRIVATE_FILE_MODE = 0o600;
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
 const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
+const safeStatsIsFileMethod = Stats.prototype.isFile;
+const safeArraySortMethod = Array.prototype.sort;
 
 export class AtomicUpdateRecoveryError extends Error {
   readonly code = 'RECOVERY_REQUIRED' as const;
@@ -63,8 +66,9 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
     mkdirSync(packageDir, { mode: PRIVATE_DIRECTORY_MODE });
     try {
       await install(packageDir);
-      writeCompletionWitness(packageDir);
+      syncInstalledTree(packageDir);
       captureDirectoryTreeProof(packageDir, globalConfigDir);
+      writeCompletionWitness(packageDir);
       syncDirectory(packageDir);
       syncDirectory(dirname(packageDir));
     } catch {
@@ -112,6 +116,35 @@ function readOptionalTree(path: string, containmentRoot: string): TreeProof | un
 function writeCompletionWitness(packageDir: string): void {
   const path = `${packageDir}/.takt-install-complete`;
   writeFileSync(path, 'complete\n', { flag: 'wx', mode: PRIVATE_FILE_MODE });
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function syncInstalledTree(directory: string): void {
+  const entries = readdirSync(directory);
+  safeReflectApply(safeArraySortMethod, entries, []);
+  for (let index = 0; index < entries.length; index += 1) {
+    const path = `${directory}/${entries[index]!}`;
+    const stat = lstatSync(path);
+    if (safeReflectApply(safeStatsIsSymbolicLinkMethod, stat, [])) throw recoveryRequired();
+    if (safeReflectApply(safeStatsIsDirectoryMethod, stat, [])) {
+      syncInstalledTree(path);
+    } else if (safeReflectApply(safeStatsIsFileMethod, stat, [])) {
+      syncFile(path);
+    } else {
+      throw recoveryRequired();
+    }
+  }
+  // Post-order fsync makes every nested directory entry durable before its
+  // parent and before the completion witness is allowed to exist.
+  syncDirectory(directory);
+}
+
+function syncFile(path: string): void {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     fsyncSync(fd);

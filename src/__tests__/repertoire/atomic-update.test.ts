@@ -54,4 +54,21 @@ describe('atomicReplace durable publication', () => {
     expect(transactions.some((entry) => existsSync(join(transactionsRoot, entry, 'payload', 'old.yaml')))).toBe(true);
     expect(transactions.some((entry) => existsSync(join(transactionsRoot, entry, 'partial', 'partial.yaml')))).toBe(true);
   });
+
+  it('does not create a completion witness when the installed tree proof fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-atomic-'));
+    roots.push(root);
+    const packageDir = join(root, 'repertoire', '@owner', 'repo');
+    await expect(atomicReplace({
+      globalConfigDir: root,
+      packageDir,
+      install: async (reserved) => {
+        // A FIFO/socket-like unsupported entry is represented by a directory
+        // symlink here and must fail before the witness mutation.
+        const { symlinkSync } = await import('node:fs');
+        symlinkSync(root, join(reserved, 'unstable'));
+      },
+    })).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+    expect(existsSync(join(packageDir, '.takt-install-complete'))).toBe(false);
+  });
 });
