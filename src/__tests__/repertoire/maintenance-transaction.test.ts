@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureDirectoryTreeProof } from '../../features/repertoire/filesystem-proof.js';
@@ -126,6 +126,34 @@ describe('detachToMaintenance', () => {
       complete: [],
       incomplete: [transaction],
     });
+  });
+
+  it('keeps a completed transaction valid after recursive copy to another root', () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'takt-maintenance-portable-a-'));
+    const destinationRoot = mkdtempSync(join(tmpdir(), 'takt-maintenance-portable-b-'));
+    roots.push(sourceRoot, destinationRoot);
+    const packageDir = join(sourceRoot, 'repertoire', '@owner', 'repo');
+    mkdirSync(join(packageDir, 'nested'), { recursive: true });
+    writeFileSync(join(packageDir, 'nested', 'workflow.yaml'), 'name: portable');
+    detachToMaintenance({
+      globalConfigDir: sourceRoot,
+      sourceDir: packageDir,
+      containmentRoot: sourceRoot,
+      expected: captureDirectoryTreeProof(packageDir, sourceRoot),
+      kind: 'payload',
+    });
+    cpSync(
+      join(sourceRoot, '.repertoire-maintenance'),
+      join(destinationRoot, '.repertoire-maintenance'),
+      { recursive: true },
+    );
+
+    const copied = classifyMaintenanceTransactions(destinationRoot);
+    expect(copied.complete).toHaveLength(1);
+    expect(copied.incomplete).toEqual([]);
+
+    writeFileSync(join(copied.complete[0]!, 'payload', 'nested', 'workflow.yaml'), 'tampered');
+    expect(classifyMaintenanceTransactions(destinationRoot).incomplete).toHaveLength(1);
   });
 
   it.each([
