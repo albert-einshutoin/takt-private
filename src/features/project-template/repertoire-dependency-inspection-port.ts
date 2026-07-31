@@ -34,6 +34,8 @@ const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const CAPTURED_STRING = String;
 const CAPTURED_OBJECT_FREEZE = Object.freeze;
 const CAPTURED_OBJECT_CREATE = Object.create;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor;
 const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
   Object.getOwnPropertyDescriptors;
 const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
@@ -303,7 +305,10 @@ function exactOwnDataRecord(
     Object,
     [null],
   ) as Record<string, unknown>;
-  for (const key of keys) {
+  // Why: `for...of` would consult a mutable Array iterator after module init,
+  // allowing reentry before this exact-record snapshot is complete.
+  for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+    const key = keys[keyIndex]!;
     const descriptor = descriptors[key];
     if (
       typeof key !== 'string'
@@ -323,6 +328,7 @@ function exactOwnDataRecord(
 function exactOwnDataArray(
   value: unknown,
   expectedLength?: number,
+  maxLength?: number,
 ): unknown[] {
   if (
     !CAPTURED_ARRAY_IS_ARRAY(value)
@@ -333,12 +339,13 @@ function exactOwnDataArray(
       [value],
     ) !== CAPTURED_ARRAY_PROTOTYPE
   ) throw new Error();
-  const descriptors = CAPTURED_REFLECT_APPLY(
-    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+  // Why: expected-length and bounded-capability failures must precede an
+  // attacker-sized descriptor enumeration.
+  const lengthDescriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
     Object,
-    [value],
-  ) as unknown as DescriptorMap;
-  const lengthDescriptor = descriptors['length'];
+    [value, 'length'],
+  ) as PropertyDescriptor | undefined;
   if (
     lengthDescriptor === undefined
     || !('value' in lengthDescriptor)
@@ -348,8 +355,23 @@ function exactOwnDataArray(
       expectedLength !== undefined
       && lengthDescriptor.value !== expectedLength
     )
+    || (
+      maxLength !== undefined
+      && lengthDescriptor.value > maxLength
+    )
   ) throw new Error();
   const length = lengthDescriptor.value as number;
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    Object,
+    [value],
+  ) as unknown as DescriptorMap;
+  const snapshottedLengthDescriptor = descriptors['length'];
+  if (
+    snapshottedLengthDescriptor === undefined
+    || !('value' in snapshottedLengthDescriptor)
+    || snapshottedLengthDescriptor.value !== length
+  ) throw new Error();
   const keys = CAPTURED_REFLECT_APPLY(
     CAPTURED_REFLECT_OWN_KEYS,
     Reflect,
@@ -368,7 +390,8 @@ function exactOwnDataArray(
       [descriptor.value],
     );
   }
-  for (const key of keys) {
+  for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+    const key = keys[keyIndex]!;
     if (
       key !== 'length'
       && (
@@ -405,7 +428,8 @@ function snapshotSignal(value: unknown): AbortSignal | undefined {
   ) as PropertyKey[];
   // Node carries private symbol-backed AbortSignal slots. Permit only symbol
   // data slots; caller-visible string fields and accessors remain forbidden.
-  for (const key of keys) {
+  for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+    const key = keys[keyIndex]!;
     const descriptor = descriptors[key];
     if (
       typeof key !== 'symbol'
@@ -544,7 +568,7 @@ function snapshotOptions(value: unknown): InspectionOptions {
 function snapshotCapabilities(
   value: unknown,
 ): readonly ProjectTemplateRepertoireCapabilityV1[] {
-  const capabilities = exactOwnDataArray(value);
+  const capabilities = exactOwnDataArray(value, undefined, 1);
   if (
     capabilities.length > 1
     || (capabilities.length === 1 && capabilities[0] !== 'edit')
@@ -664,6 +688,7 @@ function snapshotRawResult(
     ) throw new Error();
     const rawObservations = exactOwnDataArray(
       raw['observations'],
+      dependencies.length,
       dependencies.length,
     );
     const observations =

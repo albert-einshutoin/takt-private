@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import Ajv from 'ajv';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ProjectTemplateValidationError } from '../../features/project-template/errors.js';
 import { parseProjectTemplateManifest } from '../../features/project-template/manifest.js';
 import {
@@ -164,6 +164,65 @@ describe('project template source descriptor', () => {
     expect(invalidFailure).toMatchObject({
       name: 'ProjectTemplateValidationError',
       code: 'INVALID_SOURCE',
+    });
+  });
+
+  it('rejects an oversized dependency array before descriptor enumeration', async () => {
+    const oversized: unknown[] = [];
+    oversized.length = 1_000_000_000;
+    let hostileLengthCalls = 0;
+    const hostileLength = new Proxy([], {
+      getOwnPropertyDescriptor(target, key) {
+        if (key === 'length') hostileLengthCalls += 1;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const originalDescriptors = Object.getOwnPropertyDescriptors;
+    let descriptorCalls = 0;
+    Object.getOwnPropertyDescriptors = ((value: object) => {
+      if (value === oversized) descriptorCalls += 1;
+      return originalDescriptors(value);
+    }) as typeof Object.getOwnPropertyDescriptors;
+    vi.resetModules();
+    let fresh;
+    try {
+      fresh = await import(
+        '../../features/project-template/source-descriptor.js'
+      );
+    } finally {
+      Object.getOwnPropertyDescriptors = originalDescriptors;
+    }
+
+    const originalIterator = Array.prototype[Symbol.iterator];
+    let iteratorCalls = 0;
+    let failure: unknown;
+    let hostileFailure: unknown;
+    try {
+      Array.prototype[Symbol.iterator] = function poisonedIterator(): never {
+        iteratorCalls += 1;
+        throw new Error('oversized dependency iterator invoked');
+      };
+      fresh.parseProjectTemplateRepertoireDependencies(oversized);
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      fresh.parseProjectTemplateRepertoireDependencies(hostileLength);
+    } catch (error) {
+      hostileFailure = error;
+    } finally {
+      Array.prototype[Symbol.iterator] = originalIterator;
+    }
+    expect(descriptorCalls).toBe(0);
+    expect(iteratorCalls).toBe(0);
+    expect(hostileLengthCalls).toBe(0);
+    expect(failure).toMatchObject({
+      name: 'ProjectTemplateValidationError',
+      code: 'LIMIT_EXCEEDED',
+    });
+    expect(hostileFailure).toMatchObject({
+      name: 'ProjectTemplateValidationError',
+      code: 'NON_PLAIN_OBJECT',
     });
   });
 

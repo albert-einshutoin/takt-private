@@ -215,6 +215,206 @@ describe('project template repertoire dependency inspection authority G2', () =>
     expect(verified?.observations[0]?.scope).toBe('@acme/repertoire');
   });
 
+  it('does not traverse inspection keys through a poisoned Array iterator', () => {
+    const originalIterator = Array.prototype[Symbol.iterator];
+    const validOptions = {
+      request: request() as never,
+      port: portReturning(rawResult()),
+    };
+    const invalidOptions = {
+      request: request({ manifestSha256: 'A'.repeat(64) }) as never,
+      port: portReturning(rawResult()),
+    };
+    const reentryOptions = {
+      request: request({ dependencies: [] }) as never,
+      port: portReturning(rawResult([])),
+    };
+    let iteratorCalls = 0;
+    let reentryCalls = 0;
+    let attemptedReentry = false;
+    let reentryInspection:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let verified:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let invalidFailure: unknown;
+
+    try {
+      Array.prototype[Symbol.iterator] = function poisonedIterator() {
+        iteratorCalls += 1;
+        if (!attemptedReentry) {
+          attemptedReentry = true;
+          reentryCalls += 1;
+          try {
+            reentryInspection =
+              inspectProjectTemplateRepertoireDependencies(reentryOptions);
+          } catch {
+            // Calling the nested inspection boundary is itself the violation.
+          }
+        }
+        return Reflect.apply(originalIterator, this, []);
+      };
+      verified = inspectProjectTemplateRepertoireDependencies(validOptions);
+      try {
+        inspectProjectTemplateRepertoireDependencies(invalidOptions);
+      } catch (error) {
+        invalidFailure = error;
+      }
+    } finally {
+      Array.prototype[Symbol.iterator] = originalIterator;
+    }
+
+    const reentryMinted = reentryInspection !== undefined;
+    if (reentryInspection !== undefined) {
+      disposeProjectTemplateRepertoireDependencyInspection(
+        reentryInspection,
+      );
+    }
+    expect(iteratorCalls).toBe(0);
+    expect(reentryCalls).toBe(0);
+    expect(reentryMinted).toBe(false);
+    expect(invalidFailure).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    const claim =
+      claimProjectTemplateRepertoireDependencyInspectionForPlanning(verified);
+    const snapshot =
+      consumeProjectTemplateRepertoireDependencyInspectionPlanningClaim(
+        claim,
+      );
+    expect(snapshot.observations[0]?.scope).toBe('@acme/repertoire');
+  });
+
+  it('cannot hide an unexpected key through a poisoned Array iterator', () => {
+    const originalIterator = Array.prototype[Symbol.iterator];
+    const options = {
+      request: request() as never,
+      port: portReturning(rawResult()),
+      unexpected: true,
+    };
+    let iteratorCalls = 0;
+    let inspection:
+      ReturnType<typeof inspectProjectTemplateRepertoireDependencies>
+      | undefined;
+    let failure: unknown;
+    try {
+      Array.prototype[Symbol.iterator] = function filteredIterator() {
+        iteratorCalls += 1;
+        const values = this;
+        let index = 0;
+        return {
+          next(): IteratorResult<unknown> {
+            while (index < values.length) {
+              const value = values[index];
+              index += 1;
+              if (value === 'unexpected') continue;
+              return { done: false, value };
+            }
+            return { done: true, value: undefined };
+          },
+        };
+      };
+      try {
+        inspection = inspectProjectTemplateRepertoireDependencies(
+          options as never,
+        );
+      } catch (error) {
+        failure = error;
+      }
+    } finally {
+      Array.prototype[Symbol.iterator] = originalIterator;
+    }
+    if (inspection !== undefined) {
+      disposeProjectTemplateRepertoireDependencyInspection(inspection);
+    }
+    expect(iteratorCalls).toBe(0);
+    expect(inspection).toBeUndefined();
+    expect(failure).toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('fails array lengths before enumerating oversized bridge values', async () => {
+    const oversizedObservations: unknown[] = [];
+    oversizedObservations.length = 1_000_000_000;
+    const oversizedCapabilities: unknown[] = [];
+    oversizedCapabilities.length = 1_000_000_000;
+    let hostileLengthCalls = 0;
+    const hostileObservations = new Proxy([], {
+      getOwnPropertyDescriptor(target, key) {
+        if (key === 'length') hostileLengthCalls += 1;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const originalDescriptors = Object.getOwnPropertyDescriptors;
+    let observationDescriptorCalls = 0;
+    let capabilityDescriptorCalls = 0;
+    Object.getOwnPropertyDescriptors = ((value: object) => {
+      if (value === oversizedObservations) {
+        observationDescriptorCalls += 1;
+      }
+      if (value === oversizedCapabilities) {
+        capabilityDescriptorCalls += 1;
+      }
+      return originalDescriptors(value);
+    }) as typeof Object.getOwnPropertyDescriptors;
+    vi.resetModules();
+    let fresh;
+    try {
+      fresh = await import(
+        '../../features/project-template/repertoire-dependency-inspection-port.js'
+      );
+    } finally {
+      Object.getOwnPropertyDescriptors = originalDescriptors;
+    }
+
+    const originalIterator = Array.prototype[Symbol.iterator];
+    let iteratorCalls = 0;
+    let mismatchFailure: unknown;
+    let capabilityFailure: unknown;
+    let hostileFailure: unknown;
+    try {
+      Array.prototype[Symbol.iterator] = function poisonedIterator(): never {
+        iteratorCalls += 1;
+        throw new Error('oversized bridge iterator invoked');
+      };
+      try {
+        fresh.inspectProjectTemplateRepertoireDependencies({
+          request: request() as never,
+          port: portReturning(rawResult(oversizedObservations)),
+        });
+      } catch (error) {
+        mismatchFailure = error;
+      }
+      try {
+        fresh.inspectProjectTemplateRepertoireDependencies({
+          request: request() as never,
+          port: portReturning(rawResult([
+            installedObservation('@acme/repertoire', {
+              capabilities: oversizedCapabilities,
+            }),
+          ])),
+        });
+      } catch (error) {
+        capabilityFailure = error;
+      }
+      try {
+        fresh.inspectProjectTemplateRepertoireDependencies({
+          request: request() as never,
+          port: portReturning(rawResult(hostileObservations)),
+        });
+      } catch (error) {
+        hostileFailure = error;
+      }
+    } finally {
+      Array.prototype[Symbol.iterator] = originalIterator;
+    }
+    expect(observationDescriptorCalls).toBe(0);
+    expect(capabilityDescriptorCalls).toBe(0);
+    expect(iteratorCalls).toBe(0);
+    expect(hostileLengthCalls).toBe(0);
+    expect(mismatchFailure).toMatchObject({ code: 'BRIDGE_FAILURE' });
+    expect(capabilityFailure).toMatchObject({ code: 'BRIDGE_FAILURE' });
+    expect(hostileFailure).toMatchObject({ code: 'BRIDGE_FAILURE' });
+  });
+
   it.each([
     ['undefined options', undefined],
     ['array options', []],

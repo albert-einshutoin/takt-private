@@ -48,6 +48,8 @@ const INTRINSIC_NUMBER = Number;
 const INTRINSIC_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const INTRINSIC_OBJECT_CREATE = Object.create;
 const INTRINSIC_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const INTRINSIC_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor;
 const INTRINSIC_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
   Object.getOwnPropertyDescriptors;
 const INTRINSIC_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
@@ -278,6 +280,17 @@ function dependencyDescriptors(value: object): DependencyDescriptorMap {
   ) as unknown as DependencyDescriptorMap;
 }
 
+function dependencyOwnPropertyDescriptor(
+  value: object,
+  key: PropertyKey,
+): PropertyDescriptor | undefined {
+  return INTRINSIC_REFLECT_APPLY(
+    INTRINSIC_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    Object,
+    [value, key],
+  ) as PropertyDescriptor | undefined;
+}
+
 function dependencyOwnKeys(
   descriptors: DependencyDescriptorMap,
 ): PropertyKey[] {
@@ -340,8 +353,9 @@ function snapshotDependencyArray(
   ) {
     invalidSource(field, `${field} must be a plain array`);
   }
-  const descriptors = dependencyDescriptors(value);
-  const lengthDescriptor = descriptors['length'];
+  // Why: establish the bounded work limit before enumerating every own
+  // descriptor. A huge dense array must fail without proportional allocation.
+  const lengthDescriptor = dependencyOwnPropertyDescriptor(value, 'length');
   if (
     lengthDescriptor === undefined
     || !('value' in lengthDescriptor)
@@ -357,6 +371,15 @@ function snapshotDependencyArray(
       `${field} exceeds the ${maxItems} item limit`,
       field,
     );
+  }
+  const descriptors = dependencyDescriptors(value);
+  const snapshottedLengthDescriptor = descriptors['length'];
+  if (
+    snapshottedLengthDescriptor === undefined
+    || !('value' in snapshottedLengthDescriptor)
+    || snapshottedLengthDescriptor.value !== length
+  ) {
+    nonPlainDependency(field, `${field} must have a stable data length`);
   }
   const keys = dependencyOwnKeys(descriptors);
   if (keys.length !== length + 1) {
