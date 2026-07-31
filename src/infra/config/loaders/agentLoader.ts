@@ -76,7 +76,7 @@ function alignBasePathSpelling(allowedBase: string, personaPath: string): string
       || isAbsolute(relativeCanonicalPath)
     ) return allowedBase;
     let alignedBase = personaPath;
-    for (const _segment of relativeCanonicalPath.split(sep)) {
+    for (let remainingSegments = relativeCanonicalPath.split(sep).length; remainingSegments > 0; remainingSegments -= 1) {
       alignedBase = dirname(alignedBase);
     }
     return alignedBase;
