@@ -36,6 +36,7 @@ import { createRepertoireResourceReadAccess } from '../infra/config/loaders/repe
 import { resolveWorkflowProviderOptionsWithHost } from '../infra/config/loaders/workflowProviderOptionsResolver.js';
 import { executeTaskWorkflow } from '../features/tasks/execute/taskWorkflowExecution.js';
 import { resolveProjectTemplateRunStartMutexPath } from '../features/project-template/apply-guard.js';
+import { resolveWorkflowCallTarget } from '../infra/config/loaders/workflowCallResolver.js';
 
 const SAMPLE_WORKFLOW = `name: coordinated-workflow
 description: coordinated workflow
@@ -279,6 +280,43 @@ ${stepFields}`);
     }, (() => thenable) as never)).rejects.toMatchObject({ code: 'WORKFLOW_DISCOVERY_FAILED' });
     expect(adopted).toBe(false);
     expect(existsSync(resolveProjectTemplateRunStartMutexPath(projectDir))).toBe(false);
+  });
+
+  it('releases the child resolution permit before nested execution can begin', async () => {
+    const childPath = createRepertoireWorkflow('child');
+    writeFileSync(childPath, `${SAMPLE_WORKFLOW}\nsubworkflow:\n  callable: true\n`);
+    const parentDir = join(projectDir, '.takt', 'workflows');
+    mkdirSync(parentDir, { recursive: true });
+    writeFileSync(join(parentDir, 'parent.yaml'), `name: parent
+initial_step: delegate
+max_steps: 1
+steps:
+  - name: delegate
+    kind: workflow_call
+    call: "@owner/repo/child"
+    rules:
+      - condition: COMPLETE
+        next: COMPLETE
+      - condition: ABORT
+        next: ABORT
+`);
+    const parent = loadWorkflowByIdentifier('parent', projectDir);
+    expect(parent).not.toBeNull();
+
+    const child = resolveWorkflowCallTarget(
+      parent!,
+      '@owner/repo/child',
+      'delegate',
+      projectDir,
+    );
+    expect(child?.name).toBe('coordinated-workflow');
+
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+      timeoutMs: 250,
+    });
+    writer.release();
   });
 
   it('blocks project workflow facet, persona, and provider reads behind a writer', async () => {
