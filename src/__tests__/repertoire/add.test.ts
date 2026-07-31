@@ -424,6 +424,15 @@ describe('repertoireAddCommand temporary directory handling', () => {
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
 
+  it('preserves MAINTENANCE_REQUIRED from durable publication', async () => {
+    const capacity = Object.assign(new Error('Repertoire maintenance cleanup is required'), {
+      code: 'MAINTENANCE_REQUIRED',
+    });
+    mockAtomicReplace.mockRejectedValueOnce(capacity);
+    await expect(repertoireAddCommand('github:owner/repo@main')).rejects.toBe(capacity);
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
   it('does not report success when writer release fails after publication', async () => {
     mockReleaseCoordinationLease.mockImplementationOnce(() => {
       throw Object.assign(new Error('release recovery required'), { code: 'RECOVERY_REQUIRED' });

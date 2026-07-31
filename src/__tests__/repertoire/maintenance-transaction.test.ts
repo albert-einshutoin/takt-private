@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureDirectoryTreeProof } from '../../features/repertoire/filesystem-proof.js';
@@ -106,6 +107,48 @@ describe('detachToMaintenance', () => {
     const classification = classifyMaintenanceTransactions(root);
     expect(classification.incomplete).toHaveLength(1);
     expect(() => assertMaintenanceTransactionsReady(root)).toThrow();
+  });
+
+  it('short-circuits actual metadata bytes before payload reads', () => {
+    const { root } = createCompletedTransaction(roots);
+    let metadataReads = 0;
+    let payloadReads = 0;
+    expect(() => classifyMaintenanceTransactions(root, {
+      limits: { metadataBytes: 1 },
+      onMetadataRead: () => { metadataReads += 1; },
+      onPayloadOpen: () => { payloadReads += 1; },
+    })).toThrow(expect.objectContaining({ code: 'MAINTENANCE_REQUIRED' }));
+    expect(metadataReads).toBe(1);
+    expect(payloadReads).toBe(0);
+  });
+
+  it('caps actual payload traversal even when bound metadata underreports it', () => {
+    const { root, transaction } = createCompletedTransaction(roots);
+    rewriteClaimedPayloadBudget(transaction, 0, 0);
+    let payloadReads = 0;
+    expect(() => classifyMaintenanceTransactions(root, {
+      limits: { entries: 0, bytes: 0 },
+      onPayloadOpen: () => { payloadReads += 1; },
+    })).toThrow(expect.objectContaining({ code: 'MAINTENANCE_REQUIRED' }));
+    expect(payloadReads).toBe(1);
+  });
+
+  it('preserves MAINTENANCE_REQUIRED across a direct detach boundary', () => {
+    const { root } = createCompletedTransaction(roots);
+    const packageDir = join(root, 'repertoire', '@owner', 'next');
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(join(packageDir, 'next.yaml'), 'next');
+    expect(() => detachToMaintenance({
+      globalConfigDir: root,
+      sourceDir: packageDir,
+      containmentRoot: root,
+      expected: captureDirectoryTreeProof(packageDir, root),
+      kind: 'payload',
+      maintenanceLimits: { transactions: 0 },
+    })).toThrow(expect.objectContaining({
+      code: 'MAINTENANCE_REQUIRED',
+      message: 'Repertoire maintenance cleanup is required',
+    }));
   });
 
   it('reclassifies a completed transaction when foreign payload bytes appear', () => {
@@ -258,3 +301,44 @@ describe('detachToMaintenance', () => {
     },
   );
 });
+
+function createCompletedTransaction(roots: string[]): { root: string; transaction: string } {
+  const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-fixture-'));
+  roots.push(root);
+  const packageDir = join(root, 'repertoire', '@owner', 'repo');
+  mkdirSync(packageDir, { recursive: true });
+  writeFileSync(join(packageDir, 'workflow.yaml'), 'non-empty');
+  const transaction = detachToMaintenance({
+    globalConfigDir: root,
+    sourceDir: packageDir,
+    containmentRoot: root,
+    expected: captureDirectoryTreeProof(packageDir, root),
+    kind: 'payload',
+  });
+  return { root, transaction };
+}
+
+function rewriteClaimedPayloadBudget(transaction: string, entries: number, bytes: number): void {
+  const intentPath = join(transaction, 'intent.json');
+  const outcomePath = join(transaction, 'outcome.json');
+  const completePath = join(transaction, 'complete');
+  const intent = JSON.parse(readFileSync(intentPath, 'utf8')) as Record<string, unknown>;
+  intent['payloadEntries'] = entries;
+  intent['payloadBytes'] = bytes;
+  const intentBytes = Buffer.from(JSON.stringify(intent));
+  writeFileSync(intentPath, intentBytes);
+  const outcome = JSON.parse(readFileSync(outcomePath, 'utf8')) as Record<string, unknown>;
+  outcome['payloadEntries'] = entries;
+  outcome['payloadBytes'] = bytes;
+  outcome['intentDigest'] = digest(intentBytes);
+  const outcomeBytes = Buffer.from(JSON.stringify(outcome));
+  writeFileSync(outcomePath, outcomeBytes);
+  const complete = JSON.parse(readFileSync(completePath, 'utf8')) as Record<string, unknown>;
+  complete['intentDigest'] = outcome['intentDigest'];
+  complete['outcomeDigest'] = digest(outcomeBytes);
+  writeFileSync(completePath, JSON.stringify(complete));
+}
+
+function digest(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}

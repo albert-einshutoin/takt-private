@@ -16,8 +16,11 @@ import { dirname } from 'node:path';
 import { captureDirectoryTreeProof, type TreeProof } from './filesystem-proof.js';
 import {
   assertMaintenanceTransactionsReady,
+  classifyMaintenanceTransactions,
   detachToMaintenance,
+  RepertoireMaintenanceCapacityError,
   RepertoireMaintenanceError,
+  type MaintenanceClassificationLimits,
 } from './maintenance-transaction.js';
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
@@ -41,6 +44,8 @@ export interface AtomicReplaceOptions {
   globalConfigDir: string;
   packageDir: string;
   install: (reservedPackageDir: string) => Promise<void>;
+  /** Test-only lower startup classification limits. */
+  maintenanceLimits?: MaintenanceClassificationLimits;
 }
 
 /**
@@ -52,7 +57,16 @@ export interface AtomicReplaceOptions {
 export async function atomicReplace(options: AtomicReplaceOptions): Promise<void> {
   const { globalConfigDir, packageDir, install } = options;
   try {
-    assertMaintenanceTransactionsReady(globalConfigDir);
+    if (options.maintenanceLimits === undefined) {
+      assertMaintenanceTransactionsReady(globalConfigDir);
+    } else {
+      // The detach helper performs the same bounded classification for
+      // overwrite paths; this branch is only a deterministic test boundary.
+      const state = classifyMaintenanceTransactions(globalConfigDir, {
+        limits: options.maintenanceLimits,
+      });
+      if (state.incomplete.length !== 0) throw recoveryRequired();
+    }
     mkdirSync(dirname(packageDir), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const original = readOptionalTree(packageDir, globalConfigDir);
     if (original !== undefined) {
@@ -62,6 +76,8 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
         containmentRoot: globalConfigDir,
         expected: original,
         kind: 'payload',
+        ...(options.maintenanceLimits === undefined
+          ? {} : { maintenanceLimits: options.maintenanceLimits }),
       });
     }
 
@@ -80,6 +96,7 @@ export async function atomicReplace(options: AtomicReplaceOptions): Promise<void
     }
   } catch (error) {
     if (error instanceof AtomicUpdateRecoveryError) throw error;
+    if (error instanceof RepertoireMaintenanceCapacityError) throw error;
     if (error instanceof RepertoireMaintenanceError) throw recoveryRequired();
     throw recoveryRequired();
   }

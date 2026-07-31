@@ -101,4 +101,28 @@ describe('atomicReplace durable publication', () => {
     })).resolves.not.toThrow();
     expect(existsSync(join(packageDir, '.takt-install-complete'))).toBe(true);
   });
+
+  it('preserves MAINTENANCE_REQUIRED across atomic publication', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-atomic-capacity-'));
+    roots.push(root);
+    const oldPackage = join(root, 'repertoire', '@owner', 'old');
+    mkdirSync(oldPackage, { recursive: true });
+    writeFileSync(join(oldPackage, 'old.yaml'), 'old');
+    detachToMaintenance({
+      globalConfigDir: root,
+      sourceDir: oldPackage,
+      containmentRoot: root,
+      expected: captureDirectoryTreeProof(oldPackage, root),
+      kind: 'payload',
+    });
+    await expect(atomicReplace({
+      globalConfigDir: root,
+      packageDir: join(root, 'repertoire', '@owner', 'new'),
+      maintenanceLimits: { transactions: 0 },
+      install: async () => undefined,
+    })).rejects.toMatchObject({
+      code: 'MAINTENANCE_REQUIRED',
+      message: 'Repertoire maintenance cleanup is required',
+    });
+  });
 });

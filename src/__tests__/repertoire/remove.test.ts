@@ -372,6 +372,16 @@ describe('repertoireRemoveCommand — scan configuration', () => {
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
 
+  it('preserves MAINTENANCE_REQUIRED from durable detach', async () => {
+    vi.mocked(confirm).mockResolvedValue(true);
+    const capacity = Object.assign(new Error('Repertoire maintenance cleanup is required'), {
+      code: 'MAINTENANCE_REQUIRED',
+    });
+    mockDetachToMaintenance.mockImplementationOnce(() => { throw capacity; });
+    await expect(repertoireRemoveCommand('@owner/repo')).rejects.toBe(capacity);
+    expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
+  });
+
   it('removes an exactly empty owner directory non-recursively', async () => {
     vi.mocked(confirm).mockResolvedValue(true);
     vi.mocked(readdirSync).mockImplementation((path) => (

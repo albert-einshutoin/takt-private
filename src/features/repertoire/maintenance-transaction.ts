@@ -24,6 +24,7 @@ const PRIVATE_FILE_MODE = 0o600;
 export const MAX_MAINTENANCE_TRANSACTIONS = 4_096;
 export const MAX_MAINTENANCE_AGGREGATE_ENTRIES = 65_536;
 export const MAX_MAINTENANCE_AGGREGATE_BYTES = 1024 * 1024 * 1024;
+export const MAX_MAINTENANCE_METADATA_BYTES = 16 * 1024 * 1024;
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeBufferToStringMethod = Buffer.prototype.toString;
 const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
@@ -59,11 +60,19 @@ export class RepertoireMaintenanceCapacityError extends Error {
 export type MaintenancePayloadKind = 'payload' | 'partial';
 export type MaintenanceClassification = { complete: string[]; incomplete: string[] };
 type PortableTreeSummary = { digest: string; entries: number; bytes: number };
+export type MaintenanceClassificationLimits = Partial<{
+  transactions: number;
+  entries: number;
+  bytes: number;
+  metadataBytes: number;
+}>;
 type ClassificationOptions = {
   /** Test-only lower limits for exact boundary coverage. */
-  limits?: Partial<{ transactions: number; entries: number; bytes: number }>;
+  limits?: MaintenanceClassificationLimits;
   /** Test-only proof that aggregate preflight occurs before payload reads. */
   onPayloadOpen?: () => void;
+  /** Test-only proof of metadata short-circuit read counts. */
+  onMetadataRead?: () => void;
 };
 type PreparedTransaction = {
   transaction: string;
@@ -86,6 +95,8 @@ export interface DetachToMaintenanceOptions {
   onPhase?: (phase: MaintenanceTransactionPhase) => void;
   /** Test-only direct filesystem operation fault injection. */
   beforeFilesystemOperation?: (operation: MaintenanceFilesystemOperation) => void;
+  /** Test-only lower startup classification limits. */
+  maintenanceLimits?: MaintenanceClassificationLimits;
 }
 
 export type MaintenanceFilesystemOperation =
@@ -151,6 +162,7 @@ export function classifyMaintenanceTransactions(
       transactions: options.limits?.transactions ?? MAX_MAINTENANCE_TRANSACTIONS,
       entries: options.limits?.entries ?? MAX_MAINTENANCE_AGGREGATE_ENTRIES,
       bytes: options.limits?.bytes ?? MAX_MAINTENANCE_AGGREGATE_BYTES,
+      metadataBytes: options.limits?.metadataBytes ?? MAX_MAINTENANCE_METADATA_BYTES,
     };
     if (entries.length > limits.transactions) throw maintenanceRequired();
     safeReflectApply(safeArraySortMethod, entries, []);
@@ -158,6 +170,7 @@ export function classifyMaintenanceTransactions(
     const prepared: PreparedTransaction[] = [];
     let aggregateEntries = 0;
     let aggregateBytes = 0;
+    let metadataBytes = 0;
     for (let index = 0; index < entries.length; index += 1) {
       const transaction = join(transactionsRoot, entries[index]!);
       const stat = lstatSync(transaction);
@@ -167,15 +180,25 @@ export function classifyMaintenanceTransactions(
         item.transactionEntries = readdirSync(transaction);
         safeReflectApply(safeArraySortMethod, item.transactionEntries, []);
         item.intent = readApprovedRegularFile(join(transaction, 'intent.json'), transaction);
+        options.onMetadataRead?.();
+        metadataBytes += item.intent.bytes.length;
+        if (metadataBytes > limits.metadataBytes) throw maintenanceRequired();
         item.outcome = readApprovedRegularFile(join(transaction, 'outcome.json'), transaction);
+        options.onMetadataRead?.();
+        metadataBytes += item.outcome.bytes.length;
+        if (metadataBytes > limits.metadataBytes) throw maintenanceRequired();
         item.completeRecord = readApprovedRegularFile(join(transaction, 'complete'), transaction);
+        options.onMetadataRead?.();
+        metadataBytes += item.completeRecord.bytes.length;
+        if (metadataBytes > limits.metadataBytes) throw maintenanceRequired();
         item.parsedIntent = parseRecord(item.intent.bytes);
         item.parsedOutcome = parseRecord(item.outcome.bytes);
         item.parsedComplete = parseRecord(item.completeRecord.bytes);
         if (!hasValidPortableMetadata(item)) throw recoveryRequired();
         aggregateEntries += item.parsedIntent.payloadEntries as number;
         aggregateBytes += item.parsedIntent.payloadBytes as number;
-      } catch {
+      } catch (error) {
+        if (error instanceof RepertoireMaintenanceCapacityError) throw error;
         // Incomplete/corrupt metadata is classified without opening its payload.
       }
       safeReflectApply(safeArrayPushMethod, prepared, [item]);
@@ -183,6 +206,7 @@ export function classifyMaintenanceTransactions(
     if (aggregateEntries > limits.entries || aggregateBytes > limits.bytes) {
       throw maintenanceRequired();
     }
+    const actualBudget = { entries: 0, bytes: 0 };
     for (let index = 0; index < prepared.length; index += 1) {
       const item = prepared[index]!;
       let complete = false;
@@ -197,14 +221,18 @@ export function classifyMaintenanceTransactions(
         safeReflectApply(safeArraySortMethod, expectedEntries, []);
         options.onPayloadOpen?.();
         const payloadSummary = kind === 'payload' || kind === 'partial'
-          ? capturePortableTreeSummary(join(item.transaction, kind))
+          ? capturePortableTreeSummary(join(item.transaction, kind), {
+            aggregate: actualBudget,
+            limits,
+          })
           : undefined;
         complete = sameEntries(item.transactionEntries!, expectedEntries)
           && payloadSummary !== undefined
           && payloadSummary.digest === parsedOutcome.actualPortableDigest
           && payloadSummary.entries === parsedOutcome.payloadEntries
           && payloadSummary.bytes === parsedOutcome.payloadBytes;
-      } catch {
+      } catch (error) {
+        if (error instanceof RepertoireMaintenanceCapacityError) throw error;
         complete = false;
       }
       safeReflectApply(safeArrayPushMethod, complete ? result.complete : result.incomplete, [item.transaction]);
@@ -226,7 +254,10 @@ export function classifyMaintenanceTransactions(
  */
 export function detachToMaintenance(options: DetachToMaintenanceOptions): string {
   try {
-    assertMaintenanceTransactionsReady(options.globalConfigDir);
+    const classification = classifyMaintenanceTransactions(options.globalConfigDir, {
+      ...(options.maintenanceLimits === undefined ? {} : { limits: options.maintenanceLimits }),
+    });
+    if (classification.incomplete.length !== 0) throw recoveryRequired();
     const transactionsRoot = transactionRoot(options.globalConfigDir);
     createAndSyncHierarchy(options.globalConfigDir, transactionsRoot, options);
     const nonce = safeReflectApply(
@@ -334,7 +365,10 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     options.onPhase?.('complete-durable');
     return transactionDir;
   } catch (error) {
-    if (error instanceof RepertoireMaintenanceError) throw error;
+    if (
+      error instanceof RepertoireMaintenanceError
+      || error instanceof RepertoireMaintenanceCapacityError
+    ) throw error;
     throw recoveryRequired();
   }
 }
@@ -424,17 +458,38 @@ function sameEntries(left: string[], right: string[]): boolean {
   return true;
 }
 
-function capturePortableTreeSummary(root: string): PortableTreeSummary {
-  const first = capturePortableTreeSummaryOnce(root);
-  const second = capturePortableTreeSummaryOnce(root);
+function capturePortableTreeSummary(
+  root: string,
+  aggregateOptions?: {
+    aggregate: { entries: number; bytes: number };
+    limits: { entries: number; bytes: number };
+  },
+): PortableTreeSummary {
+  const remaining = aggregateOptions === undefined ? undefined : {
+    entries: aggregateOptions.limits.entries - aggregateOptions.aggregate.entries,
+    bytes: aggregateOptions.limits.bytes - aggregateOptions.aggregate.bytes,
+  };
+  const first = capturePortableTreeSummaryOnce(root, remaining);
+  const second = capturePortableTreeSummaryOnce(root, remaining);
   if (!samePortableSummary(first, second)) throw recoveryRequired();
+  if (aggregateOptions !== undefined) {
+    aggregateOptions.aggregate.entries += second.entries;
+    aggregateOptions.aggregate.bytes += second.bytes;
+    if (
+      aggregateOptions.aggregate.entries > aggregateOptions.limits.entries
+      || aggregateOptions.aggregate.bytes > aggregateOptions.limits.bytes
+    ) throw maintenanceRequired();
+  }
   return second;
 }
 
-function capturePortableTreeSummaryOnce(root: string): PortableTreeSummary {
+function capturePortableTreeSummaryOnce(
+  root: string,
+  capacity?: { entries: number; bytes: number },
+): PortableTreeSummary {
   const records: string[] = ['d:.'];
   const budget = { entries: 0, bytes: 0 };
-  visitPortableTree(root, root, records, budget, 0);
+  visitPortableTree(root, root, records, budget, 0, capacity);
   return {
     digest: createHash('sha256').update(
       safeReflectApply(safeArrayJoinMethod, records, ['\0']) as string,
@@ -450,12 +505,14 @@ function visitPortableTree(
   records: string[],
   budget: { entries: number; bytes: number },
   depth: number,
+  capacity?: { entries: number; bytes: number },
 ): void {
   if (depth > 32) throw recoveryRequired();
   const before = readdirSync(directory);
   safeReflectApply(safeArraySortMethod, before, []);
   for (let index = 0; index < before.length; index += 1) {
     budget.entries += 1;
+    if (capacity !== undefined && budget.entries > capacity.entries) throw maintenanceRequired();
     if (budget.entries > 4_096) throw recoveryRequired();
     const path = join(directory, before[index]!);
     const stat = lstatSync(path);
@@ -463,11 +520,12 @@ function visitPortableTree(
     const relativePath = relative(root, path);
     if (isDirectory(stat)) {
       safeReflectApply(safeArrayPushMethod, records, [`d:${relativePath}`]);
-      visitPortableTree(root, path, records, budget, depth + 1);
+      visitPortableTree(root, path, records, budget, depth + 1, capacity);
       continue;
     }
     const approved = readApprovedRegularFile(path, root);
     budget.bytes += approved.bytes.length;
+    if (capacity !== undefined && budget.bytes > capacity.bytes) throw maintenanceRequired();
     if (budget.bytes > 64 * 1024 * 1024) throw recoveryRequired();
     safeReflectApply(safeArrayPushMethod, records, [
       `f:${relativePath}:${approved.bytes.length}:${approved.proof.digest}`,
