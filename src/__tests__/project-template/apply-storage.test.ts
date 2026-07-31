@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   captureProjectTemplateBackupFile,
+  consumeProjectTemplateApprovalRecord,
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
   pruneProjectTemplateBackupGenerations,
@@ -33,6 +34,7 @@ import {
   type ProjectTemplateApplyStorageIoOperation,
   type ProjectTemplateBackupManifest,
 } from '../../features/project-template/apply-storage.js';
+import { canonicalizeTaktpackJson } from '../../features/project-template/canonical-json.js';
 
 const roots: string[] = [];
 
@@ -79,6 +81,89 @@ afterEach(() => {
 });
 
 describe('project template apply storage', () => {
+  it('writes exact approval claim bytes without mutable serialization hooks', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    const approvalId = 'approval-claim-audit';
+    const claim = {
+      schemaVersion: '1.0',
+      approvalId,
+      nonce: '00000000-0000-0000-0000-000000000001',
+      disposition: 'consumed',
+      claimedAt: '2026-08-01T00:00:00.000Z',
+    };
+    const expected = `${canonicalizeTaktpackJson(claim)}\n`;
+    const originals = {
+      bufferFrom: Buffer.from,
+      stringify: JSON.stringify,
+      descriptors: Object.getOwnPropertyDescriptors,
+      isArray: Array.isArray,
+    };
+    const hooks = { buffer: 0, json: 0, object: 0, array: 0 };
+    Object.defineProperty(Buffer, 'from', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        hooks.buffer += 1;
+        return originals.bufferFrom.call(Buffer, '{"forged":true}\n');
+      },
+    });
+    Object.defineProperty(JSON, 'stringify', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        hooks.json += 1;
+        return '"forged"';
+      },
+    });
+    Object.defineProperty(Object, 'getOwnPropertyDescriptors', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        hooks.object += 1;
+        return {};
+      },
+    });
+    Object.defineProperty(Array, 'isArray', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        hooks.array += 1;
+        return false;
+      },
+    });
+    try {
+      await consumeProjectTemplateApprovalRecord({ storage, approvalId, claim });
+    } finally {
+      Object.defineProperty(Buffer, 'from', {
+        configurable: true,
+        writable: true,
+        value: originals.bufferFrom,
+      });
+      Object.defineProperty(JSON, 'stringify', {
+        configurable: true,
+        writable: true,
+        value: originals.stringify,
+      });
+      Object.defineProperty(Object, 'getOwnPropertyDescriptors', {
+        configurable: true,
+        writable: true,
+        value: originals.descriptors,
+      });
+      Object.defineProperty(Array, 'isArray', {
+        configurable: true,
+        writable: true,
+        value: originals.isArray,
+      });
+    }
+
+    expect(readFileSync(join(
+      storage.controlRoot,
+      'approval-claims',
+      `${approvalId}.json`,
+    ), 'utf8')).toBe(expected);
+    expect(hooks).toEqual({ buffer: 0, json: 0, object: 0, array: 0 });
+  });
+
   it('creates a private repo-local control root on the target filesystem', async () => {
     const repoPath = makeRepo();
 

@@ -528,7 +528,26 @@ function parseApprovalRecord(
     }
     if (!known) return undefined;
   }
-  return value as ProjectTemplateApplyPreviewApprovalRecord;
+  const record = value as ProjectTemplateApplyPreviewApprovalRecord;
+  if (
+    record.schemaVersion !== '1.0'
+    || typeof record.approvalId !== 'string'
+    || typeof record.nonce !== 'string'
+    || (record.decision !== 'approved' && record.decision !== 'rejected')
+    || record.context !== APPROVAL_CONTEXT
+    || typeof record.projectIdentity !== 'string'
+    || typeof record.previewId !== 'string'
+    || typeof record.contentPlanId !== 'string'
+    || typeof record.contentPreconditionToken !== 'string'
+    || typeof record.repertoireDependencyPlanId !== 'string'
+    || typeof record.repertoireDependencyPreconditionToken !== 'string'
+    || (record.baselineStrategy !== 'conflict'
+      && record.baselineStrategy !== 'adopt-identical')
+    || typeof record.reviewSurfaceSha256 !== 'string'
+    || typeof record.issuedAt !== 'string'
+    || typeof record.expiresAt !== 'string'
+  ) return undefined;
+  return record;
 }
 
 function recordMatches(options: {

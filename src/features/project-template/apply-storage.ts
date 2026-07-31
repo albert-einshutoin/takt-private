@@ -37,6 +37,12 @@ const MAX_CONTROL_TREE_DEPTH = 16;
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_APPROVAL_BYTES = 64 * 1024;
 const CONTROL_GITIGNORE_CONTENT = Buffer.from(PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT);
+const CAPTURED_BUFFER_FROM = Buffer.from;
+const CAPTURED_BUFFER_RECEIVER = Buffer;
+const CAPTURED_BUFFER_TO_STRING = Buffer.prototype.toString;
+const CAPTURED_JSON_PARSE = JSON.parse;
+const CAPTURED_JSON_RECEIVER = JSON;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
 
 export type ProjectTemplateApplyStorageIoOperation =
   | 'lstat'
@@ -206,7 +212,11 @@ export async function writeProjectTemplateApprovalRecord(options: {
 function projectTemplateApprovalRecordContent(record: unknown): Buffer {
   // Preserve the established approval-record encoding. The canonical renderer
   // already terminates its JSON and storage adds the historical trailing LF.
-  return Buffer.from(`${canonicalizeTaktpackJson(record)}\n`);
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_BUFFER_FROM,
+    CAPTURED_BUFFER_RECEIVER,
+    [`${canonicalizeTaktpackJson(record)}\n`],
+  ) as Buffer;
 }
 
 export async function readProjectTemplateApprovalRecord(options: {
@@ -224,13 +234,18 @@ export async function readProjectTemplateApprovalRecord(options: {
     options.storage.device,
     options.storage.platform,
   );
-  return JSON.parse(
-    (await options.storage.io.readPrivateFile(
-      approvalPath,
-      MAX_APPROVAL_BYTES,
-      options.storage.device,
-    ))
-      .toString('utf8'),
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_JSON_PARSE,
+    CAPTURED_JSON_RECEIVER,
+    [CAPTURED_REFLECT_APPLY(
+      CAPTURED_BUFFER_TO_STRING,
+      await options.storage.io.readPrivateFile(
+        approvalPath,
+        MAX_APPROVAL_BYTES,
+        options.storage.device,
+      ),
+      ['utf8'],
+    )],
   ) as unknown;
 }
 
@@ -271,7 +286,11 @@ export async function consumeProjectTemplateApprovalRecord(options: {
   // and therefore fails closed if the issued record is later restored.
   await options.storage.io.writeExclusive(
     claimPath,
-    Buffer.from(`${canonicalizeTaktpackJson(options.claim)}\n`),
+    CAPTURED_REFLECT_APPLY(
+      CAPTURED_BUFFER_FROM,
+      CAPTURED_BUFFER_RECEIVER,
+      [`${canonicalizeTaktpackJson(options.claim)}\n`],
+    ) as Buffer,
     PRIVATE_FILE_MODE,
   );
   await options.storage.io.chmod(claimPath, PRIVATE_FILE_MODE);

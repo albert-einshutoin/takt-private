@@ -1157,4 +1157,145 @@ describe('project template revocable preview approval authority G6.2', () => {
       });
     expect(poisonHooks).toBe(0);
   });
+
+  it('decodes and parses durable records without mutable Buffer or JSON hooks', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const tamperedEvidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const regularEvidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'conflict',
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const approvalPath = (approvalId: string) => join(
+      storage.controlRoot,
+      'approvals',
+      `${approvalId}.json`,
+    );
+    const tamperedOriginal = JSON.parse(readFileSync(
+      approvalPath(tamperedEvidence.approvalId),
+      'utf8',
+    )) as unknown;
+    const regularOriginal = JSON.parse(readFileSync(
+      approvalPath(regularEvidence.approvalId),
+      'utf8',
+    )) as unknown;
+    writeFileSync(
+      approvalPath(tamperedEvidence.approvalId),
+      '{"tampered":true}\n',
+      { mode: 0o600 },
+    );
+    const originalParse = JSON.parse;
+    const originalToString = Buffer.prototype.toString;
+    let parseHooks = 0;
+    let bufferHooks = 0;
+    Object.defineProperty(JSON, 'parse', {
+      configurable: true,
+      writable: true,
+      value: (text: string) => {
+        parseHooks += 1;
+        return text.includes('tampered') ? tamperedOriginal : regularOriginal;
+      },
+    });
+    Object.defineProperty(Buffer.prototype, 'toString', {
+      configurable: true,
+      writable: true,
+      value(this: Buffer, encoding?: BufferEncoding) {
+        bufferHooks += 1;
+        const actual = originalToString.call(this, encoding);
+        return actual.includes('tampered')
+          ? JSON.stringify(tamperedOriginal)
+          : JSON.stringify(regularOriginal);
+      },
+    });
+    let tampered: boolean;
+    let regular: boolean;
+    try {
+      tampered = await consumeProjectTemplateApplyPreviewApproval({
+        storage,
+        preview: value,
+        baselineStrategy: 'conflict',
+        evidence: tamperedEvidence,
+      });
+      regular = await consumeProjectTemplateApplyPreviewApproval({
+        storage,
+        preview: value,
+        baselineStrategy: 'conflict',
+        evidence: regularEvidence,
+      });
+    } finally {
+      Object.defineProperty(JSON, 'parse', {
+        configurable: true,
+        writable: true,
+        value: originalParse,
+      });
+      Object.defineProperty(Buffer.prototype, 'toString', {
+        configurable: true,
+        writable: true,
+        value: originalToString,
+      });
+    }
+
+    expect({ tampered, regular }).toEqual({ tampered: false, regular: true });
+    expect({ parseHooks, bufferHooks }).toEqual({ parseHooks: 0, bufferHooks: 0 });
+  });
+
+  it('validates every durable record field before object coercion', async () => {
+    const projectRoot = makeRepo();
+    const value = preview();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const fields = [
+      'schemaVersion', 'approvalId', 'nonce', 'decision', 'context',
+      'projectIdentity', 'previewId', 'contentPlanId',
+      'contentPreconditionToken', 'repertoireDependencyPlanId',
+      'repertoireDependencyPreconditionToken', 'baselineStrategy',
+      'reviewSurfaceSha256', 'issuedAt', 'expiresAt',
+    ] as const;
+    const fixtures = [];
+    for (const field of fields) {
+      const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+        projectRoot,
+        preview: value,
+        baselineStrategy: 'conflict',
+      });
+      const path = join(
+        storage.controlRoot,
+        'approvals',
+        `${evidence.approvalId}.json`,
+      );
+      const record = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+      record[field] = {};
+      writeFileSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+      fixtures.push(evidence);
+    }
+    let coercionHooks = 0;
+    Object.defineProperty(Object.prototype, Symbol.toPrimitive, {
+      configurable: true,
+      value: () => {
+        coercionHooks += 1;
+        return '2026-08-01T00:00:00.000Z';
+      },
+    });
+    let results: boolean[];
+    try {
+      results = [];
+      for (const evidence of fixtures) {
+        results.push(await consumeProjectTemplateApplyPreviewApproval({
+          storage,
+          preview: value,
+          baselineStrategy: 'conflict',
+          evidence,
+        }));
+      }
+    } finally {
+      delete Object.prototype[Symbol.toPrimitive];
+    }
+    expect(results).toEqual(fields.map(() => false));
+    expect(coercionHooks).toBe(0);
+  });
 });
