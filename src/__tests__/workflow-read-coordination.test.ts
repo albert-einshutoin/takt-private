@@ -111,6 +111,43 @@ steps:
     return join(partialsDir, 'shared.md');
   }
 
+  function createProjectWorkflowWithRepertoireAlias(
+    kind: 'facet' | 'partial' | 'persona' | 'provider',
+  ): void {
+    const workflowDir = join(projectDir, '.takt', 'workflows');
+    const targetDir = join(configDir, 'repertoire', '@owner', 'repo', 'alias-targets');
+    mkdirSync(workflowDir, { recursive: true });
+    mkdirSync(targetDir, { recursive: true });
+    const targetPath = join(targetDir, `${kind}.${kind === 'provider' ? 'yaml' : 'md'}`);
+    const localDirs = {
+      facet: join(projectDir, '.takt', 'facets', 'instructions'),
+      partial: join(projectDir, '.takt', 'facets', 'partials', 'instructions'),
+      persona: join(projectDir, '.takt', 'facets', 'personas'),
+      provider: join(projectDir, '.takt', 'provider-options'),
+    } as const;
+    const localDir = localDirs[kind];
+    mkdirSync(localDir, { recursive: true });
+    writeFileSync(targetPath, kind === 'provider'
+      ? 'codex:\n  network_access: false\n'
+      : `repertoire ${kind}`);
+    symlinkSync(targetPath, join(localDir, `alias.${kind === 'provider' ? 'yaml' : 'md'}`));
+    const stepFields = kind === 'facet'
+      ? '    instruction: alias\n'
+      : kind === 'partial'
+        ? '    instruction: "Use {partial:alias}"\n'
+        : kind === 'persona'
+          ? '    persona: alias\n    instruction: "{task}"\n'
+          : '    instruction: "{task}"\n';
+    const workflowProvider = kind === 'provider'
+      ? 'workflow_config:\n  provider_options:\n    extends: alias\n'
+      : '';
+    writeFileSync(join(workflowDir, `alias-${kind}.yaml`), `name: alias-${kind}
+${workflowProvider}initial_step: review
+steps:
+  - name: review
+${stepFields}`);
+  }
+
   it('blocks list and direct scope reads behind a writer, then succeeds after release', async () => {
     createRepertoireWorkflow();
     const writer = await acquireRepertoireCoordinationLease({
@@ -176,6 +213,73 @@ steps:
     }
     expect(loadPersonaPromptFromPath(personaPath, projectDir)).toBe('You review changes.');
   });
+
+  it.each(['facet', 'partial', 'persona', 'provider'] as const)(
+    'does not let a project %s symlink alias bypass a repertoire writer',
+    async (kind) => {
+      createProjectWorkflowWithRepertoireAlias(kind);
+      const writer = await acquireRepertoireCoordinationLease({
+        globalConfigDir: configDir,
+        mode: 'write',
+      });
+      try {
+        expect(() => loadWorkflowByIdentifier(`alias-${kind}`, projectDir)).toThrow(
+          expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+        );
+      } finally {
+        writer.release();
+      }
+      expect(() => loadWorkflowByIdentifier(`alias-${kind}`, projectDir)).toThrow(
+        expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
+      );
+    },
+  );
+
+  it('loads absolute and relative repertoire workflow paths through approved bytes', async () => {
+    const workflowPath = createRepertoireWorkflow();
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+    });
+    try {
+      expect(() => loadWorkflowByIdentifier(workflowPath, projectDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+      expect(() => loadWorkflowByIdentifier('./repertoire/@owner/repo/workflows/review.yaml', projectDir, {
+        basePath: configDir,
+      })).toThrow(expect.objectContaining({ code: 'REPERTOIRE_BUSY' }));
+    } finally {
+      writer.release();
+    }
+    expect(loadWorkflowByIdentifier(workflowPath, projectDir)?.name).toBe('coordinated-workflow');
+    expect(loadWorkflowByIdentifier('./repertoire/@owner/repo/workflows/review.yaml', projectDir, {
+      basePath: configDir,
+    })?.name).toBe('coordinated-workflow');
+  });
+
+  it.each(['symlink', 'hardlink'] as const)(
+    'rejects an external %s alias to a repertoire workflow path',
+    async (kind) => {
+      const workflowPath = createRepertoireWorkflow();
+      const aliasPath = join(projectDir, `${kind}-workflow.yaml`);
+      if (kind === 'symlink') symlinkSync(workflowPath, aliasPath);
+      else linkSync(workflowPath, aliasPath);
+      const writer = await acquireRepertoireCoordinationLease({
+        globalConfigDir: configDir,
+        mode: 'write',
+      });
+      try {
+        expect(() => loadWorkflowByIdentifier(aliasPath, projectDir)).toThrow(
+          expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+        );
+      } finally {
+        writer.release();
+      }
+      expect(() => loadWorkflowByIdentifier(aliasPath, projectDir)).toThrow(
+        expect.objectContaining({ code: 'WORKFLOW_DISCOVERY_FAILED' }),
+      );
+    },
+  );
 
   it.each([
     ['facet', 'facets/instructions/review.md'],
