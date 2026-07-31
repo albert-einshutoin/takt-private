@@ -9,6 +9,7 @@ import {
   openSync,
   readSync,
   readdirSync,
+  realpathSync,
   renameSync,
   writeFileSync,
   type BigIntStats,
@@ -197,6 +198,12 @@ type CoordinationPaths = {
   writerIntent: string;
 };
 
+type TrustedConfigRoot = {
+  readonly canonicalRoot: string;
+  close(): void;
+  assertUnchanged(): void;
+};
+
 type CoordinationSnapshot = {
   digest: string;
   readers: LeaseEvidence[];
@@ -366,21 +373,90 @@ function leaseHandle(
 }
 
 function prepareCoordinationPaths(globalConfigDir: string): CoordinationPaths {
-  assertPrivateDirectory(globalConfigDir);
-  const root = join(globalConfigDir, COORDINATION_DIRECTORY_NAME);
-  const readers = join(root, READERS_DIRECTORY_NAME);
-  const released = join(root, RELEASED_DIRECTORY_NAME);
-  ensurePrivateDirectory(root);
-  ensurePrivateDirectory(readers);
-  ensurePrivateDirectory(released);
-  const paths = {
-    root,
-    readers,
-    released,
-    writerIntent: join(root, WRITER_INTENT_FILENAME),
+  const trustedRoot = assertTrustedConfigRoot(globalConfigDir);
+  try {
+    // Child paths are based on the proven canonical leaf. Ancestor aliases
+    // such as macOS /tmp remain valid, while a symlink at the .takt leaf does not.
+    const root = join(trustedRoot.canonicalRoot, COORDINATION_DIRECTORY_NAME);
+    const readers = join(root, READERS_DIRECTORY_NAME);
+    const released = join(root, RELEASED_DIRECTORY_NAME);
+    ensurePrivateDirectory(root);
+    ensurePrivateDirectory(readers);
+    ensurePrivateDirectory(released);
+    const paths = {
+      root,
+      readers,
+      released,
+      writerIntent: join(root, WRITER_INTENT_FILENAME),
+    };
+    assertCoordinationDirectories(paths);
+    // Creating the private subtree is observable filesystem work. Re-prove
+    // the opened root afterwards so replacement cannot redirect later leases.
+    trustedRoot.assertUnchanged();
+    return paths;
+  } finally {
+    trustedRoot.close();
+  }
+}
+
+function assertTrustedConfigRoot(path: string): TrustedConfigRoot {
+  const before = lstatSync(path);
+  assertTrustedConfigRootStat(before);
+  const canonicalRoot = realpathSync(path);
+  const canonicalBefore = lstatSync(canonicalRoot);
+  assertSameTrustedConfigRoot(before, canonicalBefore);
+  let fd: number | undefined;
+  try {
+    fd = openSync(canonicalRoot, DIRECTORY_OPEN_FLAGS);
+    const opened = fstatSync(fd);
+    assertSameTrustedConfigRoot(before, opened);
+    const lexicalAfterOpen = lstatSync(path);
+    const canonicalAfterOpen = lstatSync(canonicalRoot);
+    assertSameTrustedConfigRoot(before, lexicalAfterOpen);
+    assertSameTrustedConfigRoot(before, canonicalAfterOpen);
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd);
+    throw error;
+  }
+  let closed = false;
+  return {
+    canonicalRoot,
+    assertUnchanged(): void {
+      if (closed || fd === undefined) throw new RepertoireCoordinationError('UNSAFE_STATE');
+      const opened = fstatSync(fd);
+      const lexicalCurrent = lstatSync(path);
+      const canonicalCurrent = lstatSync(canonicalRoot);
+      assertSameTrustedConfigRoot(before, opened);
+      assertSameTrustedConfigRoot(before, lexicalCurrent);
+      assertSameTrustedConfigRoot(before, canonicalCurrent);
+    },
+    close(): void {
+      if (closed || fd === undefined) return;
+      closeSync(fd);
+      closed = true;
+      fd = undefined;
+    },
   };
-  assertCoordinationDirectories(paths);
-  return paths;
+}
+
+function assertTrustedConfigRootStat(stat: Stats): void {
+  const expectedUid = currentUid();
+  if (
+    !isDirectoryMode(stat.mode)
+    || isSymlinkMode(stat.mode)
+    || (stat.mode & 0o022) !== 0
+    || (expectedUid !== null && stat.uid !== expectedUid)
+  ) throw new RepertoireCoordinationError('UNSAFE_STATE');
+}
+
+function assertSameTrustedConfigRoot(expected: Stats, actual: Stats): void {
+  assertTrustedConfigRootStat(actual);
+  if (
+    actual.dev !== expected.dev
+    || actual.ino !== expected.ino
+    || actual.uid !== expected.uid
+    || (actual.mode & 0o777) !== (expected.mode & 0o777)
+  ) throw new RepertoireCoordinationError('UNSAFE_STATE');
 }
 
 function assertCoordinationDirectories(paths: CoordinationPaths): void {

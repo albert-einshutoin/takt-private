@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
+  chownSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -8,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -45,7 +47,7 @@ const moduleSourcePath = fileURLToPath(
 const productionModuleExists = existsSync(moduleSourcePath);
 const forceContract = process.env['TAKT_H1_FORCE_CONTRACT'] === '1';
 const contractEnabled = productionModuleExists || forceContract;
-const contractCaseCount = 17;
+const contractCaseCount = 25;
 const roots: string[] = [];
 const children = new Set<ChildProcess>();
 const childOutput = new WeakMap<ChildProcess, { stdout: Buffer[]; stderr: Buffer[] }>();
@@ -210,6 +212,83 @@ describeContract(
 
       await lease.release();
     });
+
+    it.each([0o700, 0o750, 0o755])(
+      'accepts a trusted non-writable global config root with mode %s',
+      async (mode) => {
+        const globalConfigDir = makeGlobalConfigDir();
+        chmodSync(globalConfigDir, mode);
+        const lease = await acquire(globalConfigDir, 'read');
+        expect(lstatSync(globalConfigDir).mode & 0o777).toBe(mode);
+        for (const path of coordinationArtifacts(globalConfigDir).directories) {
+          expect(lstatSync(path).mode & 0o777).toBe(0o700);
+        }
+        for (const path of coordinationArtifacts(globalConfigDir).files) {
+          expect(lstatSync(path).mode & 0o777).toBe(0o600);
+        }
+        await lease.release();
+      },
+    );
+
+    it.each([0o775, 0o777])(
+      'rejects a group/world-writable global config root with mode %s',
+      async (mode) => {
+        const globalConfigDir = makeGlobalConfigDir();
+        chmodSync(globalConfigDir, mode);
+        await expect(acquire(globalConfigDir, 'read'))
+          .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+      },
+    );
+
+    it('rejects a symlink at the global config leaf', async () => {
+      const parent = makeGlobalConfigDir();
+      const target = join(parent, 'target');
+      const alias = join(parent, 'leaf');
+      mkdirSync(target, { mode: 0o700 });
+      symlinkSync(target, alias);
+      await expect(acquire(alias, 'read'))
+        .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+    });
+
+    it('allows an ancestor alias while anchoring children to the canonical root', async () => {
+      const parent = makeGlobalConfigDir();
+      const canonicalParent = join(parent, 'canonical');
+      const aliasParent = join(parent, 'alias');
+      const canonicalRoot = join(canonicalParent, 'config');
+      mkdirSync(canonicalRoot, { recursive: true, mode: 0o700 });
+      symlinkSync(canonicalParent, aliasParent);
+      const lease = await acquire(join(aliasParent, 'config'), 'read');
+      expect(existsSync(join(canonicalRoot, '.takt-repertoire-coordination'))).toBe(true);
+      await lease.release();
+    });
+
+    it('fails closed when the trusted root is replaced while a lease is active', async () => {
+      const parent = makeGlobalConfigDir();
+      const globalConfigDir = join(parent, 'config');
+      const displacedRoot = join(parent, 'displaced');
+      mkdirSync(globalConfigDir, { mode: 0o700 });
+      const lease = await acquire(globalConfigDir, 'read');
+      renameSync(globalConfigDir, displacedRoot);
+      mkdirSync(globalConfigDir, { mode: 0o700 });
+
+      expect(() => lease.release()).toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
+      expect(existsSync(displacedRoot)).toBe(true);
+    });
+
+    it.runIf(typeof process.getuid === 'function' && process.getuid() === 0)(
+      'rejects a global config root owned by another uid',
+      async () => {
+        const globalConfigDir = makeGlobalConfigDir();
+        const originalUid = process.getuid!();
+        chownSync(globalConfigDir, originalUid + 1, -1);
+        try {
+          await expect(acquire(globalConfigDir, 'read'))
+            .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+        } finally {
+          chownSync(globalConfigDir, originalUid, -1);
+        }
+      },
+    );
 
     it.each(['symlink', 'hardlink'] as const)(
       'fails closed when a prior lease path is replaced by a %s',

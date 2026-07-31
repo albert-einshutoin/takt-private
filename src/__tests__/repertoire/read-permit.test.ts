@@ -126,7 +126,7 @@ describe('repertoire read permit private boundary', () => {
 
   it('does not invoke the callback when read lease acquisition fails', async () => {
     const root = makeRoot(roots);
-    chmodSync(root, 0o755);
+    chmodSync(root, 0o775);
     let calls = 0;
     await expect(withRepertoireReadPermit({ globalConfigDir: root, operation: () => {
       calls += 1;
