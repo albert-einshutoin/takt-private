@@ -45,6 +45,10 @@ const {
 }));
 
 vi.mock('node:fs', () => ({
+  Stats: class {
+    isDirectory() { return true; }
+    isSymbolicLink() { return false; }
+  },
   default: {
     mkdtempSync: mockMkdtempSync,
     mkdirSync: mockMkdirSync,

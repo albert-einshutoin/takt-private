@@ -9,7 +9,7 @@
  * - Packages with more than MAX_FILE_COUNT files throw an error
  */
 
-import { lstatSync, readdirSync, type Stats } from 'node:fs';
+import { Stats, lstatSync, readdirSync } from 'node:fs';
 import { join, extname, relative } from 'node:path';
 import { createLogger } from '../../shared/utils/debug.js';
 
@@ -18,6 +18,8 @@ const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeArrayIncludesMethod = Array.prototype.includes;
 const safeArrayPushMethod = Array.prototype.push;
 const safeArraySortMethod = Array.prototype.sort;
+const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
+const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
 const safeArrayIncludes = <T>(values: readonly T[], value: T): boolean => (
   safeReflectApply(safeArrayIncludesMethod, values, [value]) as boolean
 );
@@ -99,9 +101,9 @@ function collectFromDir(
     const absolutePath = join(dir, entry);
     const stats = lstatSync(absolutePath);
 
-    if (stats.isSymbolicLink()) continue;
+    if (safeReflectApply(safeStatsIsSymbolicLinkMethod, stats, [])) continue;
 
-    if (stats.isDirectory()) {
+    if (safeReflectApply(safeStatsIsDirectoryMethod, stats, [])) {
       collectFromDir(absolutePath, packageRoot, targets);
       continue;
     }
@@ -137,7 +139,7 @@ export function collectCopyTargets(packageRoot: string): CopyTarget[] {
       log.debug('Directory not accessible, skipping', { dirPath, err });
       continue;
     }
-    if (!stats?.isDirectory()) continue;
+    if (!safeReflectApply(safeStatsIsDirectoryMethod, stats, [])) continue;
 
     collectFromDir(dirPath, packageRoot, targets);
 

@@ -12,6 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
+  Stats,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
@@ -118,6 +119,22 @@ describe('collectCopyTargets', () => {
     // Then: symlink is excluded
     expect(paths.some((p) => p.includes('link.md'))).toBe(false);
     expect(paths.some((p) => p.includes('real.md'))).toBe(true);
+  });
+
+  it('keeps directory authorization stable when Stats hooks are poisoned', () => {
+    mkdirSync(join(tempDir, 'workflows'));
+    writeFileSync(join(tempDir, 'workflows', 'safe.yaml'), 'name: safe');
+    const originalDirectory = Stats.prototype.isDirectory;
+    const originalSymlink = Stats.prototype.isSymbolicLink;
+    try {
+      Stats.prototype.isDirectory = () => false;
+      Stats.prototype.isSymbolicLink = () => true;
+      expect(collectCopyTargets(tempDir).map((target) => target.relativePath))
+        .toEqual([join('workflows', 'safe.yaml')]);
+    } finally {
+      Stats.prototype.isDirectory = originalDirectory;
+      Stats.prototype.isSymbolicLink = originalSymlink;
+    }
   });
 
   it('should throw when file count exceeds MAX_FILE_COUNT', () => {

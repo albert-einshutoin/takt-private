@@ -25,6 +25,10 @@ import { join } from 'node:path';
 // ---------------------------------------------------------------------------
 
 vi.mock('node:fs', () => ({
+  Stats: class {
+    isDirectory() { return true; }
+    isSymbolicLink() { return false; }
+  },
   existsSync: vi.fn().mockReturnValue(true),
   lstatSync: vi.fn(() => ({
     dev: 1,

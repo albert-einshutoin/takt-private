@@ -4,6 +4,7 @@
 
 import {
   existsSync,
+  Stats,
   lstatSync,
   readdirSync,
   realpathSync,
@@ -38,6 +39,8 @@ const safeStringIndexOfMethod = String.prototype.indexOf;
 const safeStringSliceMethod = String.prototype.slice;
 const safeArraySortMethod = Array.prototype.sort;
 const safeArrayJoinMethod = Array.prototype.join;
+const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
+const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
 const safeStringStartsWith = (value: string, search: string): boolean => (
   safeReflectApply(safeStringStartsWithMethod, value, [search]) as boolean
 );
@@ -151,7 +154,10 @@ function capturePackageIdentity(
     throw new Error(`Invalid scope: "${scope}". Package path escapes repertoire directory`);
   }
   const stat = lstatSync(packageDir);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+  if (
+    !safeReflectApply(safeStatsIsDirectoryMethod, stat, [])
+    || safeReflectApply(safeStatsIsSymbolicLinkMethod, stat, [])
+  ) {
     throw new Error('Package state cannot be proven safe');
   }
   return captureDirectoryTreeProof(packageDir, repertoireDir);

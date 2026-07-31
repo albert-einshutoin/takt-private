@@ -8,6 +8,7 @@
 
 import {
   existsSync,
+  Stats,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -83,6 +84,8 @@ const safeStringTrimMethod = String.prototype.trim;
 const safeStringReplaceMethod = String.prototype.replace;
 const safeArrayJoinMethod = Array.prototype.join;
 const safeArrayPushMethod = Array.prototype.push;
+const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
+const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
 const safeStringStartsWith = (value: string, search: string): boolean => (
   safeReflectApply(safeStringStartsWithMethod, value, [search]) as boolean
 );
@@ -407,7 +410,10 @@ function capturePackageState(packageDir: string, repertoireDir: string): Package
   }
 
   const stat = lstatSync(packageDir);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+  if (
+    !safeReflectApply(safeStatsIsDirectoryMethod, stat, [])
+    || safeReflectApply(safeStatsIsSymbolicLinkMethod, stat, [])
+  ) {
     throw new Error('Package state cannot be proven safe');
   }
   const packageRealpath = realpathSync(packageDir);
