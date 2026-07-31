@@ -165,6 +165,11 @@ export type AcquireRepertoireCoordinationLeaseOptions = {
   timeoutMs?: number;
 };
 
+export type AcquireImmediateRepertoireReadLeaseOptions = Omit<
+  AcquireRepertoireCoordinationLeaseOptions,
+  'mode' | 'timeoutMs'
+>;
+
 type LeaseRecord = {
   version: 1;
   mode: RepertoireCoordinationMode;
@@ -224,6 +229,23 @@ export async function acquireRepertoireCoordinationLease(
     return options.mode === 'read'
       ? acquireReadLease(paths, options.signal)
       : await acquireWriteLease(paths, deadline, options.signal);
+  } catch (error) {
+    throw normalizeCoordinationError(error);
+  }
+}
+
+/** Acquires a read lease synchronously and never waits behind a writer. */
+export function acquireRepertoireCoordinationReadLeaseImmediate(
+  options: AcquireImmediateRepertoireReadLeaseOptions,
+): RepertoireCoordinationLease {
+  try {
+    const validated = { ...options, mode: 'read' as const };
+    validateOptions(validated);
+    throwIfAborted(validated.signal);
+    const paths = prepareCoordinationPaths(validated.globalConfigDir);
+    const initial = scanStableState(paths);
+    enforceTombstoneLimits(initial.releasedCount, 'read');
+    return acquireReadLease(paths, validated.signal);
   } catch (error) {
     throw normalizeCoordinationError(error);
   }

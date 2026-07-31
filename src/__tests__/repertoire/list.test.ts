@@ -9,13 +9,17 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   readPackageInfo,
   listPackages,
 } from '../../features/repertoire/list.js';
+import { acquireRepertoireCoordinationLease } from '../../features/repertoire/coordination-lease.js';
 
 // ---------------------------------------------------------------------------
 // readPackageInfo
@@ -219,4 +223,62 @@ imported_at: 2026-02-20T12:00:00.000Z
     expect(pkg.commit).toBe('abc1234');
     expect(pkg.commit).toHaveLength(7);
   });
+
+  it('fails immediately behind a writer and succeeds after release', async () => {
+    const repertoireDir = join(tempDir, 'repertoire');
+    createPackage(repertoireDir, 'nrslib', 'takt-fullstack', 'Fullstack', 'HEAD', 'abc1234def5678');
+    const packageDir = join(repertoireDir, '@nrslib', 'takt-fullstack');
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: tempDir,
+      mode: 'write',
+    });
+    try {
+      expect(() => listPackages(repertoireDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+      expect(() => readPackageInfo(packageDir, '@nrslib/takt-fullstack')).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+    } finally {
+      writer.release();
+    }
+    expect(listPackages(repertoireDir)).toHaveLength(1);
+    expect(readPackageInfo(packageDir, '@nrslib/takt-fullstack').commit).toBe('abc1234');
+  });
+
+  it('honors a writer held by another process', async () => {
+    const repertoireDir = join(tempDir, 'repertoire');
+    createPackage(repertoireDir, 'nrslib', 'takt-fullstack', 'Fullstack', 'HEAD', 'abc1234def5678');
+    const readyPath = join(tempDir, 'child.ready');
+    const releasePath = join(tempDir, 'child.release');
+    const vitestEntry = fileURLToPath(new URL('../../../node_modules/vitest/vitest.mjs', import.meta.url));
+    const childTest = fileURLToPath(new URL('./coordination-lease-child.test.ts', import.meta.url));
+    const child = spawn(process.execPath, [vitestEntry, 'run', childTest], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        TAKT_REPERTOIRE_LEASE_CHILD: '1',
+        TAKT_REPERTOIRE_LEASE_CONFIG_DIR: tempDir,
+        TAKT_REPERTOIRE_LEASE_READY_PATH: readyPath,
+        TAKT_REPERTOIRE_LEASE_RELEASE_PATH: releasePath,
+      },
+      stdio: 'pipe',
+    });
+    try {
+      const deadline = Date.now() + 5_000;
+      while (!existsSync(readyPath) && Date.now() < deadline) await delay(10);
+      expect(existsSync(readyPath)).toBe(true);
+      expect(() => listPackages(repertoireDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+      writeFileSync(releasePath, 'release\n', { flag: 'wx', mode: 0o600 });
+      const exitCode = await new Promise<number | null>((resolveExit) => {
+        child.once('exit', resolveExit);
+      });
+      expect(exitCode).toBe(0);
+      expect(listPackages(repertoireDir)).toHaveLength(1);
+    } finally {
+      if (!child.killed && child.exitCode === null) child.kill('SIGKILL');
+    }
+  }, 15_000);
 });

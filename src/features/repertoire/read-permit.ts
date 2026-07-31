@@ -2,6 +2,7 @@ import {
   REPERTOIRE_COORDINATION_LOCK_ORDER,
   RepertoireCoordinationError,
   acquireRepertoireCoordinationLease,
+  acquireRepertoireCoordinationReadLeaseImmediate,
   type AcquireRepertoireCoordinationLeaseOptions,
   type RepertoireCoordinationLease,
 } from './coordination-lease.js';
@@ -26,6 +27,22 @@ export type RepertoireReadPermitOptions<T> = RepertoireReadPermitBaseOptions & {
 export type PrepareRepertoireReadOptions<T> = RepertoireReadPermitBaseOptions & {
   operation: (permit: RepertoireReadPermit) => PromiseLike<T>;
 };
+
+export type ImmediateRepertoireReadPermitOptions<T> = Omit<
+  RepertoireReadPermitBaseOptions,
+  'timeoutMs'
+> & {
+  operation: (permit: RepertoireReadPermit) => T;
+};
+
+export class RepertoireReadBusyError extends Error {
+  readonly code = 'REPERTOIRE_BUSY' as const;
+
+  constructor() {
+    super('Repertoire is busy');
+    this.name = 'RepertoireReadBusyError';
+  }
+}
 
 type PermitState = {
   active: boolean;
@@ -56,6 +73,7 @@ const SafeWeakMap = WeakMap;
 const safeWeakMapGetMethod = WeakMap.prototype.get;
 const safeWeakMapSetMethod = WeakMap.prototype.set;
 const safeAcquireCoordinationLease = acquireRepertoireCoordinationLease;
+const safeAcquireImmediateReadLease = acquireRepertoireCoordinationReadLeaseImmediate;
 const permitAuthority = new SafeWeakMap<object, PermitState>();
 
 export const REPERTOIRE_READ_PERMIT_LOCK_ORDER = REPERTOIRE_COORDINATION_LOCK_ORDER;
@@ -111,6 +129,38 @@ export async function prepareRepertoireRead<T>(
   if (primaryFailure !== undefined) throw primaryFailure.error;
   if (releaseFailure !== undefined) throw releaseFailure.error;
   return await prepared;
+}
+
+/** Runs a synchronous read or fails immediately when a writer is present. */
+export function withImmediateRepertoireReadPermit<T>(
+  options: ImmediateRepertoireReadPermitOptions<T>,
+): T {
+  const snapshot = snapshotOptions<T>(options);
+  let lease: RepertoireCoordinationLease;
+  try {
+    lease = safeAcquireImmediateReadLease({
+      globalConfigDir: snapshot.globalConfigDir,
+      signal: snapshot.signal,
+    });
+  } catch (error) {
+    if (error instanceof RepertoireCoordinationError && error.code === 'WRITER_PENDING') {
+      throw new RepertoireReadBusyError();
+    }
+    throw error;
+  }
+  const { permit, state } = mintPermit(snapshot.globalConfigDir);
+  let result!: T;
+  let primaryFailure: CapturedFailure | undefined;
+  try {
+    result = snapshot.operation(permit);
+  } catch (error) {
+    primaryFailure = { error };
+  }
+  state.active = false;
+  const releaseFailure = releaseLease(lease);
+  if (primaryFailure !== undefined) throw primaryFailure.error;
+  if (releaseFailure !== undefined) throw releaseFailure.error;
+  return result;
 }
 
 /** Validates authority without revealing its bound root or underlying lease. */
