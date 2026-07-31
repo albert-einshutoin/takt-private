@@ -42,7 +42,7 @@ import {
 import { collectCopyTargets } from '../../features/repertoire/file-filter.js';
 import { parseTarVerboseListing } from '../../features/repertoire/tar-parser.js';
 import { resolveRef } from '../../features/repertoire/github-ref-resolver.js';
-import { atomicReplace, cleanupResiduals } from '../../features/repertoire/atomic-update.js';
+import { atomicReplace } from '../../features/repertoire/atomic-update.js';
 import { acquireRepertoireCoordinationLease } from '../../features/repertoire/coordination-lease.js';
 import {
   captureDirectoryTreeProof,
@@ -353,9 +353,8 @@ export async function repertoireAddCommand(
       )) {
         throw new Error('Downloaded package source changed while waiting for coordination lease');
       }
-      cleanupResiduals(packageDir);
-
       await atomicReplace({
+        globalConfigDir: getGlobalConfigDir(),
         packageDir,
         install: async (stagingDir) => {
           for (let index = 0; index < targets.length; index += 1) {

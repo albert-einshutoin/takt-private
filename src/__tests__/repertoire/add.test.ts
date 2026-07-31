@@ -16,7 +16,6 @@ const {
   mockResolveRef,
   mockResolveRepertoireConfigPath,
   mockAtomicReplace,
-  mockCleanupResiduals,
   mockAcquireCoordinationLease,
   mockReleaseCoordinationLease,
   mockCaptureRegularFileProof,
@@ -37,7 +36,6 @@ const {
   mockResolveRef: vi.fn(),
   mockResolveRepertoireConfigPath: vi.fn(),
   mockAtomicReplace: vi.fn(),
-  mockCleanupResiduals: vi.fn(),
   mockAcquireCoordinationLease: vi.fn(),
   mockReleaseCoordinationLease: vi.fn(),
   mockCaptureRegularFileProof: vi.fn(),
@@ -115,7 +113,6 @@ vi.mock('../../features/repertoire/file-filter.js', () => ({
 }));
 
 vi.mock('../../features/repertoire/atomic-update.js', () => ({
-  cleanupResiduals: mockCleanupResiduals,
   atomicReplace: mockAtomicReplace,
 }));
 
@@ -160,7 +157,6 @@ vi.mock('../../shared/utils/index.js', async (importOriginal) => ({
 import { repertoireAddCommand } from '../../commands/repertoire/add.js';
 import { collectCopyTargets } from '../../features/repertoire/file-filter.js';
 import { detectEditWorkflows } from '../../features/repertoire/pack-summary.js';
-import { cleanupResiduals } from '../../features/repertoire/atomic-update.js';
 import { confirm } from '../../shared/prompt/index.js';
 import { success } from '../../shared/ui/index.js';
 
@@ -319,8 +315,6 @@ describe('repertoireAddCommand temporary directory handling', () => {
       mode: 'write',
     });
     expect(mockAcquireCoordinationLease.mock.invocationCallOrder[0])
-      .toBeLessThan(vi.mocked(cleanupResiduals).mock.invocationCallOrder[0]!);
-    expect(vi.mocked(cleanupResiduals).mock.invocationCallOrder[0])
       .toBeLessThan(mockAtomicReplace.mock.invocationCallOrder[0]!);
     expect(mockAtomicReplace.mock.invocationCallOrder[0])
       .toBeLessThan(mockReleaseCoordinationLease.mock.invocationCallOrder[0]!);
@@ -333,7 +327,6 @@ describe('repertoireAddCommand temporary directory handling', () => {
 
       await expect(repertoireAddCommand('github:owner/repo@main')).rejects.toMatchObject({ code });
 
-      expect(mockCleanupResiduals).not.toHaveBeenCalled();
       expect(mockAtomicReplace).not.toHaveBeenCalled();
       expect(mockReleaseCoordinationLease).not.toHaveBeenCalled();
     },
@@ -354,7 +347,6 @@ describe('repertoireAddCommand temporary directory handling', () => {
     await expect(repertoireAddCommand('github:owner/repo@main'))
       .rejects.toThrow(/changed while waiting/);
 
-    expect(mockCleanupResiduals).not.toHaveBeenCalled();
     expect(mockAtomicReplace).not.toHaveBeenCalled();
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
@@ -369,7 +361,6 @@ describe('repertoireAddCommand temporary directory handling', () => {
     await expect(repertoireAddCommand('github:owner/repo@main'))
       .rejects.toThrow(/source changed while waiting/);
 
-    expect(mockCleanupResiduals).not.toHaveBeenCalled();
     expect(mockAtomicReplace).not.toHaveBeenCalled();
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
@@ -417,21 +408,15 @@ describe('repertoireAddCommand temporary directory handling', () => {
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
 
-  it('fails closed on an unknown residual discovered under the writer', async () => {
-    const residual = '/home/user/.takt/repertoire/@owner/repo.bak';
-    mockExistsSync.mockImplementation((target: string) => (
-      target === secureTempDir
-      || target === '/home/user/.takt/repertoire'
-      || target === residual
-    ));
-    mockCleanupResiduals.mockImplementationOnce(() => {
+  it('propagates a normalized durable publication failure under the writer', async () => {
+    mockAtomicReplace.mockImplementationOnce(() => {
       throw Object.assign(new Error('recovery required'), { code: 'RECOVERY_REQUIRED' });
     });
 
     await expect(repertoireAddCommand('github:owner/repo@main'))
       .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
 
-    expect(mockAtomicReplace).not.toHaveBeenCalled();
+    expect(mockAtomicReplace).toHaveBeenCalledOnce();
     expect(mockReleaseCoordinationLease).toHaveBeenCalledOnce();
   });
 

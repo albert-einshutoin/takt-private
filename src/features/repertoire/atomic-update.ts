@@ -1,207 +1,139 @@
-/**
- * Atomic package installation / replacement.
- *
- * Package bytes are completed in a sibling staging directory before a rename
- * publishes them. Existing `.tmp` or `.bak` paths are never guessed to be
- * ours: without durable ownership evidence, deleting them could remove data
- * created by another TaktDesk process or an interrupted operator recovery.
- */
+/** Durable package publication without recursive cleanup or automatic restore. */
 
 import {
-  existsSync,
+  Stats,
+  closeSync,
+  constants,
+  fsyncSync,
   lstatSync,
   mkdirSync,
-  renameSync,
-  rmSync,
+  openSync,
+  writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
+import { captureDirectoryTreeProof, type TreeProof } from './filesystem-proof.js';
 import {
-  captureDirectoryTreeProof,
-  sameTreeProof,
-  type TreeProof,
-} from './filesystem-proof.js';
+  detachToMaintenance,
+  RepertoireMaintenanceError,
+} from './maintenance-transaction.js';
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
-
-type DirectoryIdentity = {
-  dev: number;
-  ino: number;
-};
+const PRIVATE_FILE_MODE = 0o600;
+const safeReflectApply = Reflect.apply.bind(Reflect);
+const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
+const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
 
 export class AtomicUpdateRecoveryError extends Error {
-  readonly code = 'RECOVERY_REQUIRED';
+  readonly code = 'RECOVERY_REQUIRED' as const;
 
   constructor() {
-    super('repertoire package recovery is required before mutation can continue');
+    super('Repertoire package recovery is required');
     this.name = 'AtomicUpdateRecoveryError';
   }
 }
 
 export interface AtomicReplaceOptions {
-  /** Absolute path to the package directory (final install location). */
+  globalConfigDir: string;
   packageDir: string;
-  /** Writes and validates the complete new package inside stagingDir. */
-  install: (stagingDir: string) => Promise<void>;
+  install: (reservedPackageDir: string) => Promise<void>;
 }
 
 /**
- * Proves that no ambiguous recovery artifacts exist.
- *
- * Despite the historical name, this function deliberately does not clean an
- * unknown artifact. Safe automated cleanup requires a future durable recovery
- * record that binds the artifact to the interrupted transaction.
- */
-export function cleanupResiduals(packageDir: string): void {
-  if (existsSync(`${packageDir}.tmp`) || existsSync(`${packageDir}.bak`)) {
-    throw new AtomicUpdateRecoveryError();
-  }
-}
-
-/**
- * Builds a complete package off to the side and atomically publishes it.
- *
- * The caller must hold the global repertoire writer lease for the entire call.
- * Identity checks still fail closed around cleanup and rollback so an
- * out-of-protocol same-UID replacement is not recursively deleted.
+ * Reserves the final pathname before writing. An overwritten package is first
+ * retained as a durable maintenance payload; failures retain partial bytes too.
+ * No automatic rollback is attempted because a same-UID process can mutate
+ * pathnames between Node filesystem calls.
  */
 export async function atomicReplace(options: AtomicReplaceOptions): Promise<void> {
-  const { packageDir, install } = options;
-  const stagingDir = `${packageDir}.tmp`;
-  const backupDir = `${packageDir}.bak`;
-  const parentDir = dirname(packageDir);
-
-  cleanupResiduals(packageDir);
-  const originalIdentity = readOptionalDirectoryIdentity(packageDir);
-  mkdirSync(parentDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
-  const parentIdentity = readRequiredDirectoryIdentity(parentDir);
-  mkdirSync(stagingDir, { mode: PRIVATE_DIRECTORY_MODE });
-  const stagingIdentity = readRequiredDirectoryIdentity(stagingDir);
-  const originalTree = originalIdentity === undefined
-    ? undefined
-    : captureDirectoryTreeProof(packageDir, parentDir);
-
+  const { globalConfigDir, packageDir, install } = options;
   try {
-    await install(stagingDir);
-  } catch (error) {
-    removeOwnedDirectory(stagingDir, stagingIdentity);
-    throw error;
-  }
-
-  assertDirectoryIdentity(parentDir, parentIdentity);
-  assertDirectoryIdentity(stagingDir, stagingIdentity);
-  const stagingTree = captureDirectoryTreeProof(stagingDir, parentDir);
-  assertOptionalDirectoryIdentity(backupDir, undefined);
-  assertOptionalDirectoryIdentity(packageDir, originalIdentity);
-  assertOptionalTree(packageDir, parentDir, originalTree);
-
-  if (originalIdentity !== undefined) {
-    // POSIX rename may replace an existing destination. Re-prove both the
-    // destination absence and parent identity at the last synchronous boundary.
-    assertDirectoryIdentity(parentDir, parentIdentity);
-    assertOptionalDirectoryIdentity(backupDir, undefined);
-    assertDirectoryIdentity(packageDir, originalIdentity);
-    assertOptionalTree(packageDir, parentDir, originalTree);
-    renameOwnedDirectory(packageDir, backupDir);
-    assertDirectoryIdentity(backupDir, originalIdentity);
-    assertRelocatedTree(backupDir, parentDir, originalTree!);
-  }
-
-  try {
-    assertDirectoryIdentity(parentDir, parentIdentity);
-    assertDirectoryIdentity(stagingDir, stagingIdentity);
-    assertRelocatedTree(stagingDir, parentDir, stagingTree);
-    assertOptionalDirectoryIdentity(packageDir, undefined);
-    renameOwnedDirectory(stagingDir, packageDir);
-  } catch (error) {
-    if (originalIdentity !== undefined) {
-      assertDirectoryIdentity(parentDir, parentIdentity);
-      assertDirectoryIdentity(backupDir, originalIdentity);
-      assertRelocatedTree(backupDir, parentDir, originalTree!);
-      assertOptionalDirectoryIdentity(packageDir, undefined);
-      renameOwnedDirectory(backupDir, packageDir);
+    mkdirSync(dirname(packageDir), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+    const original = readOptionalTree(packageDir, globalConfigDir);
+    if (original !== undefined) {
+      detachToMaintenance({
+        globalConfigDir,
+        sourceDir: packageDir,
+        containmentRoot: globalConfigDir,
+        expected: original,
+        kind: 'payload',
+      });
     }
-    throw error;
-  }
 
-  assertDirectoryIdentity(parentDir, parentIdentity);
-  assertDirectoryIdentity(packageDir, stagingIdentity);
-  if (originalIdentity !== undefined) {
-    assertRelocatedTree(backupDir, parentDir, originalTree!);
-    removeOwnedDirectory(backupDir, originalIdentity);
+    // mkdir without recursive is the O_EXCL reservation for the active name.
+    mkdirSync(packageDir, { mode: PRIVATE_DIRECTORY_MODE });
+    try {
+      await install(packageDir);
+      writeCompletionWitness(packageDir);
+      captureDirectoryTreeProof(packageDir, globalConfigDir);
+      syncDirectory(packageDir);
+      syncDirectory(dirname(packageDir));
+    } catch {
+      retainPartial(globalConfigDir, packageDir);
+      throw recoveryRequired();
+    }
+  } catch (error) {
+    if (error instanceof AtomicUpdateRecoveryError) throw error;
+    if (error instanceof RepertoireMaintenanceError) throw recoveryRequired();
+    throw recoveryRequired();
   }
 }
 
-function readOptionalDirectoryIdentity(path: string): DirectoryIdentity | undefined {
-  if (!existsSync(path)) return undefined;
-  return readRequiredDirectoryIdentity(path);
-}
-
-function readRequiredDirectoryIdentity(path: string): DirectoryIdentity {
-  let stat: ReturnType<typeof lstatSync>;
+function retainPartial(globalConfigDir: string, packageDir: string): void {
+  let proof: TreeProof;
   try {
-    stat = lstatSync(path);
+    proof = captureDirectoryTreeProof(packageDir, globalConfigDir);
   } catch {
-    throw new AtomicUpdateRecoveryError();
+    throw recoveryRequired();
   }
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new AtomicUpdateRecoveryError();
-  }
-  return { dev: stat.dev, ino: stat.ino };
+  detachToMaintenance({
+    globalConfigDir,
+    sourceDir: packageDir,
+    containmentRoot: globalConfigDir,
+    expected: proof,
+    kind: 'partial',
+  });
 }
 
-function assertOptionalDirectoryIdentity(
-  path: string,
-  expected: DirectoryIdentity | undefined,
-): void {
-  const actual = readOptionalDirectoryIdentity(path);
-  if (expected === undefined) {
-    if (actual !== undefined) throw new AtomicUpdateRecoveryError();
-    return;
-  }
-  if (actual === undefined || !sameIdentity(actual, expected)) {
-    throw new AtomicUpdateRecoveryError();
-  }
-}
-
-function assertDirectoryIdentity(path: string, expected: DirectoryIdentity): void {
-  const actual = readRequiredDirectoryIdentity(path);
-  if (!sameIdentity(actual, expected)) throw new AtomicUpdateRecoveryError();
-}
-
-function removeOwnedDirectory(path: string, expected: DirectoryIdentity): void {
-  assertDirectoryIdentity(path, expected);
+function readOptionalTree(path: string, containmentRoot: string): TreeProof | undefined {
   try {
-    rmSync(path, { recursive: true, force: true });
-  } catch {
-    throw new AtomicUpdateRecoveryError();
+    const stat = lstatSync(path);
+    if (
+      !safeReflectApply(safeStatsIsDirectoryMethod, stat, [])
+      || safeReflectApply(safeStatsIsSymbolicLinkMethod, stat, [])
+    ) throw recoveryRequired();
+    return captureDirectoryTreeProof(path, containmentRoot);
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    if (error instanceof AtomicUpdateRecoveryError) throw error;
+    throw recoveryRequired();
   }
 }
 
-function renameOwnedDirectory(source: string, destination: string): void {
+function writeCompletionWitness(packageDir: string): void {
+  const path = `${packageDir}/.takt-install-complete`;
+  writeFileSync(path, 'complete\n', { flag: 'wx', mode: PRIVATE_FILE_MODE });
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    renameSync(source, destination);
-  } catch {
-    throw new AtomicUpdateRecoveryError();
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }
 
-function sameIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
-function assertOptionalTree(
-  path: string,
-  parentDir: string,
-  expected: TreeProof | undefined,
-): void {
-  if (expected === undefined) return;
-  if (!sameTreeProof(expected, captureDirectoryTreeProof(path, parentDir))) {
-    throw new AtomicUpdateRecoveryError();
+function syncDirectory(path: string): void {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }
 
-function assertRelocatedTree(path: string, parentDir: string, expected: TreeProof): void {
-  if (!sameTreeProof(expected, captureDirectoryTreeProof(path, parentDir), true)) {
-    throw new AtomicUpdateRecoveryError();
-  }
+function isMissing(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+function recoveryRequired(): AtomicUpdateRecoveryError {
+  return new AtomicUpdateRecoveryError();
 }
