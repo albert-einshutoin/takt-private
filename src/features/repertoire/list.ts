@@ -5,13 +5,22 @@
  * metadata (description, ref, truncated commit SHA) for display.
  */
 
-import { Stats, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  Stats,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+} from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { types as utilTypes } from 'node:util';
 import { parseTaktRepertoireConfig } from './takt-repertoire-config.js';
 import { parseLockFile } from './lock-file.js';
 import { TAKT_REPERTOIRE_MANIFEST_FILENAME, TAKT_REPERTOIRE_LOCK_FILENAME } from './constants.js';
-import { createLogger, getErrorMessage } from '../../shared/utils/index.js';
 import {
   assertActiveRepertoireReadPermit,
   withImmediateRepertoireReadPermit,
@@ -20,16 +29,21 @@ import {
 import { RepertoireCoordinationError } from './coordination-lease.js';
 import { getGlobalConfigDir, getRepertoireDir } from '../../infra/config/paths.js';
 
-const log = createLogger('repertoire-list');
+const MAX_METADATA_BYTES = 1024 * 1024;
 const safeObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor.bind(Object);
 const safeObjectGetPrototypeOf = Object.getPrototypeOf.bind(Object);
 const safeObjectHasOwn = Object.hasOwn.bind(Object);
+const safeObjectCreate = Object.create.bind(Object);
+const safeObjectFreeze = Object.freeze.bind(Object);
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeReflectOwnKeys = Reflect.ownKeys.bind(Reflect);
 const safeIsProxy = utilTypes.isProxy.bind(utilTypes);
 const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
+const safeStatsIsFileMethod = Stats.prototype.isFile;
 const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
 const localObjectPrototype = Object.prototype;
+const safeBufferAlloc = Buffer.alloc.bind(Buffer);
+const safeGetUid = typeof process.getuid === 'function' ? process.getuid.bind(process) : undefined;
 
 export interface ListPackagesFromGlobalConfigOptions {
   globalConfigDir: string;
@@ -94,16 +108,10 @@ function readPackageInfoWithPermit(
   const packConfigPath = join(packageDir, TAKT_REPERTOIRE_MANIFEST_FILENAME);
   const lockPath = join(packageDir, TAKT_REPERTOIRE_LOCK_FILENAME);
 
-  assertContext(context);
-  const configYaml = existsSync(packConfigPath)
-    ? readApprovedText(packConfigPath, context)
-    : '';
+  const configYaml = readApprovedTextOptional(packConfigPath, packageDir, context);
   const config = parseTaktRepertoireConfig(configYaml);
 
-  assertContext(context);
-  const lockYaml = existsSync(lockPath)
-    ? readApprovedText(lockPath, context)
-    : '';
+  const lockYaml = readApprovedTextOptional(lockPath, packageDir, context);
   const lock = parseLockFile(lockYaml);
 
   return {
@@ -149,38 +157,83 @@ export function listPackagesFromGlobalConfig(
 function listPackagesWithPermit(
   context: TrustedReadContext,
 ): PackageInfo[] {
-  assertContext(context);
-  if (!existsSync(context.repertoireDir)) return [];
+  const root = validateDirectory(context.repertoireDir, context.repertoireRealPath, context);
+  if (root === undefined) return [];
 
   const packages: PackageInfo[] = [];
-
-  assertContext(context);
-  for (const ownerEntry of readdirSync(context.repertoireDir)) {
+  const rootSnapshot = captureDirectorySnapshot(context.repertoireDir, root, context);
+  for (const ownerEntry of rootSnapshot.entries) {
     if (!ownerEntry.startsWith('@')) continue;
     const ownerDir = join(context.repertoireDir, ownerEntry);
-    assertContext(context);
-    try { if (!statSync(ownerDir).isDirectory()) continue; } catch (e) { log.debug(`stat failed for ${ownerDir}: ${getErrorMessage(e)}`); continue; }
+    const owner = validateDirectory(ownerDir, join(context.repertoireRealPath, ownerEntry), context);
+    if (owner === undefined) throw unsafeState();
 
-    assertContext(context);
-    for (const repoEntry of readdirSync(ownerDir)) {
+    const ownerSnapshot = captureDirectorySnapshot(ownerDir, owner, context);
+    for (const repoEntry of ownerSnapshot.entries) {
       const packageDir = join(ownerDir, repoEntry);
-      assertContext(context);
-      try { if (!statSync(packageDir).isDirectory()) continue; } catch (e) { log.debug(`stat failed for ${packageDir}: ${getErrorMessage(e)}`); continue; }
+      const packageStat = validateDirectory(
+        packageDir,
+        join(context.repertoireRealPath, ownerEntry, repoEntry),
+        context,
+      );
+      if (packageStat === undefined) throw unsafeState();
       const scope = `${ownerEntry}/${repoEntry}`;
-      assertApprovedPackagePath(packageDir, context);
       packages.push(readPackageInfoWithPermit(packageDir, scope, context));
     }
+    assertDirectorySnapshot(ownerDir, ownerSnapshot, context);
   }
+  assertDirectorySnapshot(context.repertoireDir, rootSnapshot, context);
 
   return packages;
 }
 
-function readApprovedText(
+function readApprovedTextOptional(
   path: string,
+  packageDir: string,
   context: TrustedReadContext,
 ): string {
+  const before = lstatOptionalWithContext(path, context);
+  if (before === undefined) return '';
+  assertApprovedRegularFile(before, context);
   assertContext(context);
-  return readFileSync(path, 'utf-8');
+  let resolvedBefore: string;
+  let packageRealPath: string;
+  try {
+    assertContext(context);
+    packageRealPath = realpathSync(packageDir);
+    assertContext(context);
+    resolvedBefore = realpathSync(path);
+  } catch {
+    throw unsafeState();
+  }
+  if (resolvedBefore !== join(packageRealPath, basename(path))) throw unsafeState();
+  let fd: number | undefined;
+  try {
+    assertContext(context);
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    assertContext(context);
+    const opened = fstatSync(fd);
+    assertApprovedRegularFile(opened, context);
+    if (!sameStableIdentity(before, opened) || opened.size > MAX_METADATA_BYTES) throw unsafeState();
+    const bytes = readBounded(fd, opened.size, context);
+    assertContext(context);
+    const openedAfter = fstatSync(fd);
+    const after = lstatRequiredWithContext(path, context);
+    assertContext(context);
+    const resolvedAfter = realpathSync(path);
+    if (
+      bytes.length !== opened.size
+      || resolvedAfter !== resolvedBefore
+      || !sameStableIdentity(opened, openedAfter)
+      || !sameStableIdentity(opened, after)
+    ) throw unsafeState();
+    return bytes.toString('utf-8');
+  } catch (error) {
+    if (error instanceof RepertoireCoordinationError) throw error;
+    throw unsafeState();
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function validateTrustedContext(
@@ -246,17 +299,13 @@ function assertApprovedPackagePath(packageDir: string, context: TrustedReadConte
     || segments.length !== 2
     || !segments[0]?.startsWith('@')
   ) throw unsafeState();
-  assertContext(context);
-  const before = lstatRequired(packageDir);
-  if (!isDirectory(before) || isSymbolicLink(before)) throw unsafeState();
-  assertContext(context);
-  const realPath = realpathSync(packageDir);
-  assertContext(context);
-  const after = lstatRequired(realPath);
-  if (
-    realPath !== join(context.repertoireRealPath, ...segments)
-    || !sameIdentity(before, after)
-  ) throw unsafeState();
+  const ownerDir = join(context.repertoireDir, segments[0]!);
+  if (validateDirectory(ownerDir, join(context.repertoireRealPath, segments[0]!), context) === undefined) {
+    throw unsafeState();
+  }
+  if (validateDirectory(packageDir, join(context.repertoireRealPath, ...segments), context) === undefined) {
+    throw unsafeState();
+  }
 }
 
 function snapshotListOptions(options: unknown): ListPackagesFromGlobalConfigOptions {
@@ -282,7 +331,7 @@ function snapshotExactOptions(options: unknown, expectedKeys: readonly string[])
   ) throw unsafeState();
   const keys = safeReflectOwnKeys(options);
   if (keys.length !== expectedKeys.length) throw unsafeState();
-  const snapshot: Record<string, string> = Object.create(null) as Record<string, string>;
+  const snapshot = safeObjectCreate(null) as Record<string, string>;
   for (const expectedKey of expectedKeys) {
     const descriptor = safeObjectGetOwnPropertyDescriptor(options, expectedKey);
     if (
@@ -295,7 +344,7 @@ function snapshotExactOptions(options: unknown, expectedKeys: readonly string[])
   for (const key of keys) {
     if (typeof key !== 'string' || !safeObjectHasOwn(snapshot, key)) throw unsafeState();
   }
-  return snapshot;
+  return safeObjectFreeze(snapshot);
 }
 
 function assertContext(context: TrustedReadContext): void {
@@ -321,12 +370,135 @@ function lstatRequired(path: string): Stats {
   return stat;
 }
 
+function lstatOptionalWithContext(path: string, context: TrustedReadContext): Stats | undefined {
+  assertContext(context);
+  return lstatOptional(path);
+}
+
+function lstatRequiredWithContext(path: string, context: TrustedReadContext): Stats {
+  const stat = lstatOptionalWithContext(path, context);
+  if (stat === undefined) throw unsafeState();
+  return stat;
+}
+
 function isDirectory(stat: Stats): boolean {
   return safeReflectApply(safeStatsIsDirectoryMethod, stat, []) as boolean;
 }
 
 function isSymbolicLink(stat: Stats): boolean {
   return safeReflectApply(safeStatsIsSymbolicLinkMethod, stat, []) as boolean;
+}
+
+function isFile(stat: Stats): boolean {
+  return safeReflectApply(safeStatsIsFileMethod, stat, []) as boolean;
+}
+
+function validateDirectory(
+  path: string,
+  expectedRealPath: string,
+  context: TrustedReadContext,
+): Stats | undefined {
+  const before = lstatOptionalWithContext(path, context);
+  if (before === undefined) return undefined;
+  assertApprovedDirectory(before, context);
+  assertContext(context);
+  let realPath: string;
+  try {
+    realPath = realpathSync(path);
+  } catch {
+    throw unsafeState();
+  }
+  const after = lstatRequiredWithContext(realPath, context);
+  if (realPath !== expectedRealPath || !sameStableIdentity(before, after)) throw unsafeState();
+  return after;
+}
+
+type DirectorySnapshot = { entries: string[]; stat: Stats };
+
+function captureDirectorySnapshot(
+  path: string,
+  expected: Stats,
+  context: TrustedReadContext,
+): DirectorySnapshot {
+  assertContext(context);
+  let entries: string[];
+  try {
+    entries = readdirSync(path).sort();
+  } catch {
+    throw unsafeState();
+  }
+  const fresh = lstatRequiredWithContext(path, context);
+  if (!sameStableIdentity(expected, fresh)) throw unsafeState();
+  return { entries, stat: fresh };
+}
+
+function assertDirectorySnapshot(
+  path: string,
+  snapshot: DirectorySnapshot,
+  context: TrustedReadContext,
+): void {
+  assertContext(context);
+  let entries: string[];
+  try {
+    entries = readdirSync(path).sort();
+  } catch {
+    throw unsafeState();
+  }
+  const fresh = lstatRequiredWithContext(path, context);
+  if (
+    !sameStableIdentity(snapshot.stat, fresh)
+    || snapshot.entries.join('\0') !== entries.join('\0')
+  ) throw unsafeState();
+}
+
+function assertApprovedDirectory(stat: Stats, context: TrustedReadContext): void {
+  if (
+    !isDirectory(stat)
+    || isSymbolicLink(stat)
+    || stat.dev !== lstatRequiredWithContext(context.repertoireDir, context).dev
+    || (safeGetUid !== undefined && stat.uid !== safeGetUid())
+    || (stat.mode & 0o022) !== 0
+    || stat.nlink < 1
+  ) throw unsafeState();
+}
+
+function assertApprovedRegularFile(stat: Stats, context: TrustedReadContext): void {
+  if (
+    !isFile(stat)
+    || isSymbolicLink(stat)
+    || stat.dev !== lstatRequiredWithContext(context.repertoireDir, context).dev
+    || (safeGetUid !== undefined && stat.uid !== safeGetUid())
+    || (stat.mode & 0o022) !== 0
+    || stat.nlink !== 1
+    || !Number.isSafeInteger(stat.size)
+    || stat.size < 0
+  ) throw unsafeState();
+}
+
+function sameStableIdentity(left: Stats, right: Stats): boolean {
+  return sameIdentity(left, right)
+    && left.mode === right.mode
+    && left.uid === right.uid
+    && left.nlink === right.nlink
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+function readBounded(fd: number, expectedSize: number, context: TrustedReadContext): Buffer {
+  if (expectedSize > MAX_METADATA_BYTES) throw unsafeState();
+  const result = safeBufferAlloc(expectedSize);
+  let offset = 0;
+  while (offset < expectedSize) {
+    assertContext(context);
+    const count = readSync(fd, result, offset, expectedSize - offset, offset);
+    if (count === 0) break;
+    offset += count;
+  }
+  assertContext(context);
+  const probe = safeBufferAlloc(1);
+  if (readSync(fd, probe, 0, 1, expectedSize) !== 0) throw unsafeState();
+  return offset === expectedSize ? result : result.subarray(0, offset);
 }
 
 function sameIdentity(left: Stats, right: Stats): boolean {

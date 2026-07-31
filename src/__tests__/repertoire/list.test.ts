@@ -8,8 +8,16 @@
  * - Multiple packages are correctly listed
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  existsSync,
+  linkSync,
+  mkdtempSync,
+  mkdirSync,
+  symlinkSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -370,5 +378,67 @@ imported_at: 2026-02-20T12:00:00.000Z
       expect.objectContaining({ code: 'UNSAFE_STATE' }),
     );
     expect(reads).toBe(0);
+  });
+
+  it('rejects an owner symlink instead of treating it as an empty repertoire', () => {
+    const repertoireDir = join(tempDir, 'repertoire');
+    const outsideOwner = join(tempDir, 'outside-owner');
+    mkdirSync(repertoireDir, { recursive: true });
+    mkdirSync(outsideOwner);
+    symlinkSync(outsideOwner, join(repertoireDir, '@external'), 'dir');
+
+    expect(() => listForTest(repertoireDir)).toThrow(
+      expect.objectContaining({ code: 'UNSAFE_STATE' }),
+    );
+  });
+
+  it('rejects package metadata symlinks while the target root has a writer', async () => {
+    const repertoireDir = join(tempDir, 'repertoire');
+    const packageDir = join(repertoireDir, '@nrslib', 'linked');
+    mkdirSync(packageDir, { recursive: true });
+    const targetRoot = mkdtempSync(join(tmpdir(), 'takt-list-target-'));
+    const targetRepertoire = join(targetRoot, 'repertoire');
+    createPackage(targetRepertoire, 'nrslib', 'target', 'Target', 'HEAD', 'abc1234def5678');
+    const targetManifest = join(targetRepertoire, '@nrslib', 'target', 'takt-repertoire.yaml');
+    symlinkSync(targetManifest, join(packageDir, 'takt-repertoire.yaml'));
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: targetRoot,
+      mode: 'write',
+    });
+    try {
+      expect(() => readForTest(packageDir, '@nrslib/linked')).toThrow(
+        expect.objectContaining({ code: 'UNSAFE_STATE' }),
+      );
+    } finally {
+      writer.release();
+      rmSync(targetRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects hard-linked package metadata', () => {
+    const repertoireDir = join(tempDir, 'repertoire');
+    const packageDir = join(repertoireDir, '@nrslib', 'linked');
+    mkdirSync(packageDir, { recursive: true });
+    const source = join(tempDir, 'shared-manifest.yaml');
+    writeFileSync(source, 'description: shared\n');
+    linkSync(source, join(packageDir, 'takt-repertoire.yaml'));
+
+    expect(() => readForTest(packageDir, '@nrslib/linked')).toThrow(
+      expect.objectContaining({ code: 'UNSAFE_STATE' }),
+    );
+  });
+
+  it('uses captured object intrinsics when snapshotting options', () => {
+    const repertoireDir = join(tempDir, 'repertoire');
+    mkdirSync(repertoireDir, { recursive: true });
+    const poisoned = vi.spyOn(Object, 'create').mockImplementation(() => {
+      throw new Error('poisoned Object.create');
+    });
+    try {
+      expect(listForTest(repertoireDir)).toEqual([]);
+      expect(poisoned).not.toHaveBeenCalled();
+    } finally {
+      poisoned.mockRestore();
+    }
   });
 });
