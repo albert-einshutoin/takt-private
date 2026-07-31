@@ -75,9 +75,33 @@ const { version: TAKT_VERSION } = require('../../../package.json') as { version:
 const GH_API_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeStringStartsWithMethod = String.prototype.startsWith;
+const safeStringIncludesMethod = String.prototype.includes;
+const safeStringSplitMethod = String.prototype.split;
+const safeStringTrimMethod = String.prototype.trim;
+const safeStringReplaceMethod = String.prototype.replace;
+const safeArrayJoinMethod = Array.prototype.join;
+const safeArrayPushMethod = Array.prototype.push;
 const safeStringStartsWith = (value: string, search: string): boolean => (
   safeReflectApply(safeStringStartsWithMethod, value, [search]) as boolean
 );
+const safeStringIncludes = (value: string, search: string): boolean => (
+  safeReflectApply(safeStringIncludesMethod, value, [search]) as boolean
+);
+const safeStringSplit = (value: string, separator: string): string[] => (
+  safeReflectApply(safeStringSplitMethod, value, [separator]) as string[]
+);
+const safeStringTrim = (value: string): string => (
+  safeReflectApply(safeStringTrimMethod, value, []) as string
+);
+const safeStringReplace = (value: string, search: string | RegExp, replacement: string): string => (
+  safeReflectApply(safeStringReplaceMethod, value, [search, replacement]) as string
+);
+const safeArrayJoin = (values: string[], separator: string): string => (
+  safeReflectApply(safeArrayJoinMethod, values, [separator]) as string
+);
+const safeArrayPush = <T>(values: T[], value: T): void => {
+  safeReflectApply(safeArrayPushMethod, values, [value]);
+};
 
 const log = createLogger('repertoire-add');
 
@@ -142,13 +166,19 @@ export async function repertoireAddCommand(
       stdio: 'pipe',
     });
 
-    const verboseLines = tarVerboseList.split('\n').filter(l => l.trim());
+    const verboseLines: string[] = [];
+    const rawVerboseLines = safeStringSplit(tarVerboseList, '\n');
+    for (let index = 0; index < rawVerboseLines.length; index += 1) {
+      if (safeStringTrim(rawVerboseLines[index]!) !== '') {
+        safeArrayPush(verboseLines, rawVerboseLines[index]!);
+      }
+    }
     const { firstDirEntry, includePaths } = parseTarVerboseListing(verboseLines);
 
     const commitSha = extractCommitSha(firstDirEntry);
 
     if (includePaths.length > 0) {
-      writeFileSync(tmpIncludeFile, includePaths.join('\n') + '\n');
+      writeFileSync(tmpIncludeFile, safeArrayJoin(includePaths, '\n') + '\n');
       execFileSync(
         'tar',
         ['xzf', tmpTarPath, '-C', tmpExtractDir, '--strip-components=1', '-T', tmpIncludeFile],
@@ -181,18 +211,31 @@ export async function repertoireAddCommand(
     });
 
     const targets = collectCopyTargets(packageRoot);
-    const facetFiles = targets.filter(t => t.relativePath.startsWith('facets/'));
-    const workflowFiles = targets.filter(t => t.relativePath.startsWith('workflows/'));
-    const providerOptionsFiles = targets.filter(t => t.relativePath.startsWith('provider-options/'));
+    const facetFiles: typeof targets = [];
+    const workflowFiles: typeof targets = [];
+    const providerOptionsFiles: typeof targets = [];
+    for (let index = 0; index < targets.length; index += 1) {
+      const target = targets[index]!;
+      if (safeStringStartsWith(target.relativePath, 'facets/')) safeArrayPush(facetFiles, target);
+      if (safeStringStartsWith(target.relativePath, 'workflows/')) safeArrayPush(workflowFiles, target);
+      if (safeStringStartsWith(target.relativePath, 'provider-options/')) {
+        safeArrayPush(providerOptionsFiles, target);
+      }
+    }
 
-    const facetSummary = summarizeFacetsByType(facetFiles.map(t => t.relativePath));
+    const facetPaths: string[] = [];
+    for (let index = 0; index < facetFiles.length; index += 1) {
+      facetPaths[index] = facetFiles[index]!.relativePath;
+    }
+    const facetSummary = summarizeFacetsByType(facetPaths);
 
     const workflowYamls: Array<{ name: string; content: string; relativePath: string }> = [];
-    for (const workflowFile of workflowFiles) {
+    for (let index = 0; index < workflowFiles.length; index += 1) {
+      const workflowFile = workflowFiles[index]!;
       try {
         const content = readFileSync(workflowFile.absolutePath, 'utf-8');
-        workflowYamls.push({
-          name: workflowFile.relativePath.replace(/^workflows\//, ''),
+        safeArrayPush(workflowYamls, {
+          name: safeStringReplace(workflowFile.relativePath, /^workflows\//, ''),
           content,
           relativePath: workflowFile.relativePath,
         });
@@ -201,12 +244,21 @@ export async function repertoireAddCommand(
       }
     }
     const providerOptionsYamls: Array<{ name: string; content: string; relativePath: string }> = [];
-    const workflowRelativeProviderOptionsFiles = workflowFiles.filter(t => t.relativePath.includes('/provider-options/'));
-    for (const providerOptionsFile of [...providerOptionsFiles, ...workflowRelativeProviderOptionsFiles]) {
+    const allProviderOptionsFiles: typeof providerOptionsFiles = [];
+    for (let index = 0; index < providerOptionsFiles.length; index += 1) {
+      allProviderOptionsFiles[index] = providerOptionsFiles[index]!;
+    }
+    for (let index = 0; index < workflowFiles.length; index += 1) {
+      if (safeStringIncludes(workflowFiles[index]!.relativePath, '/provider-options/')) {
+        safeArrayPush(allProviderOptionsFiles, workflowFiles[index]!);
+      }
+    }
+    for (let index = 0; index < allProviderOptionsFiles.length; index += 1) {
+      const providerOptionsFile = allProviderOptionsFiles[index]!;
       try {
         const content = readFileSync(providerOptionsFile.absolutePath, 'utf-8');
-        providerOptionsYamls.push({
-          name: providerOptionsFile.relativePath.replace(/^provider-options\//, ''),
+        safeArrayPush(providerOptionsYamls, {
+          name: safeStringReplace(providerOptionsFile.relativePath, /^provider-options\//, ''),
           content,
           relativePath: providerOptionsFile.relativePath,
         });
@@ -238,16 +290,22 @@ export async function repertoireAddCommand(
     info(`\n📦 ${owner}/${repo} @${ref}`);
     info(`   facets:  ${facetSummary}`);
     if (workflowFiles.length > 0) {
-      const workflowNames = workflowFiles.map(t =>
-        t.relativePath.replace(/^workflows\//, '').replace(/\.yaml$/, ''),
-      );
-      info(`   workflows:  ${workflowFiles.length} (${workflowNames.join(', ')})`);
+      const workflowNames: string[] = [];
+      for (let index = 0; index < workflowFiles.length; index += 1) {
+        workflowNames[index] = safeStringReplace(
+          safeStringReplace(workflowFiles[index]!.relativePath, /^workflows\//, ''),
+          /\.yaml$/,
+          '',
+        );
+      }
+      info(`   workflows:  ${workflowFiles.length} (${safeArrayJoin(workflowNames, ', ')})`);
     } else {
       info('   workflows:  0');
     }
-    for (const workflow of editWorkflows) {
-      for (const warning of formatEditWorkflowWarnings(workflow)) {
-        info(warning);
+    for (let index = 0; index < editWorkflows.length; index += 1) {
+      const warnings = formatEditWorkflowWarnings(editWorkflows[index]!);
+      for (let warningIndex = 0; warningIndex < warnings.length; warningIndex += 1) {
+        info(warnings[warningIndex]!);
       }
     }
     info('');

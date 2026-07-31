@@ -14,6 +14,19 @@ import { join, extname, relative } from 'node:path';
 import { createLogger } from '../../shared/utils/debug.js';
 
 const log = createLogger('repertoire-file-filter');
+const safeReflectApply = Reflect.apply.bind(Reflect);
+const safeArrayIncludesMethod = Array.prototype.includes;
+const safeArrayPushMethod = Array.prototype.push;
+const safeArraySortMethod = Array.prototype.sort;
+const safeArrayIncludes = <T>(values: readonly T[], value: T): boolean => (
+  safeReflectApply(safeArrayIncludesMethod, values, [value]) as boolean
+);
+const safeArrayPush = <T>(values: T[], value: T): void => {
+  safeReflectApply(safeArrayPushMethod, values, [value]);
+};
+const safeArraySort = (values: string[]): string[] => (
+  safeReflectApply(safeArraySortMethod, values, []) as string[]
+);
 
 /** Allowed file extensions for repertoire package files. */
 export const ALLOWED_EXTENSIONS = ['.md', '.yaml', '.yml'] as const;
@@ -39,7 +52,7 @@ export interface CopyTarget {
  */
 export function isAllowedExtension(filename: string): boolean {
   const ext = extname(filename);
-  return (ALLOWED_EXTENSIONS as readonly string[]).includes(ext);
+  return safeArrayIncludes(ALLOWED_EXTENSIONS, ext);
 }
 
 /**
@@ -69,12 +82,14 @@ function collectFromDir(
   let entries: string[];
   try {
     entries = readdirSync(dir, 'utf-8');
+    safeArraySort(entries);
   } catch (err) {
     log.debug('Failed to read directory', { dir, err });
     return;
   }
 
-  for (const entry of entries) {
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
     if (targets.length >= MAX_FILE_COUNT) {
       throw new Error(
         `Package exceeds maximum file count of ${MAX_FILE_COUNT}`,
@@ -93,7 +108,7 @@ function collectFromDir(
 
     if (!shouldCopyFile(absolutePath, stats)) continue;
 
-    targets.push({
+    safeArrayPush(targets, {
       absolutePath,
       relativePath: relative(packageRoot, absolutePath),
     });
@@ -112,7 +127,8 @@ function collectFromDir(
 export function collectCopyTargets(packageRoot: string): CopyTarget[] {
   const targets: CopyTarget[] = [];
 
-  for (const allowedDir of ALLOWED_DIRS) {
+  for (let index = 0; index < ALLOWED_DIRS.length; index += 1) {
+    const allowedDir = ALLOWED_DIRS[index]!;
     const dirPath = join(packageRoot, allowedDir);
     let stats: Stats | undefined;
     try {

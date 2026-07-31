@@ -163,6 +163,35 @@ describe('collectCopyTargets', () => {
     // Then: file is found under facets/personas/
     expect(paths).toContain(join('facets', 'personas', 'coder.md'));
   });
+
+  it('keeps authorization stable when mutable Array hooks are poisoned', () => {
+    mkdirSync(join(tempDir, 'facets'), { recursive: true });
+    writeFileSync(join(tempDir, 'facets', 'coder.md'), 'Coder');
+    const originalIncludes = Array.prototype.includes;
+    const originalPush = Array.prototype.push;
+    const originalSort = Array.prototype.sort;
+    let targets: ReturnType<typeof collectCopyTargets>;
+    try {
+      Array.prototype.includes = function poisonedIncludes(value: unknown) {
+        if (this === ALLOWED_EXTENSIONS) return false;
+        return originalIncludes.call(this, value);
+      };
+      Array.prototype.push = function poisonedPush(...items: unknown[]) {
+        if (typeof items[0] === 'object' && items[0] !== null && 'absolutePath' in items[0]) {
+          return this.length;
+        }
+        return originalPush.apply(this, items);
+      };
+      Array.prototype.sort = function poisonedSort() { return this; };
+      targets = collectCopyTargets(tempDir);
+    } finally {
+      Array.prototype.includes = originalIncludes;
+      Array.prototype.push = originalPush;
+      Array.prototype.sort = originalSort;
+    }
+    expect(targets!).toHaveLength(1);
+    expect(targets![0]!.relativePath).toBe(join('facets', 'coder.md'));
+  });
 });
 
 // ---------------------------------------------------------------------------
