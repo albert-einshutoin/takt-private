@@ -20,6 +20,7 @@ import {
 import { resolveProviderOptionsByName } from '../../infra/config/loaders/providerOptionsLookupDirectories.js';
 
 const roots: string[] = [];
+const FUTURE_DEADLINE_MS = performance.now() + 5 * 60_000;
 
 function root(): string {
   const value = mkdtempSync(join(tmpdir(), 'takt-capability-snapshot-'));
@@ -54,7 +55,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       ),
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
     });
 
     expect(snapshot.workflowFiles.map((file) => file.relativePath)).toEqual([
@@ -82,7 +83,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       ),
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
     })).toThrow(expect.objectContaining({ code: 'INVALID_CAPABILITY' }));
 
     rmSync(join(pkg, 'workflows', 'invalid.yaml'));
@@ -97,7 +98,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       ),
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
     })).toThrow(expect.objectContaining({ code: 'UNSAFE_INPUT' }));
   });
 
@@ -120,7 +121,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       ),
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
       approvedLayers: [
         { role: 'project', root: project },
         { role: 'global', root: global },
@@ -178,19 +179,19 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       ),
       packageRelativePath: '@acme/review',
       scope: '@acme/review' as const,
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
     };
     const first = captureProjectTemplateRepertoireCapabilitySnapshot(input);
     const second = captureProjectTemplateRepertoireCapabilitySnapshot(input);
     expect(first.privateWitnessFragment).toBe(second.privateWitnessFragment);
     expect(() => revalidateProjectTemplateRepertoireCapabilitySnapshot(
       first,
-      { deadlineMs: Number.POSITIVE_INFINITY },
+      { deadlineMs: FUTURE_DEADLINE_MS },
     )).not.toThrow();
     write(join(pkg, 'workflows', 'review.yaml'), 'steps:\n  - edit: true\n');
     expect(() => revalidateProjectTemplateRepertoireCapabilitySnapshot(
       first,
-      { deadlineMs: Number.POSITIVE_INFINITY },
+      { deadlineMs: FUTURE_DEADLINE_MS },
     )).toThrow(expect.objectContaining({ code: 'CHANGED' }));
   });
 
@@ -203,7 +204,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
     const aborted = new AbortController();
     aborted.abort();
     for (const request of [
-      { signal: aborted.signal, deadlineMs: Number.POSITIVE_INFINITY },
+      { signal: aborted.signal, deadlineMs: FUTURE_DEADLINE_MS },
       { deadlineMs: 0 },
     ]) {
       expect(() => captureProjectTemplateRepertoireCapabilitySnapshot({
@@ -219,14 +220,14 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       repertoireContext: context,
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
       budgetSeam: { maxPackageFiles: 1 },
     })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
     expect(() => captureProjectTemplateRepertoireCapabilitySnapshot({
       repertoireContext: context,
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
       budgetSeam: { maxBytes: 1 },
     })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
     let completedFileReads = 0;
@@ -234,7 +235,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       repertoireContext: context,
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
       requestFileCount: 4096,
       budgetSeam: { maxRequestFiles: 4096 },
       ioSeam(phase) {
@@ -246,7 +247,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       repertoireContext: context,
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
       budgetSeam: { maxEntries: 8192, initialEntries: 8192 },
     })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
   });
@@ -265,7 +266,8 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       ),
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
+      budgetSeam: { maxDepth: 40 },
     })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
   });
 
@@ -281,7 +283,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       ),
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
       approvedLayers: [{ role: 'project', root: missing }],
     });
     const access = getProjectTemplateRepertoireCapabilityFileAccess(snapshot);
@@ -290,12 +292,12 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
     )).toBe(false);
     expect(() => revalidateProjectTemplateRepertoireCapabilitySnapshot(
       snapshot,
-      { deadlineMs: Number.POSITIVE_INFINITY },
+      { deadlineMs: FUTURE_DEADLINE_MS },
     )).not.toThrow();
     mkdirSync(missing);
     expect(() => revalidateProjectTemplateRepertoireCapabilitySnapshot(
       snapshot,
-      { deadlineMs: Number.POSITIVE_INFINITY },
+      { deadlineMs: FUTURE_DEADLINE_MS },
     )).toThrow(expect.objectContaining({ code: 'CHANGED' }));
   });
 
@@ -318,7 +320,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       repertoireContext: context,
       packageRelativePath: '@acme/review',
       scope: '@acme/review',
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
       approvedLayers: [
         { role: 'builtin', root: builtin },
         { role: 'project', root: project },
@@ -332,7 +334,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
     expect(seamCalls).toBeGreaterThan(0);
     seamCalls = 0;
     revalidateProjectTemplateRepertoireCapabilitySnapshot(snapshot, {
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
     });
     expect(seamCalls).toBe(0);
   });
@@ -347,7 +349,7 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
       ),
       packageRelativePath: '@acme/review',
       scope: '@acme/review' as const,
-      deadlineMs: Number.POSITIVE_INFINITY,
+      deadlineMs: FUTURE_DEADLINE_MS,
     };
     let nested: unknown;
     let attempted = false;
@@ -416,10 +418,216 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
     } catch (error) {
       thrown = error;
     }
-    expect(thrown).toMatchObject({ code: 'UNSAFE_INPUT' });
+    expect(thrown).toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect(String(thrown)).not.toContain(secret);
     expect((thrown as Error).cause).toBeUndefined();
     expect(captureProjectTemplateRepertoireCapabilitySnapshot(base)
       .workflowFiles).toHaveLength(1);
+  });
+
+  it('binds the canonical scope to the package path before private reads', () => {
+    const repertoire = root();
+    write(
+      join(repertoire, '@other', 'secret', 'workflows', 'secret.yaml'),
+      'steps: []\n',
+    );
+    let privateReads = 0;
+    const context = createProjectTemplateRepertoireSafeReadContext(
+      repertoire,
+      () => {
+        privateReads += 1;
+      },
+    );
+    expect(() => captureProjectTemplateRepertoireCapabilitySnapshot({
+      repertoireContext: context,
+      packageRelativePath: '@other/secret',
+      scope: '@acme/review',
+      deadlineMs: FUTURE_DEADLINE_MS,
+    })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    expect(privateReads).toBe(0);
+  });
+
+  it('requires an exact, finite and branded capture DTO before private reads', () => {
+    const repertoire = root();
+    mkdirSync(join(repertoire, '@acme', 'review'), { recursive: true });
+    let privateReads = 0;
+    const base = {
+      repertoireContext: createProjectTemplateRepertoireSafeReadContext(
+        repertoire,
+        () => {
+          privateReads += 1;
+        },
+      ),
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review' as const,
+      deadlineMs: FUTURE_DEADLINE_MS,
+    };
+    const symbol = Symbol('extra');
+    for (const input of [
+      { ...base, extra: true },
+      Object.assign({ ...base }, { [symbol]: true }),
+      new Proxy({ ...base }, {}),
+      { ...base, deadlineMs: Number.POSITIVE_INFINITY },
+      { ...base, signal: { aborted: false } },
+    ]) {
+      expect(() => captureProjectTemplateRepertoireCapabilitySnapshot(
+        input as never,
+      )).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    }
+    expect(privateReads).toBe(0);
+  });
+
+  it('requires an exact, finite and branded revalidation DTO', () => {
+    const repertoire = root();
+    mkdirSync(join(repertoire, '@acme', 'review'), { recursive: true });
+    const snapshot = captureProjectTemplateRepertoireCapabilitySnapshot({
+      repertoireContext: createProjectTemplateRepertoireSafeReadContext(
+        repertoire,
+      ),
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review',
+      deadlineMs: FUTURE_DEADLINE_MS,
+    });
+    const symbol = Symbol('extra');
+    for (const input of [
+      { deadlineMs: FUTURE_DEADLINE_MS, extra: true },
+      { deadlineMs: Number.POSITIVE_INFINITY },
+      { deadlineMs: -1 },
+      { deadlineMs: FUTURE_DEADLINE_MS, signal: { aborted: false } },
+      Object.assign({ deadlineMs: FUTURE_DEADLINE_MS }, { [symbol]: true }),
+      new Proxy({ deadlineMs: FUTURE_DEADLINE_MS }, {}),
+    ]) {
+      expect(() => revalidateProjectTemplateRepertoireCapabilitySnapshot(
+        snapshot,
+        input as never,
+      )).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    }
+    const secret = 'secret revalidate accessor';
+    const accessor = Object.defineProperty({}, 'deadlineMs', {
+      get() {
+        throw new Error(secret);
+      },
+    });
+    let thrown: unknown;
+    try {
+      revalidateProjectTemplateRepertoireCapabilitySnapshot(
+        snapshot,
+        accessor as never,
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(String(thrown)).not.toContain(secret);
+    expect((thrown as Error).cause).toBeUndefined();
+  });
+
+  it('rejects malformed or unbounded approved layer DTOs before IO', () => {
+    const repertoire = root();
+    mkdirSync(join(repertoire, '@acme', 'review'), { recursive: true });
+    let io = 0;
+    const base = {
+      repertoireContext: createProjectTemplateRepertoireSafeReadContext(
+        repertoire,
+        () => {
+          io += 1;
+        },
+      ),
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review' as const,
+      deadlineMs: FUTURE_DEADLINE_MS,
+    };
+    const secret = 'secret layer root';
+    const accessor = Object.defineProperty({ role: 'project' }, 'root', {
+      enumerable: true,
+      get() {
+        throw new Error(secret);
+      },
+    });
+    const symbol = Symbol('extra');
+    const tooMany = Array.from({ length: 132 }, (_, index) => ({
+      role: 'scoped' as const,
+      root: `/missing/${index}`,
+      scope: `@owner/package-${index}` as `@${string}/${string}`,
+    }));
+    for (const approvedLayers of [
+      [accessor],
+      [Object.assign({ role: 'project', root: '/missing' }, { extra: true })],
+      [Object.assign({ role: 'project', root: '/missing' }, { [symbol]: true })],
+      Array(1),
+      tooMany,
+      new Proxy([], {}),
+    ]) {
+      io = 0;
+      let thrown: unknown;
+      try {
+        captureProjectTemplateRepertoireCapabilitySnapshot({
+          ...base,
+          approvedLayers: approvedLayers as never,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ code: 'INVALID_ARGUMENT' });
+      expect(String(thrown)).not.toContain(secret);
+      expect(io).toBe(0);
+    }
+  });
+
+  it('keeps all budget seams below hard production ceilings', () => {
+    const repertoire = root();
+    const pkg = join(repertoire, '@acme', 'review');
+    write(join(pkg, 'workflows', 'review.yaml'), 'steps: []\n');
+    const context = createProjectTemplateRepertoireSafeReadContext(repertoire);
+    expect(() => captureProjectTemplateRepertoireCapabilitySnapshot({
+      repertoireContext: context,
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review',
+      deadlineMs: FUTURE_DEADLINE_MS,
+      requestFileCount: 4096,
+      budgetSeam: { maxRequestFiles: 5000 },
+    })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
+    expect(() => captureProjectTemplateRepertoireCapabilitySnapshot({
+      repertoireContext: context,
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review',
+      deadlineMs: FUTURE_DEADLINE_MS,
+      budgetSeam: {
+        maxEntries: 9000,
+        initialEntries: 8192,
+      },
+    })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
+
+    const nested = join(pkg, 'workflows', 'nested');
+    write(join(nested, 'review.yaml'), 'steps: []\n');
+    expect(() => captureProjectTemplateRepertoireCapabilitySnapshot({
+      repertoireContext: context,
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review',
+      deadlineMs: FUTURE_DEADLINE_MS,
+      budgetSeam: { maxDepth: 1 },
+    })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
+  });
+
+  it('does not grant provider file authority to workflow YAML', () => {
+    const repertoire = root();
+    const pkg = join(repertoire, '@acme', 'review');
+    write(join(pkg, 'workflows', 'secret.yaml'), 'steps: []\n');
+    write(join(pkg, 'provider-options', 'review.yaml'), '{}\n');
+    const snapshot = captureProjectTemplateRepertoireCapabilitySnapshot({
+      repertoireContext: createProjectTemplateRepertoireSafeReadContext(
+        repertoire,
+      ),
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review',
+      deadlineMs: FUTURE_DEADLINE_MS,
+    });
+    const access = getProjectTemplateRepertoireCapabilityFileAccess(snapshot);
+    expect(access.readText(
+      `${PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT}/provider-options/review.yaml`,
+    )).toBe('{}\n');
+    expect(() => access.readText(
+      `${PROJECT_TEMPLATE_REPERTOIRE_PACKAGE_VIRTUAL_ROOT}/workflows/secret.yaml`,
+    )).toThrow(expect.objectContaining({ code: 'OUTSIDE_REGISTRY' }));
   });
 });

@@ -6,7 +6,7 @@ import {
   realpathSync,
   type Stats,
 } from 'node:fs';
-import { dirname, isAbsolute } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { types } from 'node:util';
 import type { ProviderOptionsFileAccess } from '../config/loaders/workflowProviderOptionsResolver.js';
 import {
@@ -32,6 +32,7 @@ const MAX_REQUEST_FILES = 4096;
 const MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 const MAX_TOTAL_ENTRIES = 8192;
 const MAX_DEPTH = 32;
+const MAX_APPROVED_LAYERS = 131;
 const YAML_EXTENSION = /\.ya?ml$/;
 const SCOPE = /^@(?![a-z0-9-]*--)[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/(?!\.{1,2}$)(?!.*\.git$)[a-z0-9._-]{1,100}$/;
 const CAPTURED_ABORTED_GETTER =
@@ -42,7 +43,11 @@ const CAPTURED_REFLECT_APPLY = Reflect.apply;
 const CAPTURED_OBJECT_CREATE = Object.create;
 const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const CAPTURED_OBJECT_FREEZE = Object.freeze;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor;
+const CAPTURED_OBJECT_HAS_OWN = Object.hasOwn;
 const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_ARRAY_IS_ARRAY = Array.isArray;
 const CAPTURED_ARRAY_INCLUDES = Array.prototype.includes;
 const CAPTURED_ARRAY_JOIN = Array.prototype.join;
 const CAPTURED_ARRAY_SORT = Array.prototype.sort;
@@ -51,11 +56,16 @@ const CAPTURED_STRING_INCLUDES = String.prototype.includes;
 const CAPTURED_STRING_SPLIT = String.prototype.split;
 const CAPTURED_STRING_STARTS_WITH = String.prototype.startsWith;
 const CAPTURED_TYPES_IS_PROXY = types.isProxy;
+const CAPTURED_NUMBER_IS_FINITE = Number.isFinite;
+const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
+const CAPTURED_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const CAPTURED_REFLECT_RECEIVER = Reflect;
 const CAPTURED_LSTAT_SYNC = lstatSync;
 const CAPTURED_READDIR_SYNC = readdirSync;
 const CAPTURED_REALPATH_NATIVE = realpathSync.native;
 const CAPTURED_DIRNAME = dirname;
 const CAPTURED_IS_ABSOLUTE = isAbsolute;
+const CAPTURED_RESOLVE = resolve;
 const CAPTURED_WEAK_MAP_GET = WeakMap.prototype.get;
 const CAPTURED_WEAK_MAP_SET = WeakMap.prototype.set;
 const SNAPSHOT_STATES = new WeakMap<object, SnapshotState>();
@@ -152,6 +162,7 @@ export interface ProjectTemplateRepertoireCapabilityBudgetSeam {
   readonly maxEntries?: number;
   /** Test-only accounting seam for already consumed traversal entries. */
   readonly initialEntries?: number;
+  readonly maxDepth?: number;
 }
 
 export type ProjectTemplateRepertoireCapabilitySnapshotIoSeam = (
@@ -193,6 +204,29 @@ interface Budget {
   readonly maxRequestFiles: number;
   readonly maxBytes: number;
   readonly maxEntries: number;
+  readonly maxDepth: number;
+}
+
+interface NormalizedCaptureInput {
+  readonly repertoireContext: ProjectTemplateRepertoireSafeReadContext;
+  readonly packageRelativePath: `@${string}/${string}`;
+  readonly scope: `@${string}/${string}`;
+  readonly approvedLayers:
+    readonly ProjectTemplateRepertoireCapabilityApprovedLayer[];
+  readonly signal?: AbortSignal;
+  readonly deadlineMs: number;
+  readonly requestFileCount: number;
+  readonly budgetSeam: NormalizedBudgetSeam;
+  readonly ioSeam?: ProjectTemplateRepertoireCapabilitySnapshotIoSeam;
+}
+
+interface NormalizedBudgetSeam {
+  readonly maxPackageFiles: number;
+  readonly maxRequestFiles: number;
+  readonly maxBytes: number;
+  readonly maxEntries: number;
+  readonly initialEntries: number;
+  readonly maxDepth: number;
 }
 
 interface CapturedDirectory {
@@ -215,8 +249,8 @@ interface CapturedFile {
 interface SnapshotState {
   readonly directories: readonly CapturedDirectory[];
   readonly files: readonly CapturedFile[];
-  readonly registry: Readonly<Record<string, string>>;
-  readonly knownPrefixes: readonly string[];
+  readonly providerRegistry: Readonly<Record<string, string>>;
+  readonly providerPrefixes: readonly string[];
   readonly fileAccess: ProviderOptionsFileAccess;
   readonly missingRoots: readonly CapturedMissingRoot[];
 }
@@ -236,8 +270,8 @@ interface CaptureState {
   readonly files: CapturedFile[];
   readonly workflowFiles: ProjectTemplateRepertoireCapabilitySnapshotFile[];
   readonly providerFiles: ProjectTemplateRepertoireCapabilitySnapshotFile[];
-  readonly registry: Record<string, string>;
-  readonly knownPrefixes: string[];
+  readonly providerRegistry: Record<string, string>;
+  readonly providerPrefixes: string[];
   readonly witnessParts: string[];
   readonly missingRoots: CapturedMissingRoot[];
 }
@@ -269,6 +303,307 @@ function freeze<T>(value: T): Readonly<T> {
 
 function append<T>(values: T[], value: T): void {
   defineOwn(values, values.length, value);
+}
+
+const CAPTURE_INPUT_KEYS = freeze([
+  'repertoireContext',
+  'packageRelativePath',
+  'scope',
+  'approvedLayers',
+  'signal',
+  'deadlineMs',
+  'requestFileCount',
+  'budgetSeam',
+  'ioSeam',
+]);
+const CAPTURE_REQUIRED_KEYS = freeze([
+  'repertoireContext',
+  'packageRelativePath',
+  'scope',
+  'deadlineMs',
+]);
+const LAYER_KEYS = freeze(['role', 'root', 'scope']);
+const LAYER_REQUIRED_KEYS = freeze(['role', 'root']);
+const BUDGET_KEYS = freeze([
+  'maxPackageFiles',
+  'maxRequestFiles',
+  'maxBytes',
+  'maxEntries',
+  'initialEntries',
+  'maxDepth',
+]);
+const REVALIDATE_KEYS = freeze(['signal', 'deadlineMs']);
+const REVALIDATE_REQUIRED_KEYS = freeze(['deadlineMs']);
+
+function includesKey(values: readonly string[], key: string): boolean {
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === key) return true;
+  }
+  return false;
+}
+
+function exactOwnDataRecord(
+  value: unknown,
+  allowed: readonly string[],
+  required: readonly string[],
+): Readonly<Record<string, unknown>> {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_TYPES_IS_PROXY(value)
+    || CAPTURED_ARRAY_IS_ARRAY(value)
+  ) throw failure('INVALID_ARGUMENT');
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [value],
+  ) as PropertyKey[];
+  const result = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_CREATE,
+    CAPTURED_OBJECT_RECEIVER,
+    [null],
+  ) as Record<string, unknown>;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    if (typeof key !== 'string' || !includesKey(allowed, key)) {
+      throw failure('INVALID_ARGUMENT');
+    }
+    const descriptor = CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+      CAPTURED_OBJECT_RECEIVER,
+      [value, key],
+    ) as PropertyDescriptor | undefined;
+    if (
+      descriptor === undefined
+      || !CAPTURED_REFLECT_APPLY(
+        CAPTURED_OBJECT_HAS_OWN,
+        CAPTURED_OBJECT_RECEIVER,
+        [descriptor, 'value'],
+      )
+    ) throw failure('INVALID_ARGUMENT');
+    defineOwn(result, key, descriptor.value);
+  }
+  for (let index = 0; index < required.length; index += 1) {
+    if (!CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_HAS_OWN,
+      CAPTURED_OBJECT_RECEIVER,
+      [result, required[index]!],
+    )) throw failure('INVALID_ARGUMENT');
+  }
+  return freeze(result);
+}
+
+function normalizeSignal(value: unknown): AbortSignal | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_TYPES_IS_PROXY(value)
+  ) throw failure('INVALID_ARGUMENT');
+  try {
+    CAPTURED_REFLECT_APPLY(CAPTURED_ABORTED_GETTER, value, []);
+  } catch {
+    throw failure('INVALID_ARGUMENT');
+  }
+  return value as AbortSignal;
+}
+
+function normalizeFiniteDeadline(value: unknown): number {
+  if (
+    typeof value !== 'number'
+    || !CAPTURED_NUMBER_IS_FINITE(value)
+    || value < 0
+  ) throw failure('INVALID_ARGUMENT');
+  return value;
+}
+
+function normalizeConsumed(value: unknown, hardLimit: number): number {
+  if (value === undefined) return 0;
+  if (
+    typeof value !== 'number'
+    || !CAPTURED_NUMBER_IS_SAFE_INTEGER(value)
+    || value < 0
+    || value > hardLimit
+  ) throw failure('INVALID_ARGUMENT');
+  return value;
+}
+
+function normalizeShrinkLimit(value: unknown, hardLimit: number): number {
+  if (value === undefined) return hardLimit;
+  if (
+    typeof value !== 'number'
+    || !CAPTURED_NUMBER_IS_SAFE_INTEGER(value)
+    || value < 0
+  ) throw failure('INVALID_ARGUMENT');
+  return value < hardLimit ? value : hardLimit;
+}
+
+function normalizeScope(value: unknown): `@${string}/${string}` {
+  if (
+    typeof value !== 'string'
+    || !CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, SCOPE, [value])
+  ) throw failure('INVALID_ARGUMENT');
+  return value as `@${string}/${string}`;
+}
+
+function normalizeApprovedLayers(
+  value: unknown,
+): readonly ProjectTemplateRepertoireCapabilityApprovedLayer[] {
+  if (value === undefined) return freeze([]);
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_TYPES_IS_PROXY(value)
+    || !CAPTURED_ARRAY_IS_ARRAY(value)
+  ) throw failure('INVALID_ARGUMENT');
+  const lengthDescriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    CAPTURED_OBJECT_RECEIVER,
+    [value, 'length'],
+  ) as PropertyDescriptor | undefined;
+  if (
+    lengthDescriptor === undefined
+    || !CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_HAS_OWN,
+      CAPTURED_OBJECT_RECEIVER,
+      [lengthDescriptor, 'value'],
+    )
+    || typeof lengthDescriptor.value !== 'number'
+    || !CAPTURED_NUMBER_IS_SAFE_INTEGER(lengthDescriptor.value)
+    || lengthDescriptor.value < 0
+    || lengthDescriptor.value > MAX_APPROVED_LAYERS
+  ) throw failure('INVALID_ARGUMENT');
+  const length = lengthDescriptor.value;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [value],
+  ) as PropertyKey[];
+  if (keys.length !== length + 1) throw failure('INVALID_ARGUMENT');
+  const result: ProjectTemplateRepertoireCapabilityApprovedLayer[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+      CAPTURED_OBJECT_RECEIVER,
+      [value, index],
+    ) as PropertyDescriptor | undefined;
+    if (
+      descriptor === undefined
+      || !CAPTURED_REFLECT_APPLY(
+        CAPTURED_OBJECT_HAS_OWN,
+        CAPTURED_OBJECT_RECEIVER,
+        [descriptor, 'value'],
+      )
+    ) throw failure('INVALID_ARGUMENT');
+    const raw = exactOwnDataRecord(
+      descriptor.value,
+      LAYER_KEYS,
+      LAYER_REQUIRED_KEYS,
+    );
+    const role = raw.role;
+    const root = raw.root;
+    if (
+      role !== 'project'
+      && role !== 'global'
+      && role !== 'builtin'
+      && role !== 'scoped'
+    ) throw failure('INVALID_ARGUMENT');
+    if (
+      typeof root !== 'string'
+      || !CAPTURED_REFLECT_APPLY(CAPTURED_IS_ABSOLUTE, undefined, [root])
+      || CAPTURED_REFLECT_APPLY(CAPTURED_RESOLVE, undefined, [root]) !== root
+    ) throw failure('INVALID_ARGUMENT');
+    const hasScope = CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_HAS_OWN,
+      CAPTURED_OBJECT_RECEIVER,
+      [raw, 'scope'],
+    ) as boolean;
+    if (role === 'scoped') {
+      if (!hasScope) throw failure('INVALID_ARGUMENT');
+      append(result, freeze({
+        role,
+        root,
+        scope: normalizeScope(raw.scope),
+      }));
+    } else {
+      if (hasScope) throw failure('INVALID_ARGUMENT');
+      append(result, freeze({ role, root }));
+    }
+  }
+  return freeze(orderedLayers(result));
+}
+
+function normalizeBudgetSeam(
+  value: unknown,
+): NormalizedBudgetSeam {
+  const raw: Readonly<Record<string, unknown>> = value === undefined
+    ? freeze({}) as Readonly<Record<string, unknown>>
+    : exactOwnDataRecord(value, BUDGET_KEYS, []);
+  return freeze({
+    maxPackageFiles: normalizeShrinkLimit(
+      raw.maxPackageFiles,
+      MAX_PACKAGE_FILES,
+    ),
+    maxRequestFiles: normalizeShrinkLimit(
+      raw.maxRequestFiles,
+      MAX_REQUEST_FILES,
+    ),
+    maxBytes: normalizeShrinkLimit(raw.maxBytes, MAX_TOTAL_BYTES),
+    maxEntries: normalizeShrinkLimit(raw.maxEntries, MAX_TOTAL_ENTRIES),
+    initialEntries: normalizeConsumed(raw.initialEntries, MAX_TOTAL_ENTRIES),
+    maxDepth: normalizeShrinkLimit(raw.maxDepth, MAX_DEPTH),
+  });
+}
+
+function normalizeCaptureInput(
+  value: unknown,
+): NormalizedCaptureInput {
+  const raw = exactOwnDataRecord(
+    value,
+    CAPTURE_INPUT_KEYS,
+    CAPTURE_REQUIRED_KEYS,
+  );
+  const scope = normalizeScope(raw.scope);
+  const packageRelativePath = normalizeScope(raw.packageRelativePath);
+  if (scope !== packageRelativePath) throw failure('INVALID_ARGUMENT');
+  if (
+    typeof raw.repertoireContext !== 'object'
+    || raw.repertoireContext === null
+    || CAPTURED_TYPES_IS_PROXY(raw.repertoireContext)
+  ) throw failure('INVALID_ARGUMENT');
+  if (raw.ioSeam !== undefined && typeof raw.ioSeam !== 'function') {
+    throw failure('INVALID_ARGUMENT');
+  }
+  return freeze({
+    repertoireContext: raw.repertoireContext as
+      ProjectTemplateRepertoireSafeReadContext,
+    packageRelativePath,
+    scope,
+    approvedLayers: normalizeApprovedLayers(raw.approvedLayers),
+    signal: normalizeSignal(raw.signal),
+    deadlineMs: normalizeFiniteDeadline(raw.deadlineMs),
+    requestFileCount: normalizeConsumed(
+      raw.requestFileCount,
+      MAX_REQUEST_FILES,
+    ),
+    budgetSeam: normalizeBudgetSeam(raw.budgetSeam),
+    ioSeam: raw.ioSeam as
+      ProjectTemplateRepertoireCapabilitySnapshotIoSeam | undefined,
+  });
+}
+
+function normalizeRevalidateInput(
+  value: unknown,
+): Control {
+  const raw = exactOwnDataRecord(
+    value,
+    REVALIDATE_KEYS,
+    REVALIDATE_REQUIRED_KEYS,
+  );
+  return freeze({
+    signal: normalizeSignal(raw.signal),
+    deadlineMs: normalizeFiniteDeadline(raw.deadlineMs),
+  });
 }
 
 function failure(
@@ -430,20 +765,12 @@ function sortFiles(
   ]);
 }
 
-function limit(value: number | undefined, fallback: number): number {
-  if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw failure('INVALID_ARGUMENT');
-  }
-  return value;
-}
-
 function addKnownPrefix(state: CaptureState, value: string): void {
   if (!CAPTURED_REFLECT_APPLY(
     CAPTURED_ARRAY_INCLUDES,
-    state.knownPrefixes,
+    state.providerPrefixes,
     [value],
-  )) append(state.knownPrefixes, value);
+  )) append(state.providerPrefixes, value);
 }
 
 function invokeSeam(
@@ -465,7 +792,7 @@ function readDirectory(
   role: ProjectTemplateRepertoireCapabilityFileRole,
   depth: number,
 ): ReturnType<typeof readProjectTemplateRepertoireRootDirectory> {
-  if (depth > MAX_DEPTH) throw failure('LIMIT_EXCEEDED');
+  if (depth >= state.budget.maxDepth) throw failure('LIMIT_EXCEEDED');
   invokeSeam(state, 'before-directory', role, relativePath);
   const result = relativePath === ''
     ? readProjectTemplateRepertoireRootDirectory(context)
@@ -505,6 +832,7 @@ function captureFile(
   role: ProjectTemplateRepertoireCapabilityFileRole,
   scope: `@${string}/${string}` | undefined,
   kind: 'workflow' | 'provider-options',
+  providerAuthority: boolean,
 ): void {
   invokeSeam(state, 'before-file', role, relativePath);
   if (
@@ -554,10 +882,12 @@ function captureFile(
   }) as ProjectTemplateRepertoireCapabilitySnapshotFile;
   if (kind === 'workflow') append(state.workflowFiles, publicFile);
   else append(state.providerFiles, publicFile);
-  if (state.registry[virtualPath] !== undefined) {
-    throw failure('UNSAFE_INPUT');
+  if (providerAuthority) {
+    if (state.providerRegistry[virtualPath] !== undefined) {
+      throw failure('UNSAFE_INPUT');
+    }
+    defineOwn(state.providerRegistry, virtualPath, parsed.text);
   }
-  defineOwn(state.registry, virtualPath, parsed.text);
   append(state.files, freeze({
     context: revalidationContext,
     fileClass: kind === 'workflow' ? 'workflow' : 'provider',
@@ -579,6 +909,7 @@ function walk(
   role: ProjectTemplateRepertoireCapabilityFileRole,
   scope: `@${string}/${string}` | undefined,
   defaultKind: 'workflow' | 'provider-options',
+  providerAuthority: boolean,
   depth: number,
 ): void {
   const directory = readDirectory(
@@ -589,9 +920,9 @@ function walk(
     role,
     depth,
   );
-  addKnownPrefix(state, virtualPath);
+  if (providerAuthority) addKnownPrefix(state, virtualPath);
   for (let entryIndex = 0; entryIndex < directory.entries.length; entryIndex += 1) {
-    if (depth >= MAX_DEPTH) throw failure('LIMIT_EXCEEDED');
+    if (depth >= state.budget.maxDepth) throw failure('LIMIT_EXCEEDED');
     const entry = directory.entries[entryIndex]!;
     checkpoint(state.control);
     const childRelative = relativePath === '' ? entry : `${relativePath}/${entry}`;
@@ -610,6 +941,7 @@ function walk(
         role,
         scope,
         defaultKind,
+        providerAuthority,
         depth + 1,
       );
       continue;
@@ -633,6 +965,7 @@ function walk(
         role,
         scope,
         kind,
+        providerAuthority,
       );
     } catch (error) {
       if (isFailure(error)) throw error;
@@ -709,8 +1042,8 @@ function orderedLayers(
 }
 
 function makeFileAccess(
-  registry: Readonly<Record<string, string>>,
-  knownPrefixes: readonly string[],
+  providerRegistry: Readonly<Record<string, string>>,
+  providerPrefixes: readonly string[],
   control: Control,
 ): ProviderOptionsFileAccess {
   // Why: the runtime resolver accepts a filesystem-like interface. Restricting
@@ -739,8 +1072,8 @@ function makeFileAccess(
         || segments[index] === '..'
       ) throw failure('OUTSIDE_REGISTRY');
     }
-    for (let index = 0; index < knownPrefixes.length; index += 1) {
-      const prefix = knownPrefixes[index]!;
+    for (let index = 0; index < providerPrefixes.length; index += 1) {
+      const prefix = providerPrefixes[index]!;
       if (path === prefix || CAPTURED_REFLECT_APPLY(
         CAPTURED_STRING_STARTS_WITH,
         path,
@@ -755,11 +1088,11 @@ function makeFileAccess(
   return freeze({
     exists(path: string): boolean {
       requireKnown(path);
-      return registry[path] !== undefined;
+      return providerRegistry[path] !== undefined;
     },
     readText(path: string): string {
       requireKnown(path);
-      const value = registry[path];
+      const value = providerRegistry[path];
       if (value === undefined) throw failure('MISSING');
       return value;
     },
@@ -775,28 +1108,20 @@ function makeFileAccess(
 }
 
 function captureSnapshotUnchecked(
-  input: CaptureProjectTemplateRepertoireCapabilitySnapshotInput,
+  rawInput: CaptureProjectTemplateRepertoireCapabilitySnapshotInput,
 ): ProjectTemplateRepertoireCapabilitySnapshot {
-  if (
-    typeof input !== 'object'
-    || input === null
-    || CAPTURED_TYPES_IS_PROXY(input)
-    || !CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, SCOPE, [input.scope])
-    || typeof input.packageRelativePath !== 'string'
-    || typeof input.deadlineMs !== 'number'
-    || Number.isNaN(input.deadlineMs)
-    || (input.ioSeam !== undefined && typeof input.ioSeam !== 'function')
-  ) throw failure('INVALID_ARGUMENT');
+  const input = normalizeCaptureInput(rawInput);
   const budgetSeam = input.budgetSeam;
   const budget: Budget = {
     packageFiles: 0,
-    requestFiles: limit(input.requestFileCount, 0),
+    requestFiles: input.requestFileCount,
     bytes: 0,
-    entries: limit(budgetSeam?.initialEntries, 0),
-    maxPackageFiles: limit(budgetSeam?.maxPackageFiles, MAX_PACKAGE_FILES),
-    maxRequestFiles: limit(budgetSeam?.maxRequestFiles, MAX_REQUEST_FILES),
-    maxBytes: limit(budgetSeam?.maxBytes, MAX_TOTAL_BYTES),
-    maxEntries: limit(budgetSeam?.maxEntries, MAX_TOTAL_ENTRIES),
+    entries: budgetSeam.initialEntries,
+    maxPackageFiles: budgetSeam.maxPackageFiles,
+    maxRequestFiles: budgetSeam.maxRequestFiles,
+    maxBytes: budgetSeam.maxBytes,
+    maxEntries: budgetSeam.maxEntries,
+    maxDepth: budgetSeam.maxDepth,
   };
   if (budget.requestFiles > budget.maxRequestFiles) {
     throw failure('LIMIT_EXCEEDED');
@@ -810,12 +1135,12 @@ function captureSnapshotUnchecked(
     files: [],
     workflowFiles: [],
     providerFiles: [],
-    registry: CAPTURED_REFLECT_APPLY(
+    providerRegistry: CAPTURED_REFLECT_APPLY(
       CAPTURED_OBJECT_CREATE,
       CAPTURED_OBJECT_RECEIVER,
       [null],
     ) as Record<string, string>,
-    knownPrefixes: [],
+    providerPrefixes: [],
     witnessParts: [],
     missingRoots: [],
   };
@@ -848,6 +1173,7 @@ function captureSnapshotUnchecked(
         'package',
         input.scope,
         'workflow',
+        false,
         1,
       );
     }
@@ -861,6 +1187,7 @@ function captureSnapshotUnchecked(
         'package',
         input.scope,
         'provider-options',
+        true,
         1,
       );
     }
@@ -869,7 +1196,7 @@ function captureSnapshotUnchecked(
       scope: `@${string}/${string}`;
       candidateDir: string;
     }[] = [];
-    const layers = orderedLayers(input.approvedLayers ?? []);
+    const layers = input.approvedLayers;
     for (let layerIndex = 0; layerIndex < layers.length; layerIndex += 1) {
       const layer = layers[layerIndex]!;
       checkpoint(state.control);
@@ -919,6 +1246,7 @@ function captureSnapshotUnchecked(
         layer.role,
         layer.scope,
         'provider-options',
+        true,
         0,
       );
       if (layer.role === 'scoped') {
@@ -930,9 +1258,13 @@ function captureSnapshotUnchecked(
     sortFiles(state.workflowFiles);
     sortFiles(state.providerFiles);
     CAPTURED_REFLECT_APPLY(CAPTURED_ARRAY_SORT, state.witnessParts, []);
-    const registry = freeze(state.registry);
-    const knownPrefixes = freeze(state.knownPrefixes);
-    const fileAccess = makeFileAccess(registry, knownPrefixes, state.control);
+    const providerRegistry = freeze(state.providerRegistry);
+    const providerPrefixes = freeze(state.providerPrefixes);
+    const fileAccess = makeFileAccess(
+      providerRegistry,
+      providerPrefixes,
+      state.control,
+    );
     const frozenScopedDirs: {
       readonly scope: `@${string}/${string}`;
       readonly candidateDir: string;
@@ -955,8 +1287,8 @@ function captureSnapshotUnchecked(
       [snapshot, freeze({
         directories: freeze(state.directories),
         files: freeze(state.files),
-        registry,
-        knownPrefixes,
+        providerRegistry,
+        providerPrefixes,
         fileAccess,
         missingRoots: freeze(state.missingRoots),
       })],
@@ -977,7 +1309,7 @@ export function captureProjectTemplateRepertoireCapabilitySnapshot(
     return captureSnapshotUnchecked(input);
   } catch (error) {
     if (isFailure(error)) throw error;
-    throw failure('UNSAFE_INPUT');
+    throw failure('INVALID_ARGUMENT');
   } finally {
     CAPTURE_ACTIVE = false;
   }
@@ -999,15 +1331,19 @@ export function revalidateProjectTemplateRepertoireCapabilitySnapshot(
   snapshot: ProjectTemplateRepertoireCapabilitySnapshot,
   input: RevalidateProjectTemplateRepertoireCapabilitySnapshotInput,
 ): void {
+  let control: Control;
+  try {
+    control = normalizeRevalidateInput(input);
+  } catch (error) {
+    if (isFailure(error)) throw error;
+    throw failure('INVALID_ARGUMENT');
+  }
   const state = CAPTURED_REFLECT_APPLY(
     CAPTURED_WEAK_MAP_GET,
     SNAPSHOT_STATES,
     [snapshot],
   ) as SnapshotState | undefined;
-  if (state === undefined || typeof input !== 'object' || input === null) {
-    throw failure('INVALID_ARGUMENT');
-  }
-  const control = { signal: input.signal, deadlineMs: input.deadlineMs };
+  if (state === undefined) throw failure('INVALID_ARGUMENT');
   try {
     for (let index = 0; index < state.files.length; index += 1) {
       const file = state.files[index]!;
