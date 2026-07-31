@@ -125,9 +125,16 @@ export {
 export {
   createProjectTemplateGithubArchiveAssetPort,
 } from './infra/github/project-template-github-archive-asset-port.js';
+export {
+  resolveAuthenticatedGithubTemplateSource,
+} from './infra/github/project-template-source-resolver.js';
 export type {
   ProjectTemplateGithubArchiveAssetPortDependencies,
 } from './infra/github/project-template-github-archive-asset-port.js';
+export type {
+  ProjectTemplateSourceResolverDependencies,
+  ResolveAuthenticatedGithubTemplateSourceOptions,
+} from './infra/github/project-template-source-resolver.js';
 export type {
   ProjectTemplateManifestV1,
   ProjectTemplateGithubRefSourceSpec,
