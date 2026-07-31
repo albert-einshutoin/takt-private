@@ -11,7 +11,7 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import {
   captureDirectoryTreeProof,
   readApprovedRegularFile,
@@ -26,6 +26,13 @@ const safeReflectApply = Reflect.apply.bind(Reflect);
 const safeBufferToStringMethod = Buffer.prototype.toString;
 const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
 const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
+const safeArrayIsArray = Array.isArray.bind(Array);
+const safeArraySortMethod = Array.prototype.sort;
+const safeArrayPushMethod = Array.prototype.push;
+const safeStringStartsWithMethod = String.prototype.startsWith;
+const safeJsonParse = JSON.parse.bind(JSON);
+const safeJsonStringify = JSON.stringify.bind(JSON);
+const safeBufferFrom = Buffer.from.bind(Buffer);
 
 export class RepertoireMaintenanceError extends Error {
   readonly code = 'RECOVERY_REQUIRED' as const;
@@ -81,7 +88,7 @@ export function classifyMaintenanceTransactions(
       throw error;
     }
     if (entries.length > MAX_TRANSACTIONS) throw recoveryRequired();
-    entries.sort();
+    safeReflectApply(safeArraySortMethod, entries, []);
     const result: MaintenanceClassification = { complete: [], incomplete: [] };
     for (let index = 0; index < entries.length; index += 1) {
       const transaction = join(transactionsRoot, entries[index]!);
@@ -89,13 +96,25 @@ export function classifyMaintenanceTransactions(
       if (!isDirectory(stat) || isSymbolicLink(stat)) throw recoveryRequired();
       let complete = false;
       try {
+        const transactionEntries = readdirSync(transaction);
+        safeReflectApply(safeArraySortMethod, transactionEntries, []);
         const intent = readApprovedRegularFile(join(transaction, 'intent.json'), transaction);
         const outcome = readApprovedRegularFile(join(transaction, 'outcome.json'), transaction);
         const completeRecord = readApprovedRegularFile(join(transaction, 'complete'), transaction);
         const parsedIntent = parseRecord(intent.bytes);
         const parsedOutcome = parseRecord(outcome.bytes);
         const parsedComplete = parseRecord(completeRecord.bytes);
-        complete = parsedIntent.version === 1
+        const kind = parsedIntent.kind;
+        const expectedEntries = typeof kind === 'string'
+          ? ['complete', 'intent.json', kind, 'outcome.json']
+          : [];
+        safeReflectApply(safeArraySortMethod, expectedEntries, []);
+        const payloadProof = kind === 'payload' || kind === 'partial'
+          ? captureDirectoryTreeProof(join(transaction, kind), globalConfigDir)
+          : undefined;
+        complete = sameEntries(transactionEntries, expectedEntries)
+          && parsedIntent.version === 1
+          && parsedIntent.nonce === basename(transaction)
           && parsedOutcome.version === 1
           && parsedOutcome.phase === 'detached'
           && parsedOutcome.intentDigest === digestBytes(intent.bytes)
@@ -104,11 +123,13 @@ export function classifyMaintenanceTransactions(
           && parsedComplete.phase === 'complete'
           && parsedComplete.intentDigest === parsedOutcome.intentDigest
           && parsedComplete.actualProofDigest === parsedOutcome.actualProofDigest
-          && parsedComplete.outcomeDigest === digestBytes(outcome.bytes);
+          && parsedComplete.outcomeDigest === digestBytes(outcome.bytes)
+          && payloadProof !== undefined
+          && digestTree(payloadProof) === parsedOutcome.actualProofDigest;
       } catch {
         complete = false;
       }
-      (complete ? result.complete : result.incomplete).push(transaction);
+      safeReflectApply(safeArrayPushMethod, complete ? result.complete : result.incomplete, [transaction]);
     }
     return result;
   } catch (error) {
@@ -139,10 +160,13 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     options.onPhase?.('transaction-created');
     const destination = join(transactionDir, options.kind);
     const source = relative(options.globalConfigDir, options.sourceDir);
-    if (source === '' || isAbsolute(source) || source === '..' || source.startsWith('../')) {
+    if (
+      source === '' || isAbsolute(source) || source === '..'
+      || safeReflectApply(safeStringStartsWithMethod, source, ['../'])
+    ) {
       throw recoveryRequired();
     }
-    const intent = Buffer.from(JSON.stringify({
+    const intent = safeBufferFrom(safeJsonStringify({
       version: 1,
       kind: options.kind,
       source,
@@ -173,7 +197,7 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     if (!sameTreeProof(options.expected, actual, true)) throw recoveryRequired();
     options.onPhase?.('proof-complete');
 
-    const outcome = Buffer.from(JSON.stringify({
+    const outcome = safeBufferFrom(safeJsonStringify({
       version: 1,
       phase: 'detached',
       intentDigest: digestBytes(intent),
@@ -186,7 +210,7 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     syncFile(join(transactionDir, 'outcome.json'));
     syncDirectory(transactionDir);
     options.onPhase?.('outcome-durable');
-    const complete = Buffer.from(JSON.stringify({
+    const complete = safeBufferFrom(safeJsonStringify({
       version: 1,
       phase: 'complete',
       intentDigest: digestBytes(intent),
@@ -240,8 +264,16 @@ function transactionRoot(globalConfigDir: string): string {
   return join(globalConfigDir, '.repertoire-maintenance', 'transactions');
 }
 
+function sameEntries(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
 function digestTree(proof: TreeProof): string {
-  return createHash('sha256').update(JSON.stringify({
+  return createHash('sha256').update(safeJsonStringify({
     dev: proof.dev,
     ino: proof.ino,
     mode: proof.mode,
@@ -256,12 +288,12 @@ function digestBytes(bytes: Buffer): string {
 }
 
 function parseRecord(bytes: Buffer): Record<string, unknown> {
-  const value: unknown = JSON.parse(safeReflectApply(
+  const value: unknown = safeJsonParse(safeReflectApply(
     safeBufferToStringMethod,
     bytes,
     ['utf8'],
   ) as string);
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw recoveryRequired();
+  if (typeof value !== 'object' || value === null || safeArrayIsArray(value)) throw recoveryRequired();
   return value as Record<string, unknown>;
 }
 

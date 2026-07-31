@@ -106,4 +106,24 @@ describe('detachToMaintenance', () => {
     expect(classification.incomplete).toHaveLength(1);
     expect(() => assertMaintenanceTransactionsReady(root)).toThrow();
   });
+
+  it('reclassifies a completed transaction when foreign payload bytes appear', () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-foreign-'));
+    roots.push(root);
+    const packageDir = join(root, 'repertoire', '@owner', 'repo');
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(join(packageDir, 'workflow.yaml'), 'name: retained');
+    const transaction = detachToMaintenance({
+      globalConfigDir: root,
+      sourceDir: packageDir,
+      containmentRoot: root,
+      expected: captureDirectoryTreeProof(packageDir, root),
+      kind: 'payload',
+    });
+    writeFileSync(join(transaction, 'payload', 'foreign.yaml'), 'foreign');
+    expect(classifyMaintenanceTransactions(root)).toEqual({
+      complete: [],
+      incomplete: [transaction],
+    });
+  });
 });
