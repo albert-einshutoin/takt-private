@@ -50,6 +50,7 @@ function contentInput(
     incoming?: string;
     compatibility?: 'compatible' | 'unknown' | 'incompatible';
     inspection?: boolean;
+    localContent?: boolean;
   } = { base: 'same', local: 'same', incoming: 'same' },
 ): ProjectTemplateApplyPlanInput {
   const path = 'workflows/test.yaml';
@@ -71,7 +72,9 @@ function contentInput(
     mode: '0644',
     sha256: hash(options.local),
     bytes: Buffer.byteLength(options.local),
-    content: Buffer.from(options.local),
+    ...(options.localContent === false
+      ? {}
+      : { content: Buffer.from(options.local) }),
     gitTrackingStatus: 'tracked-clean' as const,
   }];
   const input: ProjectTemplateApplyPlanInput = {
@@ -454,7 +457,7 @@ describe('project template sealed outer apply preview G5', () => {
     const json = renderProjectTemplateApplyPreviewJson(preview);
     const parsed = JSON.parse(json) as Record<string, unknown>;
     expect(JSON.stringify(parsed)).toBe(json);
-    expect(human).toContain(`previewId=${preview.previewId}`);
+    expect(human).toContain(`previewId=${JSON.stringify(preview.previewId)}`);
     expect(human).toContain('reviewRequired=false');
     expect(parsed).toMatchObject({
       schemaVersion: '1.0',
@@ -483,6 +486,9 @@ describe('project template sealed outer apply preview G5', () => {
     const contentPlan = createProjectTemplateApplyPlan(contentInput({
       base: 'base', local: 'base', incoming: 'next',
     }));
+    expect(contentPlan.planId).toBe(
+      '64498df1fe60a52f522761795533c13ea68bbf2b3d03a72da400a637f35f66ec',
+    );
     const dep = dependency();
     const repertoireDependencyPlan = dependencyPlan(
       contentPlan.incomingManifestSha256,
@@ -502,6 +508,87 @@ describe('project template sealed outer apply preview G5', () => {
     expect(first).toContain('UPSTREAM_CHANGED');
     expect(first).toContain('@acme/repertoire');
     expect(first).toContain('NOT_INSTALLED');
+  });
+
+  it('renders every safe content DTO field in human form with full digests', () => {
+    const contentPlan = createProjectTemplateApplyPlan(contentInput({
+      base: 'base', local: 'base', incoming: 'next',
+    }));
+    const preview = createProjectTemplateApplyPreview({
+      contentPlan,
+      repertoireDependencyPlan: dependencyPlan(
+        contentPlan.incomingManifestSha256,
+      ),
+    });
+    const human = renderProjectTemplateApplyPreviewHuman(preview);
+    const parsed = JSON.parse(
+      renderProjectTemplateApplyPreviewJson(preview),
+    ) as {
+      bindings: Record<string, string>;
+      content: {
+        summary: { counts: Record<string, number>; human: string; json: string };
+        entries: Array<Record<string, unknown>>;
+      } & Record<string, unknown>;
+    };
+    for (const digest of Object.values(parsed.bindings)) {
+      expect(human).toContain(digest);
+    }
+    const entry = parsed.content.entries[0]!;
+    for (const field of [
+      'path', 'policy', 'action', 'reasonCode', 'beforeSha256', 'baseSha256',
+      'incomingSha256', 'afterSha256', 'beforeMode', 'incomingMode',
+      'afterMode', 'gitTrackingStatus', 'rollbackImpact', 'reviewRequired',
+    ]) {
+      expect(human).toContain(JSON.stringify(entry[field]));
+    }
+    expect(human).toContain(JSON.stringify(entry['capabilitiesBefore']));
+    expect(human).toContain(JSON.stringify(entry['capabilitiesAfter']));
+    expect(human).toContain(JSON.stringify(entry['diff']));
+    expect(human).toContain(JSON.stringify(parsed.content.summary.counts));
+    expect(human).toContain(JSON.stringify(parsed.content.summary.human));
+    expect(human).toContain(JSON.stringify(parsed.content.summary.json));
+  });
+
+  it('renders only safe sentinels for opaque content and resists path injection', () => {
+    const secret = 'ghp_syntheticcredential123456';
+    const cases = [
+      { expected: 'redacted', base: 'base', local: secret, incoming: 'next' },
+      { expected: 'binary', base: 'a\u0000', local: 'a\u0000', incoming: 'b\u0000' },
+      {
+        expected: 'too-large',
+        base: 'a'.repeat(65 * 1024),
+        local: 'a'.repeat(65 * 1024),
+        incoming: 'b'.repeat(65 * 1024),
+      },
+      {
+        expected: 'unavailable',
+        base: 'base',
+        local: 'base',
+        incoming: 'next',
+        localContent: false,
+      },
+    ] as const;
+    for (const scenario of cases) {
+      const contentPlan = createProjectTemplateApplyPlan(contentInput(scenario));
+      const preview = createProjectTemplateApplyPreview({
+        contentPlan,
+        repertoireDependencyPlan: dependencyPlan(
+          contentPlan.incomingManifestSha256,
+        ),
+      });
+      const output = renderProjectTemplateApplyPreviewHuman(preview)
+        + renderProjectTemplateApplyPreviewJson(preview);
+      expect(output).toContain(`"kind":"${scenario.expected}"`);
+      expect(output).not.toContain(secret);
+      expect(output.length).toBeLessThan(64 * 1024);
+    }
+
+    const pair = cleanPair();
+    const injected = 'credential\n/Users/private/token=synthetic';
+    expect(Reflect.set(pair.contentPlan.entries[0]!, 'path', injected)).toBe(false);
+    const preview = createProjectTemplateApplyPreview(pair);
+    expect(renderProjectTemplateApplyPreviewHuman(preview)).not.toContain(injected);
+    expect(renderProjectTemplateApplyPreviewJson(preview)).not.toContain(injected);
   });
 
   it('does not change the established content planId formula', () => {

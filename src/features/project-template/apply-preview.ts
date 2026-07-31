@@ -45,6 +45,25 @@ interface PreviewSeal {
   readonly json: string;
 }
 
+interface ContentReviewDto {
+  readonly schemaVersion: '1.0';
+  readonly planId: string;
+  readonly baseLockSha256?: string;
+  readonly incomingManifestSha256: string;
+  readonly incomingArchiveSha256?: string;
+  readonly incomingCompatibility: ProjectTemplateApplyPlan['incomingCompatibility'];
+  readonly capabilitiesBefore: ProjectTemplateApplyPlan['capabilitiesBefore'];
+  readonly capabilitiesAfter: ProjectTemplateApplyPlan['capabilitiesAfter'];
+  readonly basePackVersion?: string;
+  readonly incomingPackVersion: string;
+  readonly flags: {
+    readonly reviewRequired: boolean;
+    readonly defaultApplyPossible: boolean;
+  };
+  readonly entries: readonly ProjectTemplateApplyPlanEntry[];
+  readonly summary: ProjectTemplateApplyPlan['summary'];
+}
+
 const PREVIEW_ID_DOMAIN = 'takt.project-template.apply-preview.v1\u0000';
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_ARRAY_RECEIVER = Array;
@@ -224,7 +243,7 @@ function hashPreviewBody(canonicalBody: string): string {
   ) as string;
 }
 
-function contentReview(plan: ProjectTemplateApplyPlan): ReviewValue {
+function contentReview(plan: ProjectTemplateApplyPlan): ContentReviewDto {
   return freeze({
     schemaVersion: plan.schemaVersion,
     planId: plan.planId,
@@ -246,9 +265,9 @@ function contentReview(plan: ProjectTemplateApplyPlan): ReviewValue {
       reviewRequired: plan.reviewRequired,
       defaultApplyPossible: plan.defaultApplyPossible,
     }),
-    entries: plan.entries as unknown as readonly ReviewValue[],
-    summary: plan.summary as unknown as ReviewValue,
-  }) as unknown as ReviewValue;
+    entries: plan.entries,
+    summary: plan.summary,
+  });
 }
 
 function contentHardConflicts(
@@ -308,18 +327,34 @@ function humanPreview(
   reviewRequired: boolean,
   hardConflict: boolean,
   defaultApplyPossible: boolean,
-  contentPlan: ProjectTemplateApplyPlan,
+  content: ContentReviewDto,
   dependencyHuman: string,
 ): string {
   const lines: string[] = [];
   append(lines, 'project-template-apply-preview schema=1.0');
-  append(lines, `previewId=${previewId}`);
-  append(lines, `contentPlanId=${bindings.contentPlanId}`);
-  append(lines, `repertoireDependencyPlanId=${bindings.repertoireDependencyPlanId}`);
-  append(lines, 'bindings:'
-    + ` manifest=${bindings.incomingManifestSha256}`
-    + ` sourceDescriptor=${bindings.sourceDescriptorSha256}`
-    + ` declaration=${bindings.repertoireDeclarationSha256}`);
+  append(lines, `previewId=${canonicalString(previewId)}`);
+  append(lines, `contentPlanId=${canonicalString(bindings.contentPlanId)}`);
+  append(lines, 'repertoireDependencyPlanId='
+    + canonicalString(bindings.repertoireDependencyPlanId));
+  append(lines, 'bindings:');
+  append(lines, '  incomingManifestSha256='
+    + canonicalString(bindings.incomingManifestSha256));
+  if (bindings.incomingArchiveSha256 !== undefined) {
+    append(lines, '  incomingArchiveSha256='
+      + canonicalString(bindings.incomingArchiveSha256));
+  }
+  if (bindings.baseLockSha256 !== undefined) {
+    append(lines, '  baseLockSha256='
+      + canonicalString(bindings.baseLockSha256));
+  }
+  append(lines, '  sourceDescriptorSha256='
+    + canonicalString(bindings.sourceDescriptorSha256));
+  append(lines, '  repertoireDeclarationSha256='
+    + canonicalString(bindings.repertoireDeclarationSha256));
+  if (bindings.previousRepertoireLockSha256 !== undefined) {
+    append(lines, '  previousRepertoireLockSha256='
+      + canonicalString(bindings.previousRepertoireLockSha256));
+  }
   append(lines, `compositionConflicts=${canonicalJson(compositionConflicts)}`);
   append(lines, `contentHardConflicts=${canonicalJson(hardConflicts as unknown as ReviewValue)}`);
   append(lines, `dependencyHardConflict=${dependencyHardConflict}`);
@@ -327,17 +362,78 @@ function humanPreview(
     + ` hardConflict=${hardConflict}`
     + ` defaultApplyPossible=${defaultApplyPossible}`);
   append(lines, 'content:');
-  append(lines, `  compatibility=${contentPlan.incomingCompatibility}`);
-  append(lines, `  summary=${canonicalString(contentPlan.summary.human)}`);
-  for (let index = 0; index < contentPlan.entries.length; index += 1) {
-    const entry: ProjectTemplateApplyPlanEntry = contentPlan.entries[index]!;
+  append(lines, `  schemaVersion=${canonicalString(content.schemaVersion)}`);
+  append(lines, `  planId=${canonicalString(content.planId)}`);
+  if (content.baseLockSha256 !== undefined) {
+    append(lines, '  baseLockSha256='
+      + canonicalString(content.baseLockSha256));
+  }
+  append(lines, '  incomingManifestSha256='
+    + canonicalString(content.incomingManifestSha256));
+  if (content.incomingArchiveSha256 !== undefined) {
+    append(lines, '  incomingArchiveSha256='
+      + canonicalString(content.incomingArchiveSha256));
+  }
+  append(lines, '  incomingCompatibility='
+    + canonicalString(content.incomingCompatibility));
+  append(lines, '  capabilitiesBefore='
+    + canonicalJson(content.capabilitiesBefore as unknown as ReviewValue));
+  append(lines, '  capabilitiesAfter='
+    + canonicalJson(content.capabilitiesAfter as unknown as ReviewValue));
+  if (content.basePackVersion !== undefined) {
+    append(lines, '  basePackVersion='
+      + canonicalString(content.basePackVersion));
+  }
+  append(lines, '  incomingPackVersion='
+    + canonicalString(content.incomingPackVersion));
+  append(lines, `  flags: reviewRequired=${content.flags.reviewRequired}`
+    + ` defaultApplyPossible=${content.flags.defaultApplyPossible}`);
+  append(lines, '  summary.counts='
+    + canonicalJson(content.summary.counts as unknown as ReviewValue));
+  append(lines, `  summary.human=${canonicalString(content.summary.human)}`);
+  append(lines, `  summary.json=${canonicalString(content.summary.json)}`);
+  append(lines, '  entries:');
+  for (let index = 0; index < content.entries.length; index += 1) {
+    const entry = content.entries[index]!;
     append(lines, `  - path=${canonicalString(entry.path)}`
-      + ` policy=${entry.policy}`
-      + ` action=${entry.action}`
-      + ` reason=${entry.reasonCode}`
+      + ` policy=${canonicalString(entry.policy)}`
+      + ` action=${canonicalString(entry.action)}`
+      + ` reasonCode=${canonicalString(entry.reasonCode)}`
       + ` reviewRequired=${entry.reviewRequired}`);
+    const hashes = {
+      ...(entry.beforeSha256 === undefined
+        ? {} : { beforeSha256: entry.beforeSha256 }),
+      ...(entry.baseSha256 === undefined
+        ? {} : { baseSha256: entry.baseSha256 }),
+      ...(entry.incomingSha256 === undefined
+        ? {} : { incomingSha256: entry.incomingSha256 }),
+      ...(entry.afterSha256 === undefined
+        ? {} : { afterSha256: entry.afterSha256 }),
+    } as unknown as ReviewValue;
+    const modes = {
+      ...(entry.beforeMode === undefined
+        ? {} : { beforeMode: entry.beforeMode }),
+      ...(entry.incomingMode === undefined
+        ? {} : { incomingMode: entry.incomingMode }),
+      ...(entry.afterMode === undefined
+        ? {} : { afterMode: entry.afterMode }),
+    } as unknown as ReviewValue;
+    append(lines, `    hashes=${canonicalJson(hashes)}`);
+    append(lines, `    modes=${canonicalJson(modes)}`);
+    append(lines, '    capabilitiesBefore='
+      + canonicalJson(entry.capabilitiesBefore as unknown as ReviewValue));
+    append(lines, '    capabilitiesAfter='
+      + canonicalJson(entry.capabilitiesAfter as unknown as ReviewValue));
+    append(lines, '    gitTrackingStatus='
+      + canonicalString(entry.gitTrackingStatus)
+      + ' rollbackImpact=' + canonicalString(entry.rollbackImpact)
+      + ` reviewRequired=${entry.reviewRequired}`);
+    if (entry.diff !== undefined) {
+      append(lines, '    diff='
+        + canonicalJson(entry.diff as unknown as ReviewValue));
+    }
     if (entry.mergeDiagnostics !== undefined) {
-      append(lines, '    diagnostics='
+      append(lines, '    mergeDiagnostics='
         + canonicalJson(entry.mergeDiagnostics as unknown as ReviewValue));
     }
   }
@@ -404,7 +500,7 @@ export function createProjectTemplateApplyPreview(
     reviewRequired,
     hardConflict,
     defaultApplyPossible,
-    contentReview: contentDto,
+    contentReview: contentDto as unknown as ReviewValue,
     repertoireDependencyReviewJson: dependencyJson,
   }) as unknown as ReviewValue;
   const canonicalBody = canonicalJson(internalBody);
@@ -430,7 +526,7 @@ export function createProjectTemplateApplyPreview(
     + ',"flags":{"reviewRequired":' + CAPTURED_STRING(reviewRequired)
     + ',"hardConflict":' + CAPTURED_STRING(hardConflict)
     + ',"defaultApplyPossible":' + CAPTURED_STRING(defaultApplyPossible)
-    + '},"content":' + canonicalJson(contentDto)
+    + '},"content":' + canonicalJson(contentDto as unknown as ReviewValue)
     + ',"repertoireDependencies":' + dependencyJson + '}';
   const human = humanPreview(
     previewId,
@@ -441,7 +537,7 @@ export function createProjectTemplateApplyPreview(
     reviewRequired,
     hardConflict,
     defaultApplyPossible,
-    contentPlan,
+    contentDto,
     renderProjectTemplateRepertoireDependencyPlanHuman(dependencyPlan),
   );
   CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_SET, PREVIEW_SEALS, [

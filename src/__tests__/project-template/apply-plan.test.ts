@@ -102,6 +102,52 @@ function input(
 }
 
 describe('project template three-way apply plan', () => {
+  it('freezes the unresolved and resealed plan graph through captured intrinsics', () => {
+    const freezeDescriptor = Object.getOwnPropertyDescriptor(Object, 'freeze')!;
+    let poisonCalls = 0;
+    let plan: ReturnType<typeof createProjectTemplateApplyPlan> | undefined;
+    try {
+      Object.defineProperty(Object, 'freeze', {
+        ...freezeDescriptor,
+        value<T>(value: T): T {
+          poisonCalls += 1;
+          return value;
+        },
+      });
+      plan = createProjectTemplateApplyPlan(input({
+        base: 'base', local: 'base', incoming: 'next',
+      }));
+    } finally {
+      Object.defineProperty(Object, 'freeze', freezeDescriptor);
+    }
+    expect(poisonCalls).toBe(0);
+    expect(plan).toBeDefined();
+    const pending: object[] = [plan!];
+    const seen = new WeakSet<object>();
+    while (pending.length !== 0) {
+      const current = pending.pop()!;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      expect(Object.isFrozen(current)).toBe(true);
+      for (const descriptor of Object.values(
+        Object.getOwnPropertyDescriptors(current),
+      )) {
+        if (
+          'value' in descriptor
+          && typeof descriptor.value === 'object'
+          && descriptor.value !== null
+        ) pending.push(descriptor.value as object);
+      }
+    }
+    const originalPath = plan!.entries[0]!.path;
+    expect(Reflect.set(
+      plan!.entries[0]!,
+      'path',
+      'credential\n/Users/private/token=synthetic',
+    )).toBe(false);
+    expect(plan!.entries[0]!.path).toBe(originalPath);
+  });
+
   it.each([
     ['unchanged / changed', 'base', 'base', 'next', 'update', 'UPSTREAM_CHANGED'],
     ['changed / unchanged', 'base', 'local', 'base', 'keep', 'LOCAL_CHANGED'],
