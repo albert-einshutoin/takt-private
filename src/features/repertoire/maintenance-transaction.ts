@@ -29,6 +29,7 @@ const safeStatsIsSymbolicLinkMethod = Stats.prototype.isSymbolicLink;
 const safeArrayIsArray = Array.isArray.bind(Array);
 const safeArraySortMethod = Array.prototype.sort;
 const safeArrayPushMethod = Array.prototype.push;
+const safeArrayJoinMethod = Array.prototype.join;
 const safeStringStartsWithMethod = String.prototype.startsWith;
 const safeJsonParse = JSON.parse.bind(JSON);
 const safeJsonStringify = JSON.stringify.bind(JSON);
@@ -45,6 +46,7 @@ export class RepertoireMaintenanceError extends Error {
 
 export type MaintenancePayloadKind = 'payload' | 'partial';
 export type MaintenanceClassification = { complete: string[]; incomplete: string[] };
+type PortableTreeSummary = { digest: string; entries: number; bytes: number };
 
 export interface DetachToMaintenanceOptions {
   globalConfigDir: string;
@@ -124,8 +126,8 @@ export function classifyMaintenanceTransactions(
           ? ['complete', 'intent.json', kind, 'outcome.json']
           : [];
         safeReflectApply(safeArraySortMethod, expectedEntries, []);
-        const payloadProof = kind === 'payload' || kind === 'partial'
-          ? captureDirectoryTreeProof(join(transaction, kind), globalConfigDir)
+        const payloadSummary = kind === 'payload' || kind === 'partial'
+          ? capturePortableTreeSummary(join(transaction, kind))
           : undefined;
         complete = sameEntries(transactionEntries, expectedEntries)
           && parsedIntent.version === 1
@@ -133,14 +135,20 @@ export function classifyMaintenanceTransactions(
           && parsedOutcome.version === 1
           && parsedOutcome.phase === 'detached'
           && parsedOutcome.intentDigest === digestBytes(intent.bytes)
-          && typeof parsedOutcome.actualProofDigest === 'string'
+          && typeof parsedIntent.expectedPortableDigest === 'string'
+          && typeof parsedOutcome.actualPortableDigest === 'string'
+          && parsedOutcome.actualPortableDigest === parsedIntent.expectedPortableDigest
+          && parsedOutcome.payloadEntries === parsedIntent.payloadEntries
+          && parsedOutcome.payloadBytes === parsedIntent.payloadBytes
           && parsedComplete.version === 1
           && parsedComplete.phase === 'complete'
           && parsedComplete.intentDigest === parsedOutcome.intentDigest
-          && parsedComplete.actualProofDigest === parsedOutcome.actualProofDigest
+          && parsedComplete.actualPortableDigest === parsedOutcome.actualPortableDigest
           && parsedComplete.outcomeDigest === digestBytes(outcome.bytes)
-          && payloadProof !== undefined
-          && digestTree(payloadProof) === parsedOutcome.actualProofDigest;
+          && payloadSummary !== undefined
+          && payloadSummary.digest === parsedOutcome.actualPortableDigest
+          && payloadSummary.entries === parsedOutcome.payloadEntries
+          && payloadSummary.bytes === parsedOutcome.payloadBytes;
       } catch {
         complete = false;
       }
@@ -181,11 +189,14 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     ) {
       throw recoveryRequired();
     }
+    const portableBefore = capturePortableTreeSummary(options.sourceDir);
     const intent = safeBufferFrom(safeJsonStringify({
       version: 1,
       kind: options.kind,
       source,
-      expectedTreeDigest: digestTree(options.expected),
+      expectedPortableDigest: portableBefore.digest,
+      payloadEntries: portableBefore.entries,
+      payloadBytes: portableBefore.bytes,
       nonce,
     }));
     options.beforeFilesystemOperation?.('intent-write');
@@ -217,13 +228,17 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     options.beforeFilesystemOperation?.('payload-proof');
     const actual = captureDirectoryTreeProof(destination, options.globalConfigDir);
     if (!sameTreeProof(options.expected, actual, true)) throw recoveryRequired();
+    const portableAfter = capturePortableTreeSummary(destination);
+    if (!samePortableSummary(portableBefore, portableAfter)) throw recoveryRequired();
     options.onPhase?.('proof-complete');
 
     const outcome = safeBufferFrom(safeJsonStringify({
       version: 1,
       phase: 'detached',
       intentDigest: digestBytes(intent),
-      actualProofDigest: digestTree(actual),
+      actualPortableDigest: portableAfter.digest,
+      payloadEntries: portableAfter.entries,
+      payloadBytes: portableAfter.bytes,
     }));
     options.beforeFilesystemOperation?.('outcome-write');
     writeFileSync(join(transactionDir, 'outcome.json'), outcome, {
@@ -238,7 +253,7 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
       version: 1,
       phase: 'complete',
       intentDigest: digestBytes(intent),
-      actualProofDigest: digestTree(actual),
+      actualPortableDigest: portableAfter.digest,
       outcomeDigest: digestBytes(outcome),
     }));
     const pendingComplete = join(transactionDir, 'complete.pending');
@@ -300,15 +315,62 @@ function sameEntries(left: string[], right: string[]): boolean {
   return true;
 }
 
-function digestTree(proof: TreeProof): string {
-  return createHash('sha256').update(safeJsonStringify({
-    dev: proof.dev,
-    ino: proof.ino,
-    mode: proof.mode,
-    realpath: proof.realpath,
-    contentFingerprint: proof.contentFingerprint,
-    stableIdentity: proof.stableIdentity,
-  })).digest('hex');
+function capturePortableTreeSummary(root: string): PortableTreeSummary {
+  const first = capturePortableTreeSummaryOnce(root);
+  const second = capturePortableTreeSummaryOnce(root);
+  if (!samePortableSummary(first, second)) throw recoveryRequired();
+  return second;
+}
+
+function capturePortableTreeSummaryOnce(root: string): PortableTreeSummary {
+  const records: string[] = ['d:.'];
+  const budget = { entries: 0, bytes: 0 };
+  visitPortableTree(root, root, records, budget, 0);
+  return {
+    digest: createHash('sha256').update(
+      safeReflectApply(safeArrayJoinMethod, records, ['\0']) as string,
+    ).digest('hex'),
+    entries: budget.entries,
+    bytes: budget.bytes,
+  };
+}
+
+function visitPortableTree(
+  root: string,
+  directory: string,
+  records: string[],
+  budget: { entries: number; bytes: number },
+  depth: number,
+): void {
+  if (depth > 32) throw recoveryRequired();
+  const before = readdirSync(directory);
+  safeReflectApply(safeArraySortMethod, before, []);
+  for (let index = 0; index < before.length; index += 1) {
+    budget.entries += 1;
+    if (budget.entries > 4_096) throw recoveryRequired();
+    const path = join(directory, before[index]!);
+    const stat = lstatSync(path);
+    if (isSymbolicLink(stat)) throw recoveryRequired();
+    const relativePath = relative(root, path);
+    if (isDirectory(stat)) {
+      safeReflectApply(safeArrayPushMethod, records, [`d:${relativePath}`]);
+      visitPortableTree(root, path, records, budget, depth + 1);
+      continue;
+    }
+    const approved = readApprovedRegularFile(path, root);
+    budget.bytes += approved.bytes.length;
+    if (budget.bytes > 64 * 1024 * 1024) throw recoveryRequired();
+    safeReflectApply(safeArrayPushMethod, records, [
+      `f:${relativePath}:${approved.bytes.length}:${approved.proof.digest}`,
+    ]);
+  }
+  const after = readdirSync(directory);
+  safeReflectApply(safeArraySortMethod, after, []);
+  if (!sameEntries(before, after)) throw recoveryRequired();
+}
+
+function samePortableSummary(left: PortableTreeSummary, right: PortableTreeSummary): boolean {
+  return left.digest === right.digest && left.entries === right.entries && left.bytes === right.bytes;
 }
 
 function digestBytes(bytes: Buffer): string {
