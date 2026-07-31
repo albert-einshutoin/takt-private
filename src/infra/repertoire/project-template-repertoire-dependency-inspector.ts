@@ -171,8 +171,38 @@ interface ScopeParts {
 }
 
 interface ScopeInspection {
-  readonly observation: ProjectTemplateRepertoireDependencyObservation;
+  readonly observation?: ProjectTemplateRepertoireDependencyObservation;
+  readonly installed?: {
+    readonly scope: `@${string}/${string}`;
+    readonly source: `github:${string}/${string}`;
+    readonly ref: string;
+    readonly version: string;
+    readonly commit: string;
+    readonly capabilities: readonly [] | readonly ['edit'];
+    readonly capabilitySnapshot: ProjectTemplateRepertoireCapabilitySnapshot;
+  };
   readonly privateWitness: string;
+}
+
+interface RealmDescriptorSnapshot {
+  readonly key: PropertyKey;
+  readonly configurable: boolean;
+  readonly enumerable: boolean;
+  readonly writable?: boolean;
+  readonly value?: unknown;
+  readonly get?: (() => unknown);
+  readonly set?: ((value: unknown) => void);
+}
+
+interface RealmSurfaceSnapshot {
+  readonly target: object;
+  readonly descriptors: readonly RealmDescriptorSnapshot[];
+}
+
+interface RealmBindingSnapshot {
+  readonly key: 'Array' | 'Object' | 'String' | 'Set' | 'Map' | 'RegExp' | 'JSON';
+  readonly value: object;
+  readonly descriptor: RealmDescriptorSnapshot;
 }
 
 interface InspectionInput {
@@ -216,6 +246,180 @@ function joinArray(values: readonly string[], separator: string): string {
     values,
     [separator],
   ) as string;
+}
+
+function snapshotDescriptor(
+  key: PropertyKey,
+  descriptor: PropertyDescriptor | undefined,
+): RealmDescriptorSnapshot {
+  if (descriptor === undefined) throw INTERNAL_FAILURE;
+  const value = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_HAS_OWN_PROPERTY,
+    descriptor,
+    ['value'],
+  ) === true;
+  return freeze(value
+    ? {
+        key,
+        configurable: descriptor.configurable === true,
+        enumerable: descriptor.enumerable === true,
+        writable: descriptor.writable === true,
+        value: descriptor.value,
+      }
+    : {
+        key,
+        configurable: descriptor.configurable === true,
+        enumerable: descriptor.enumerable === true,
+        get: descriptor.get,
+        set: descriptor.set,
+      });
+}
+
+function descriptorBagValue(
+  descriptors: PropertyDescriptorMap,
+  key: PropertyKey,
+): PropertyDescriptor {
+  const own = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    CAPTURED_OBJECT_RECEIVER,
+    [descriptors, key],
+  ) as PropertyDescriptor | undefined;
+  if (!isOwnDataDescriptor(own) || typeof own.value !== 'object') {
+    throw INTERNAL_FAILURE;
+  }
+  return own.value as PropertyDescriptor;
+}
+
+function snapshotSurface(target: object): RealmSurfaceSnapshot {
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [target],
+  ) as PropertyKey[];
+  const descriptorBag = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [target],
+  ) as PropertyDescriptorMap;
+  const descriptors: RealmDescriptorSnapshot[] = [];
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    append(descriptors, snapshotDescriptor(
+      key,
+      descriptorBagValue(descriptorBag, key),
+    ));
+  }
+  return freeze({ target, descriptors: freeze(descriptors) });
+}
+
+function sameDescriptor(
+  expected: RealmDescriptorSnapshot,
+  actual: PropertyDescriptor | undefined,
+): boolean {
+  if (
+    actual === undefined
+    || actual.configurable !== expected.configurable
+    || actual.enumerable !== expected.enumerable
+  ) return false;
+  const actualIsData = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_HAS_OWN_PROPERTY,
+    actual,
+    ['value'],
+  ) === true;
+  const expectedIsData = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_HAS_OWN_PROPERTY,
+    expected,
+    ['value'],
+  ) === true;
+  return actualIsData === expectedIsData
+    && (actualIsData
+      ? actual.writable === expected.writable
+        && actual.value === expected.value
+      : actual.get === expected.get && actual.set === expected.set);
+}
+
+const DETECTOR_REALM_BINDING_NAMES = freeze([
+  'Array',
+  'Object',
+  'String',
+  'Set',
+  'Map',
+  'RegExp',
+  'JSON',
+] as const);
+const DETECTOR_REALM_BINDINGS: readonly RealmBindingSnapshot[] = (() => {
+  const snapshots: RealmBindingSnapshot[] = [];
+  for (let index = 0; index < DETECTOR_REALM_BINDING_NAMES.length; index += 1) {
+    const key = DETECTOR_REALM_BINDING_NAMES[index]!;
+    const descriptor = CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+      CAPTURED_OBJECT_RECEIVER,
+      [globalThis, key],
+    ) as PropertyDescriptor | undefined;
+    if (descriptor === undefined || typeof descriptor.value !== 'object'
+      && typeof descriptor.value !== 'function') throw INTERNAL_FAILURE;
+    append(snapshots, freeze({
+      key,
+      value: descriptor.value as object,
+      descriptor: snapshotDescriptor(key, descriptor),
+    }));
+  }
+  return freeze(snapshots);
+})();
+const DETECTOR_REALM_SURFACES: readonly RealmSurfaceSnapshot[] = freeze([
+  snapshotSurface(Array),
+  snapshotSurface(Array.prototype),
+  snapshotSurface(Object),
+  snapshotSurface(Object.prototype),
+  snapshotSurface(String),
+  snapshotSurface(String.prototype),
+  snapshotSurface(Set),
+  snapshotSurface(Set.prototype),
+  snapshotSurface(Map),
+  snapshotSurface(Map.prototype),
+  snapshotSurface(RegExp),
+  snapshotSurface(RegExp.prototype),
+  snapshotSurface(JSON),
+]);
+
+/**
+ * Why: detectEditWorkflows is intentionally the sole semantic classifier, but
+ * it and its YAML/config helpers use mutable realm intrinsics. Exact module-init
+ * descriptors prevent prototype replacement from silently downgrading edit
+ * detection while keeping the trusted detector implementation unchanged.
+ */
+function attestDetectorRealm(): void {
+  for (let index = 0; index < DETECTOR_REALM_BINDINGS.length; index += 1) {
+    const expected = DETECTOR_REALM_BINDINGS[index]!;
+    const actual = CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+      CAPTURED_OBJECT_RECEIVER,
+      [globalThis, expected.key],
+    ) as PropertyDescriptor | undefined;
+    if (!sameDescriptor(expected.descriptor, actual)
+      || actual?.value !== expected.value) throw INTERNAL_FAILURE;
+  }
+  for (let index = 0; index < DETECTOR_REALM_SURFACES.length; index += 1) {
+    const surface = DETECTOR_REALM_SURFACES[index]!;
+    const keys = CAPTURED_REFLECT_APPLY(
+      CAPTURED_REFLECT_OWN_KEYS,
+      CAPTURED_REFLECT_RECEIVER,
+      [surface.target],
+    ) as PropertyKey[];
+    const descriptorBag = CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+      CAPTURED_OBJECT_RECEIVER,
+      [surface.target],
+    ) as PropertyDescriptorMap;
+    if (keys.length !== surface.descriptors.length) throw INTERNAL_FAILURE;
+    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+      const expected = surface.descriptors[keyIndex]!;
+      if (keys[keyIndex] !== expected.key || !sameDescriptor(
+        expected,
+        descriptorBagValue(descriptorBag, expected.key),
+      )) throw INTERNAL_FAILURE;
+    }
+  }
 }
 
 function test(pattern: RegExp, value: string): boolean {
@@ -800,6 +1004,119 @@ function capabilityScopedCandidateDirs(
   }) as unknown as ScopedProviderOptionsCandidateDirs;
 }
 
+function requireExactDataValue(
+  target: object,
+  key: PropertyKey,
+  enumerable = true,
+): unknown {
+  const descriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    CAPTURED_OBJECT_RECEIVER,
+    [target, key],
+  ) as PropertyDescriptor | undefined;
+  if (
+    !isOwnDataDescriptor(descriptor)
+    || descriptor.configurable !== true
+    || descriptor.enumerable !== enumerable
+    || descriptor.writable !== true
+  ) throw INTERNAL_FAILURE;
+  return descriptor.value;
+}
+
+function validateDetectorArray(value: unknown): readonly unknown[] {
+  if (
+    !CAPTURED_ARRAY_IS_ARRAY(value)
+    || CAPTURED_TYPES_IS_PROXY(value)
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [value],
+    ) !== Array.prototype
+  ) throw INTERNAL_FAILURE;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [value],
+  ) as PropertyKey[];
+  if (keys.length !== value.length + 1 || keys[keys.length - 1] !== 'length') {
+    throw INTERNAL_FAILURE;
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const key = CAPTURED_STRING(index);
+    if (keys[index] !== key) {
+      throw INTERNAL_FAILURE;
+    }
+    requireExactDataValue(value, key);
+  }
+  const lengthDescriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    CAPTURED_OBJECT_RECEIVER,
+    [value, 'length'],
+  ) as PropertyDescriptor | undefined;
+  if (
+    !isOwnDataDescriptor(lengthDescriptor)
+    || lengthDescriptor.value !== value.length
+    || lengthDescriptor.enumerable !== false
+    || lengthDescriptor.configurable !== false
+    || lengthDescriptor.writable !== true
+  ) throw INTERNAL_FAILURE;
+  return value as unknown[];
+}
+
+function validateDetectorStringArray(value: unknown): readonly string[] {
+  const values = validateDetectorArray(value);
+  for (let index = 0; index < values.length; index += 1) {
+    if (typeof values[index] !== 'string') throw INTERNAL_FAILURE;
+  }
+  return values as string[];
+}
+
+function validateDetectorOutput(value: unknown): readonly {
+  readonly name: string;
+  readonly allowedTools: readonly string[];
+  readonly hasEdit: boolean;
+  readonly requiredPermissionModes: readonly string[];
+}[] {
+  const output = validateDetectorArray(value) as unknown[];
+  for (let index = 0; index < output.length; index += 1) {
+    const entry = output[index];
+    if (
+      typeof entry !== 'object'
+      || entry === null
+      || CAPTURED_TYPES_IS_PROXY(entry)
+      || CAPTURED_REFLECT_APPLY(
+        CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+        CAPTURED_OBJECT_RECEIVER,
+        [entry],
+      ) !== Object.prototype
+    ) throw INTERNAL_FAILURE;
+    const keys = CAPTURED_REFLECT_APPLY(
+      CAPTURED_REFLECT_OWN_KEYS,
+      CAPTURED_REFLECT_RECEIVER,
+      [entry],
+    ) as PropertyKey[];
+    const expectedKeys = freeze([
+      'name',
+      'allowedTools',
+      'hasEdit',
+      'requiredPermissionModes',
+    ]);
+    if (keys.length !== expectedKeys.length) throw INTERNAL_FAILURE;
+    for (let keyIndex = 0; keyIndex < expectedKeys.length; keyIndex += 1) {
+      if (keys[keyIndex] !== expectedKeys[keyIndex]) throw INTERNAL_FAILURE;
+    }
+    if (
+      typeof requireExactDataValue(entry, 'name') !== 'string'
+      || typeof requireExactDataValue(entry, 'hasEdit') !== 'boolean'
+    ) throw INTERNAL_FAILURE;
+    validateDetectorStringArray(requireExactDataValue(entry, 'allowedTools'));
+    validateDetectorStringArray(
+      requireExactDataValue(entry, 'requiredPermissionModes'),
+    );
+  }
+  return output as ReturnType<typeof validateDetectorOutput>;
+}
+
 function detectInstalledCapabilities(
   state: InspectorState,
   snapshot: ProjectTemplateRepertoireCapabilitySnapshot,
@@ -870,7 +1187,8 @@ function detectInstalledCapabilities(
     index < snapshot.providerOptionsCandidateDirs.length;
     index += 1
   ) append(candidateDirs, snapshot.providerOptionsCandidateDirs[index]!);
-  const detected = detectEditWorkflows(
+  attestDetectorRealm();
+  const detectedRaw = detectEditWorkflows(
     freeze(workflows) as unknown as Parameters<typeof detectEditWorkflows>[0],
     freeze(packageProviders) as unknown as NonNullable<
       Parameters<typeof detectEditWorkflows>[1]
@@ -889,7 +1207,8 @@ function detectInstalledCapabilities(
       }),
     }),
   );
-  if (!CAPTURED_ARRAY_IS_ARRAY(detected)) throw INTERNAL_FAILURE;
+  attestDetectorRealm();
+  const detected = validateDetectorOutput(detectedRaw);
   const resultWitness: string[] = [];
   for (let index = 0; index < detected.length; index += 1) {
     const result = detected[index]!;
@@ -1125,18 +1444,15 @@ function inspectScope(
         !== joinArray(owner.entries, '\u0000')
     ) return invalid(request, scope, 'coherence');
     checkpoint(request);
-    const capabilities = detectedCapabilities.capabilities;
     return {
-      observation: freeze({
+      installed: freeze({
         scope: scope.scope,
-        state: 'installed',
-        installed: freeze({
-          source: lock.source,
-          ref: lock.ref,
-          version: lock.version,
-          commit: lock.commit,
-          capabilities,
-        }),
+        source: lock.source as `github:${string}/${string}`,
+        ref: lock.ref,
+        version: lock.version,
+        commit: lock.commit,
+        capabilities: detectedCapabilities.capabilities,
+        capabilitySnapshot,
       }),
       privateWitness: 'installed:'
         + `${witnessIdentity(packageDirectory.witness)}:`
@@ -1153,6 +1469,22 @@ function inspectScope(
     if (capabilityCode === 'TIMEOUT') throw fixedFailure('TIMEOUT');
     return invalid(request, scope, 'io');
   }
+}
+
+function materializeInstalled(
+  installed: NonNullable<ScopeInspection['installed']>,
+): ProjectTemplateRepertoireDependencyObservation {
+  return freeze({
+    scope: installed.scope,
+    state: 'installed' as const,
+    installed: freeze({
+      source: installed.source,
+      ref: installed.ref,
+      version: installed.version,
+      commit: installed.commit,
+      capabilities: installed.capabilities,
+    }),
+  });
 }
 
 function finalizeInspection(
@@ -1178,6 +1510,7 @@ function inspectRequest(
   const input = snapshotInspectionInput(request);
   checkpoint(input);
   const observations: ProjectTemplateRepertoireDependencyObservation[] = [];
+  const inspections: ScopeInspection[] = [];
   const scopes: ScopeParts[] = [];
   const witnessParts: string[] = [
     `language:${state.language}`,
@@ -1222,10 +1555,10 @@ function inspectRequest(
         const inspected = rootWitness === undefined
           ? invalid(input, scope, 'root-parent')
           : missing(input, scope, rootWitness);
-        append(observations, inspected.observation);
+        append(observations, inspected.observation!);
         append(
           witnessParts,
-          `${index}:${scope.scope}:${inspected.observation.state}:`
+          `${index}:${scope.scope}:${inspected.observation!.state}:`
           + inspected.privateWitness,
         );
       }
@@ -1260,11 +1593,57 @@ function inspectRequest(
     const inspected = safeContext === undefined
       ? invalid(input, scope, 'root')
       : inspectScope(state, input, safeContext, scope, scopes);
-    append(observations, inspected.observation);
+    append(inspections, inspected);
+  }
+
+  // Why: scoped provider graphs are shared across dependency observations.
+  // Retaining every snapshot until all seams finish prevents a later scope
+  // callback from leaving an earlier installed capability silently stale.
+  let coherenceFailure: string | undefined;
+  for (let index = 0; index < inspections.length; index += 1) {
+    const installed = inspections[index]!.installed;
+    if (installed === undefined) continue;
+    try {
+      checkpoint(input);
+      revalidateProjectTemplateRepertoireCapabilitySnapshot(
+        installed.capabilitySnapshot,
+        { signal: input.signal, deadlineMs: input.deadlineMs },
+      );
+      checkpoint(input);
+    } catch (error) {
+      if (isStopFailure(error)) throw error;
+      const code = getProjectTemplateRepertoireCapabilitySnapshotErrorCode(error);
+      if (code === 'ABORTED') throw fixedFailure('ABORTED');
+      if (code === 'TIMEOUT') throw fixedFailure('TIMEOUT');
+      coherenceFailure = sha256(
+        `scope:${index}:${code ?? 'INVALID'}:`
+        + installed.capabilitySnapshot.privateWitnessFragment,
+      );
+      break;
+    }
+  }
+  if (coherenceFailure !== undefined) {
+    for (let index = 0; index < scopes.length; index += 1) {
+      const scope = scopes[index]!;
+      const inspected = invalid(input, scope, `request-coherence:${coherenceFailure}`);
+      append(observations, inspected.observation!);
+      append(
+        witnessParts,
+        `${index}:${scope.scope}:invalid:${inspected.privateWitness}`,
+      );
+    }
+    return finalizeInspection(input, witnessParts, observations);
+  }
+  for (let index = 0; index < inspections.length; index += 1) {
+    const scope = scopes[index]!;
+    const inspected = inspections[index]!;
+    const observation = inspected.installed === undefined
+      ? inspected.observation!
+      : materializeInstalled(inspected.installed);
+    append(observations, observation);
     append(
       witnessParts,
-      `${index}:${scope.scope}:${inspected.observation.state}:`
-      + inspected.privateWitness,
+      `${index}:${scope.scope}:${observation.state}:${inspected.privateWitness}`,
     );
   }
   return finalizeInspection(input, witnessParts, observations);

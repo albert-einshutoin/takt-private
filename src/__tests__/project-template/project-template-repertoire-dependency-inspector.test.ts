@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   inspectProjectTemplateRepertoireDependencies,
   ProjectTemplateRepertoireDependencyInspectionError,
@@ -407,6 +407,66 @@ describe('project template installed repertoire dependency inspector G3.2', () =
     });
     expect(callbacks.at(-1)).toBe('after-scope');
   });
+
+  it.each([
+    ['A references B', '@acme/a', '@acme/b', '@acme/b'],
+    ['B references A', '@acme/b', '@acme/a', '@acme/b'],
+  ] as const)(
+    'invalidates every provisional observation when %s cross-scope evidence drifts',
+    (_label, consumerScope, providerScope, mutationScope) => {
+      const repertoireRoot = root();
+      const consumer = install(repertoireRoot, consumerScope);
+      const provider = install(repertoireRoot, providerScope);
+      mkdirSync(join(consumer, 'workflows'));
+      mkdirSync(join(provider, 'provider-options'));
+      writeFileSync(
+        join(consumer, 'workflows', 'meaning.yaml'),
+        `steps:\n  - provider_options:\n      extends: "${providerScope}/edit"\n`,
+      );
+      const providerPath = join(provider, 'provider-options', 'edit.yaml');
+      writeFileSync(providerPath, '{}\n');
+      let mutate = true;
+      let callbackCount = 0;
+      const port = createProjectTemplateInstalledRepertoireDependencyInspectionPort(
+        { projectRoot: repertoireRoot, language: 'ja', repertoireRoot },
+        (phase, scope) => {
+          callbackCount += 1;
+          if (phase !== 'before-scope' || scope !== mutationScope || !mutate) return;
+          mutate = false;
+          writeFileSync(
+            providerPath,
+            'claude:\n  allowed_tools: [Write]\n',
+          );
+        },
+      );
+      const dependencies = ['@acme/a', '@acme/b'].map((scope) => dependency(scope));
+
+      const drifted = port.inspect(request(dependencies)) as {
+        witnessSha256: string;
+        observations: unknown[];
+      };
+      expect(drifted).toMatchObject({
+        observations: [
+          { scope: '@acme/a', state: 'invalid' },
+          { scope: '@acme/b', state: 'invalid' },
+        ],
+      });
+      expect(callbackCount).toBe(16);
+      const current = port.inspect(request(dependencies)) as {
+        witnessSha256: string;
+        observations: unknown[];
+      };
+      expect(current.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          scope: consumerScope,
+          state: 'installed',
+          installed: expect.objectContaining({ capabilities: ['edit'] }),
+        }),
+      ]));
+      expect(current.witnessSha256).not.toBe(drifted.witnessSha256);
+      expect(callbackCount).toBe(32);
+    },
+  );
 
   it('fails nested inspection on the same port without corrupting the outer run', () => {
     const repertoireRoot = root();
@@ -872,13 +932,10 @@ describe('project template installed repertoire dependency inspector G3.2', () =
       Object.getOwnPropertyDescriptor = originalDescriptor;
       Reflect.ownKeys = originalOwnKeys;
     }
-    // detectEditWorkflows and its trusted YAML/config dependencies retain
-    // mutable-realm semantics. The inspector/snapshot boundary must still
-    // return only the closed observation and must not mint filesystem access.
+    // Snapshot parsing precedes the detector boundary and may exercise mutable
+    // YAML intrinsics, but the attestation must fail closed before a capability
+    // can be minted from that drifted realm.
     expect(calls).toBeGreaterThan(0);
-    expect(called.every((name) => (
-      name === 'push' || name === 'slice' || name === 'indexOf'
-    ))).toBe(true);
     expect(result).toMatchObject({
       observations: [{
         state: 'invalid',
@@ -886,6 +943,92 @@ describe('project template installed repertoire dependency inspector G3.2', () =
       }],
     });
     expect(JSON.stringify(result)).not.toContain(repertoireRoot);
+  });
+
+  it('rejects an Array.push wrapper before capability detection', () => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    mkdirSync(join(packageDir, 'workflows'));
+    writeFileSync(
+      join(packageDir, 'workflows', 'meaning.yaml'),
+      'steps:\n  - edit: true\n',
+    );
+    const port = createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+      projectRoot: repertoireRoot,
+      language: 'en',
+      repertoireRoot,
+    });
+    const original = Object.getOwnPropertyDescriptor(Array.prototype, 'push')!;
+    let result: unknown;
+    try {
+      Object.defineProperty(Array.prototype, 'push', {
+        ...original,
+        value: function wrappedPush(...values: unknown[]) {
+          return Reflect.apply(original.value, this, values) as number;
+        },
+      });
+      result = port.inspect(request());
+    } finally {
+      Object.defineProperty(Array.prototype, 'push', original);
+    }
+    expect(result).toMatchObject({
+      observations: [{ state: 'invalid', reason: 'INVALID_INSTALLATION' }],
+    });
+  });
+
+  it('rejects realm mutation performed during capability detection', async () => {
+    const repertoireRoot = root();
+    const packageDir = install(repertoireRoot);
+    mkdirSync(join(packageDir, 'workflows'));
+    writeFileSync(
+      join(packageDir, 'workflows', 'meaning.yaml'),
+      'steps:\n  - edit: true\n',
+    );
+    const pushDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      'push',
+    )!;
+    vi.resetModules();
+    vi.doMock('../../features/repertoire/pack-summary.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('../../features/repertoire/pack-summary.js')
+      >('../../features/repertoire/pack-summary.js');
+      return {
+        ...actual,
+        detectEditWorkflows(
+          ...args: Parameters<typeof actual.detectEditWorkflows>
+        ) {
+          const output = actual.detectEditWorkflows(...args);
+          Object.defineProperty(Array.prototype, 'push', {
+            ...pushDescriptor,
+            value: function mutatedDuringDetection(...values: unknown[]) {
+              return Reflect.apply(pushDescriptor.value, this, values) as number;
+            },
+          });
+          return output;
+        },
+      };
+    });
+    let result: unknown;
+    try {
+      const isolated = await import(
+        '../../infra/repertoire/project-template-repertoire-dependency-inspector.js'
+      );
+      const port =
+        isolated.createProjectTemplateInstalledRepertoireDependencyInspectionPort({
+          projectRoot: repertoireRoot,
+          language: 'en',
+          repertoireRoot,
+        });
+      result = port.inspect(request());
+    } finally {
+      Object.defineProperty(Array.prototype, 'push', pushDescriptor);
+      vi.doUnmock('../../features/repertoire/pack-summary.js');
+      vi.resetModules();
+    }
+    expect(result).toMatchObject({
+      observations: [{ state: 'invalid', reason: 'INVALID_INSTALLATION' }],
+    });
   });
 
   it('does not expose private provenance buffers to typed-array hooks', () => {
