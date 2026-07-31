@@ -129,7 +129,7 @@ export function resolveResourceContentWithSource(
     const resolved = resolveResourcePath(spec, workflowDir);
     if (resourceExists(resolved, context)) {
       return {
-        content: readResourceText(resolved, context),
+        content: readResourceText(resolved, context, workflowDir),
         sourcePath: resolved,
         facetType,
         refName,
@@ -222,7 +222,7 @@ function resolveFacetFromCandidateDirs(
     }
     if (resourceExists(filePath, context)) {
       return {
-        content: readResourceText(filePath, context),
+        content: readResourceText(filePath, context, dir),
         sourcePath: filePath,
         facetType,
         refName,
@@ -331,20 +331,27 @@ export function resolveFacetByNameWithSource(
   facetType: FacetType,
   context: FacetResolutionContext,
 ): ResolvedFacetContent | undefined {
-  const filePath = resolveFacetPath(name, facetType, context);
-  if (filePath) {
-    return expandFacetInheritance(
-      {
-        content: readResourceText(filePath, context),
-        sourcePath: filePath,
-        facetType,
-        refName: name,
-      },
+  const resolved = isScopeRef(name) && context.repertoireDir
+    ? (() => {
+        const filePath = resolveScopeRef(parseScopeRef(name), facetType, context.repertoireDir!);
+        return resourceExists(filePath, context)
+          ? {
+              content: readResourceText(filePath, context, context.repertoireDir!),
+              sourcePath: filePath,
+              facetType,
+              refName: name,
+            }
+          : undefined;
+      })()
+    : resolveFacetFromCandidateDirs(
+      name,
       facetType,
+      buildCandidateDirsWithPackage(facetType, context),
+      name,
+      undefined,
       context,
     );
-  }
-  return undefined;
+  return resolved ? expandFacetInheritance(resolved, facetType, context) : undefined;
 }
 
 /**
@@ -380,7 +387,7 @@ export function resolveRefToContentWithSource(
     const filePath = resolveScopeRef(scopeRef, facetType, context.repertoireDir);
     return resourceExists(filePath, context)
       ? expandFacetInheritance({
-          content: readResourceText(filePath, context),
+          content: readResourceText(filePath, context, context.repertoireDir),
           sourcePath: filePath,
           facetType,
           refName: ref,

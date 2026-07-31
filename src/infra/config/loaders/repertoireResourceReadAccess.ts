@@ -124,9 +124,13 @@ export function resourceExists(path: string, context?: FacetResolutionContext): 
   return access ? access.exists(path) : lstatExists(path);
 }
 
-export function readResourceText(path: string, context?: FacetResolutionContext): string {
+export function readResourceText(
+  path: string,
+  context: FacetResolutionContext | undefined,
+  trustedBaseDir: string,
+): string {
   const access = getRequiredRepertoireAccess(path, context);
-  return access ? access.readText(path) : readNodeText(path);
+  return access ? access.readText(path) : readNodeText(path, trustedBaseDir);
 }
 
 export function resourceRealpath(path: string, context?: FacetResolutionContext): string {
@@ -173,8 +177,13 @@ export function hasCoordinatedRepertoireContext(context?: FacetResolutionContext
   if (access !== undefined) {
     const authority = getAccessAuthority(access);
     if (authority !== undefined) {
-      assertAuthorityMatchesContext(authority, context);
-      return true;
+      try {
+        assertAuthorityMatchesContext(authority, context);
+        return true;
+      } catch (error) {
+        if (resolve(context.repertoireDir) !== resolve(getRepertoireDir())) return false;
+        throw error;
+      }
     }
   }
   return resolve(context.repertoireDir) === resolve(getRepertoireDir());
@@ -223,8 +232,8 @@ function lstatExists(path: string): boolean {
   return existsSync(path);
 }
 
-function readNodeText(path: string): string {
-  return readStableWorkflowResourceText(path);
+function readNodeText(path: string, trustedBaseDir: string): string {
+  return readStableWorkflowResourceText(path, trustedBaseDir);
 }
 
 function isMissing(error: unknown): boolean {

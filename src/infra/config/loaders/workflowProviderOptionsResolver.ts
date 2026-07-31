@@ -33,6 +33,7 @@ interface ResolvedProviderOptionsExtendsPath {
   realPath: string;
   kind: 'path' | 'name' | 'scope';
   candidateDirs?: readonly string[];
+  trustedBaseDir: string;
 }
 
 interface ProviderOptionsResolutionScope {
@@ -43,7 +44,7 @@ interface ProviderOptionsResolutionScope {
 
 export interface ProviderOptionsFileAccess {
   exists(path: string): boolean;
-  readText(path: string): string;
+  readText(path: string, trustedBaseDir: string): string;
   realpath(path: string): string;
   isSymlink?(path: string): boolean;
 }
@@ -55,7 +56,7 @@ export interface WorkflowProviderOptionsResolutionHost extends ProviderOptionsRe
 
 const nodeFileAccess: ProviderOptionsFileAccess = {
   exists: (path) => fs.existsSync(path),
-  readText: (path) => readStableWorkflowResourceText(path),
+  readText: (path, trustedBaseDir) => readStableWorkflowResourceText(path, trustedBaseDir),
   realpath: (path) => fs.realpathSync(path),
   isSymlink: (path) => fs.lstatSync(path).isSymbolicLink(),
 };
@@ -118,7 +119,7 @@ function resolvePathLikeProviderOptionsExtends(
     throw new Error(`Configuration error: provider_options.extends must stay inside the workflow directory: ${ref}`);
   }
 
-  return { path: refPath, realPath: realRefPath, kind: 'path' };
+  return { path: refPath, realPath: realRefPath, kind: 'path', trustedBaseDir: rootDir };
 }
 
 function getProviderOptionsCandidateDirs(scope: ProviderOptionsResolutionScope, ref: string): readonly string[] {
@@ -140,6 +141,7 @@ function resolveProviderOptionsByNameExtends(
         path: resolved.path,
         realPath: fileAccess.realpath(resolved.path),
         kind: 'name',
+        trustedBaseDir: resolved.candidateDir,
         candidateDirs: candidateDirs.slice(resolved.sourceLayerIndex),
       }
     : undefined;
@@ -157,6 +159,7 @@ function resolveProviderOptionsScopeRefPath(
         path: resolved.path,
         realPath: fileAccess.realpath(resolved.path),
         kind: 'scope',
+        trustedBaseDir: resolved.candidateDir,
         candidateDirs: [resolved.candidateDir],
       }
     : undefined;
@@ -216,9 +219,9 @@ export function resolveWorkflowProviderOptionsWithHost(
         exists: (path) => isRepertoireResourcePath(path, host.context)
           ? resourceExists(path, host.context)
           : fallback.exists(path),
-        readText: (path) => isRepertoireResourcePath(path, host.context)
-          ? readResourceText(path, host.context)
-          : fallback.readText(path),
+        readText: (path, trustedBaseDir) => isRepertoireResourcePath(path, host.context)
+          ? readResourceText(path, host.context, trustedBaseDir)
+          : fallback.readText(path, trustedBaseDir),
         realpath: (path) => isRepertoireResourcePath(path, host.context)
           ? resourceRealpath(path, host.context)
           : fallback.realpath(path),
@@ -267,7 +270,7 @@ function resolveWorkflowProviderOptionsFromDir(
     throw new Error(`Configuration error: provider_options.extends contains a circular reference: ${ref}`);
   }
 
-  const referencedRaw = parseYaml(fileAccess.readText(refPath.path));
+  const referencedRaw = parseYaml(fileAccess.readText(refPath.path, refPath.trustedBaseDir));
   if (!isRecord(referencedRaw)) {
     throw new Error(`Configuration error: provider_options.extends must point to a YAML object: ${ref}`);
   }

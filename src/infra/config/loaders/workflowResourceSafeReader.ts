@@ -8,7 +8,7 @@ import {
   readSync,
   realpathSync,
 } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 
 export const MAX_WORKFLOW_RESOURCE_BYTES = 2 * 1024 * 1024;
 
@@ -43,6 +43,7 @@ export interface WorkflowResourceReadProbe {
  */
 export function readStableWorkflowResourceText(
   path: string,
+  trustedBaseDir: string,
   probe: WorkflowResourceReadProbe = {},
 ): string {
   let fd: number | undefined;
@@ -50,11 +51,24 @@ export function readStableWorkflowResourceText(
   let operationError: WorkflowResourceReadError | undefined;
   let closeError: WorkflowResourceReadError | undefined;
   try {
-    const rootDir = getImmediateRoot(path);
-    const root = lstatRequired(rootDir);
+    const relativePath = relative(trustedBaseDir, path);
+    if (relativePath === '' || relativePath.startsWith('..') || isAbsolute(relativePath)) throw failed();
+    const root = lstatRequired(trustedBaseDir);
     assertApprovedRoot(root);
-    const realRoot = realpathSync(rootDir);
-    const expectedRealPath = join(realRoot, relative(rootDir, path));
+    const realRoot = realpathSync(trustedBaseDir);
+    const segments = relativePath.split(sep);
+    const directoryFrames: Array<{ path: string; realPath: string; stat: Stats }> = [];
+    let directoryPath = trustedBaseDir;
+    let expectedDirectoryRealPath = realRoot;
+    for (const segment of segments.slice(0, -1)) {
+      directoryPath = join(directoryPath, segment);
+      expectedDirectoryRealPath = join(expectedDirectoryRealPath, segment);
+      const stat = lstatRequired(directoryPath);
+      assertApprovedDirectory(stat, root);
+      if (realpathSync(directoryPath) !== expectedDirectoryRealPath) throw failed();
+      directoryFrames.push({ path: directoryPath, realPath: expectedDirectoryRealPath, stat });
+    }
+    const expectedRealPath = join(realRoot, relativePath);
     const before = lstatRequired(path);
     assertApprovedFile(before, root);
     if (realpathSync(path) !== expectedRealPath) throw failed();
@@ -69,12 +83,19 @@ export function readStableWorkflowResourceText(
 
     const openedAfter = fstatSync(fd);
     const pathAfter = lstatRequired(path);
+    const rootAfter = lstatRequired(trustedBaseDir);
     if (
       bytes.length !== opened.size
+      || !sameStableIdentity(root, rootAfter)
+      || realpathSync(trustedBaseDir) !== realRoot
       || realpathSync(path) !== expectedRealPath
       || !sameStableIdentity(opened, openedAfter)
       || !sameStableIdentity(opened, pathAfter)
     ) throw failed();
+    for (const frame of directoryFrames) {
+      const after = lstatRequired(frame.path);
+      if (!sameStableIdentity(frame.stat, after) || realpathSync(frame.path) !== frame.realPath) throw failed();
+    }
     approvedText = safeReflectApply(safeBufferToStringMethod, bytes, ['utf-8']) as string;
   } catch (error) {
     operationError = error instanceof WorkflowResourceReadError ? error : failed();
@@ -93,12 +114,6 @@ export function readStableWorkflowResourceText(
   return approvedText;
 }
 
-function getImmediateRoot(path: string): string {
-  const root = dirname(path);
-  if (root === path) throw failed();
-  return root;
-}
-
 function lstatRequired(path: string): Stats {
   try {
     return lstatSync(path);
@@ -111,6 +126,16 @@ function assertApprovedRoot(stat: Stats): void {
   if (
     !(safeReflectApply(safeStatsIsDirectoryMethod, stat, []) as boolean)
     || (safeReflectApply(safeStatsIsSymbolicLinkMethod, stat, []) as boolean)
+    || (safeGetUid !== undefined && stat.uid !== safeGetUid())
+    || (stat.mode & 0o022) !== 0
+  ) throw failed();
+}
+
+function assertApprovedDirectory(stat: Stats, root: Stats): void {
+  if (
+    !(safeReflectApply(safeStatsIsDirectoryMethod, stat, []) as boolean)
+    || (safeReflectApply(safeStatsIsSymbolicLinkMethod, stat, []) as boolean)
+    || stat.dev !== root.dev
     || (safeGetUid !== undefined && stat.uid !== safeGetUid())
     || (stat.mode & 0o022) !== 0
   ) throw failed();

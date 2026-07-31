@@ -58,11 +58,12 @@ export function validatePersonaPromptPath(personaPath: string, cwd: string): voi
   assertPromptExists(personaPath);
 }
 
-function assertAllowedPromptPath(personaPath: string, cwd: string): void {
-  const isValid = getAllowedPromptBases(cwd).some((base) => isPathSafe(base, personaPath));
-  if (!isValid) {
+function assertAllowedPromptPath(personaPath: string, cwd: string): string {
+  const allowedBase = getAllowedPromptBases(cwd).find((base) => isPathSafe(base, personaPath));
+  if (!allowedBase) {
     throw new Error(`Persona prompt file path is not allowed: ${personaPath}`);
   }
+  return allowedBase;
 
 }
 
@@ -130,13 +131,13 @@ export function loadAgentPrompt(agent: CustomAgentConfig, cwd: string): string {
 
   if (agent.promptFile) {
     const promptFile = agent.promptFile;
-    assertAllowedPromptPath(promptFile, cwd);
+    const allowedBase = assertAllowedPromptPath(promptFile, cwd);
 
     if (isRepertoirePromptPath(promptFile)) return readRepertoirePersonaPrompt(promptFile, true);
 
     assertPromptExists(promptFile);
 
-    return readStableWorkflowResourceText(agent.promptFile);
+    return readStableWorkflowResourceText(agent.promptFile, allowedBase);
   }
 
   throw new Error(`Agent ${agent.name} has no prompt defined`);
@@ -144,8 +145,8 @@ export function loadAgentPrompt(agent: CustomAgentConfig, cwd: string): string {
 
 /** Load persona prompt from a resolved path. */
 export function loadPersonaPromptFromPath(personaPath: string, cwd: string): string {
-  assertAllowedPromptPath(personaPath, cwd);
+  const allowedBase = assertAllowedPromptPath(personaPath, cwd);
   if (isRepertoirePromptPath(personaPath)) return readRepertoirePersonaPrompt(personaPath, true);
   assertPromptExists(personaPath);
-  return readStableWorkflowResourceText(personaPath);
+  return readStableWorkflowResourceText(personaPath, allowedBase);
 }

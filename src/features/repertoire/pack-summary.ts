@@ -119,14 +119,14 @@ function buildProviderOptionsFileAccess(
       const resolvedPath = resolve(path);
       return files.has(resolvedPath) || (!isPackageVirtualPath(resolvedPath) && fallbackFileAccess.exists(resolvedPath));
     },
-    readText: (path) => {
+    readText: (path, trustedBaseDir) => {
       const resolvedPath = resolve(path);
       const content = files.get(resolvedPath);
       if (content !== undefined) {
         return content;
       }
       if (!isPackageVirtualPath(resolvedPath)) {
-        return fallbackFileAccess.readText(resolvedPath);
+        return fallbackFileAccess.readText(resolvedPath, trustedBaseDir);
       }
       throw new Error(`Configuration error: provider_options.extends not found: ${path}`);
     },

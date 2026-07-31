@@ -62,7 +62,7 @@ export function resolveInstructionPartialByName(
       return {
         name,
         sourcePath,
-        content: readResourceText(sourcePath, context),
+        content: readResourceText(sourcePath, context, dir),
       };
     }
   }
