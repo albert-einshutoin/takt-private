@@ -10,6 +10,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -92,6 +93,38 @@ describe('project template apply storage', () => {
     expect(readFileSync(join(storage.controlRoot, '.gitignore'), 'utf8')).toBe('*\n');
     expect(lstatSync(join(storage.controlRoot, '.gitignore')).mode & 0o077).toBe(0);
   });
+
+  it('initializes the same fresh repository concurrently without false failure', async () => {
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+      const repoPath = makeRepo();
+      const [first, second] = await Promise.all([
+        initializeProjectTemplateApplyStorage({ repoPath }),
+        initializeProjectTemplateApplyStorage({ repoPath }),
+      ]);
+      expect(first.repoRoot).toBe(second.repoRoot);
+      expect(readFileSync(join(first.controlRoot, '.gitignore'), 'utf8'))
+        .toBe('*\n');
+      expect(lstatSync(join(first.controlRoot, '.gitignore')).mode & 0o777)
+        .toBe(0o600);
+    }
+  });
+
+  it.each(['symlink', 'hardlink'] as const)(
+    'keeps rejecting a hostile preexisting control .gitignore %s',
+    async (kind) => {
+      const repoPath = makeRepo();
+      const storage = await initializeProjectTemplateApplyStorage({ repoPath });
+      const ignorePath = join(storage.controlRoot, '.gitignore');
+      const source = join(repoPath, 'hostile-ignore');
+      writeFileSync(source, '*\n', { mode: 0o600 });
+      unlinkSync(ignorePath);
+      if (kind === 'symlink') symlinkSync(source, ignorePath);
+      else linkSync(source, ignorePath);
+
+      await expect(initializeProjectTemplateApplyStorage({ repoPath }))
+        .rejects.toMatchObject({ code: 'UNSAFE_CONTROL_ROOT' });
+    },
+  );
 
   it('durably publishes each newly created control directory in its parent', async () => {
     const repoPath = makeRepo();

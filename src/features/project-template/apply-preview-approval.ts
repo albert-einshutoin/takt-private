@@ -6,6 +6,8 @@ import {
 } from './apply-preview.js';
 import type { ProjectTemplateApplyPreview } from './apply-preview-types.js';
 import {
+  consumeProjectTemplateApprovalRecord,
+  discardProjectTemplateApprovalRecordIfIdentityMatches,
   initializeProjectTemplateApplyStorage,
   writeProjectTemplateApprovalRecord,
   type ProjectTemplateApplyStorage,
@@ -75,8 +77,8 @@ interface ApprovalIssuanceOptionsSnapshot {
   readonly projectRoot: string;
   readonly preview: ProjectTemplateApplyPreview;
   readonly baselineStrategy: 'conflict' | 'adopt-identical';
-  readonly now: Date;
-  readonly expiresInMs: number;
+  readonly issuedAt: string;
+  readonly expiresAt: string;
   readonly io?: ProjectTemplateApplyStorageIo;
 }
 
@@ -84,6 +86,8 @@ interface ApprovalIssuanceOptionsSnapshot {
 // the exact object returned after the private record is durably published.
 const APPROVAL_AUTHORITIES =
   new WeakMap<object, ProjectTemplateApplyPreviewApprovalAuthority>();
+const BURNED_APPROVAL_IDS = new Set<string>();
+const CAPTURED_SET_ADD = Set.prototype.add;
 
 function sha256(value: string): string {
   const hash = CAPTURED_CREATE_HASH('sha256');
@@ -200,16 +204,54 @@ function snapshotOptions(value: unknown): ApprovalIssuanceOptionsSnapshot {
   )) {
     invalidIssuance('apply preview approval time is invalid');
   }
+  // Convert caller-owned mutable Date state to immutable primitives before the
+  // first await. No later issuance step retains or re-reads the Date object.
+  const issuedAt = CAPTURED_REFLECT_APPLY(
+    CAPTURED_DATE_TO_ISO_STRING,
+    new CAPTURED_DATE(nowMs),
+    [],
+  ) as string;
+  const expiresAt = CAPTURED_REFLECT_APPLY(
+    CAPTURED_DATE_TO_ISO_STRING,
+    new CAPTURED_DATE(nowMs + expiresInMs),
+    [],
+  ) as string;
   return {
     projectRoot,
     preview: descriptors['preview']!.value as ProjectTemplateApplyPreview,
     baselineStrategy,
-    now: now as Date,
-    expiresInMs,
+    issuedAt,
+    expiresAt,
     ...(descriptors['io'] === undefined
       ? {}
       : { io: descriptors['io'].value as ProjectTemplateApplyStorageIo }),
   };
+}
+
+async function burnUncertainApproval(options: {
+  storage: ProjectTemplateApplyStorage;
+  approvalId: string;
+  burnedAt: string;
+}): Promise<void> {
+  CAPTURED_REFLECT_APPLY(CAPTURED_SET_ADD, BURNED_APPROVAL_IDS, [
+    options.approvalId,
+  ]);
+  try {
+    await consumeProjectTemplateApprovalRecord({
+      storage: options.storage,
+      approvalId: options.approvalId,
+      claim: {
+        schemaVersion: '1.0',
+        approvalId: options.approvalId,
+        context: APPROVAL_CONTEXT,
+        state: 'burned',
+        burnedAt: options.burnedAt,
+      },
+    });
+  } catch {
+    // The process-local burn still prevents authority creation in this run.
+    // G6.2 consumes the durable claim whenever publication completed.
+  }
 }
 
 /**
@@ -232,21 +274,17 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
   if (preview.defaultApplyPossible) {
     invalidIssuance('default-applicable apply preview cannot be approved');
   }
-  const nowMs = CAPTURED_REFLECT_APPLY(
-    CAPTURED_DATE_GET_TIME,
-    options.now,
-    [],
-  ) as number;
   const approvalId = `approval-${CAPTURED_RANDOM_UUID()}`;
   const nonce = CAPTURED_RANDOM_UUID();
-  let storage: ProjectTemplateApplyStorage;
+  let storage: ProjectTemplateApplyStorage | undefined;
+  let record: ProjectTemplateApplyPreviewApprovalRecord | undefined;
   try {
     storage = await initializeProjectTemplateApplyStorage({
       repoPath: options.projectRoot,
       ...(options.io === undefined ? {} : { io: options.io }),
     });
     const identity = projectIdentity(storage);
-    const record: ProjectTemplateApplyPreviewApprovalRecord = {
+    record = {
       schemaVersion: '1.0',
       approvalId,
       nonce,
@@ -262,16 +300,8 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
       baselineStrategy: options.baselineStrategy,
       reviewSurfaceSha256:
         projectTemplateApplyPreviewReviewSurfaceSha256(preview),
-      issuedAt: CAPTURED_REFLECT_APPLY(
-        CAPTURED_DATE_TO_ISO_STRING,
-        options.now,
-        [],
-      ) as string,
-      expiresAt: CAPTURED_REFLECT_APPLY(
-        CAPTURED_DATE_TO_ISO_STRING,
-        new CAPTURED_DATE(nowMs + options.expiresInMs),
-        [],
-      ) as string,
+      issuedAt: options.issuedAt,
+      expiresAt: options.expiresAt,
     };
     await writeProjectTemplateApprovalRecord({ storage, approvalId, record });
     const evidence = CAPTURED_REFLECT_APPLY(
@@ -289,6 +319,20 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
     ]);
     return evidence;
   } catch {
+    if (storage !== undefined && record !== undefined) {
+      const outcome = await discardProjectTemplateApprovalRecordIfIdentityMatches({
+        storage,
+        approvalId,
+        record,
+      });
+      if (outcome === 'uncertain') {
+        await burnUncertainApproval({
+          storage,
+          approvalId,
+          burnedAt: options.issuedAt,
+        });
+      }
+    }
     // Storage paths, injected hook errors, and secrets must not cross the
     // issuance boundary. No authority is registered before durable success.
     throw new Error('project template apply preview approval issuance failed');

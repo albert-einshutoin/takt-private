@@ -8,6 +8,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +33,8 @@ import {
 import {
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
+  type ProjectTemplateApplyStorageIo,
+  type ProjectTemplateApplyStorageIoOperation,
 } from '../../features/project-template/apply-storage.js';
 import {
   calculateProjectTemplateManifestSha256,
@@ -170,6 +173,42 @@ afterEach(() => {
 });
 
 describe('project template apply preview approval issuance G6.1', () => {
+  it('snapshots caller time before the first asynchronous boundary', async () => {
+    const projectRoot = makeRepo();
+    const original = new Date('2026-08-01T00:00:00.000Z');
+    const baseIo = createProjectTemplateApplyStorageIo();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const io: ProjectTemplateApplyStorageIo = {
+      ...baseIo,
+      realpath: async (path) => {
+        await gate;
+        return await baseIo.realpath(path);
+      },
+    };
+
+    const pending = issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: preview(),
+      baselineStrategy: 'conflict',
+      now: original,
+      io,
+    });
+    original.setTime(Date.parse('2030-01-01T00:00:00.000Z'));
+    release();
+    const evidence = await pending;
+    const record = JSON.parse(readFileSync(join(
+      projectRoot,
+      '.takt-template-state',
+      'approvals',
+      `${evidence.approvalId}.json`,
+    ), 'utf8')) as Record<string, unknown>;
+    expect(record['issuedAt']).toBe('2026-08-01T00:00:00.000Z');
+    expect(record['expiresAt']).toBe('2026-08-01T00:05:00.000Z');
+    expect(Date.parse(record['issuedAt'] as string))
+      .toBeLessThan(Date.parse(record['expiresAt'] as string));
+  });
+
   it('durably issues minimal process-local evidence bound to the exact review', async () => {
     const projectRoot = makeRepo();
     const value = preview();
@@ -384,5 +423,165 @@ describe('project template apply preview approval issuance G6.1', () => {
     );
     const approvalRoot = join(projectRoot, '.takt-template-state', 'approvals');
     expect(readdirSync(approvalRoot)).toEqual([]);
+  });
+
+  it.each([
+    ['after write', 'write', 'after'],
+    ['before rename', 'rename', 'before'],
+    ['file fsync', 'file-fsync', 'after'],
+    ['after rename', 'rename', 'after'],
+    ['directory fsync', 'directory-fsync', 'before'],
+  ] as const)(
+    'removes its record and temporary files after a recoverable %s failure',
+    async (_label, faultOperation, faultTiming) => {
+      const projectRoot = makeRepo();
+      const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+      let injected = false;
+      const io = createProjectTemplateApplyStorageIo({
+        [faultTiming]: (
+          operation: ProjectTemplateApplyStorageIoOperation,
+          path: string,
+        ) => {
+          if (
+            !injected
+            && operation === faultOperation
+            && (
+              path.includes('/approvals/')
+              || path.endsWith('/approvals')
+            )
+          ) {
+            injected = true;
+            throw new Error(`private injected failure token=${faultOperation}`);
+          }
+        },
+      });
+      await expect(issueTrustedProjectTemplateApplyPreviewApproval({
+        projectRoot,
+        preview: preview(),
+        baselineStrategy: 'conflict',
+        io,
+      })).rejects.toThrow(
+        'project template apply preview approval issuance failed',
+      );
+      expect(injected).toBe(true);
+      expect(readdirSync(join(storage.controlRoot, 'approvals'))).toEqual([]);
+    },
+  );
+
+  it('burns the id without deleting a mismatched approval record', async () => {
+    const projectRoot = makeRepo();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    let renameFailed = false;
+    const io = createProjectTemplateApplyStorageIo({
+      after: (operation, path) => {
+        if (
+          !renameFailed
+          && operation === 'rename'
+          && path.includes('/approvals/')
+        ) {
+          renameFailed = true;
+          writeFileSync(path, '{"foreign":true}\n', { mode: 0o600 });
+          throw new Error('injected post-rename uncertainty');
+        }
+      },
+    });
+    await expect(issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: preview(),
+      baselineStrategy: 'conflict',
+      io,
+    })).rejects.toThrow(
+      'project template apply preview approval issuance failed',
+    );
+    const records = readdirSync(join(storage.controlRoot, 'approvals'));
+    expect(records).toHaveLength(1);
+    const approvalId = records[0]!.replace(/\.json$/, '');
+    expect(readFileSync(join(
+      storage.controlRoot,
+      'approvals',
+      records[0]!,
+    ), 'utf8')).toBe('{"foreign":true}\n');
+    const claimPath = join(
+      storage.controlRoot,
+      'approval-claims',
+      `${approvalId}.json`,
+    );
+    expect(JSON.parse(readFileSync(claimPath, 'utf8'))).toEqual({
+      schemaVersion: '1.0',
+      approvalId,
+      context: 'project-template-apply-preview-review',
+      state: 'burned',
+      burnedAt: expect.any(String),
+    });
+    expect(lstatSync(claimPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('burns the id when a prepared approval temp cannot be removed', async () => {
+    const projectRoot = makeRepo();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    let writeFailed = false;
+    const io = createProjectTemplateApplyStorageIo({
+      after: (operation, path) => {
+        if (
+          !writeFailed
+          && operation === 'write'
+          && path.includes('/approvals/')
+        ) {
+          writeFailed = true;
+          throw new Error('injected prepared-record uncertainty');
+        }
+      },
+      before: (operation, path) => {
+        if (operation === 'unlink' && path.includes('/approvals/')) {
+          throw new Error('injected prepared-record cleanup failure');
+        }
+      },
+    });
+    await expect(issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: preview(),
+      baselineStrategy: 'conflict',
+      io,
+    })).rejects.toThrow(
+      'project template apply preview approval issuance failed',
+    );
+    const [tempName] = readdirSync(join(storage.controlRoot, 'approvals'));
+    expect(tempName).toMatch(/^\.approval-[a-f0-9-]{36}\.json\..+\.tmp$/);
+    const approvalId = tempName!.slice(1, tempName!.indexOf('.json.'));
+    expect(JSON.parse(readFileSync(join(
+      storage.controlRoot,
+      'approval-claims',
+      `${approvalId}.json`,
+    ), 'utf8'))).toMatchObject({
+      approvalId,
+      context: 'project-template-apply-preview-review',
+      state: 'burned',
+    });
+  });
+
+  it('supports repeated concurrent issuance against a fresh repository', async () => {
+    const value = preview();
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+      const projectRoot = makeRepo();
+      const evidence = await Promise.all([
+        issueTrustedProjectTemplateApplyPreviewApproval({
+          projectRoot,
+          preview: value,
+          baselineStrategy: 'conflict',
+        }),
+        issueTrustedProjectTemplateApplyPreviewApproval({
+          projectRoot,
+          preview: value,
+          baselineStrategy: 'conflict',
+        }),
+      ]);
+      expect(evidence[0].approvalId).not.toBe(evidence[1].approvalId);
+      const records = readdirSync(join(
+        projectRoot,
+        '.takt-template-state',
+        'approvals',
+      )).filter((name) => name.endsWith('.json'));
+      expect(records).toHaveLength(2);
+    }
   });
 });

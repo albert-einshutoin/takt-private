@@ -198,10 +198,106 @@ export async function writeProjectTemplateApprovalRecord(options: {
   await writePrivateDurableFile({
     storage: options.storage,
     finalPath: approvalPath,
-    content: Buffer.from(`${canonicalizeTaktpackJson(options.record)}\n`),
+    content: projectTemplateApprovalRecordContent(options.record),
     replace: false,
     io: options.storage.io,
   });
+}
+
+function projectTemplateApprovalRecordContent(record: unknown): Buffer {
+  // Preserve the established approval-record encoding. The canonical renderer
+  // already terminates its JSON and storage adds the historical trailing LF.
+  return Buffer.from(`${canonicalizeTaktpackJson(record)}\n`);
+}
+
+export type ProjectTemplateApprovalDiscardOutcome =
+  | 'absent'
+  | 'removed'
+  | 'uncertain';
+
+/**
+ * Removes only the caller's exact private approval record after uncertain
+ * publication. Any identity/content ambiguity fails closed as `uncertain`.
+ *
+ * @internal
+ */
+export async function discardProjectTemplateApprovalRecordIfIdentityMatches(
+  options: {
+    storage: ProjectTemplateApplyStorage;
+    approvalId: string;
+    record: unknown;
+  },
+): Promise<ProjectTemplateApprovalDiscardOutcome> {
+  const { approvalsRoot, approvalPath } = projectTemplateApprovalPath(
+    options.storage,
+    options.approvalId,
+  );
+  const expected = projectTemplateApprovalRecordContent(options.record);
+  try {
+    const rootEntry = await tryLstat(options.storage.io, approvalsRoot);
+    if (rootEntry === undefined) return 'absent';
+    if (
+      rootEntry.isSymbolicLink()
+      || !rootEntry.isDirectory()
+      || rootEntry.dev !== options.storage.device
+      || !isProjectTemplatePrivateDirectoryMode(
+        rootEntry.mode,
+        options.storage.platform,
+      )
+    ) return 'uncertain';
+    const tempPrefix = `.${options.approvalId}.json.`;
+    const tempSuffix = '.tmp';
+    const candidates = [approvalPath];
+    const entries = await options.storage.io.readdir(
+      approvalsRoot,
+      MAX_CONTROL_DIRECTORY_ENTRIES,
+    );
+    for (let index = 0; index < entries.length; index += 1) {
+      const name = entries[index]!.name;
+      if (name.startsWith(tempPrefix) && name.endsWith(tempSuffix)) {
+        candidates.push(join(approvalsRoot, name));
+      }
+    }
+    let removed = false;
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index]!;
+      const before = await tryLstat(options.storage.io, candidate);
+      if (before === undefined) continue;
+      if (
+        before.isSymbolicLink()
+        || !before.isFile()
+        || before.nlink !== 1
+        || before.dev !== options.storage.device
+        || !isProjectTemplatePrivateFileMode(
+          before.mode,
+          options.storage.platform,
+        )
+        || before.size !== expected.byteLength
+      ) return 'uncertain';
+      const content = await options.storage.io.readPrivateFile(
+        candidate,
+        expected.byteLength,
+        options.storage.device,
+      );
+      const afterRead = await options.storage.io.lstat(candidate);
+      if (
+        !content.equals(expected)
+        || !areProjectTemplateFileStatsEqual(before, afterRead)
+      ) return 'uncertain';
+      await options.storage.io.unlink(candidate);
+      removed = true;
+    }
+    if (!removed) return 'absent';
+    await options.storage.io.fsyncDirectory(approvalsRoot);
+    for (let index = 0; index < candidates.length; index += 1) {
+      if (await tryLstat(options.storage.io, candidates[index]!) !== undefined) {
+        return 'uncertain';
+      }
+    }
+    return 'removed';
+  } catch {
+    return 'uncertain';
+  }
 }
 
 export async function readProjectTemplateApprovalRecord(options: {
@@ -986,35 +1082,53 @@ export async function initializeProjectTemplateApplyStorage(options: {
   const controlIgnorePath = join(controlRoot, '.gitignore');
   const existingIgnore = await tryLstat(io, controlIgnorePath);
   if (existingIgnore === undefined) {
-    await writePrivateDurableFile({
-      storage,
-      finalPath: controlIgnorePath,
-      content: CONTROL_GITIGNORE_CONTENT,
-      replace: false,
-      io,
-    });
-  } else {
-    if (
-      existingIgnore.isSymbolicLink()
-      || !existingIgnore.isFile()
-      || existingIgnore.nlink !== 1
-      || existingIgnore.dev !== storage.device
-      || !isProjectTemplateOwnerOnlyMode(existingIgnore.mode, platform)
-      || existingIgnore.size !== CONTROL_GITIGNORE_CONTENT.byteLength
-      || !(
-        await io.readFile(
-          controlIgnorePath,
-          CONTROL_GITIGNORE_CONTENT.byteLength,
-        )
-      ).equals(CONTROL_GITIGNORE_CONTENT)
-    ) {
-      throw new ProjectTemplateApplyStorageError(
-        'UNSAFE_CONTROL_ROOT',
-        'project template control ignore file is unsafe',
-      );
+    try {
+      await writePrivateDurableFile({
+        storage,
+        finalPath: controlIgnorePath,
+        content: CONTROL_GITIGNORE_CONTENT,
+        replace: false,
+        io,
+      });
+    } catch (error) {
+      // Another initializer may have durably won the O_EXCL publication race.
+      // Only that exact race is recoverable; every other storage failure keeps
+      // its original fail-closed semantics.
+      if (
+        !(error instanceof ProjectTemplateApplyStorageError)
+        || error.code !== 'ALREADY_EXISTS'
+      ) throw error;
+      await assertControlIgnoreFile(storage, controlIgnorePath, io);
     }
+  } else {
+    await assertControlIgnoreFile(storage, controlIgnorePath, io);
   }
   return storage;
+}
+
+async function assertControlIgnoreFile(
+  storage: ProjectTemplateApplyStorage,
+  controlIgnorePath: string,
+  io: ProjectTemplateApplyStorageIo,
+): Promise<void> {
+  const entry = await io.lstat(controlIgnorePath);
+  if (
+    entry.isSymbolicLink()
+    || !entry.isFile()
+    || entry.nlink !== 1
+    || entry.dev !== storage.device
+    || !isProjectTemplateOwnerOnlyMode(entry.mode, storage.platform)
+    || entry.size !== CONTROL_GITIGNORE_CONTENT.byteLength
+    || !(await io.readFile(
+      controlIgnorePath,
+      CONTROL_GITIGNORE_CONTENT.byteLength,
+    )).equals(CONTROL_GITIGNORE_CONTENT)
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template control ignore file is unsafe',
+    );
+  }
 }
 
 async function writePrivateDurableFile(options: {
