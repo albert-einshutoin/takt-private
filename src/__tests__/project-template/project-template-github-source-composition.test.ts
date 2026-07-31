@@ -294,6 +294,64 @@ describe('authenticated GitHub source composition F4', () => {
     },
   );
 
+  it('preserves the exact malformed resolver input contract for both methods', async () => {
+    const value = integrationHarness();
+    const resolver = createProjectTemplateGithubSourceComposition(
+      { deadlineMs: 10_000 },
+      value.dependencies,
+    ).resolver;
+    const malformed = Object.freeze({
+      source: 'github:octo/demo@main',
+      extra: true,
+    });
+
+    const advisoryError = await resolver.resolveAdvisory(
+      malformed as { readonly source: string },
+    ).catch((caught: unknown) => caught);
+    const downloadError = await resolver.resolveForDownload(
+      malformed as { readonly source: string },
+    ).catch((caught: unknown) => caught);
+
+    expect(advisoryError).toBeInstanceOf(TypeError);
+    expect(downloadError).toBeInstanceOf(TypeError);
+    expect((advisoryError as Error).message)
+      .toBe('GitHub source composition input is invalid');
+    expect((downloadError as Error).message)
+      .toBe((advisoryError as Error).message);
+    expect(value.activity).toHaveLength(0);
+  });
+
+  it.each([
+    ['invalid-source', 'INVALID_SOURCE_SPEC'],
+    ['invalid-descriptor', 'INVALID_DESCRIPTOR'],
+    ['checksum-mismatch', 'CHECKSUM_MISMATCH'],
+  ] as const)(
+    'preserves bounded F3 resolution error: %s',
+    async (failure, code) => {
+      const value = integrationHarness({
+        invalidDescriptor: failure === 'invalid-descriptor',
+        checksumMismatch: failure === 'checksum-mismatch',
+      });
+      const resolver = createProjectTemplateGithubSourceComposition(
+        { deadlineMs: 10_000 },
+        value.dependencies,
+      ).resolver;
+
+      const error = await resolver.resolveAdvisory({
+        source: failure === 'invalid-source'
+          ? 'https://example.invalid/template.taktpack'
+          : 'github:octo/demo@main',
+      }).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code });
+      expect((error as Error).message)
+        .not.toBe('GitHub template source advisory composition failed');
+      expect(value.credentials.every(({ dispose }) =>
+        dispose.mock.calls.length === 1
+      )).toBe(true);
+    },
+  );
+
   it('rejects hostile exact boundaries before activity and redacts resolution failures', async () => {
     const value = integrationHarness();
     const accessor = vi.fn(() => value.dependencies.now);
@@ -423,6 +481,8 @@ function coldDependencies(): {
 function integrationHarness(options: {
   readonly mutable?: boolean;
   readonly rejectCredential?: boolean;
+  readonly invalidDescriptor?: boolean;
+  readonly checksumMismatch?: boolean;
 } = {}): {
   readonly dependencies: ProjectTemplateGithubSourceCompositionDependencies;
   readonly activity: string[];
@@ -491,7 +551,9 @@ function integrationHarness(options: {
     activity.push('requestMetadata');
     receivers.push(this);
     if (request.path.includes('/contents/')) {
-      return Buffer.from(DESCRIPTOR);
+      return Buffer.from(
+        options.invalidDescriptor === true ? '{}' : DESCRIPTOR,
+      );
     }
     if (request.path.includes('/releases/tags/')) {
       return Buffer.from(JSON.stringify({
@@ -522,7 +584,11 @@ function integrationHarness(options: {
     attemptInputs.push(input);
     let pullCount = 0;
     const bytes = input.assetId === 202
-      ? new TextEncoder().encode(CHECKSUM)
+      ? new TextEncoder().encode(
+        options.checksumMismatch === true
+          ? `${'b'.repeat(64)}  ${ASSET_NAME}\n`
+          : CHECKSUM,
+      )
       : Uint8Array.from([1, 2, 3]);
     return Object.freeze({
       pull(settlement: ProjectTemplateArtifactSingleAttemptSettlement) {

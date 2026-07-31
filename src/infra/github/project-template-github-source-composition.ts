@@ -312,20 +312,19 @@ export function createProjectTemplateGithubSourceComposition(
     resolveAdvisory: Object.freeze(async (
       input: GithubTemplateSourceResolutionInput,
     ): Promise<GithubTemplateSourceAdvisory> => {
-      let resolved: ResolvedGithubTemplateSource | undefined;
+      // Input and F3 failures are already finite public contracts. Keep them
+      // outside the demotion boundary so callers retain their precise code.
+      const resolved = await resolve(input);
       try {
-        resolved = await resolve(input);
         return demoteResolvedGithubTemplateSourceToAdvisory(resolved);
       } catch {
-        if (resolved !== undefined) {
-          // Demotion builds all evidence before its hook-free consume step.
-          // After consume it returns without invoking user code, so a thrown
-          // copy path leaves this authority active and reclaimable here.
-          try {
-            discardResolvedGithubTemplateSource(resolved);
-          } catch {
-            // A bounded public error must not be replaced by cleanup detail.
-          }
+        // Demotion builds all evidence before its hook-free consume step.
+        // After consume it returns without invoking user code, so a thrown
+        // copy path leaves this authority active and reclaimable here.
+        try {
+          discardResolvedGithubTemplateSource(resolved);
+        } catch {
+          // A bounded public error must not be replaced by cleanup detail.
         }
         throw advisoryCompositionFailure();
       }
