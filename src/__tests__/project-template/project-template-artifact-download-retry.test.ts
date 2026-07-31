@@ -742,7 +742,7 @@ describe('project-template artifact download D4 retry bridge', () => {
     expect(credential.dispose).toHaveBeenCalledTimes(1);
   });
 
-  it('accepts bounded data-only instrumentation symbols on a native Promise', async () => {
+  it('accepts Node AsyncLocalStorage promise instrumentation', async () => {
     const credential = controlledCredential();
     const storage = new AsyncLocalStorage<{ readonly trace: string }>();
     const promise = storage.run(
@@ -752,21 +752,13 @@ describe('project-template artifact download D4 retry bridge', () => {
         { credential: credential.credential },
       ) as Promise<DisposableProjectTemplateGhCredential>,
     );
-    const symbolValueTrap = vi.fn(() => {
-      throw new Error('SECRET instrumentation value');
-    });
-    const opaqueValue = new Proxy(Object.freeze({}), {
-      get: symbolValueTrap,
-    });
-    Object.defineProperty(promise, Symbol('instrumentation'), {
-      configurable: true,
-      enumerable: true,
-      value: opaqueValue,
-      writable: true,
-    });
-    expect(Reflect.ownKeys(promise).some(
+    expect(Reflect.ownKeys(promise).filter(
       (key) => typeof key === 'symbol',
-    )).toBe(true);
+    ).map((key) => key.description)).toEqual([
+      'async_id_symbol',
+      'trigger_async_id_symbol',
+      'kResourceStore',
+    ]);
     const value = harness(1_000_000, {
       unmockedAcquire: true,
       acquireCredential: () => promise,
@@ -782,8 +774,92 @@ describe('project-template artifact download D4 retry bridge', () => {
     });
     await value.iterator.return!();
     expect(credential.dispose).toHaveBeenCalledTimes(1);
-    expect(symbolValueTrap).not.toHaveBeenCalled();
+    storage.disable();
   });
+
+  it('does not inspect the AsyncLocalStorage resource store during settlement', async () => {
+    const credential = controlledCredential();
+    const storage = new AsyncLocalStorage<object>();
+    const promise = storage.run(
+      Object.freeze({ trace: 'test' }),
+      () => Promise.resolve(credential.credential),
+    );
+    const resourceStore = Reflect.ownKeys(promise).find(
+      (key): key is symbol => (
+        typeof key === 'symbol' && key.description === 'kResourceStore'
+      ),
+    )!;
+    const storeTrap = vi.fn(() => {
+      throw new Error('SECRET resource store');
+    });
+    Object.defineProperty(promise, resourceStore, {
+      ...Object.getOwnPropertyDescriptor(promise, resourceStore),
+      value: new Proxy(Object.freeze({}), { get: storeTrap }),
+    });
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    value.attempts[0]!.settlement!.chunk(Uint8Array.from([8]));
+    await expect(pending).resolves.toMatchObject({ done: false });
+    await value.iterator.return!();
+    expect(storeTrap).not.toHaveBeenCalled();
+    storage.disable();
+  });
+
+  it.each([
+    ['async_id_symbol', 'proxy'],
+    ['async_id_symbol', 'nan'],
+    ['async_id_symbol', 'infinity'],
+    ['async_id_symbol', 'out-of-range'],
+    ['trigger_async_id_symbol', 'proxy'],
+    ['trigger_async_id_symbol', 'negative'],
+    ['trigger_async_id_symbol', 'nan'],
+    ['trigger_async_id_symbol', 'infinity'],
+  ] as const)(
+    'rejects an invalid Node %s %s value before attaching a reaction',
+    async (description, invalidKind) => {
+      const credential = controlledCredential();
+      const storage = new AsyncLocalStorage<object>();
+      const promise = storage.run(
+        Object.freeze({ trace: 'test' }),
+        () => Promise.resolve(credential.credential),
+      );
+      const symbol = Reflect.ownKeys(promise).find(
+        (key): key is symbol => (
+          typeof key === 'symbol' && key.description === description
+        ),
+      )!;
+      const valueTrap = vi.fn(() => {
+        throw new Error('SECRET async instrumentation value');
+      });
+      const invalidValue = invalidKind === 'proxy'
+        ? new Proxy(Object.freeze({}), { get: valueTrap })
+        : invalidKind === 'nan'
+          ? Number.NaN
+          : invalidKind === 'infinity'
+            ? Number.POSITIVE_INFINITY
+            : invalidKind === 'negative'
+              ? -1
+              : Number.MAX_SAFE_INTEGER + 1;
+      Object.defineProperty(promise, symbol, {
+        ...Object.getOwnPropertyDescriptor(promise, symbol),
+        value: invalidValue,
+      });
+      const value = harness(1_000_000, {
+        unmockedAcquire: true,
+        acquireCredential: () => promise,
+      });
+
+      await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
+      expect(value.createAttempt).not.toHaveBeenCalled();
+      expect(valueTrap).not.toHaveBeenCalled();
+      storage.disable();
+    },
+  );
 
   it.each([false, true])(
     'rejects an enumerable=%s instrumentation symbol accessor without invoking it',
@@ -810,41 +886,50 @@ describe('project-template artifact download D4 retry bridge', () => {
     },
   );
 
-  it('bounds instrumentation symbols before attaching a reaction', async () => {
-    const credential = controlledCredential();
-    const createPromise = (symbolCount: number) => {
-      const promise = runInNewContext(
-        'Promise.resolve(credential)',
-        { credential: credential.credential },
-      ) as Promise<DisposableProjectTemplateGhCredential>;
-      const existing = Reflect.ownKeys(promise).filter(
-        (key) => typeof key === 'symbol',
-      ).length;
-      for (let index = existing; index < symbolCount; index += 1) {
-        Object.defineProperty(promise, Symbol(`instrumentation-${index}`), {
-          configurable: true,
-          value: index,
-        });
-      }
-      return promise;
-    };
-    const accepted = harness(1_000_000, {
-      unmockedAcquire: true,
-      acquireCredential: () => createPromise(8),
-    });
-    const pending = accepted.iterator.next();
-    await Promise.resolve();
-    accepted.attempts[0]!.settlement!.chunk(Uint8Array.from([9]));
-    await expect(pending).resolves.toMatchObject({ done: false });
-    await accepted.iterator.return!();
+  it.each([
+    Symbol('unknown'),
+    Symbol('async_id_symbol'),
+    Symbol('trigger_async_id_symbol'),
+    Symbol('kResourceStore'),
+  ])(
+    'rejects an unknown instrumentation symbol identity',
+    async (symbol) => {
+      const credential = controlledCredential();
+      const promise = Promise.resolve(credential.credential);
+      Object.defineProperty(promise, symbol, {
+        configurable: true,
+        value: 1,
+      });
+      const value = harness(1_000_000, {
+        unmockedAcquire: true,
+        acquireCredential: () => promise,
+      });
 
-    const rejected = harness(1_000_000, {
-      unmockedAcquire: true,
-      acquireCredential: () => createPromise(9),
+      await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
+      expect(value.createAttempt).not.toHaveBeenCalled();
+      expect(credential.dispose).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a duplicate instrumentation symbol description', async () => {
+    const credential = controlledCredential();
+    const storage = new AsyncLocalStorage<object>();
+    const promise = storage.run(
+      Object.freeze({ trace: 'test' }),
+      () => Promise.resolve(credential.credential),
+    );
+    Object.defineProperty(promise, Symbol('kResourceStore'), {
+      configurable: true,
+      value: Object.freeze({}),
     });
-    await expectCode(rejected.iterator.next(), 'BRIDGE_FAILURE');
-    expect(rejected.createAttempt).not.toHaveBeenCalled();
-    expect(credential.dispose).toHaveBeenCalledTimes(1);
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
+    expect(value.createAttempt).not.toHaveBeenCalled();
+    storage.disable();
   });
 
   it('rejects hostile Promise descriptors without invoking their traps', async () => {

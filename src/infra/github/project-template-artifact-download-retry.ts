@@ -36,6 +36,8 @@ const MAX_TRANSACTIONAL_TIMER_ARMS = 8;
 const TIMER_SETUP_MARGIN_MS = 1;
 const RETRY_DELAYS_MS = Object.freeze([0, 250, 1_000] as const);
 const MAX_PROMISE_INSTRUMENTATION_SYMBOLS = 8;
+const NativePromise = Promise;
+const NATIVE_PROMISE_RESOLVE = Promise.resolve;
 const NATIVE_PROMISE_THEN = Promise.prototype.then;
 const FUNCTION_TO_STRING = Function.prototype.toString;
 const NATIVE_PROMISE_CONSTRUCTOR_SOURCE = Reflect.apply(
@@ -848,21 +850,58 @@ function isExactNativePromise(value: unknown): value is Promise<unknown> {
     const symbolKeys = valueKeys.filter(
       (key): key is symbol => typeof key === 'symbol',
     );
+    const instrumentationProbe = Reflect.apply(
+      NATIVE_PROMISE_RESOLVE,
+      NativePromise,
+      [undefined],
+    );
+    const nativeInstrumentationSymbols = new Set(
+      Reflect.ownKeys(instrumentationProbe).filter(
+        (key): key is symbol => typeof key === 'symbol',
+      ),
+    );
+    const symbolDescriptions = new Set<string>();
     if (
       valueKeys.some((key) => typeof key === 'string')
       || symbolKeys.length > MAX_PROMISE_INSTRUMENTATION_SYMBOLS
       || symbolKeys.some((key) => {
+        if (!nativeInstrumentationSymbols.has(key)) return true;
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
-        return descriptor === undefined || !('value' in descriptor);
+        if (descriptor === undefined || !('value' in descriptor)) return true;
+        const description = key.description;
+        if (
+          description === undefined
+          || symbolDescriptions.has(description)
+        ) return true;
+        symbolDescriptions.add(description);
+        if (description === 'kResourceStore') return false;
+        if (
+          description !== 'async_id_symbol'
+          && description !== 'trigger_async_id_symbol'
+        ) return true;
+        const instrumentationId = descriptor.value;
+        return (
+          typeof instrumentationId !== 'number'
+          || !Number.isSafeInteger(instrumentationId)
+          || (
+            description === 'async_id_symbol'
+              ? instrumentationId <= 0
+              : instrumentationId < 0
+          )
+        );
       })
     ) return false;
     // Node's AsyncLocalStorage (and therefore Vitest/OTel instrumentation)
-    // adds own symbol data to genuine native Promises. Promise reaction
-    // semantics never consult those instance symbols, so bounded data-only
-    // entries are compatible; every string key and symbol accessor is rejected
-    // without reading or invoking its value. Data descriptor flags are not
-    // restricted because Node 20 emits enumerable entries and no flag
-    // participates in Promise reaction semantics.
+    // adds these own symbol data descriptors to genuine native Promises. Node
+    // consumes the async IDs while attaching/running reactions, so accepting
+    // arbitrary values here could execute a hostile Proxy inside async_hooks.
+    // IDs therefore stay finite safe integers, while the opaque resource store
+    // is deliberately never inspected. Unknown, duplicate, and accessor
+    // symbols fail closed before a reaction is attached. A fresh captured-
+    // intrinsic Promise identifies Node's process-local symbol identities, so
+    // a user-created Symbol with a trusted-looking description is rejected.
+    // Descriptor flags are unrestricted because Node 20 emits enumerable,
+    // writable entries.
 
     // A dependency may execute in another VM realm, so identity against this
     // realm's Promise.prototype would reject a genuine native Promise. Native
