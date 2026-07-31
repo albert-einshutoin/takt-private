@@ -18,6 +18,10 @@ export const MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_BYTES =
   256 * 1024;
 
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
+const INTRINSIC_REFLECT_APPLY = Reflect.apply;
+const PRISTINE_UINT8_ARRAY = Uint8Array;
+const PRISTINE_TEXT_DECODER = TextDecoder;
+const TEXT_DECODER_DECODE = TextDecoder.prototype.decode;
 const TYPED_ARRAY_BYTE_LENGTH_GETTER = (() => {
   const getter =
     Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, 'byteLength')?.get;
@@ -103,11 +107,16 @@ export function parseProjectTemplateRepertoireDependencyLockJson(
   ) {
     const bytes = snapshotPristineBytes(input);
     try {
-      json = new TextDecoder('utf-8', {
+      const decoder = new PRISTINE_TEXT_DECODER('utf-8', {
         fatal: true,
         // Preserve a BOM so canonical equality rejects a second byte form.
         ignoreBOM: true,
-      }).decode(bytes.value);
+      });
+      json = INTRINSIC_REFLECT_APPLY(
+        TEXT_DECODER_DECODE,
+        decoder,
+        [bytes],
+      ) as string;
     } catch {
       invalidLock('repertoire dependency lock bytes must be valid UTF-8');
     }
@@ -130,15 +139,12 @@ export function parseProjectTemplateRepertoireDependencyLockJson(
   return parsed;
 }
 
-function snapshotPristineBytes(value: object): {
-  readonly value: Uint8Array;
-  readonly byteLength: number;
-} {
+function snapshotPristineBytes(value: object): Uint8Array {
   let byteLength: number;
   try {
     // Calling the captured intrinsic getter performs the internal-slot brand
     // check without consulting an own/inherited `byteLength` property.
-    byteLength = Reflect.apply(
+    byteLength = INTRINSIC_REFLECT_APPLY(
       TYPED_ARRAY_BYTE_LENGTH_GETTER,
       value,
       [],
@@ -165,10 +171,13 @@ function snapshotPristineBytes(value: object): {
       'repertoire dependency lock bytes must not contain extra properties',
     );
   }
-  return {
-    value: value as Uint8Array,
-    byteLength,
-  };
+  // Decode only a local byte-for-byte snapshot. A SharedArrayBuffer resize or
+  // mutation after descriptor capture cannot change the canonical JSON bytes.
+  const snapshot = new PRISTINE_UINT8_ARRAY(byteLength);
+  for (let index = 0; index < byteLength; index += 1) {
+    snapshot[index] = descriptors[String(index)]!.value as number;
+  }
+  return snapshot;
 }
 
 export function serializeProjectTemplateRepertoireDependencyLock(

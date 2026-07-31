@@ -378,6 +378,82 @@ describe('project template repertoire dependency lock', () => {
     )).toThrow(expect.objectContaining({ code: 'INVALID_LOCK' }));
   });
 
+  it('isolates decoding from caller bytes and post-initialization decoder poison', () => {
+    const json = serializeProjectTemplateRepertoireDependencyLock(validLock());
+    const bytes = new TextEncoder().encode(json);
+    const originalDecode = TextDecoder.prototype.decode;
+    let poisonCalls = 0;
+    TextDecoder.prototype.decode = function decodePoison(
+      input?: AllowSharedBufferSource,
+      options?: TextDecodeOptions,
+    ): string {
+      poisonCalls += 1;
+      expect(input).not.toBe(bytes);
+      bytes.fill(0x20);
+      return originalDecode.call(this, input, options);
+    };
+    try {
+      expect(parseProjectTemplateRepertoireDependencyLockJson(bytes))
+        .toEqual(validLock());
+      expect(poisonCalls).toBe(0);
+    } finally {
+      TextDecoder.prototype.decode = originalDecode;
+    }
+  });
+
+  it('uses the captured Reflect.apply before reading the byte view', () => {
+    const json = serializeProjectTemplateRepertoireDependencyLock(validLock());
+    const bytes = new TextEncoder().encode(json);
+    const originalApply = Reflect.apply;
+    let poisonCalls = 0;
+    Reflect.apply = () => {
+      poisonCalls += 1;
+      throw new Error('post-initialization Reflect.apply poison');
+    };
+    try {
+      expect(parseProjectTemplateRepertoireDependencyLockJson(bytes))
+        .toEqual(validLock());
+      expect(poisonCalls).toBe(0);
+    } finally {
+      Reflect.apply = originalApply;
+    }
+  });
+
+  it('returns a byte-independent snapshot when caller storage mutates later', () => {
+    const json = serializeProjectTemplateRepertoireDependencyLock(validLock());
+    const bytes = new TextEncoder().encode(json);
+    const parsed = parseProjectTemplateRepertoireDependencyLockJson(bytes);
+
+    bytes.fill(0);
+
+    expect(parsed).toEqual(validLock());
+    expect(Object.isFrozen(parsed)).toBe(true);
+  });
+
+  it('decodes descriptor bytes after caller storage changes identity state', () => {
+    const json = serializeProjectTemplateRepertoireDependencyLock(validLock());
+    const bytes = new TextEncoder().encode(json);
+    const originalDescriptors = Object.getOwnPropertyDescriptors;
+    let mutations = 0;
+    Object.getOwnPropertyDescriptors = function snapshotThenMutate<T>(
+      value: T,
+    ): TypedPropertyDescriptor<T> & { [P in keyof T]: TypedPropertyDescriptor<T[P]> } {
+      const descriptors = originalDescriptors(value);
+      if (value === bytes) {
+        mutations += 1;
+        bytes.fill(0x20);
+      }
+      return descriptors;
+    };
+    try {
+      expect(parseProjectTemplateRepertoireDependencyLockJson(bytes))
+        .toEqual(validLock());
+      expect(mutations).toBe(1);
+    } finally {
+      Object.getOwnPropertyDescriptors = originalDescriptors;
+    }
+  });
+
   it('enforces the raw lock byte bound before decoding or parsing', () => {
     expect(MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_BYTES)
       .toBe(256 * 1024);
