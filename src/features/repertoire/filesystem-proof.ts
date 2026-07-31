@@ -181,9 +181,15 @@ export function sameFileProof(left: FileProof, right: FileProof): boolean {
 }
 
 export function sameTreeProof(left: TreeProof, right: TreeProof, allowRelocation = false): boolean {
+  if (allowRelocation) {
+    // rename(2) changes ctime, which is part of stableIdentity. Across the
+    // deliberate rename boundary, retain inode/mode and full-content identity.
+    return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+      && left.contentFingerprint === right.contentFingerprint;
+  }
   return left.stableIdentity === right.stableIdentity
     && left.contentFingerprint === right.contentFingerprint
-    && (allowRelocation || left.realpath === right.realpath);
+    && left.realpath === right.realpath;
 }
 
 export function sameParentProof(left: ParentProof, right: ParentProof): boolean {
