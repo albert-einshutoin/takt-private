@@ -74,4 +74,36 @@ describe('detachToMaintenance', () => {
     expect(classifyMaintenanceTransactions(root).incomplete).toEqual([transaction]);
     expect(() => assertMaintenanceTransactionsReady(root)).toThrow();
   });
+
+  it.each([
+    'transaction-created',
+    'intent-written',
+    'intent-durable',
+    'before-rename',
+    'after-rename',
+    'rename-durable',
+    'proof-complete',
+    'outcome-written',
+    'outcome-durable',
+  ] as const)('classifies a deterministic crash at %s as recovery-required', (phase) => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-fault-'));
+    roots.push(root);
+    const packageDir = join(root, 'repertoire', '@owner', 'repo');
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(join(packageDir, 'workflow.yaml'), 'name: retained');
+    const expected = captureDirectoryTreeProof(packageDir, root);
+    expect(() => detachToMaintenance({
+      globalConfigDir: root,
+      sourceDir: packageDir,
+      containmentRoot: root,
+      expected,
+      kind: 'payload',
+      onPhase: (current) => {
+        if (current === phase) throw new Error('simulated crash');
+      },
+    })).toThrow(expect.objectContaining({ code: 'RECOVERY_REQUIRED' }));
+    const classification = classifyMaintenanceTransactions(root);
+    expect(classification.incomplete).toHaveLength(1);
+    expect(() => assertMaintenanceTransactionsReady(root)).toThrow();
+  });
 });

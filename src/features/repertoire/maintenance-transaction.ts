@@ -45,7 +45,22 @@ export interface DetachToMaintenanceOptions {
   containmentRoot: string;
   expected: TreeProof;
   kind: MaintenancePayloadKind;
+  /** Test-only deterministic crash/fault boundary. */
+  onPhase?: (phase: MaintenanceTransactionPhase) => void;
 }
+
+export type MaintenanceTransactionPhase =
+  | 'transaction-created'
+  | 'intent-written'
+  | 'intent-durable'
+  | 'before-rename'
+  | 'after-rename'
+  | 'rename-durable'
+  | 'proof-complete'
+  | 'outcome-written'
+  | 'outcome-durable'
+  | 'complete-written'
+  | 'complete-durable';
 
 /** Fail closed at startup when a prior mutation did not publish its outcome. */
 export function assertMaintenanceTransactionsReady(globalConfigDir: string): void {
@@ -75,14 +90,21 @@ export function classifyMaintenanceTransactions(
       let complete = false;
       try {
         const intent = readApprovedRegularFile(join(transaction, 'intent.json'), transaction);
-        const outcome = readApprovedRegularFile(join(transaction, 'complete'), transaction);
+        const outcome = readApprovedRegularFile(join(transaction, 'outcome.json'), transaction);
+        const completeRecord = readApprovedRegularFile(join(transaction, 'complete'), transaction);
         const parsedIntent = parseRecord(intent.bytes);
         const parsedOutcome = parseRecord(outcome.bytes);
+        const parsedComplete = parseRecord(completeRecord.bytes);
         complete = parsedIntent.version === 1
           && parsedOutcome.version === 1
-          && parsedOutcome.phase === 'complete'
+          && parsedOutcome.phase === 'detached'
           && parsedOutcome.intentDigest === digestBytes(intent.bytes)
-          && typeof parsedOutcome.actualProofDigest === 'string';
+          && typeof parsedOutcome.actualProofDigest === 'string'
+          && parsedComplete.version === 1
+          && parsedComplete.phase === 'complete'
+          && parsedComplete.intentDigest === parsedOutcome.intentDigest
+          && parsedComplete.actualProofDigest === parsedOutcome.actualProofDigest
+          && parsedComplete.outcomeDigest === digestBytes(outcome.bytes);
       } catch {
         complete = false;
       }
@@ -114,6 +136,7 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     mkdirSync(transactionDir, { mode: PRIVATE_DIRECTORY_MODE });
     syncDirectory(transactionDir);
     syncDirectory(transactionsRoot);
+    options.onPhase?.('transaction-created');
     const destination = join(transactionDir, options.kind);
     const source = relative(options.globalConfigDir, options.sourceDir);
     if (source === '' || isAbsolute(source) || source === '..' || source.startsWith('../')) {
@@ -126,30 +149,58 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
       expectedTreeDigest: digestTree(options.expected),
       nonce,
     }));
-    writeDurableExclusive(join(transactionDir, 'intent.json'), intent);
+    writeFileSync(join(transactionDir, 'intent.json'), intent, {
+      flag: 'wx', mode: PRIVATE_FILE_MODE,
+    });
+    options.onPhase?.('intent-written');
+    syncFile(join(transactionDir, 'intent.json'));
     syncDirectory(transactionDir);
+    options.onPhase?.('intent-durable');
 
     if (!sameTreeProof(
       options.expected,
       captureDirectoryTreeProof(options.sourceDir, options.containmentRoot),
     )) throw recoveryRequired();
 
+    options.onPhase?.('before-rename');
     renameSync(options.sourceDir, destination);
+    options.onPhase?.('after-rename');
     syncDirectory(dirname(options.sourceDir));
     syncDirectory(transactionDir);
     syncDirectory(transactionsRoot);
+    options.onPhase?.('rename-durable');
     const actual = captureDirectoryTreeProof(destination, options.globalConfigDir);
     if (!sameTreeProof(options.expected, actual, true)) throw recoveryRequired();
+    options.onPhase?.('proof-complete');
 
     const outcome = Buffer.from(JSON.stringify({
+      version: 1,
+      phase: 'detached',
+      intentDigest: digestBytes(intent),
+      actualProofDigest: digestTree(actual),
+    }));
+    writeFileSync(join(transactionDir, 'outcome.json'), outcome, {
+      flag: 'wx', mode: PRIVATE_FILE_MODE,
+    });
+    options.onPhase?.('outcome-written');
+    syncFile(join(transactionDir, 'outcome.json'));
+    syncDirectory(transactionDir);
+    options.onPhase?.('outcome-durable');
+    const complete = Buffer.from(JSON.stringify({
       version: 1,
       phase: 'complete',
       intentDigest: digestBytes(intent),
       actualProofDigest: digestTree(actual),
+      outcomeDigest: digestBytes(outcome),
     }));
-    writeDurableExclusive(join(transactionDir, 'complete'), outcome);
+    writeFileSync(join(transactionDir, 'complete'), complete, {
+      flag: 'wx', mode: PRIVATE_FILE_MODE,
+    });
+    options.onPhase?.('complete-written');
+    syncFile(join(transactionDir, 'complete'));
     syncDirectory(transactionDir);
     syncDirectory(transactionsRoot);
+    options.onPhase?.('complete-durable');
     return transactionDir;
   } catch (error) {
     if (error instanceof RepertoireMaintenanceError) throw error;
@@ -165,11 +216,6 @@ function createAndSyncHierarchy(globalConfigDir: string, transactionsRoot: strin
   mkdirSync(transactionsRoot, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   syncDirectory(maintenanceRoot);
   syncDirectory(transactionsRoot);
-}
-
-function writeDurableExclusive(path: string, bytes: Buffer): void {
-  writeFileSync(path, bytes, { flag: 'wx', mode: PRIVATE_FILE_MODE });
-  syncFile(path);
 }
 
 function syncFile(path: string): void {
