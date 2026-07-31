@@ -251,6 +251,38 @@ function isFailure(
     );
 }
 
+function correlateFailureWithDelivery(
+  failure: ProjectTemplateArtifactSingleAttemptFailure,
+  deliveredAny: boolean,
+): ProjectTemplateArtifactSingleAttemptFailure {
+  if (
+    failure.code === 'HTTP_STATUS'
+    && failure.statusCode === 200
+  ) return INTERNAL_FAILURE;
+  if (deliveredAny) {
+    // D2 false-ifies replayable failures after its first delivered chunk.
+    // A still-retryable envelope therefore cannot have come from D2.
+    return failure.retryable ? INTERNAL_FAILURE : failure;
+  }
+  if (
+    !failure.retryable
+    && (
+      failure.code === 'NETWORK'
+      || (
+        failure.code === 'HTTP_STATUS'
+        && isRetryableProjectTemplateArtifactHttpStatus(
+          failure.statusCode,
+        )
+      )
+    )
+  ) {
+    // NETWORK and allowlisted HTTP failures become non-retryable only after
+    // delivery. Before delivery, this envelope is semantically impossible.
+    return INTERNAL_FAILURE;
+  }
+  return failure;
+}
+
 function safelyDisposeAttempt(attempt: AttemptSnapshot | undefined): void {
   if (attempt === undefined) return;
   try {
@@ -506,12 +538,13 @@ function handleFailure(
   state.current = undefined;
   state.phase = 'deciding';
   const observed = isFailure(failureValue) ? failureValue : INTERNAL_FAILURE;
-  // D2 marks every post-delivery failure non-replay-safe. Treat a structurally
-  // valid but contract-breaking fake retryable failure as INTERNAL instead of
-  // presenting an impossible terminal-event type to policy.
-  const failure = observed.retryable && state.deliveredAny
-    ? INTERNAL_FAILURE
-    : observed;
+  // Shape validation above protects the record surface; this separate step
+  // enforces D2's delivery-dependent failure semantics without copying valid
+  // reason objects and losing their identity.
+  const failure = correlateFailureWithDelivery(
+    observed,
+    state.deliveredAny,
+  );
   // Revoke and physically release the old generation before policy can expose
   // a replacement attempt or retain its one-shot decision control.
   safelyDisposeAttempt(old);

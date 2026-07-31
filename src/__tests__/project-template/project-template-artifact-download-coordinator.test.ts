@@ -102,17 +102,21 @@ function failure(
   code: 'NETWORK' | 'INTERNAL' = 'NETWORK',
 ): ProjectTemplateArtifactSingleAttemptFailure {
   if (code === 'NETWORK') {
-    return Object.freeze(Object.assign(Object.create(null) as object, {
+    return exactFailure({
       code,
       retryable: true,
       replaySafe: true,
-    }));
+    });
   }
-  return Object.freeze(Object.assign(Object.create(null) as object, {
+  return exactFailure({
     code,
     retryable: false,
     replaySafe: false,
-  }));
+  });
+}
+
+function exactFailure<Value extends object>(value: Value): Readonly<Value> {
+  return Object.freeze(Object.assign(Object.create(null) as object, value));
 }
 
 async function expectCode(
@@ -240,6 +244,56 @@ describe('project-template artifact download D3 coordinator', () => {
     event.control.fail();
     await expectCode(terminal, 'BRIDGE_FAILURE');
   });
+
+  it.each([
+    ['before', 'HTTP_STATUS', 200, false],
+    ['before', 'NETWORK', undefined, false],
+    ['before', 'HTTP_STATUS', 503, false],
+    ['before', 'HTTP_STATUS', 401, true],
+    ['after', 'HTTP_STATUS', 503, true],
+    ['after', 'NETWORK', undefined, true],
+    ['after', 'HTTP_STATUS', 200, false],
+  ] as const)(
+    'normalizes %s-delivery %s %s identity=%s',
+    async (delivery, code, statusCode, preservesIdentity) => {
+      const first = controlledAttempt();
+      const reason = exactFailure({
+        code,
+        ...(statusCode === undefined ? {} : { statusCode }),
+        retryable: false as const,
+        replaySafe: false as const,
+      }) as ProjectTemplateArtifactSingleAttemptFailure;
+      let event!: ProjectTemplateArtifactDownloadDecisionEvent;
+      const iterator = iteratorFor(first.attempt, policy((value) => {
+        event = value;
+        return undefined;
+      }));
+      if (delivery === 'after') {
+        const chunk = iterator.next();
+        first.settlement!.chunk(Uint8Array.from([1]));
+        await expect(chunk).resolves.toEqual({
+          value: Uint8Array.from([1]),
+          done: false,
+        });
+      }
+      const terminal = iterator.next();
+      first.settlement!.fail(reason);
+
+      expect(event.kind).toBe('terminal');
+      if (preservesIdentity) {
+        expect(event.failure).toBe(reason);
+      } else {
+        expect(event.failure).toEqual({
+          code: 'INTERNAL',
+          retryable: false,
+          replaySafe: false,
+        });
+        expect(event.failure).not.toBe(reason);
+      }
+      event.control.fail();
+      await expectCode(terminal, 'BRIDGE_FAILURE');
+    },
+  );
 
   it.each([
     {
