@@ -1047,6 +1047,146 @@ describe('project-template artifact download D4 retry bridge', () => {
     innerStorage.disable();
   });
 
+  it('accepts 21 layered genuine AsyncLocalStorage resource stores', async () => {
+    const credential = controlledCredential();
+    const storages = Array.from(
+      { length: 21 },
+      () => new AsyncLocalStorage<object>(),
+    );
+    const createPromise = (index: number):
+    Promise<DisposableProjectTemplateGhCredential> => (
+      index === storages.length
+        ? Promise.resolve(credential.credential)
+        : storages[index]!.run(
+          Object.freeze({ index }),
+          () => createPromise(index + 1),
+        )
+    );
+    const promise = createPromise(0);
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    value.attempts[0]!.settlement!.chunk(Uint8Array.from([10]));
+    await expect(pending).resolves.toMatchObject({ done: false });
+    await value.iterator.return!();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
+    for (const storage of storages) storage.disable();
+  });
+
+  it('accepts 64 bounded resource-store symbols', async () => {
+    const credential = controlledCredential();
+    const promise = Promise.resolve(credential.credential);
+    for (let index = 0; index < 64; index += 1) {
+      Object.defineProperty(promise, Symbol('kResourceStore'), {
+        configurable: true,
+        value: Object.freeze({ index }),
+      });
+    }
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    const pending = value.iterator.next();
+    await Promise.resolve();
+    value.attempts[0]!.settlement!.chunk(Uint8Array.from([11]));
+    await expect(pending).resolves.toMatchObject({ done: false });
+    await value.iterator.return!();
+    expect(credential.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects 65 resource-store symbols before attaching a reaction', async () => {
+    const credential = controlledCredential();
+    const promise = Promise.resolve(credential.credential);
+    for (let index = 0; index < 65; index += 1) {
+      Object.defineProperty(promise, Symbol('kResourceStore'), {
+        configurable: true,
+        value: Object.freeze({ index }),
+      });
+    }
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
+    expect(value.createAttempt).not.toHaveBeenCalled();
+    expect(credential.dispose).not.toHaveBeenCalled();
+  });
+
+  it('rejects a 65th resource-store accessor without invoking it', async () => {
+    const credential = controlledCredential();
+    const promise = Promise.resolve(credential.credential);
+    for (let index = 0; index < 64; index += 1) {
+      Object.defineProperty(promise, Symbol('kResourceStore'), {
+        configurable: true,
+        value: Object.freeze({ index }),
+      });
+    }
+    const accessor = vi.fn(() => Object.freeze({}));
+    Object.defineProperty(promise, Symbol('kResourceStore'), {
+      configurable: true,
+      get: accessor,
+    });
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
+    expect(accessor).not.toHaveBeenCalled();
+    expect(value.createAttempt).not.toHaveBeenCalled();
+  });
+
+  it('rejects 64 stores plus a hostile actual async ID before reaction', async () => {
+    const credential = controlledCredential();
+    const storage = new AsyncLocalStorage<object>();
+    const promise = storage.run(
+      Object.freeze({ trace: 'test' }),
+      () => Promise.resolve(credential.credential),
+    );
+    const asyncId = Reflect.ownKeys(promise).find(
+      (key): key is symbol => (
+        typeof key === 'symbol' && key.description === 'async_id_symbol'
+      ),
+    );
+    if (asyncId === undefined) {
+      storage.disable();
+      return;
+    }
+    const existingStores = Reflect.ownKeys(promise).filter(
+      (key) => (
+        typeof key === 'symbol' && key.description === 'kResourceStore'
+      ),
+    ).length;
+    for (let index = existingStores; index < 64; index += 1) {
+      Object.defineProperty(promise, Symbol('kResourceStore'), {
+        configurable: true,
+        value: Object.freeze({ index }),
+      });
+    }
+    const asyncIdTrap = vi.fn(() => {
+      throw new Error('SECRET async id');
+    });
+    Object.defineProperty(promise, asyncId, {
+      ...Object.getOwnPropertyDescriptor(promise, asyncId),
+      value: new Proxy(Object.freeze({}), { get: asyncIdTrap }),
+    });
+    const value = harness(1_000_000, {
+      unmockedAcquire: true,
+      acquireCredential: () => promise,
+    });
+
+    await expectCode(value.iterator.next(), 'BRIDGE_FAILURE');
+    expect(asyncIdTrap).not.toHaveBeenCalled();
+    expect(value.createAttempt).not.toHaveBeenCalled();
+    storage.disable();
+  });
+
   it('rejects hostile Promise descriptors without invoking their traps', async () => {
     const credential = controlledCredential();
     const candidates: Array<{

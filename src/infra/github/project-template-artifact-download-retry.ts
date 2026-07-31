@@ -35,7 +35,10 @@ const ATTEMPT_TIMEOUT_MS = 120_000;
 const MAX_TRANSACTIONAL_TIMER_ARMS = 8;
 const TIMER_SETUP_MARGIN_MS = 1;
 const RETRY_DELAYS_MS = Object.freeze([0, 250, 1_000] as const);
-const MAX_PROMISE_INSTRUMENTATION_SYMBOLS = 8;
+// A single process can legitimately layer many OTel/ALS contexts on Node 20.
+// 64 admits the observed 21-store stack while keeping descriptor validation
+// and the pre-reaction attack surface independently bounded after ownKeys.
+const MAX_PROMISE_INSTRUMENTATION_SYMBOLS = 64;
 const NATIVE_PROMISE_THEN = Promise.prototype.then;
 const FUNCTION_TO_STRING = Function.prototype.toString;
 const SYMBOL_DESCRIPTION_GETTER = Object.getOwnPropertyDescriptor(
