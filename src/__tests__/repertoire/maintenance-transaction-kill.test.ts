@@ -21,32 +21,42 @@ describe('maintenance transaction real process crash classification', () => {
   });
 
   it.each([
-    'intent-written',
-    'intent-durable',
-    'after-rename',
-    'outcome-durable',
-  ] satisfies MaintenanceTransactionPhase[])('classifies SIGKILL at %s on restart', async (phase) => {
-    const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-kill-'));
-    roots.push(root);
-    const packageDir = join(root, 'repertoire', '@owner', 'repo');
-    mkdirSync(packageDir, { recursive: true });
-    writeFileSync(join(packageDir, 'workflow.yaml'), 'name: retained');
-    const ready = join(root, 'child.ready');
-    const child = spawnCrashChild(root, packageDir, ready, phase);
-    children.add(child);
-    await waitForPath(ready);
-    child.kill('SIGKILL');
-    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
-    children.delete(child);
+    ['maintenance-root-created', 'empty'],
+    ['maintenance-root-durable', 'empty'],
+    ['transactions-root-created', 'empty'],
+    ['transactions-root-durable', 'empty'],
+    ['intent-written', 'incomplete'],
+    ['intent-durable', 'incomplete'],
+    ['after-rename', 'incomplete'],
+    ['outcome-durable', 'incomplete'],
+    ['complete-written', 'incomplete'],
+    ['complete-pending-durable', 'incomplete'],
+    ['complete-renamed', 'complete'],
+  ] satisfies Array<[MaintenanceTransactionPhase, 'empty' | 'incomplete' | 'complete']>)(
+    'classifies SIGKILL at %s on restart', async (phase, expectedState) => {
+      const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-kill-'));
+      roots.push(root);
+      const packageDir = join(root, 'repertoire', '@owner', 'repo');
+      mkdirSync(packageDir, { recursive: true });
+      writeFileSync(join(packageDir, 'workflow.yaml'), 'name: retained');
+      const ready = join(root, 'child.ready');
+      const child = spawnCrashChild(root, packageDir, ready, phase);
+      children.add(child);
+      await waitForPath(ready);
+      child.kill('SIGKILL');
+      await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      children.delete(child);
 
-    const classification = classifyMaintenanceTransactions(root);
-    expect(classification.incomplete).toHaveLength(1);
-    const transaction = classification.incomplete[0]!;
-    expect(
-      existsSync(join(packageDir, 'workflow.yaml'))
-      || existsSync(join(transaction, 'payload', 'workflow.yaml')),
-    ).toBe(true);
-  }, 15_000);
+      const classification = classifyMaintenanceTransactions(root);
+      expect(classification[expectedState === 'complete' ? 'complete' : 'incomplete'])
+        .toHaveLength(expectedState === 'empty' ? 0 : 1);
+      const transaction = classification.complete[0] ?? classification.incomplete[0];
+      expect(
+        existsSync(join(packageDir, 'workflow.yaml'))
+        || (transaction !== undefined
+          && existsSync(join(transaction, 'payload', 'workflow.yaml'))),
+      ).toBe(true);
+    }, 15_000);
 });
 
 function spawnCrashChild(

@@ -89,6 +89,12 @@ export interface DetachToMaintenanceOptions {
 }
 
 export type MaintenanceFilesystemOperation =
+  | 'maintenance-root-mkdir'
+  | 'maintenance-root-fsync'
+  | 'transactions-root-mkdir'
+  | 'transactions-root-fsync'
+  | 'transaction-mkdir'
+  | 'transaction-parent-fsync'
   | 'intent-write'
   | 'intent-file-fsync'
   | 'intent-parent-fsync'
@@ -99,9 +105,15 @@ export type MaintenanceFilesystemOperation =
   | 'outcome-write'
   | 'outcome-file-fsync'
   | 'complete-write'
-  | 'complete-file-fsync';
+  | 'complete-file-fsync'
+  | 'complete-pending-rename'
+  | 'complete-parent-fsync';
 
 export type MaintenanceTransactionPhase =
+  | 'maintenance-root-created'
+  | 'maintenance-root-durable'
+  | 'transactions-root-created'
+  | 'transactions-root-durable'
   | 'transaction-created'
   | 'intent-written'
   | 'intent-durable'
@@ -112,6 +124,8 @@ export type MaintenanceTransactionPhase =
   | 'outcome-written'
   | 'outcome-durable'
   | 'complete-written'
+  | 'complete-pending-durable'
+  | 'complete-renamed'
   | 'complete-durable';
 
 /** Fail closed at startup when a prior mutation did not publish its outcome. */
@@ -214,15 +228,17 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
   try {
     assertMaintenanceTransactionsReady(options.globalConfigDir);
     const transactionsRoot = transactionRoot(options.globalConfigDir);
-    createAndSyncHierarchy(options.globalConfigDir, transactionsRoot);
+    createAndSyncHierarchy(options.globalConfigDir, transactionsRoot, options);
     const nonce = safeReflectApply(
       safeBufferToStringMethod,
       randomBytes(32),
       ['hex'],
     ) as string;
     const transactionDir = join(transactionsRoot, nonce);
+    options.beforeFilesystemOperation?.('transaction-mkdir');
     mkdirSync(transactionDir, { mode: PRIVATE_DIRECTORY_MODE });
     syncDirectory(transactionDir);
+    options.beforeFilesystemOperation?.('transaction-parent-fsync');
     syncDirectory(transactionsRoot);
     options.onPhase?.('transaction-created');
     const destination = join(transactionDir, options.kind);
@@ -308,7 +324,11 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     options.onPhase?.('complete-written');
     options.beforeFilesystemOperation?.('complete-file-fsync');
     syncFile(pendingComplete);
+    options.onPhase?.('complete-pending-durable');
+    options.beforeFilesystemOperation?.('complete-pending-rename');
     renameSync(pendingComplete, join(transactionDir, 'complete'));
+    options.onPhase?.('complete-renamed');
+    options.beforeFilesystemOperation?.('complete-parent-fsync');
     syncDirectory(transactionDir);
     syncDirectory(transactionsRoot);
     options.onPhase?.('complete-durable');
@@ -319,14 +339,26 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
   }
 }
 
-function createAndSyncHierarchy(globalConfigDir: string, transactionsRoot: string): void {
+function createAndSyncHierarchy(
+  globalConfigDir: string,
+  transactionsRoot: string,
+  options: DetachToMaintenanceOptions,
+): void {
   const maintenanceRoot = join(globalConfigDir, '.repertoire-maintenance');
+  options.beforeFilesystemOperation?.('maintenance-root-mkdir');
   mkdirSync(maintenanceRoot, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  options.onPhase?.('maintenance-root-created');
+  options.beforeFilesystemOperation?.('maintenance-root-fsync');
   syncDirectory(globalConfigDir);
   syncDirectory(maintenanceRoot);
+  options.onPhase?.('maintenance-root-durable');
+  options.beforeFilesystemOperation?.('transactions-root-mkdir');
   mkdirSync(transactionsRoot, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  options.onPhase?.('transactions-root-created');
+  options.beforeFilesystemOperation?.('transactions-root-fsync');
   syncDirectory(maintenanceRoot);
   syncDirectory(transactionsRoot);
+  options.onPhase?.('transactions-root-durable');
 }
 
 function syncFile(path: string): void {

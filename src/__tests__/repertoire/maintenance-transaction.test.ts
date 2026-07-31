@@ -185,20 +185,28 @@ describe('detachToMaintenance', () => {
   });
 
   it.each([
-    'intent-write',
-    'intent-file-fsync',
-    'intent-parent-fsync',
-    'rename',
-    'source-parent-fsync',
-    'destination-parent-fsync',
-    'payload-proof',
-    'outcome-write',
-    'outcome-file-fsync',
-    'complete-write',
-    'complete-file-fsync',
-  ] satisfies MaintenanceFilesystemOperation[])(
+    ['maintenance-root-mkdir', 'empty'],
+    ['maintenance-root-fsync', 'empty'],
+    ['transactions-root-mkdir', 'empty'],
+    ['transactions-root-fsync', 'empty'],
+    ['transaction-mkdir', 'empty'],
+    ['transaction-parent-fsync', 'incomplete'],
+    ['intent-write', 'incomplete'],
+    ['intent-file-fsync', 'incomplete'],
+    ['intent-parent-fsync', 'incomplete'],
+    ['rename', 'incomplete'],
+    ['source-parent-fsync', 'incomplete'],
+    ['destination-parent-fsync', 'incomplete'],
+    ['payload-proof', 'incomplete'],
+    ['outcome-write', 'incomplete'],
+    ['outcome-file-fsync', 'incomplete'],
+    ['complete-write', 'incomplete'],
+    ['complete-file-fsync', 'incomplete'],
+    ['complete-pending-rename', 'incomplete'],
+    ['complete-parent-fsync', 'complete'],
+  ] satisfies Array<[MaintenanceFilesystemOperation, 'empty' | 'incomplete' | 'complete']>)(
     'normalizes direct %s failure and leaves restart-visible evidence',
-    (operation) => {
+    (operation, expectedState) => {
       const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-fs-fault-'));
       roots.push(root);
       const packageDir = join(root, 'repertoire', '@owner', 'repo');
@@ -226,12 +234,15 @@ describe('detachToMaintenance', () => {
         message: 'Repertoire package recovery is required',
       });
       expect(caught).not.toHaveProperty('cause');
-      expect(classifyMaintenanceTransactions(root).incomplete).toHaveLength(1);
+      const classification = classifyMaintenanceTransactions(root);
+      expect(classification[expectedState === 'complete' ? 'complete' : 'incomplete'])
+        .toHaveLength(expectedState === 'empty' ? 0 : 1);
       const transactionsRoot = join(root, '.repertoire-maintenance', 'transactions');
-      const transaction = readdirSync(transactionsRoot)[0]!;
+      const transaction = existsSync(transactionsRoot) ? readdirSync(transactionsRoot)[0] : undefined;
       expect(
         existsSync(join(packageDir, 'workflow.yaml'))
-        || existsSync(join(transactionsRoot, transaction, 'payload', 'workflow.yaml')),
+        || (transaction !== undefined
+          && existsSync(join(transactionsRoot, transaction, 'payload', 'workflow.yaml'))),
       ).toBe(true);
     },
   );
