@@ -75,6 +75,15 @@ function iteratorFor(
     attempt,
     decisionPolicy,
   );
+  return iteratorForBridge(bridge, signal);
+}
+
+function iteratorForBridge(
+  bridge: ReturnType<
+  typeof createProjectTemplateArtifactDownloadCoordinatorBridge
+  >,
+  signal?: AbortSignal,
+): AsyncIterator<Uint8Array> {
   return createProjectTemplateArtifactDownloadPort(
     Object.freeze({ deadlineMs: 1_000 }),
     Object.freeze({
@@ -93,17 +102,17 @@ function failure(
   code: 'NETWORK' | 'INTERNAL' = 'NETWORK',
 ): ProjectTemplateArtifactSingleAttemptFailure {
   if (code === 'NETWORK') {
-    return Object.freeze({
+    return Object.freeze(Object.assign(Object.create(null) as object, {
       code,
       retryable: true,
       replaySafe: true,
-    });
+    }));
   }
-  return Object.freeze({
+  return Object.freeze(Object.assign(Object.create(null) as object, {
     code,
     retryable: false,
     replaySafe: false,
-  });
+  }));
 }
 
 async function expectCode(
@@ -204,6 +213,34 @@ describe('project-template artifact download D3 coordinator', () => {
     await expectCode(terminal, 'BRIDGE_FAILURE');
   });
 
+  it('preserves a post-delivery HTTP 503 non-retryable reason identity', async () => {
+    const first = controlledAttempt();
+    const reason = Object.freeze(Object.assign(Object.create(null) as object, {
+      code: 'HTTP_STATUS' as const,
+      statusCode: 503,
+      retryable: false as const,
+      replaySafe: false as const,
+    }));
+    let event!: ProjectTemplateArtifactDownloadDecisionEvent;
+    const iterator = iteratorFor(first.attempt, policy((value) => {
+      event = value;
+      return undefined;
+    }));
+    const chunk = iterator.next();
+    first.settlement!.chunk(Uint8Array.from([1]));
+    await expect(chunk).resolves.toEqual({
+      value: Uint8Array.from([1]),
+      done: false,
+    });
+
+    const terminal = iterator.next();
+    first.settlement!.fail(reason);
+    expect(event.kind).toBe('terminal');
+    expect(event.failure).toBe(reason);
+    event.control.fail();
+    await expectCode(terminal, 'BRIDGE_FAILURE');
+  });
+
   it.each([
     {
       code: 'HTTP_STATUS',
@@ -222,6 +259,42 @@ describe('project-template artifact download D3 coordinator', () => {
       retryable: true,
     },
   ])('maps a contract-breaking failure %# to INTERNAL', async (invalid) => {
+    const first = controlledAttempt();
+    let event!: ProjectTemplateArtifactDownloadDecisionEvent;
+    const pending = iteratorFor(first.attempt, policy((value) => {
+      event = value;
+      return undefined;
+    })).next();
+
+    first.settlement!.fail(
+      invalid as unknown as ProjectTemplateArtifactSingleAttemptFailure,
+    );
+    expect(event.kind).toBe('terminal');
+    expect(event.failure).toEqual({
+      code: 'INTERNAL',
+      retryable: false,
+      replaySafe: false,
+    });
+    event.control.fail();
+    await expectCode(pending, 'BRIDGE_FAILURE');
+  });
+
+  it.each([
+    Object.freeze({
+      code: 'NETWORK',
+      retryable: true,
+      replaySafe: true,
+    }),
+    Object.freeze(Object.defineProperties(Object.create(null), {
+      code: { enumerable: false, value: 'NETWORK' },
+      retryable: { enumerable: true, value: true },
+      replaySafe: { enumerable: true, value: true },
+    })),
+    Object.freeze(Object.assign(
+      Object.create({ toJSON: () => 'private failure' }) as object,
+      { code: 'NETWORK', retryable: true, replaySafe: true },
+    )),
+  ])('rejects a non-D2 failure surface %# as INTERNAL', async (invalid) => {
     const first = controlledAttempt();
     let event!: ProjectTemplateArtifactDownloadDecisionEvent;
     const pending = iteratorFor(first.attempt, policy((value) => {
@@ -378,6 +451,52 @@ describe('project-template artifact download D3 coordinator', () => {
     });
   });
 
+  it('claims a retry attempt before returning to reentrant policy code', async () => {
+    const first = controlledAttempt();
+    const next = controlledAttempt();
+    let duplicateError: unknown;
+    const pending = iteratorFor(first.attempt, policy((event) => {
+      if (event.kind !== 'retryable') throw new Error('expected retryable');
+      event.control.retry(next.attempt);
+      try {
+        createProjectTemplateArtifactDownloadCoordinatorBridge(
+          next.attempt,
+          policy(() => undefined),
+        );
+      } catch (error) {
+        duplicateError = error;
+      }
+      return undefined;
+    })).next();
+    first.settlement!.fail(failure());
+
+    expect(duplicateError).toBeInstanceOf(TypeError);
+    expect(next.pull).toHaveBeenCalledTimes(1);
+    next.settlement!.chunk(Uint8Array.from([5]));
+    await expect(pending).resolves.toEqual({
+      value: Uint8Array.from([5]),
+      done: false,
+    });
+  });
+
+  it('rejects the same initial attempt in two coordinators atomically', async () => {
+    const first = controlledAttempt();
+    const bridge = createProjectTemplateArtifactDownloadCoordinatorBridge(
+      first.attempt,
+      policy(() => undefined),
+    );
+
+    expect(() => createProjectTemplateArtifactDownloadCoordinatorBridge(
+      first.attempt,
+      policy(() => undefined),
+    )).toThrow(TypeError);
+    const iterator = iteratorForBridge(bridge);
+    const pending = iterator.next();
+    await iterator.return!();
+    await expect(pending).resolves.toEqual({ value: undefined, done: true });
+    expect(first.dispose).toHaveBeenCalledTimes(1);
+  });
+
   it('revokes and cleans the active attempt on abort and concurrent next', async () => {
     const abortedAttempt = controlledAttempt();
     const controller = new AbortController();
@@ -442,7 +561,7 @@ describe('project-template artifact download D3 coordinator', () => {
   });
 
   it.each(['throw', 'return'] as const)(
-    'converts attempt pull %s to an INTERNAL terminal decision',
+    'fails attempt pull %s without consulting retry policy',
     async (fault) => {
       const dispose = vi.fn(() => undefined);
       const attempt = Object.freeze({
@@ -452,20 +571,139 @@ describe('project-template artifact download D3 coordinator', () => {
         }),
         dispose,
       }) as unknown as ProjectTemplateArtifactSingleAttempt;
-      let event!: ProjectTemplateArtifactDownloadDecisionEvent;
+      const decide = vi.fn();
       const pending = iteratorFor(attempt, policy((value) => {
-        event = value;
+        decide(value);
         return undefined;
       })).next();
 
-      expect(event.kind).toBe('terminal');
-      expect(event.failure).toEqual({
-        code: 'INTERNAL',
-        retryable: false,
-        replaySafe: false,
-      });
-      event.control.fail();
       await expectCode(pending, 'BRIDGE_FAILURE');
+      expect(decide).not.toHaveBeenCalled();
+      expect(dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    ['chunk', 'throw'],
+    ['done', 'throw'],
+    ['fail', 'throw'],
+    ['chunk', 'return'],
+    ['done', 'return'],
+    ['fail', 'return'],
+  ] as const)(
+    'discards synchronous %s when attempt pull later %s',
+    async (event, outcome) => {
+      const dispose = vi.fn(() => undefined);
+      const decide = vi.fn();
+      const next = controlledAttempt();
+      const attempt = Object.freeze({
+        pull(
+          settlement: ProjectTemplateArtifactSingleAttemptSettlement,
+        ): undefined {
+          if (event === 'chunk') settlement.chunk(Uint8Array.from([7]));
+          else if (event === 'done') settlement.done();
+          else settlement.fail(failure());
+          if (outcome === 'throw') throw new Error('late pull secret');
+          return 1 as never;
+        },
+        dispose,
+      }) as unknown as ProjectTemplateArtifactSingleAttempt;
+      const pending = iteratorFor(attempt, policy((value) => {
+        decide(value);
+        if (value.kind === 'retryable') value.control.retry(next.attempt);
+        else value.control.fail();
+        return undefined;
+      })).next();
+
+      await expectCode(pending, 'BRIDGE_FAILURE');
+      expect(decide).not.toHaveBeenCalled();
+      expect(next.pull).not.toHaveBeenCalled();
+      expect(dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('fails a pull that emits more than one synchronous event', async () => {
+    const dispose = vi.fn(() => undefined);
+    const decide = vi.fn();
+    const attempt = Object.freeze({
+      pull(
+        settlement: ProjectTemplateArtifactSingleAttemptSettlement,
+      ): undefined {
+        settlement.chunk(Uint8Array.from([1]));
+        settlement.chunk(
+          new Uint8Array(MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES),
+        );
+        return undefined;
+      },
+      dispose,
+    }) as unknown as ProjectTemplateArtifactSingleAttempt;
+    const pending = iteratorFor(attempt, policy((value) => {
+      decide(value);
+      return undefined;
+    })).next();
+
+    await expectCode(pending, 'BRIDGE_FAILURE');
+    expect(decide).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('snapshots a synchronous chunk before attempt pull mutates its source', async () => {
+    const source = Uint8Array.from([7]);
+    const attempt = Object.freeze({
+      pull(
+        settlement: ProjectTemplateArtifactSingleAttemptSettlement,
+      ): undefined {
+        settlement.chunk(source);
+        source[0] = 9;
+        return undefined;
+      },
+      dispose: vi.fn(() => undefined),
+    }) as unknown as ProjectTemplateArtifactSingleAttempt;
+    const pending = iteratorFor(attempt, policy(() => undefined)).next();
+
+    await expect(pending).resolves.toEqual({
+      value: Uint8Array.from([7]),
+      done: false,
+    });
+  });
+
+  it.each(['return', 'throw'] as const)(
+    'contains synchronous iterator.%s reentry during attempt pull',
+    async (operation) => {
+      let iterator!: AsyncIterator<Uint8Array>;
+      let terminal!: PromiseLike<unknown>;
+      let retained!: ProjectTemplateArtifactSingleAttemptSettlement;
+      const dispose = vi.fn(() => undefined);
+      const attempt = Object.freeze({
+        pull(
+          settlement: ProjectTemplateArtifactSingleAttemptSettlement,
+        ): undefined {
+          retained = settlement;
+          terminal = operation === 'return'
+            ? iterator.return!()
+            : iterator.throw!(new Error('private caller cause'));
+          settlement.chunk(Uint8Array.from([7]));
+          return undefined;
+        },
+        dispose,
+      }) as unknown as ProjectTemplateArtifactSingleAttempt;
+      iterator = iteratorFor(attempt, policy(() => undefined));
+      const pending = iterator.next();
+
+      if (operation === 'return') {
+        await expect(terminal).resolves.toEqual({
+          value: undefined,
+          done: true,
+        });
+        await expect(pending).resolves.toEqual({
+          value: undefined,
+          done: true,
+        });
+      } else {
+        await expectCode(terminal, 'CLOSED');
+        await expectCode(pending, 'CLOSED');
+      }
+      retained.chunk(Uint8Array.from([9]));
       expect(dispose).toHaveBeenCalledTimes(1);
     },
   );

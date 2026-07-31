@@ -68,11 +68,23 @@ interface AttemptSnapshot {
 
 interface AttemptToken {
   active: boolean;
+  pulling: boolean;
+  queued: AttemptSettlementEvent | undefined;
+  overflowed: boolean;
+  dispatch?: (event: AttemptSettlementEvent) => void;
 }
 
 interface PendingPull {
   readonly settlement: ProjectTemplateArtifactDownloadSettlement;
 }
+
+type AttemptSettlementEvent =
+  | { readonly kind: 'chunk'; readonly value: Uint8Array }
+  | { readonly kind: 'done' }
+  | {
+    readonly kind: 'failure';
+    readonly failure: ProjectTemplateArtifactSingleAttemptFailure;
+  };
 
 interface Decision {
   active: boolean;
@@ -101,6 +113,7 @@ const decisionAuthorities = new WeakMap<object, Decision>();
 const expiredDecisionControls = new WeakSet<object>();
 const claimedAttempts = new WeakSet<object>();
 const disposedAttempts = new WeakSet<object>();
+const NativeUint8Array = Uint8Array;
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(
   Uint8Array.prototype,
 ) as object;
@@ -108,6 +121,11 @@ const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
   TYPED_ARRAY_PROTOTYPE,
   'byteLength',
 )?.get;
+const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
+  TYPED_ARRAY_PROTOTYPE,
+  'buffer',
+)?.get;
+const TYPED_ARRAY_SET = Uint8Array.prototype.set;
 
 const OUTPUT_LIMIT_FAILURE = Object.freeze(
   Object.assign(Object.create(null) as object, {
@@ -187,22 +205,17 @@ function snapshotPolicy(value: unknown): PolicySnapshot {
 function isFailure(
   value: unknown,
 ): value is ProjectTemplateArtifactSingleAttemptFailure {
-  const prototype = (
-    typeof value === 'object'
-    && value !== null
-    && !types.isProxy(value)
-  )
-    ? Object.getPrototypeOf(value)
-    : undefined;
   if (
     typeof value !== 'object'
     || value === null
     || types.isProxy(value)
     || !Object.isFrozen(value)
-    || (prototype !== null && prototype !== Object.prototype)
+    || Object.getPrototypeOf(value) !== null
   ) return false;
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  if (Object.values(descriptors).some((entry) => !('value' in entry))) {
+  if (Object.values(descriptors).some(
+    (entry) => !('value' in entry) || !entry.enumerable,
+  )) {
     return false;
   }
   const code = descriptors['code']?.value;
@@ -219,8 +232,10 @@ function isFailure(
     return Number.isSafeInteger(statusCode)
       && statusCode >= 100
       && statusCode <= 599
-      && retryable
-        === isRetryableProjectTemplateArtifactHttpStatus(statusCode);
+      && (
+        retryable === false
+        || isRetryableProjectTemplateArtifactHttpStatus(statusCode)
+      );
   }
   return [
     'NETWORK',
@@ -248,6 +263,15 @@ function safelyDisposeAttempt(attempt: AttemptSnapshot | undefined): void {
   }
 }
 
+function revokeAttemptToken(token: AttemptToken | undefined): void {
+  if (token === undefined) return;
+  token.active = false;
+  token.pulling = false;
+  token.queued = undefined;
+  token.overflowed = false;
+  token.dispatch = undefined;
+}
+
 function expireDecision(decision: Decision): void {
   decision.active = false;
   const control = decision.control;
@@ -268,7 +292,7 @@ function failBridge(state: CoordinatorState, pending: PendingPull): void {
   state.pending = undefined;
   const current = state.current;
   state.current = undefined;
-  if (state.attemptToken !== undefined) state.attemptToken.active = false;
+  revokeAttemptToken(state.attemptToken);
   state.attemptToken = undefined;
   const decision = state.decision;
   state.decision = undefined;
@@ -281,17 +305,30 @@ function failBridge(state: CoordinatorState, pending: PendingPull): void {
   }
 }
 
-function inspectChunkByteLength(value: unknown): number | undefined {
+function snapshotChunk(value: unknown): Uint8Array | undefined {
   if (
     typeof value !== 'object'
     || value === null
     || types.isProxy(value)
     || !types.isUint8Array(value)
     || TYPED_ARRAY_BYTE_LENGTH_GETTER === undefined
+    || TYPED_ARRAY_BUFFER_GETTER === undefined
   ) return undefined;
   try {
     const length = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []);
-    return typeof length === 'number' && length > 0 ? length : undefined;
+    const buffer = Reflect.apply(TYPED_ARRAY_BUFFER_GETTER, value, []);
+    if (
+      typeof length !== 'number'
+      || length <= 0
+      || length > MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES
+      || types.isSharedArrayBuffer(buffer)
+    ) return undefined;
+    // Snapshot while the callback is on-stack. A synchronous attempt may
+    // mutate its source before pull returns, but D3 retains at most this one
+    // bounded native chunk until the pull contract is known to be valid.
+    const copy = new NativeUint8Array(length);
+    Reflect.apply(TYPED_ARRAY_SET, copy, [value]);
+    return copy;
   } catch {
     return undefined;
   }
@@ -316,7 +353,6 @@ function applyDecision(decision: Decision): void {
   state.phase = 'active';
   state.current = selected.attempt;
   state.seenAttempts.add(selected.attempt.receiver);
-  claimedAttempts.add(selected.attempt.receiver);
   pullCurrent(state, pending);
 }
 
@@ -377,6 +413,9 @@ function selectRetry(
     throw invalidArgument();
   }
   decision.selected = { kind: 'retry', attempt: next };
+  // Commit ownership before returning to untrusted policy; it may otherwise
+  // reentrantly create a second coordinator around the same next attempt.
+  claimedAttempts.add(next.receiver);
   if (!decision.invoking) applyDecision(decision);
   return undefined;
 }
@@ -461,7 +500,7 @@ function handleFailure(
     || state.pending !== pending
     || state.phase !== 'active'
   ) return;
-  token.active = false;
+  revokeAttemptToken(token);
   state.attemptToken = undefined;
   const old = state.current;
   state.current = undefined;
@@ -490,58 +529,89 @@ function pullCurrent(state: CoordinatorState, pending: PendingPull): void {
     failBridge(state, pending);
     return;
   }
-  const token: AttemptToken = { active: true };
+  const token: AttemptToken = {
+    active: true,
+    pulling: true,
+    queued: undefined,
+    overflowed: false,
+  };
   state.attemptToken = token;
-  const settlement = Object.freeze<ProjectTemplateArtifactSingleAttemptSettlement>({
-    chunk(value): undefined {
-      if (
-        !token.active
-        || state.attemptToken !== token
-        || state.pending !== pending
-        || state.phase !== 'active'
-      ) return undefined;
-      const byteLength = inspectChunkByteLength(value);
-      if (
-        byteLength === undefined
-        || byteLength > MAX_PROJECT_TEMPLATE_ARTIFACT_CHUNK_BYTES
-      ) {
-        handleFailure(state, pending, token, OUTPUT_LIMIT_FAILURE);
-        return undefined;
+  const dispatch = (event: AttemptSettlementEvent): void => {
+    if (
+      !token.active
+      || state.attemptToken !== token
+      || state.pending !== pending
+      || state.phase !== 'active'
+    ) return;
+    if (token.pulling) {
+      if (token.queued !== undefined || token.overflowed) {
+        token.queued = undefined;
+        token.overflowed = true;
+      } else {
+        token.queued = event;
       }
-      token.active = false;
+      return;
+    }
+    if (event.kind === 'failure') {
+      handleFailure(state, pending, token, event.failure);
+      return;
+    }
+    if (event.kind === 'chunk') {
+      revokeAttemptToken(token);
       state.attemptToken = undefined;
       state.pending = undefined;
       state.deliveredAny = true;
       try {
-        pending.settlement.chunk(value);
+        pending.settlement.chunk(event.value);
       } catch {
         // D1 owns validation and closes its bridge on malformed delivery.
+      }
+      return;
+    }
+    revokeAttemptToken(token);
+    state.attemptToken = undefined;
+    state.pending = undefined;
+    state.phase = 'done';
+    const completed = state.current;
+    state.current = undefined;
+    safelyDisposeAttempt(completed);
+    try {
+      pending.settlement.done();
+    } catch {
+      // D1 owns its terminal bridge outcome.
+    }
+  };
+  // Retained attempt settlements close over only this revocable token. Once
+  // dispatch is cleared they cannot retain coordinator policy or D1 pending.
+  token.dispatch = dispatch;
+  const settlement = Object.freeze<ProjectTemplateArtifactSingleAttemptSettlement>({
+    chunk(value): undefined {
+      if (!token.active) return undefined;
+      if (token.pulling && (token.queued !== undefined || token.overflowed)) {
+        token.queued = undefined;
+        token.overflowed = true;
+        return undefined;
+      }
+      const copied = snapshotChunk(value);
+      if (copied === undefined) {
+        token.dispatch?.({
+          kind: 'failure',
+          failure: OUTPUT_LIMIT_FAILURE,
+        });
+      } else {
+        token.dispatch?.({ kind: 'chunk', value: copied });
       }
       return undefined;
     },
     done(): undefined {
-      if (
-        !token.active
-        || state.attemptToken !== token
-        || state.pending !== pending
-        || state.phase !== 'active'
-      ) return undefined;
-      token.active = false;
-      state.attemptToken = undefined;
-      state.pending = undefined;
-      state.phase = 'done';
-      const completed = state.current;
-      state.current = undefined;
-      safelyDisposeAttempt(completed);
-      try {
-        pending.settlement.done();
-      } catch {
-        // D1 owns its terminal bridge outcome.
-      }
+      token.dispatch?.({ kind: 'done' });
       return undefined;
     },
     fail(failure): undefined {
-      handleFailure(state, pending, token, failure);
+      token.dispatch?.({
+        kind: 'failure',
+        failure: isFailure(failure) ? failure : INTERNAL_FAILURE,
+      });
       return undefined;
     },
   });
@@ -551,9 +621,18 @@ function pullCurrent(state: CoordinatorState, pending: PendingPull): void {
   } catch {
     returned = false;
   }
-  if (returned !== undefined) {
-    handleFailure(state, pending, token, INTERNAL_FAILURE);
+  token.pulling = false;
+  if (!token.active) return;
+  if (returned !== undefined || token.overflowed) {
+    token.queued = undefined;
+    // A pull contract violation is a coordinator failure, not a retry policy
+    // decision. No synchronously emitted effect can commit before return.
+    failBridge(state, pending);
+    return;
   }
+  const queued = token.queued;
+  token.queued = undefined;
+  if (queued !== undefined) token.dispatch?.(queued);
 }
 
 function pullCoordinator(
@@ -583,7 +662,7 @@ function disposeCoordinator(state: CoordinatorState): undefined {
   if (state.phase === 'disposed') return undefined;
   state.phase = 'disposed';
   state.pending = undefined;
-  if (state.attemptToken !== undefined) state.attemptToken.active = false;
+  revokeAttemptToken(state.attemptToken);
   state.attemptToken = undefined;
   const decision = state.decision;
   state.decision = undefined;
