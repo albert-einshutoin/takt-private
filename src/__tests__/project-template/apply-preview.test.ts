@@ -322,6 +322,31 @@ describe('project template sealed outer apply preview G5', () => {
     });
   });
 
+  it('fails closed when content B is composed with dependency evidence for A', () => {
+    const contentA = createProjectTemplateApplyPlan(contentInput({
+      base: 'same', local: 'same', incoming: 'same',
+    }));
+    const contentB = createProjectTemplateApplyPlan(contentInput({
+      base: 'same', local: 'same', incoming: 'next',
+    }));
+    const preview = createProjectTemplateApplyPreview({
+      contentPlan: contentB,
+      repertoireDependencyPlan: dependencyPlan(
+        contentA.incomingManifestSha256,
+      ),
+    });
+    expect(contentB.incomingManifestSha256)
+      .not.toBe(contentA.incomingManifestSha256);
+    expect(preview.compositionConflicts).toEqual([
+      'MANIFEST_BINDING_MISMATCH',
+    ]);
+    expect(preview).toMatchObject({
+      reviewRequired: true,
+      hardConflict: true,
+      defaultApplyPossible: false,
+    });
+  });
+
   it('binds both plan identities and opaque tokens into previewId', () => {
     const firstPair = cleanPair();
     const secondContent = createProjectTemplateApplyPlan(contentInput({

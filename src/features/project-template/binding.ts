@@ -4,8 +4,25 @@ import { parseProjectTemplateManifest, serializeProjectTemplateManifest } from '
 import { parseTemplateLock } from './lock.js';
 import type { ProjectTemplateManifestV1, TemplateLockV1 } from './types.js';
 
+const CAPTURED_CREATE_HASH = createHash;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const MANIFEST_HASH_SAMPLE = CAPTURED_CREATE_HASH('sha256');
+// Capture method identities once so a reviewed manifest cannot be rebound by
+// later prototype mutation between parsing and composition.
+const CAPTURED_HASH_UPDATE = MANIFEST_HASH_SAMPLE.update;
+const CAPTURED_HASH_DIGEST = MANIFEST_HASH_SAMPLE.digest;
+
 export function calculateProjectTemplateManifestSha256(value: unknown): string {
-  return createHash('sha256').update(serializeProjectTemplateManifest(value), 'utf8').digest('hex');
+  const hash = CAPTURED_CREATE_HASH('sha256');
+  CAPTURED_REFLECT_APPLY(CAPTURED_HASH_UPDATE, hash, [
+    serializeProjectTemplateManifest(value),
+    'utf8',
+  ]);
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_HASH_DIGEST,
+    hash,
+    ['hex'],
+  ) as string;
 }
 
 function assertLockMatch(condition: boolean, field: string): void {
