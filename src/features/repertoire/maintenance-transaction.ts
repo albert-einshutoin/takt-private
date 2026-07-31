@@ -54,7 +54,22 @@ export interface DetachToMaintenanceOptions {
   kind: MaintenancePayloadKind;
   /** Test-only deterministic crash/fault boundary. */
   onPhase?: (phase: MaintenanceTransactionPhase) => void;
+  /** Test-only direct filesystem operation fault injection. */
+  beforeFilesystemOperation?: (operation: MaintenanceFilesystemOperation) => void;
 }
+
+export type MaintenanceFilesystemOperation =
+  | 'intent-write'
+  | 'intent-file-fsync'
+  | 'intent-parent-fsync'
+  | 'rename'
+  | 'source-parent-fsync'
+  | 'destination-parent-fsync'
+  | 'payload-proof'
+  | 'outcome-write'
+  | 'outcome-file-fsync'
+  | 'complete-write'
+  | 'complete-file-fsync';
 
 export type MaintenanceTransactionPhase =
   | 'transaction-created'
@@ -173,11 +188,14 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
       expectedTreeDigest: digestTree(options.expected),
       nonce,
     }));
+    options.beforeFilesystemOperation?.('intent-write');
     writeFileSync(join(transactionDir, 'intent.json'), intent, {
       flag: 'wx', mode: PRIVATE_FILE_MODE,
     });
     options.onPhase?.('intent-written');
+    options.beforeFilesystemOperation?.('intent-file-fsync');
     syncFile(join(transactionDir, 'intent.json'));
+    options.beforeFilesystemOperation?.('intent-parent-fsync');
     syncDirectory(transactionDir);
     options.onPhase?.('intent-durable');
 
@@ -187,12 +205,16 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
     )) throw recoveryRequired();
 
     options.onPhase?.('before-rename');
+    options.beforeFilesystemOperation?.('rename');
     renameSync(options.sourceDir, destination);
     options.onPhase?.('after-rename');
+    options.beforeFilesystemOperation?.('source-parent-fsync');
     syncDirectory(dirname(options.sourceDir));
+    options.beforeFilesystemOperation?.('destination-parent-fsync');
     syncDirectory(transactionDir);
     syncDirectory(transactionsRoot);
     options.onPhase?.('rename-durable');
+    options.beforeFilesystemOperation?.('payload-proof');
     const actual = captureDirectoryTreeProof(destination, options.globalConfigDir);
     if (!sameTreeProof(options.expected, actual, true)) throw recoveryRequired();
     options.onPhase?.('proof-complete');
@@ -203,10 +225,12 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
       intentDigest: digestBytes(intent),
       actualProofDigest: digestTree(actual),
     }));
+    options.beforeFilesystemOperation?.('outcome-write');
     writeFileSync(join(transactionDir, 'outcome.json'), outcome, {
       flag: 'wx', mode: PRIVATE_FILE_MODE,
     });
     options.onPhase?.('outcome-written');
+    options.beforeFilesystemOperation?.('outcome-file-fsync');
     syncFile(join(transactionDir, 'outcome.json'));
     syncDirectory(transactionDir);
     options.onPhase?.('outcome-durable');
@@ -217,11 +241,15 @@ export function detachToMaintenance(options: DetachToMaintenanceOptions): string
       actualProofDigest: digestTree(actual),
       outcomeDigest: digestBytes(outcome),
     }));
-    writeFileSync(join(transactionDir, 'complete'), complete, {
+    const pendingComplete = join(transactionDir, 'complete.pending');
+    options.beforeFilesystemOperation?.('complete-write');
+    writeFileSync(pendingComplete, complete, {
       flag: 'wx', mode: PRIVATE_FILE_MODE,
     });
     options.onPhase?.('complete-written');
-    syncFile(join(transactionDir, 'complete'));
+    options.beforeFilesystemOperation?.('complete-file-fsync');
+    syncFile(pendingComplete);
+    renameSync(pendingComplete, join(transactionDir, 'complete'));
     syncDirectory(transactionDir);
     syncDirectory(transactionsRoot);
     options.onPhase?.('complete-durable');

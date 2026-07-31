@@ -7,6 +7,7 @@ import {
   assertMaintenanceTransactionsReady,
   classifyMaintenanceTransactions,
   detachToMaintenance,
+  type MaintenanceFilesystemOperation,
 } from '../../features/repertoire/maintenance-transaction.js';
 
 describe('detachToMaintenance', () => {
@@ -126,4 +127,56 @@ describe('detachToMaintenance', () => {
       incomplete: [transaction],
     });
   });
+
+  it.each([
+    'intent-write',
+    'intent-file-fsync',
+    'intent-parent-fsync',
+    'rename',
+    'source-parent-fsync',
+    'destination-parent-fsync',
+    'payload-proof',
+    'outcome-write',
+    'outcome-file-fsync',
+    'complete-write',
+    'complete-file-fsync',
+  ] satisfies MaintenanceFilesystemOperation[])(
+    'normalizes direct %s failure and leaves restart-visible evidence',
+    (operation) => {
+      const root = mkdtempSync(join(tmpdir(), 'takt-maintenance-fs-fault-'));
+      roots.push(root);
+      const packageDir = join(root, 'repertoire', '@owner', 'repo');
+      mkdirSync(packageDir, { recursive: true });
+      writeFileSync(join(packageDir, 'workflow.yaml'), 'name: retained');
+      let caught: unknown;
+      try {
+        detachToMaintenance({
+          globalConfigDir: root,
+          sourceDir: packageDir,
+          containmentRoot: root,
+          expected: captureDirectoryTreeProof(packageDir, root),
+          kind: 'payload',
+          beforeFilesystemOperation: (current) => {
+            if (current === operation) {
+              throw Object.assign(new Error('/secret/path token=abc'), { code: 'EIO' });
+            }
+          },
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({
+        code: 'RECOVERY_REQUIRED',
+        message: 'Repertoire package recovery is required',
+      });
+      expect(caught).not.toHaveProperty('cause');
+      expect(classifyMaintenanceTransactions(root).incomplete).toHaveLength(1);
+      const transactionsRoot = join(root, '.repertoire-maintenance', 'transactions');
+      const transaction = readdirSync(transactionsRoot)[0]!;
+      expect(
+        existsSync(join(packageDir, 'workflow.yaml'))
+        || existsSync(join(transactionsRoot, transaction, 'payload', 'workflow.yaml')),
+      ).toBe(true);
+    },
+  );
 });
