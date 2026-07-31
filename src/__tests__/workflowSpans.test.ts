@@ -59,6 +59,13 @@ type FakeContext = {
   remoteParentName?: string;
 };
 
+const mockedContextStorages = new Set<AsyncLocalStorage<FakeContext>>();
+
+function disableMockedContextStorages(): void {
+  for (const storage of mockedContextStorages) storage.disable();
+  mockedContextStorages.clear();
+}
+
 class CapturingSpanExporter implements SpanExporter {
   readonly spans: ReadableSpan[] = [];
 
@@ -82,6 +89,7 @@ async function loadWorkflowSpansWithMockedApi() {
   const spans: FakeSpan[] = [];
   const metricRecords: MetricRecord[] = [];
   const contextStorage = new AsyncLocalStorage<FakeContext>();
+  mockedContextStorages.add(contextStorage);
   const rootContext: FakeContext = {};
 
   vi.doMock('@opentelemetry/api', () => ({
@@ -219,8 +227,21 @@ function findReadableSpan(spans: ReadableSpan[], name: string): ReadableSpan {
 
 describe('workflow OpenTelemetry spans', () => {
   afterEach(() => {
+    // Each mock module owns an ALS instance. Releasing all instances here keeps
+    // Promise instrumentation independent of file order and repeated loaders.
+    disableMockedContextStorages();
     vi.doUnmock('@opentelemetry/api');
     vi.resetModules();
+  });
+
+  it('releases every repeated mocked async context storage', async () => {
+    await loadWorkflowSpansWithMockedApi();
+    await loadWorkflowSpansWithMockedApi();
+    expect(mockedContextStorages.size).toBe(2);
+
+    disableMockedContextStorages();
+
+    expect(mockedContextStorages.size).toBe(0);
   });
 
   it('does not start spans when observability is disabled', async () => {
