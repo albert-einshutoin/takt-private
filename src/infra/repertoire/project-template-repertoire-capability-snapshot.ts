@@ -536,9 +536,20 @@ function normalizeApprovedLayers(
 function normalizeBudgetSeam(
   value: unknown,
 ): NormalizedBudgetSeam {
-  const raw: Readonly<Record<string, unknown>> = value === undefined
-    ? freeze({}) as Readonly<Record<string, unknown>>
-    : exactOwnDataRecord(value, BUDGET_KEYS, []);
+  // Why: an empty ordinary-object fallback would inherit hostile budget
+  // accessors installed on Object.prototype. Materialize every production
+  // default as an own data property without consulting any fallback object.
+  if (value === undefined) {
+    return freeze({
+      maxPackageFiles: MAX_PACKAGE_FILES,
+      maxRequestFiles: MAX_REQUEST_FILES,
+      maxBytes: MAX_TOTAL_BYTES,
+      maxEntries: MAX_TOTAL_ENTRIES,
+      initialEntries: 0,
+      maxDepth: MAX_DEPTH,
+    });
+  }
+  const raw = exactOwnDataRecord(value, BUDGET_KEYS, []);
   return freeze({
     maxPackageFiles: normalizeShrinkLimit(
       raw.maxPackageFiles,

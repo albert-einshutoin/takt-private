@@ -609,6 +609,55 @@ describe('project template repertoire capability snapshot G3.3.2', () => {
     })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED' }));
   });
 
+  it('does not inherit default budget values from Object.prototype', () => {
+    const repertoire = root();
+    const pkg = join(repertoire, '@acme', 'review');
+    write(join(pkg, 'workflows', 'review.yaml'), 'steps: []\n');
+    const input = {
+      repertoireContext: createProjectTemplateRepertoireSafeReadContext(
+        repertoire,
+      ),
+      packageRelativePath: '@acme/review',
+      scope: '@acme/review' as const,
+      deadlineMs: FUTURE_DEADLINE_MS,
+    };
+    const budgetKeys = [
+      'maxPackageFiles',
+      'maxRequestFiles',
+      'maxBytes',
+      'maxEntries',
+      'initialEntries',
+      'maxDepth',
+    ] as const;
+    const originals = budgetKeys.map((key) =>
+      Object.getOwnPropertyDescriptor(Object.prototype, key));
+    let calls = 0;
+    let snapshot: ReturnType<
+      typeof captureProjectTemplateRepertoireCapabilitySnapshot
+    > | undefined;
+    try {
+      for (const key of budgetKeys) {
+        Object.defineProperty(Object.prototype, key, {
+          configurable: true,
+          get() {
+            calls += 1;
+            return key === 'maxBytes' ? 0 : undefined;
+          },
+        });
+      }
+      snapshot = captureProjectTemplateRepertoireCapabilitySnapshot(input);
+    } finally {
+      for (let index = 0; index < budgetKeys.length; index += 1) {
+        const key = budgetKeys[index]!;
+        const descriptor = originals[index];
+        if (descriptor === undefined) Reflect.deleteProperty(Object.prototype, key);
+        else Object.defineProperty(Object.prototype, key, descriptor);
+      }
+    }
+    expect(calls).toBe(0);
+    expect(snapshot?.workflowFiles).toHaveLength(1);
+  });
+
   it('does not grant provider file authority to workflow YAML', () => {
     const repertoire = root();
     const pkg = join(repertoire, '@acme', 'review');
