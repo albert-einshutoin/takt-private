@@ -10,6 +10,7 @@ import type {
 import {
   demoteResolvedGithubTemplateSourceToAdvisory,
   discardResolvedGithubTemplateSource,
+  GithubTemplateSourceResolutionError,
   type GithubTemplateCurrentSourceEvidence,
   type GithubTemplateSourceAdvisory,
   type ResolvedGithubTemplateSource,
@@ -33,19 +34,44 @@ import {
 } from './project-template-source-resolver.js';
 
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_OBJECT_FREEZE = Object.freeze;
 
+/**
+ * Shared absolute deadline for one low-level authenticated composition.
+ */
 export interface ProjectTemplateGithubSourceCompositionContext {
   readonly deadlineMs: number;
 }
 
+/**
+ * Exact dependency set projected privately into F3 metadata and D5 archive
+ * boundaries. Each operation still acquires and disposes its own credential.
+ */
 export interface ProjectTemplateGithubSourceCompositionDependencies
   extends ProjectTemplateGithubArchiveAssetPortDependencies {
   readonly requestMetadata:
     ProjectTemplateSourceResolverDependencies['requestMetadata'];
 }
 
+/**
+ * Low-level capabilities used by an approval-aware application flow.
+ *
+ * This object does not enforce approval. Call `resolver.resolveAdvisory` to
+ * render authority-free evidence, then discard this composition. After an
+ * approval, create a new composition with a new absolute deadline and call
+ * `resolver.resolveForDownload`.
+ */
 export interface ProjectTemplateGithubSourceComposition {
+  /**
+   * Produces authority-free advisory evidence or one fresh download authority.
+   * No credential or resolved result is cached between method calls.
+   */
   readonly resolver: GithubTemplateSourceResolverPort;
+  /**
+   * Archive transport capability for the same absolute deadline. Pass this
+   * only as `downloadGithubTemplateSource(...).asset`; do not open it directly
+   * after an advisory-only resolution or across the approval gap.
+   */
   readonly archive: GithubTemplateArchiveAssetPort;
 }
 
@@ -79,6 +105,13 @@ const DEFAULT_DEPENDENCIES =
 
 function invalidArgument(): TypeError {
   return new TypeError('GitHub source composition input is invalid');
+}
+
+function advisoryCompositionFailure(): GithubTemplateSourceResolutionError {
+  return CAPTURED_OBJECT_FREEZE(new GithubTemplateSourceResolutionError(
+    'METADATA_PORT_FAILURE',
+    'GitHub template source advisory composition failed',
+  ));
 }
 
 function exactDataRecord(
@@ -198,6 +231,14 @@ function snapshotResolutionInput(
   });
 }
 
+/**
+ * Composes F3 source resolution and D5 archive transport without sharing
+ * credentials or caching authority.
+ *
+ * The returned value is intentionally below the product approval boundary:
+ * advisory completion must be followed by an idle approval gap, and approved
+ * downloads must use a newly created composition and absolute deadline.
+ */
 export function createProjectTemplateGithubSourceComposition(
   contextValue: ProjectTemplateGithubSourceCompositionContext,
   dependenciesValue?: ProjectTemplateGithubSourceCompositionDependencies,
@@ -271,18 +312,22 @@ export function createProjectTemplateGithubSourceComposition(
     resolveAdvisory: Object.freeze(async (
       input: GithubTemplateSourceResolutionInput,
     ): Promise<GithubTemplateSourceAdvisory> => {
-      const resolved = await resolve(input);
+      let resolved: ResolvedGithubTemplateSource | undefined;
       try {
+        resolved = await resolve(input);
         return demoteResolvedGithubTemplateSourceToAdvisory(resolved);
-      } catch (error) {
-        // Demotion normally consumes the result. If evidence construction
-        // fails before that transition, retire the fresh authority here.
-        try {
-          discardResolvedGithubTemplateSource(resolved);
-        } catch {
-          // The original bounded failure remains authoritative.
+      } catch {
+        if (resolved !== undefined) {
+          // Demotion builds all evidence before its hook-free consume step.
+          // After consume it returns without invoking user code, so a thrown
+          // copy path leaves this authority active and reclaimable here.
+          try {
+            discardResolvedGithubTemplateSource(resolved);
+          } catch {
+            // A bounded public error must not be replaced by cleanup detail.
+          }
         }
-        throw error;
+        throw advisoryCompositionFailure();
       }
     }),
     resolveForDownload: Object.freeze(async (

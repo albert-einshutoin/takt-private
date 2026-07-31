@@ -56,6 +56,16 @@ describe('package exports contract', () => {
       join(packageRoot, 'dist', 'index.d.ts'),
       'utf8',
     );
+    const compositionDeclaration = readFileSync(
+      join(
+        packageRoot,
+        'dist',
+        'infra',
+        'github',
+        'project-template-github-source-composition.d.ts',
+      ),
+      'utf8',
+    );
 
     const result = runSelfReferenceImport(`
       const api = await import('takt');
@@ -205,6 +215,9 @@ describe('package exports contract', () => {
       .toContain('ProjectTemplateGithubSourceComposition');
     expect(declarationEntry)
       .toContain('ProjectTemplateGithubSourceCompositionDependencies');
+    expect(compositionDeclaration).toContain('does not enforce approval');
+    expect(compositionDeclaration)
+      .toContain('downloadGithubTemplateSource(...).asset');
   });
 
   it('keeps GitHub template download storage authority out of the root API', () => {

@@ -3,6 +3,7 @@ import {
   claimResolvedGithubTemplateSourceForDownload,
   discardResolvedGithubTemplateSourceDownloadClaim,
 } from '../../features/project-template/github-update-check.js';
+import * as githubUpdateCheck from '../../features/project-template/github-update-check.js';
 import {
   serializeProjectTemplateSourceDescriptor,
 } from '../../features/project-template/source-descriptor.js';
@@ -213,6 +214,85 @@ describe('authenticated GitHub source composition F4', () => {
     expect(value.attemptInputs.map(({ assetId }) => assetId))
       .toEqual([202, 201]);
   });
+
+  it.each(['map', 'freeze'] as const)(
+    'redacts a poisoned advisory %s copy and retires its authority',
+    async (attack) => {
+      const value = integrationHarness();
+      const composition = createProjectTemplateGithubSourceComposition(
+        { deadlineMs: 10_000 },
+        value.dependencies,
+      );
+      const originalDemote =
+        githubUpdateCheck.demoteResolvedGithubTemplateSourceToAdvisory;
+      let resolved:
+        Parameters<typeof originalDemote>[0] | undefined;
+      let restore = () => undefined;
+      const demote = vi.spyOn(
+        githubUpdateCheck,
+        'demoteResolvedGithubTemplateSourceToAdvisory',
+      ).mockImplementation((candidate) => {
+        resolved = candidate;
+        if (attack === 'map') {
+          const descriptor = Object.getOwnPropertyDescriptor(
+            Array.prototype,
+            'map',
+          )!;
+          Object.defineProperty(Array.prototype, 'map', {
+            ...descriptor,
+            value() {
+              throw new Error('SECRET_ADVISORY_COPY');
+            },
+          });
+          restore = () => {
+            Object.defineProperty(Array.prototype, 'map', descriptor);
+          };
+        } else {
+          const descriptor = Object.getOwnPropertyDescriptor(
+            Object,
+            'freeze',
+          )!;
+          Object.defineProperty(Object, 'freeze', {
+            ...descriptor,
+            value() {
+              throw new Error('SECRET_ADVISORY_COPY');
+            },
+          });
+          restore = () => {
+            Object.defineProperty(Object, 'freeze', descriptor);
+          };
+        }
+        return originalDemote(candidate);
+      });
+
+      let error: unknown;
+      try {
+        error = await composition.resolver.resolveAdvisory({
+          source: 'github:octo/demo@main',
+        }).catch((caught: unknown) => caught);
+      } finally {
+        restore();
+        demote.mockRestore();
+      }
+
+      expect(error).toMatchObject({
+        code: 'METADATA_PORT_FAILURE',
+        field: undefined,
+      });
+      expect((error as Error).message)
+        .toBe('GitHub template source advisory composition failed');
+      expect('cause' in (error as object)).toBe(false);
+      expect(String((error as Error).stack))
+        .not.toContain('SECRET_ADVISORY_COPY');
+      expect(resolved).toBeDefined();
+      expect(() => claimResolvedGithubTemplateSourceForDownload(resolved))
+        .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+      expect(value.credentials).toHaveLength(2);
+      expect(value.credentials.every(({ dispose }) =>
+        dispose.mock.calls.length === 1
+      )).toBe(true);
+    },
+  );
 
   it('rejects hostile exact boundaries before activity and redacts resolution failures', async () => {
     const value = integrationHarness();
