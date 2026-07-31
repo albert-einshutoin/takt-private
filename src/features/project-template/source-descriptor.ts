@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { TextDecoder } from 'node:util';
+import { TextDecoder, types } from 'node:util';
 import { ProjectTemplateValidationError } from './errors.js';
 import { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
 import {
@@ -21,7 +21,7 @@ export const PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH =
   '.takt-template-source.json';
 export const MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES = 64 * 1024;
 
-const MAX_REPERTOIRE_DEPENDENCIES = 128;
+export const MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES = 128;
 const MAX_DEPENDENCY_CAPABILITIES = 128;
 const MAX_RELEASE_ASSET_NAME_LENGTH = 255;
 const MAX_CHECKSUM_ASSET_NAME_LENGTH =
@@ -91,7 +91,7 @@ export const projectTemplateSourceDescriptorV1JsonSchema = {
     },
     repertoireDependencies: {
       type: 'array',
-      maxItems: MAX_REPERTOIRE_DEPENDENCIES,
+      maxItems: MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -185,19 +185,36 @@ export function parseProjectTemplateSourceDescriptor(
   );
   requireDescriptorSchemaVersion(descriptor['schemaVersion']);
 
-  const dependencies = requireArray(
+  const dependencies = parseProjectTemplateRepertoireDependencies(
     descriptor['repertoireDependencies'],
-    'sourceDescriptor.repertoireDependencies',
-    MAX_REPERTOIRE_DEPENDENCIES,
-    'INVALID_SOURCE',
-  ).map(parseRepertoireDependency);
-  assertCanonicalDependencyOrder(dependencies);
+  );
 
   return {
     schemaVersion: '1.0',
     pack: parseDescriptorPack(descriptor['pack']),
     repertoireDependencies: dependencies,
   };
+}
+
+/**
+ * Shared strict parser for source-descriptor declarations and their companion
+ * lock. Keeping one semantic boundary prevents the lock from accepting a
+ * dependency that its authenticated descriptor would reject.
+ */
+export function parseProjectTemplateRepertoireDependencies(
+  value: unknown,
+  field = 'sourceDescriptor.repertoireDependencies',
+): ProjectTemplateRepertoireDependencyV1[] {
+  rejectProxy(value, field);
+  const dependencies = requireArray(
+    value,
+    field,
+    MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES,
+    'INVALID_SOURCE',
+  ).map((dependency, index) =>
+    parseRepertoireDependency(dependency, index, field));
+  assertCanonicalDependencyOrder(dependencies, field);
+  return dependencies;
 }
 
 /**
@@ -332,8 +349,10 @@ function parseDescriptorPack(
 function parseRepertoireDependency(
   value: unknown,
   index: number,
+  dependenciesField: string,
 ): ProjectTemplateRepertoireDependencyV1 {
-  const field = `sourceDescriptor.repertoireDependencies[${index}]`;
+  const field = `${dependenciesField}[${index}]`;
+  rejectProxy(value, field);
   const dependency = requireRecord(value, field);
   assertAllowedKeys(
     dependency,
@@ -477,6 +496,7 @@ function parseDependencyCapabilities(
   value: unknown,
   field: string,
 ): ProjectTemplateRepertoireCapabilityV1[] {
+  rejectProxy(value, field);
   const rawCapabilities = requireArray(
     value,
     field,
@@ -500,6 +520,7 @@ function parseDependencyCapabilities(
 
 function assertCanonicalDependencyOrder(
   dependencies: readonly ProjectTemplateRepertoireDependencyV1[],
+  field: string,
 ): void {
   let previousScope: string | undefined;
   for (const dependency of dependencies) {
@@ -508,11 +529,25 @@ function assertCanonicalDependencyOrder(
         ? 'duplicate scope'
         : 'non-canonical scope order';
       invalidSource(
-        'sourceDescriptor.repertoireDependencies',
-        `sourceDescriptor.repertoireDependencies contains ${reason}`,
+        field,
+        `${field} contains ${reason}`,
       );
     }
     previousScope = dependency.scope;
+  }
+}
+
+function rejectProxy(value: unknown, field: string): void {
+  if (
+    typeof value === 'object'
+    && value !== null
+    && types.isProxy(value)
+  ) {
+    throw new ProjectTemplateValidationError(
+      'NON_PLAIN_OBJECT',
+      `${field} must not be a Proxy`,
+      field,
+    );
   }
 }
 
