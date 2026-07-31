@@ -411,9 +411,13 @@ describe('authenticated project-template source resolver F3', () => {
         value: new TextEncoder().encode(CHECKSUM),
         done: false as const,
       }));
+      const returned = vi.fn(async () => ({
+        value: undefined,
+        done: true as const,
+      }));
       const createIterator = vi.fn(() => {
         if (boundary === 'iterator') controller.abort('SECRET');
-        return { next };
+        return { next, return: returned };
       });
       const value = harness({
         signal: controller.signal,
@@ -434,6 +438,9 @@ describe('authenticated project-template source resolver F3', () => {
         boundary === 'open' ? 0 : 1,
       );
       expect(next).not.toHaveBeenCalled();
+      expect(returned).toHaveBeenCalledTimes(
+        boundary === 'open' ? 0 : 1,
+      );
       expect(value.dispose).toHaveBeenCalledTimes(1);
     },
   );

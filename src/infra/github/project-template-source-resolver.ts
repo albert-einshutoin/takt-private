@@ -430,13 +430,28 @@ async function collectChecksum(
   } catch {
     throw closedFacade();
   }
-  requireActiveSignal(input.signal);
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   let complete = false;
+  let returnIterator:
+    | ((...args: unknown[]) => Promise<IteratorResult<Uint8Array>>)
+    | undefined;
   try {
+    // Ownership begins as soon as the iterator exists. Capture `return` first
+    // so every later abort/validation failure can close the acquired resource
+    // exactly once without re-reading a mutable property.
+    const capturedReturn = iterator.return;
+    if (
+      capturedReturn !== undefined
+      && typeof capturedReturn !== 'function'
+    ) throw closedFacade();
+    returnIterator = capturedReturn;
+    requireActiveSignal(input.signal);
+    const nextIterator = iterator.next;
+    if (typeof nextIterator !== 'function') throw closedFacade();
+    requireActiveSignal(input.signal);
     for (;;) {
-      const next = await iterator.next();
+      const next = await Reflect.apply(nextIterator, iterator, []);
       requireActiveSignal(input.signal);
       if (next.done === true) {
         complete = true;
@@ -448,9 +463,9 @@ async function collectChecksum(
       chunks.push(next.value.slice());
     }
   } finally {
-    if (!complete && typeof iterator.return === 'function') {
+    if (!complete && returnIterator !== undefined) {
       try {
-        await iterator.return();
+        await Reflect.apply(returnIterator, iterator, []);
       } catch {
         // Bounded collection failure remains authoritative.
       }
