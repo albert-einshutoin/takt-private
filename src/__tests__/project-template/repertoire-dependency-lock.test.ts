@@ -167,14 +167,39 @@ describe('project template repertoire dependency lock', () => {
   });
 
   it('rejects accessors, proxies, coercion objects, and sparse arrays', () => {
+    let getterCalls = 0;
     const accessor = validLock();
     Object.defineProperty(accessor, 'manifestSha256', {
       enumerable: true,
-      get: () => MANIFEST_SHA256,
+      get: () => {
+        getterCalls += 1;
+        return MANIFEST_SHA256;
+      },
     });
     expectLockError(accessor, 'NON_PLAIN_OBJECT');
+    expect(getterCalls).toBe(0);
 
-    expectLockError(new Proxy(validLock(), {}), 'NON_PLAIN_OBJECT');
+    let proxyTraps = 0;
+    const trappedLock = new Proxy(validLock(), {
+      get: () => {
+        proxyTraps += 1;
+        throw new Error('must not run');
+      },
+      getOwnPropertyDescriptor: () => {
+        proxyTraps += 1;
+        throw new Error('must not run');
+      },
+      getPrototypeOf: () => {
+        proxyTraps += 1;
+        throw new Error('must not run');
+      },
+      ownKeys: () => {
+        proxyTraps += 1;
+        throw new Error('must not run');
+      },
+    });
+    expectLockError(trappedLock, 'NON_PLAIN_OBJECT');
+    expect(proxyTraps).toBe(0);
 
     const proxiedDependency = validLock();
     const dependency = dependencyAt(proxiedDependency, 0);
@@ -193,6 +218,75 @@ describe('project template repertoire dependency lock', () => {
     dependencies[1] = dependencyAt(sparse, 0);
     sparse['dependencies'] = dependencies;
     expectLockError(sparse, 'NON_PLAIN_OBJECT');
+  });
+
+  it.each([
+    ['top-level symbol', (value: Record<string, unknown>) => {
+      Object.defineProperty(value, Symbol('secret'), {
+        value: 'hidden',
+      });
+    }],
+    ['top-level non-enumerable', (value: Record<string, unknown>) => {
+      Object.defineProperty(value, 'hidden', {
+        value: 'secret',
+      });
+    }],
+    ['dependency symbol', (value: Record<string, unknown>) => {
+      Object.defineProperty(dependencyAt(value, 0), Symbol('secret'), {
+        value: 'hidden',
+      });
+    }],
+    ['dependency non-enumerable', (value: Record<string, unknown>) => {
+      Object.defineProperty(dependencyAt(value, 0), 'hidden', {
+        value: 'secret',
+      });
+    }],
+    ['dependencies array symbol', (value: Record<string, unknown>) => {
+      Object.defineProperty(value['dependencies'], Symbol('secret'), {
+        value: 'hidden',
+      });
+    }],
+    ['dependencies array non-enumerable', (value: Record<string, unknown>) => {
+      Object.defineProperty(value['dependencies'], 'hidden', {
+        value: 'secret',
+      });
+    }],
+    ['capabilities array symbol', (value: Record<string, unknown>) => {
+      Object.defineProperty(
+        dependencyAt(value, 0)['capabilities'],
+        Symbol('secret'),
+        { value: 'hidden' },
+      );
+    }],
+    ['capabilities array non-enumerable', (value: Record<string, unknown>) => {
+      Object.defineProperty(
+        dependencyAt(value, 0)['capabilities'],
+        'hidden',
+        { value: 'secret' },
+      );
+    }],
+  ])('rejects every own-key extra without reading it: %s', (_label, mutate) => {
+    const value = validLock();
+    mutate(value);
+    expectLockError(value);
+  });
+
+  it('rejects symbol accessors without invoking caller code', () => {
+    let getterCalls = 0;
+    const value = validLock();
+    Object.defineProperty(
+      dependencyAt(value, 0)['capabilities'],
+      Symbol('secret'),
+      {
+        get: () => {
+          getterCalls += 1;
+          return 'hidden';
+        },
+      },
+    );
+
+    expectLockError(value, 'NON_PLAIN_OBJECT');
+    expect(getterCalls).toBe(0);
   });
 
   it('parses only bounded fatal UTF-8 canonical JSON', () => {
@@ -231,6 +325,56 @@ describe('project template repertoire dependency lock', () => {
     )).toThrow(expect.objectContaining({ code: 'INVALID_LOCK' }));
     expect(() => parseProjectTemplateRepertoireDependencyLockJson(
       `${json}\n`,
+    )).toThrow(expect.objectContaining({ code: 'INVALID_LOCK' }));
+  });
+
+  it('rejects hostile and non-pristine byte views without reading byteLength', () => {
+    const json = serializeProjectTemplateRepertoireDependencyLock(validLock());
+    let byteLengthReads = 0;
+    const bytes = new TextEncoder().encode(json);
+    Object.defineProperty(bytes, 'byteLength', {
+      get: () => {
+        byteLengthReads += 1;
+        return bytes.length;
+      },
+    });
+
+    expect(() => parseProjectTemplateRepertoireDependencyLockJson(bytes))
+      .toThrow(expect.objectContaining({ code: 'INVALID_LOCK' }));
+    expect(byteLengthReads).toBe(0);
+
+    let proxyTraps = 0;
+    const trappedBytes = new Proxy(bytes, {
+      get: () => {
+        proxyTraps += 1;
+        throw new Error('must not run');
+      },
+      getOwnPropertyDescriptor: () => {
+        proxyTraps += 1;
+        throw new Error('must not run');
+      },
+      getPrototypeOf: () => {
+        proxyTraps += 1;
+        throw new Error('must not run');
+      },
+      ownKeys: () => {
+        proxyTraps += 1;
+        throw new Error('must not run');
+      },
+    });
+    expect(() => parseProjectTemplateRepertoireDependencyLockJson(trappedBytes))
+      .toThrow(expect.objectContaining({ code: 'INVALID_LOCK' }));
+    expect(proxyTraps).toBe(0);
+
+    class ByteSubclass extends Uint8Array {}
+    expect(() => parseProjectTemplateRepertoireDependencyLockJson(
+      new ByteSubclass(bytes),
+    )).toThrow(expect.objectContaining({ code: 'INVALID_LOCK' }));
+    expect(() => parseProjectTemplateRepertoireDependencyLockJson(
+      Buffer.from(bytes),
+    )).toThrow(expect.objectContaining({ code: 'INVALID_LOCK' }));
+    expect(() => parseProjectTemplateRepertoireDependencyLockJson(
+      new DataView(bytes.buffer) as unknown as Uint8Array,
     )).toThrow(expect.objectContaining({ code: 'INVALID_LOCK' }));
   });
 

@@ -38,6 +38,9 @@ const PORTABLE_RELATIVE_PATH_BODY_SOURCE = '(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(
 export const LOCAL_SOURCE_URI_PATTERN_SOURCE = `^(?:\\.|${PORTABLE_RELATIVE_PATH_BODY_SOURCE})$`;
 export const PROJECT_TEMPLATE_PATH_PATTERN_SOURCE = `^(?!\\.takt(?:/|$))${PORTABLE_RELATIVE_PATH_BODY_SOURCE}$`;
 
+type OwnPropertyDescriptorMap =
+  Record<PropertyKey, PropertyDescriptor | undefined>;
+
 const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE);
 const SHA256_PATTERN = new RegExp(SHA256_PATTERN_SOURCE);
 const COMMIT_PATTERN = new RegExp(COMMIT_PATTERN_SOURCE);
@@ -66,8 +69,12 @@ export function requireRecord(
   if (!isRecord(value)) {
     throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must be a plain own-property object`, field);
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  if (Object.values(descriptors).some((descriptor) => !('value' in descriptor))) {
+  const descriptors = Object.getOwnPropertyDescriptors(
+    value,
+  ) as unknown as OwnPropertyDescriptorMap;
+  if (Reflect.ownKeys(descriptors).some(
+    (key) => !('value' in descriptors[key]!),
+  )) {
     throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must not contain accessors`, field);
   }
   return value;
@@ -82,20 +89,38 @@ export function requireArray(
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
     throw new ProjectTemplateValidationError(errorCode, `${field} must be a plain array`, field);
   }
-  if (value.length > maxItems) {
+  const descriptors = Object.getOwnPropertyDescriptors(
+    value,
+  ) as unknown as OwnPropertyDescriptorMap;
+  const lengthDescriptor = descriptors['length'];
+  if (lengthDescriptor === undefined || !('value' in lengthDescriptor)) {
+    throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must have an intrinsic data length`, field);
+  }
+  const length = lengthDescriptor.value as number;
+  if (length > maxItems) {
     throw new ProjectTemplateValidationError('LIMIT_EXCEEDED', `${field} exceeds the ${maxItems} item limit`, field);
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const hasAccessor = Object.entries(descriptors)
-    .some(([key, descriptor]) => key !== 'length' && !('value' in descriptor));
-  const hasNonIndexProperty = Object.keys(value)
-    .some((key) => !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length);
-  const hasHole = Array.from({ length: value.length }, (_, index) => index)
-    .some((index) => !Object.prototype.hasOwnProperty.call(value, index));
+  const ownKeys = Reflect.ownKeys(descriptors);
+  const hasAccessor = ownKeys.some(
+    (key) => key !== 'length' && !('value' in descriptors[key]!),
+  );
+  const hasNonIndexProperty = ownKeys.some((key) =>
+    typeof key !== 'string'
+    || (
+      key !== 'length'
+      && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= length)
+    ));
+  const hasHole = Array.from({ length }, (_, index) => index)
+    .some((index) => descriptors[String(index)] === undefined);
   if (hasAccessor || hasNonIndexProperty || hasHole) {
     throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must be a dense JSON array without extra properties`, field);
   }
-  return value;
+  // Return a descriptor snapshot so later validation never reads caller-owned
+  // array indices after the exact data-property boundary has been established.
+  return Array.from(
+    { length },
+    (_, index) => descriptors[String(index)]!.value,
+  );
 }
 
 export function assertAllowedKeys(
@@ -103,7 +128,14 @@ export function assertAllowedKeys(
   allowed: readonly string[],
   field: string,
 ): void {
-  for (const key of Object.keys(value)) {
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') {
+      throw new ProjectTemplateValidationError(
+        'UNKNOWN_KEY',
+        `${field} contains a non-string own key outside schema 1.0`,
+        field,
+      );
+    }
     if (!allowed.includes(key)) {
       throw new ProjectTemplateValidationError('UNKNOWN_KEY', `${field}.${key} is not part of schema 1.0`, `${field}.${key}`);
     }

@@ -17,6 +17,16 @@ export const PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH =
 export const MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_BYTES =
   256 * 1024;
 
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = (() => {
+  const getter =
+    Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, 'byteLength')?.get;
+  if (getter === undefined) {
+    throw new Error('TypedArray byteLength intrinsic is unavailable');
+  }
+  return getter;
+})();
+
 export interface ProjectTemplateRepertoireDependencyLockV1 {
   readonly schemaVersion: '1.0';
   readonly sourceDescriptorSha256: string;
@@ -86,14 +96,18 @@ export function parseProjectTemplateRepertoireDependencyLockJson(
     && types.isProxy(input)
   ) {
     invalidLock('repertoire dependency lock input must not be a Proxy');
-  } else if (input instanceof Uint8Array) {
-    assertByteLimit(input.byteLength);
+  } else if (
+    typeof input === 'object'
+    && input !== null
+    && Object.getPrototypeOf(input) === Uint8Array.prototype
+  ) {
+    const bytes = snapshotPristineBytes(input);
     try {
       json = new TextDecoder('utf-8', {
         fatal: true,
         // Preserve a BOM so canonical equality rejects a second byte form.
         ignoreBOM: true,
-      }).decode(input);
+      }).decode(bytes.value);
     } catch {
       invalidLock('repertoire dependency lock bytes must be valid UTF-8');
     }
@@ -114,6 +128,47 @@ export function parseProjectTemplateRepertoireDependencyLockJson(
     );
   }
   return parsed;
+}
+
+function snapshotPristineBytes(value: object): {
+  readonly value: Uint8Array;
+  readonly byteLength: number;
+} {
+  let byteLength: number;
+  try {
+    // Calling the captured intrinsic getter performs the internal-slot brand
+    // check without consulting an own/inherited `byteLength` property.
+    byteLength = Reflect.apply(
+      TYPED_ARRAY_BYTE_LENGTH_GETTER,
+      value,
+      [],
+    ) as number;
+  } catch {
+    invalidLock('repertoire dependency lock bytes must be a pristine Uint8Array');
+  }
+  assertByteLimit(byteLength);
+
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const ownKeys = Reflect.ownKeys(descriptors);
+  const hasUnsafeProperty = ownKeys.some((key) => {
+    if (
+      typeof key !== 'string'
+      || !/^(0|[1-9]\d*)$/.test(key)
+      || Number(key) >= byteLength
+    ) return true;
+    const descriptor = descriptors[key]!;
+    return !('value' in descriptor)
+      || typeof descriptor.value !== 'number';
+  });
+  if (hasUnsafeProperty || ownKeys.length !== byteLength) {
+    invalidLock(
+      'repertoire dependency lock bytes must not contain extra properties',
+    );
+  }
+  return {
+    value: value as Uint8Array,
+    byteLength,
+  };
 }
 
 export function serializeProjectTemplateRepertoireDependencyLock(
