@@ -2,7 +2,7 @@
  * Workflow resolution.
  */
 
-import { existsSync, lstatSync, realpathSync, type Stats } from 'node:fs';
+import { existsSync, lstatSync, realpathSync, Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { types as utilTypes } from 'node:util';
@@ -43,7 +43,10 @@ import {
   assertActiveRepertoireReadPermit,
   withImmediateRepertoireReadPermit,
 } from '../../../features/repertoire/read-permit.js';
-import { createRepertoireResourceReadAccess } from './repertoireResourceReadAccess.js';
+import {
+  createRepertoireResourceReadAccess,
+  isRepertoireResourcePath,
+} from './repertoireResourceReadAccess.js';
 
 const safeObjectCreate = Object.create.bind(Object);
 const safeObjectFreeze = Object.freeze.bind(Object);
@@ -52,6 +55,8 @@ const safeObjectGetPrototypeOf = Object.getPrototypeOf.bind(Object);
 const safeObjectHasOwn = Object.hasOwn.bind(Object);
 const safeReflectOwnKeys = Reflect.ownKeys.bind(Reflect);
 const safeIsProxy = utilTypes.isProxy.bind(utilTypes);
+const safeReflectApply = Reflect.apply.bind(Reflect);
+const safeStatsIsFileMethod = Stats.prototype.isFile;
 const localObjectPrototype = Object.prototype;
 
 interface LoadWorkflowsOptions {
@@ -162,12 +167,42 @@ function loadWorkflowFromResolvedPath(
     return null;
   }
 
+  const repertoireReadAccess = readContext
+    ? createRepertoireResourceReadAccess(readContext)
+    : undefined;
+  const repertoirePath = isRepertoireResourcePath(resolvedPath, {
+    lang: 'en',
+    repertoireDir: readContext?.repertoireDir ?? join(getGlobalConfigDir(), 'repertoire'),
+    repertoireReadAccess,
+  });
+  const stat = lstatSync(resolvedPath);
+  if (
+    (safeReflectApply(safeStatsIsFileMethod, stat, []) as boolean)
+    && stat.nlink !== 1
+  ) throw new WorkflowDiscoveryReadError();
+
+  if (repertoirePath) {
+    if (readContext === undefined) throw new WorkflowDiscoveryReadError();
+    return loadWorkflowApprovedTextWithResolutionOptions(
+      resolvedPath,
+      readRepertoireWorkflowTextWithReadContext(resolvedPath, readContext),
+      {
+        projectCwd,
+        lookupCwd,
+        source: 'repertoire',
+        callableArgs,
+        parentTrustInfo,
+        repertoireReadAccess,
+      },
+    );
+  }
+
   return loadWorkflowFileWithResolutionOptions(resolvedPath, {
     projectCwd,
     lookupCwd,
     callableArgs,
     parentTrustInfo,
-    repertoireReadAccess: readContext ? createRepertoireResourceReadAccess(readContext) : undefined,
+    repertoireReadAccess,
   });
 }
 

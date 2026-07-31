@@ -97,14 +97,35 @@ export function resourceIsSymlink(path: string, context?: FacetResolutionContext
   return access ? access.isSymlink(path) : lstatSync(path).isSymbolicLink();
 }
 
+/**
+ * Classifies a candidate without trusting its lexical spelling. An alias whose
+ * canonical target enters the coordinated repertoire is rejected; callers can
+ * retry under a permit, but aliases remain outside the root-bound authority.
+ */
+export function isRepertoireResourcePath(path: string, context?: FacetResolutionContext): boolean {
+  if (!context?.repertoireDir) return false;
+  const repertoireDir = resolve(context.repertoireDir);
+  const candidatePath = resolve(path);
+  if (isInsideOrEqual(repertoireDir, candidatePath)) return true;
+  if (repertoireDir !== resolve(getRepertoireDir()) || !existsSync(path)) return false;
+  let canonicalPath: string;
+  let canonicalRepertoireDir: string;
+  try {
+    canonicalPath = realpathSync(path);
+    canonicalRepertoireDir = realpathSync(repertoireDir);
+  } catch {
+    throw failed();
+  }
+  if (isInsideOrEqual(canonicalRepertoireDir, canonicalPath)) throw failed();
+  return false;
+}
+
 function getRequiredRepertoireAccess(
   path: string,
   context?: FacetResolutionContext,
 ): RepertoireResourceReadAccess | undefined {
+  if (!isRepertoireResourcePath(path, context)) return undefined;
   if (!context?.repertoireDir) return undefined;
-  const candidate = relative(context.repertoireDir, path);
-  const inside = !candidate.startsWith('..') && !isAbsolute(candidate);
-  if (!inside) return undefined;
   const access = context.repertoireReadAccess;
   if (
     access === undefined
@@ -117,6 +138,11 @@ function getRequiredRepertoireAccess(
     return undefined;
   }
   return access;
+}
+
+function isInsideOrEqual(root: string, candidate: string): boolean {
+  const relativePath = relative(root, candidate);
+  return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath));
 }
 
 function lstatExists(path: string): boolean {

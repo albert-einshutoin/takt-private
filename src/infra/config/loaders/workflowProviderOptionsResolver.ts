@@ -10,6 +10,7 @@ import { mergeProviderOptions, normalizeProviderOptions } from '../providerOptio
 import type { FacetResolutionContext } from './workflowPackageScope.js';
 import {
   readResourceText,
+  isRepertoireResourcePath,
   resourceExists,
   resourceIsSymlink,
   resourceRealpath,
@@ -210,16 +211,16 @@ export function resolveWorkflowProviderOptionsWithHost(
   const fallback = host.fileAccess ?? nodeFileAccess;
   const fileAccess: ProviderOptionsFileAccess = host.context?.repertoireDir
     ? {
-        exists: (path) => isRepertoirePath(path, host.context!)
+        exists: (path) => isRepertoireResourcePath(path, host.context)
           ? resourceExists(path, host.context)
           : fallback.exists(path),
-        readText: (path) => isRepertoirePath(path, host.context!)
+        readText: (path) => isRepertoireResourcePath(path, host.context)
           ? readResourceText(path, host.context)
           : fallback.readText(path),
-        realpath: (path) => isRepertoirePath(path, host.context!)
+        realpath: (path) => isRepertoireResourcePath(path, host.context)
           ? resourceRealpath(path, host.context)
           : fallback.realpath(path),
-        isSymlink: (path) => isRepertoirePath(path, host.context!)
+        isSymlink: (path) => isRepertoireResourcePath(path, host.context)
           ? resourceIsSymlink(path, host.context)
           : (fallback.isSymlink?.(path) ?? false),
       }
@@ -236,13 +237,6 @@ export function resolveWorkflowProviderOptionsWithHost(
     fileAccess,
     new Set<string>(),
   );
-}
-
-function isRepertoirePath(path: string, context: FacetResolutionContext): boolean {
-  if (context.repertoireDir === undefined) return false;
-  const root = resolve(context.repertoireDir);
-  const candidate = resolve(path);
-  return candidate === root || isPathInside(root, candidate);
 }
 
 function resolveWorkflowProviderOptionsFromDir(
