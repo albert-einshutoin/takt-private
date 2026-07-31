@@ -297,6 +297,37 @@ describe('authenticated project-template source resolver F3', () => {
     expect(value.dispose).toHaveBeenCalledTimes(1);
   });
 
+  it('uses its captured byte allocator when the mutable global is replaced', async () => {
+    const value = harness();
+    const NativeUint8Array = Uint8Array;
+    const construct = vi.fn(() => {
+      throw new Error('SECRET constructor');
+    });
+    const HostileUint8Array = new Proxy(function HostileUint8Array() {
+      return undefined;
+    }, {
+      construct,
+    });
+    Object.defineProperty(HostileUint8Array, Symbol.hasInstance, {
+      value: (candidate: unknown) => candidate instanceof NativeUint8Array,
+    });
+    const original = globalThis.Uint8Array;
+    globalThis.Uint8Array = HostileUint8Array as unknown as
+      Uint8ArrayConstructor;
+    try {
+      await expect(resolveAuthenticatedGithubTemplateSource(
+        value.options,
+        value.dependencies,
+      )).resolves.toMatchObject({ commit: COMMIT });
+    } finally {
+      globalThis.Uint8Array = original;
+    }
+
+    expect(construct).not.toHaveBeenCalled();
+    expect(value.rawBodies[1]!.every((byte) => byte === 0)).toBe(true);
+    expect(value.dispose).toHaveBeenCalledTimes(1);
+  });
+
   it('returns a checksum iterator on overflow and consumes no later chunk', async () => {
     const returned = vi.fn(async () => ({
       value: undefined,
@@ -372,6 +403,41 @@ describe('authenticated project-template source resolver F3', () => {
     expect(value.dispose).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['open', 'iterator'] as const)(
+    'stops before checksum next when %s synchronously aborts',
+    async (boundary) => {
+      const controller = new AbortController();
+      const next = vi.fn(async () => ({
+        value: new TextEncoder().encode(CHECKSUM),
+        done: false as const,
+      }));
+      const createIterator = vi.fn(() => {
+        if (boundary === 'iterator') controller.abort('SECRET');
+        return { next };
+      });
+      const value = harness({
+        signal: controller.signal,
+        openReleaseAsset: () => {
+          if (boundary === 'open') controller.abort('SECRET');
+          return { [Symbol.asyncIterator]: createIterator };
+        },
+      });
+
+      const error = await resolveAuthenticatedGithubTemplateSource(
+        value.options,
+        value.dependencies,
+      ).catch((reason: unknown) => reason);
+
+      expect(error).toMatchObject({ code: 'METADATA_PORT_FAILURE' });
+      expect(String(error)).not.toContain('SECRET');
+      expect(createIterator).toHaveBeenCalledTimes(
+        boundary === 'open' ? 0 : 1,
+      );
+      expect(next).not.toHaveBeenCalled();
+      expect(value.dispose).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('rejects non-exact options and dependencies without side effects', async () => {
     const value = harness();
     const accessor = vi.fn(() => value.options.source);
@@ -434,6 +500,7 @@ function harness(overrides: {
     >[0],
   ) => Promise<Buffer>;
   readonly checksumIterable?: AsyncIterable<Uint8Array>;
+  readonly openReleaseAsset?: () => AsyncIterable<Uint8Array>;
   readonly disposeThrows?: boolean;
 } = {}) {
   const receivers: Array<{
@@ -495,6 +562,9 @@ function harness(overrides: {
     this: unknown,
   ): AsyncIterable<Uint8Array> {
     receivers.push({ kind: 'asset', receiver: this });
+    if (overrides.openReleaseAsset !== undefined) {
+      return overrides.openReleaseAsset();
+    }
     return overrides.checksumIterable ?? (async function* () {
       yield new TextEncoder().encode(CHECKSUM);
     })();

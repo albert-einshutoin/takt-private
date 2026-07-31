@@ -36,6 +36,7 @@ const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
 )?.get;
 const TYPED_ARRAY_SET = Uint8Array.prototype.set;
 const TYPED_ARRAY_FILL = Uint8Array.prototype.fill;
+const NativeUint8Array = Uint8Array;
 const BUFFER_TO_STRING = Buffer.prototype.toString;
 
 export interface ResolveAuthenticatedGithubTemplateSourceOptions {
@@ -345,7 +346,7 @@ function copyAndWipeBuffer(value: Buffer): Uint8Array {
       value,
       [],
     ) as number;
-    const copy = new Uint8Array(byteLength);
+    const copy = new NativeUint8Array(byteLength);
     Reflect.apply(TYPED_ARRAY_SET, copy, [value]);
     return copy;
   } finally {
@@ -422,7 +423,14 @@ async function collectChecksum(
   } catch {
     throw closedFacade();
   }
-  const iterator = iterable[Symbol.asyncIterator]();
+  requireActiveSignal(input.signal);
+  let iterator: AsyncIterator<Uint8Array>;
+  try {
+    iterator = iterable[Symbol.asyncIterator]();
+  } catch {
+    throw closedFacade();
+  }
+  requireActiveSignal(input.signal);
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   let complete = false;
@@ -434,7 +442,7 @@ async function collectChecksum(
         complete = true;
         break;
       }
-      if (!(next.value instanceof Uint8Array)) throw closedFacade();
+      if (!(next.value instanceof NativeUint8Array)) throw closedFacade();
       bytes += next.value.byteLength;
       if (bytes > input.maxBytes) throw closedFacade();
       chunks.push(next.value.slice());
@@ -448,7 +456,7 @@ async function collectChecksum(
       }
     }
   }
-  const result = new Uint8Array(bytes);
+  const result = new NativeUint8Array(bytes);
   let offset = 0;
   for (const chunk of chunks) {
     result.set(chunk, offset);
