@@ -358,6 +358,27 @@ function validateEnvelope(envelope: unknown): ProjectTemplateCliEnvelope {
   return snapshot as unknown as ProjectTemplateCliEnvelope;
 }
 
+function validateOutcome(outcome: unknown): ProjectTemplateCliOutcome {
+  const snapshot = snapshotMachineJson(outcome);
+  if (
+    snapshot === null
+    || isJsonArray(snapshot)
+    || typeof snapshot !== 'object'
+    || !hasExactKeys(snapshot, ['envelope', 'exitCode'])
+    || snapshot.envelope === undefined
+    || typeof snapshot.exitCode !== 'number'
+  ) {
+    throw new ProjectTemplateCliContractError(
+      'PROTOCOL_ERROR',
+      'machine outcome must contain one envelope and exit code',
+    );
+  }
+  return {
+    envelope: validateEnvelope(snapshot.envelope),
+    exitCode: snapshot.exitCode as ProjectTemplateCliExitCode,
+  };
+}
+
 export function createProjectTemplateCliSuccess(input: {
   readonly command: string;
   readonly mode: ProjectTemplateCliMode;
@@ -405,16 +426,17 @@ export async function writeProjectTemplateCliOutcome(
 ): Promise<void> {
   // A single top-level write prevents partial JSON from becoming observable if
   // presentation fails and gives shell consumers one complete record to parse.
-  const expectedExitCode = outcome.envelope.status === 'success'
+  const validated = validateOutcome(outcome);
+  const expectedExitCode = validated.envelope.status === 'success'
     ? 0
-    : projectTemplateCliExitCodeForErrorCode(outcome.envelope.error.code);
-  if (outcome.exitCode !== expectedExitCode) {
+    : projectTemplateCliExitCodeForErrorCode(validated.envelope.error.code);
+  if (validated.exitCode !== expectedExitCode) {
     throw new ProjectTemplateCliContractError(
       'PROTOCOL_ERROR',
       'exit code contradicts machine envelope status',
     );
   }
-  const chunk = presentProjectTemplateCliEnvelope(outcome.envelope);
+  const chunk = canonicalizeTaktpackJson(validated.envelope);
   await write(chunk);
 }
 

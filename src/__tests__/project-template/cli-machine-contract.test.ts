@@ -193,4 +193,23 @@ describe('project template CLI machine contract', () => {
     );
     expect(write).not.toHaveBeenCalled();
   });
+
+  it('rejects hostile outcome accessors before invoking them or the writer', async () => {
+    const statusGetter = vi.fn(() => 'success');
+    const envelope = Object.defineProperty({
+      schemaVersion: '1.0',
+      command: 'project-template preview',
+      mode: 'dry-run',
+      result: null,
+      warnings: [],
+    }, 'status', { enumerable: true, get: statusGetter });
+    const write = vi.fn(() => undefined);
+
+    await expect(writeProjectTemplateCliOutcome({
+      envelope: envelope as never,
+      exitCode: 0,
+    }, write)).rejects.toThrow(ProjectTemplateCliContractError);
+    expect(statusGetter).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
 });
