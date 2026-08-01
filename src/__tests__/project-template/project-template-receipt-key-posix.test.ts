@@ -62,7 +62,7 @@ describe('POSIX project template receipt key store', () => {
     expect(lstatSync(directory).mode & 0o777).toBe(0o700);
     expect(lstatSync(join(directory, 'keyring.json')).mode & 0o777).toBe(0o600);
     expect(readFileSync(join(directory, 'keyring.json'), 'utf8')).toBe(
-      '{"schemaVersion":1,"keys":[{"keyId":"receipt-key-11111111111111111111111111111111","state":"active","secret":"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"}]}',
+      '{"schemaVersion":1,"generation":0,"keys":[{"keyId":"receipt-key-11111111111111111111111111111111","state":"active","secret":"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"}]}',
     );
     expect(await store.read()).toEqual(registry());
   });
@@ -219,16 +219,19 @@ describe('POSIX project template receipt key store', () => {
     const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
     await healthy.write(registry());
     let maximumRequested = 0;
+    let readBuffer: Uint8Array | undefined;
     const partial = createPosixProjectTemplateReceiptKeyStore({
       directory,
       io: {
         read(fd, buffer, offset, length, position) {
           maximumRequested = Math.max(maximumRequested, buffer.byteLength);
+          readBuffer = buffer;
           return readSync(fd, buffer, offset, Math.min(length, 3), position);
         },
       },
     });
     expect(await partial.read()).toEqual(registry());
     expect(maximumRequested).toBeLessThanOrEqual(64 * 1024 + 1);
+    expect(readBuffer?.every((byte) => byte === 0)).toBe(true);
   });
 });

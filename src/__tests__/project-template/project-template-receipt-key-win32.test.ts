@@ -13,6 +13,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -187,18 +188,21 @@ describe('Windows project template receipt key store', () => {
     });
     await healthy.write(registry());
     let maximumRequested = 0;
+    let readBuffer: Uint8Array | undefined;
     const partial = createWin32ProjectTemplateReceiptKeyStore({
       directory,
       dpapi: reversibleDpapi(),
       io: {
         read(fd, buffer, offset, length, position) {
           maximumRequested = Math.max(maximumRequested, buffer.byteLength);
+          readBuffer = buffer;
           return readSync(fd, buffer, offset, Math.min(length, 2), position);
         },
       },
     });
     expect(await partial.read()).toEqual(registry());
     expect(maximumRequested).toBeLessThanOrEqual(64 * 1024 + 1);
+    expect(readBuffer?.every((byte) => byte === 0)).toBe(true);
   });
 
   it('does not report a false failure after a published rename', async () => {
@@ -224,6 +228,29 @@ describe('Windows project template receipt key store', () => {
       },
     });
     await expect(verifiedPublished.write(registry())).resolves.toBeUndefined();
+
+    const mismatched = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      io: {
+        fsyncDirectory() {
+          const path = join(directory, 'keyring.dpapi');
+          const ciphertext = readFileSync(path);
+          const plaintext = Uint8Array.from(ciphertext, (value) => value ^ 0xa5);
+          const parsed = JSON.parse(Buffer.from(plaintext).toString('utf8')) as {
+            keys: Array<{ secret: string }>;
+          };
+          parsed.keys[0]!.secret = Buffer.alloc(32, 99).toString('base64url');
+          const changed = Buffer.from(JSON.stringify(parsed), 'utf8');
+          writeFileSync(path, Uint8Array.from(changed, (value) => value ^ 0xa5));
+          plaintext.fill(0);
+          ciphertext.fill(0);
+          changed.fill(0);
+          throw Object.assign(new Error('uncertain'), { code: 'EIO' });
+        },
+      },
+    });
+    await expect(mismatched.write(registry())).rejects.toThrow(/unknown/i);
   });
 
   it('settles DPAPI timeout once and ignores late successful close', async () => {
@@ -259,6 +286,11 @@ describe('Windows project template receipt key store', () => {
       child.emit('error', new Error('spawn secret'));
       child.emit('close', 0);
     })).status).toBe('rejected');
+    const exact = await outcome((child) => {
+      child.stdout.end(Buffer.from('BwgJ', 'ascii'));
+      child.emit('close', 0);
+    });
+    expect(exact).toEqual({ status: 'fulfilled', value: new Uint8Array([7, 8, 9]) });
     expect((await outcome((child) => child.emit('close', 0))).status).toBe('rejected');
     expect((await outcome((child) => {
       child.stdout.end(Buffer.alloc(64 * 1024 + 1, 65));
@@ -268,6 +300,38 @@ describe('Windows project template receipt key store', () => {
       child.stderr.end(Buffer.alloc(64 * 1024 + 1, 65));
       child.emit('close', 1);
     })).status).toBe('rejected');
+  });
+
+  it('zeroizes DPAPI adapter and store-owned buffers', async () => {
+    let adapterInput: Uint8Array | undefined;
+    const adapter = createWindowsDpapiCurrentUserAdapter({
+      async run(request) {
+        adapterInput = request.input;
+        return new Uint8Array([1]);
+      },
+    });
+    await adapter.protect(new Uint8Array([4]));
+    expect(adapterInput?.every((byte) => byte === 0)).toBe(true);
+
+    let plaintext: Uint8Array | undefined;
+    let ciphertext: Uint8Array | undefined;
+    const store = createWin32ProjectTemplateReceiptKeyStore({
+      directory: join(root(), 'keys'),
+      dpapi: {
+        scope: 'CurrentUser',
+        async protect(value) {
+          plaintext = value;
+          ciphertext = Uint8Array.from(value, (byte) => byte ^ 0xa5);
+          return ciphertext;
+        },
+        async unprotect(value) {
+          return Uint8Array.from(value, (byte) => byte ^ 0xa5);
+        },
+      },
+    });
+    await store.write(registry());
+    expect(plaintext?.every((byte) => byte === 0)).toBe(true);
+    expect(ciphertext?.every((byte) => byte === 0)).toBe(true);
   });
 });
 

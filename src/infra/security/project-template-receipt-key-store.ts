@@ -22,10 +22,26 @@ export interface ProjectTemplateReceiptKeyRegistry {
   readonly keys: readonly ProjectTemplateReceiptKeyEntry[];
 }
 
+export interface ProjectTemplateReceiptKeySnapshot {
+  readonly generation: number;
+  readonly registry: ProjectTemplateReceiptKeyRegistry;
+}
+
+export interface ProjectTemplateReceiptKeyStoreLease {
+  readonly snapshot: ProjectTemplateReceiptKeySnapshot | undefined;
+  compareAndSwap(
+    expectedGeneration: number | undefined,
+    registry: ProjectTemplateReceiptKeyRegistry,
+  ): Promise<ProjectTemplateReceiptKeySnapshot | undefined>;
+}
+
 /** Internal persistence port. It deliberately has no import/export operation. */
 export interface ProjectTemplateReceiptKeyStore {
   read(): Promise<ProjectTemplateReceiptKeyRegistry | undefined>;
   write(registry: ProjectTemplateReceiptKeyRegistry): Promise<void>;
+  withExclusiveLease<T>(
+    operation: (lease: ProjectTemplateReceiptKeyStoreLease) => Promise<T> | T,
+  ): Promise<T>;
   dispose(): Promise<void>;
 }
 
@@ -96,63 +112,113 @@ export function validateProjectTemplateReceiptKeyRegistry(
   }
   const seen = new Set<string>();
   let active = 0;
-  const keys = record['keys'].map((value) => {
-    const candidate = exactRecord(
-      value,
-      Reflect.ownKeys(value as object).includes('secret')
-        ? ['keyId', 'state', 'secret']
-        : ['keyId', 'state'],
-    );
-    const keyId = candidate['keyId'];
-    const state = candidate['state'];
-    const secret = candidate['secret'];
-    if (!validKeyId(keyId) || seen.has(keyId)) {
-      throw new ProjectTemplateReceiptKeyStoreError('Invalid or duplicate key id');
-    }
-    if (state !== 'active' && state !== 'verify-only' && state !== 'revoked') {
-      throw new ProjectTemplateReceiptKeyStoreError('Invalid key state');
-    }
-    if (state === 'revoked') {
-      if (secret !== undefined) {
-        throw new ProjectTemplateReceiptKeyStoreError('Revoked keys retain no secret');
+  const keys: ProjectTemplateReceiptKeyEntry[] = [];
+  try {
+    for (const value of record['keys']) {
+      const candidate = exactRecord(
+        value,
+        typeof value === 'object'
+          && value !== null
+          && Reflect.ownKeys(value).includes('secret')
+          ? ['keyId', 'state', 'secret']
+          : ['keyId', 'state'],
+      );
+      const keyId = candidate['keyId'];
+      const state = candidate['state'];
+      const secret = candidate['secret'];
+      if (!validKeyId(keyId) || seen.has(keyId)) {
+        throw new ProjectTemplateReceiptKeyStoreError('Invalid or duplicate key id');
       }
-    } else if (
-      !(secret instanceof Uint8Array)
-      || types.isProxy(secret)
-      || secret.byteLength !== PROJECT_TEMPLATE_RECEIPT_KEY_BYTES
-    ) {
-      throw new ProjectTemplateReceiptKeyStoreError('Invalid key secret');
+      if (state !== 'active' && state !== 'verify-only' && state !== 'revoked') {
+        throw new ProjectTemplateReceiptKeyStoreError('Invalid key state');
+      }
+      if (state === 'revoked') {
+        if (secret !== undefined) {
+          throw new ProjectTemplateReceiptKeyStoreError('Revoked keys retain no secret');
+        }
+      } else if (
+        !(secret instanceof Uint8Array)
+        || types.isProxy(secret)
+        || secret.byteLength !== PROJECT_TEMPLATE_RECEIPT_KEY_BYTES
+      ) {
+        throw new ProjectTemplateReceiptKeyStoreError('Invalid key secret');
+      }
+      seen.add(keyId);
+      if (state === 'active') active += 1;
+      keys.push(cloneEntry({
+        keyId,
+        state,
+        ...(secret === undefined ? {} : { secret }),
+      }));
     }
-    seen.add(keyId);
-    if (state === 'active') active += 1;
-    return cloneEntry({ keyId, state, ...(secret === undefined ? {} : { secret }) });
-  });
-  if (keys.length > 0 && active !== 1) {
-    throw new ProjectTemplateReceiptKeyStoreError(
-      'Key registry must contain exactly one active key',
-    );
+    if (keys.length > 0 && active !== 1) {
+      throw new ProjectTemplateReceiptKeyStoreError(
+        'Key registry must contain exactly one active key',
+      );
+    }
+    return Object.freeze({ schemaVersion: 1, keys: Object.freeze(keys) });
+  } catch (error) {
+    for (const key of keys) key.secret?.fill(0);
+    throw error;
   }
-  return Object.freeze({ schemaVersion: 1, keys: Object.freeze(keys) });
 }
 
 export function serializeProjectTemplateReceiptKeyRegistry(
   registry: ProjectTemplateReceiptKeyRegistry,
 ): Uint8Array {
   const validated = validateProjectTemplateReceiptKeyRegistry(registry);
-  const keys: SerializedEntry[] = validated.keys.map((entry) => ({
-    keyId: entry.keyId,
-    state: entry.state,
-    ...(entry.secret === undefined
-      ? {}
-      : { secret: Buffer.from(entry.secret).toString('base64url') }),
-  }));
-  const bytes = Buffer.from(JSON.stringify({ schemaVersion: 1, keys }), 'utf8');
-  if (bytes.byteLength > PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
-    throw new ProjectTemplateReceiptKeyStoreError(
-      'Serialized key registry exceeds the bounded maximum',
-    );
+  try {
+    const keys: SerializedEntry[] = validated.keys.map((entry) => ({
+      keyId: entry.keyId,
+      state: entry.state,
+      ...(entry.secret === undefined
+        ? {}
+        : { secret: Buffer.from(entry.secret).toString('base64url') }),
+    }));
+    const bytes = Buffer.from(JSON.stringify({ schemaVersion: 1, keys }), 'utf8');
+    if (bytes.byteLength > PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
+      bytes.fill(0);
+      throw new ProjectTemplateReceiptKeyStoreError(
+        'Serialized key registry exceeds the bounded maximum',
+      );
+    }
+    return bytes;
+  } finally {
+    for (const key of validated.keys) key.secret?.fill(0);
   }
-  return bytes;
+}
+
+export function serializeProjectTemplateReceiptKeySnapshot(
+  snapshot: ProjectTemplateReceiptKeySnapshot,
+): Uint8Array {
+  if (
+    !Number.isSafeInteger(snapshot.generation)
+    || snapshot.generation < 0
+  ) throw new ProjectTemplateReceiptKeyStoreError('Invalid key registry generation');
+  const registry = validateProjectTemplateReceiptKeyRegistry(snapshot.registry);
+  try {
+    const keys: SerializedEntry[] = registry.keys.map((entry) => ({
+      keyId: entry.keyId,
+      state: entry.state,
+      ...(entry.secret === undefined
+        ? {}
+        : { secret: Buffer.from(entry.secret).toString('base64url') }),
+    }));
+    const bytes = Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      generation: snapshot.generation,
+      keys,
+    }), 'utf8');
+    if (bytes.byteLength > PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
+      bytes.fill(0);
+      throw new ProjectTemplateReceiptKeyStoreError(
+        'Serialized key registry exceeds the bounded maximum',
+      );
+    }
+    return bytes;
+  } finally {
+    for (const key of registry.keys) key.secret?.fill(0);
+  }
 }
 
 export function parseProjectTemplateReceiptKeyRegistry(
@@ -196,4 +262,39 @@ export function parseProjectTemplateReceiptKeyRegistry(
     };
   });
   return validateProjectTemplateReceiptKeyRegistry({ schemaVersion: 1, keys });
+}
+
+export function parseProjectTemplateReceiptKeySnapshot(
+  bytes: Uint8Array,
+): ProjectTemplateReceiptKeySnapshot {
+  if (bytes.byteLength > PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
+    throw new ProjectTemplateReceiptKeyStoreError(
+      'Key registry exceeds the bounded maximum',
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(bytes).toString('utf8'));
+  } catch {
+    throw new ProjectTemplateReceiptKeyStoreError('Invalid key registry JSON');
+  }
+  const record = exactRecord(parsed, ['schemaVersion', 'generation', 'keys']);
+  const generation = record['generation'];
+  if (
+    record['schemaVersion'] !== 1
+    || !Number.isSafeInteger(generation)
+    || (generation as number) < 0
+  ) throw new ProjectTemplateReceiptKeyStoreError('Invalid key registry generation');
+  const legacyBytes = Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    keys: record['keys'],
+  }), 'utf8');
+  try {
+    return Object.freeze({
+      generation: generation as number,
+      registry: parseProjectTemplateReceiptKeyRegistry(legacyBytes),
+    });
+  } finally {
+    legacyBytes.fill(0);
+  }
 }
