@@ -129,7 +129,7 @@ describe('project-template inspect CLI service', () => {
 });
 
 describe('project-template list CLI service', () => {
-  it('reports first-install without touching backup storage', async () => {
+  it('reports first-install with only bounded backup-generation identifiers', async () => {
     const listBackupIds = vi.fn(async () => [] as const);
     const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
       readCompanionLockState: vi.fn(() => ({
@@ -146,7 +146,7 @@ describe('project-template list CLI service', () => {
         result: { installed: false, backupIds: [], recoveryState: 'clean' },
       },
     });
-    expect(listBackupIds).not.toHaveBeenCalled();
+    expect(listBackupIds).toHaveBeenCalledWith('/safe/repo', false);
   });
 
   it('returns only the installed target and a bounded backup generation list', async () => {
