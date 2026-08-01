@@ -28,6 +28,7 @@ type FsOperation =
   | 'readSync'
   | 'readdirSync'
   | 'renameSync'
+  | 'unlinkSync'
   | 'writeFileSync';
 
 const fsFault = vi.hoisted(() => ({
@@ -37,8 +38,10 @@ const fsFault = vi.hoisted(() => ({
   afterReaddir: undefined as ((path: string) => boolean | void) | undefined,
   afterLeaseWrite: undefined as (() => void) | undefined,
   afterClaimLink: undefined as (() => void) | undefined,
+  afterClaimUnlink: undefined as (() => void) | undefined,
   actualRenameSync: undefined as typeof import('node:fs').renameSync | undefined,
   actualWriteFileSync: undefined as typeof import('node:fs').writeFileSync | undefined,
+  actualUnlinkSync: undefined as typeof import('node:fs').unlinkSync | undefined,
   openFds: new Set<number>(),
   readCalls: 0,
 }));
@@ -63,6 +66,7 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   fsFault.actualRenameSync = actual.renameSync;
   fsFault.actualWriteFileSync = actual.writeFileSync;
+  fsFault.actualUnlinkSync = actual.unlinkSync;
   const fail = (operation: FsOperation): void => {
     if (fsFault.operation !== operation) return;
     fsFault.operation = undefined;
@@ -96,6 +100,14 @@ vi.mock('node:fs', async (importOriginal) => {
       const result = actual.linkSync(...args);
       const hook = fsFault.afterClaimLink;
       fsFault.afterClaimLink = undefined;
+      hook?.();
+      return result;
+    },
+    unlinkSync(...args: Parameters<typeof actual.unlinkSync>) {
+      fail('unlinkSync');
+      const result = actual.unlinkSync(...args);
+      const hook = fsFault.afterClaimUnlink;
+      fsFault.afterClaimUnlink = undefined;
       hook?.();
       return result;
     },
@@ -170,6 +182,7 @@ afterEach(() => {
   fsFault.afterReaddir = undefined;
   fsFault.afterLeaseWrite = undefined;
   fsFault.afterClaimLink = undefined;
+  fsFault.afterClaimUnlink = undefined;
   fsFault.openFds.clear();
   fsFault.readCalls = 0;
   cryptoFault.nextRandomBytes = undefined;
@@ -177,6 +190,55 @@ afterEach(() => {
 });
 
 describe('repertoire coordination hardening', () => {
+  it('treats a stable winner plus a different-inode writer staging claim as busy', async () => {
+    const root = makeRoot();
+    let observedCode: string | undefined;
+    fsFault.afterClaimUnlink = () => {
+      const activePath = findActiveLeasePath(root, 'write');
+      const activeBefore = lstatSync(activePath);
+      const publishingPath = `${activePath}.publishing`;
+      fsFault.actualWriteFileSync!(publishingPath, '{', { mode: 0o600 });
+      try {
+        const unexpected = acquireRepertoireCoordinationReadLeaseImmediate({
+          globalConfigDir: root,
+        });
+        unexpected.release();
+        observedCode = 'GRANTED';
+      } catch (error) {
+        observedCode = (error as { code?: string }).code;
+      }
+      const activeAfter = lstatSync(activePath);
+      expect({ dev: activeAfter.dev, ino: activeAfter.ino, nlink: activeAfter.nlink }).toEqual({
+        dev: activeBefore.dev,
+        ino: activeBefore.ino,
+        nlink: 1,
+      });
+      fsFault.actualUnlinkSync!(publishingPath);
+    };
+
+    const lease = await acquire(root, 'write');
+    expect(observedCode).toBe('WRITER_PENDING');
+    lease.release();
+  });
+
+  it('retries a scan when publishing evidence disappears after directory listing', async () => {
+    const root = makeRoot();
+    const seed = await acquire(root, 'read');
+    seed.release();
+    const readers = join(root, '.takt-repertoire-coordination', 'readers');
+    const publishingPath = join(readers, `123.${randomUUID()}.lease.publishing`);
+    fsFault.actualWriteFileSync!(publishingPath, '', { mode: 0o600 });
+    fsFault.afterReaddir = (path) => {
+      if (basename(path) !== 'readers') return false;
+      fsFault.actualUnlinkSync!(publishingPath);
+      return true;
+    };
+
+    const lease = acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root });
+    lease.release();
+    expect(existsSync(publishingPath)).toBe(false);
+  });
+
   it('treats an active-plus-publishing claim pair as busy, never malformed or granted', async () => {
     const root = makeRoot();
     let observedCode: string | undefined;

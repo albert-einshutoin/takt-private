@@ -766,17 +766,22 @@ function scanStateOnce(
   const readers = scanReaders(paths.readers);
   const released = scanReleased(paths.released, enforceHardLimit);
   const writerPublishing = safeArrayIncludes(rootEntries, WRITER_INTENT_PUBLISHING_FILENAME);
+  let writerDuringPublishing: LeaseEvidence | undefined;
   if (writerPublishing && safeArrayIncludes(rootEntries, WRITER_INTENT_FILENAME)) {
-    assertPublishingPair(
+    const pairState = classifyPublishingPair(
       paths.writerIntent,
       `${paths.writerIntent}${CLAIM_PUBLISHING_SUFFIX}`,
     );
+    if (pairState === 'contender') {
+      writerDuringPublishing = readListedLease(paths.writerIntent, 'write');
+    }
   } else if (writerPublishing) {
     assertPublishingOnly(`${paths.writerIntent}${CLAIM_PUBLISHING_SUFFIX}`);
   }
   const writer = safeArrayIncludes(rootEntries, WRITER_INTENT_FILENAME)
-    && !writerPublishing
-    ? readListedLease(paths.writerIntent, 'write')
+    ? writerDuringPublishing ?? (
+      !writerPublishing ? readListedLease(paths.writerIntent, 'write') : undefined
+    )
     : undefined;
   const rootAfter = readDirectoryIdentity(paths.root);
   if (rootBefore !== rootAfter) throw SNAPSHOT_CHANGED;
@@ -834,11 +839,20 @@ function scanReaders(directory: string): {
       // linkSync briefly exposes the complete inode with nlink=2. The paired
       // staging name proves this is still a known publication transition;
       // never parse or grant it until only the active nlink=1 name remains.
-      assertPublishingPair(
+      const pairState = classifyPublishingPair(
         join(directory, filename),
         join(directory, `${filename}${CLAIM_PUBLISHING_SUFFIX}`),
       );
-      safeArrayPush(digests, `${filename}:paired-publishing`);
+      let activeDigest = '-';
+      if (pairState === 'contender') {
+        const lease = readListedLease(join(directory, filename), 'read');
+        if (`${lease.record.pid}` !== match[1] || lease.record.token !== match[2]) {
+          throw new RepertoireCoordinationError('UNSAFE_STATE');
+        }
+        safeArrayPush(evidence, lease);
+        activeDigest = lease.digest;
+      }
+      safeArrayPush(digests, `${filename}:paired-publishing:${activeDigest}`);
       continue;
     }
     const lease = readListedLease(join(directory, filename), 'read');
@@ -853,7 +867,10 @@ function scanReaders(directory: string): {
   return { digest: `${before}:${safeArrayJoin(digests, ',')}`, evidence, publishing };
 }
 
-function assertPublishingPair(activePath: string, publishingPath: string): void {
+function classifyPublishingPair(
+  activePath: string,
+  publishingPath: string,
+): 'linked' | 'contender' {
   const active = lstatPublishingPath(activePath);
   const publishing = lstatPublishingPath(publishingPath);
   const expectedUid = currentUid();
@@ -862,14 +879,22 @@ function assertPublishingPair(activePath: string, publishingPath: string): void 
     || !isFileMode(publishing.mode)
     || isSymlinkMode(active.mode)
     || isSymlinkMode(publishing.mode)
-    || active.dev !== publishing.dev
-    || active.ino !== publishing.ino
-    || active.nlink !== 2
-    || publishing.nlink !== 2
     || (active.mode & 0o777) !== PRIVATE_FILE_MODE
     || (publishing.mode & 0o777) !== PRIVATE_FILE_MODE
+    || publishing.size < 0
+    || publishing.size > MAX_LEASE_BYTES
     || (expectedUid !== null && (active.uid !== expectedUid || publishing.uid !== expectedUid))
   ) throw new RepertoireCoordinationError('UNSAFE_STATE');
+  if (active.dev === publishing.dev && active.ino === publishing.ino) {
+    if (active.nlink !== 2 || publishing.nlink !== 2) {
+      throw new RepertoireCoordinationError('UNSAFE_STATE');
+    }
+    return 'linked';
+  }
+  if (active.nlink !== 1 || publishing.nlink !== 1) {
+    throw new RepertoireCoordinationError('UNSAFE_STATE');
+  }
+  return 'contender';
 }
 
 function assertPublishingOnly(path: string): void {
