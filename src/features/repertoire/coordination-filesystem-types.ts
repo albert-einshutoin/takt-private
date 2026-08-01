@@ -57,6 +57,7 @@ export type CoordinationStableDirectory = {
 
 export interface CoordinationFilesystemPolicy extends CoordinationIdentityPolicy {
   preflightRoot(path: string): CoordinationDirectoryAuthority;
+  sealRoot(authority: CoordinationDirectoryAuthority): void;
   ensurePrivateDirectory(path: string): void;
   createPrivateDirectoryExclusive(path: string): CoordinationIdentity;
   sealPrivateDirectory(path: string): void;
@@ -71,6 +72,16 @@ export interface CoordinationFilesystemPolicy extends CoordinationIdentityPolicy
   syncDirectory(path: string): void;
   sameObject(left: CoordinationFileObservation, right: CoordinationFileObservation): boolean;
   sameStableFile(left: CoordinationFileObservation, right: CoordinationFileObservation): boolean;
+}
+
+export class CoordinationFilesystemChangedError extends Error {}
+export class CoordinationFilesystemUnsafeError extends Error {}
+export class CoordinationFilesystemPendingError extends Error {
+  readonly malformed: boolean;
+  constructor(malformed = false) {
+    super('coordination filesystem publication is pending');
+    this.malformed = malformed;
+  }
 }
 
 const freeze = Object.freeze.bind(Object);

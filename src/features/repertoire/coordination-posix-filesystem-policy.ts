@@ -19,6 +19,8 @@ import {
 import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
+  CoordinationFilesystemChangedError,
+  CoordinationFilesystemUnsafeError,
   createCoordinationIdentityPolicy,
   type CoordinationDirectoryAuthority,
   type CoordinationFileObservation,
@@ -39,9 +41,6 @@ const getUid = typeof process.getuid === 'function' ? process.getuid.bind(proces
 // intrinsics at module initialization so callback code cannot replace them and
 // influence filesystem validation or publication.
 const freeze = Object.freeze.bind(Object);
-
-export class CoordinationFilesystemChangedError extends Error {}
-export class CoordinationFilesystemUnsafeError extends Error {}
 
 export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = freeze({
   ...identityPolicy,
@@ -85,6 +84,9 @@ export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = f
         closeSync(retainedFd);
       },
     });
+  },
+  sealRoot(authority: CoordinationDirectoryAuthority): void {
+    authority.assertUnchanged();
   },
   ensurePrivateDirectory(path: string): void {
     try {

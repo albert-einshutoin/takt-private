@@ -5,15 +5,15 @@ import {
   createCoordinationPlatformPolicy,
   type CoordinationRootAuthority,
 } from './coordination-platform-policy.js';
+import { posixCoordinationFilesystemPolicy } from './coordination-posix-filesystem-policy.js';
+import { win32CoordinationFilesystemPolicy } from './coordination-win32-filesystem-policy.js';
 import {
   CoordinationFilesystemChangedError,
-  posixCoordinationFilesystemPolicy,
-} from './coordination-posix-filesystem-policy.js';
-import type {
-  CoordinationIdentity,
-  CoordinationFileObservation,
-  CoordinationStableDirectory,
-  CoordinationStableFile,
+  CoordinationFilesystemPendingError,
+  type CoordinationIdentity,
+  type CoordinationFileObservation,
+  type CoordinationStableDirectory,
+  type CoordinationStableFile,
 } from './coordination-filesystem-types.js';
 
 const COORDINATION_DIRECTORY_NAME = '.takt-repertoire-coordination';
@@ -104,6 +104,9 @@ const safeGetUid = typeof process.getuid === 'function'
   : undefined;
 const safePid = process.pid;
 const safePlatform = process.platform;
+const coordinationFilesystemPolicy = safePlatform === 'win32'
+  ? win32CoordinationFilesystemPolicy
+  : posixCoordinationFilesystemPolicy;
 
 export const REPERTOIRE_COORDINATION_LOCK_ORDER = safeObjectFreeze([
   'global-repertoire',
@@ -191,11 +194,10 @@ type CoordinationSnapshot = {
 const SNAPSHOT_CHANGED = Symbol('repertoire-coordination-snapshot-changed');
 const coordinationPlatformPolicy = createCoordinationPlatformPolicy({
   platform: safePlatform,
-  openPosixRootAuthority: posixCoordinationFilesystemPolicy.preflightRoot,
-  // Phase 1 intentionally has no mode-bit fallback on Windows. Until the
-  // native owner/DACL/reparse bridge is approved and shipped, acquisition is
-  // rejected before prepareCoordinationPaths can create its private subtree.
-  loadWindowsBridge: () => undefined,
+  openPosixRootAuthority: coordinationFilesystemPolicy.preflightRoot,
+  loadWindowsBridge: () => ({
+    openRootAuthority: win32CoordinationFilesystemPolicy.preflightRoot,
+  }),
 });
 
 /**
@@ -213,8 +215,12 @@ export async function acquireRepertoireCoordinationLease(
   try {
     validateOptions(options);
     throwIfAborted(options.signal);
-    paths = prepareCoordinationPaths(options.globalConfigDir);
     const deadline = safeDateNow() + (options.timeoutMs ?? 5_000);
+    paths = await prepareCoordinationPathsBounded(
+      options.globalConfigDir,
+      deadline,
+      options.signal,
+    );
     return options.mode === 'read'
       ? await acquireReadLeaseBounded(paths, deadline, options.signal)
       : await acquireWriteLease(paths, deadline, options.signal);
@@ -416,6 +422,7 @@ function prepareCoordinationPaths(globalConfigDir: string): CoordinationPaths {
     ensurePrivateDirectory(root);
     ensurePrivateDirectory(readers);
     ensurePrivateDirectory(released);
+    coordinationFilesystemPolicy.sealRoot(trustedRoot);
     const paths = {
       root,
       readers,
@@ -434,6 +441,35 @@ function prepareCoordinationPaths(globalConfigDir: string): CoordinationPaths {
   }
 }
 
+async function prepareCoordinationPathsBounded(
+  globalConfigDir: string,
+  deadline: number,
+  signal: AbortSignal | undefined,
+): Promise<CoordinationPaths> {
+  let malformedSentinelPublication = false;
+  while (true) {
+    throwIfAborted(signal);
+    try {
+      return prepareCoordinationPaths(globalConfigDir);
+    } catch (error) {
+      if (!(error instanceof CoordinationFilesystemPendingError)) throw error;
+      malformedSentinelPublication ||= error.malformed;
+      const remaining = deadline - safeDateNow();
+      if (remaining <= 0) {
+        throw new RepertoireCoordinationError(
+          malformedSentinelPublication ? 'UNSAFE_STATE' : 'TIMEOUT',
+        );
+      }
+      try {
+        await delay(safeMathMin(RETRY_DELAY_MS, remaining), undefined, { signal });
+      } catch {
+        if (signal?.aborted) throw new RepertoireCoordinationError('ABORTED');
+        throw new RepertoireCoordinationError('UNSAFE_STATE');
+      }
+    }
+  }
+}
+
 function assertCoordinationDirectories(paths: CoordinationPaths): void {
   assertPrivateDirectory(paths.root);
   assertPrivateDirectory(paths.readers);
@@ -441,11 +477,11 @@ function assertCoordinationDirectories(paths: CoordinationPaths): void {
 }
 
 function ensurePrivateDirectory(path: string): void {
-  posixCoordinationFilesystemPolicy.ensurePrivateDirectory(path);
+  coordinationFilesystemPolicy.ensurePrivateDirectory(path);
 }
 
 function assertPrivateDirectory(path: string): void {
-  posixCoordinationFilesystemPolicy.assertDirectory(path);
+  coordinationFilesystemPolicy.assertDirectory(path);
 }
 
 function createLeaseRecord(mode: RepertoireCoordinationMode): LeaseRecord {
@@ -469,7 +505,7 @@ function createLeaseFile(
   assertPrivateDirectory(parentDirectory);
   const publishingPath = `${path}${CLAIM_PUBLISHING_SUFFIX}`;
   const bytes = safeBufferFromUtf8(`${safeJsonStringify(record)}\n`);
-  const stagedFile = posixCoordinationFilesystemPolicy.createStagedExclusiveFile(
+  const stagedFile = coordinationFilesystemPolicy.createStagedExclusiveFile(
     publishingPath,
     bytes,
   );
@@ -483,21 +519,21 @@ function createLeaseFile(
   try {
     // Hard-link publication preserves O_EXCL/no-replace semantics. rename(2)
     // could overwrite an already-published writer intent after staging.
-    posixCoordinationFilesystemPolicy.linkNoReplace(publishingPath, path);
+    coordinationFilesystemPolicy.linkNoReplace(publishingPath, path);
   } catch (error) {
     if (isAlreadyExistsError(error)) {
       const owned = readExactPrivateLease(publishingPath, record.mode);
       if (!sameOwnerAndIdentity(owned, record, staged.identity)) {
         throw new RepertoireCoordinationError('UNSAFE_STATE');
       }
-      posixCoordinationFilesystemPolicy.unlinkOwned(publishingPath, staged.identity);
+      coordinationFilesystemPolicy.unlinkOwned(publishingPath, staged.identity);
       syncDirectory(parentDirectory);
       paths.trustedRoot.assertUnchanged();
     }
     throw error;
   }
   paths.trustedRoot.assertUnchanged();
-  posixCoordinationFilesystemPolicy.unlinkOwned(publishingPath, staged.identity);
+  coordinationFilesystemPolicy.unlinkOwned(publishingPath, staged.identity);
   syncDirectory(parentDirectory);
   paths.trustedRoot.assertUnchanged();
   const published = readExactPrivateLease(path, record.mode);
@@ -512,7 +548,7 @@ function readExactPrivateLease(
   expectedMode?: RepertoireCoordinationMode,
 ): LeaseEvidence {
   return leaseEvidenceFromStableFile(
-    posixCoordinationFilesystemPolicy.readStableFile(path, MAX_LEASE_BYTES),
+    coordinationFilesystemPolicy.readStableFile(path, MAX_LEASE_BYTES),
     expectedMode,
   );
 }
@@ -715,7 +751,7 @@ function classifyPublishingPair(
 ): 'linked' | 'contender' {
   const active = statPublishingPath(activePath);
   const publishing = statPublishingPath(publishingPath);
-  if (posixCoordinationFilesystemPolicy.sameObject(active, publishing)) {
+  if (coordinationFilesystemPolicy.sameObject(active, publishing)) {
     if (active.linkCount !== 2 || publishing.linkCount !== 2) throw SNAPSHOT_CHANGED;
     return 'linked';
   }
@@ -740,7 +776,7 @@ function assertPublishingOnly(path: string): void {
 }
 
 function statPublishingPath(path: string): CoordinationFileObservation {
-  const stat = posixCoordinationFilesystemPolicy.statPath(path, MAX_LEASE_BYTES);
+  const stat = coordinationFilesystemPolicy.statPath(path, MAX_LEASE_BYTES);
   if (stat === undefined) throw SNAPSHOT_CHANGED;
   return stat;
 }
@@ -810,7 +846,7 @@ function scanReleased(
 
 function listStableDirectory(path: string): CoordinationStableDirectory {
   try {
-    return posixCoordinationFilesystemPolicy.listStable(path);
+    return coordinationFilesystemPolicy.listStable(path);
   } catch (error) {
     if (error instanceof CoordinationFilesystemChangedError || isMissingError(error)) {
       throw SNAPSHOT_CHANGED;
@@ -884,7 +920,7 @@ function releaseOwnedLease(
   const publishingContainer = `${container}${RELEASE_PUBLISHING_SUFFIX}`;
   let containerIdentity: CoordinationIdentity;
   try {
-    containerIdentity = posixCoordinationFilesystemPolicy.createPrivateDirectoryExclusive(
+    containerIdentity = coordinationFilesystemPolicy.createPrivateDirectoryExclusive(
       publishingContainer,
     );
   } catch (error) {
@@ -914,12 +950,12 @@ function releaseOwnedLease(
   // published; the post-rename identity check and full scan fail closed but
   // cannot provide a stronger OS isolation boundary than the shared UID.
   paths.trustedRoot.assertUnchanged();
-  posixCoordinationFilesystemPolicy.renameOwned(path, publishingPath, identity);
+  coordinationFilesystemPolicy.renameOwned(path, publishingPath, identity);
   paths.trustedRoot.assertUnchanged();
   syncDirectory(parentDirectory);
   syncDirectory(publishingContainer);
   paths.trustedRoot.assertUnchanged();
-  posixCoordinationFilesystemPolicy.renameOwned(
+  coordinationFilesystemPolicy.renameOwned(
     publishingContainer,
     container,
     containerIdentity,
@@ -945,7 +981,7 @@ function sameOwnerAndIdentity(
   expected: LeaseRecord,
   identity: FileIdentity,
 ): boolean {
-  return posixCoordinationFilesystemPolicy.sameIdentity(evidence.identity, identity)
+  return coordinationFilesystemPolicy.sameIdentity(evidence.identity, identity)
     && sameOwner(evidence.record, expected);
 }
 
@@ -1000,11 +1036,11 @@ async function waitForRetry(
 }
 
 function syncDirectory(path: string): void {
-  posixCoordinationFilesystemPolicy.syncDirectory(path);
+  coordinationFilesystemPolicy.syncDirectory(path);
 }
 
 function enforcePrivateDirectoryMode(path: string): void {
-  posixCoordinationFilesystemPolicy.sealPrivateDirectory(path);
+  coordinationFilesystemPolicy.sealPrivateDirectory(path);
 }
 
 function validateOptions(options: AcquireRepertoireCoordinationLeaseOptions): void {
@@ -1060,6 +1096,9 @@ function errnoCode(error: unknown): unknown {
 }
 
 function normalizeCoordinationError(error: unknown): RepertoireCoordinationError {
+  if (error instanceof CoordinationFilesystemPendingError) {
+    return new RepertoireCoordinationError(error.malformed ? 'UNSAFE_STATE' : 'WRITER_PENDING');
+  }
   return error instanceof RepertoireCoordinationError
     ? error
     : new RepertoireCoordinationError('UNSAFE_STATE');

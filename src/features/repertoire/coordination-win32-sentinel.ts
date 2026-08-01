@@ -21,6 +21,7 @@ const MAX_SENTINEL_BYTES = 4_096;
 const PUBLISHING_SUFFIX = '.publishing';
 const PUBLISHING_PATTERN = /^\.root\.identity\.([0-9a-f-]{36})\.publishing$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const freeze = Object.freeze.bind(Object);
 
 export type WindowsSentinelFileStat = {
   readonly dev: bigint;
@@ -174,7 +175,7 @@ export function openWindowsCoordinationSentinel(options: {
     const retainedSentinelFd = sentinelFd;
     sentinelFd = undefined;
     let closed = false;
-    return Object.freeze({
+    return freeze({
       token: record.token,
       assertUnchanged(): void {
         try {
@@ -245,7 +246,11 @@ function assertKnownPublishingEntries(
   let publishing = false;
   let malformed = false;
   for (const name of dependencies.list(coordinationRoot)) {
-    if (!name.endsWith(PUBLISHING_SUFFIX)) continue;
+    // Lease claims also use a .publishing suffix in this directory. Sentinel
+    // recovery owns only its reserved prefix and must not reinterpret valid
+    // lease transitions as malformed sentinel state.
+    if (!name.startsWith(`${SENTINEL_FILENAME}.`)) continue;
+    if (!name.endsWith(PUBLISHING_SUFFIX)) throw failed();
     const match = PUBLISHING_PATTERN.exec(name);
     if (match === null || !UUID.test(match[1]!)) throw failed();
     const stat = dependencies.lstat(win32.join(coordinationRoot, name));

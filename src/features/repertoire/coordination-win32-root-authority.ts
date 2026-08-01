@@ -5,6 +5,7 @@ import { win32 } from 'node:path';
 const COORDINATION_DIRECTORY_NAME = '.takt-repertoire-coordination';
 const RESERVED_SEGMENT = /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const LOCAL_DRIVE_ROOT = /^[a-z]:\\/i;
+const freeze = Object.freeze.bind(Object);
 
 export type WindowsRootFileStat = {
   readonly dev: bigint;
@@ -16,6 +17,7 @@ export type WindowsRootFileStat = {
 };
 
 export type WindowsRootIdentityEvidence = {
+  readonly kind: 'win32';
   readonly dev: string;
   readonly ino: string;
 };
@@ -73,8 +75,8 @@ export function createWindowsRootAuthorityOpener(
       if (!sameRootIdentity(before, after)) throw failed();
 
       let closed = false;
-      const evidence = Object.freeze(toEvidence(before));
-      return Object.freeze({
+      const evidence = freeze(toEvidence(before));
+      return freeze({
         lexicalRoot: path,
         canonicalRoot,
         evidence,
@@ -209,6 +211,7 @@ function sameRootIdentity(left: WindowsRootFileStat, right: WindowsRootFileStat)
 
 function toEvidence(stat: WindowsRootFileStat): WindowsRootIdentityEvidence {
   return {
+    kind: 'win32',
     dev: stat.dev.toString(),
     ino: stat.ino.toString(),
   };

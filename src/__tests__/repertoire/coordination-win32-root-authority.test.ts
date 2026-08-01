@@ -55,6 +55,7 @@ describe('Windows coordination root authority', () => {
     expect(authority.lexicalRoot).toBe(ROOT);
     expect(authority.canonicalRoot).toBe(ROOT);
     expect(authority.evidence).toEqual({
+      kind: 'win32',
       dev: '1',
       ino: '4',
     });

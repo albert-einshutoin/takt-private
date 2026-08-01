@@ -117,6 +117,18 @@ describe('Windows coordination root sentinel', () => {
     expect(value.bytes()).toEqual(before);
   });
 
+  it('does not reinterpret lease claim publication as sentinel staging', () => {
+    const value = fixture(true);
+    value.paths.set(`${SUBTREE}\\writer.intent.publishing`, stat('file', 9n));
+
+    const authority = openWindowsCoordinationSentinel({
+      rootAuthority: value.rootAuthority,
+      dependencies: value.dependencies,
+    });
+
+    expect(authority.token).toBe(TOKEN);
+  });
+
   it('blocks a concurrent first-start observer until complete publication', () => {
     const value = fixture();
     let observed: unknown;
