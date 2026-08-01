@@ -23,6 +23,7 @@ import {
   acquireProjectTemplateApplyLease,
 } from '../../features/project-template/apply-lease.js';
 import {
+  createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
 } from '../../features/project-template/apply-storage.js';
 import {
@@ -141,6 +142,56 @@ const CRASH_PHASES = [
 ] as const satisfies readonly ProjectTemplateCompanionLockTransactionPhase[];
 
 describe('project template companion lock transaction crash recovery', () => {
+  it('reports closed recovery when target-drift preparation cleanup is uncertain', async () => {
+    const projectRoot = makeRepo();
+    const oldCohort = cohort('old');
+    const newCohort = cohort('new');
+    writeCohort(projectRoot, oldCohort);
+    const preconditionToken = await contentPrecondition(projectRoot);
+    const injected = new Error('cleanup unlink failed');
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (operation === 'unlink' && path.includes('/staging/')) throw injected;
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: projectRoot,
+      io,
+    });
+    const lease = acquireProjectTemplateApplyLease(projectRoot);
+    const foreign = 'foreign editor content\n';
+    try {
+      await expect(executeOwnedProjectTemplateCompanionLockTransaction({
+        storage,
+        lease,
+        transactionPlanId: 'a'.repeat(64),
+        preconditionToken,
+        candidatePaths: ['workflows/review.yaml'],
+        outputs: {
+          contentEntries: [{
+            path: 'workflows/review.yaml',
+            action: 'write',
+            content: newCohort[CONTENT_ENTRY_PATH]!,
+            mode: '0600',
+          }],
+          contentLock: newCohort[CONTENT_LOCK_PATH]!,
+          repertoireLock: newCohort[PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH]!,
+          sourceProvenance: newCohort[PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH]!,
+        },
+        async consumeApproval() { return true; },
+        runDoctor() {},
+        onPhase(phase) {
+          if (phase === 'source-provenance-backed-up') {
+            writeFileSync(join(projectRoot, CONTENT_ENTRY_PATH), foreign);
+          }
+        },
+      })).rejects.toBeInstanceOf(ProjectTemplateCompanionLockRecoveryError);
+    } finally {
+      lease.release();
+    }
+    expect(readFileSync(join(projectRoot, CONTENT_ENTRY_PATH), 'utf8')).toBe(foreign);
+  });
+
   it.each(['before-execute', 'after-backup'] as const)(
     'rejects foreign target drift %s before approval consumption',
     async (timing) => {
