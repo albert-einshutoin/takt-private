@@ -16,6 +16,7 @@ import {
   executeOwnedProjectTemplateCompanionLockTransaction,
   ProjectTemplateCompanionLockRecoveryError,
   ProjectTemplateCompanionLockRollbackError,
+  ProjectTemplateCompanionLockTargetDriftError,
 } from './companion-lock-transaction.js';
 import {
   ProjectTemplateCompanionLockStateError,
@@ -221,6 +222,7 @@ async function execute(options: {
         lease,
         transactionPlanId: fresh.preview.transactionPlanId,
         preconditionToken: fresh.preview.bindings.contentPreconditionToken,
+        candidatePaths: fresh.candidatePaths,
         expectedPreviousLocksSha256:
           fresh.preview.bindings.previousLocksSha256,
         outputs: {
@@ -262,6 +264,9 @@ async function execute(options: {
       }
     }
     if (revocationFailed) result = { status: 'indeterminate' };
+    else if (error instanceof ProjectTemplateCompanionLockTargetDriftError) {
+      result = { status: 'not_started', code: 'TARGET_DRIFT' };
+    }
     else if (
       error instanceof ProjectTemplateCompanionLockRollbackError
       || error instanceof ProjectTemplateCompanionLockRecoveryError

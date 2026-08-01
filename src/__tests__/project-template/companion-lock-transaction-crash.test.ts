@@ -89,9 +89,12 @@ function readCohort(projectRoot: string): Readonly<Record<string, string>> {
   ])));
 }
 
-async function contentPrecondition(projectRoot: string): Promise<string> {
+async function contentPrecondition(
+  projectRoot: string,
+  candidatePaths: readonly string[] = ['workflows/review.yaml'],
+): Promise<string> {
   return calculateProjectTemplateTargetPreconditionToken(
-    await captureProjectTemplateTargetSnapshot(projectRoot, ['workflows/review.yaml']),
+    await captureProjectTemplateTargetSnapshot(projectRoot, candidatePaths),
   );
 }
 
@@ -253,7 +256,8 @@ describe('project template companion lock transaction crash recovery', () => {
         storage,
         lease,
         transactionPlanId: 'a'.repeat(64),
-        preconditionToken: 'b'.repeat(64),
+        preconditionToken: await contentPrecondition(projectRoot, []),
+        candidatePaths: [],
         expectedPreviousLocksSha256,
         outputs: {
           contentLock: cohort('new')[CONTENT_LOCK_PATH]!,
@@ -301,7 +305,8 @@ describe('project template companion lock transaction crash recovery', () => {
         storage,
         lease,
         transactionPlanId: 'a'.repeat(64),
-        preconditionToken: 'b'.repeat(64),
+        preconditionToken: await contentPrecondition(projectRoot, []),
+        candidatePaths: [],
         outputs: {
           mergeBaselines: [{ sha256: BASELINE_SHA256, content: BASELINE }],
           contentLock: newCohort[CONTENT_LOCK_PATH]!,
@@ -344,7 +349,8 @@ describe('project template companion lock transaction crash recovery', () => {
           storage,
           lease,
           transactionPlanId: 'a'.repeat(64),
-          preconditionToken: 'b'.repeat(64),
+          preconditionToken: await contentPrecondition(projectRoot),
+          candidatePaths: ['workflows/review.yaml'],
           outputs: {
             mergeBaselines: [{ sha256: BASELINE_SHA256, content: BASELINE }],
             contentEntries: [{
@@ -412,11 +418,13 @@ describe('project template companion lock transaction crash recovery', () => {
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
     const lease = acquireProjectTemplateApplyLease(projectRoot);
     let approvalConsumes = 0;
+    const preconditionToken = await contentPrecondition(projectRoot);
     const execute = () => executeOwnedProjectTemplateCompanionLockTransaction({
       storage,
       lease,
       transactionPlanId: 'a'.repeat(64),
-      preconditionToken: 'b'.repeat(64),
+      preconditionToken,
+      candidatePaths: ['workflows/review.yaml'],
       outputs: {
         mergeBaselines: [{ sha256: BASELINE_SHA256, content: BASELINE }],
         contentEntries: [{
@@ -480,7 +488,8 @@ describe('project template companion lock transaction crash recovery', () => {
         storage,
         lease,
         transactionPlanId: 'a'.repeat(64),
-        preconditionToken: 'b'.repeat(64),
+        preconditionToken: await contentPrecondition(projectRoot),
+        candidatePaths: ['workflows/review.yaml'],
         outputs: {
           contentEntries: [{
             path: 'workflows/review.yaml',

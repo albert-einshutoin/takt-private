@@ -55,6 +55,7 @@ export interface DeriveLocalProjectTemplateTransactionOptions {
 
 export interface DerivedLocalProjectTemplateTransaction {
   readonly preview: ProjectTemplateLocalApplyPreview;
+  readonly candidatePaths: readonly string[];
   readonly mergeBaselines: readonly {
     readonly sha256: string;
     readonly content: Uint8Array;
@@ -272,6 +273,7 @@ export async function deriveLocalProjectTemplateTransaction(
   }
   return Object.freeze({
     preview,
+    candidatePaths: Object.freeze(contentPlan.entries.map((entry) => entry.path)),
     mergeBaselines: Object.freeze(mergeBaselines),
     contentEntries: Object.freeze(contentEntries),
     companionOutputs: Object.freeze({
