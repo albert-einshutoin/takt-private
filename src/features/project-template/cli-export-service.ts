@@ -232,6 +232,13 @@ export async function executeProjectTemplateCliExport(
       return failure(mode, initialGuard.applyError);
     }
     const planned = await createPlannedExport(input, projectRoot, testSeam);
+    const reviewSummary = initialGuard.readiness === 'ready'
+      && planned.output.projection.target.state === 'regular-file'
+      ? {
+        readiness: 'review-required' as const,
+        reviewCodes: ['REVIEW_REQUIRED'] as const,
+      }
+      : initialGuard;
     const baseResult = {
       planId: planned.planId,
       entryCount: planned.plan.manifest.entries.length,
@@ -239,8 +246,8 @@ export async function executeProjectTemplateCliExport(
       // Export does not resolve repertoire dependencies; dependency planning
       // belongs to inspect/diff and therefore remains explicitly empty here.
       dependencyCount: 0,
-      readiness: initialGuard.readiness,
-      reviewCodes: initialGuard.reviewCodes,
+      readiness: reviewSummary.readiness,
+      reviewCodes: reviewSummary.reviewCodes,
     };
     if (mode === 'dry-run') {
       testSeam.onPhase?.('before-dry-run-success');
@@ -265,7 +272,9 @@ export async function executeProjectTemplateCliExport(
     const finalGuard = guardSummary(projectRoot);
     if (finalGuard.applyError !== undefined) return failure(mode, finalGuard.applyError);
     if (!input.mutation.force && planned.output.projection.target.state !== 'absent') {
-      return failure(mode, 'TARGET_DRIFT');
+      // Why: the exact plan already binds this regular output. Missing force is
+      // an approval decision, not evidence that the target changed after review.
+      return failure(mode, 'APPROVAL_REQUIRED');
     }
     input.signal?.throwIfAborted();
     const finalOutput = await captureTaktpackOutputPrecondition(input.outputPath, {

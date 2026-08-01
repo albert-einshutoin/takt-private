@@ -211,8 +211,36 @@ describe('project template CLI export service', () => {
     const fixture = makeFixture();
     writeFileSync(fixture.outputPath, 'existing archive');
     const preview = await dryRun(fixture.root, fixture.outputPath);
-    expect(preview.envelope.status).toBe('success');
+    expect(preview).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        status: 'success',
+        result: {
+          readiness: 'review-required',
+          reviewCodes: ['REVIEW_REQUIRED'],
+        },
+      },
+    });
     if (preview.envelope.status !== 'success') return;
+
+    const approvalRequired = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply',
+        force: false,
+        expectedPlanId: preview.envelope.result.planId,
+      },
+    });
+    expect(approvalRequired).toMatchObject({
+      exitCode: 21,
+      envelope: {
+        status: 'error',
+        error: { code: 'APPROVAL_REQUIRED' },
+      },
+    });
+    expect(readFileSync(fixture.outputPath, 'utf8')).toBe('existing archive');
 
     const outcome = await executeProjectTemplateCliExport({
       projectRoot: fixture.root,
