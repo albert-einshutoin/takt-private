@@ -36,6 +36,7 @@ export interface ProjectTemplateSourceProvenanceV1 {
     readonly canonicalSource: string;
     readonly requestedRef: string;
     readonly releaseTag: string;
+    readonly assetName?: string;
     readonly commit: string;
     readonly descriptorSha256: string;
   };
@@ -62,6 +63,14 @@ function validationError(
 function exactRecord(
   value: unknown,
   keys: readonly string[],
+  field: string,
+): Record<string, unknown> {
+  return exactRecordVariant(value, [keys], field);
+}
+
+function exactRecordVariant(
+  value: unknown,
+  keyVariants: readonly (readonly string[])[],
   field: string,
 ): Record<string, unknown> {
   if (
@@ -91,7 +100,13 @@ function exactRecord(
     Reflect,
     [descriptors],
   ) as PropertyKey[];
-  if (ownKeys.length !== keys.length) {
+  const keys = keyVariants.find((candidate) => (
+    ownKeys.length === candidate.length
+    && ownKeys.every((key) => (
+      typeof key === 'string' && candidate.includes(key)
+    ))
+  ));
+  if (keys === undefined) {
     validationError('UNKNOWN_KEY', `${field} contains unknown or missing fields`, field);
   }
   const snapshot: Record<string, unknown> = Object.create(null);
@@ -150,17 +165,21 @@ export function parseProjectTemplateSourceProvenance(
     );
   }
 
-  const rawSource = exactRecord(
+  const sourceKeys = [
+    'owner',
+    'repo',
+    'repositoryUrl',
+    'canonicalSource',
+    'requestedRef',
+    'releaseTag',
+    'commit',
+    'descriptorSha256',
+  ] as const;
+  const rawSource = exactRecordVariant(
     root['source'],
     [
-      'owner',
-      'repo',
-      'repositoryUrl',
-      'canonicalSource',
-      'requestedRef',
-      'releaseTag',
-      'commit',
-      'descriptorSha256',
+      sourceKeys,
+      [...sourceKeys, 'assetName'],
     ],
     'sourceProvenance.source',
   );
@@ -193,11 +212,18 @@ export function parseProjectTemplateSourceProvenance(
     );
   }
   if (
-    parsedSource.kind !== 'github-ref'
-    || parsedSource.owner !== owner
+    parsedSource.owner !== owner
     || parsedSource.repo !== repo
     || parsedSource.repositoryUrl !== repositoryUrl
     || parsedSource.ref !== requestedRef
+    || (
+      parsedSource.kind === 'github-ref'
+        ? rawSource['assetName'] !== undefined
+        : (
+          parsedSource.ref !== releaseTag
+          || rawSource['assetName'] !== parsedSource.assetName
+        )
+    )
   ) {
     validationError(
       'INVALID_SOURCE',
@@ -268,6 +294,9 @@ export function parseProjectTemplateSourceProvenance(
     canonicalSource,
     requestedRef,
     releaseTag,
+    ...(parsedSource.kind === 'github-release-asset'
+      ? { assetName: parsedSource.assetName }
+      : {}),
     commit,
     descriptorSha256: sha256(
       rawSource['descriptorSha256'],

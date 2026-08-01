@@ -50,6 +50,7 @@ import {
   requireActiveRemotePreview,
   type ProjectTemplateRemotePreviewOperationContext,
 } from './remote-preview-operation.js';
+import { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
 
 export {
   GithubProjectTemplateRemotePreviewError,
@@ -337,6 +338,11 @@ export async function createGithubProjectTemplateRemotePreview(
       canonicalSource: receipt.payload.source.canonicalSource,
       requestedRef: receipt.payload.source.requestedRef,
       releaseTag: receipt.payload.source.releaseTag,
+      ...(parseProjectTemplateGithubSourceSpec(
+        receipt.payload.source.canonicalSource,
+      ).kind === 'github-release-asset'
+        ? { assetName: receipt.payload.release.assetName }
+        : {}),
       commit: receipt.payload.source.commit,
       descriptorSha256: receipt.payload.source.descriptorSha256,
     }),
