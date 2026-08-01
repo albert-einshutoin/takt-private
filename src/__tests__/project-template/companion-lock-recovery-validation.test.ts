@@ -209,6 +209,44 @@ describe('companion lock cross-file recovery validation', () => {
 });
 
 describe('companion lock rollback current-state guard', () => {
+  it.each([0, 4])(
+    'validates every backup blob before restoring when blob %i is corrupt',
+    async (corruptIndex) => {
+      const entries: readonly EntrySpec[] = [
+        { target: { kind: 'template-entry', path: 'workflows/a.yaml' }, action: 'update', before: 'old-0', after: 'new-0', current: 'after' },
+        { target: { kind: 'template-entry', path: 'workflows/b.yaml' }, action: 'update', before: 'old-1', after: 'new-1', current: 'after' },
+        { target: { kind: 'content-lock' }, action: 'update', before: 'old-2', after: 'new-2', current: 'after' },
+        { target: { kind: 'repertoire-lock' }, action: 'update', before: 'old-3', after: 'new-3', current: 'after' },
+        { target: { kind: 'source-provenance' }, action: 'update', before: 'old-4', after: 'new-4', current: 'after' },
+      ];
+      const value = await recoveryFixture({
+        completedOperations: [
+          'entry:workflows/a.yaml', 'entry:workflows/b.yaml',
+          'content-lock', 'repertoire-lock', 'source-provenance',
+        ],
+        entries,
+      });
+      const before = value.snapshot();
+      const corrupt = value.manifest.entries[corruptIndex]!.before;
+      if (corrupt.kind !== 'file') throw new Error('fixture requires backup file');
+      const blobPath = join(value.storage.backupsRoot, BACKUP, corrupt.blobRelativePath);
+      const originalBlob = readFileSync(blobPath);
+      writeFileSync(blobPath, 'corrupt', { mode: 0o600 });
+
+      const failure = await recoverProjectTemplateCompanionLockTransaction({
+        projectRoot: value.projectRoot,
+      }).catch((error: unknown) => error);
+      expect(value.snapshot().targets).toEqual(before.targets);
+      expect(failure).toMatchObject({ code: 'RECOVERY_BLOCKED' });
+
+      writeFileSync(blobPath, originalBlob, { mode: 0o600 });
+      await expect(recoverProjectTemplateCompanionLockTransaction({
+        projectRoot: value.projectRoot,
+      })).resolves.toEqual({ status: 'rolled-back' });
+      expect(value.snapshot().targets).toEqual(entries.map((entry) => Buffer.from(entry.before!)));
+    },
+  );
+
   it.each([
     ['add', undefined, 'new', 'intruder'],
     ['update', 'old', 'new', 'intruder'],
