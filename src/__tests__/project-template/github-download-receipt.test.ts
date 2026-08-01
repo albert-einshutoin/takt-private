@@ -33,6 +33,7 @@ import { parseProjectTemplateGithubSourceSpec } from '../../features/project-tem
 import {
   claimResolvedGithubTemplateSourceForDownload,
   resolveGithubTemplateSource,
+  resolveGithubTemplateSourceForAuthenticatedDownload,
   type GithubTemplateSourceMetadataPort,
 } from '../../features/project-template/github-update-check.js';
 import {
@@ -40,9 +41,6 @@ import {
   serializeProjectTemplateSourceDescriptor,
   type ProjectTemplateSourceDescriptorV1,
 } from '../../features/project-template/source-descriptor.js';
-import {
-  verifyImmutableGithubDependencySources,
-} from '../../features/repertoire/github-ref-resolver.js';
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const ASSET_NAME = 'template.taktpack';
@@ -183,18 +181,13 @@ async function createFixture(options: FixtureOptions = {}) {
       return new TextEncoder().encode(checksum);
     },
   };
-  const resolved = await resolveGithubTemplateSource({
+  const resolved = await resolveGithubTemplateSourceForAuthenticatedDownload({
     source: parseProjectTemplateGithubSourceSpec(
       options.directSource
         ? `https://github.com/acme/template/releases/download/v1.2.3/${ASSET_NAME}`
         : 'github:acme/template@main',
     ),
     metadata,
-    verifyDependencies: (dependencies) =>
-      verifyImmutableGithubDependencySources({
-        dependencies,
-        resolver: metadata,
-      }),
   });
   const controlRoot = join(projectRoot, '.takt-template-state');
   mkdirSync(controlRoot, { mode: 0o700 });

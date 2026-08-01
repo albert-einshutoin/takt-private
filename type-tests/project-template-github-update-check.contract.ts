@@ -8,10 +8,34 @@ import {
   type ClaimedResolvedGithubTemplateSource,
   type ClaimedResolvedGithubTemplateSourceForDownload,
   type GithubTemplateSourceAdvisory,
+  type GithubTemplateSourceMetadataPort,
+  resolveGithubTemplateSource,
   type ResolvedGithubTemplateSource,
 } from '../src/features/project-template/github-update-check.js';
+import type {
+  ProjectTemplateGithubSourceSpec,
+} from '../src/features/project-template/github-source-spec.js';
 
 declare const resolved: ResolvedGithubTemplateSource;
+declare const source: ProjectTemplateGithubSourceSpec;
+declare const metadata: GithubTemplateSourceMetadataPort;
+
+void resolveGithubTemplateSource({
+  source,
+  metadata,
+  // @ts-expect-error Public resolution cannot opt into download verification.
+  verifyDependencySources: true,
+});
+void resolveGithubTemplateSource({
+  source,
+  metadata,
+  // @ts-expect-error Public resolution cannot inject structural evidence.
+  verifyDependencies: async () => ({
+    method: 'github-ref-to-commit-v1' as const,
+    declarationSha256: 'a'.repeat(64),
+    count: 0,
+  }),
+});
 
 const advisory: GithubTemplateSourceAdvisory =
   demoteResolvedGithubTemplateSourceToAdvisory(resolved);

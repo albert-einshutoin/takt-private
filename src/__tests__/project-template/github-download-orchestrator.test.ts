@@ -33,6 +33,7 @@ import {
   demoteResolvedGithubTemplateSourceToAdvisory,
   discardResolvedGithubTemplateSource,
   resolveGithubTemplateSource,
+  resolveGithubTemplateSourceForAuthenticatedDownload,
   type GithubTemplateSourceAdvisory,
   type GithubTemplateSourceMetadataPort,
   type ResolvedGithubTemplateSource,
@@ -41,9 +42,6 @@ import type {
   GithubTemplateSourceResolutionInput,
   GithubTemplateSourceResolverPort,
 } from '../../features/project-template/github-source-resolver-port.js';
-import {
-  verifyImmutableGithubDependencySources,
-} from '../../features/repertoire/github-ref-resolver.js';
 import {
   serializeProjectTemplateSourceDescriptor,
   type ProjectTemplateSourceDescriptorV1,
@@ -152,16 +150,6 @@ async function makeFixture() {
   calls.length = 0;
   const resolverInputs: GithubTemplateSourceResolutionInput[] = [];
   const resolverMethods: string[] = [];
-  const verifyDependencies = (
-    dependencies: ProjectTemplateSourceDescriptorV1[
-      'repertoireDependencies'
-    ],
-    signal?: AbortSignal,
-  ) => verifyImmutableGithubDependencySources({
-    dependencies,
-    resolver: metadata,
-    ...(signal === undefined ? {} : { signal }),
-  });
   const resolver: GithubTemplateSourceResolverPort = {
     async resolveAdvisory(input) {
       resolverMethods.push('resolveAdvisory');
@@ -177,12 +165,10 @@ async function makeFixture() {
     async resolveForDownload(input) {
       resolverMethods.push('resolveForDownload');
       resolverInputs.push(input);
-      return resolveGithubTemplateSource({
+      return resolveGithubTemplateSourceForAuthenticatedDownload({
         source: parseProjectTemplateGithubSourceSpec(input.source),
         metadata,
         ...(input.current === undefined ? {} : { current: input.current }),
-        verifyDependencies: (dependencies) =>
-          verifyDependencies(dependencies, input.signal),
       });
     },
   };
@@ -240,7 +226,6 @@ async function makeFixture() {
     },
     source: 'github:acme/template@main',
     verifier,
-    verifyDependencies,
   };
 }
 
@@ -264,12 +249,10 @@ describe('GitHub template download orchestrator O1', () => {
       },
       async resolveForDownload(input) {
         inputs.push(input);
-        return resolveGithubTemplateSource({
+        return resolveGithubTemplateSourceForAuthenticatedDownload({
           source: parseProjectTemplateGithubSourceSpec(input.source),
           metadata: fixture.metadata,
           ...(input.current === undefined ? {} : { current: input.current }),
-          verifyDependencies: (dependencies) =>
-            fixture.verifyDependencies(dependencies, input.signal),
         });
       },
     };
@@ -813,11 +796,9 @@ describe('GitHub template download orchestrator O1', () => {
         resolveAdvisory: fixture.resolver.resolveAdvisory,
         async resolveForDownload(input) {
           if (boundary === 'ineligible') {
-            fresh = await resolveGithubTemplateSource({
+            fresh = await resolveGithubTemplateSourceForAuthenticatedDownload({
               source: parseProjectTemplateGithubSourceSpec(input.source),
               metadata: fixture.metadata,
-              verifyDependencies: (dependencies) =>
-                fixture.verifyDependencies(dependencies, input.signal),
               current: {
                 owner: fixture.advisory.source.owner,
                 repo: fixture.advisory.source.repo,

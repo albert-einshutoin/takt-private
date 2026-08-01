@@ -73,6 +73,8 @@ describe('public API exports', () => {
     expect('loadWorktreeSessions' in api).toBe(false);
     expect('updateWorktreeSession' in api).toBe(false);
     expect('listWorkflowEntries' in api).toBe(false);
+    expect('resolveGithubTemplateSourceForAuthenticatedDownload' in api)
+      .toBe(false);
     expect('WorkflowDirEntry' in api).toBe(false);
   });
 });

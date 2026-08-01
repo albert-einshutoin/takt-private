@@ -71,6 +71,9 @@ describe('package exports contract', () => {
       ),
       'utf8',
     );
+    expect(declarationEntry).not.toContain(
+      'resolveGithubTemplateSourceForAuthenticatedDownload',
+    );
 
     const result = runSelfReferenceImport(`
       const api = await import('takt');

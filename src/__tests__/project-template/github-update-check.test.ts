@@ -10,6 +10,7 @@ import {
   GithubTemplateSourceResolutionError,
   handoffResolvedGithubTemplateSourceDownloadClaimForReceipt,
   resolveGithubTemplateSource,
+  resolveGithubTemplateSourceForAuthenticatedDownload,
   type GithubTemplateSourceMetadataPort,
 } from '../../features/project-template/github-update-check.js';
 import {
@@ -76,7 +77,13 @@ function createPort(overrides: Partial<GithubTemplateSourceMetadataPort> = {}): 
   const base: GithubTemplateSourceMetadataPort = {
     async resolveRefToCommit(input) {
       calls.push({ method: 'resolveRefToCommit', input });
-      return { commit: COMMIT };
+      return {
+        commit: input.owner === 'acme' && input.repo === 'dependency'
+          ? (descriptor().repertoireDependencies as Array<{
+            commit: string;
+          }>)[0]!.commit
+          : COMMIT,
+      };
     },
     async readFileAtCommit(input) {
       calls.push({ method: 'readFileAtCommit', input });
@@ -121,6 +128,33 @@ describe('resolveGithubTemplateSource', () => {
     } as never)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect(forged).not.toHaveBeenCalled();
     expect(fixture.calls).toEqual([]);
+  });
+
+  it('never promotes a public nonzero resolution or its structural evidence clone to download authority', async () => {
+    const fixture = createPort();
+    const resolved = await resolveGithubTemplateSource({
+      source: parseProjectTemplateGithubSourceSpec(
+        'github:acme/template@main',
+      ),
+      metadata: fixture.port,
+    });
+    const forged = Object.freeze({
+      ...resolved,
+      dependencyVerification: Object.freeze({
+        method: 'github-ref-to-commit-v1' as const,
+        declarationSha256:
+          calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+            resolved.declaredDependencies,
+          ),
+        count: resolved.declaredDependencies.length,
+      }),
+    });
+
+    expect(resolved).not.toHaveProperty('dependencyVerification');
+    expect(() => claimResolvedGithubTemplateSourceForDownload(resolved))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    expect(() => claimResolvedGithubTemplateSourceForDownload(forged))
+      .toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
   });
 
   it('demotes active authority into deeply frozen advisory evidence', async () => {
@@ -1201,21 +1235,11 @@ describe('resolveGithubTemplateSource', () => {
 });
 
 async function resolveDownloadAuthorityFixture() {
-  return resolveGithubTemplateSource({
+  return resolveGithubTemplateSourceForAuthenticatedDownload({
     source: parseProjectTemplateGithubSourceSpec(
       'github:acme/template@main',
     ),
     metadata: createPort().port,
-    async verifyDependencies(dependencies) {
-      return Object.freeze({
-        method: 'github-ref-to-commit-v1' as const,
-        declarationSha256:
-          calculateProjectTemplateRepertoireDependencyDeclarationSha256(
-            dependencies,
-          ),
-        count: dependencies.length,
-      });
-    },
   });
 }
 
