@@ -29,10 +29,14 @@ describe('project-template CLI entrypoint contract', () => {
     expect(isProjectTemplateCliInvocation(['project-template', 'list'])).toBe(true);
     expect(isProjectTemplateCliInvocation(['--cwd', '/repo', 'project-template', 'list']))
       .toBe(true);
+    expect(isProjectTemplateCliInvocation(['--quiet', 'project-template', 'list']))
+      .toBe(true);
     expect(isProjectTemplateCliInvocation(['--task', 'project-template', 'run']))
       .toBe(false);
     expect(isProjectTemplateCliInvocation(['--task=project-template', 'run']))
       .toBe(false);
+    expect(isProjectTemplateCliInvocation(['add', 'project-template'])).toBe(false);
+    expect(isProjectTemplateCliInvocation(['workflow', 'init', 'project-template'])).toBe(false);
   });
 
   it('prints seven-command help without update UI, ANSI, or stderr', () => {
