@@ -181,6 +181,8 @@ export type {
   ProjectTemplateRemoteApplyPreview,
 } from './apply-preview-types.js';
 export type {
+  ProjectTemplateGithubSourceProvenanceV1,
+  ProjectTemplateLocalSourceProvenanceV1,
   ProjectTemplateSourceProvenanceV1,
 } from './source-provenance.js';
 export type {
