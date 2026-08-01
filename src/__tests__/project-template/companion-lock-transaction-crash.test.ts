@@ -15,6 +15,7 @@ import {
   executeOwnedProjectTemplateCompanionLockTransaction,
   ProjectTemplateCompanionLockRecoveryError,
   ProjectTemplateCompanionLockRollbackError,
+  ProjectTemplateCompanionLockTargetDriftError,
   recoverProjectTemplateCompanionLockTransaction,
   type ProjectTemplateCompanionLockTransactionPhase,
 } from '../../features/project-template/companion-lock-transaction.js';
@@ -36,6 +37,10 @@ import {
 import {
   PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
 } from '../../features/project-template/source-provenance.js';
+import {
+  calculateProjectTemplateTargetPreconditionToken,
+  captureProjectTemplateTargetSnapshot,
+} from '../../features/project-template/target-snapshot.js';
 
 const CONTENT_LOCK_PATH = '.takt-template-lock.json';
 const CONTENT_ENTRY_PATH = '.takt/workflows/review.yaml';
@@ -84,6 +89,12 @@ function readCohort(projectRoot: string): Readonly<Record<string, string>> {
   ])));
 }
 
+async function contentPrecondition(projectRoot: string): Promise<string> {
+  return calculateProjectTemplateTargetPreconditionToken(
+    await captureProjectTemplateTargetSnapshot(projectRoot, ['workflows/review.yaml']),
+  );
+}
+
 const CRASH_PHASES = [
   'merge-baseline-0-staged',
   'content-entry-0-staged',
@@ -127,6 +138,106 @@ const CRASH_PHASES = [
 ] as const satisfies readonly ProjectTemplateCompanionLockTransactionPhase[];
 
 describe('project template companion lock transaction crash recovery', () => {
+  it.each(['before-execute', 'after-backup'] as const)(
+    'rejects foreign target drift %s before approval consumption',
+    async (timing) => {
+      const projectRoot = makeRepo();
+      const oldCohort = cohort('old');
+      const newCohort = cohort('new');
+      writeCohort(projectRoot, oldCohort);
+      const preconditionToken = await contentPrecondition(projectRoot);
+      const foreign = 'foreign editor content\n';
+      if (timing === 'before-execute') {
+        writeFileSync(join(projectRoot, CONTENT_ENTRY_PATH), foreign);
+      }
+      const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+      const lease = acquireProjectTemplateApplyLease(projectRoot);
+      let approvalConsumes = 0;
+      try {
+        await expect(executeOwnedProjectTemplateCompanionLockTransaction({
+          storage,
+          lease,
+          transactionPlanId: 'a'.repeat(64),
+          preconditionToken,
+          candidatePaths: ['workflows/review.yaml'],
+          outputs: {
+            contentEntries: [{
+              path: 'workflows/review.yaml',
+              action: 'write',
+              content: newCohort[CONTENT_ENTRY_PATH]!,
+              mode: '0600',
+            }],
+            contentLock: newCohort[CONTENT_LOCK_PATH]!,
+            repertoireLock: newCohort[PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH]!,
+            sourceProvenance: newCohort[PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH]!,
+          },
+          async consumeApproval() {
+            approvalConsumes += 1;
+            return true;
+          },
+          runDoctor() {},
+          onPhase(phase) {
+            if (timing === 'after-backup' && phase === 'source-provenance-backed-up') {
+              writeFileSync(join(projectRoot, CONTENT_ENTRY_PATH), foreign);
+            }
+          },
+        })).rejects.toBeInstanceOf(ProjectTemplateCompanionLockTargetDriftError);
+      } finally {
+        lease.release();
+      }
+      expect(approvalConsumes).toBe(0);
+      expect(readFileSync(join(projectRoot, CONTENT_ENTRY_PATH), 'utf8')).toBe(foreign);
+      expect(readdirSync(storage.backupsRoot)).toEqual([]);
+      expect(existsSync(storage.journalPath)).toBe(false);
+    },
+  );
+
+  it('never overwrites a foreign edit introduced immediately before rename', async () => {
+    const projectRoot = makeRepo();
+    const oldCohort = cohort('old');
+    const newCohort = cohort('new');
+    writeCohort(projectRoot, oldCohort);
+    const preconditionToken = await contentPrecondition(projectRoot);
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const lease = acquireProjectTemplateApplyLease(projectRoot);
+    let approvalConsumes = 0;
+    const foreign = 'foreign editor content\n';
+    try {
+      await expect(executeOwnedProjectTemplateCompanionLockTransaction({
+        storage,
+        lease,
+        transactionPlanId: 'a'.repeat(64),
+        preconditionToken,
+        candidatePaths: ['workflows/review.yaml'],
+        outputs: {
+          contentEntries: [{
+            path: 'workflows/review.yaml',
+            action: 'write',
+            content: newCohort[CONTENT_ENTRY_PATH]!,
+            mode: '0600',
+          }],
+          contentLock: newCohort[CONTENT_LOCK_PATH]!,
+          repertoireLock: newCohort[PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH]!,
+          sourceProvenance: newCohort[PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH]!,
+        },
+        async consumeApproval() {
+          approvalConsumes += 1;
+          return true;
+        },
+        runDoctor() {},
+        onPhase(phase) {
+          if (phase === 'content-entry-0-before-rename') {
+            writeFileSync(join(projectRoot, CONTENT_ENTRY_PATH), foreign);
+          }
+        },
+      })).rejects.toBeInstanceOf(ProjectTemplateCompanionLockRollbackError);
+    } finally {
+      lease.release();
+    }
+    expect(approvalConsumes).toBe(1);
+    expect(readFileSync(join(projectRoot, CONTENT_ENTRY_PATH), 'utf8')).toBe(foreign);
+  });
+
   it('rechecks the exact companion witness before consuming approval', async () => {
     const projectRoot = makeRepo();
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
