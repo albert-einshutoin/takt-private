@@ -57,6 +57,7 @@ function buildTaskFileData(task: TaskRecord, content: string): TaskFileData {
     exceeded_max_steps: task.exceeded_max_steps,
     exceeded_current_iteration: task.exceeded_current_iteration,
     resume_point: task.resume_point,
+    workflow_generation_witness: task.workflow_generation_witness,
     source: task.source,
     pr_number: task.pr_number,
   });

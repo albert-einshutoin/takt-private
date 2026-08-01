@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { Language } from '../../../core/models/index.js';
@@ -6,6 +6,7 @@ import { DEFAULT_LANGUAGE } from '../../../shared/constants.js';
 import { getLanguageResourcesDir } from '../../resources/index.js';
 import { getGlobalConfigPath } from '../paths.js';
 import { invalidateGlobalConfigCache } from './globalConfig.js';
+import { ensureGlobalConfigDirectory } from './globalConfigDirectory.js';
 
 export interface ResetGlobalConfigResult {
   configPath: string;
@@ -50,7 +51,7 @@ function resolveBackupPath(configPath: string, timestamp: string): string {
 export function resetGlobalConfigToTemplate(now = new Date()): ResetGlobalConfigResult {
   const configPath = getGlobalConfigPath();
   const configDir = dirname(configPath);
-  mkdirSync(configDir, { recursive: true });
+  ensureGlobalConfigDirectory(configDir);
 
   const language = detectConfigLanguage(configPath);
   const templatePath = join(getLanguageResourcesDir(language), 'config.yaml');

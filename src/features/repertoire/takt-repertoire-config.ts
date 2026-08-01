@@ -10,7 +10,7 @@
  * - Realpath validation to prevent symlink-based traversal outside root
  */
 
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { Stats, existsSync, lstatSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { isPathInside } from '../../shared/utils/index.js';
@@ -31,6 +31,8 @@ interface PackageContentCheckContext {
 }
 
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+const safeReflectApply = Reflect.apply.bind(Reflect);
+const safeStatsIsDirectoryMethod = Stats.prototype.isDirectory;
 
 /**
  * Parse takt-repertoire.yaml content string into a TaktRepertoireConfig.
@@ -128,7 +130,7 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 
 function isExistingDirectory(path: string): boolean {
   try {
-    return lstatSync(path).isDirectory();
+    return safeReflectApply(safeStatsIsDirectoryMethod, lstatSync(path), []) as boolean;
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {
       return false;

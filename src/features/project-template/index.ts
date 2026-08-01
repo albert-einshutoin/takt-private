@@ -2,6 +2,69 @@ export {
   parseProjectTemplateManifest,
   serializeProjectTemplateManifest,
 } from './manifest.js';
+export { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
+export type {
+  ProjectTemplateGithubRefSourceSpec,
+  ProjectTemplateGithubReleaseAssetSourceSpec,
+  ProjectTemplateGithubSourceSpec,
+} from './github-source-spec.js';
+export {
+  PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
+  MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
+  projectTemplateSourceDescriptorV1JsonSchema,
+  parseProjectTemplateSourceDescriptor,
+  parseProjectTemplateSourceDescriptorJson,
+  serializeProjectTemplateSourceDescriptor,
+  calculateProjectTemplateSourceDescriptorSha256,
+} from './source-descriptor.js';
+export {
+  PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+  MAX_PROJECT_TEMPLATE_SOURCE_PROVENANCE_BYTES,
+  parseProjectTemplateSourceProvenance,
+  parseProjectTemplateSourceProvenanceJson,
+  serializeProjectTemplateSourceProvenance,
+  calculateProjectTemplateSourceProvenanceSha256,
+} from './source-provenance.js';
+export type {
+  ProjectTemplateSourceDescriptorPackV1,
+  ProjectTemplateRepertoireCapabilityV1,
+  ProjectTemplateRepertoireDependencyV1,
+  ProjectTemplateSourceDescriptorV1,
+} from './source-descriptor.js';
+export {
+  demoteResolvedGithubTemplateSourceToAdvisory,
+  discardResolvedGithubTemplateSource,
+  GithubTemplateSourceResolutionError,
+  resolveGithubTemplateSource,
+} from './github-update-check.js';
+export type {
+  GithubTemplateSourceResolutionErrorCode,
+  GithubTemplateResolveRefInput,
+  GithubTemplateReadFileInput,
+  GithubTemplateGetReleaseInput,
+  GithubTemplateReadReleaseAssetInput,
+  GithubTemplateSourceMetadataPort,
+  GithubTemplateSourceAdvisory,
+  GithubTemplateCurrentSourceEvidence,
+  GithubTemplateUpdateState,
+  ResolveGithubTemplateSourceOptions,
+  ResolvedGithubTemplateSource,
+} from './github-update-check.js';
+export type {
+  GithubTemplateSourceResolutionInput,
+  GithubTemplateSourceResolverPort,
+} from './github-source-resolver-port.js';
+export {
+  downloadGithubTemplateSource,
+  GithubTemplateDownloadOrchestratorError,
+} from './github-download-orchestrator.js';
+export type {
+  DownloadGithubTemplateSourceOptions,
+  DownloadedGithubTemplateSource,
+  GithubTemplateArchiveAssetInput,
+  GithubTemplateArchiveAssetPort,
+  GithubTemplateDownloadOrchestratorErrorCode,
+} from './github-download-orchestrator.js';
 export { parseTemplateLock, serializeTemplateLock } from './lock.js';
 export {
   calculateProjectTemplateManifestSha256,
@@ -61,6 +124,31 @@ export {
   prepareProjectTemplateApplyPlan,
 } from './apply-plan.js';
 export {
+  renderProjectTemplateApplyPreviewHuman,
+  renderProjectTemplateApplyPreviewJson,
+} from './apply-preview.js';
+export {
+  createGithubProjectTemplateRemotePreview,
+  GithubProjectTemplateRemotePreviewError,
+} from './remote-preview-facade.js';
+export type {
+  CreateGithubProjectTemplateRemotePreviewOptions,
+  GithubProjectTemplateRemotePreviewErrorCode,
+} from './remote-preview-facade.js';
+export type {
+  ProjectTemplateApplyPreview,
+  ProjectTemplateApplyPreviewBindings,
+  ProjectTemplateApplyPreviewCompositionConflictCode,
+  ProjectTemplateApplyPreviewContentHardConflict,
+  ProjectTemplateRemoteApplyPreview,
+} from './apply-preview-types.js';
+export type {
+  ProjectTemplateSourceProvenanceV1,
+} from './source-provenance.js';
+export type {
+  ProjectTemplateApplyPreviewApprovalEvidence,
+} from './apply-preview-approval.js';
+export {
   inspectProjectTemplateApplyGuard,
 } from './apply-guard.js';
 export type {
@@ -88,6 +176,14 @@ export type {
   ProjectTemplateRecoveryResult,
   ProjectTemplateRollbackResult,
 } from './apply-executor.js';
+export {
+  applyGithubProjectTemplateRemoteTransaction,
+  GithubProjectTemplateRemoteApplyError,
+} from './remote-transaction-apply-facade.js';
+export type {
+  ApplyGithubProjectTemplateRemoteTransactionOptions,
+  GithubProjectTemplateRemoteApplyErrorCode,
+} from './remote-transaction-apply-facade.js';
 export type {
   ProjectTemplateApplyApprovalEvidence,
 } from './apply-approval.js';

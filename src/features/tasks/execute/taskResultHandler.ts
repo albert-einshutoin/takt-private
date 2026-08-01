@@ -33,6 +33,7 @@ interface PersistTaskResultOptions {
 interface PersistTaskErrorOptions {
   emitStatusLog?: boolean;
   responsePrefix?: string;
+  preserveRetryMetadataOnMissingRunMeta?: boolean;
 }
 
 export function buildTaskResult(params: BuildTaskResultParams): TaskResult {
@@ -125,6 +126,9 @@ export function persistExceededTaskResult(
     newMaxSteps: exceeded.newMaxSteps,
     currentIteration: exceeded.currentIteration,
     ...(exceeded.resumePoint ? { resumePoint: exceeded.resumePoint } : {}),
+    ...(exceeded.workflowGenerationWitness
+      ? { workflowGenerationWitness: exceeded.workflowGenerationWitness }
+      : {}),
     ...(context?.worktreePath ? { worktreePath: context.worktreePath } : {}),
     ...(context?.copyWorkspacePath ? { copyWorkspacePath: context.copyWorkspacePath } : {}),
     ...(context?.branch ? { branch: context.branch } : {}),
@@ -152,6 +156,9 @@ export function persistTaskError(
     ...(task.data?.branch ? { branch: task.data.branch } : {}),
     ...(task.worktreePath ? { worktreePath: task.worktreePath } : {}),
     ...(task.copyWorkspacePath ? { copyWorkspacePath: task.copyWorkspacePath } : {}),
+    ...(options?.preserveRetryMetadataOnMissingRunMeta
+      ? { preserveRetryMetadataOnMissingRunMeta: true }
+      : {}),
   });
 
   if (emitStatusLog) {

@@ -17,6 +17,9 @@ export const TAKTPACK_ENTRY_NAMES = [
 
 export const TAKTPACK_BLOB_PREFIX = 'blobs/sha256/';
 
+/** Maximum bytes in one validated template cohort across apply and recovery. */
+export const MAX_PROJECT_TEMPLATE_COHORT_BYTES = 32 * 1024 * 1024;
+
 export interface TaktpackLimits {
   maxEntries: number;
   maxPackJsonBytes: number;
@@ -33,7 +36,7 @@ export const DEFAULT_TAKTPACK_LIMITS: Readonly<TaktpackLimits> = Object.freeze({
   maxManifestJsonBytes: 4 * 1024 * 1024,
   maxExportReportJsonBytes: 1024 * 1024,
   maxBlobBytes: 1024 * 1024,
-  maxTotalBytes: 32 * 1024 * 1024,
+  maxTotalBytes: MAX_PROJECT_TEMPLATE_COHORT_BYTES,
   maxArchiveBytes: 40 * 1024 * 1024,
 });
 
@@ -97,6 +100,7 @@ export interface TaktpackInspectResult {
   lockSeed: TaktpackLockSeedV1;
   report: TaktpackExportReportV1;
   archiveSha256: string;
+  manifestSha256: string;
   compatibility: {
     status: 'unknown' | 'compatible' | 'incompatible';
     compatible?: boolean;
@@ -130,6 +134,9 @@ export interface TaktpackIndexV1 extends TaktpackDescriptorV1 {
 export interface InspectTaktpackOptions {
   currentTaktVersion?: string;
   limits?: Partial<TaktpackLimits>;
+  signal?: AbortSignal;
+  /** Absolute deadline in the monotonic performance time domain. */
+  deadlineMs?: number;
 }
 
 export interface WriteTaktpackOptions {

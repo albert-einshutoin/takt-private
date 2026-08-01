@@ -30,6 +30,7 @@ export interface DirectResumeMetadata {
 }
 
 export interface RunMetaManagerOptions {
+  readonly workflowGenerationWitness?: string;
   readonly traceDiscovery?: WorkflowTraceDiscovery;
   readonly projectTemplateRunStartPermit?: ProjectTemplateRunStartPermit;
   readonly projectTemplateCoordinationRoot?: string;
@@ -37,10 +38,11 @@ export interface RunMetaManagerOptions {
   readonly ownerPid?: number;
 }
 
-type PersistedRunMeta = Omit<RunMeta, 'resumePoint' | 'sourceRunSlug' | 'resumeMode'> & {
+type PersistedRunMeta = Omit<RunMeta, 'resumePoint' | 'sourceRunSlug' | 'resumeMode' | 'workflowGenerationWitness'> & {
   resume_point?: WorkflowResumePoint;
   source_run_slug?: string;
   resume_mode?: DirectResumeMetadata['resumeMode'];
+  workflow_generation_witness?: string;
 };
 
 export class RunMetaManager {
@@ -115,6 +117,9 @@ export class RunMetaManager {
       status: 'running',
       startTime: new Date().toISOString(),
       ...(options?.ownerPid === undefined ? {} : { ownerPid: options.ownerPid }),
+      ...(options?.workflowGenerationWitness
+        ? { workflowGenerationWitness: options.workflowGenerationWitness }
+        : {}),
       ...(directResume ? {
         sourceRunSlug: directResume.sourceRunSlug,
         resumeMode: directResume.resumeMode,
@@ -192,13 +197,22 @@ export class RunMetaManager {
 
   private writeRunMeta(meta: RunMeta): void {
     const updatedAt = new Date().toISOString();
-    const { resumePoint, sourceRunSlug, resumeMode, ...baseMeta } = meta;
+    const {
+      resumePoint,
+      sourceRunSlug,
+      resumeMode,
+      workflowGenerationWitness,
+      ...baseMeta
+    } = meta;
     const serialized: PersistedRunMeta = {
       ...baseMeta,
       updatedAt,
       ...(resumePoint ? { resume_point: resumePoint } : {}),
       ...(sourceRunSlug ? { source_run_slug: sourceRunSlug } : {}),
       ...(resumeMode ? { resume_mode: resumeMode } : {}),
+      ...(workflowGenerationWitness
+        ? { workflow_generation_witness: workflowGenerationWitness }
+        : {}),
     };
     this.runMeta.updatedAt = updatedAt;
     const content = JSON.stringify(serialized, null, 2);

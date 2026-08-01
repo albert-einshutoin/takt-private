@@ -18,6 +18,10 @@ import type { DirectResumeMetadata } from './runMeta.js';
 import type { TaskAttachment } from '../attachments.js';
 import type { TraceTaskContext } from './traceTaskMetadata.js';
 import type { ProjectTemplateRunStartPermit } from '../../project-template/apply-lease.js';
+import type {
+  WorkflowGenerationSnapshot,
+  WorkflowRetrySource,
+} from './workflowRetryGeneration.js';
 
 /** Info captured when iteration limit is hit in non-interactive mode */
 export interface ExceededInfo {
@@ -25,6 +29,7 @@ export interface ExceededInfo {
   newMaxSteps: number;
   currentIteration: number;
   resumePoint?: WorkflowResumePoint;
+  workflowGenerationWitness?: string;
 }
 
 /** Result of workflow execution */
@@ -86,6 +91,13 @@ export interface WorkflowExecutionOptions {
   retryNote?: string;
   /** Resume point for workflow_call-aware retries */
   resumePoint?: WorkflowResumePoint;
+  /** Generation loaded under the runtime repertoire snapshot. */
+  workflowGenerationWitness?: string;
+  /**
+   * Borrowed callable tree pinned at run start. The task boundary owns and
+   * disposes it after executor settlement; engines must never retain it.
+   */
+  workflowGenerationSnapshot?: WorkflowGenerationSnapshot;
   /** Source direct run metadata for resumed direct executions */
   directResume?: DirectResumeMetadata;
   /** Override report directory name (e.g. "20260201-015714-foptng") */
@@ -153,6 +165,8 @@ export interface ExecuteTaskOptions {
   retryNote?: string;
   /** Resume point for workflow_call-aware retries */
   resumePoint?: WorkflowResumePoint;
+  /** Raw retry metadata plus the generation that produced it. */
+  retrySource?: WorkflowRetrySource;
   /** Source direct run metadata for resumed direct executions */
   directResume?: DirectResumeMetadata;
   /** Override report directory name (e.g. "20260201-015714-foptng") */

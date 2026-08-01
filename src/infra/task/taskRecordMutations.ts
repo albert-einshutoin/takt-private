@@ -8,17 +8,19 @@ export interface ResolvedTaskRetryMetadata {
   resumePoint?: WorkflowResumePoint;
   currentIteration?: number;
   maxSteps?: number;
+  workflowGenerationWitness?: string;
+  runMetaMissing?: boolean;
   preserveExisting?: boolean;
 }
 
 type TerminalTaskUpdates = Omit<
   Partial<TaskRecord>,
-  'start_step' | 'resume_point' | 'exceeded_current_iteration' | 'exceeded_max_steps'
+  'start_step' | 'resume_point' | 'exceeded_current_iteration' | 'exceeded_max_steps' | 'workflow_generation_witness'
 >;
 
 type ClearedRetryTaskRecord = Omit<
   TaskRecord,
-  'start_step' | 'resume_point' | 'exceeded_current_iteration' | 'exceeded_max_steps'
+  'start_step' | 'resume_point' | 'exceeded_current_iteration' | 'exceeded_max_steps' | 'workflow_generation_witness'
 >;
 
 export function buildClaimedTaskRecord(task: TaskRecord): TaskRecord {
@@ -51,7 +53,14 @@ export function buildTerminalTaskRecord(
     ...updates,
     ...(nextRetryMetadata?.startStep ? { start_step: nextRetryMetadata.startStep } : {}),
     ...(nextRetryMetadata?.resumePoint ? { resume_point: nextRetryMetadata.resumePoint } : {}),
+    ...(nextRetryMetadata?.workflowGenerationWitness
+      ? { workflow_generation_witness: nextRetryMetadata.workflowGenerationWitness }
+      : {}),
     ...exceededMetadata,
+    // A pre-execution rejection can occur after reserving a new slug but
+    // before canonical run metadata exists. Keep generation A continuation
+    // fields and remove the dangling slug instead of silently losing both.
+    ...(retryMetadata?.runMetaMissing ? { run_slug: undefined } : {}),
   };
 }
 
@@ -87,6 +96,9 @@ export function buildRetryTaskRecord(
     // them to a different workflow can start that workflow already over budget.
     exceeded_current_iteration: preservesResumeBudget ? task.exceeded_current_iteration : undefined,
     exceeded_max_steps: preservesResumeBudget ? task.exceeded_max_steps : undefined,
+    workflow_generation_witness: preservesResumeBudget
+      ? task.workflow_generation_witness
+      : undefined,
   };
 }
 
@@ -120,6 +132,7 @@ function clearRetryMetadata(task: TaskRecord): ClearedRetryTaskRecord {
     'resume_point',
     'exceeded_current_iteration',
     'exceeded_max_steps',
+    'workflow_generation_witness',
   ]);
   return Object.fromEntries(
     Object.entries(task).filter(([key]) => !retryMetadataKeys.has(key)),

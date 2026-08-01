@@ -211,6 +211,9 @@ export async function createWorkflowExecutionBootstrap(
       workflowConfig.name,
       options.directResume,
       {
+        ...(options.workflowGenerationWitness
+          ? { workflowGenerationWitness: options.workflowGenerationWitness }
+          : {}),
         ...(traceDiscovery ? { traceDiscovery } : {}),
         ...(projectTemplateRunStartPermit
           ? {

@@ -75,11 +75,15 @@ export type ProjectTemplateApplyGuardBlock =
 
 export type ProjectTemplateProcessProbeResult = 'alive' | 'dead' | 'unknown';
 
-export interface ProjectTemplateApplyLeaseIdentity {
+export interface ProjectTemplateMutationLeaseIdentity {
   lockPath: string;
   token: string;
   pid: number;
 }
+
+/** Compatibility name for the legacy apply-only coordination API. */
+export type ProjectTemplateApplyLeaseIdentity =
+  ProjectTemplateMutationLeaseIdentity;
 
 export interface InspectProjectTemplateApplyGuardOptions {
   repoPath?: string;
@@ -91,8 +95,9 @@ export interface InspectProjectTemplateApplyGuardOptions {
    */
   probeProcess?: (pid: number) => ProjectTemplateProcessProbeResult;
   /**
-   * Apply may re-run the guard after taking the exclusive lease. The lease is
-   * ignored only when both its canonical path and durable token match.
+   * A mutation may re-run the guard after taking the shared exclusive lease.
+   * The lease is ignored only when its canonical path and durable identity
+   * match. The legacy option name remains for API compatibility.
    */
   ownedLease?: ProjectTemplateApplyLeaseIdentity;
 }
@@ -252,11 +257,12 @@ export function resolveProjectTemplateRecoveryRequiredPath(repoPath: string): st
   return join(resolve(repoPath), '.takt-template-state', 'recovery-required.json');
 }
 
-function parseLeaseIdentity(
+export function parseProjectTemplateMutationLeaseIdentity(
   value: unknown,
 ): Pick<ProjectTemplateApplyLeaseIdentity, 'token' | 'pid'> | undefined {
   if (
     !isRecord(value)
+    || Reflect.ownKeys(value).length !== 3
     || value['version'] !== 1
     || typeof value['token'] !== 'string'
     || value['token'].trim().length === 0
@@ -377,7 +383,7 @@ function inspectApplyLease(
       path: lockPath,
     }];
   }
-  const identity = parseLeaseIdentity(read.value);
+  const identity = parseProjectTemplateMutationLeaseIdentity(read.value);
   if (identity === undefined) {
     return [{
       code: 'APPLY_LEASE_UNKNOWN',

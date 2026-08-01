@@ -27,6 +27,7 @@ import {
   beginProjectTemplatePreparation,
   type ProjectTemplatePreparationReservation,
 } from './projectTemplatePreparationReservation.js';
+import { WorkflowDiscoveryReadError } from '../../../infra/config/loaders/workflowDiscoveryError.js';
 
 export type { TaskExecutionOptions, ExecuteTaskOptions };
 
@@ -83,6 +84,7 @@ export async function executeTaskAndCompleteWithResult(
   let preparationReservation: ProjectTemplatePreparationReservation | undefined;
   let preparationPrimaryError: unknown;
   let hasPreparationPrimaryError = false;
+  let hasRunningEvidencePublished = false;
 
   const onExternalAbort = (): void => {
     taskAbortController.abort();
@@ -129,6 +131,7 @@ export async function executeTaskAndCompleteWithResult(
       orderContent,
       maxStepsOverride,
       initialIterationOverride,
+      retrySource,
     } = await resolveTaskExecution(task, cwd, taskAbortSignal);
 
     const executionTask = taskRunner.updateRunningTaskExecution(task.name, {
@@ -156,6 +159,7 @@ export async function executeTaskAndCompleteWithResult(
       taskDisplayLabel: parallelOptions?.taskDisplayLabel,
       maxStepsOverride,
       initialIterationOverride,
+      retrySource,
       currentTaskIssueNumber: issueNumber,
       traceTaskMetadata: buildTraceTaskMetadata({
         task,
@@ -167,6 +171,7 @@ export async function executeTaskAndCompleteWithResult(
         issueNumber,
       }),
       onRunningEvidencePublished: () => {
+        hasRunningEvidencePublished = true;
         preparationReservation!.complete();
       },
     });
@@ -249,7 +254,10 @@ export async function executeTaskAndCompleteWithResult(
     preparationPrimaryError = err;
     hasPreparationPrimaryError = true;
     const completedAt = new Date().toISOString();
-    persistTaskError(taskRunner, taskForPersistence, startedAt, completedAt, err);
+    persistTaskError(taskRunner, taskForPersistence, startedAt, completedAt, err, {
+      preserveRetryMetadataOnMissingRunMeta:
+        err instanceof WorkflowDiscoveryReadError && !hasRunningEvidencePublished,
+    });
     return false;
   } finally {
     if (preparationReservation !== undefined) {

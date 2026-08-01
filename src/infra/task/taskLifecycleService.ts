@@ -173,6 +173,9 @@ export class TaskLifecycleService {
       }
 
       const target = current.tasks[index]!;
+      const retryMetadata = result.preserveRetryMetadataOnMissingRunMeta === true
+        ? { preserveExisting: true, runMetaMissing: true }
+        : this.readTerminalRetryMetadata(target);
       const updated = buildTerminalTaskRecord(target, {
         status: 'failed',
         started_at: result.startedAt,
@@ -182,7 +185,7 @@ export class TaskLifecycleService {
         branch: result.branch ?? target.branch,
         worktree_path: result.worktreePath ?? target.worktree_path,
         copy_workspace_path: result.copyWorkspacePath ?? target.copy_workspace_path,
-      }, this.readTerminalRetryMetadata(target));
+      }, retryMetadata);
       const tasks = [...current.tasks];
       tasks[index] = updated;
       return { tasks };

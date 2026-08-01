@@ -48,3 +48,16 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:e2e:mock
+
+  windows-repertoire-coordination:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Verify production Win32 coordination across processes
+        run: npx vitest run src/__tests__/repertoire/coordination-win32-e2e.test.ts

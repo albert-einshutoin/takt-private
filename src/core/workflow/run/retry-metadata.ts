@@ -6,6 +6,7 @@ export interface ResolvedRetryMetadata {
   resumePoint?: WorkflowResumePoint;
   currentIteration?: number;
   preserveExisting?: boolean;
+  workflowGenerationWitness?: string;
 }
 
 export function resolveRetryMetadataFromRunMeta(runMeta: RunMeta | null): ResolvedRetryMetadata {
@@ -21,6 +22,9 @@ export function resolveRetryMetadataFromRunMeta(runMeta: RunMeta | null): Resolv
     ...(rootStep ? { startStep: rootStep } : {}),
     ...(resumePoint ? { resumePoint } : {}),
     ...(currentIteration !== undefined ? { currentIteration } : {}),
+    ...(runMeta.workflowGenerationWitness
+      ? { workflowGenerationWitness: runMeta.workflowGenerationWitness }
+      : {}),
   };
 }
 

@@ -1,152 +1,128 @@
-/**
- * Tests for atomic package update (overwrite install).
- *
- * Covers:
- * - cleanupResiduals: pre-existing .tmp/ and .bak/ are removed before install
- * - atomicReplace: normal success path (new → .bak → rename)
- * - atomicReplace: validation failure → .tmp/ is removed, existing package preserved
- */
-
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import {
-  cleanupResiduals,
-  atomicReplace,
-  type AtomicReplaceOptions,
-} from '../../features/repertoire/atomic-update.js';
+import { join } from 'node:path';
+import { atomicReplace } from '../../features/repertoire/atomic-update.js';
+import { captureDirectoryTreeProof } from '../../features/repertoire/filesystem-proof.js';
+import { detachToMaintenance } from '../../features/repertoire/maintenance-transaction.js';
 
-// ---------------------------------------------------------------------------
-// cleanupResiduals
-// ---------------------------------------------------------------------------
-
-describe('cleanupResiduals', () => {
-  let tempDir: string;
-
-  beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'takt-atomic-'));
-  });
-
+describe('atomicReplace durable publication', () => {
+  const roots: string[] = [];
   afterEach(() => {
-    rmSync(tempDir, { recursive: true, force: true });
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
 
-  it('should remove pre-existing .tmp directory', () => {
-    // Given: a .tmp directory remains from a previous failed install
-    const packageDir = join(tempDir, 'takt-fullstack');
-    const tmpDir = join(tempDir, 'takt-fullstack.tmp');
-    mkdirSync(packageDir, { recursive: true });
-    mkdirSync(tmpDir, { recursive: true });
-    writeFileSync(join(tmpDir, 'stale.yaml'), 'stale');
+  it('reserves the final path and writes the completion witness last', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-atomic-'));
+    roots.push(root);
+    const packageDir = join(root, 'repertoire', '@owner', 'repo');
 
-    // When: cleanup is performed
-    cleanupResiduals(packageDir);
-
-    // Then: .tmp directory is removed
-    expect(existsSync(tmpDir)).toBe(false);
-  });
-
-  it('should remove pre-existing .bak directory', () => {
-    // Given: a .bak directory remains from a previous failed install
-    const packageDir = join(tempDir, 'takt-fullstack');
-    const bakDir = join(tempDir, 'takt-fullstack.bak');
-    mkdirSync(packageDir, { recursive: true });
-    mkdirSync(bakDir, { recursive: true });
-    writeFileSync(join(bakDir, 'old.yaml'), 'old');
-
-    // When: cleanup is performed
-    cleanupResiduals(packageDir);
-
-    // Then: .bak directory is removed
-    expect(existsSync(bakDir)).toBe(false);
-  });
-
-  it('should succeed even when neither .tmp nor .bak exist', () => {
-    // Given: no residual directories
-    const packageDir = join(tempDir, 'takt-fullstack');
-    mkdirSync(packageDir, { recursive: true });
-
-    // When: cleanup is performed
-    // Then: no error thrown
-    expect(() => cleanupResiduals(packageDir)).not.toThrow();
-  });
-
-  it('should remove both .tmp and .bak when both exist', () => {
-    // Given: both residuals exist
-    const packageDir = join(tempDir, 'takt-fullstack');
-    const tmpDirPath = join(tempDir, 'takt-fullstack.tmp');
-    const bakDir = join(tempDir, 'takt-fullstack.bak');
-    mkdirSync(packageDir, { recursive: true });
-    mkdirSync(tmpDirPath, { recursive: true });
-    mkdirSync(bakDir, { recursive: true });
-
-    // When: cleanup is performed
-    cleanupResiduals(packageDir);
-
-    // Then: both are removed
-    expect(existsSync(tmpDirPath)).toBe(false);
-    expect(existsSync(bakDir)).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// atomicReplace
-// ---------------------------------------------------------------------------
-
-describe('atomicReplace', () => {
-  let tempDir: string;
-
-  beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'takt-atomic-replace-'));
-  });
-
-  afterEach(() => {
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it('should replace existing package and delete .bak on success', async () => {
-    // Given: an existing package directory
-    const packageDir = join(tempDir, 'takt-fullstack');
-    mkdirSync(packageDir, { recursive: true });
-    writeFileSync(join(packageDir, 'old.yaml'), 'old content');
-
-    const options: AtomicReplaceOptions = {
+    await atomicReplace({
+      globalConfigDir: root,
       packageDir,
-      install: async () => {
-        // Simulate successful install into packageDir
-        writeFileSync(join(packageDir, 'new.yaml'), 'new content');
+      install: async (reserved) => {
+        expect(reserved).toBe(packageDir);
+        writeFileSync(join(reserved, 'new.yaml'), 'new');
       },
-    };
+    });
 
-    // When: atomicReplace is executed
-    await atomicReplace(options);
-
-    // Then: new content is in place, .bak is cleaned up
     expect(existsSync(join(packageDir, 'new.yaml'))).toBe(true);
-    expect(existsSync(join(tempDir, 'takt-fullstack.bak'))).toBe(false);
+    expect(existsSync(join(packageDir, '.takt-install-complete'))).toBe(true);
   });
 
-  it('should preserve existing package when install throws (validation failure)', async () => {
-    // Given: an existing package with content
-    const packageDir = join(tempDir, 'takt-fullstack');
+  it('retains the old package and a failed partial without restoring either', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-atomic-'));
+    roots.push(root);
+    const packageDir = join(root, 'repertoire', '@owner', 'repo');
     mkdirSync(packageDir, { recursive: true });
-    writeFileSync(join(packageDir, 'existing.yaml'), 'existing');
+    writeFileSync(join(packageDir, 'old.yaml'), 'old');
 
-    const options: AtomicReplaceOptions = {
+    await expect(atomicReplace({
+      globalConfigDir: root,
       packageDir,
-      install: async () => {
-        // Simulate validation failure
-        throw new Error('Validation failed: empty package');
+      install: async (reserved) => {
+        writeFileSync(join(reserved, 'partial.yaml'), 'partial');
+        throw new Error('private validation detail');
       },
-    };
+    })).rejects.toEqual(expect.objectContaining({
+      code: 'RECOVERY_REQUIRED',
+      message: 'Repertoire package recovery is required',
+    }));
 
-    // When: atomicReplace is executed with a failing install
-    await expect(atomicReplace(options)).rejects.toThrow('Validation failed');
+    expect(existsSync(packageDir)).toBe(false);
+    const transactionsRoot = join(root, '.repertoire-maintenance', 'transactions');
+    const transactions = readdirSync(transactionsRoot);
+    expect(transactions).toHaveLength(2);
+    expect(transactions.some((entry) => existsSync(join(transactionsRoot, entry, 'payload', 'old.yaml')))).toBe(true);
+    expect(transactions.some((entry) => existsSync(join(transactionsRoot, entry, 'partial', 'partial.yaml')))).toBe(true);
+  });
 
-    // Then: existing package is preserved
-    expect(existsSync(join(packageDir, 'existing.yaml'))).toBe(true);
-    // .tmp directory should be cleaned up
-    expect(existsSync(join(tempDir, 'takt-fullstack.tmp'))).toBe(false);
+  it('does not create a completion witness when the installed tree proof fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-atomic-'));
+    roots.push(root);
+    const packageDir = join(root, 'repertoire', '@owner', 'repo');
+    await expect(atomicReplace({
+      globalConfigDir: root,
+      packageDir,
+      install: async (reserved) => {
+        // A FIFO/socket-like unsupported entry is represented by a directory
+        // symlink here and must fail before the witness mutation.
+        const { symlinkSync } = await import('node:fs');
+        symlinkSync(root, join(reserved, 'unstable'));
+      },
+    })).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+    expect(existsSync(join(packageDir, '.takt-install-complete'))).toBe(false);
+  });
+
+  it('allows add after completed maintenance history is copied to a new root', async () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'takt-atomic-portable-a-'));
+    const destinationRoot = mkdtempSync(join(tmpdir(), 'takt-atomic-portable-b-'));
+    roots.push(sourceRoot, destinationRoot);
+    const oldPackage = join(sourceRoot, 'repertoire', '@owner', 'old');
+    mkdirSync(oldPackage, { recursive: true });
+    writeFileSync(join(oldPackage, 'old.yaml'), 'old');
+    detachToMaintenance({
+      globalConfigDir: sourceRoot,
+      sourceDir: oldPackage,
+      containmentRoot: sourceRoot,
+      expected: captureDirectoryTreeProof(oldPackage, sourceRoot),
+      kind: 'payload',
+    });
+    cpSync(
+      join(sourceRoot, '.repertoire-maintenance'),
+      join(destinationRoot, '.repertoire-maintenance'),
+      { recursive: true },
+    );
+    const packageDir = join(destinationRoot, 'repertoire', '@owner', 'new');
+    await expect(atomicReplace({
+      globalConfigDir: destinationRoot,
+      packageDir,
+      install: async (reserved) => writeFileSync(join(reserved, 'new.yaml'), 'new'),
+    })).resolves.not.toThrow();
+    expect(existsSync(join(packageDir, '.takt-install-complete'))).toBe(true);
+  });
+
+  it('preserves MAINTENANCE_REQUIRED across atomic publication', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-atomic-capacity-'));
+    roots.push(root);
+    const oldPackage = join(root, 'repertoire', '@owner', 'old');
+    mkdirSync(oldPackage, { recursive: true });
+    writeFileSync(join(oldPackage, 'old.yaml'), 'old');
+    detachToMaintenance({
+      globalConfigDir: root,
+      sourceDir: oldPackage,
+      containmentRoot: root,
+      expected: captureDirectoryTreeProof(oldPackage, root),
+      kind: 'payload',
+    });
+    await expect(atomicReplace({
+      globalConfigDir: root,
+      packageDir: join(root, 'repertoire', '@owner', 'new'),
+      maintenanceLimits: { transactions: 0 },
+      install: async () => undefined,
+    })).rejects.toMatchObject({
+      code: 'MAINTENANCE_REQUIRED',
+      message: 'Repertoire maintenance cleanup is required',
+    });
   });
 });

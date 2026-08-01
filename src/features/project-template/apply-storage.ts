@@ -14,9 +14,9 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { TextDecoder, TextEncoder } from 'node:util';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import {
-  isProjectTemplateOwnerOnlyMode,
   isProjectTemplatePrivateDirectoryMode,
   isProjectTemplatePrivateFileMode,
   PROJECT_TEMPLATE_CONTROL_DIRECTORY,
@@ -26,7 +26,21 @@ import {
   areProjectTemplateFileStatsEqual,
   readBoundedProjectTemplateFile,
 } from './bounded-file-read.js';
+import {
+  areProjectTemplateDirectorySnapshotsStable,
+} from './filesystem-scan.js';
 import { parsePortablePath } from './validation.js';
+import {
+  PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX,
+  PROJECT_TEMPLATE_TRANSACTION_LIMITS,
+  projectTemplateTransactionTargetByteLimit,
+} from './transaction-limits.js';
+import {
+  PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+} from './repertoire-dependency-lock.js';
+import {
+  PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+} from './source-provenance.js';
 
 export { PROJECT_TEMPLATE_CONTROL_DIRECTORY } from './control-root-contract.js';
 export const DEFAULT_PROJECT_TEMPLATE_BACKUP_GENERATIONS = 5;
@@ -35,9 +49,18 @@ const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_CONTROL_DIRECTORY_ENTRIES = 8_192;
 const MAX_CONTROL_TREE_DEPTH = 16;
-const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_APPROVAL_BYTES = 64 * 1024;
 const CONTROL_GITIGNORE_CONTENT = Buffer.from(PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT);
+const CAPTURED_JSON_PARSE = JSON.parse;
+const CAPTURED_JSON_RECEIVER = JSON;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const APPROVAL_UTF8_DECODER = new TextDecoder('utf-8', {
+  fatal: true,
+  ignoreBOM: true,
+});
+const CAPTURED_TEXT_DECODER_DECODE = TextDecoder.prototype.decode;
+const APPROVAL_UTF8_ENCODER = new TextEncoder();
+const CAPTURED_TEXT_ENCODER_ENCODE = TextEncoder.prototype.encode;
 
 export type ProjectTemplateApplyStorageIoOperation =
   | 'lstat'
@@ -162,6 +185,16 @@ export interface ProjectTemplateApplyStorage {
   io: ProjectTemplateApplyStorageIo;
 }
 
+export type ProjectTemplateReadOnlyStoragePhase =
+  | 'repository-opened'
+  | 'control-opened'
+  | 'baselines-opened'
+  | 'all-closed';
+
+export interface ProjectTemplateReadOnlyStorageIoSeam {
+  onPhase?(phase: ProjectTemplateReadOnlyStoragePhase): void;
+}
+
 function projectTemplateApprovalPath(
   storage: ProjectTemplateApplyStorage,
   approvalId: string,
@@ -198,10 +231,20 @@ export async function writeProjectTemplateApprovalRecord(options: {
   await writePrivateDurableFile({
     storage: options.storage,
     finalPath: approvalPath,
-    content: Buffer.from(`${canonicalizeTaktpackJson(options.record)}\n`),
+    content: projectTemplateApprovalRecordContent(options.record),
     replace: false,
     io: options.storage.io,
   });
+}
+
+function projectTemplateApprovalRecordContent(record: unknown): Uint8Array {
+  // Preserve the established approval-record encoding. The canonical renderer
+  // already terminates its JSON and storage adds the historical trailing LF.
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_TEXT_ENCODER_ENCODE,
+    APPROVAL_UTF8_ENCODER,
+    [`${canonicalizeTaktpackJson(record)}\n`],
+  ) as Uint8Array;
 }
 
 export async function readProjectTemplateApprovalRecord(options: {
@@ -219,13 +262,18 @@ export async function readProjectTemplateApprovalRecord(options: {
     options.storage.device,
     options.storage.platform,
   );
-  return JSON.parse(
-    (await options.storage.io.readPrivateFile(
-      approvalPath,
-      MAX_APPROVAL_BYTES,
-      options.storage.device,
-    ))
-      .toString('utf8'),
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_JSON_PARSE,
+    CAPTURED_JSON_RECEIVER,
+    [CAPTURED_REFLECT_APPLY(
+      CAPTURED_TEXT_DECODER_DECODE,
+      APPROVAL_UTF8_DECODER,
+      [await options.storage.io.readPrivateFile(
+        approvalPath,
+        MAX_APPROVAL_BYTES,
+        options.storage.device,
+      )],
+    )],
   ) as unknown;
 }
 
@@ -266,7 +314,11 @@ export async function consumeProjectTemplateApprovalRecord(options: {
   // and therefore fails closed if the issued record is later restored.
   await options.storage.io.writeExclusive(
     claimPath,
-    Buffer.from(`${canonicalizeTaktpackJson(options.claim)}\n`),
+    CAPTURED_REFLECT_APPLY(
+      CAPTURED_TEXT_ENCODER_ENCODE,
+      APPROVAL_UTF8_ENCODER,
+      [`${canonicalizeTaktpackJson(options.claim)}\n`],
+    ) as Uint8Array,
     PRIVATE_FILE_MODE,
   );
   await options.storage.io.chmod(claimPath, PRIVATE_FILE_MODE);
@@ -276,7 +328,10 @@ export async function consumeProjectTemplateApprovalRecord(options: {
 
 export type ProjectTemplateApplyTarget =
   | { kind: 'template-entry'; path: string }
-  | { kind: 'lock' };
+  | { kind: 'lock' }
+  | { kind: 'content-lock' }
+  | { kind: 'repertoire-lock' }
+  | { kind: 'source-provenance' };
 
 export interface ResolvedProjectTemplateApplyTarget {
   target: ProjectTemplateApplyTarget;
@@ -326,7 +381,7 @@ export interface ProjectTemplateBackupManifestEntry {
 }
 
 export interface ProjectTemplateBackupManifest {
-  schemaVersion: '1.0';
+  schemaVersion: '1.0' | '1.1';
   backupId: string;
   planId: string;
   preconditionToken: string;
@@ -346,7 +401,7 @@ export type ProjectTemplateApplyJournalState =
   | 'restore-failed';
 
 export interface ProjectTemplateApplyJournal {
-  schemaVersion: '1.0';
+  schemaVersion: '1.0' | '1.1';
   transactionId: string;
   planId: string;
   backupId: string;
@@ -788,6 +843,12 @@ export function resolveProjectTemplateApplyTarget(
     );
   }
   if (value.kind === 'lock') {
+    if (!hasExactDataKeys(value, ['kind'])) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_PATH',
+        'project template apply target is invalid',
+      );
+    }
     return {
       target: { kind: 'lock' },
       key: 'lock',
@@ -796,10 +857,52 @@ export function resolveProjectTemplateApplyTarget(
       displayPath: '.takt-template-lock.json',
     };
   }
+  const companion = value.kind === 'content-lock'
+    ? {
+        key: 'content-lock',
+        path: '.takt-template-lock.json',
+      }
+    : value.kind === 'repertoire-lock'
+      ? {
+          key: 'repertoire-lock',
+          path: PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+        }
+      : value.kind === 'source-provenance'
+        ? {
+            key: 'source-provenance',
+            path: PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+          }
+        : undefined;
+  if (companion !== undefined) {
+    if (!hasExactDataKeys(value, ['kind'])) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_PATH',
+        'project template apply target is invalid',
+      );
+    }
+    const target = value.kind === 'content-lock'
+      ? { kind: 'content-lock' as const }
+      : value.kind === 'repertoire-lock'
+        ? { kind: 'repertoire-lock' as const }
+        : { kind: 'source-provenance' as const };
+    return {
+      target,
+      key: companion.key,
+      absolutePath: join(storage.repoRoot, companion.path),
+      stagingRelativePath: `locks/${companion.path}`,
+      displayPath: companion.path,
+    };
+  }
   if (value.kind !== 'template-entry') {
     throw new ProjectTemplateApplyStorageError(
       'UNSAFE_PATH',
       'project template apply target kind is invalid',
+    );
+  }
+  if (!hasExactDataKeys(value, ['kind', 'path'])) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_PATH',
+      'project template apply target is invalid',
     );
   }
   const path = safeRelativePath(value.path);
@@ -810,6 +913,56 @@ export function resolveProjectTemplateApplyTarget(
     stagingRelativePath: `entries/${path}`,
     displayPath: `.takt/${path}`,
   };
+}
+
+function hasExactDataKeys(
+  value: object,
+  expected: readonly string[],
+): boolean {
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  return keys.length === expected.length
+    && keys.every((key) => typeof key === 'string' && expected.includes(key))
+    && Object.values(descriptors).every((descriptor) => 'value' in descriptor);
+}
+
+function validateManifestTarget(
+  value: unknown,
+  schemaVersion: '1.0' | '1.1',
+): ProjectTemplateApplyTarget {
+  if (value === null || typeof value !== 'object') {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST',
+      'backup manifest target is invalid',
+    );
+  }
+  const target = value as Partial<ProjectTemplateApplyTarget>;
+  if (target.kind === 'template-entry') {
+    if (!hasExactDataKeys(value, ['kind', 'path'])) {
+      throw new ProjectTemplateApplyStorageError(
+        'INVALID_MANIFEST',
+        'backup manifest target is invalid',
+      );
+    }
+    return {
+      kind: 'template-entry',
+      path: safeRelativePath((target as { path: string }).path),
+    };
+  }
+  const expectedKinds = schemaVersion === '1.0'
+    ? ['lock'] as const
+    : ['content-lock', 'repertoire-lock', 'source-provenance'] as const;
+  if (
+    typeof target.kind !== 'string'
+    || !expectedKinds.includes(target.kind as never)
+    || !hasExactDataKeys(value, ['kind'])
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST',
+      'backup manifest target is invalid',
+    );
+  }
+  return { kind: target.kind } as ProjectTemplateApplyTarget;
 }
 
 function safeMode(value: string): string {
@@ -880,7 +1033,18 @@ async function ensurePrivateParents(
   relativePath: string,
   io: ProjectTemplateApplyStorageIo,
 ): Promise<void> {
-  const segments = safeRelativePath(relativePath).split('/');
+  // This path is produced only by resolveProjectTemplateApplyTarget after the
+  // caller path is validated. Its internal `entries/` prefix legitimately
+  // makes a maximum-length portable target longer than the public path bound.
+  const segments = relativePath.split('/');
+  if (
+    !['entries', 'lock', 'locks'].includes(segments[0]!)
+    || segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_PATH', 'project template staging path is unsafe',
+    );
+  }
   let current = root;
   for (const segment of segments.slice(0, -1)) {
     current = join(current, segment);
@@ -986,35 +1150,193 @@ export async function initializeProjectTemplateApplyStorage(options: {
   const controlIgnorePath = join(controlRoot, '.gitignore');
   const existingIgnore = await tryLstat(io, controlIgnorePath);
   if (existingIgnore === undefined) {
-    await writePrivateDurableFile({
-      storage,
-      finalPath: controlIgnorePath,
-      content: CONTROL_GITIGNORE_CONTENT,
-      replace: false,
-      io,
-    });
-  } else {
-    if (
-      existingIgnore.isSymbolicLink()
-      || !existingIgnore.isFile()
-      || existingIgnore.nlink !== 1
-      || existingIgnore.dev !== storage.device
-      || !isProjectTemplateOwnerOnlyMode(existingIgnore.mode, platform)
-      || existingIgnore.size !== CONTROL_GITIGNORE_CONTENT.byteLength
-      || !(
-        await io.readFile(
-          controlIgnorePath,
-          CONTROL_GITIGNORE_CONTENT.byteLength,
-        )
-      ).equals(CONTROL_GITIGNORE_CONTENT)
-    ) {
-      throw new ProjectTemplateApplyStorageError(
-        'UNSAFE_CONTROL_ROOT',
-        'project template control ignore file is unsafe',
-      );
+    try {
+      await writePrivateDurableFile({
+        storage,
+        finalPath: controlIgnorePath,
+        content: CONTROL_GITIGNORE_CONTENT,
+        replace: false,
+        io,
+      });
+    } catch (error) {
+      // Another initializer may have durably won the O_EXCL publication race.
+      // Only that exact race is recoverable; every other storage failure keeps
+      // its original fail-closed semantics.
+      if (
+        !(error instanceof ProjectTemplateApplyStorageError)
+        || error.code !== 'ALREADY_EXISTS'
+      ) throw error;
+      await assertControlIgnoreFile(storage, controlIgnorePath, io);
     }
+  } else {
+    await assertControlIgnoreFile(storage, controlIgnorePath, io);
   }
   return storage;
+}
+
+/**
+ * Opens an existing baseline store for preview without creating, syncing,
+ * cleaning, locking, or repairing any control artifact.
+ */
+export async function openProjectTemplateApplyStorageReadOnly(options: {
+  repoPath: string;
+  platform?: NodeJS.Platform;
+  ioSeam?: ProjectTemplateReadOnlyStorageIoSeam;
+}): Promise<ProjectTemplateApplyStorage> {
+  const platform = options.platform ?? process.platform;
+  const io = createProjectTemplateApplyStorageIo({}, platform);
+  const repoRoot = await realpath(resolve(options.repoPath));
+  const controlRoot = join(repoRoot, PROJECT_TEMPLATE_CONTROL_DIRECTORY);
+  const baselinesRoot = join(controlRoot, 'merge-baselines');
+  const paths = [repoRoot, controlRoot, baselinesRoot] as const;
+  const phases = [
+    'repository-opened',
+    'control-opened',
+    'baselines-opened',
+  ] as const;
+  const handles: Awaited<ReturnType<typeof open>>[] = [];
+  const snapshots: Stats[] = [];
+  let primaryError: unknown;
+  let closeFailed = false;
+  try {
+    for (let index = 0; index < paths.length; index += 1) {
+      const path = paths[index]!;
+      const pathBefore = await lstat(path);
+      const resolvedPath = await realpath(path);
+      if (
+        resolvedPath !== path
+        || pathBefore.isSymbolicLink()
+        || !pathBefore.isDirectory()
+        || (
+          index > 0
+          && !isProjectTemplatePrivateDirectoryMode(pathBefore.mode, platform)
+        )
+        || (
+          index > 0
+          && platform !== 'win32'
+          && process.getuid !== undefined
+          && pathBefore.uid !== process.getuid()
+        )
+        || (index > 0 && pathBefore.dev !== snapshots[0]!.dev)
+      ) {
+        throw new ProjectTemplateApplyStorageError(
+          'UNSAFE_CONTROL_ROOT',
+          'project template read-only control directory is unsafe',
+        );
+      }
+      const handle = await open(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY,
+      );
+      handles.push(handle);
+      const opened = await handle.stat();
+      if (!areProjectTemplateDirectorySnapshotsStable(pathBefore, opened)) {
+        throw new ProjectTemplateApplyStorageError(
+          'UNSAFE_CONTROL_ROOT',
+          'project template read-only control directory changed identity',
+        );
+      }
+      snapshots.push(opened);
+      options.ioSeam?.onPhase?.(phases[index]!);
+    }
+    for (let index = 0; index < paths.length; index += 1) {
+      const [openedAfter, pathAfter, resolvedAfter] = await Promise.all([
+        handles[index]!.stat(),
+        lstat(paths[index]!),
+        realpath(paths[index]!),
+      ]);
+      if (
+        resolvedAfter !== paths[index]
+        || !areProjectTemplateDirectorySnapshotsStable(
+          snapshots[index]!,
+          openedAfter,
+        )
+        || !areProjectTemplateDirectorySnapshotsStable(
+          openedAfter,
+          pathAfter,
+        )
+      ) {
+        throw new ProjectTemplateApplyStorageError(
+          'UNSAFE_CONTROL_ROOT',
+          'project template read-only control directory changed identity',
+        );
+      }
+    }
+  } catch (error) {
+    primaryError = error;
+  }
+  for (let index = handles.length - 1; index >= 0; index -= 1) {
+    try {
+      await handles[index]!.close();
+    } catch (error) {
+      closeFailed = true;
+      primaryError ??= error;
+    }
+  }
+  if (!closeFailed) {
+    try {
+      options.ioSeam?.onPhase?.('all-closed');
+    } catch (error) {
+      primaryError ??= error;
+    }
+  }
+  if (primaryError !== undefined) {
+    if (primaryError instanceof ProjectTemplateApplyStorageError) {
+      throw primaryError;
+    }
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template read-only control directory cannot be proven safe',
+    );
+  }
+  const repoStat = snapshots[0]!;
+  const baselinesStat = snapshots[2]!;
+  return {
+    repoRoot,
+    targetRoot: join(repoRoot, '.takt'),
+    lockTargetPath: join(repoRoot, '.takt-template-lock.json'),
+    controlRoot,
+    stagingRoot: join(controlRoot, 'staging'),
+    backupsRoot: join(controlRoot, 'backups'),
+    baselinesRoot,
+    baselinesDevice: baselinesStat.dev,
+    baselinesInode: baselinesStat.ino,
+    journalPath: join(controlRoot, 'journal.json'),
+    lockPath: join(controlRoot, 'apply.lock'),
+    device: repoStat.dev,
+    inode: repoStat.ino,
+    platform,
+    io,
+  };
+}
+
+async function assertControlIgnoreFile(
+  storage: ProjectTemplateApplyStorage,
+  controlIgnorePath: string,
+  io: ProjectTemplateApplyStorageIo,
+): Promise<void> {
+  let content: Buffer;
+  try {
+    // One nofollow FD-bound read verifies regular-file type, nlink, exact 0600
+    // mode, device, size bound, and pre/post path identity. A separate lstat
+    // plus pathname read would reopen a swap window during concurrent init.
+    content = await io.readPrivateFile(
+      controlIgnorePath,
+      CONTROL_GITIGNORE_CONTENT.byteLength,
+      storage.device,
+    );
+  } catch {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template control ignore file is unsafe',
+    );
+  }
+  if (!content.equals(CONTROL_GITIGNORE_CONTENT)) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template control ignore file is unsafe',
+    );
+  }
 }
 
 async function writePrivateDurableFile(options: {
@@ -1280,9 +1602,18 @@ function validateBackupManifest(
   manifest: ProjectTemplateBackupManifest,
 ): ProjectTemplateBackupManifest {
   if (
-    manifest.schemaVersion !== '1.0'
+    (manifest.schemaVersion !== '1.0' && manifest.schemaVersion !== '1.1')
+    || !hasExactDataKeys(manifest, [
+      'schemaVersion',
+      'backupId',
+      'planId',
+      'preconditionToken',
+      'createdAt',
+      'createdTargetDirectories',
+      'entries',
+    ])
     || !Array.isArray(manifest.entries)
-    || manifest.entries.length > MAX_CONTROL_DIRECTORY_ENTRIES
+    || manifest.entries.length > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxOperations
   ) {
     throw new ProjectTemplateApplyStorageError(
       'INVALID_MANIFEST',
@@ -1290,6 +1621,10 @@ function validateBackupManifest(
     );
   }
   const paths = new Set<string>();
+  let beforeTemplateBytes = 0;
+  let afterTemplateBytes = 0;
+  let beforeRecoveryBytes = 0;
+  let afterRecoveryBytes = 0;
   const entries = manifest.entries.map((entry) => {
     if (
       entry === null
@@ -1302,21 +1637,21 @@ function validateBackupManifest(
         'backup manifest entry is invalid',
       );
     }
-    const target = entry.target.kind === 'lock'
-      ? { kind: 'lock' as const }
-      : entry.target.kind === 'template-entry'
-        ? {
-            kind: 'template-entry' as const,
-            path: safeRelativePath(entry.target.path),
-          }
-        : undefined;
-    if (target === undefined) {
+    if (!hasExactDataKeys(entry, [
+      'target', 'action', 'before', 'after',
+    ])) {
       throw new ProjectTemplateApplyStorageError(
         'INVALID_MANIFEST',
-        'backup manifest target is invalid',
+        'backup manifest entry is invalid',
       );
     }
-    const targetKey = target.kind === 'lock' ? 'lock' : `entry:${target.path}`;
+    const target = validateManifestTarget(
+      entry.target,
+      manifest.schemaVersion,
+    );
+    const targetKey = target.kind === 'template-entry'
+      ? `entry:${target.path}`
+      : target.kind;
     if (paths.has(targetKey)) {
       throw new ProjectTemplateApplyStorageError(
         'INVALID_MANIFEST',
@@ -1330,11 +1665,50 @@ function validateBackupManifest(
         'backup manifest action is invalid',
       );
     }
+    const before = validateBackupState(entry.before);
+    const after = validateBackupState(entry.after);
+    const maxBytes = projectTemplateTransactionTargetByteLimit(target.kind);
+    if (
+      (before.kind === 'file' && before.bytes > maxBytes)
+      || (after.kind === 'file' && after.bytes > maxBytes)
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'INVALID_MANIFEST', 'backup entry exceeds its target byte budget',
+      );
+    }
+    const addStateBytes = (
+      state: ProjectTemplateBackupEntryState,
+      template: 'before' | 'after',
+    ): void => {
+      if (state.kind !== 'file') return;
+      if (template === 'before') beforeRecoveryBytes += state.bytes;
+      else afterRecoveryBytes += state.bytes;
+      if (target.kind === 'template-entry') {
+        if (template === 'before') beforeTemplateBytes += state.bytes;
+        else afterTemplateBytes += state.bytes;
+      }
+      if (
+        !Number.isSafeInteger(beforeRecoveryBytes)
+        || !Number.isSafeInteger(afterRecoveryBytes)
+        || !Number.isSafeInteger(beforeTemplateBytes)
+        || !Number.isSafeInteger(afterTemplateBytes)
+        || beforeRecoveryBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRecoveryBytes
+        || afterRecoveryBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRecoveryBytes
+        || beforeTemplateBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes
+        || afterTemplateBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes
+      ) {
+        throw new ProjectTemplateApplyStorageError(
+          'INVALID_MANIFEST', 'backup manifest exceeds its aggregate byte budget',
+        );
+      }
+    };
+    addStateBytes(before, 'before');
+    addStateBytes(after, 'after');
     return {
       target,
       action: entry.action,
-      before: validateBackupState(entry.before),
-      after: validateBackupState(entry.after),
+      before,
+      after,
     };
   });
   const createdTargetDirectories = validateCreatedTargetDirectories(
@@ -1343,7 +1717,7 @@ function validateBackupManifest(
   );
   const allowedCreatedDirectories = new Set<string>();
   for (const entry of entries) {
-    if (entry.target.kind === 'lock') continue;
+    if (entry.target.kind !== 'template-entry') continue;
     allowedCreatedDirectories.add('');
     const parent = dirname(entry.target.path).split('/').filter(
       (segment) => segment !== '.',
@@ -1361,7 +1735,7 @@ function validateBackupManifest(
     );
   }
   return {
-    schemaVersion: '1.0',
+    schemaVersion: manifest.schemaVersion,
     backupId: assertSafeIdentifier(manifest.backupId, 'backupId'),
     planId: assertHash(manifest.planId, 'planId'),
     preconditionToken: assertHash(manifest.preconditionToken, 'preconditionToken'),
@@ -1375,7 +1749,10 @@ function validateCreatedTargetDirectories(
   value: unknown,
   code: 'INVALID_MANIFEST' | 'INVALID_JOURNAL',
 ): string[] {
-  if (!Array.isArray(value) || value.length > MAX_CONTROL_DIRECTORY_ENTRIES) {
+  if (
+    !Array.isArray(value)
+    || value.length > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxCreatedTargetDirectories
+  ) {
     throw new ProjectTemplateApplyStorageError(code, 'created target directories are invalid');
   }
   const seen = new Set<string>();
@@ -1410,6 +1787,12 @@ export async function writeProjectTemplateBackupManifest(options: {
   io?: ProjectTemplateApplyStorageIo;
 }): Promise<string> {
   const manifest = validateBackupManifest(options.manifest);
+  const content = Buffer.from(`${canonicalizeTaktpackJson(manifest)}\n`);
+  if (content.byteLength > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST', 'backup manifest exceeds its serialized byte budget',
+    );
+  }
   const io = options.io ?? options.storage.io;
   const backupRoot = join(options.storage.backupsRoot, manifest.backupId);
   await ensurePrivateDirectory(
@@ -1421,7 +1804,7 @@ export async function writeProjectTemplateBackupManifest(options: {
   return writePrivateDurableFile({
     storage: options.storage,
     finalPath: join(backupRoot, 'manifest.json'),
-    content: Buffer.from(`${canonicalizeTaktpackJson(manifest)}\n`),
+    content,
     replace: false,
     io,
   });
@@ -1447,16 +1830,31 @@ export function parseProjectTemplateApplyJournal(
     'restore-failed',
   ]);
   if (
-    journal.schemaVersion !== '1.0'
+    (journal.schemaVersion !== '1.0' && journal.schemaVersion !== '1.1')
+    || !hasExactDataKeys(value, [
+      'schemaVersion',
+      'transactionId',
+      'planId',
+      'backupId',
+      'state',
+      'completedOperations',
+      'createdTargetDirectories',
+      'updatedAt',
+    ])
     || typeof journal.transactionId !== 'string'
     || typeof journal.planId !== 'string'
     || typeof journal.backupId !== 'string'
     || typeof journal.state !== 'string'
     || !validStates.has(journal.state)
     || !Array.isArray(journal.completedOperations)
-    || journal.completedOperations.length > MAX_CONTROL_DIRECTORY_ENTRIES
+    || journal.completedOperations.length
+      > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxOperations
     || journal.completedOperations.some(
-      (operation) => typeof operation !== 'string' || operation.length > 512,
+      (operation) => (
+        typeof operation !== 'string'
+        || operation.length > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxOperationKeyLength
+        || !isOperationKeyForSchema(operation, journal.schemaVersion!)
+      ),
     )
     || typeof journal.updatedAt !== 'string'
   ) {
@@ -1470,7 +1868,7 @@ export function parseProjectTemplateApplyJournal(
     'INVALID_JOURNAL',
   );
   return {
-    schemaVersion: '1.0',
+    schemaVersion: journal.schemaVersion,
     transactionId: assertSafeIdentifier(journal.transactionId, 'transactionId'),
     planId: assertHash(journal.planId, 'planId'),
     backupId: assertSafeIdentifier(journal.backupId, 'backupId'),
@@ -1481,16 +1879,42 @@ export function parseProjectTemplateApplyJournal(
   };
 }
 
+function isOperationKeyForSchema(
+  value: string,
+  schemaVersion: '1.0' | '1.1',
+): boolean {
+  if (value.startsWith(PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX)) {
+    try {
+      return value === `${PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX}${safeRelativePath(
+        value.slice(PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX.length),
+      )}`;
+    } catch {
+      return false;
+    }
+  }
+  return schemaVersion === '1.0'
+    ? value === 'lock'
+    : value === 'content-lock'
+      || value === 'repertoire-lock'
+      || value === 'source-provenance';
+}
+
 export async function writeProjectTemplateApplyJournal(options: {
   storage: ProjectTemplateApplyStorage;
   journal: ProjectTemplateApplyJournal;
   io?: ProjectTemplateApplyStorageIo;
 }): Promise<string> {
   const journal = parseProjectTemplateApplyJournal(options.journal);
+  const content = Buffer.from(`${canonicalizeTaktpackJson(journal)}\n`);
+  if (content.byteLength > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxJournalBytes) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_JOURNAL', 'apply journal exceeds its serialized byte budget',
+    );
+  }
   return writePrivateDurableFile({
     storage: options.storage,
     finalPath: options.storage.journalPath,
-    content: Buffer.from(`${canonicalizeTaktpackJson(journal)}\n`),
+    content,
     replace: true,
     io: options.io ?? options.storage.io,
   });
@@ -1506,7 +1930,10 @@ export async function readProjectTemplateBackupManifest(options: {
   const manifestPath = join(options.storage.backupsRoot, backupId, 'manifest.json');
   let parsed: unknown;
   try {
-    parsed = JSON.parse((await io.readFile(manifestPath, MAX_MANIFEST_BYTES)).toString('utf8'));
+    parsed = JSON.parse((await io.readFile(
+      manifestPath,
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes,
+    )).toString('utf8'));
   } catch {
     throw new ProjectTemplateApplyStorageError(
       'INVALID_MANIFEST',

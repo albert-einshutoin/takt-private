@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { loadWorkflow } from '../infra/config/loaders/workflowResolver.js';
+import { loadWorkflowByIdentifierWithReadContext } from '../infra/config/loaders/workflowResolver.js';
 import { resolveWorkflowConfigValues } from '../infra/config/index.js';
 import {
   buildSubscriptionCliInvocation,
@@ -18,6 +18,7 @@ import {
   createDefaultDevloopCommandRunner,
   type DevloopCommandRunner,
 } from './commandRunner.js';
+import { snapshotWorkflowRuntimeRead } from '../features/tasks/execute/workflowRuntimeReadBoundary.js';
 
 export type ProviderSmokeStatus = 'pass' | 'fail' | 'skip';
 
@@ -136,11 +137,20 @@ function resolveCommandForSpec(
   return undefined;
 }
 
-function workflowContextFor(repoPath: string, workflow: string | undefined) {
+function workflowContextFor(
+  repoPath: string,
+  workflow: string | undefined,
+  readContext: Parameters<typeof loadWorkflowByIdentifierWithReadContext>[3],
+) {
   if (workflow === undefined || workflow.trim() === '') {
     return undefined;
   }
-  const loaded = loadWorkflow(workflow, repoPath);
+  const loaded = loadWorkflowByIdentifierWithReadContext(
+    workflow,
+    repoPath,
+    { lookupCwd: repoPath },
+    readContext,
+  );
   if (loaded === null) {
     throw new Error(`workflow not found: ${workflow}`);
   }
@@ -159,12 +169,16 @@ function resolveConfiguredProviders(options: {
   if (options.providers !== undefined && options.providers.length > 0) {
     return uniqueProviders(options.providers);
   }
-  const workflowContext = workflowContextFor(options.repoPath, options.workflow);
-  const resolved = resolveWorkflowConfigValues(options.repoPath, ['provider'], { workflowContext });
-  return uniqueProviders([
-    ...(workflowContext?.provider !== undefined ? [workflowContext.provider] : []),
-    ...(resolved.provider !== undefined ? [resolved.provider] : []),
-  ]);
+  return [...snapshotWorkflowRuntimeRead({
+    snapshot: (readContext) => {
+      const workflowContext = workflowContextFor(options.repoPath, options.workflow, readContext);
+      const resolved = resolveWorkflowConfigValues(options.repoPath, ['provider'], { workflowContext });
+      return uniqueProviders([
+        ...(workflowContext?.provider !== undefined ? [workflowContext.provider] : []),
+        ...(resolved.provider !== undefined ? [resolved.provider] : []),
+      ]);
+    },
+  })];
 }
 
 async function runVersionOrHelpProbe(options: {

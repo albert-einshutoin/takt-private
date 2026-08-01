@@ -46,6 +46,10 @@ import {
 const TAR_BLOCK_BYTES = 512;
 const ZERO_BLOCK = Buffer.alloc(TAR_BLOCK_BYTES);
 const BLOB_NAME_PATTERN = /^blobs\/sha256\/([a-f0-9]{64})$/;
+const ABORTED_GETTER = Object.getOwnPropertyDescriptor(
+  AbortSignal.prototype,
+  'aborted',
+)?.get;
 
 interface ParsedHeader {
   name: string;
@@ -58,6 +62,35 @@ interface PackMetadata {
   exportReportSha256: string;
   lockSeed: TaktpackLockSeedV1;
   blobs: TaktpackBlobIndexEntry[];
+}
+
+function requireActiveInspection(
+  signal: AbortSignal | undefined,
+  deadlineMs: number | undefined,
+): void {
+  if (signal !== undefined) {
+    let aborted = true;
+    try {
+      aborted = ABORTED_GETTER === undefined
+        || Reflect.apply(ABORTED_GETTER, signal, []) as boolean;
+    } catch {
+      aborted = true;
+    }
+    if (aborted) {
+      throw new TaktpackError(
+        'OPERATION_ABORTED',
+        'project template remote preview was aborted',
+        'operation',
+      );
+    }
+  }
+  if (deadlineMs !== undefined && performance.now() >= deadlineMs) {
+    throw new TaktpackError(
+      'OPERATION_TIMEOUT',
+      'project template remote preview timed out',
+      'operation',
+    );
+  }
 }
 
 function parseOctal(field: Buffer, name: string): number {
@@ -353,6 +386,21 @@ export interface TaktpackInspectorIoSeam {
   onPhase?(phase: TaktpackInspectorIoPhase): void;
 }
 
+export interface TaktpackMaterializerIoSeam extends TaktpackInspectorIoSeam {
+  /** Test-only observation point immediately before an independent path copy. */
+  onMaterializedPathAllocation?(path: string, bytes: number): void;
+}
+
+export interface MaterializedTaktpackContent {
+  readonly path: string;
+  readonly content: Uint8Array;
+}
+
+export interface MaterializedTaktpackContents {
+  readonly inspection: TaktpackInspectResult;
+  readonly contents: readonly MaterializedTaktpackContent[];
+}
+
 function normalizeInspectorIoError(error: unknown, field: string): Error {
   if (error instanceof TaktpackError) return error;
   return new TaktpackError(
@@ -362,11 +410,26 @@ function normalizeInspectorIoError(error: unknown, field: string): Error {
   );
 }
 
-export async function inspectTaktpackWithIoSeam(
+async function inspectTaktpackWithExpectedLinks(
   archivePath: string,
   options: InspectTaktpackOptions = {},
   ioSeam: TaktpackInspectorIoSeam = {},
+  expectedLinks: 1 | 2 = 1,
+  retainedBlobs?: Map<string, Buffer>,
 ): Promise<TaktpackInspectResult> {
+  const signal = options.signal;
+  const deadlineMs = options.deadlineMs;
+  if (
+    deadlineMs !== undefined
+    && (!Number.isFinite(deadlineMs) || deadlineMs < 0)
+  ) {
+    throw new TaktpackError(
+      'OPERATION_TIMEOUT',
+      'project template remote preview timed out',
+      'operation',
+    );
+  }
+  requireActiveInspection(signal, deadlineMs);
   const currentVersion = options.currentTaktVersion === undefined
     ? undefined
     : requireSemVer(options.currentTaktVersion, 'currentTaktVersion');
@@ -377,8 +440,13 @@ export async function inspectTaktpackWithIoSeam(
   } catch {
     throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input cannot be read safely', 'archive');
   }
-  if (pathSnapshot.isSymbolicLink() || !pathSnapshot.isFile() || pathSnapshot.nlink !== 1) {
-    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input must be a regular single-link file', 'archive');
+  requireActiveInspection(signal, deadlineMs);
+  if (
+    pathSnapshot.isSymbolicLink()
+    || !pathSnapshot.isFile()
+    || pathSnapshot.nlink !== expectedLinks
+  ) {
+    throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input has unsafe link authority', 'archive');
   }
   let handle: Awaited<ReturnType<typeof open>>;
   try {
@@ -403,8 +471,12 @@ export async function inspectTaktpackWithIoSeam(
     operation: () => Promise<Value>,
   ): Promise<Value> => {
     try {
+      requireActiveInspection(signal, deadlineMs);
       ioSeam.onPhase?.(phase);
-      return await operation();
+      requireActiveInspection(signal, deadlineMs);
+      const value = await operation();
+      requireActiveInspection(signal, deadlineMs);
+      return value;
     } catch (error) {
       throw normalizeInspectorIoError(error, field);
     }
@@ -413,7 +485,7 @@ export async function inspectTaktpackWithIoSeam(
     const stat = await runIo('handle-stat', 'archive.stat', () => handle.stat());
     if (
       !stat.isFile()
-      || stat.nlink !== 1
+      || stat.nlink !== expectedLinks
       || stat.dev !== pathSnapshot.dev
       || stat.ino !== pathSnapshot.ino
       || stat.size !== pathSnapshot.size
@@ -559,6 +631,10 @@ export async function inspectTaktpackWithIoSeam(
           }
           detections.push(classification.detectedCapabilities);
         }
+        // Why: preview needs owned bytes but must not add a second tar parser.
+        // Retention happens only after the existing bounded hash, index, order,
+        // padding, and semantic checks for this content-addressed blob.
+        retainedBlobs?.set(hash, Buffer.from(content));
       }
     }
     if (metadata === undefined || manifest === undefined || report === undefined) {
@@ -586,7 +662,8 @@ export async function inspectTaktpackWithIoSeam(
     validateReportAgainstManifest(report, manifest);
     const finalStat = await runIo('final-stat', 'archive.finalStat', () => handle.stat());
     if (
-      finalStat.dev !== stat.dev
+      finalStat.nlink !== expectedLinks
+      || finalStat.dev !== stat.dev
       || finalStat.ino !== stat.ino
       || finalStat.size !== stat.size
       || finalStat.mtimeMs !== stat.mtimeMs
@@ -607,6 +684,7 @@ export async function inspectTaktpackWithIoSeam(
       lockSeed: metadata.lockSeed,
       report,
       archiveSha256: archiveDigest.digest('hex'),
+      manifestSha256: metadata.manifestSha256,
       compatibility: {
         status: compatible === undefined ? 'unknown' : compatible ? 'compatible' : 'incompatible',
         ...(compatible === undefined ? {} : { compatible }),
@@ -642,7 +720,28 @@ export async function inspectTaktpackWithIoSeam(
   if (closeFailure !== undefined) {
     throw normalizeInspectorIoError(closeFailure, 'archive.close');
   }
+  requireActiveInspection(signal, deadlineMs);
   return result!;
+}
+
+export function inspectTaktpackWithIoSeam(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+  ioSeam: TaktpackInspectorIoSeam = {},
+): Promise<TaktpackInspectResult> {
+  return inspectTaktpackWithExpectedLinks(archivePath, options, ioSeam, 1);
+}
+
+/**
+ * Inspects the canonical side of an atomic cache publication while its
+ * temporary hardlink still exists. The ordinary importer remains single-link
+ * only; this narrow entry point exists so cleanup can validate before unlink.
+ */
+export function inspectTaktpackCachePublicationAlias(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+): Promise<TaktpackInspectResult> {
+  return inspectTaktpackWithExpectedLinks(archivePath, options, {}, 2);
 }
 
 export function inspectTaktpack(
@@ -650,4 +749,78 @@ export function inspectTaktpack(
   options: InspectTaktpackOptions = {},
 ): Promise<TaktpackInspectResult> {
   return inspectTaktpackWithIoSeam(archivePath, options);
+}
+
+export async function materializeTaktpackContentsWithIoSeam(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+  ioSeam: TaktpackMaterializerIoSeam = {},
+): Promise<MaterializedTaktpackContents> {
+  // Resolve synchronously so a caller cannot mutate the limit object while the
+  // archive inspection is awaiting filesystem I/O.
+  const limits = resolveTaktpackLimits(options.limits);
+  const retainedBlobs = new Map<string, Buffer>();
+  const inspection = await inspectTaktpackWithExpectedLinks(
+    archivePath,
+    options,
+    ioSeam,
+    1,
+    retainedBlobs,
+  );
+  const retainedFor = (sha256: string): Buffer => {
+    const retained = retainedBlobs.get(sha256);
+    if (retained === undefined) {
+      throw new TaktpackError(
+        'MISSING_ARCHIVE_ENTRY',
+        'manifest content was not retained from the verified archive',
+        'manifest.entries',
+      );
+    }
+    return retained;
+  };
+  let resolvedTotalBytes = 0;
+  for (const entry of inspection.manifest.entries) {
+    requireActiveInspection(options.signal, options.deadlineMs);
+    const retained = retainedFor(entry.sha256);
+    // The archive stores each digest once, but materialization deliberately
+    // creates independent bytes per manifest path. Account for that expanded
+    // size before making any path copy so repeated digest references cannot
+    // turn a bounded archive into an unbounded allocation.
+    if (retained.byteLength > limits.maxTotalBytes - resolvedTotalBytes) {
+      throw new TaktpackError(
+        'ARCHIVE_LIMIT_EXCEEDED',
+        'materialized archive contents exceed the total byte limit',
+        'contents',
+      );
+    }
+    resolvedTotalBytes += retained.byteLength;
+  }
+
+  const contents = inspection.manifest.entries.map(({ path, sha256 }) => {
+    requireActiveInspection(options.signal, options.deadlineMs);
+    const retained = retainedFor(sha256);
+    try {
+      ioSeam.onMaterializedPathAllocation?.(path, retained.byteLength);
+    } catch (error) {
+      throw normalizeInspectorIoError(error, 'contents');
+    }
+    requireActiveInspection(options.signal, options.deadlineMs);
+    return Object.freeze({
+      path,
+      // Each manifest path receives independent bytes. A caller editing its
+      // preview copy cannot alias another path or a later materialization.
+      content: new Uint8Array(retained),
+    });
+  });
+  return Object.freeze({
+    inspection,
+    contents: Object.freeze(contents),
+  });
+}
+
+export function materializeTaktpackContents(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+): Promise<MaterializedTaktpackContents> {
+  return materializeTaktpackContentsWithIoSeam(archivePath, options);
 }

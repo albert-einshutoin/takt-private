@@ -7,6 +7,7 @@ export type ProjectTemplateValidationErrorCode =
   | 'INVALID_LOCK'
   | 'INVALID_SEMVER'
   | 'INVALID_SOURCE'
+  | 'INVALID_SOURCE_DESCRIPTOR'
   | 'MISSING_HASH'
   | 'INVALID_HASH'
   | 'INVALID_PATH'
@@ -22,6 +23,30 @@ export type ProjectTemplateValidationErrorCode =
   | 'LOCK_MISMATCH'
   | 'DETECTED_CAPABILITY_MISMATCH';
 
+const ERROR_OBJECT_RECEIVER = Object;
+const ERROR_OBJECT_CREATE = Object.create;
+const ERROR_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const ERROR_REFLECT_APPLY = Reflect.apply;
+
+function defineErrorName(error: Error, name: string): void {
+  const descriptor = ERROR_REFLECT_APPLY(
+    ERROR_OBJECT_CREATE,
+    ERROR_OBJECT_RECEIVER,
+    [null],
+  ) as PropertyDescriptor;
+  // Why: direct assignment can invoke a post-init setter on the public error
+  // prototype and reenter a validation or authority boundary.
+  descriptor.configurable = true;
+  descriptor.enumerable = true;
+  descriptor.value = name;
+  descriptor.writable = true;
+  ERROR_REFLECT_APPLY(
+    ERROR_OBJECT_DEFINE_PROPERTY,
+    ERROR_OBJECT_RECEIVER,
+    [error, 'name', descriptor],
+  );
+}
+
 export class ProjectTemplateValidationError extends Error {
   constructor(
     public readonly code: ProjectTemplateValidationErrorCode,
@@ -29,7 +54,7 @@ export class ProjectTemplateValidationError extends Error {
     public readonly field?: string,
   ) {
     super(message);
-    this.name = 'ProjectTemplateValidationError';
+    defineErrorName(this, 'ProjectTemplateValidationError');
   }
 }
 
@@ -51,6 +76,8 @@ export type TaktpackErrorCode =
   | 'HASH_MISMATCH'
   | 'ARCHIVE_WRITE_FAILED'
   | 'ARCHIVE_READ_FAILED'
+  | 'OPERATION_ABORTED'
+  | 'OPERATION_TIMEOUT'
   | 'DURABILITY_FAILED'
   | 'CLEANUP_FAILED';
 
@@ -64,6 +91,6 @@ export class TaktpackError extends Error {
     public readonly artifactState?: TaktpackArtifactState,
   ) {
     super(message);
-    this.name = 'TaktpackError';
+    defineErrorName(this, 'TaktpackError');
   }
 }

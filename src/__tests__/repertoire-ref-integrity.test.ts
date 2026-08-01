@@ -17,10 +17,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { findScopeReferences } from '../features/repertoire/remove.js';
+import {
+  REFERENCE_MAX_FILES,
+  REFERENCE_MAX_SINGLE_FILE_BYTES,
+} from '../features/repertoire/remove.js';
 import { makeScanConfig } from './helpers/repertoire-test-helpers.js';
 
 describe('repertoire reference integrity: detection', () => {
@@ -165,5 +169,136 @@ describe('repertoire reference integrity: non-detection', () => {
     const refs = findScopeReferences('@nrslib/takt-ensemble-fixture', makeScanConfig(tempDir));
 
     expect(refs).toHaveLength(0);
+  });
+});
+
+describe('repertoire reference integrity: fail-closed authorization', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'takt-ref-fail-closed-'));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('rejects a partial scan when a discovered path cannot be inspected', () => {
+    const workflowsDir = join(tempDir, 'workflows');
+    mkdirSync(workflowsDir, { recursive: true });
+    symlinkSync('loop.yaml', join(workflowsDir, 'loop.yaml'));
+
+    expect(() => findScopeReferences('@owner/repo', {
+      ...makeScanConfig(tempDir),
+      failClosed: true,
+    })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
+  });
+
+  it('normalizes readdir failures without exposing path or raw cause', () => {
+    const notDirectory = join(tempDir, 'not-a-directory');
+    writeFileSync(notDirectory, 'secret-path-content');
+
+    let caught: unknown;
+    try {
+      findScopeReferences('@owner/repo', {
+        workflowDirs: [notDirectory],
+        providerOptionsDirs: [],
+        categoriesFiles: [],
+        failClosed: true,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      code: 'REFERENCE_SCAN_FAILED',
+      message: 'Repertoire reference scan could not be completed safely',
+    });
+    expect(caught).not.toHaveProperty('cause');
+    expect(JSON.stringify(caught)).not.toContain(notDirectory);
+  });
+
+  it('detects references after mutable String and Array intrinsics are poisoned', () => {
+    const workflowsDir = join(tempDir, 'workflows');
+    const workflowFile = join(workflowsDir, 'flow.yaml');
+    mkdirSync(workflowsDir, { recursive: true });
+    writeFileSync(workflowFile, 'persona: "@owner/repo/coder"');
+    const originalIncludes = String.prototype.includes;
+    const originalEndsWith = String.prototype.endsWith;
+    const originalPush = Array.prototype.push;
+    let refs: ReturnType<typeof findScopeReferences>;
+    try {
+      String.prototype.includes = () => false;
+      String.prototype.endsWith = () => false;
+      Array.prototype.push = function poisonedPush(...items: unknown[]) {
+        if (typeof items[0] === 'object' && items[0] !== null && 'filePath' in items[0]) {
+          return this.length;
+        }
+        return originalPush.apply(this, items);
+      };
+      refs = findScopeReferences('@owner/repo', {
+        workflowDirs: [workflowsDir],
+        providerOptionsDirs: [],
+        categoriesFiles: [],
+        failClosed: true,
+      });
+    } finally {
+      String.prototype.includes = originalIncludes;
+      String.prototype.endsWith = originalEndsWith;
+      Array.prototype.push = originalPush;
+    }
+
+    expect(refs!).toHaveLength(1);
+    expect(refs![0]).toMatchObject({
+      filePath: workflowFile,
+      dev: expect.any(Number),
+      ino: expect.any(Number),
+      contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+  });
+
+  it('fails closed when a reference file exceeds the bounded read budget', () => {
+    const workflowsDir = join(tempDir, 'workflows');
+    mkdirSync(workflowsDir);
+    writeFileSync(
+      join(workflowsDir, 'large.yaml'),
+      Buffer.alloc(REFERENCE_MAX_SINGLE_FILE_BYTES + 1),
+    );
+    expect(() => findScopeReferences('@owner/repo', {
+      workflowDirs: [workflowsDir],
+      providerOptionsDirs: [],
+      categoriesFiles: [],
+      failClosed: true,
+    })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
+  });
+
+  it('counts non-YAML directory entries against the scan budget', () => {
+    const workflowsDir = join(tempDir, 'workflows-entry-budget');
+    mkdirSync(workflowsDir);
+    for (let index = 0; index <= REFERENCE_MAX_FILES; index += 1) {
+      writeFileSync(join(workflowsDir, `ignored-${index}.txt`), 'x');
+    }
+    expect(() => findScopeReferences('@owner/repo', {
+      workflowDirs: [workflowsDir],
+      providerOptionsDirs: [],
+      categoriesFiles: [],
+      failClosed: true,
+    })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
+  });
+
+  it.runIf(process.getuid?.() !== 0)('treats EACCES as failure rather than absence', () => {
+    const denied = join(tempDir, 'denied');
+    mkdirSync(denied);
+    chmodSync(denied, 0o000);
+    try {
+      expect(() => findScopeReferences('@owner/repo', {
+        workflowDirs: [join(denied, 'workflows')],
+        providerOptionsDirs: [],
+        categoriesFiles: [],
+        failClosed: true,
+      })).toThrow(expect.objectContaining({ code: 'REFERENCE_SCAN_FAILED' }));
+    } finally {
+      chmodSync(denied, 0o700);
+    }
   });
 });

@@ -29,6 +29,8 @@ export interface TaskResult {
   worktreePath?: string;
   copyWorkspacePath?: string;
   prUrl?: string;
+  /** Preserve generation A retry state when a new run never published meta. */
+  preserveRetryMetadataOnMissingRunMeta?: boolean;
 }
 
 export interface WorktreeOptions {

@@ -6,6 +6,7 @@ import {
   realpath,
 } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
+import { MAX_PROJECT_TEMPLATE_COHORT_BYTES } from './archive-types.js';
 import {
   classifyProjectTemplateEntry,
   createProjectTemplateBlockedResult,
@@ -27,7 +28,7 @@ const DEFAULT_LIMITS: ProjectTemplateScanLimits = {
   maxNodes: DEFAULT_PROJECT_TEMPLATE_MAX_NODES,
   maxFiles: 4_096,
   maxSingleFileBytes: 1024 * 1024,
-  maxTotalBytes: 32 * 1024 * 1024,
+  maxTotalBytes: MAX_PROJECT_TEMPLATE_COHORT_BYTES,
   maxScanBytes: 4 * 1024 * 1024,
   maxDepth: 8,
 };

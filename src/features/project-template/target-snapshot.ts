@@ -9,7 +9,10 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
+import {
+  DEFAULT_TAKTPACK_LIMITS,
+  MAX_PROJECT_TEMPLATE_COHORT_BYTES,
+} from './archive-types.js';
 import {
   areProjectTemplateFileStatsEqual,
 } from './bounded-file-read.js';
@@ -24,10 +27,13 @@ import {
   parsePortablePath,
   requireArray,
 } from './validation.js';
+import {
+  requireActiveRemotePreview,
+  type ProjectTemplateRemotePreviewOperationContext,
+} from './remote-preview-operation.js';
 
 const execFileAsync = promisify(execFile);
-const MAX_LOCAL_FILE_BYTES = 32 * 1024 * 1024;
-const MAX_LOCAL_TOTAL_BYTES = 32 * 1024 * 1024;
+const MAX_LOCAL_FILE_BYTES = MAX_PROJECT_TEMPLATE_COHORT_BYTES;
 const MAX_DIFF_CONTENT_BYTES = 64 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
 const GIT_TIMEOUT_MS = 5_000;
@@ -463,17 +469,29 @@ async function captureFile(
 export async function captureProjectTemplateTargetSnapshot(
   projectRoot: string,
   candidateValue: unknown,
+  operationContext?: ProjectTemplateRemotePreviewOperationContext,
 ): Promise<ProjectTemplateTargetSnapshot> {
+  const checkpoint = (): void => {
+    if (operationContext !== undefined) {
+      requireActiveRemotePreview(operationContext);
+    }
+  };
+  checkpoint();
   const candidatePaths = parseCandidatePaths(candidateValue);
-  const taktRoot = resolve(projectRoot, '.takt');
   let projectRealPath: string;
+  let taktRoot: string;
   let rootRealPath: string | undefined;
   let rootBefore: Stats | undefined;
   try {
     projectRealPath = await realpath(projectRoot);
+    // Why: macOS commonly exposes /var through /private/var. Every descendant
+    // identity comparison must share the canonical root or a safe target is
+    // falsely classified as an escaping directory.
+    taktRoot = resolve(projectRealPath, '.takt');
   } catch {
     throw unsafeTarget();
   }
+  checkpoint();
   const directoryNames = new Map<string, Map<string, string[]>>();
   const directoryScanBudget = { entries: 0 };
   const projectNames = await readBoundedDirectory(
@@ -481,6 +499,7 @@ export async function captureProjectTemplateTargetSnapshot(
     directoryNames,
     directoryScanBudget,
   );
+  checkpoint();
   const rootPortableMatches = projectNames.get('.takt') ?? [];
   if (
     rootPortableMatches.length > 1
@@ -496,6 +515,7 @@ export async function captureProjectTemplateTargetSnapshot(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw unsafeTarget();
     const tracking = await gitTrackingForPaths(projectRoot, candidatePaths);
+    checkpoint();
     try {
       await lstat(taktRoot);
       throw unsafeTarget();
@@ -507,6 +527,7 @@ export async function captureProjectTemplateTargetSnapshot(
       new Map(),
       { entries: 0 },
     );
+    checkpoint();
     if ((refreshedProjectNames.get('.takt') ?? []).length > 0) {
       throw unsafeTarget();
     }
@@ -550,9 +571,11 @@ export async function captureProjectTemplateTargetSnapshot(
       directoryNames,
       directoryScanBudget,
     ) === 'missing') {
+      checkpoint();
       missingPaths.push(path);
       continue;
     }
+    checkpoint();
     presentCandidatePaths.push(path);
     const parentRelative = dirname(path) === '.' ? '' : dirname(path);
     const parentAbsolute = parentRelative === ''
@@ -575,6 +598,7 @@ export async function captureProjectTemplateTargetSnapshot(
       directoryNames,
       directoryScanBudget,
     );
+    checkpoint();
     for (const requestedName of group.names) {
       for (const sibling of siblings.get(requestedName) ?? []) {
         const siblingPath = group.relative === ''
@@ -586,6 +610,7 @@ export async function captureProjectTemplateTargetSnapshot(
   }
   for (const path of presentCandidatePaths) {
     const entry = await captureFile(join(taktRoot, path), path, rootRealPath);
+    checkpoint();
     if (entry === undefined) {
       missingPaths.push(path);
       continue;
@@ -593,7 +618,7 @@ export async function captureProjectTemplateTargetSnapshot(
     if (capturedActualPaths.has(entry.entry.path)) continue;
     capturedActualPaths.add(entry.entry.path);
     totalBytes += entry.entry.bytes;
-    if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
+    if (totalBytes > MAX_PROJECT_TEMPLATE_COHORT_BYTES) {
       throw new TaktpackError(
         'ARCHIVE_LIMIT_EXCEEDED',
         'project template target exceeds the snapshot byte budget',
@@ -604,10 +629,11 @@ export async function captureProjectTemplateTargetSnapshot(
   }
   for (const path of [...collisionPaths].sort(compareAscii)) {
     const entry = await captureFile(join(taktRoot, path), path, rootRealPath);
+    checkpoint();
     if (entry === undefined || capturedActualPaths.has(entry.entry.path)) continue;
     capturedActualPaths.add(entry.entry.path);
     totalBytes += entry.entry.bytes;
-    if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
+    if (totalBytes > MAX_PROJECT_TEMPLATE_COHORT_BYTES) {
       throw new TaktpackError(
         'ARCHIVE_LIMIT_EXCEEDED',
         'project template target exceeds the snapshot byte budget',
@@ -621,6 +647,7 @@ export async function captureProjectTemplateTargetSnapshot(
     projectRoot,
     candidatePaths,
   );
+  checkpoint();
 
   // Git inspection takes time and can race with editors. Revalidate both
   // directories and files afterward so one precondition token never combines
@@ -632,6 +659,7 @@ export async function captureProjectTemplateTargetSnapshot(
     } catch {
       throw unsafeTarget();
     }
+    checkpoint();
     if (!areProjectTemplateDirectorySnapshotsStable(before, after)) {
       throw unsafeTarget();
     }
@@ -643,6 +671,7 @@ export async function captureProjectTemplateTargetSnapshot(
     } catch {
       throw unsafeTarget();
     }
+    checkpoint();
     if (!areProjectTemplateFileStatsEqual(snapshot, after)) throw unsafeTarget();
   }
   for (const path of missingPaths) {
@@ -652,12 +681,14 @@ export async function captureProjectTemplateTargetSnapshot(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    checkpoint();
   }
 
   const entries = captured.map(({ entry }): CapturedProjectTemplateTargetEntry => ({
     ...entry,
     gitTrackingStatus: tracking.get(entry.path) ?? 'unavailable',
   }));
+  checkpoint();
   return {
     rootState: 'directory',
     candidatePaths,

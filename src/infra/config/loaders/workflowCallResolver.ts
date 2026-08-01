@@ -7,6 +7,7 @@ import { validateWorkflowCallRulesAgainstChildReturns } from './workflowCallCont
 import { getWorkflowTrustInfo, type WorkflowTrustInfo } from './workflowTrustSource.js';
 import { loadWorkflowByIdentifierForWorkflowCall, isWorkflowPath } from './workflowResolver.js';
 import { validateWorkflowCallTrustBoundary } from './workflowTrustBoundary.js';
+import type { InternalWorkflowReadContext } from './workflowDiscovery.js';
 
 export interface WorkflowCallParentContext {
   sourcePath?: string;
@@ -38,6 +39,7 @@ export function resolveWorkflowCallTarget(
   projectCwd: string,
   lookupCwd = projectCwd,
   parentContext?: WorkflowCallParentContext,
+  readContext?: InternalWorkflowReadContext,
 ): WorkflowConfig | null {
   if (!isScopeRef(identifier) && !isWorkflowPath(identifier)) {
     validateWorkflowCallNamedIdentifier(identifier, stepName);
@@ -54,6 +56,7 @@ export function resolveWorkflowCallTarget(
     lookupCwd,
     callableArgs: parentStep.args,
     parentTrustInfo,
+    repertoireReadContext: readContext,
   });
 
   if (!childWorkflow) {

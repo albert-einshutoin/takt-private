@@ -30,6 +30,8 @@ import {
 } from '../execute/projectTemplatePreparationReservation.js';
 import { runDirectInstructMode } from './directInstructMode.js';
 import { findLatestResumableDirectRun, type ResumableDirectRun } from './directRunFinder.js';
+import type { WorkflowRetrySource } from '../execute/workflowRetryGeneration.js';
+import { WorkflowDiscoveryReadError } from '../../../infra/config/loaders/workflowDiscoveryError.js';
 
 type DirectRunResumeAction = 'requeue' | 'retry' | 'instruct' | 'view_reports' | 'cancel';
 
@@ -40,6 +42,7 @@ interface DirectRunResumeExecutionContext {
   readonly startStep: string | undefined;
   readonly resumePoint: WorkflowResumePoint | undefined;
   readonly workflowContext: WorkflowContext;
+  readonly retrySource?: WorkflowRetrySource;
 }
 
 const DIRECT_RUN_ACTIONS: readonly { label: string; value: DirectRunResumeAction }[] = [
@@ -161,6 +164,22 @@ function buildExecutionContext(projectDir: string, run: ResumableDirectRun): Dir
   const workflowConfig = loadWorkflow(projectDir, run);
   const resumePoint = resolveResumePoint(projectDir, workflowConfig, run);
   const resolvedTask = resolveTaskContent(projectDir, run);
+  const hasContinuation = run.meta.currentStep !== undefined
+    || run.meta.currentIteration !== undefined
+    || run.meta.resumePoint !== undefined;
+  if (hasContinuation && run.meta.workflowGenerationWitness === undefined) {
+    throw new WorkflowDiscoveryReadError();
+  }
+  const retrySource: WorkflowRetrySource | undefined = hasContinuation
+    ? {
+      ...(run.meta.currentStep ? { configuredStartStep: run.meta.currentStep } : {}),
+      ...(run.meta.resumePoint ? { resumePoint: run.meta.resumePoint } : {}),
+      ...(run.meta.currentIteration !== undefined
+        ? { initialIteration: run.meta.currentIteration }
+        : {}),
+      generationWitness: run.meta.workflowGenerationWitness!,
+    }
+    : undefined;
   return {
     run,
     taskContent: resolvedTask.taskContent,
@@ -168,6 +187,7 @@ function buildExecutionContext(projectDir: string, run: ResumableDirectRun): Dir
     startStep: resolveStartStep(workflowConfig, run, resumePoint),
     resumePoint,
     workflowContext: buildWorkflowContext(projectDir, run.meta.workflow),
+    ...(retrySource ? { retrySource } : {}),
   };
 }
 
@@ -199,6 +219,7 @@ async function executeDirectResume(
     retryNote,
     resumePoint: context.resumePoint,
     directResume: buildDirectResumeMetadata(context.run, resumeMode),
+    ...(context.retrySource ? { retrySource: context.retrySource } : {}),
     traceTaskMetadata: buildTraceTaskMetadata({
       taskContent: context.taskContent,
       taskSlug: context.run.slug,

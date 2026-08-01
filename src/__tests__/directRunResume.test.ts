@@ -123,6 +123,7 @@ function createRun(overrides?: Record<string, unknown>) {
       currentIteration: 5,
       iterations: 50,
       resumePoint,
+      workflowGenerationWitness: 'a'.repeat(64),
       ...overrides,
     },
   };
@@ -152,6 +153,19 @@ describe('resumeDirectRun', () => {
     expect(mockInfo).toHaveBeenCalledTimes(1);
     expect(mockInfo).toHaveBeenCalledWith('No resumable direct run found. Use `takt list` for queued tasks.');
     expect(mockSelectOption).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a legacy direct continuation without a generation witness', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun({
+      workflowGenerationWitness: undefined,
+    }));
+    mockSelectOption.mockResolvedValueOnce('requeue');
+
+    await expect(resumeDirectRun('/project')).rejects.toMatchObject({
+      name: 'WorkflowDiscoveryReadError',
+      message: 'Workflow discovery failed',
+    });
+    expect(mockExecuteTaskWithResult).not.toHaveBeenCalled();
   });
 
   it('Given a resumable direct run, When the menu is shown, Then only direct-run actions are offered', async () => {
@@ -341,10 +355,39 @@ describe('resumeDirectRun', () => {
     }));
     expect(mockExecuteTaskWithResult).toHaveBeenCalledWith(expect.objectContaining({
       retryNote: 'Also update regression coverage',
+      retrySource: expect.objectContaining({
+        configuredStartStep: 'fix',
+        resumePoint,
+        initialIteration: 5,
+        generationWitness: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
       directResume: {
         sourceRunSlug: '20260524-direct-failed',
         resumeMode: 'instruct',
       },
+    }));
+  });
+
+  it('Given Instruct changes a same-name workflow, Then generation A remains attached to the old resume stack', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun());
+    mockSelectOption.mockResolvedValueOnce('instruct');
+    mockRunDirectInstructMode.mockImplementationOnce(async () => {
+      mockLoadWorkflowByIdentifier.mockReturnValue({
+        ...workflow,
+        steps: workflow.steps.map((step) => (
+          step.name === 'review' ? { ...step, instruction: 'Generation B review' } : step
+        )),
+      });
+      return { action: 'execute', task: 'Continue after editing the workflow' };
+    });
+
+    await resumeDirectRun('/project');
+
+    expect(mockExecuteTaskWithResult).toHaveBeenCalledWith(expect.objectContaining({
+      retrySource: expect.objectContaining({
+        resumePoint,
+        generationWitness: 'a'.repeat(64),
+      }),
     }));
   });
 

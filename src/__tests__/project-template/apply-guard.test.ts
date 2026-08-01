@@ -1,4 +1,5 @@
 import {
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -343,6 +344,41 @@ describe('project template apply guard', () => {
     expect(() => assertProjectTemplateApplyLeaseAvailable(repoPath)).toThrow(
       ProjectTemplateApplyLeaseUnavailableError,
     );
+  });
+
+  it.each([
+    ['extra key', {
+      version: 1,
+      token: 'owner',
+      pid: process.pid,
+      operation: 'download',
+    }],
+    ['wrong token type', {
+      version: 1,
+      token: 123,
+      pid: process.pid,
+    }],
+    ['wrong pid type', {
+      version: 1,
+      token: 'owner',
+      pid: String(process.pid),
+    }],
+    ['wrong version', {
+      version: 2,
+      token: 'owner',
+      pid: process.pid,
+    }],
+  ])('requires exact v1 mutation lease schema: %s', (_label, payload) => {
+    const repoPath = makeTempRepo();
+    const lockPath = resolveProjectTemplateApplyLeasePath(repoPath);
+    mkdirSync(join(lockPath, '..'), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify(payload));
+
+    expect(() => assertProjectTemplateApplyLeaseAvailable(repoPath)).toThrow(
+      ProjectTemplateApplyLeaseUnavailableError,
+    );
+    expect(blockCodes(repoPath)).toContain('APPLY_LEASE_UNKNOWN');
+    expect(existsSync(lockPath)).toBe(true);
   });
 
   it('allows only the apply operation that proves ownership of the lease token', () => {

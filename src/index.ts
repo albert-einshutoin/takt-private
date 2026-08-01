@@ -81,6 +81,26 @@ export type { JudgeStatusResult } from './agents/agent-usecases.js';
 export {
   parseProjectTemplateManifest,
   serializeProjectTemplateManifest,
+  parseProjectTemplateGithubSourceSpec,
+  PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
+  MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
+  projectTemplateSourceDescriptorV1JsonSchema,
+  parseProjectTemplateSourceDescriptor,
+  parseProjectTemplateSourceDescriptorJson,
+  serializeProjectTemplateSourceDescriptor,
+  calculateProjectTemplateSourceDescriptorSha256,
+  PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+  MAX_PROJECT_TEMPLATE_SOURCE_PROVENANCE_BYTES,
+  parseProjectTemplateSourceProvenance,
+  parseProjectTemplateSourceProvenanceJson,
+  serializeProjectTemplateSourceProvenance,
+  calculateProjectTemplateSourceProvenanceSha256,
+  demoteResolvedGithubTemplateSourceToAdvisory,
+  discardResolvedGithubTemplateSource,
+  GithubTemplateSourceResolutionError,
+  resolveGithubTemplateSource,
+  downloadGithubTemplateSource,
+  GithubTemplateDownloadOrchestratorError,
   parseTemplateLock,
   serializeTemplateLock,
   calculateProjectTemplateManifestSha256,
@@ -95,6 +115,9 @@ export {
   captureProjectTemplateTargetSnapshot,
   createProjectTemplateApplyPlan,
   prepareProjectTemplateApplyPlan,
+  renderProjectTemplateApplyPreviewHuman,
+  renderProjectTemplateApplyPreviewJson,
+  createGithubProjectTemplateRemotePreview,
   inspectProjectTemplateApplyGuard,
   runProjectTemplateDoctor,
   PROJECT_TEMPLATE_LOCK_PATH,
@@ -110,8 +133,62 @@ export {
   ProjectTemplateValidationError,
   TaktpackError,
 } from './features/project-template/index.js';
+export {
+  createProjectTemplateGithubArchiveAssetPort,
+} from './infra/github/project-template-github-archive-asset-port.js';
+export {
+  resolveAuthenticatedGithubTemplateSource,
+} from './infra/github/project-template-source-resolver.js';
+export {
+  createProjectTemplateGithubSourceComposition,
+} from './infra/github/project-template-github-source-composition.js';
+export {
+  createProjectTemplateRemoteProductionComposition,
+  ProjectTemplateRemoteProductionCompositionError,
+} from './infra/github/project-template-remote-production-composition.js';
+export type {
+  ProjectTemplateGithubArchiveAssetPortDependencies,
+} from './infra/github/project-template-github-archive-asset-port.js';
+export type {
+  ProjectTemplateSourceResolverDependencies,
+  ResolveAuthenticatedGithubTemplateSourceOptions,
+} from './infra/github/project-template-source-resolver.js';
+export type {
+  ProjectTemplateGithubSourceComposition,
+  ProjectTemplateGithubSourceCompositionContext,
+  ProjectTemplateGithubSourceCompositionDependencies,
+} from './infra/github/project-template-github-source-composition.js';
+export type {
+  ProjectTemplateRemoteProductionComposition,
+  ProjectTemplateRemoteProductionCompositionErrorCode,
+} from './infra/github/project-template-remote-production-composition.js';
 export type {
   ProjectTemplateManifestV1,
+  ProjectTemplateGithubRefSourceSpec,
+  ProjectTemplateGithubReleaseAssetSourceSpec,
+  ProjectTemplateGithubSourceSpec,
+  ProjectTemplateSourceDescriptorPackV1,
+  ProjectTemplateRepertoireCapabilityV1,
+  ProjectTemplateRepertoireDependencyV1,
+  ProjectTemplateSourceDescriptorV1,
+  GithubTemplateSourceResolutionErrorCode,
+  GithubTemplateResolveRefInput,
+  GithubTemplateReadFileInput,
+  GithubTemplateGetReleaseInput,
+  GithubTemplateReadReleaseAssetInput,
+  GithubTemplateSourceMetadataPort,
+  GithubTemplateSourceAdvisory,
+  GithubTemplateCurrentSourceEvidence,
+  GithubTemplateUpdateState,
+  ResolveGithubTemplateSourceOptions,
+  ResolvedGithubTemplateSource,
+  GithubTemplateSourceResolutionInput,
+  GithubTemplateSourceResolverPort,
+  DownloadGithubTemplateSourceOptions,
+  DownloadedGithubTemplateSource,
+  GithubTemplateArchiveAssetInput,
+  GithubTemplateArchiveAssetPort,
+  GithubTemplateDownloadOrchestratorErrorCode,
   TemplateCapability,
   TemplateEntry,
   TemplateEntryPolicy,
@@ -166,6 +243,14 @@ export type {
   ProjectTemplateApplyPlan,
   PreparedProjectTemplateApplyPlan,
   ProjectTemplateApplyApprovalEvidence,
+  ProjectTemplateApplyPreview,
+  ProjectTemplateApplyPreviewBindings,
+  ProjectTemplateApplyPreviewCompositionConflictCode,
+  ProjectTemplateApplyPreviewContentHardConflict,
+  ProjectTemplateApplyPreviewApprovalEvidence,
+  ProjectTemplateRemoteApplyPreview,
+  ProjectTemplateSourceProvenanceV1,
+  CreateGithubProjectTemplateRemotePreviewOptions,
   ProjectTemplatePolicyActionMap,
   ProjectTemplateApplyGuardBlockCode,
   ProjectTemplateApplyGuardBlock,

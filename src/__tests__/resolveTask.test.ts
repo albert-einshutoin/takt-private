@@ -52,7 +52,11 @@ function createTempProjectDir(): string {
 }
 
 function createTask(overrides: Partial<TaskInfo> = {}): TaskInfo {
-  const baseData = { task: 'Run task', workflow: 'default' } as NonNullable<TaskInfo['data']>;
+  const baseData = {
+    task: 'Run task',
+    workflow: 'default',
+    workflow_generation_witness: 'a'.repeat(64),
+  } as NonNullable<TaskInfo['data']>;
   const data = overrides.data === undefined
     ? baseData
     : overrides.data === null
@@ -200,6 +204,12 @@ describe('resolveTaskExecution', () => {
       stack: task.data?.resume_point?.stack.slice(0, 1),
     });
     expect(result.initialIterationOverride).toBe(7);
+    expect(result.retrySource).toEqual(expect.objectContaining({
+      configuredStartStep: 'review',
+      resumePoint: task.data?.resume_point,
+      initialIteration: 7,
+      generationWitness: 'a'.repeat(64),
+    }));
   });
 
   it('should preserve resume_point when child workflow step no longer resolves', async () => {
@@ -491,6 +501,33 @@ describe('resolveTaskExecution', () => {
 
     expect(result.initialIterationOverride).toBe(50);
     expect(result.maxStepsOverride).toBe(51);
+    expect(result.retrySource).toEqual({
+      storedMaxSteps: 50,
+      initialIteration: 50,
+      generationWitness: 'a'.repeat(64),
+    });
+  });
+
+  it('fails closed for legacy continuation metadata without a generation witness', async () => {
+    const root = createTempProjectDir();
+    const task = createTask({
+      data: ({
+        task: 'Legacy retry',
+        workflow: 'default',
+        resume_point: {
+          version: 1,
+          stack: [{ workflow: 'default', step: 'review', kind: 'agent' }],
+          iteration: 2,
+          elapsed_ms: 10,
+        },
+        workflow_generation_witness: undefined,
+      } as unknown) as NonNullable<TaskInfo['data']>,
+    });
+
+    await expect(resolveTaskExecutionStrict(task, root)).rejects.toMatchObject({
+      name: 'WorkflowDiscoveryReadError',
+      message: 'Workflow discovery failed',
+    });
   });
 
   it('should fail fast when an unknown workflow key is present', async () => {

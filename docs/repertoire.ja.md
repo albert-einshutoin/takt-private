@@ -91,6 +91,21 @@ takt repertoire add github:{owner}/{repo}@{ref}
 
 インストールはアトミックに行われます。途中で失敗しても中途半端な状態は残りません。
 
+### マシン間移行と Windows coordination
+
+`.takt` ツリーは別の TaktDesk マシンへコピーできます。device、inode、timestamp、
+canonical path などホスト固有の証拠は、移行可能な認可情報として保存されません。
+移行先は repertoire を読み書きする前に、そのマシン上で filesystem 状態を改めて
+証明します。
+
+Windows では、OS profile 配下の標準 `.takt` ディレクトリだけを coordination 対象に
+します。local drive 上の非 reparse directory identity と、開いたまま保持する通常
+ファイル sentinel により authority の寿命を保護します。未完了の sentinel または
+lease publication がある間は、指定 timeout 内の取得をブロックし、自動削除しません。
+移行は対象を利用する全 TaktDesk を停止してから行ってください。recovery または
+unsafe state が報告された場合、個別ファイルを手動削除せず、診断のため
+`.takt-repertoire-coordination` を保持してください。
+
 ### セキュリティ制約
 
 - `.md`、`.yaml`、`.yml` ファイルのみコピー

@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
-import { TextDecoder } from 'node:util';
+import { TextDecoder, types } from 'node:util';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import { calculateProjectTemplateManifestSha256 } from './binding.js';
-import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
+import {
+  DEFAULT_TAKTPACK_LIMITS,
+  MAX_PROJECT_TEMPLATE_COHORT_BYTES,
+} from './archive-types.js';
 import { ProjectTemplateValidationError } from './errors.js';
 import { portablePathKey } from './filesystem-scan.js';
 import { parseTemplateLock } from './lock.js';
@@ -49,7 +52,33 @@ import {
 const MAX_DIFF_INPUT_BYTES = 64 * 1024;
 const MAX_DIFF_LINES = 1_000;
 const MAX_DIFF_OUTPUT_CHARS = 16 * 1024;
-const MAX_LOCAL_TOTAL_BYTES = 32 * 1024 * 1024;
+const APPLY_PLAN_SEALS = new WeakMap<object, {
+  readonly canonicalBody: string;
+  readonly planId: string;
+  readonly reviewSnapshot: ProjectTemplateApplyPlan;
+}>();
+const CAPTURED_ARRAY_BUFFER_IS_VIEW = ArrayBuffer.isView;
+const CAPTURED_ARRAY_BUFFER_RECEIVER = ArrayBuffer;
+const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_REFLECT_RECEIVER = Reflect;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_CREATE_HASH = createHash;
+const CAPTURED_OBJECT_CREATE = Object.create;
+const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const CAPTURED_OBJECT_FREEZE = Object.freeze;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
+  Object.getOwnPropertyDescriptors;
+const CAPTURED_OBJECT_IS_FROZEN = Object.isFrozen;
+const CAPTURED_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const CAPTURED_TYPES_IS_PROXY = types.isProxy;
+const CAPTURED_WEAK_MAP_GET = WeakMap.prototype.get;
+const CAPTURED_WEAK_MAP_SET = WeakMap.prototype.set;
+const CAPTURED_WEAK_SET = WeakSet;
+const CAPTURED_WEAK_SET_ADD = WeakSet.prototype.add;
+const CAPTURED_WEAK_SET_HAS = WeakSet.prototype.has;
+const APPLY_PLAN_HASH_SAMPLE = CAPTURED_CREATE_HASH('sha256');
+const CAPTURED_HASH_UPDATE = APPLY_PLAN_HASH_SAMPLE.update;
+const CAPTURED_HASH_DIGEST = APPLY_PLAN_HASH_SAMPLE.digest;
 const TRACKING_STATUSES = new Set<ProjectTemplateLocalSnapshotEntry['gitTrackingStatus']>([
   'tracked-clean',
   'tracked-modified',
@@ -62,7 +91,179 @@ const TRACKING_STATUSES = new Set<ProjectTemplateLocalSnapshotEntry['gitTracking
 ]);
 
 function sha256(value: string | Uint8Array): string {
-  return createHash('sha256').update(value).digest('hex');
+  const hash = CAPTURED_CREATE_HASH('sha256');
+  CAPTURED_REFLECT_APPLY(CAPTURED_HASH_UPDATE, hash, [value]);
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_HASH_DIGEST,
+    hash,
+    ['hex'],
+  ) as string;
+}
+
+function registerProjectTemplateApplyPlan(
+  plan: ProjectTemplateApplyPlan,
+  canonicalBody: string,
+): ProjectTemplateApplyPlan {
+  assertFrozenApplyPlanGraph(plan);
+  const currentCanonicalBody = canonicalApplyPlanBody(plan);
+  if (
+    currentCanonicalBody !== canonicalBody
+    || sha256(currentCanonicalBody) !== plan.planId
+  ) {
+    throw new ProjectTemplateValidationError(
+      'INVALID_LOCK',
+      'content plan identity does not match its frozen body',
+      'contentPlan.planId',
+    );
+  }
+  const seal = capturedFreeze({
+    canonicalBody,
+    planId: plan.planId,
+    // The graph was recursively verified frozen before it became private
+    // review evidence, so downstream composition never trusts mutable fields.
+    reviewSnapshot: plan,
+  });
+  CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_SET, APPLY_PLAN_SEALS, [
+    plan,
+    seal,
+  ]);
+  return plan;
+}
+
+function capturedFreeze<T>(value: T): T {
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_FREEZE,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as T;
+}
+
+function objectDescriptors(value: object): Record<PropertyKey, PropertyDescriptor> {
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as Record<PropertyKey, PropertyDescriptor>;
+}
+
+function descriptorKeys(
+  descriptors: Record<PropertyKey, PropertyDescriptor>,
+): PropertyKey[] {
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [descriptors],
+  ) as PropertyKey[];
+}
+
+function invalidFrozenPlan(field = 'contentPlan'): never {
+  throw new ProjectTemplateValidationError(
+    'INVALID_LOCK',
+    'apply preview requires an immutable process-local content plan',
+    field,
+  );
+}
+
+function assertFrozenApplyPlanGraph(root: object): void {
+  const seen = new CAPTURED_WEAK_SET<object>();
+  const visit = (value: object): void => {
+    if (CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_SET_HAS, seen, [value])) return;
+    CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_SET_ADD, seen, [value]);
+    if (
+      CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+      || CAPTURED_REFLECT_APPLY(
+        CAPTURED_ARRAY_BUFFER_IS_VIEW,
+        CAPTURED_ARRAY_BUFFER_RECEIVER,
+        [value],
+      )
+      || !CAPTURED_REFLECT_APPLY(
+        CAPTURED_OBJECT_IS_FROZEN,
+        CAPTURED_OBJECT_RECEIVER,
+        [value],
+      )
+    ) invalidFrozenPlan();
+    const descriptors = objectDescriptors(value);
+    const keys = descriptorKeys(descriptors);
+    for (let index = 0; index < keys.length; index += 1) {
+      const descriptor = descriptors[keys[index]!]!;
+      if (!('value' in descriptor)) invalidFrozenPlan();
+      const child = descriptor.value as unknown;
+      if (typeof child === 'object' && child !== null) visit(child);
+    }
+  };
+  visit(root);
+}
+
+function canonicalApplyPlanBody(plan: ProjectTemplateApplyPlan): string {
+  const descriptors = objectDescriptors(plan);
+  const keys = descriptorKeys(descriptors);
+  const body = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_CREATE,
+    CAPTURED_OBJECT_RECEIVER,
+    [null],
+  ) as Record<string, unknown>;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    if (typeof key !== 'string' || key === 'planId') continue;
+    const descriptor = descriptors[key]!;
+    if (!('value' in descriptor)) invalidFrozenPlan();
+    CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_DEFINE_PROPERTY,
+      CAPTURED_OBJECT_RECEIVER,
+      [body, key, {
+        configurable: true,
+        enumerable: true,
+        value: descriptor.value,
+        writable: true,
+      }],
+    );
+  }
+  return canonicalizeTaktpackJson(body);
+}
+
+/** @internal Process-local identity check used only by the G5 composition boundary. */
+export function calculateSealedProjectTemplateApplyPlanId(
+  value: unknown,
+): string {
+  const seal = typeof value === 'object' && value !== null
+    ? CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_GET, APPLY_PLAN_SEALS, [value])
+    : undefined;
+  if (seal === undefined) {
+    throw new ProjectTemplateValidationError(
+      'INVALID_LOCK',
+      'apply preview requires a process-local sealed content plan',
+      'contentPlan',
+    );
+  }
+  assertFrozenApplyPlanGraph(value as object);
+  const currentCanonicalBody = canonicalApplyPlanBody(
+    value as ProjectTemplateApplyPlan,
+  );
+  if (currentCanonicalBody !== seal.canonicalBody) invalidFrozenPlan();
+  const calculated = sha256(currentCanonicalBody);
+  if (calculated !== seal.planId) invalidFrozenPlan('contentPlan.planId');
+  return calculated;
+}
+
+/** @internal Rejects structural clones before reading any public plan field. */
+export function assertSealedProjectTemplateApplyPlan(
+  value: unknown,
+): ProjectTemplateApplyPlan {
+  const calculated = calculateSealedProjectTemplateApplyPlanId(value);
+  const plan = value as ProjectTemplateApplyPlan;
+  if (plan.planId !== calculated) {
+    throw new ProjectTemplateValidationError(
+      'INVALID_LOCK',
+      'content plan identity does not match its sealed body',
+      'contentPlan.planId',
+    );
+  }
+  const seal = CAPTURED_REFLECT_APPLY(
+    CAPTURED_WEAK_MAP_GET,
+    APPLY_PLAN_SEALS,
+    [plan],
+  ) as { readonly reviewSnapshot: ProjectTemplateApplyPlan };
+  return seal.reviewSnapshot;
 }
 
 function semanticConfigDocument(
@@ -106,15 +307,31 @@ function deepFreeze<T>(value: T): T {
   if (
     typeof value !== 'object'
     || value === null
-    || Object.isFrozen(value)
-    || ArrayBuffer.isView(value)
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_ARRAY_BUFFER_IS_VIEW,
+      CAPTURED_ARRAY_BUFFER_RECEIVER,
+      [value],
+    )
   ) {
     return value;
   }
-  for (const child of Object.values(value as Record<string, unknown>)) {
-    deepFreeze(child);
+  if (CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])) {
+    invalidFrozenPlan();
   }
-  return Object.freeze(value);
+  const descriptors = objectDescriptors(value);
+  const keys = descriptorKeys(descriptors);
+  for (let index = 0; index < keys.length; index += 1) {
+    const descriptor = descriptors[keys[index]!]!;
+    if (!('value' in descriptor)) invalidFrozenPlan();
+    deepFreeze(descriptor.value);
+  }
+  const frozen = capturedFreeze(value);
+  if (!CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_IS_FROZEN,
+    CAPTURED_OBJECT_RECEIVER,
+    [frozen],
+  )) invalidFrozenPlan();
+  return frozen;
 }
 
 function invalidInput(message: string, field: string): never {
@@ -152,7 +369,7 @@ function parseLocalEntries(value: unknown): ProjectTemplateLocalSnapshotEntry[] 
       invalidInput('local entry bytes must be a nonnegative safe integer', `${field}.bytes`);
     }
     const bytes = entry['bytes'] as number;
-    if (bytes > MAX_LOCAL_TOTAL_BYTES) {
+    if (bytes > MAX_PROJECT_TEMPLATE_COHORT_BYTES) {
       throw new ProjectTemplateValidationError(
         'LIMIT_EXCEEDED',
         'local entry exceeds the snapshot byte limit',
@@ -160,7 +377,7 @@ function parseLocalEntries(value: unknown): ProjectTemplateLocalSnapshotEntry[] 
       );
     }
     totalBytes += bytes;
-    if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
+    if (totalBytes > MAX_PROJECT_TEMPLATE_COHORT_BYTES) {
       throw new ProjectTemplateValidationError(
         'LIMIT_EXCEEDED',
         'local entries exceed the snapshot byte budget',
@@ -899,10 +1116,12 @@ function resealProjectTemplateApplyPlan(
     entries,
     summary,
   };
-  return deepFreeze({
+  const canonicalBody = canonicalizeTaktpackJson(body);
+  const sealed = deepFreeze({
     ...body,
-    planId: sha256(canonicalizeTaktpackJson(body)),
+    planId: sha256(canonicalBody),
   });
+  return registerProjectTemplateApplyPlan(sealed, canonicalBody);
 }
 
 /**
@@ -1134,8 +1353,10 @@ function createUnresolvedProjectTemplateApplyPlan(
     entries,
     summary,
   };
-  const planId = sha256(canonicalizeTaktpackJson(planBody));
-  return deepFreeze({ ...planBody, planId });
+  const canonicalBody = canonicalizeTaktpackJson(planBody);
+  const planId = sha256(canonicalBody);
+  const sealed = deepFreeze({ ...planBody, planId });
+  return registerProjectTemplateApplyPlan(sealed, canonicalBody);
 }
 
 /**

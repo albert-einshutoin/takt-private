@@ -19,7 +19,7 @@ beforeEach(() => {
   if (shouldForceNoTty) {
     process.env.TAKT_NO_TTY = '1';
   }
-  mkdirSync(process.env.TAKT_CONFIG_DIR, { recursive: true });
+  mkdirSync(process.env.TAKT_CONFIG_DIR, { recursive: true, mode: 0o700 });
 });
 
 afterEach(() => {

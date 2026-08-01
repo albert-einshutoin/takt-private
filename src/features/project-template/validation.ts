@@ -1,4 +1,5 @@
 import { ProjectTemplateValidationError } from './errors.js';
+import { types } from 'node:util';
 import type {
   ProjectTemplateValidationErrorCode,
 } from './errors.js';
@@ -38,6 +39,38 @@ const PORTABLE_RELATIVE_PATH_BODY_SOURCE = '(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(
 export const LOCAL_SOURCE_URI_PATTERN_SOURCE = `^(?:\\.|${PORTABLE_RELATIVE_PATH_BODY_SOURCE})$`;
 export const PROJECT_TEMPLATE_PATH_PATTERN_SOURCE = `^(?!\\.takt(?:/|$))${PORTABLE_RELATIVE_PATH_BODY_SOURCE}$`;
 
+type OwnPropertyDescriptorMap =
+  Record<PropertyKey, PropertyDescriptor | undefined>;
+
+const CAPTURED_ARRAY_FROM = Array.from;
+const CAPTURED_ARRAY_INCLUDES = Array.prototype.includes;
+const CAPTURED_ARRAY_IS_ARRAY = Array.isArray;
+const CAPTURED_ARRAY_PROTOTYPE = Array.prototype;
+const CAPTURED_ARRAY_RECEIVER = Array;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
+  Object.getOwnPropertyDescriptors;
+const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
+const CAPTURED_OBJECT_PROTOTYPE = Object.prototype;
+const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const CAPTURED_REFLECT_RECEIVER = Reflect;
+const CAPTURED_TYPES_IS_PROXY = types.isProxy;
+
+function appendArrayValue<T>(values: T[], value: T): void {
+  CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_DEFINE_PROPERTY,
+    CAPTURED_OBJECT_RECEIVER,
+    [values, `${values.length}`, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true,
+    }],
+  );
+}
+
 const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE);
 const SHA256_PATTERN = new RegExp(SHA256_PATTERN_SOURCE);
 const COMMIT_PATTERN = new RegExp(COMMIT_PATTERN_SOURCE);
@@ -50,13 +83,30 @@ const PROJECT_TEMPLATE_PATH_PATTERN = new RegExp(PROJECT_TEMPLATE_PATH_PATTERN_S
 const POSIX_MODE_PATTERN = /^0[0-7]{3}$/;
 
 function codePointLength(value: string): number {
-  return Array.from(value).length;
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_ARRAY_FROM,
+    CAPTURED_ARRAY_RECEIVER,
+    [value],
+  ).length;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_ARRAY_IS_ARRAY,
+      CAPTURED_ARRAY_RECEIVER,
+      [value],
+    )
+  ) return false;
+  const prototype = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  );
+  return prototype === CAPTURED_OBJECT_PROTOTYPE || prototype === null;
 }
 
 export function requireRecord(
@@ -66,9 +116,20 @@ export function requireRecord(
   if (!isRecord(value)) {
     throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must be a plain own-property object`, field);
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  if (Object.values(descriptors).some((descriptor) => !('value' in descriptor))) {
-    throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must not contain accessors`, field);
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as unknown as OwnPropertyDescriptorMap;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [descriptors],
+  ) as PropertyKey[];
+  for (let index = 0; index < keys.length; index += 1) {
+    if (!('value' in descriptors[keys[index]!]!)) {
+      throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must not contain accessors`, field);
+    }
   }
   return value;
 }
@@ -79,23 +140,74 @@ export function requireArray(
   maxItems: number,
   errorCode: ProjectTemplateValidationErrorCode,
 ): unknown[] {
-  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+    || !CAPTURED_REFLECT_APPLY(
+      CAPTURED_ARRAY_IS_ARRAY,
+      CAPTURED_ARRAY_RECEIVER,
+      [value],
+    )
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [value],
+    ) !== CAPTURED_ARRAY_PROTOTYPE
+  ) {
     throw new ProjectTemplateValidationError(errorCode, `${field} must be a plain array`, field);
   }
-  if (value.length > maxItems) {
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as unknown as OwnPropertyDescriptorMap;
+  const lengthDescriptor = descriptors['length'];
+  if (lengthDescriptor === undefined || !('value' in lengthDescriptor)) {
+    throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must have an intrinsic data length`, field);
+  }
+  const length = lengthDescriptor.value as number;
+  if (length > maxItems) {
     throw new ProjectTemplateValidationError('LIMIT_EXCEEDED', `${field} exceeds the ${maxItems} item limit`, field);
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const hasAccessor = Object.entries(descriptors)
-    .some(([key, descriptor]) => key !== 'length' && !('value' in descriptor));
-  const hasNonIndexProperty = Object.keys(value)
-    .some((key) => !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length);
-  const hasHole = Array.from({ length: value.length }, (_, index) => index)
-    .some((index) => !Object.prototype.hasOwnProperty.call(value, index));
-  if (hasAccessor || hasNonIndexProperty || hasHole) {
-    throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must be a dense JSON array without extra properties`, field);
+  const ownKeys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [descriptors],
+  ) as PropertyKey[];
+  for (let index = 0; index < ownKeys.length; index += 1) {
+    const key = ownKeys[index]!;
+    if (
+      typeof key !== 'string'
+      || (
+        key !== 'length'
+        && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= length)
+      )
+      || (key !== 'length' && !('value' in descriptors[key]!))
+    ) {
+      throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must be a dense JSON array without extra properties`, field);
+    }
   }
-  return value;
+  // Return a descriptor snapshot so later validation never reads caller-owned
+  // array indices after the exact data-property boundary has been established.
+  const snapshot: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      throw new ProjectTemplateValidationError('NON_PLAIN_OBJECT', `${field} must be a dense JSON array without extra properties`, field);
+    }
+    CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_DEFINE_PROPERTY,
+      CAPTURED_OBJECT_RECEIVER,
+      [snapshot, `${index}`, {
+        configurable: true,
+        enumerable: true,
+        value: descriptor.value,
+        writable: true,
+      }],
+    );
+  }
+  return snapshot;
 }
 
 export function assertAllowedKeys(
@@ -103,8 +215,28 @@ export function assertAllowedKeys(
   allowed: readonly string[],
   field: string,
 ): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) {
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [value],
+  ) as PropertyKey[];
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    if (typeof key !== 'string') {
+      throw new ProjectTemplateValidationError(
+        'UNKNOWN_KEY',
+        `${field} contains a non-string own key outside schema 1.0`,
+        field,
+      );
+    }
+    let isAllowed = false;
+    for (let allowedIndex = 0; allowedIndex < allowed.length; allowedIndex += 1) {
+      if (allowed[allowedIndex] === key) {
+        isAllowed = true;
+        break;
+      }
+    }
+    if (!isAllowed) {
       throw new ProjectTemplateValidationError('UNKNOWN_KEY', `${field}.${key} is not part of schema 1.0`, `${field}.${key}`);
     }
   }
@@ -227,13 +359,20 @@ function parseRef(value: unknown): string {
 }
 
 function requirePortablePathSegmentLimit(path: string, field: string): void {
-  const oversizedSegment = path.split('/').find((segment) => segment.length > 255);
-  if (oversizedSegment !== undefined) {
-    throw new ProjectTemplateValidationError(
-      'LIMIT_EXCEEDED',
-      `${field} contains a path segment longer than 255 ASCII characters`,
-      field,
-    );
+  let segmentLength = 0;
+  for (let index = 0; index <= path.length; index += 1) {
+    if (index === path.length || path[index] === '/') {
+      if (segmentLength > 255) {
+        throw new ProjectTemplateValidationError(
+          'LIMIT_EXCEEDED',
+          `${field} contains a path segment longer than 255 ASCII characters`,
+          field,
+        );
+      }
+      segmentLength = 0;
+    } else {
+      segmentLength += 1;
+    }
   }
 }
 
@@ -293,8 +432,13 @@ export function parseCapabilities(
   const capabilityErrorCode = errorCode === 'DETECTED_CAPABILITY_MISMATCH'
     ? errorCode
     : 'UNDECLARED_CAPABILITY';
-  for (const capability of rawCapabilities) {
-    if (!TEMPLATE_CAPABILITIES.includes(capability as TemplateCapability)) {
+  for (let index = 0; index < rawCapabilities.length; index += 1) {
+    const capability = rawCapabilities[index];
+    if (!CAPTURED_REFLECT_APPLY(
+      CAPTURED_ARRAY_INCLUDES,
+      TEMPLATE_CAPABILITIES,
+      [capability],
+    )) {
       throw new ProjectTemplateValidationError(capabilityErrorCode, `${field} contains an unsupported capability`, field);
     }
     const typedCapability = capability as TemplateCapability;
@@ -302,7 +446,7 @@ export function parseCapabilities(
       throw new ProjectTemplateValidationError(capabilityErrorCode, `${field} must not contain duplicates`, field);
     }
     seen.add(typedCapability);
-    capabilities.push(typedCapability);
+    appendArrayValue(capabilities, typedCapability);
   }
   return capabilities;
 }
@@ -312,7 +456,11 @@ export function parsePolicy(
   field: string,
   errorCode: 'INVALID_ENTRY' | 'INVALID_LOCK' = 'INVALID_ENTRY',
 ): TemplateEntryPolicy {
-  if (!TEMPLATE_ENTRY_POLICIES.includes(value as TemplateEntryPolicy)) {
+  if (!CAPTURED_REFLECT_APPLY(
+    CAPTURED_ARRAY_INCLUDES,
+    TEMPLATE_ENTRY_POLICIES,
+    [value],
+  )) {
     throw new ProjectTemplateValidationError(errorCode, `${field} is not a supported policy`, field);
   }
   return value as TemplateEntryPolicy;
@@ -350,7 +498,10 @@ export function parseSha256(value: unknown, field: string): string {
 }
 
 export function isExecutableMode(mode: string): boolean {
-  return mode.slice(1).split('').some((digit) => (Number(digit) & 1) === 1);
+  for (let index = 1; index < mode.length; index += 1) {
+    if ((Number(mode[index]) & 1) === 1) return true;
+  }
+  return false;
 }
 
 export interface CapabilityEntry {
@@ -364,16 +515,27 @@ export function validateDeclaredCapabilities(
   manifestCapabilities: TemplateCapability[],
   field: string,
 ): void {
-  const declaredCapabilities = new Set(manifestCapabilities);
-  for (const entry of entries) {
+  for (let entryIndex = 0; entryIndex < entries.length; entryIndex += 1) {
+    const entry = entries[entryIndex]!;
     const entryCapabilities = entry.capabilities ?? [];
     // Executable bits alter what applying a template can run. Requiring a
     // declaration at both levels makes the preview explicit and auditable.
-    if (isExecutableMode(entry.mode) && !entryCapabilities.includes('executable')) {
+    let declaresExecutable = false;
+    for (let index = 0; index < entryCapabilities.length; index += 1) {
+      if (entryCapabilities[index] === 'executable') declaresExecutable = true;
+    }
+    if (isExecutableMode(entry.mode) && !declaresExecutable) {
       throw new ProjectTemplateValidationError('UNDECLARED_CAPABILITY', `${entry.path} is executable but does not declare executable capability`, field);
     }
-    for (const capability of entryCapabilities) {
-      if (!declaredCapabilities.has(capability)) {
+    for (let index = 0; index < entryCapabilities.length; index += 1) {
+      const capability = entryCapabilities[index]!;
+      let declared = false;
+      for (let declaredIndex = 0;
+        declaredIndex < manifestCapabilities.length;
+        declaredIndex += 1) {
+        if (manifestCapabilities[declaredIndex] === capability) declared = true;
+      }
+      if (!declared) {
         throw new ProjectTemplateValidationError('UNDECLARED_CAPABILITY', `${entry.path} uses ${capability} without a top-level declaration`, field);
       }
     }
@@ -389,7 +551,8 @@ export function validatePathIdentities(entries: PathIdentityEntry[], field: stri
   const exactPaths = new Map<string, PathIdentityEntry>();
   const compatibilityNormalizedPaths = new Map<string, string>();
   const caseInsensitivePaths = new Map<string, string>();
-  for (const entry of entries) {
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
     const duplicate = exactPaths.get(entry.path);
     if (duplicate) {
       if (duplicate.policy !== entry.policy) {
