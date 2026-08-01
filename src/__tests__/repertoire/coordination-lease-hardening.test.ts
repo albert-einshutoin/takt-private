@@ -8,6 +8,7 @@ import {
   realpathSync,
   rmSync,
   lstatSync,
+  linkSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -36,6 +37,7 @@ const fsFault = vi.hoisted(() => ({
   hook0: undefined as (() => void) | undefined,
   beforeReleaseMutation: undefined as ((path: string) => void) | undefined,
   afterReaddir: undefined as ((path: string) => boolean | void) | undefined,
+  afterClaimLstat: undefined as ((path: string) => boolean | void) | undefined,
   afterPublishingLstat: undefined as ((path: string) => boolean | void) | undefined,
   afterLeaseWrite: undefined as (() => void) | undefined,
   afterClaimLink: undefined as (() => void) | undefined,
@@ -98,6 +100,8 @@ vi.mock('node:fs', async (importOriginal) => {
       fail('lstatSync');
       const result = actual.lstatSync(...args);
       const path = String(args[0]);
+      const claimHook = fsFault.afterClaimLstat;
+      if (claimHook?.(path) !== false) fsFault.afterClaimLstat = undefined;
       const hook = fsFault.afterPublishingLstat;
       if (hook?.(path) !== false) fsFault.afterPublishingLstat = undefined;
       return result;
@@ -187,6 +191,7 @@ afterEach(() => {
   fsFault.hook0 = undefined;
   fsFault.beforeReleaseMutation = undefined;
   fsFault.afterReaddir = undefined;
+  fsFault.afterClaimLstat = undefined;
   fsFault.afterPublishingLstat = undefined;
   fsFault.afterLeaseWrite = undefined;
   fsFault.afterClaimLink = undefined;
@@ -252,6 +257,46 @@ describe('repertoire coordination hardening', () => {
       expect(lstatSync(activePath).nlink).toBe(1);
     }
     expect(existsSync(publishingPath)).toBe(false);
+  });
+
+  it.each([
+    { mode: 'write' as const, transition: 'replacement staging', releaseWinner: false, linkReplacement: false },
+    { mode: 'write' as const, transition: 'replacement linked pair', releaseWinner: true, linkReplacement: true },
+    { mode: 'write' as const, transition: 'winner release with replacement staging', releaseWinner: true, linkReplacement: false },
+    { mode: 'read' as const, transition: 'replacement staging', releaseWinner: false, linkReplacement: false },
+    { mode: 'read' as const, transition: 'replacement linked pair', releaseWinner: true, linkReplacement: true },
+    { mode: 'read' as const, transition: 'winner release with replacement staging', releaseWinner: true, linkReplacement: false },
+  ])('retries $mode pair scan across $transition', async ({ mode, releaseWinner, linkReplacement }) => {
+    const root = makeRoot();
+    const seed = await acquire(root, mode);
+    seed.release();
+    const [released] = releasedFiles(root);
+    const record = JSON.parse(readFileSync(released!, 'utf8')) as Record<string, unknown>;
+    const coordinationRoot = realpathSync(join(root, '.takt-repertoire-coordination'));
+    const activePath = mode === 'write'
+      ? join(coordinationRoot, 'writer.intent')
+      : join(coordinationRoot, 'readers', `${String(record['pid'])}.${String(record['token'])}.lease`);
+    const publishingPath = `${activePath}.publishing`;
+    const validBytes = readFileSync(released!);
+    writeFileSync(publishingPath, validBytes, { mode: 0o600 });
+    linkSync(publishingPath, activePath);
+    const oldPublishing = lstatSync(publishingPath);
+    fsFault.afterClaimLstat = (path) => {
+      if (path !== activePath) return false;
+      fsFault.actualUnlinkSync!(publishingPath);
+      if (releaseWinner) fsFault.actualUnlinkSync!(activePath);
+      fsFault.actualWriteFileSync!(publishingPath, validBytes, { mode: 0o600, flag: 'wx' });
+      if (linkReplacement) fsFault.actualLinkSync!(publishingPath, activePath);
+      return true;
+    };
+
+    expect(() => acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root }))
+      .toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
+    const replacement = lstatSync(publishingPath);
+    expect({ dev: replacement.dev, ino: replacement.ino }).not.toEqual({
+      dev: oldPublishing.dev,
+      ino: oldPublishing.ino,
+    });
   });
 
   it('removes only its valid losing staging claim after publication gets EEXIST', async () => {

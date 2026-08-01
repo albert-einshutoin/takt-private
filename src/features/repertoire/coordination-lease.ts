@@ -873,41 +873,20 @@ function classifyPublishingPair(
 ): 'linked' | 'contender' {
   const active = lstatPublishingPath(activePath);
   const publishing = lstatPublishingPath(publishingPath);
-  const expectedUid = currentUid();
-  if (
-    !isFileMode(active.mode)
-    || !isFileMode(publishing.mode)
-    || isSymlinkMode(active.mode)
-    || isSymlinkMode(publishing.mode)
-    || (active.mode & 0o777) !== PRIVATE_FILE_MODE
-    || (publishing.mode & 0o777) !== PRIVATE_FILE_MODE
-    || publishing.size < 0
-    || publishing.size > MAX_LEASE_BYTES
-    || (expectedUid !== null && (active.uid !== expectedUid || publishing.uid !== expectedUid))
-  ) throw new RepertoireCoordinationError('UNSAFE_STATE');
+  assertSafeClaimArtifactMetadata(active);
+  assertSafeClaimArtifactMetadata(publishing);
   if (active.dev === publishing.dev && active.ino === publishing.ino) {
-    if (active.nlink !== 2 || publishing.nlink !== 2) {
-      throw new RepertoireCoordinationError('UNSAFE_STATE');
-    }
+    if (active.nlink !== 2 || publishing.nlink !== 2) throw SNAPSHOT_CHANGED;
     return 'linked';
   }
-  if (active.nlink !== 1 || publishing.nlink !== 1) {
-    throw new RepertoireCoordinationError('UNSAFE_STATE');
-  }
+  if (active.nlink !== 1 || publishing.nlink !== 1) throw SNAPSHOT_CHANGED;
   return 'contender';
 }
 
 function assertPublishingOnly(path: string): void {
   const stat = lstatPublishingPath(path);
-  const expectedUid = currentUid();
-  if (
-    !isFileMode(stat.mode)
-    || isSymlinkMode(stat.mode)
-    || stat.size < 0
-    || stat.size > MAX_LEASE_BYTES
-    || (stat.mode & 0o777) !== PRIVATE_FILE_MODE
-    || (expectedUid !== null && stat.uid !== expectedUid)
-  ) throw new RepertoireCoordinationError('UNSAFE_STATE');
+  assertSafeClaimArtifactMetadata(stat);
+  if (stat.nlink === 1) return;
   if (stat.nlink === 2) {
     const activePath = path.slice(0, -CLAIM_PUBLISHING_SUFFIX.length);
     let active: Stats;
@@ -917,23 +896,27 @@ function assertPublishingOnly(path: string): void {
       if (isMissingError(error)) throw SNAPSHOT_CHANGED;
       throw error;
     }
+    assertSafeClaimArtifactMetadata(active);
     // The directory listing can race across the publisher's nlink=2 window.
     // The active name may therefore be the same inode at nlink 2, already be
     // the remaining nlink=1 publication, or have been released. Restarting is
     // bounded, so a stable external hard link with no derived active name still
     // terminates as unsafe rather than authorizing progress.
-    if (
-      isFileMode(active.mode)
-      && !isSymlinkMode(active.mode)
-      && active.dev === stat.dev
-      && active.ino === stat.ino
-      && (active.nlink === 1 || active.nlink === 2)
-      && (active.mode & 0o777) === PRIVATE_FILE_MODE
-      && (expectedUid === null || active.uid === expectedUid)
-    ) throw SNAPSHOT_CHANGED;
-    throw new RepertoireCoordinationError('UNSAFE_STATE');
+    throw SNAPSHOT_CHANGED;
   }
-  if (stat.nlink !== 1) throw new RepertoireCoordinationError('UNSAFE_STATE');
+  throw SNAPSHOT_CHANGED;
+}
+
+function assertSafeClaimArtifactMetadata(stat: Stats): void {
+  const expectedUid = currentUid();
+  if (
+    !isFileMode(stat.mode)
+    || isSymlinkMode(stat.mode)
+    || stat.size < 0
+    || stat.size > MAX_LEASE_BYTES
+    || (stat.mode & 0o777) !== PRIVATE_FILE_MODE
+    || (expectedUid !== null && stat.uid !== expectedUid)
+  ) throw new RepertoireCoordinationError('UNSAFE_STATE');
 }
 
 function lstatPublishingPath(path: string): Stats {
