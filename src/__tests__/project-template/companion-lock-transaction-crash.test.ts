@@ -7,6 +7,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -22,6 +23,12 @@ import {
 import {
   initializeProjectTemplateApplyStorage,
 } from '../../features/project-template/apply-storage.js';
+import {
+  readProjectTemplateCompanionLockState,
+} from '../../features/project-template/companion-lock-state-reader.js';
+import {
+  readProjectTemplateMergeBaseline,
+} from '../../features/project-template/merge-baseline-store.js';
 import {
   PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
 } from '../../features/project-template/repertoire-dependency-lock.js';
@@ -110,6 +117,85 @@ const CRASH_PHASES = [
 ] as const satisfies readonly ProjectTemplateCompanionLockTransactionPhase[];
 
 describe('project template companion lock transaction crash recovery', () => {
+  it('rechecks the exact companion witness before consuming approval', async () => {
+    const projectRoot = makeRepo();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const lease = acquireProjectTemplateApplyLease(projectRoot);
+    const expectedPreviousLocksSha256 = readProjectTemplateCompanionLockState(
+      projectRoot,
+    ).previousLocksSha256;
+    let approvalConsumes = 0;
+    try {
+      await expect(executeOwnedProjectTemplateCompanionLockTransaction({
+        storage,
+        lease,
+        transactionPlanId: 'a'.repeat(64),
+        preconditionToken: 'b'.repeat(64),
+        expectedPreviousLocksSha256,
+        outputs: {
+          contentLock: cohort('new')[CONTENT_LOCK_PATH]!,
+          repertoireLock:
+            cohort('new')[PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH]!,
+          sourceProvenance:
+            cohort('new')[PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH]!,
+        },
+        async consumeApproval() {
+          approvalConsumes += 1;
+          return true;
+        },
+        runDoctor() {},
+        onPhase(phase) {
+          if (phase === 'journal-durable') {
+            writeFileSync(join(projectRoot, CONTENT_LOCK_PATH), 'foreign\n');
+          }
+        },
+      })).rejects.toThrow();
+      expect(approvalConsumes).toBe(0);
+    } finally {
+      lease.release();
+    }
+  });
+
+  it('publishes merge baselines inside the rollback and recovery transaction', async () => {
+    const projectRoot = makeRepo();
+    const oldCohort = cohort('old');
+    const newCohort = cohort('new');
+    writeCohort(projectRoot, oldCohort);
+    const baseline = new TextEncoder().encode('name: next\n');
+    const baselineSha256 = createHash('sha256').update(baseline).digest('hex');
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const lease = acquireProjectTemplateApplyLease(projectRoot);
+    try {
+      await executeOwnedProjectTemplateCompanionLockTransaction({
+        storage,
+        lease,
+        transactionPlanId: 'a'.repeat(64),
+        preconditionToken: 'b'.repeat(64),
+        outputs: {
+          mergeBaselines: [{ sha256: baselineSha256, content: baseline }],
+          contentLock: newCohort[CONTENT_LOCK_PATH]!,
+          repertoireLock:
+            newCohort[PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH]!,
+          sourceProvenance:
+            newCohort[PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH]!,
+        },
+        async consumeApproval() { return true; },
+        async runDoctor() {
+          await expect(readProjectTemplateMergeBaseline({
+            storage,
+            expectedSha256: baselineSha256,
+          })).resolves.toEqual(Buffer.from(baseline));
+        },
+      });
+    } finally {
+      lease.release();
+    }
+    await expect(readProjectTemplateMergeBaseline({
+      storage,
+      expectedSha256: baselineSha256,
+    })).resolves.toEqual(Buffer.from(baseline));
+  });
+
   it.each(CRASH_PHASES)(
     'converges to one complete cohort after a crash at %s',
     async (crashPhase) => {
