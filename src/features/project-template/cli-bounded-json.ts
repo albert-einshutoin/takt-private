@@ -9,6 +9,7 @@ export const PROJECT_TEMPLATE_CLI_JSON_LIMITS = Object.freeze({
 });
 
 const localeCompare = String.prototype.localeCompare;
+const arraySort = Array.prototype.sort;
 
 function invalidGraph(): never {
   throw new ProjectTemplateCliContractError(
@@ -142,7 +143,7 @@ export function serializeProjectTemplateCliJson(value: unknown): string {
     }
     const record = current as object;
     const keys = Reflect.ownKeys(record) as string[];
-    keys.sort(compareKeys);
+    Reflect.apply(arraySort, keys, [compareKeys]);
     append('{');
     for (let index = 0; index < keys.length; index += 1) {
       if (index > 0) append(',');
