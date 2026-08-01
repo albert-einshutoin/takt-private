@@ -424,4 +424,164 @@ describe('project template remote production composition', () => {
       .resolves.toEqual({ status: 'none' });
     await restarted.dispose();
   });
+
+  it('sweeps expired receipt, preview, and approval handles before each capacity reservation', async () => {
+    const value = await fixture();
+    let now = 0;
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+      now: () => now,
+      handleTtlMs: 10,
+      handleLimit: 1,
+    });
+    const firstReceipt = await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    const firstPreview = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: firstReceipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    });
+    const firstApproval = await composition.approve({
+      projectRoot: value.projectRoot, previewId: firstPreview.previewId,
+      transactionPlanId: firstPreview.transactionPlanId, baselineStrategy: 'conflict',
+    });
+    now = 11;
+    const secondReceipt = await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    const secondPreview = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: secondReceipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    });
+    await expect(composition.apply({
+      cacheRoot: value.cacheRoot, receiptKey: firstReceipt.receiptKey,
+      previewId: firstPreview.previewId,
+      transactionPlanId: firstPreview.transactionPlanId,
+      approvalId: firstApproval.approvalId,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    })).rejects.toMatchObject({ code: 'UNKNOWN_APPROVAL' });
+    await expect(composition.approve({
+      projectRoot: value.projectRoot, previewId: firstPreview.previewId,
+      transactionPlanId: firstPreview.transactionPlanId, baselineStrategy: 'conflict',
+    })).rejects.toMatchObject({ code: 'UNKNOWN_PREVIEW' });
+    await expect(composition.approve({
+      projectRoot: value.projectRoot, previewId: secondPreview.previewId,
+      transactionPlanId: secondPreview.transactionPlanId, baselineStrategy: 'conflict',
+    })).resolves.toHaveProperty('approvalId');
+    await composition.dispose();
+  });
+
+  it('sweeps only expired handles in a mixed expired/live preview set', async () => {
+    const value = await fixture();
+    let now = 0;
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+      now: () => now,
+      handleTtlMs: 10,
+      handleLimit: 2,
+    });
+    const receipt = await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    const expired = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
+    });
+    now = 5;
+    await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    writeFileSync(join(value.projectRoot, 'local.txt'), 'one');
+    const live = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
+    });
+    now = 11;
+    writeFileSync(join(value.projectRoot, 'local.txt'), 'two');
+    const replacement = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
+    });
+    await expect(composition.approve({
+      projectRoot: value.projectRoot, previewId: expired.previewId,
+      transactionPlanId: expired.transactionPlanId, baselineStrategy: 'conflict',
+    })).rejects.toMatchObject({ code: 'UNKNOWN_PREVIEW' });
+    for (const handle of [live, replacement]) {
+      await expect(composition.approve({
+        projectRoot: value.projectRoot, previewId: handle.previewId,
+        transactionPlanId: handle.transactionPlanId, baselineStrategy: 'conflict',
+      })).resolves.toHaveProperty('approvalId');
+    }
+    await composition.dispose();
+  });
+
+  it.each([Number.NaN, -1])('fails closed on invalid or rolled-back clock %s', async (badNow) => {
+    const value = await fixture();
+    let now = 0;
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+      now: () => now,
+      handleTtlMs: 10,
+      handleLimit: 1,
+    });
+    await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    now = badNow;
+    await expect(composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    })).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
+    await composition.dispose();
+  });
+
+  it('keeps an in-flight reservation while an expired sweep and dispose race', async () => {
+    const value = await fixture();
+    let now = 0;
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+      now: () => now,
+      handleTtlMs: 10,
+      handleLimit: 1,
+    });
+    await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    now = 11;
+    const concurrent = await Promise.allSettled([
+      composition.download({
+        projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+        source: value.source, advisory: value.advisory,
+      }),
+      composition.download({
+        projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+        source: value.source, advisory: value.advisory,
+      }),
+    ]);
+    expect(concurrent.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(concurrent.filter((result) => result.status === 'rejected')[0])
+      .toMatchObject({ reason: { code: 'HANDLE_LIMIT_EXCEEDED' } });
+    await composition.dispose();
+  });
 });
