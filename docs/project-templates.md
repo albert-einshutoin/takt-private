@@ -478,7 +478,7 @@ takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0
 takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --apply --expected-plan-id <sha256> --json
 takt project-template inspect ./team.taktpack --cwd ./destination --json
 takt project-template apply ./team.taktpack --cwd ./destination --dry-run --json
-takt project-template apply ./team.taktpack --cwd ./destination --apply --expected-plan-id <sha256> --json
+takt project-template apply ./team.taktpack --cwd ./destination --apply --expected-plan-id <sha256> --force --json
 ```
 
 Canonical GitHub example (never place credentials in the source argument):
@@ -486,7 +486,8 @@ Canonical GitHub example (never place credentials in the source argument):
 ```sh
 takt project-template diff github:team/repository@v1.2.3 --cwd ./destination --json
 takt project-template apply github:team/repository@v1.2.3 --cwd ./destination --dry-run --json
-takt project-template update github:team/repository@v1.2.3 --cwd ./destination --apply --expected-plan-id <sha256> --json
+takt project-template update github:team/repository@v1.2.3 --cwd ./destination --dry-run --json
+takt project-template update github:team/repository@v1.2.3 --cwd ./destination --apply --expected-plan-id <sha256> --force --json
 ```
 
 Preview authority is process-local, single-use state. TaktDesk may persist the

@@ -406,7 +406,7 @@ takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0
 takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --apply --expected-plan-id <sha256> --json
 takt project-template inspect ./team.taktpack --cwd ./destination --json
 takt project-template apply ./team.taktpack --cwd ./destination --dry-run --json
-takt project-template apply ./team.taktpack --cwd ./destination --apply --expected-plan-id <sha256> --json
+takt project-template apply ./team.taktpack --cwd ./destination --apply --expected-plan-id <sha256> --force --json
 ```
 
 canonical GitHub例（source引数へcredentialを含めてはいけません）:
@@ -414,7 +414,8 @@ canonical GitHub例（source引数へcredentialを含めてはいけません）
 ```sh
 takt project-template diff github:team/repository@v1.2.3 --cwd ./destination --json
 takt project-template apply github:team/repository@v1.2.3 --cwd ./destination --dry-run --json
-takt project-template update github:team/repository@v1.2.3 --cwd ./destination --apply --expected-plan-id <sha256> --json
+takt project-template update github:team/repository@v1.2.3 --cwd ./destination --dry-run --json
+takt project-template update github:team/repository@v1.2.3 --cwd ./destination --apply --expected-plan-id <sha256> --force --json
 ```
 
 preview authorityはprocess-localかつsingle-useです。TaktDeskが保存できるのは安全なJSONの
