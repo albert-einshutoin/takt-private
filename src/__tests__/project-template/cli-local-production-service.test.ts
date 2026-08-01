@@ -13,8 +13,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { writeTaktpack } from '../../features/project-template/archive-writer.js';
 import {
-  createProductionProjectTemplateCliLocalApplyService,
+  createProductionProjectTemplateCliLocalApplyService as createCoreLocalApplyService,
+  type ProjectTemplateCliLocalApplyOptions,
 } from '../../features/project-template/cli-local-apply-service.js';
+import { startProjectTemplateCliLifecycle } from '../../features/project-template/cli-lifecycle.js';
 import { createProjectTemplateExportPlan } from '../../features/project-template/export-plan.js';
 import {
   acquireProjectTemplateApplyLease,
@@ -25,6 +27,30 @@ import {
 } from '../../features/project-template/local-transaction-apply-facade.js';
 
 const roots: string[] = [];
+
+type LocalApplyTestOptions = Omit<
+  Extract<ProjectTemplateCliLocalApplyOptions, { mode: 'apply' }>,
+  'admitMutation'
+>;
+
+function createProductionProjectTemplateCliLocalApplyService() {
+  const core = createCoreLocalApplyService();
+  return {
+    diff: core.diff,
+    apply(options: LocalApplyTestOptions) {
+      return startProjectTemplateCliLifecycle({
+        command: 'project-template apply',
+        mode: 'apply',
+        dispose: () => undefined,
+        handle: ({ admitMutation, signal }) => core.apply({
+          ...options,
+          signal: options.signal ?? signal,
+          admitMutation,
+        }),
+      }).result;
+    },
+  };
+}
 
 function root(prefix: string): string {
   const value = mkdtempSync(join(tmpdir(), prefix));

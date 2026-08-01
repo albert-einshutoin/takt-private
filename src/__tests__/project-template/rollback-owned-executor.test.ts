@@ -34,9 +34,36 @@ import {
 import {
   deriveProjectTemplateRollbackPlan,
 } from '../../features/project-template/rollback-plan.js';
-import { createProductionProjectTemplateCliRollbackService } from '../../features/project-template/cli-rollback-service.js';
+import {
+  createProductionProjectTemplateCliRollbackService as createCoreRollbackService,
+  type ProjectTemplateCliRollbackOptions,
+} from '../../features/project-template/cli-rollback-service.js';
+import { startProjectTemplateCliLifecycle } from '../../features/project-template/cli-lifecycle.js';
 
 const roots: string[] = [];
+
+type RollbackTestOptions =
+  | Extract<ProjectTemplateCliRollbackOptions, { mode: 'dry-run' }>
+  | Omit<Extract<ProjectTemplateCliRollbackOptions, { mode: 'apply' }>, 'admitMutation'>;
+
+function createProductionProjectTemplateCliRollbackService() {
+  const core = createCoreRollbackService();
+  return {
+    rollback(options: RollbackTestOptions) {
+      if (options.mode === 'dry-run') return core.rollback(options);
+      return startProjectTemplateCliLifecycle({
+        command: 'project-template rollback',
+        mode: 'apply',
+        dispose: () => undefined,
+        handle: ({ admitMutation, signal }) => core.rollback({
+          ...options,
+          signal: options.signal ?? signal,
+          admitMutation,
+        }),
+      }).result;
+    },
+  };
+}
 
 function root(prefix: string): string {
   const value = mkdtempSync(join(tmpdir(), prefix));
