@@ -100,6 +100,7 @@ export interface ProjectTemplateCliRemoteBaseOptions {
   readonly baselineStrategy: 'conflict' | 'adopt-identical';
   readonly force: boolean;
   readonly signal?: AbortSignal;
+  readonly admitMutation?: () => void;
 }
 
 export type ProjectTemplateCliRemoteMutationOptions =
@@ -269,7 +270,7 @@ function snapshotOptions(
     ...(mutation ? ['mode'] : []),
     ...(mutation && mode === 'apply' ? ['expectedPlanId'] : []),
   ];
-  const allowed = new Set([...required, 'signal']);
+  const allowed = new Set([...required, 'signal', 'admitMutation']);
   const keys = Reflect.ownKeys(descriptors);
   if (keys.some((key) => typeof key !== 'string' || !allowed.has(key))
     || required.some((key) => !keys.includes(key))) return undefined;
@@ -285,8 +286,10 @@ function snapshotOptions(
     currentTaktVersion: snapshot['currentTaktVersion'],
     baselineStrategy: snapshot['baselineStrategy'], force: snapshot['force'],
     ...(snapshot['signal'] === undefined ? {} : { signal: snapshot['signal'] }),
+    ...(snapshot['admitMutation'] === undefined ? {} : { admitMutation: snapshot['admitMutation'] }),
   } as ProjectTemplateCliRemoteBaseOptions;
-  if (!validBase(base)) return undefined;
+  if (!validBase(base)
+    || (base.admitMutation !== undefined && typeof base.admitMutation !== 'function')) return undefined;
   if (!mutation) return Object.freeze(base);
   if (mode === 'dry-run') return Object.freeze({ ...base, mode: 'dry-run' as const });
   if (mode === 'apply' && typeof snapshot['expectedPlanId'] === 'string') {
@@ -375,6 +378,11 @@ export function createProjectTemplateCliRemoteApplyService(
     }
     if (derived.reviewRequired && !(options.force && derived.forceApplicable)) {
       return failure(command, 'apply', 'REVIEW_REQUIRED');
+    }
+    try {
+      options.admitMutation?.();
+    } catch {
+      return failure(command, 'apply', aborted(options.signal) ? 'INTERRUPTED' : 'INTERNAL');
     }
     try {
       // Cancellation is intentionally not forwarded after this admission

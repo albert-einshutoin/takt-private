@@ -59,21 +59,50 @@ describe('project template CLI export service', () => {
     const preview = await dryRun(fixture.root, fixture.outputPath);
     const planId = preview.envelope.status === 'success' && 'planId' in preview.envelope.result
       ? preview.envelope.result.planId : '';
-    const admitMutation = vi.fn();
-    await executeProjectTemplateCliExport({
+    const controller = new AbortController();
+    const admitMutation = vi.fn(() => controller.abort());
+    const outcome = await executeProjectTemplateCliExport({
       projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
       mutation: { mode: 'apply', force: false, expectedPlanId: planId },
-      admitMutation,
+      signal: controller.signal, admitMutation,
     });
     expect(admitMutation).toHaveBeenCalledOnce();
+    expect(outcome).toMatchObject({ exitCode: 0, envelope: { status: 'success' } });
+    expect(existsSync(fixture.outputPath)).toBe(true);
+  });
+  it('maps an admission interrupt before archive publication', async () => {
+    const fixture = makeFixture();
+    const preview = await dryRun(fixture.root, fixture.outputPath);
+    const planId = preview.envelope.status === 'success' && 'planId' in preview.envelope.result
+      ? preview.envelope.result.planId : '';
+    const controller = new AbortController();
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
+      mutation: { mode: 'apply', force: false, expectedPlanId: planId }, signal: controller.signal,
+      admitMutation() { controller.abort(); throw new Error('interrupt'); },
+    });
+    expect(outcome).toMatchObject({ exitCode: 130, envelope: { error: { code: 'INTERRUPTED' } } });
+    expect(existsSync(fixture.outputPath)).toBe(false);
+    const generic = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
+      mutation: { mode: 'apply', force: false, expectedPlanId: planId },
+      admitMutation() { throw new Error('failed'); },
+    });
+    expect(generic).toMatchObject({ exitCode: 70, envelope: { error: { code: 'INTERNAL' } } });
+    expect(existsSync(fixture.outputPath)).toBe(false);
   });
   it('returns a deterministic closed dry-run DTO without writing an archive', async () => {
     const fixture = makeFixture();
+    const admitMutation = vi.fn();
 
-    const first = await dryRun(fixture.root, fixture.outputPath);
+    const first = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
+      mutation: { mode: 'dry-run', force: false }, admitMutation,
+    });
     const second = await dryRun(fixture.root, fixture.outputPath);
 
     expect(first).toEqual(second);
+    expect(admitMutation).not.toHaveBeenCalled();
     expect(first).toMatchObject({
       exitCode: 0,
       envelope: {
@@ -119,12 +148,14 @@ describe('project template CLI export service', () => {
 
   it('requires the exact fresh plan id before invoking the archive writer', async () => {
     const fixture = makeFixture();
+    const admitMutation = vi.fn();
 
     const outcome = await executeProjectTemplateCliExport({
       projectRoot: fixture.root,
       outputPath: fixture.outputPath,
       exportOptions,
       mutation: { mode: 'apply', force: false, expectedPlanId: 'f'.repeat(64) },
+      admitMutation,
     });
 
     expect(outcome).toMatchObject({
@@ -133,6 +164,7 @@ describe('project template CLI export service', () => {
     });
     expect(existsSync(fixture.outputPath)).toBe(false);
     expect(readdirSync(join(fixture.root, 'exports'))).toEqual([]);
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('delegates the only archive write to the core atomic writer after re-planning', async () => {
@@ -233,6 +265,7 @@ describe('project template CLI export service', () => {
 
   it('does not let force bypass an active run', async () => {
     const fixture = makeFixture();
+    const admitMutation = vi.fn();
     const runDir = join(fixture.root, '.takt', 'runs', 'active-run');
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, 'meta.json'), JSON.stringify({
@@ -261,12 +294,14 @@ describe('project template CLI export service', () => {
       mutation: {
         mode: 'apply', force: true, expectedPlanId: plan.envelope.result.planId,
       },
+      admitMutation,
     });
     expect(outcome).toMatchObject({
       exitCode: 23,
       envelope: { status: 'error', error: { code: 'ACTIVE_RUN' } },
     });
     expect(existsSync(fixture.outputPath)).toBe(false);
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('honors a pre-aborted signal without leaving an archive or temp file', async () => {

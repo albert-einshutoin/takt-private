@@ -35,6 +35,7 @@ interface ProjectTemplateCliExportInput {
   readonly exportOptions: ProjectTemplateExportOptions;
   readonly mutation: ProjectTemplateCliMutationOptions;
   readonly signal?: AbortSignal;
+  readonly admitMutation?: () => void;
 }
 
 interface PlannedExport {
@@ -254,11 +255,16 @@ export async function executeProjectTemplateCliExport(
       input.mutation.force,
     );
     if (finalPlanId !== planned.planId) return failure(mode, 'TARGET_DRIFT');
+    try {
+      input.admitMutation?.();
+    } catch {
+      return failure(mode, input.signal?.aborted === true ? 'INTERRUPTED' : 'INTERNAL');
+    }
     const archive = await writeTaktpackWithOutputPrecondition(
       input.outputPath,
       planned.plan,
       finalOutput.authority,
-      { force: input.mutation.force, signal: input.signal },
+      { force: input.mutation.force },
       testSeam.writerIoSeam,
     );
     return {

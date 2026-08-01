@@ -106,6 +106,7 @@ export interface ProjectTemplateCliLocalBaseOptions {
   readonly currentTaktVersion: string;
   readonly force: boolean;
   readonly signal?: AbortSignal;
+  readonly admitMutation?: () => void;
 }
 
 export type ProjectTemplateCliLocalApplyOptions =
@@ -397,6 +398,12 @@ export function createProjectTemplateCliLocalApplyService(
 
       // Mutation admission begins inside this one trusted call. Cancellation
       // after it starts must never make the CLI abandon executor recovery.
+      try {
+        options.admitMutation?.();
+      } catch {
+        return failure('project-template apply', 'apply',
+          active(options.signal) ? 'INTERNAL' : 'INTERRUPTED');
+      }
       let executed: ProjectTemplateCliLocalExecutionResult;
       try {
         executed = await (CAPTURED_REFLECT_APPLY(port.execute, port.receiver, [{
@@ -406,7 +413,6 @@ export function createProjectTemplateCliLocalApplyService(
           expectedTransactionPlanId: plan.transactionPlanId,
           force: options.force,
           derived: plan,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
         }]) as Promise<ProjectTemplateCliLocalExecutionResult>);
       } catch {
         return failure('project-template apply', 'apply', 'RESULT_INDETERMINATE');

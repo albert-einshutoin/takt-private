@@ -46,13 +46,34 @@ describe('local project-template CLI diff/apply service', () => {
     expect(execute).toHaveBeenCalledOnce();
     expect(execute.mock.calls[0]![0]).not.toHaveProperty('signal');
   });
+  it('maps an admission interrupt before execute', async () => {
+    const controller = new AbortController();
+    const execute = vi.fn();
+    const service = createProjectTemplateCliLocalApplyService(port({ execute }));
+    const outcome = await service.apply({
+      cwd: '/safe/repo', sourcePath: 'pack.taktpack', currentTaktVersion: '0.48.0',
+      force: false, mode: 'apply', expectedPlanId: PLAN_ID, signal: controller.signal,
+      admitMutation() { controller.abort(); throw new Error('interrupt'); },
+    });
+    expect(outcome).toMatchObject({ exitCode: 130, envelope: { error: { code: 'INTERRUPTED' } } });
+    expect(execute).not.toHaveBeenCalled();
+    const generic = await service.apply({
+      cwd: '/safe/repo', sourcePath: 'pack.taktpack', currentTaktVersion: '0.48.0',
+      force: false, mode: 'apply', expectedPlanId: PLAN_ID,
+      admitMutation() { throw new Error('failed'); },
+    });
+    expect(generic).toMatchObject({ exitCode: 70, envelope: { error: { code: 'INTERNAL' } } });
+    expect(execute).not.toHaveBeenCalled();
+  });
   it('returns the same closed dry-run plan for diff and apply', async () => {
+    const admitMutation = vi.fn();
     const service = createProjectTemplateCliLocalApplyService(port());
     const options = {
       cwd: '/safe/repo',
       sourcePath: 'pack.taktpack',
       currentTaktVersion: '0.48.0',
       force: false,
+      admitMutation,
     };
 
     const diff = await service.diff(options);
@@ -82,9 +103,11 @@ describe('local project-template CLI diff/apply service', () => {
       },
     });
     expect(JSON.stringify(diff)).not.toContain('authority');
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('rejects expected-plan drift before mutation admission', async () => {
+    const admitMutation = vi.fn();
     const execute = vi.fn();
     const service = createProjectTemplateCliLocalApplyService(port({ execute }));
     const outcome = await service.apply({
@@ -94,6 +117,7 @@ describe('local project-template CLI diff/apply service', () => {
       mode: 'apply',
       expectedPlanId: 'b'.repeat(64),
       force: false,
+      admitMutation,
     });
 
     expect(outcome).toMatchObject({
@@ -101,10 +125,12 @@ describe('local project-template CLI diff/apply service', () => {
       envelope: { status: 'error', error: { code: 'PLAN_DRIFT' } },
     });
     expect(execute).not.toHaveBeenCalled();
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('does not let force bypass a hard content conflict', async () => {
     const execute = vi.fn();
+    const admitMutation = vi.fn();
     const service = createProjectTemplateCliLocalApplyService(port({
       derive: vi.fn(async () => ({
         transactionPlanId: PLAN_ID,
@@ -127,6 +153,7 @@ describe('local project-template CLI diff/apply service', () => {
       mode: 'apply',
       expectedPlanId: PLAN_ID,
       force: true,
+      admitMutation,
     });
 
     expect(outcome).toMatchObject({
@@ -134,6 +161,7 @@ describe('local project-template CLI diff/apply service', () => {
       envelope: { status: 'error', error: { code: 'HARD_CONFLICT' } },
     });
     expect(execute).not.toHaveBeenCalled();
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('blocks active-run state before deriving or creating approval state', async () => {

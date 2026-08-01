@@ -47,6 +47,7 @@ export type ProjectTemplateCliRollbackOptions = {
   readonly backupId: string;
   readonly force: boolean;
   readonly signal?: AbortSignal;
+  readonly admitMutation?: () => void;
 } & (
   | { readonly mode: 'dry-run' }
   | { readonly mode: 'apply'; readonly expectedPlanId: string }
@@ -161,6 +162,11 @@ export function createProjectTemplateCliRollbackService(
       if (aborted(options.signal)) return failure(mode, 'INTERRUPTED');
       const finalGuard = guardCode(port.inspectGuard(cwd));
       if (finalGuard !== undefined) return failure(mode, finalGuard);
+      try {
+        options.admitMutation?.();
+      } catch {
+        return failure(mode, aborted(options.signal) ? 'INTERRUPTED' : 'INTERNAL');
+      }
       let executed: ProjectTemplateCliRollbackExecutionResult;
       try {
         // Once admitted, always await the core's terminal rollback/recovery result.
@@ -168,7 +174,6 @@ export function createProjectTemplateCliRollbackService(
           cwd,
           expectedPlanId: plan.planId,
           derived: plan,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
       } catch {
         return failure(mode, 'RESULT_INDETERMINATE');

@@ -41,16 +41,32 @@ const base = {
 
 describe('project template remote CLI service', () => {
   it.each(['apply', 'update'] as const)('admits %s exact-once before terminal execution', async (command) => {
-    const admitMutation = vi.fn();
+    const controller = new AbortController();
+    const admitMutation = vi.fn(() => controller.abort());
     const execute = vi.fn(port().execute);
     const service = createProjectTemplateCliRemoteApplyService(port({ execute }));
-    await service[command]({ ...base, mode: 'apply', expectedPlanId: PLAN_ID, admitMutation });
+    await service[command]({ ...base, mode: 'apply', expectedPlanId: PLAN_ID,
+      signal: controller.signal, admitMutation });
     expect(admitMutation).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledOnce();
   });
+  it.each([
+    ['INTERNAL', false, 70],
+    ['INTERRUPTED', true, 130],
+  ] as const)('maps %s when admission throws before remote execution', async (code, interrupt, exitCode) => {
+    const execute = vi.fn();
+    const controller = new AbortController();
+    const service = createProjectTemplateCliRemoteApplyService(port({ execute }));
+    const outcome = await service.apply({ ...base, mode: 'apply', expectedPlanId: PLAN_ID,
+      signal: controller.signal,
+      admitMutation() { if (interrupt) controller.abort(); throw new Error('admission failed'); } });
+    expect(outcome).toMatchObject({ exitCode, envelope: { error: { code } } });
+    expect(execute).not.toHaveBeenCalled();
+  });
   it('returns only the closed safe diff DTO from a fresh derivation', async () => {
+    const admitMutation = vi.fn();
     const service = createProjectTemplateCliRemoteApplyService(port());
-    const outcome = await service.diff(base);
+    const outcome = await service.diff({ ...base, admitMutation });
 
     expect(outcome).toEqual({
       exitCode: 0,
@@ -66,6 +82,7 @@ describe('project template remote CLI service', () => {
     expect(JSON.stringify(outcome)).not.toMatch(
       /receipt|previewId|approval|evidence|verifier|cache|authority/iu,
     );
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('re-derives in a new process and admits only an exact expected plan', async () => {
@@ -86,10 +103,11 @@ describe('project template remote CLI service', () => {
   });
 
   it('rejects drift before mutation admission', async () => {
+    const admitMutation = vi.fn();
     const execute = vi.fn(port().execute);
     const service = createProjectTemplateCliRemoteApplyService(port({ execute }));
     const outcome = await service.apply({
-      ...base, mode: 'apply', expectedPlanId: 'b'.repeat(64),
+      ...base, mode: 'apply', expectedPlanId: 'b'.repeat(64), admitMutation,
     });
 
     expect(outcome).toMatchObject({
@@ -97,6 +115,7 @@ describe('project template remote CLI service', () => {
       envelope: { status: 'error', error: { code: 'PLAN_DRIFT' } },
     });
     expect(execute).not.toHaveBeenCalled();
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('projects update dry-run and apply without internal handles', async () => {
@@ -115,6 +134,7 @@ describe('project template remote CLI service', () => {
 
   it('does not let force bypass hard conflicts or guards', async () => {
     const execute = vi.fn(port().execute);
+    const admitMutation = vi.fn();
     const hard = createProjectTemplateCliRemoteApplyService(port({
       execute,
       derive: async () => ({
@@ -130,11 +150,12 @@ describe('project template remote CLI service', () => {
       execute,
     }));
 
-    await expect(hard.apply({ ...base, force: true, mode: 'apply', expectedPlanId: PLAN_ID }))
+    await expect(hard.apply({ ...base, force: true, mode: 'apply', expectedPlanId: PLAN_ID, admitMutation }))
       .resolves.toMatchObject({ envelope: { error: { code: 'HARD_CONFLICT' } } });
-    await expect(blocked.apply({ ...base, force: true, mode: 'apply', expectedPlanId: PLAN_ID }))
+    await expect(blocked.apply({ ...base, force: true, mode: 'apply', expectedPlanId: PLAN_ID, admitMutation }))
       .resolves.toMatchObject({ envelope: { error: { code: 'ACTIVE_RUN' } } });
     expect(execute).not.toHaveBeenCalled();
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('blocks non-zero conflicts and inconsistent non-applicable plans even with force', async () => {

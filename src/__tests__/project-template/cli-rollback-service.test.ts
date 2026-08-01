@@ -36,6 +36,21 @@ describe('project template CLI rollback service', () => {
     expect(execute).toHaveBeenCalledOnce();
     expect(execute.mock.calls[0]![0]).not.toHaveProperty('signal');
   });
+  it('maps an admission interrupt before rollback execution', async () => {
+    const controller = new AbortController();
+    const execute = vi.fn();
+    const service = createProjectTemplateCliRollbackService(port({ execute }));
+    const outcome = await service.rollback({ cwd: '/safe/repo', backupId: 'backup-1', force: false,
+      mode: 'apply', expectedPlanId: planId, signal: controller.signal,
+      admitMutation() { controller.abort(); throw new Error('interrupt'); } });
+    expect(outcome).toMatchObject({ exitCode: 130, envelope: { error: { code: 'INTERRUPTED' } } });
+    expect(execute).not.toHaveBeenCalled();
+    const generic = await service.rollback({ cwd: '/safe/repo', backupId: 'backup-1', force: false,
+      mode: 'apply', expectedPlanId: planId,
+      admitMutation() { throw new Error('failed'); } });
+    expect(generic).toMatchObject({ exitCode: 70, envelope: { error: { code: 'INTERNAL' } } });
+    expect(execute).not.toHaveBeenCalled();
+  });
   it('classifies lease release failure as indeterminate', () => {
     expect(settleProjectTemplateRollbackAfterLease(
       { status: 'rolled_back', backupId: 'backup-1' },
@@ -43,26 +58,31 @@ describe('project template CLI rollback service', () => {
     )).toEqual({ status: 'indeterminate' });
   });
   it('returns only the closed dry-run contract', async () => {
+    const admitMutation = vi.fn();
     const service = createProjectTemplateCliRollbackService(port());
     const outcome = await service.rollback({
-      cwd: '/safe/repo', backupId: 'backup-1', force: false, mode: 'dry-run',
+      cwd: '/safe/repo', backupId: 'backup-1', force: false, mode: 'dry-run', admitMutation,
     });
     expect(outcome.envelope).toMatchObject({
       status: 'success', command: 'project-template rollback', mode: 'dry-run',
       result: { planId, recoveryState: 'clean', readiness: 'ready', reviewCodes: [] },
     });
     expect(JSON.stringify(outcome)).not.toContain('authority');
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('requires the caller expected plan before mutation admission', async () => {
+    const admitMutation = vi.fn();
     const value = port();
     const service = createProjectTemplateCliRollbackService(value);
     const outcome = await service.rollback({
       cwd: '/safe/repo', backupId: 'backup-1', force: true, mode: 'apply',
       expectedPlanId: 'b'.repeat(64),
+      admitMutation,
     });
     expect(outcome.envelope).toMatchObject({ status: 'error', error: { code: 'PLAN_DRIFT' } });
     expect(value.execute).not.toHaveBeenCalled();
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('drains an admitted rollback and returns its exact backup', async () => {
@@ -104,6 +124,7 @@ describe('project template CLI rollback service', () => {
   });
 
   it('does not let force bypass recovery or active-runtime guards', async () => {
+    const admitMutation = vi.fn();
     const value = port({
       inspectGuard: () => ({ passed: false, blocks: [{ code: 'ACTIVE_RUN' }] }),
     });
@@ -111,9 +132,11 @@ describe('project template CLI rollback service', () => {
     const outcome = await service.rollback({
       cwd: '/safe/repo', backupId: 'backup-1', force: true, mode: 'apply',
       expectedPlanId: planId,
+      admitMutation,
     });
     expect(outcome.envelope).toMatchObject({ status: 'error', error: { code: 'ACTIVE_RUN' } });
     expect(value.derive).not.toHaveBeenCalled();
+    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('reports an active run as blocked without inventing recovery state', async () => {
