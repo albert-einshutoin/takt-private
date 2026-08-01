@@ -117,6 +117,18 @@ steps:
 `);
   }
 
+  function captureGenerationWitness(workflow: NonNullable<ReturnType<typeof loadWorkflowByIdentifier>>): string {
+    return withImmediateRepertoireReadPermit({
+      globalConfigDir: configDir,
+      operation: (permit) => buildWorkflowGenerationWitness(
+        workflow,
+        projectDir,
+        projectDir,
+        createInternalWorkflowReadContext(configDir, permit),
+      ),
+    });
+  }
+
   function createProjectWorkflowWithScopedResources(): void {
     const workflowDir = join(projectDir, '.takt', 'workflows');
     const packageDir = join(configDir, 'repertoire', '@owner', 'repo');
@@ -300,7 +312,7 @@ ${stepFields}`);
   it('fails closed before execution when a same-name retry child changes generation', async () => {
     createNestedRetryWorkflow('generation A');
     const generationA = loadWorkflowByIdentifier('retry-parent', projectDir)!;
-    const generationWitness = buildWorkflowGenerationWitness(generationA, projectDir, projectDir);
+    const generationWitness = captureGenerationWitness(generationA);
     const resumePoint: WorkflowResumePoint = {
       version: 1,
       stack: [
@@ -322,7 +334,7 @@ ${stepFields}`);
     }, async () => {
       executorCalled = true;
       return { success: true };
-    })).rejects.toThrow('Workflow generation changed during retry preparation.');
+    })).rejects.toThrow('Workflow discovery failed');
 
     expect(executorCalled).toBe(false);
     expect(existsSync(resolveProjectTemplateRunStartMutexPath(projectDir))).toBe(false);
@@ -337,7 +349,7 @@ ${stepFields}`);
   it('recomputes retry step and max-steps from the witnessed runtime generation', async () => {
     createNestedRetryWorkflow('same generation');
     const generation = loadWorkflowByIdentifier('retry-parent', projectDir)!;
-    const generationWitness = buildWorkflowGenerationWitness(generation, projectDir, projectDir);
+    const generationWitness = captureGenerationWitness(generation);
     const resumePoint: WorkflowResumePoint = {
       version: 1,
       stack: [{ workflow: 'retry-parent', step: 'delegate', kind: 'workflow_call' }],
@@ -372,7 +384,7 @@ ${stepFields}`);
     async (change) => {
       createNestedRetryWorkflow('generation A');
       const generationA = loadWorkflowByIdentifier('retry-parent', projectDir)!;
-      const generationWitness = buildWorkflowGenerationWitness(generationA, projectDir, projectDir);
+      const generationWitness = captureGenerationWitness(generationA);
       createNestedRetryWorkflow(
         'generation A',
         change === 'step' ? 'work-v2' : 'work',
@@ -400,10 +412,72 @@ ${stepFields}`);
       }, async () => {
         executorCalled = true;
         return { success: true };
-      })).rejects.toThrow('Workflow generation changed during retry preparation.');
+      })).rejects.toThrow('Workflow discovery failed');
       expect(executorCalled).toBe(false);
     },
   );
+
+  it.each([
+    ['proxy', new Proxy({ generationWitness: 'a'.repeat(64) }, {})],
+    ['invalid hash', { generationWitness: 'not-a-sha256' }],
+    ['oversize resume stack', {
+      generationWitness: 'a'.repeat(64),
+      resumePoint: {
+        version: 1,
+        stack: Array.from({ length: 6 }, (_, index) => ({
+          workflow: `workflow-${index}`,
+          step: `step-${index}`,
+          kind: 'workflow_call',
+        })),
+        iteration: 1,
+        elapsed_ms: 1,
+      },
+    }],
+  ] as const)('rejects unsafe retry source %s before acquiring coordination locks', async (
+    _label,
+    retrySource,
+  ) => {
+    await expect(executeTaskWorkflow({
+      task: 'unsafe retry source',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'default',
+      retrySource: retrySource as never,
+    }, async () => ({ success: true }))).rejects.toMatchObject({
+      name: 'WorkflowDiscoveryReadError',
+      message: 'Workflow discovery failed',
+    });
+
+    expect(existsSync(resolveProjectTemplateRunStartMutexPath(projectDir))).toBe(false);
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+      timeoutMs: 250,
+    });
+    writer.release();
+  });
+
+  it('rejects retry source accessors without invoking them', async () => {
+    let getterCalled = false;
+    const retrySource = Object.defineProperty({}, 'generationWitness', {
+      enumerable: true,
+      get: () => {
+        getterCalled = true;
+        return 'a'.repeat(64);
+      },
+    });
+
+    await expect(executeTaskWorkflow({
+      task: 'accessor retry source',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'default',
+      retrySource: retrySource as never,
+    }, async () => ({ success: true }))).rejects.toMatchObject({
+      name: 'WorkflowDiscoveryReadError',
+    });
+    expect(getterCalled).toBe(false);
+  });
 
   it('rejects custom thenables without adopting them', async () => {
     createProjectRuntimeWorkflow();

@@ -2,6 +2,7 @@ import type { WorkflowConfig } from '../../../core/models/index.js';
 import { isWorkflowPath, resolveWorkflowConfigValues } from '../../../infra/config/index.js';
 import { loadWorkflowByIdentifierWithReadContext } from '../../../infra/config/loaders/workflowResolver.js';
 import type { InternalWorkflowReadContext } from '../../../infra/config/loaders/workflowDiscovery.js';
+import { WorkflowDiscoveryReadError } from '../../../infra/config/loaders/workflowDiscoveryError.js';
 import { resolveProviderOptionsWithTrace } from '../../../infra/config/resolveConfigValue.js';
 import { info, error } from '../../../shared/ui/index.js';
 import { createLogger } from '../../../shared/utils/index.js';
@@ -18,6 +19,7 @@ import { prepareWorkflowRuntimeRead } from './workflowRuntimeReadBoundary.js';
 import {
   buildWorkflowGenerationWitness,
   resolveWorkflowRetryOverrides,
+  snapshotWorkflowRetrySource,
 } from './workflowRetryGeneration.js';
 
 const log = createLogger('task');
@@ -56,6 +58,11 @@ export async function executeTaskWorkflow(
     currentTaskIssueNumber,
     onRunningEvidencePublished,
   } = options;
+  // Snapshot untrusted retry metadata before either coordination lock is held.
+  // Accessors/proxies must never execute while they can prolong a lease.
+  const safeRetrySource = retrySource === undefined
+    ? undefined
+    : snapshotWorkflowRetrySource(retrySource);
   const prepareWorkflow = (
     readContext: InternalWorkflowReadContext,
   ): Promise<WorkflowExecutionResult> => {
@@ -89,13 +96,21 @@ export async function executeTaskWorkflow(
         reason: `Workflow "${safeWorkflowIdentifier}" not found.`,
       });
     }
-    const retryOverrides = retrySource === undefined
+    const workflowGenerationWitness = buildWorkflowGenerationWitness(
+      workflowConfig,
+      projectCwd,
+      cwd,
+      readContext,
+    );
+    const retryOverrides = safeRetrySource === undefined
       ? { startStep, resumePoint, maxStepsOverride, initialIterationOverride }
       : resolveWitnessedRetryOverrides(
         workflowConfig,
         projectCwd,
         cwd,
-        retrySource,
+        safeRetrySource,
+        workflowGenerationWitness,
+        readContext,
       );
     log.debug('Running workflow', {
       name: workflowConfig.name,
@@ -128,6 +143,7 @@ export async function executeTaskWorkflow(
       taskDisplayLabel,
       maxStepsOverride: retryOverrides.maxStepsOverride,
       initialIterationOverride: retryOverrides.initialIterationOverride,
+      workflowGenerationWitness,
       currentTaskIssueNumber,
       traceTaskMetadata,
       onRunningEvidencePublished,
@@ -156,20 +172,18 @@ function resolveWitnessedRetryOverrides(
   projectCwd: string,
   lookupCwd: string,
   retrySource: NonNullable<ExecuteTaskOptions['retrySource']>,
+  currentWitness: string,
+  readContext: InternalWorkflowReadContext,
 ) {
-  const currentWitness = buildWorkflowGenerationWitness(
-    workflowConfig,
-    projectCwd,
-    lookupCwd,
-  );
   if (currentWitness !== retrySource.generationWitness) {
-    throw new Error('Workflow generation changed during retry preparation.');
+    throw new WorkflowDiscoveryReadError();
   }
   return resolveWorkflowRetryOverrides(
     workflowConfig,
     projectCwd,
     lookupCwd,
     retrySource,
+    readContext,
   );
 }
 
