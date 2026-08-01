@@ -47,8 +47,7 @@ afterEach(() => {
   for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true });
 });
 
-async function installed(): Promise<{
-  readonly projectRoot: string;
+async function applyVersion(projectRoot: string, maxSteps: number): Promise<{
   readonly backupId: string;
   readonly contentPath: string;
 }> {
@@ -56,7 +55,7 @@ async function installed(): Promise<{
   const workflowPath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
   mkdirSync(dirname(workflowPath), { recursive: true });
   writeFileSync(workflowPath, `name: review
-max_steps: 10
+max_steps: ${maxSteps}
 initial_step: review
 steps:
   - name: review
@@ -73,7 +72,6 @@ steps:
   });
   const archivePath = join(sourceRoot, 'template.taktpack');
   await writeTaktpack(archivePath, exportPlan);
-  const projectRoot = root('takt-rollback-target-');
   const derived = await deriveLocalProjectTemplateTransaction({
     archivePath,
     projectRoot,
@@ -103,10 +101,18 @@ steps:
     lease.release();
   }
   return {
-    projectRoot,
     backupId: committed.backupId,
     contentPath: join(projectRoot, '.takt', 'workflows', 'review.yaml'),
   };
+}
+
+async function installed(): Promise<{
+  readonly projectRoot: string;
+  readonly backupId: string;
+  readonly contentPath: string;
+}> {
+  const projectRoot = root('takt-rollback-target-');
+  return { projectRoot, ...await applyVersion(projectRoot, 10) };
 }
 
 describe('owned project template rollback executor', () => {
@@ -154,6 +160,27 @@ describe('owned project template rollback executor', () => {
       .toBe('first-install');
     expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
       .toBe(true);
+  });
+
+  it('restores an update backup and verifies the resulting 111 cohort', async () => {
+    const value = await installed();
+    const updated = await applyVersion(value.projectRoot, 11);
+    expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 11');
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: value.projectRoot });
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: updated.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toEqual({ status: 'rolled_back', backupId: updated.backupId });
+    } finally {
+      lease.release();
+    }
+    expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
+    expect(readProjectTemplateCompanionLockState(value.projectRoot).state).toBe('update');
+    expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed).toBe(true);
   });
 
   it('preserves a foreign target when the sealed rollback plan drifts', async () => {
