@@ -492,6 +492,76 @@ describe('taktpack deterministic writer', () => {
     }
   });
 
+  it('never path-unlinks a foreign staging entry during authority cleanup', async () => {
+    const projectRoot = makeRoot();
+    const outputRoot = makeRoot();
+    const movedOutputRoot = `${outputRoot}-moved`;
+    roots.push(movedOutputRoot);
+    writeProjectFile(projectRoot, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(projectRoot);
+    const outputDirectory = join(outputRoot, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'cleanup-swap.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    let foreignTemp: string | undefined;
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      {},
+      {
+        onPhase(phase) {
+          if (phase !== 'pipeline') return;
+          const tempName = readdirSync(outputRoot)
+            .find((name) => name.endsWith('.tmp'))!;
+          renameSync(outputRoot, movedOutputRoot);
+          mkdirSync(outputRoot);
+          foreignTemp = join(outputRoot, tempName);
+          writeFileSync(foreignTemp, 'foreign-staging-entry');
+          throw new Error('pipeline failed after staging parent swap');
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(foreignTemp).toBeDefined();
+    expect(readFileSync(foreignTemp!, 'utf8')).toBe('foreign-staging-entry');
+  });
+
+  it('reports a staging-directory close failure as indeterminate', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'staging-close.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      {},
+      {
+        onPhase(phase) {
+          if (String(phase) === 'staging-directory-close') {
+            throw new Error('close failed');
+          }
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(existsSync(output)).toBe(true);
+  });
+
   it.each([
     'rollback-restored-directory-fsync',
     'rollback-restored-witness',
