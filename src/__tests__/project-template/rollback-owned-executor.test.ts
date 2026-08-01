@@ -34,6 +34,7 @@ import {
 import {
   deriveProjectTemplateRollbackPlan,
 } from '../../features/project-template/rollback-plan.js';
+import { createProductionProjectTemplateCliRollbackService } from '../../features/project-template/cli-rollback-service.js';
 
 const roots: string[] = [];
 
@@ -116,6 +117,36 @@ async function installed(): Promise<{
 }
 
 describe('owned project template rollback executor', () => {
+  it('runs dry-run then expected-plan apply through the production service', async () => {
+    const value = await installed();
+    const service = createProductionProjectTemplateCliRollbackService();
+    const preview = await service.rollback({
+      cwd: value.projectRoot,
+      backupId: value.backupId,
+      force: false,
+      mode: 'dry-run',
+    });
+    expect(preview.envelope).toMatchObject({
+      status: 'success',
+      result: { recoveryState: 'clean', readiness: 'ready' },
+    });
+    const planId = preview.envelope.status === 'success'
+      && 'planId' in preview.envelope.result
+      ? preview.envelope.result.planId : '';
+    const applied = await service.rollback({
+      cwd: value.projectRoot,
+      backupId: value.backupId,
+      force: false,
+      mode: 'apply',
+      expectedPlanId: planId,
+    });
+    expect(applied.envelope).toMatchObject({
+      status: 'success', mode: 'apply',
+      result: { planId, rolledBack: true, backupId: value.backupId },
+    });
+    expect(existsSync(value.contentPath)).toBe(false);
+  });
+
   it('does not return a plan when abort arrives during the final target await', async () => {
     const value = await installed();
     const controller = new AbortController();
