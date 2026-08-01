@@ -1075,6 +1075,7 @@ export async function openProjectTemplateApplyStorageReadOnly(options: {
   const handles: Awaited<ReturnType<typeof open>>[] = [];
   const snapshots: Stats[] = [];
   let primaryError: unknown;
+  let closeFailed = false;
   try {
     for (let index = 0; index < paths.length; index += 1) {
       const path = paths[index]!;
@@ -1087,6 +1088,12 @@ export async function openProjectTemplateApplyStorageReadOnly(options: {
         || (
           index > 0
           && !isProjectTemplatePrivateDirectoryMode(pathBefore.mode, platform)
+        )
+        || (
+          index > 0
+          && platform !== 'win32'
+          && process.getuid !== undefined
+          && pathBefore.uid !== process.getuid()
         )
         || (index > 0 && pathBefore.dev !== snapshots[0]!.dev)
       ) {
@@ -1140,13 +1147,16 @@ export async function openProjectTemplateApplyStorageReadOnly(options: {
     try {
       await handles[index]!.close();
     } catch (error) {
+      closeFailed = true;
       primaryError ??= error;
     }
   }
-  try {
-    options.ioSeam?.onPhase?.('all-closed');
-  } catch (error) {
-    primaryError ??= error;
+  if (!closeFailed) {
+    try {
+      options.ioSeam?.onPhase?.('all-closed');
+    } catch (error) {
+      primaryError ??= error;
+    }
   }
   if (primaryError !== undefined) {
     if (primaryError instanceof ProjectTemplateApplyStorageError) {

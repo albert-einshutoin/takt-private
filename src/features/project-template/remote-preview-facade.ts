@@ -392,6 +392,7 @@ export async function createGithubProjectTemplateRemotePreview(
     capabilities: materialized.inspection.lockSeed.capabilities,
     entries: materialized.inspection.lockSeed.entries,
   };
+  requireActiveRemotePreview(operationContext);
   return createProjectTemplateRemoteApplyPreview({
     contentPlan,
     repertoireDependencyPlan: dependencyPlan,
