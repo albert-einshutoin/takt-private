@@ -176,6 +176,14 @@ export type {
   ProjectTemplateRecoveryResult,
   ProjectTemplateRollbackResult,
 } from './apply-executor.js';
+export {
+  applyGithubProjectTemplateRemoteTransaction,
+  GithubProjectTemplateRemoteApplyError,
+} from './remote-transaction-apply-facade.js';
+export type {
+  ApplyGithubProjectTemplateRemoteTransactionOptions,
+  GithubProjectTemplateRemoteApplyErrorCode,
+} from './remote-transaction-apply-facade.js';
 export type {
   ProjectTemplateApplyApprovalEvidence,
 } from './apply-approval.js';
