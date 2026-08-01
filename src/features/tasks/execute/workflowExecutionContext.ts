@@ -1,6 +1,5 @@
 import type { WorkflowConfig } from '../../../core/models/index.js';
 import type { WorkflowEngineOptions } from '../../../core/workflow/types.js';
-import { resolveWorkflowCallTarget } from '../../../infra/config/index.js';
 import { getWorkflowSourcePath } from '../../../infra/config/loaders/workflowSourceMetadata.js';
 import { getWorkflowTrustInfo } from '../../../infra/config/loaders/workflowTrustSource.js';
 import { WorkflowDiscoveryReadError } from '../../../infra/config/loaders/workflowDiscoveryError.js';
@@ -17,29 +16,19 @@ export function createWorkflowExecutionContext(workflowConfig: WorkflowConfig, p
 }
 
 export function createWorkflowCallResolver(
-  workflowContext: ReturnType<typeof createWorkflowExecutionContext>,
+  _workflowContext: ReturnType<typeof createWorkflowExecutionContext>,
   generationSnapshot?: WorkflowGenerationSnapshot,
   runtimeRootWorkflow?: WorkflowConfig,
 ): WorkflowEngineOptions['workflowCallResolver'] {
   const pinnedResolver = generationSnapshot
     ? bindWorkflowGenerationSnapshot(generationSnapshot, requireRuntimeRoot(runtimeRootWorkflow))
     : undefined;
-  return ({
-    parentWorkflow,
-    identifier,
-    stepName,
-    projectCwd,
-    lookupCwd,
-  }) => pinnedResolver
-    ? pinnedResolver(parentWorkflow, identifier, stepName)
-    : resolveWorkflowCallTarget(
-      parentWorkflow,
-      identifier,
-      stepName,
-      projectCwd,
-      lookupCwd,
-      workflowContext,
-    );
+  return ({ parentWorkflow, identifier, stepName }) => {
+    // A workflow_call must never fall back to a live disk read after run start.
+    // Leaf-only workflows do not invoke this resolver, preserving direct runs.
+    if (!pinnedResolver) throw new WorkflowDiscoveryReadError();
+    return pinnedResolver(parentWorkflow, identifier, stepName);
+  };
 }
 
 function requireRuntimeRoot(runtimeRootWorkflow: WorkflowConfig | undefined): WorkflowConfig {

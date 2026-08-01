@@ -309,7 +309,10 @@ function captureWorkflowTree(
   state.bytes += Buffer.byteLength(canonicalWorkflow, 'utf8');
   if (state.bytes > MAX_WORKFLOW_GENERATION_BYTES) throw new WorkflowDiscoveryReadError();
   const workflowHash = createHash('sha256').update(canonicalWorkflow).digest('hex');
-  const memoKey = `${reference}\0${workflowHash}`;
+  // Trust provenance is part of node identity even when two portable workflow
+  // documents have identical names and fields.
+  const trustHash = hashCanonical(getPortableWorkflowTrust(workflow, projectCwd));
+  const memoKey = `${reference}\0${workflowHash}\0${trustHash}`;
   const memoEntry = state.memo.get(memoKey);
   if (memoEntry) {
     // Different loader objects may describe the same memoized DAG node. Every

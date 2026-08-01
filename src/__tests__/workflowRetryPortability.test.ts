@@ -221,6 +221,27 @@ describe('portable retry workflow references', () => {
     expect(child?.description).toBeUndefined();
   });
 
+  it('fails closed instead of live-reading a child when the snapshot is absent', () => {
+    const generationA = captureGeneration(deskA, 'root', 1);
+    const resolver = createWorkflowCallResolver(
+      createWorkflowExecutionContext(generationA.workflow, deskA),
+      undefined,
+      generationA.workflow,
+    );
+    writeFileSync(
+      join(deskA, '.takt', 'workflows', 'child.yaml'),
+      CHILD.replace('name: child', 'name: child\ndescription: generation B'),
+    );
+
+    expect(() => resolver?.({
+      parentWorkflow: generationA.workflow,
+      identifier: './child.yaml',
+      stepName: 'delegate',
+      projectCwd: deskA,
+      lookupCwd: deskA,
+    })).toThrowError(WorkflowDiscoveryReadError);
+  });
+
   it('passes the pinned callable tree through the production task boundary', async () => {
     await expect(executeTaskWorkflow({
       task: 'pinned production composition',
