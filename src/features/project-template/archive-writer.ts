@@ -6,16 +6,18 @@ import {
   createWriteStream,
   existsSync,
   fsyncSync,
+  fstatSync,
   linkSync,
   lstatSync,
   openSync,
   readSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { pack as createTarPack, type Headers, type Pack } from 'tar-stream';
@@ -45,6 +47,150 @@ import {
 const ARCHIVE_MODE = 0o644;
 const ARCHIVE_EPOCH = new Date(0);
 const TAR_BLOCK_BYTES = 512;
+
+const OUTPUT_AUTHORITIES = new WeakMap<object, TaktpackOutputAuthorityState>();
+
+declare const OUTPUT_AUTHORITY_BRAND: unique symbol;
+
+export interface TaktpackOutputPreconditionAuthority {
+  readonly [OUTPUT_AUTHORITY_BRAND]: never;
+}
+
+interface TaktpackOutputTargetSnapshot {
+  readonly dev: number;
+  readonly ino: number;
+  readonly nlink: number;
+  readonly size: number;
+  readonly mode: number;
+  readonly uid: number;
+  readonly gid: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+}
+
+export interface TaktpackOutputPreconditionProjection {
+  readonly schemaVersion: '1.0';
+  readonly pathSha256: string;
+  readonly parent: {
+    readonly dev: number;
+    readonly ino: number;
+    readonly mode: number;
+    readonly uid: number;
+    readonly gid: number;
+  };
+  readonly target: { readonly state: 'absent' } | {
+    readonly state: 'regular-file';
+    readonly snapshot: TaktpackOutputTargetSnapshot;
+  };
+}
+
+interface TaktpackOutputAuthorityState {
+  readonly canonicalPath: string;
+  readonly directory: string;
+  readonly projection: TaktpackOutputPreconditionProjection;
+  consumed: boolean;
+}
+
+export interface CapturedTaktpackOutputPrecondition {
+  readonly authority: TaktpackOutputPreconditionAuthority;
+  readonly projection: TaktpackOutputPreconditionProjection;
+}
+
+function outputTargetSnapshot(stat: import('node:fs').Stats): TaktpackOutputTargetSnapshot {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    nlink: stat.nlink,
+    size: stat.size,
+    mode: stat.mode,
+    uid: stat.uid,
+    gid: stat.gid,
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
+  };
+}
+
+function unsafeOutputTarget(field = 'outputPath'): TaktpackError {
+  return new TaktpackError(
+    'UNSAFE_OUTPUT_TARGET',
+    'output precondition authority does not match the commit target',
+    field,
+  );
+}
+
+function unsafeOutputCapture(): TaktpackError {
+  return unsafeOutputTarget('outputCapture');
+}
+
+export async function captureTaktpackOutputPrecondition(
+  outputPath: string,
+  options: { readonly forbiddenRoot?: string } = {},
+): Promise<CapturedTaktpackOutputPrecondition> {
+  if (!isAbsolute(outputPath)) throw unsafeOutputCapture();
+  const requestedDirectory = dirname(resolve(outputPath));
+  let directory: string;
+  let parent: Awaited<ReturnType<typeof lstat>>;
+  try {
+    directory = await realpath(requestedDirectory);
+    parent = await lstat(directory);
+  } catch {
+    throw unsafeOutputCapture();
+  }
+  if (!parent.isDirectory() || parent.isSymbolicLink()) throw unsafeOutputCapture();
+  const permissions = parent.mode & 0o7777;
+  if ((permissions & 0o002) !== 0 && (permissions & 0o1000) === 0) {
+    throw unsafeOutputCapture();
+  }
+  const canonicalPath = join(directory, basename(outputPath));
+  if (options.forbiddenRoot !== undefined) {
+    let forbiddenRoot: string;
+    try {
+      forbiddenRoot = await realpath(options.forbiddenRoot);
+    } catch {
+      throw unsafeOutputCapture();
+    }
+    if (isInside(forbiddenRoot, canonicalPath)) throw unsafeOutputCapture();
+  }
+  let target: TaktpackOutputPreconditionProjection['target'];
+  try {
+    const targetStat = await lstat(canonicalPath);
+    if (!targetStat.isFile() || targetStat.isSymbolicLink() || targetStat.nlink !== 1) {
+      throw unsafeOutputCapture();
+    }
+    target = Object.freeze({
+      state: 'regular-file' as const,
+      snapshot: Object.freeze(outputTargetSnapshot(targetStat)),
+    });
+  } catch (error) {
+    if (error instanceof TaktpackError) throw error;
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+      throw unsafeOutputCapture();
+    }
+    target = Object.freeze({ state: 'absent' as const });
+  }
+  const projection = Object.freeze({
+    schemaVersion: '1.0' as const,
+    pathSha256: createHash('sha256').update(canonicalPath).digest('hex'),
+    parent: Object.freeze({
+      dev: parent.dev,
+      ino: parent.ino,
+      mode: parent.mode,
+      uid: parent.uid,
+      gid: parent.gid,
+    }),
+    target,
+  });
+  // Why: the token contains no forgeable data. Its commit authority lives only
+  // in this module's WeakMap and is consumed even when validation later fails.
+  const authority = Object.freeze(Object.create(null)) as TaktpackOutputPreconditionAuthority;
+  OUTPUT_AUTHORITIES.set(authority, {
+    canonicalPath,
+    directory,
+    projection,
+    consumed: false,
+  });
+  return Object.freeze({ authority, projection });
+}
 
 function regularHeader(name: string, size: number): Headers {
   return {
@@ -207,6 +353,122 @@ function fsyncDirectory(path: string): void {
   }
 }
 
+function sameParentIdentity(
+  expected: TaktpackOutputPreconditionProjection['parent'],
+  actual: import('node:fs').Stats,
+): boolean {
+  return actual.isDirectory()
+    && !actual.isSymbolicLink()
+    && actual.dev === expected.dev
+    && actual.ino === expected.ino
+    && actual.mode === expected.mode
+    && actual.uid === expected.uid
+    && actual.gid === expected.gid;
+}
+
+function sameTargetIdentity(
+  expected: TaktpackOutputTargetSnapshot,
+  actual: import('node:fs').Stats,
+): boolean {
+  return actual.isFile()
+    && !actual.isSymbolicLink()
+    && actual.dev === expected.dev
+    && actual.ino === expected.ino
+    && actual.nlink === expected.nlink
+    && actual.size === expected.size
+    && actual.mode === expected.mode
+    && actual.uid === expected.uid
+    && actual.gid === expected.gid
+    && actual.mtimeMs === expected.mtimeMs
+    && actual.ctimeMs === expected.ctimeMs;
+}
+
+function resolveAuthorizedOutputPath(outputPath: string): string {
+  if (!isAbsolute(outputPath)) throw unsafeOutputTarget();
+  let directory: string;
+  try {
+    directory = realpathSync(dirname(resolve(outputPath)));
+  } catch {
+    throw unsafeOutputTarget();
+  }
+  return join(directory, basename(outputPath));
+}
+
+function consumeOutputAuthority(
+  outputPath: string,
+  authority: TaktpackOutputPreconditionAuthority,
+): TaktpackOutputAuthorityState {
+  const state = OUTPUT_AUTHORITIES.get(authority);
+  if (state === undefined || state.consumed) throw unsafeOutputTarget();
+  state.consumed = true;
+  if (resolveAuthorizedOutputPath(outputPath) !== state.canonicalPath) {
+    throw unsafeOutputTarget();
+  }
+  return state;
+}
+
+function assertAuthorizedParent(
+  state: TaktpackOutputAuthorityState,
+  directoryFd?: number,
+): void {
+  if (resolveAuthorizedOutputPath(state.canonicalPath) !== state.canonicalPath) {
+    throw unsafeOutputTarget();
+  }
+  let pathStat: import('node:fs').Stats;
+  try {
+    pathStat = lstatSync(state.directory);
+  } catch {
+    throw unsafeOutputTarget();
+  }
+  if (!sameParentIdentity(state.projection.parent, pathStat)) throw unsafeOutputTarget();
+  if (directoryFd !== undefined) {
+    let heldStat: import('node:fs').Stats;
+    try {
+      heldStat = fstatSync(directoryFd);
+    } catch {
+      throw unsafeOutputTarget();
+    }
+    if (!sameParentIdentity(state.projection.parent, heldStat)) throw unsafeOutputTarget();
+  }
+}
+
+function assertAuthorizedTarget(state: TaktpackOutputAuthorityState): void {
+  const expected = state.projection.target;
+  try {
+    const actual = lstatSync(state.canonicalPath);
+    if (expected.state === 'absent' || !sameTargetIdentity(expected.snapshot, actual)) {
+      throw unsafeOutputTarget();
+    }
+  } catch (error) {
+    if (error instanceof TaktpackError) throw error;
+    if (expected.state !== 'absent'
+      || !(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+      throw unsafeOutputTarget();
+    }
+  }
+}
+
+function assertPublishedTarget(
+  state: TaktpackOutputAuthorityState,
+  publishedSnapshot: import('node:fs').Stats,
+): void {
+  assertAuthorizedParent(state);
+  let actual: import('node:fs').Stats;
+  try {
+    actual = lstatSync(state.canonicalPath);
+  } catch {
+    throw unsafeOutputTarget();
+  }
+  if (
+    !actual.isFile()
+    || actual.isSymbolicLink()
+    || actual.nlink !== 1
+    || actual.dev !== publishedSnapshot.dev
+    || actual.ino !== publishedSnapshot.ino
+    || actual.size !== publishedSnapshot.size
+  ) throw unsafeOutputTarget();
+}
+
 export function syncTaktpackOutputDirectory(
   path: string,
   platform: NodeJS.Platform = process.platform,
@@ -225,6 +487,7 @@ export type TaktpackWriterIoPhase =
   | 'archive-read'
   | 'file-fsync'
   | 'publish'
+  | 'post-publish'
   | 'post-link-unlink'
   | 'directory-fsync'
   | 'cleanup';
@@ -296,9 +559,17 @@ export async function writeTaktpackWithIoSeam(
   plan: ProjectTemplateExportPlan,
   options: WriteTaktpackOptions = {},
   ioSeam: TaktpackWriterIoSeam = {},
+  outputAuthority?: TaktpackOutputPreconditionAuthority,
 ): Promise<WriteTaktpackResult> {
   const force = options.force === true;
   const limits = resolveTaktpackLimits(options.limits);
+  const authorityState = outputAuthority === undefined
+    ? undefined
+    : consumeOutputAuthority(outputPath, outputAuthority);
+  if (authorityState !== undefined) {
+    assertAuthorizedParent(authorityState);
+    assertAuthorizedTarget(authorityState);
+  }
   const sourceState = getProjectTemplateExportSourceState(plan);
   if (sourceState === undefined || !validateProjectTemplateExportPlanSeal(plan, sourceState)) {
     throw new TaktpackError('INVALID_EXPORT_PLAN', 'export plan seal is missing or invalid', 'plan');
@@ -403,7 +674,21 @@ export async function writeTaktpackWithIoSeam(
   let cleanupFailure: unknown;
   let published = false;
   let result: WriteTaktpackResult | undefined;
+  let directoryFd: number | undefined;
+  let rollbackPath: string | undefined;
   try {
+    if (authorityState !== undefined) {
+      try {
+        directoryFd = openSync(
+          authorityState.directory,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
+      } catch {
+        throw unsafeOutputTarget();
+      }
+      assertAuthorizedParent(authorityState, directoryFd);
+      assertAuthorizedTarget(authorityState);
+    }
     for (const [sourceIndex, file] of sourceState.files.entries()) {
       const field = `sourceFiles[${sourceIndex}]`;
       try {
@@ -420,6 +705,10 @@ export async function writeTaktpackWithIoSeam(
       }
     }
 
+    if (authorityState !== undefined) {
+      assertAuthorizedParent(authorityState, directoryFd);
+      assertAuthorizedTarget(authorityState);
+    }
     const output = createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
     const hashStream = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
@@ -508,11 +797,25 @@ export async function writeTaktpackWithIoSeam(
       // begins, complete directory durability and report the published result
       // instead of turning a visible artifact into an ambiguous abort.
       options.signal?.throwIfAborted();
+      let publicationExpectedTarget = expectedTarget;
+      if (authorityState !== undefined) {
+        assertAuthorizedParent(authorityState, directoryFd);
+        assertAuthorizedTarget(authorityState);
+        if (force && authorityState.projection.target.state === 'regular-file') {
+          rollbackPath = join(
+            outputDirectory,
+            `.${basename(outputPath)}.${process.pid}.${randomUUID()}.rollback`,
+          );
+          linkSync(outputPath, rollbackPath);
+          publicationExpectedTarget = lstatSync(outputPath);
+        }
+      }
+      const publishedSnapshot = lstatSync(tempPath);
       publishTempFile(
         tempPath,
         outputPath,
         force,
-        expectedTarget,
+        publicationExpectedTarget,
         () => {
           // link/rename is the externally visible commit point. Record it
           // before any later temp cleanup or directory durability operation.
@@ -520,6 +823,39 @@ export async function writeTaktpackWithIoSeam(
         },
         () => ioSeam.onPhase?.('post-link-unlink'),
       );
+      if (authorityState !== undefined) {
+        try {
+          ioSeam.onPhase?.('post-publish');
+          assertAuthorizedParent(authorityState, directoryFd);
+          assertPublishedTarget(authorityState, publishedSnapshot);
+          if (rollbackPath !== undefined) {
+            unlinkSync(rollbackPath);
+            rollbackPath = undefined;
+          }
+          assertAuthorizedParent(authorityState, directoryFd);
+          assertPublishedTarget(authorityState, publishedSnapshot);
+        } catch (error) {
+          let rolledBack = false;
+          try {
+            if (rollbackPath !== undefined && existsSync(rollbackPath)) {
+              renameSync(rollbackPath, outputPath);
+              rollbackPath = undefined;
+              rolledBack = true;
+            } else {
+              const current = lstatSync(outputPath);
+              if (current.dev === publishedSnapshot.dev && current.ino === publishedSnapshot.ino) {
+                unlinkSync(outputPath);
+                rolledBack = true;
+              }
+            }
+          } catch {
+            // The original validation error remains primary. published=true
+            // truthfully reports that rollback could not be proven complete.
+          }
+          if (rolledBack) published = false;
+          throw error;
+        }
+      }
     } catch (error) {
       throw normalizeWriterIoError(
         error,
@@ -547,9 +883,17 @@ export async function writeTaktpackWithIoSeam(
       published ? 'published' : 'not-published',
     );
   } finally {
+    if (directoryFd !== undefined) {
+      try {
+        closeSync(directoryFd);
+      } catch {
+        // A close failure cannot change the already determined artifact state.
+      }
+    }
     try {
       ioSeam.onPhase?.('cleanup');
       if (existsSync(tempPath)) unlinkSync(tempPath);
+      if (rollbackPath !== undefined && existsSync(rollbackPath)) unlinkSync(rollbackPath);
     } catch (caughtCleanupError) {
       // Cleanup must never replace the primary failure: callers need the
       // operation that caused the archive to fail, without a raw temp path.
@@ -576,4 +920,14 @@ export function writeTaktpack(
   options: WriteTaktpackOptions = {},
 ): Promise<WriteTaktpackResult> {
   return writeTaktpackWithIoSeam(outputPath, plan, options);
+}
+
+export function writeTaktpackWithOutputPrecondition(
+  outputPath: string,
+  plan: ProjectTemplateExportPlan,
+  authority: TaktpackOutputPreconditionAuthority,
+  options: WriteTaktpackOptions = {},
+  ioSeam: TaktpackWriterIoSeam = {},
+): Promise<WriteTaktpackResult> {
+  return writeTaktpackWithIoSeam(outputPath, plan, options, ioSeam, authority);
 }

@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
-import { lstat, realpath } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Stats } from 'node:fs';
+import { realpath } from 'node:fs/promises';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { ProjectTemplateExportOptions, ProjectTemplateExportPlan } from './archive-types.js';
-import { writeTaktpack } from './archive-writer.js';
+import {
+  captureTaktpackOutputPrecondition,
+  writeTaktpackWithOutputPrecondition,
+  type CapturedTaktpackOutputPrecondition,
+  type TaktpackOutputPreconditionProjection,
+} from './archive-writer.js';
 import { inspectProjectTemplateApplyGuard } from './apply-guard.js';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import {
@@ -32,38 +36,11 @@ interface ProjectTemplateCliExportInput {
   readonly signal?: AbortSignal;
 }
 
-interface StatIdentity {
-  readonly dev: number;
-  readonly ino: number;
-  readonly nlink: number;
-  readonly size: number;
-  readonly mode: number;
-  readonly uid: number;
-  readonly gid: number;
-  readonly mtimeMs: number;
-  readonly ctimeMs: number;
-}
-
-interface OutputPrecondition {
-  readonly canonicalPath: string;
-  readonly parent: {
-    readonly dev: number;
-    readonly ino: number;
-    readonly mode: number;
-    readonly uid: number;
-    readonly gid: number;
-  };
-  readonly target: { readonly state: 'absent' } | {
-    readonly state: 'regular-file';
-    readonly snapshot: StatIdentity;
-  };
-}
-
 interface PlannedExport {
   readonly plan: ProjectTemplateExportPlan;
   readonly planId: string;
   readonly absentTargetPlanId: string;
-  readonly output: OutputPrecondition;
+  readonly output: CapturedTaktpackOutputPrecondition;
 }
 
 class CliExportBoundaryError extends Error {
@@ -87,87 +64,10 @@ function failure(
   };
 }
 
-function statIdentity(stat: Stats): StatIdentity {
-  return {
-    dev: stat.dev,
-    ino: stat.ino,
-    nlink: stat.nlink,
-    size: stat.size,
-    mode: stat.mode,
-    uid: stat.uid,
-    gid: stat.gid,
-    mtimeMs: stat.mtimeMs,
-    ctimeMs: stat.ctimeMs,
-  };
-}
-
-function isInside(root: string, candidate: string): boolean {
-  const path = relative(root, candidate);
-  return path === '' || (!path.startsWith('..') && !isAbsolute(path));
-}
-
-async function inspectOutputPrecondition(
-  projectRoot: string,
-  outputPath: string,
-): Promise<OutputPrecondition> {
-  if (!isAbsolute(outputPath) || basename(outputPath) === '.' || basename(outputPath) === '..') {
-    throw new CliExportBoundaryError('INVALID_ARGUMENT');
-  }
-  const requestedParent = dirname(resolve(outputPath));
-  let canonicalParent: string;
-  let parentStat: Stats;
-  try {
-    canonicalParent = await realpath(requestedParent);
-    parentStat = await lstat(canonicalParent);
-  } catch {
-    throw new CliExportBoundaryError('SECURITY_GUARD');
-  }
-  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
-    throw new CliExportBoundaryError('SECURITY_GUARD');
-  }
-  const permissions = parentStat.mode & 0o7777;
-  if ((permissions & 0o002) !== 0 && (permissions & 0o1000) === 0) {
-    throw new CliExportBoundaryError('SECURITY_GUARD');
-  }
-  const canonicalPath = join(canonicalParent, basename(outputPath));
-  const taktRoot = join(projectRoot, '.takt');
-  if (isInside(taktRoot, canonicalPath)) {
-    // Why: placing the archive under its own scanned source makes the export
-    // mutate the snapshot it is proving and can recursively package artifacts.
-    throw new CliExportBoundaryError('SECURITY_GUARD');
-  }
-
-  let target: OutputPrecondition['target'];
-  try {
-    const targetStat = await lstat(canonicalPath);
-    if (!targetStat.isFile() || targetStat.isSymbolicLink() || targetStat.nlink !== 1) {
-      throw new CliExportBoundaryError('SECURITY_GUARD');
-    }
-    target = { state: 'regular-file', snapshot: statIdentity(targetStat) };
-  } catch (error) {
-    if (error instanceof CliExportBoundaryError) throw error;
-    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
-      throw new CliExportBoundaryError('SECURITY_GUARD');
-    }
-    target = { state: 'absent' };
-  }
-  return {
-    canonicalPath,
-    parent: {
-      dev: parentStat.dev,
-      ino: parentStat.ino,
-      mode: parentStat.mode,
-      uid: parentStat.uid,
-      gid: parentStat.gid,
-    },
-    target,
-  };
-}
-
 function calculatePlanId(
   projectRoot: string,
   plan: ProjectTemplateExportPlan,
-  output: OutputPrecondition,
+  output: TaktpackOutputPreconditionProjection,
   force: boolean,
 ): string {
   const state = getProjectTemplateExportSourceState(plan);
@@ -205,10 +105,14 @@ async function createPlannedExport(
   projectRoot: string,
 ): Promise<PlannedExport> {
   const plan = await createProjectTemplateExportPlan(projectRoot, input.exportOptions);
-  const output = await inspectOutputPrecondition(projectRoot, input.outputPath);
-  const planId = calculatePlanId(projectRoot, plan, output, input.mutation.force);
+  input.signal?.throwIfAborted();
+  const output = await captureTaktpackOutputPrecondition(input.outputPath, {
+    forbiddenRoot: join(projectRoot, '.takt'),
+  });
+  input.signal?.throwIfAborted();
+  const planId = calculatePlanId(projectRoot, plan, output.projection, input.mutation.force);
   const absentTargetPlanId = calculatePlanId(projectRoot, plan, {
-    ...output,
+    ...output.projection,
     target: { state: 'absent' },
   }, input.mutation.force);
   return { plan, planId, absentTargetPlanId, output };
@@ -243,7 +147,9 @@ function mapError(error: unknown): ProjectTemplateCliErrorCode {
     case 'EXPORT_REVIEW_REQUIRED': return 'REVIEW_REQUIRED';
     case 'SOURCE_CHANGED': return 'PLAN_DRIFT';
     case 'OUTPUT_EXISTS':
-    case 'UNSAFE_OUTPUT_TARGET': return 'TARGET_DRIFT';
+      return 'TARGET_DRIFT';
+    case 'UNSAFE_OUTPUT_TARGET':
+      return error.field === 'outputCapture' ? 'SECURITY_GUARD' : 'TARGET_DRIFT';
     case 'OPERATION_ABORTED': return 'INTERRUPTED';
     case 'OPERATION_TIMEOUT': return 'SOURCE_UNAVAILABLE';
     case 'HASH_MISMATCH': return 'SOURCE_INTEGRITY_FAILED';
@@ -273,6 +179,7 @@ export async function executeProjectTemplateCliExport(
     input.signal?.throwIfAborted();
     if (!isAbsolute(input.projectRoot)) throw new CliExportBoundaryError('INVALID_ARGUMENT');
     const projectRoot = await realpath(resolve(input.projectRoot));
+    input.signal?.throwIfAborted();
     const initialGuard = guardSummary(projectRoot);
     if (mode === 'apply' && initialGuard.applyError !== undefined) {
       return failure(mode, initialGuard.applyError);
@@ -289,6 +196,7 @@ export async function executeProjectTemplateCliExport(
       reviewCodes: initialGuard.reviewCodes,
     };
     if (mode === 'dry-run') {
+      input.signal?.throwIfAborted();
       return {
         envelope: createProjectTemplateCliSuccess({
           command: 'project-template export',
@@ -299,7 +207,7 @@ export async function executeProjectTemplateCliExport(
       };
     }
     if (input.mutation.expectedPlanId !== planned.planId) {
-      const code = planned.output.target.state === 'regular-file'
+      const code = planned.output.projection.target.state === 'regular-file'
         && input.mutation.expectedPlanId === planned.absentTargetPlanId
         ? 'TARGET_DRIFT'
         : 'PLAN_DRIFT';
@@ -307,22 +215,27 @@ export async function executeProjectTemplateCliExport(
     }
     const finalGuard = guardSummary(projectRoot);
     if (finalGuard.applyError !== undefined) return failure(mode, finalGuard.applyError);
-    if (!input.mutation.force && planned.output.target.state !== 'absent') {
+    if (!input.mutation.force && planned.output.projection.target.state !== 'absent') {
       return failure(mode, 'TARGET_DRIFT');
     }
     input.signal?.throwIfAborted();
-    const finalOutput = await inspectOutputPrecondition(projectRoot, input.outputPath);
+    const finalOutput = await captureTaktpackOutputPrecondition(input.outputPath, {
+      forbiddenRoot: join(projectRoot, '.takt'),
+    });
+    input.signal?.throwIfAborted();
     const finalPlanId = calculatePlanId(
       projectRoot,
       planned.plan,
-      finalOutput,
+      finalOutput.projection,
       input.mutation.force,
     );
     if (finalPlanId !== planned.planId) return failure(mode, 'TARGET_DRIFT');
-    const archive = await writeTaktpack(finalOutput.canonicalPath, planned.plan, {
-      force: input.mutation.force,
-      signal: input.signal,
-    });
+    const archive = await writeTaktpackWithOutputPrecondition(
+      input.outputPath,
+      planned.plan,
+      finalOutput.authority,
+      { force: input.mutation.force, signal: input.signal },
+    );
     return {
       envelope: createProjectTemplateCliSuccess({
         command: 'project-template export',
