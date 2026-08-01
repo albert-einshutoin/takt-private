@@ -1,10 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { types } from 'node:util';
 import {
   assertProjectTemplateApplyPreview,
   projectTemplateApplyPreviewReviewSurfaceSha256,
 } from './apply-preview.js';
 import type { ProjectTemplateApplyPreview } from './apply-preview-types.js';
+import {
+  assertProjectTemplateMutationLeaseOwned,
+  type ProjectTemplateMutationLease,
+} from './apply-lease.js';
 import {
   consumeProjectTemplateApprovalRecord,
   hasProjectTemplateApprovalClaim,
@@ -266,17 +272,10 @@ async function burnFailedApproval(options: {
   }
 }
 
-/**
- * Internal trusted broker boundary. This function is intentionally absent from
- * public barrels; callers cannot turn a cloned preview into apply authority.
- *
- * @internal
- */
-export async function issueTrustedProjectTemplateApplyPreviewApproval(
-  value: unknown,
-): Promise<ProjectTemplateApplyPreviewApprovalEvidence> {
-  const options = snapshotOptions(value);
-  const preview = assertProjectTemplateApplyPreview(options.preview);
+function validateApprovalPreview(
+  value: ProjectTemplateApplyPreview,
+): ProjectTemplateApplyPreview {
+  const preview = assertProjectTemplateApplyPreview(value);
   if (!preview.reviewRequired) {
     invalidIssuance('apply preview does not require review');
   }
@@ -286,15 +285,21 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
   if (preview.defaultApplyPossible) {
     invalidIssuance('default-applicable apply preview cannot be approved');
   }
+  return preview;
+}
+
+async function publishApproval(options: {
+  readonly snapshot: ApprovalIssuanceOptionsSnapshot;
+  readonly preview: ProjectTemplateApplyPreview;
+  readonly storage: ProjectTemplateApplyStorage;
+  readonly assertAuthority?: () => void;
+}): Promise<ProjectTemplateApplyPreviewApprovalEvidence> {
+  const { snapshot, preview, storage } = options;
   const approvalId = `approval-${CAPTURED_RANDOM_UUID()}`;
   const nonce = CAPTURED_RANDOM_UUID();
-  let storage: ProjectTemplateApplyStorage | undefined;
   let record: ProjectTemplateApplyPreviewApprovalRecord | undefined;
   try {
-    storage = await initializeProjectTemplateApplyStorage({
-      repoPath: options.projectRoot,
-      ...(options.io === undefined ? {} : { io: options.io }),
-    });
+    options.assertAuthority?.();
     const identity = projectIdentity(storage);
     record = {
       schemaVersion: '1.0',
@@ -312,13 +317,15 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
       repertoireDependencyPlanId: preview.bindings.repertoireDependencyPlanId,
       repertoireDependencyPreconditionToken:
         preview.bindings.repertoireDependencyPreconditionToken,
-      baselineStrategy: options.baselineStrategy,
+      baselineStrategy: snapshot.baselineStrategy,
       reviewSurfaceSha256:
         projectTemplateApplyPreviewReviewSurfaceSha256(preview),
-      issuedAt: options.issuedAt,
-      expiresAt: options.expiresAt,
+      issuedAt: snapshot.issuedAt,
+      expiresAt: snapshot.expiresAt,
     };
+    options.assertAuthority?.();
     await writeProjectTemplateApprovalRecord({ storage, approvalId, record });
+    options.assertAuthority?.();
     const evidence = CAPTURED_REFLECT_APPLY(
       CAPTURED_OBJECT_FREEZE,
       CAPTURED_OBJECT_RECEIVER,
@@ -330,20 +337,126 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
     ]);
     return evidence;
   } catch {
-    if (storage !== undefined && record !== undefined) {
-      // Burn first and retain a possible orphan record. Without a storage lease
-      // or atomic identity-bound delete, unlinking the final pathname could
-      // destroy a foreign replacement introduced after publication failed.
+    if (record !== undefined) {
       await burnFailedApproval({
         storage,
         approvalId,
-        burnedAt: options.issuedAt,
+        burnedAt: snapshot.issuedAt,
       });
     }
-    // Storage paths, injected hook errors, and secrets must not cross the
-    // issuance boundary. No authority is registered before durable success.
     throw new Error('project template apply preview approval issuance failed');
   }
+}
+
+/**
+ * Internal trusted broker boundary. This function is intentionally absent from
+ * public barrels; callers cannot turn a cloned preview into apply authority.
+ *
+ * @internal
+ */
+export async function issueTrustedProjectTemplateApplyPreviewApproval(
+  value: unknown,
+): Promise<ProjectTemplateApplyPreviewApprovalEvidence> {
+  const options = snapshotOptions(value);
+  const preview = validateApprovalPreview(options.preview);
+  let storage: ProjectTemplateApplyStorage;
+  try {
+    storage = await initializeProjectTemplateApplyStorage({
+      repoPath: options.projectRoot,
+      ...(options.io === undefined ? {} : { io: options.io }),
+    });
+  } catch {
+    throw new Error('project template apply preview approval issuance failed');
+  }
+  return publishApproval({ snapshot: options, preview, storage });
+}
+
+/**
+ * Issues an internal approval only while the caller still owns the apply
+ * lease. Reasserting ownership around durable publication prevents a stale
+ * derivation from leaving usable approval authority after lease loss.
+ *
+ * @internal
+ */
+export async function issueOwnedProjectTemplateApplyPreviewApproval(
+  value: unknown,
+): Promise<ProjectTemplateApplyPreviewApprovalEvidence> {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [value],
+    ) !== CAPTURED_OBJECT_PROTOTYPE
+  ) invalidIssuance('owned apply preview approval options are invalid');
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as Record<PropertyKey, PropertyDescriptor>;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [descriptors],
+  ) as PropertyKey[];
+  const allowed = [
+    'projectRoot', 'storage', 'lease', 'preview', 'baselineStrategy',
+    'now', 'expiresInMs',
+  ];
+  if (
+    keys.length < 5
+    || keys.length > allowed.length
+    || keys.some((key) => typeof key !== 'string' || !allowed.includes(key))
+    || keys.some((key) => {
+      const descriptor = descriptors[key];
+      return descriptor === undefined || !('value' in descriptor);
+    })
+  ) invalidIssuance('owned apply preview approval options are invalid');
+  for (const key of ['projectRoot', 'storage', 'lease', 'preview', 'baselineStrategy']) {
+    if (descriptors[key] === undefined) {
+      invalidIssuance('owned apply preview approval options are invalid');
+    }
+  }
+  const projectRoot = descriptors['projectRoot']!.value as unknown;
+  const storage = descriptors['storage']!.value as ProjectTemplateApplyStorage;
+  const lease = descriptors['lease']!.value as ProjectTemplateMutationLease;
+  const snapshot = snapshotOptions({
+    projectRoot,
+    preview: descriptors['preview']!.value,
+    baselineStrategy: descriptors['baselineStrategy']!.value,
+    ...(descriptors['now'] === undefined
+      ? {}
+      : { now: descriptors['now'].value }),
+    ...(descriptors['expiresInMs'] === undefined
+      ? {}
+      : { expiresInMs: descriptors['expiresInMs'].value }),
+  });
+  const preview = validateApprovalPreview(snapshot.preview);
+  let canonicalProjectRoot: string;
+  try {
+    canonicalProjectRoot = await realpath(resolve(projectRoot as string));
+  } catch {
+    invalidIssuance('owned apply preview approval authority is invalid');
+  }
+  if (storage.repoRoot !== canonicalProjectRoot) {
+    invalidIssuance('owned apply preview approval authority is invalid');
+  }
+  const assertAuthority = (): void => {
+    if (
+      typeof projectRoot !== 'string'
+      || lease.operation !== 'apply'
+    ) invalidIssuance('owned apply preview approval authority is invalid');
+    assertProjectTemplateMutationLeaseOwned(projectRoot, lease);
+  };
+  assertAuthority();
+  return publishApproval({
+    snapshot,
+    preview,
+    storage,
+    assertAuthority,
+  });
 }
 
 interface ApprovalOperationSnapshot {
