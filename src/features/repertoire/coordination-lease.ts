@@ -2,12 +2,9 @@ import {
   closeSync,
   constants,
   fchmodSync,
-  fsyncSync,
-  linkSync,
   mkdirSync,
   openSync,
   renameSync,
-  unlinkSync,
 } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
@@ -496,21 +493,21 @@ function createLeaseFile(
   try {
     // Hard-link publication preserves O_EXCL/no-replace semantics. rename(2)
     // could overwrite an already-published writer intent after staging.
-    linkSync(publishingPath, path);
+    posixCoordinationFilesystemPolicy.linkNoReplace(publishingPath, path);
   } catch (error) {
     if (isAlreadyExistsError(error)) {
       const owned = readExactPrivateLease(publishingPath, record.mode);
       if (!sameOwnerAndIdentity(owned, record, staged.identity)) {
         throw new RepertoireCoordinationError('UNSAFE_STATE');
       }
-      unlinkSync(publishingPath);
+      posixCoordinationFilesystemPolicy.unlinkOwned(publishingPath, staged.identity);
       syncDirectory(parentDirectory);
       paths.trustedRoot.assertUnchanged();
     }
     throw error;
   }
   paths.trustedRoot.assertUnchanged();
-  unlinkSync(publishingPath);
+  posixCoordinationFilesystemPolicy.unlinkOwned(publishingPath, staged.identity);
   syncDirectory(parentDirectory);
   paths.trustedRoot.assertUnchanged();
   const published = readExactPrivateLease(path, record.mode);
@@ -1006,14 +1003,7 @@ async function waitForRetry(
 }
 
 function syncDirectory(path: string): void {
-  if (safePlatform === 'win32') return;
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, DIRECTORY_OPEN_FLAGS);
-    fsyncSync(fd);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
+  posixCoordinationFilesystemPolicy.syncDirectory(path);
 }
 
 function enforcePrivateDirectoryMode(path: string): void {
