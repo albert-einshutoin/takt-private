@@ -5,6 +5,7 @@ import type {
 import {
   GithubTemplateSourceResolutionError,
   resolveGithubTemplateSource,
+  resolveGithubTemplateSourceForAuthenticatedDownload,
   type GithubTemplateCurrentSourceEvidence,
   type GithubTemplateSourceMetadataPort,
   type ResolvedGithubTemplateSource,
@@ -12,9 +13,6 @@ import {
 import {
   parseProjectTemplateGithubSourceSpec,
 } from '../../features/project-template/github-source-spec.js';
-import {
-  verifyImmutableGithubDependencySources,
-} from '../../features/repertoire/github-ref-resolver.js';
 import {
   requestProjectTemplateGithubApiMetadata,
   type RequestProjectTemplateGithubApiMetadataOptions,
@@ -661,24 +659,15 @@ export async function resolveAuthenticatedGithubTemplateSource(
   }
   const metadata = createMetadataFacade(options, dependencies);
   try {
-    const result = await resolveGithubTemplateSource({
+    const resolve = options.verifyDependencySources
+      ? resolveGithubTemplateSourceForAuthenticatedDownload
+      : resolveGithubTemplateSource;
+    const result = await resolve({
       source,
       metadata: metadata.facade,
       ...(options.current === undefined
         ? {}
         : { current: options.current }),
-      ...(options.verifyDependencySources
-        ? {
-          verifyDependencies: (dependencies) =>
-            verifyImmutableGithubDependencySources({
-              dependencies,
-              resolver: metadata.facade,
-              ...(options.signal === undefined
-                ? {}
-                : { signal: options.signal }),
-            }),
-        }
-        : {}),
     });
     if (signalAborted(options.signal)) {
       throw Object.freeze(new GithubTemplateSourceResolutionError(
