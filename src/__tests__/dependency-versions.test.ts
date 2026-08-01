@@ -224,7 +224,7 @@ describe('dependency versions', () => {
       [
         '--input-type=module',
         '-e',
-        "const [anthropic, mcp] = await Promise.all([import('@anthropic-ai/claude-agent-sdk'), import('@modelcontextprotocol/sdk')]); process.stdout.write(JSON.stringify({ anthropic: Object.keys(anthropic).length > 0, mcp: Object.keys(mcp).length > 0 }));",
+        "const [anthropic, mcp] = await Promise.all([import('@anthropic-ai/claude-agent-sdk'), import('@modelcontextprotocol/sdk/client')]); process.stdout.write(JSON.stringify({ anthropic: Object.keys(anthropic).length > 0, mcp: Object.keys(mcp).length > 0 }));",
       ],
       { cwd: process.cwd(), encoding: 'utf-8' },
     );
