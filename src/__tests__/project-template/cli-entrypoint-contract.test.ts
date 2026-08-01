@@ -11,6 +11,7 @@ import {
 const runner = resolve('node_modules/.bin/vite-node');
 const entrypoint = resolve('src/app/cli/index.ts');
 const roots: string[] = [];
+const CLI_CHILD_TIMEOUT_MS = 12_000;
 const duplicateRuntimeAssertionCases = [
   [
     'inspect', './missing.taktpack',
@@ -38,15 +39,53 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-function run(args: readonly string[]) {
-  return spawnSync(runner, [entrypoint, '--', ...args], {
-    cwd: resolve('.'),
+interface BoundedRunOptions {
+  readonly cwd?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly timeoutMs?: number;
+}
+
+function runBounded(
+  command: string,
+  args: readonly string[],
+  options: BoundedRunOptions = {},
+) {
+  return spawnSync(command, args, {
+    cwd: options.cwd ?? resolve('.'),
     encoding: 'utf8',
-    env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
+    env: options.env ?? process.env,
+    // Why: Vitest cannot interrupt spawnSync. SIGKILL makes a hung real CLI
+    // process bounded even when it ignores graceful termination signals.
+    timeout: options.timeoutMs ?? CLI_CHILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  });
+}
+
+function run(args: readonly string[], envOverrides: NodeJS.ProcessEnv = {}) {
+  return runBounded(runner, [entrypoint, '--', ...args], {
+    env: {
+      ...process.env,
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      ...envOverrides,
+    },
   });
 }
 
 describe('project-template CLI entrypoint contract', () => {
+  it('force-kills a synchronous child that exceeds the bounded runner timeout', () => {
+    const startedAt = Date.now();
+    const result = runBounded(
+      process.execPath,
+      ['-e', 'setInterval(() => {}, 1000)'],
+      { timeoutMs: 100 },
+    );
+
+    expect(result.error).toMatchObject({ code: 'ETIMEDOUT' });
+    expect(result.signal).toBe('SIGKILL');
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
   it('detects the real command without matching option values or task text', () => {
     expect(isProjectTemplateCliInvocation(['project-template', 'list'])).toBe(true);
     expect(isProjectTemplateCliInvocation(['--cwd', '/repo', 'project-template', 'list']))
@@ -174,7 +213,9 @@ describe('project-template CLI entrypoint contract', () => {
       const result = run([
         '--cwd', cwd, 'project-template', command, source,
         ...assertions, ...mutation,
-      ]);
+      ], {
+        TAKT_CONFIG_DIR: join(root, 'global-config'),
+      });
 
       expect(result.status).toBe(20);
       expect(result.stderr).toBe('');
@@ -185,6 +226,7 @@ describe('project-template CLI entrypoint contract', () => {
         error: { code: 'INVALID_ARGUMENT' },
       });
       expect(await readdir(cwd)).toEqual([]);
+      expect(await readdir(root)).toEqual([command]);
     },
   );
 
