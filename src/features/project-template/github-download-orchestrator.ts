@@ -40,6 +40,9 @@ import type {
   GithubTemplateSourceResolutionInput,
   GithubTemplateSourceResolverPort,
 } from './github-source-resolver-port.js';
+import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from './repertoire-dependency-canonical.js';
 
 const RESOLVED_FIELDS = [
   'kind',
@@ -61,6 +64,7 @@ const RESOLVED_FIELDS = [
   'sha256',
   'version',
   'declaredDependencies',
+  'dependencyVerification',
   'updateState',
   'hardBlocked',
   'downloadEligible',
@@ -309,12 +313,29 @@ function snapshotDenseDataArray(
   return Object.freeze(copy);
 }
 
-function snapshotResolved(value: unknown): ResolvedSnapshot {
-  const resolved = ownDataRecord(value, RESOLVED_FIELDS);
+function snapshotResolved(
+  value: unknown,
+  requireDependencyVerification = true,
+): ResolvedSnapshot {
+  const resolved = ownDataRecord(
+    value,
+    RESOLVED_FIELDS,
+    requireDependencyVerification
+      ? RESOLVED_FIELDS
+      : RESOLVED_FIELDS.filter(
+        (field) => field !== 'dependencyVerification',
+      ),
+  );
   const dependencies = snapshotDenseDataArray(
     resolved['declaredDependencies'],
     256,
   );
+  const dependencyVerification = requireDependencyVerification
+    ? ownDataRecord(
+      resolved['dependencyVerification'],
+      ['method', 'declarationSha256', 'count'],
+    )
+    : undefined;
   if (
     resolved['kind'] !== 'resolved-github-template-source'
     || [
@@ -347,6 +368,16 @@ function snapshotResolved(value: unknown): ResolvedSnapshot {
     ))
     || typeof resolved['downloadEligible'] !== 'boolean'
     || typeof resolved['hardBlocked'] !== 'boolean'
+    || (
+      dependencyVerification !== undefined
+      && (
+        dependencyVerification['method'] !== 'github-ref-to-commit-v1'
+        || !SHA256_PATTERN.test(
+          dependencyVerification['declarationSha256'] as string,
+        )
+        || dependencyVerification['count'] !== dependencies.length
+      )
+    )
   ) throw new Error();
   const dependencySnapshots: Array<
     ResolvedGithubTemplateSource['declaredDependencies'][number]
@@ -354,9 +385,27 @@ function snapshotResolved(value: unknown): ResolvedSnapshot {
   for (let index = 0; index < dependencies.length; index += 1) {
     dependencySnapshots[index] = snapshotDependency(dependencies[index]);
   }
+  if (
+    dependencyVerification !== undefined
+    && (
+    calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+      dependencySnapshots,
+    ) !== dependencyVerification['declarationSha256']
+    )
+  ) throw new Error();
   return Object.freeze({
     ...resolved,
     declaredDependencies: Object.freeze(dependencySnapshots),
+    ...(dependencyVerification === undefined
+      ? {}
+      : {
+        dependencyVerification: Object.freeze({
+          method: 'github-ref-to-commit-v1',
+          declarationSha256:
+            dependencyVerification['declarationSha256'] as string,
+          count: dependencyVerification['count'] as number,
+        }),
+      }),
   }) as ResolvedSnapshot;
 }
 
@@ -415,7 +464,7 @@ function snapshotAdvisory(value: unknown): GithubTemplateSourceAdvisory {
     updateState: advisory['updateState'],
     hardBlocked: advisory['hardBlocked'],
     downloadEligible: advisory['downloadEligible'],
-  });
+  }, false);
   if (advisory['kind'] !== 'github-template-source-advisory') {
     throw new Error();
   }
@@ -646,7 +695,14 @@ function resolvedExactlyMatches(
   advisory: GithubTemplateSourceAdvisory,
   freshSnapshot: ResolvedSnapshot,
 ): boolean {
-  return advisory.source.owner === freshSnapshot.owner
+  const verification = freshSnapshot.dependencyVerification;
+  return verification !== undefined
+    && verification.count === advisory.declaredDependencies.length
+    && verification.declarationSha256
+      === calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+        advisory.declaredDependencies,
+      )
+    && advisory.source.owner === freshSnapshot.owner
     && advisory.source.repo === freshSnapshot.repo
     && advisory.source.repositoryUrl === freshSnapshot.repositoryUrl
     && advisory.source.canonicalSource === freshSnapshot.canonicalSource
