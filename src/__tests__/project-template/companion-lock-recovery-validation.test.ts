@@ -12,9 +12,11 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   recoverProjectTemplateCompanionLockTransaction,
+  recoverProjectTemplateCompanionLockTransactionForTest,
 } from '../../features/project-template/companion-lock-transaction.js';
 import {
   captureProjectTemplateBackupFile,
+  createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
   resolveProjectTemplateApplyTarget,
   writeProjectTemplateApplyJournal,
@@ -248,6 +250,64 @@ describe('companion lock rollback current-state guard', () => {
       ))).toEqual(entries.map((entry) => Buffer.from(entry.before!)));
     },
   );
+
+  it.each(['target-renamed', 'progress-journal-renamed'] as const)(
+    'restarts a rolling rollback after %s fault',
+    async (faultPoint) => {
+      const value = await recoveryFixture({
+        completedOperations: ['content-lock', 'repertoire-lock'],
+        entries: [
+          { target: { kind: 'content-lock' }, action: 'update', before: 'old-a', after: 'new-a', current: 'after' },
+          { target: { kind: 'repertoire-lock' }, action: 'update', before: 'old-b', after: 'new-b', current: 'after' },
+        ],
+      });
+      const contentPath = resolveProjectTemplateApplyTarget(
+        value.storage, { kind: 'content-lock' },
+      ).absolutePath;
+      let journalRenames = 0;
+      let injected = false;
+      const io = createProjectTemplateApplyStorageIo({
+        after(operation, path) {
+          if (injected || operation !== 'rename') return;
+          if (faultPoint === 'target-renamed' && path === contentPath) {
+            injected = true;
+            throw new Error('injected target rename failure');
+          }
+          if (path === value.storage.journalPath && ++journalRenames === 2) {
+            injected = true;
+            throw new Error('injected progress journal failure');
+          }
+        },
+      });
+      await expect(recoverProjectTemplateCompanionLockTransactionForTest({
+        projectRoot: value.projectRoot, io,
+      })).rejects.toBeDefined();
+      await expect(recoverProjectTemplateCompanionLockTransaction({
+        projectRoot: value.projectRoot,
+      })).resolves.toEqual({ status: 'rolled-back' });
+      expect(readFileSync(contentPath, 'utf8')).toBe('old-a');
+    },
+  );
+
+  it('blocks a target replacement immediately before its restore', async () => {
+    const value = await recoveryFixture({
+      completedOperations: ['content-lock'],
+      entries: [{
+        target: { kind: 'content-lock' }, action: 'update',
+        before: 'old', after: 'new', current: 'after',
+      }],
+    });
+    const targetPath = resolveProjectTemplateApplyTarget(
+      value.storage, { kind: 'content-lock' },
+    ).absolutePath;
+    await expect(recoverProjectTemplateCompanionLockTransactionForTest({
+      projectRoot: value.projectRoot,
+      beforeTargetRestore() {
+        writeFileSync(targetPath, 'third-party', { mode: 0o600 });
+      },
+    })).rejects.toMatchObject({ code: 'RECOVERY_BLOCKED' });
+    expect(readFileSync(targetPath, 'utf8')).toBe('third-party');
+  });
 
   it.each([
     ['add', undefined, 'new', 'intruder'],
