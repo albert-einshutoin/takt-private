@@ -1,6 +1,14 @@
 import { MAX_PROJECT_TEMPLATE_COHORT_BYTES } from './archive-types.js';
 import { DEFAULT_PROJECT_TEMPLATE_MAX_NODES } from './classifier-types.js';
 import {
+  MAX_PROJECT_TEMPLATE_CONTENT_LOCK_BYTES,
+  MAX_PROJECT_TEMPLATE_TRANSACTION_RECOVERY_BYTES,
+} from './companion-lock-limits.js';
+import {
+  MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_BYTES,
+} from './repertoire-dependency-lock.js';
+import { MAX_PROJECT_TEMPLATE_SOURCE_PROVENANCE_BYTES } from './source-provenance.js';
+import {
   MAX_TEMPLATE_ENTRIES,
   MAX_TEMPLATE_PATH_LENGTH,
 } from './validation.js';
@@ -19,6 +27,10 @@ const SERIALIZED_JSON_ITEM_OVERHEAD_BYTES = 1024;
 /** Shared bounds for apply evidence, durable journals, and offline recovery. */
 export const PROJECT_TEMPLATE_TRANSACTION_LIMITS = Object.freeze({
   maxBytes: MAX_PROJECT_TEMPLATE_COHORT_BYTES,
+  maxRecoveryBytes: MAX_PROJECT_TEMPLATE_TRANSACTION_RECOVERY_BYTES,
+  maxContentLockBytes: MAX_PROJECT_TEMPLATE_CONTENT_LOCK_BYTES,
+  maxRepertoireLockBytes: MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_BYTES,
+  maxSourceProvenanceBytes: MAX_PROJECT_TEMPLATE_SOURCE_PROVENANCE_BYTES,
   maxOperations: MAX_OPERATIONS,
   maxCreatedTargetDirectories: MAX_CREATED_TARGET_DIRECTORIES,
   maxOperationKeyLength: MAX_OPERATION_KEY_LENGTH,
@@ -40,3 +52,19 @@ export const PROJECT_TEMPLATE_TRANSACTION_LIMITS = Object.freeze({
         * (MAX_TEMPLATE_PATH_LENGTH + 3),
   ),
 });
+
+export function projectTemplateTransactionTargetByteLimit(
+  kind: 'template-entry' | 'lock' | 'content-lock'
+    | 'repertoire-lock' | 'source-provenance',
+): number {
+  if (kind === 'content-lock' || kind === 'lock') {
+    return PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxContentLockBytes;
+  }
+  if (kind === 'repertoire-lock') {
+    return PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRepertoireLockBytes;
+  }
+  if (kind === 'source-provenance') {
+    return PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxSourceProvenanceBytes;
+  }
+  return PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes;
+}

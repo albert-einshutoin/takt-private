@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, relative, sep } from 'node:path';
-import { PROJECT_TEMPLATE_TRANSACTION_LIMITS } from './transaction-limits.js';
+import {
+  PROJECT_TEMPLATE_TRANSACTION_LIMITS,
+  projectTemplateTransactionTargetByteLimit,
+} from './transaction-limits.js';
 import {
   acquireProjectTemplateApplyLease,
   assertProjectTemplateMutationLeaseOwned,
@@ -784,10 +787,14 @@ async function preflightRecoveryBackupBytes(
   for (const entry of manifest.entries) {
     const target = resolveProjectTemplateApplyTarget(storage, entry.target);
     if (!restoreKeys.has(target.key) || entry.before.kind === 'absent') continue;
+    if (
+      entry.before.bytes
+        > projectTemplateTransactionTargetByteLimit(entry.target.kind)
+    ) recoveryBlocked();
     totalBytes += entry.before.bytes;
     if (
       !Number.isSafeInteger(totalBytes)
-      || totalBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes
+      || totalBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRecoveryBytes
     ) {
       recoveryBlocked();
     }

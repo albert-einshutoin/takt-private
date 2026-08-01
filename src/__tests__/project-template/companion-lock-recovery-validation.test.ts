@@ -28,6 +28,9 @@ import {
   type ProjectTemplateBackupManifest,
   type ProjectTemplateBackupManifestEntry,
 } from '../../features/project-template/apply-storage.js';
+import {
+  PROJECT_TEMPLATE_TRANSACTION_LIMITS,
+} from '../../features/project-template/transaction-limits.js';
 
 const roots: string[] = [];
 const PLAN = 'a'.repeat(64);
@@ -274,17 +277,16 @@ describe('companion lock rollback current-state guard', () => {
   it('accepts 32 MiB of template content plus companion evidence', async () => {
     const entries = [
       ...largeCohortEntries(32),
-      {
-        target: { kind: 'content-lock' as const }, action: 'update' as const,
-        before: 'x', after: 'new-lock', current: 'after' as const,
-      },
+      { target: { kind: 'content-lock' as const }, action: 'update' as const, before: 'c'.repeat(PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxContentLockBytes), after: 'new-content', current: 'after' as const },
+      { target: { kind: 'repertoire-lock' as const }, action: 'update' as const, before: 'r'.repeat(PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRepertoireLockBytes), after: 'new-repertoire', current: 'after' as const },
+      { target: { kind: 'source-provenance' as const }, action: 'update' as const, before: 's'.repeat(PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxSourceProvenanceBytes), after: 'new-source', current: 'after' as const },
     ];
     const value = await recoveryFixture({
       completedOperations: [
-        ...entries.slice(0, -1).map((entry) => (
+        ...entries.slice(0, 32).map((entry) => (
           `entry:${(entry.target as { path: string }).path}`
         )),
-        'content-lock',
+        'content-lock', 'repertoire-lock', 'source-provenance',
       ],
       entries,
     });
@@ -293,15 +295,14 @@ describe('companion lock rollback current-state guard', () => {
     })).resolves.toEqual({ status: 'rolled-back' });
   });
 
-  it('blocks 32 MiB plus one byte without mutation and retains evidence', async () => {
+  it('rejects 32 MiB plus one byte while producing recovery evidence', async () => {
     const entries = largeCohortEntries(32, 1);
-    const value = await recoveryFixture({
+    await expect(recoveryFixture({
       completedOperations: entries.map((entry) => (
         `entry:${(entry.target as { path: string }).path}`
       )),
       entries,
-    });
-    await expectBlocked(value);
+    })).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
   });
 
   it.each([0, 4])(

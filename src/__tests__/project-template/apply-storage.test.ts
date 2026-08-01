@@ -275,7 +275,8 @@ describe('project template apply storage', () => {
     });
     const digest = 'c'.repeat(64);
     const state = {
-      kind: 'file' as const, sha256: digest, bytes: Number.MAX_SAFE_INTEGER,
+      kind: 'file' as const, sha256: digest,
+      bytes: PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes / MAX_TEMPLATE_ENTRIES,
       mode: '0644', blobRelativePath: `blobs/${digest}`,
       modifiedAt: '2026-08-01T00:00:00.000Z',
     };
@@ -336,6 +337,38 @@ describe('project template apply storage', () => {
         planId: 'a'.repeat(64), preconditionToken: 'b'.repeat(64),
         createdAt: '2026-08-01T00:00:00.000Z',
         createdTargetDirectories: [], entries,
+      },
+      io,
+    })).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    expect(writes).toBe(0);
+  });
+
+  it.each([
+    ['content-lock', PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxContentLockBytes],
+    ['repertoire-lock', PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRepertoireLockBytes],
+    ['source-provenance', PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxSourceProvenanceBytes],
+  ] as const)('rejects %s bytes above its contract before storage IO', async (
+    kind, maxBytes,
+  ) => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    let writes = 0;
+    const digest = 'd'.repeat(64);
+    const oversized = {
+      kind: 'file' as const, sha256: digest, bytes: maxBytes + 1,
+      mode: '0600', blobRelativePath: `blobs/${digest}`,
+    };
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation) { if (operation === 'write') writes += 1; },
+    });
+    await expect(writeProjectTemplateBackupManifest({
+      storage,
+      manifest: {
+        schemaVersion: '1.1', backupId: `backup-${kind}`,
+        planId: 'a'.repeat(64), preconditionToken: 'b'.repeat(64),
+        createdAt: '2026-08-01T00:00:00.000Z', createdTargetDirectories: [],
+        entries: [{
+          target: { kind }, action: 'update', before: oversized, after: oversized,
+        }],
       },
       io,
     })).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });

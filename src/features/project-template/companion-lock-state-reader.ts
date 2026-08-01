@@ -31,9 +31,9 @@ import {
   requireActiveRemotePreview,
   type ProjectTemplateRemotePreviewOperationContext,
 } from './remote-preview-operation.js';
+import { MAX_PROJECT_TEMPLATE_CONTENT_LOCK_BYTES } from './companion-lock-limits.js';
 
 const CONTENT_LOCK_PATH = '.takt-template-lock.json';
-const MAX_CONTENT_LOCK_BYTES = 4 * 1024 * 1024;
 const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
 const DIRECTORY_FLAG = process.platform === 'win32' ? 0 : constants.O_DIRECTORY;
 const PREVIOUS_LOCKS_DOMAIN =
@@ -123,7 +123,7 @@ function maxBytes(path: string): number {
   if (path.endsWith(PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH)) {
     return MAX_PROJECT_TEMPLATE_SOURCE_PROVENANCE_BYTES;
   }
-  return MAX_CONTENT_LOCK_BYTES;
+  return MAX_PROJECT_TEMPLATE_CONTENT_LOCK_BYTES;
 }
 
 function observe(path: string): ObservedLock {

@@ -33,6 +33,7 @@ import { parsePortablePath } from './validation.js';
 import {
   PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX,
   PROJECT_TEMPLATE_TRANSACTION_LIMITS,
+  projectTemplateTransactionTargetByteLimit,
 } from './transaction-limits.js';
 import {
   PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
@@ -1037,7 +1038,7 @@ async function ensurePrivateParents(
   // makes a maximum-length portable target longer than the public path bound.
   const segments = relativePath.split('/');
   if (
-    (segments[0] !== 'entries' && segments[0] !== 'locks')
+    !['entries', 'lock', 'locks'].includes(segments[0]!)
     || segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
   ) {
     throw new ProjectTemplateApplyStorageError(
@@ -1620,6 +1621,10 @@ function validateBackupManifest(
     );
   }
   const paths = new Set<string>();
+  let beforeTemplateBytes = 0;
+  let afterTemplateBytes = 0;
+  let beforeRecoveryBytes = 0;
+  let afterRecoveryBytes = 0;
   const entries = manifest.entries.map((entry) => {
     if (
       entry === null
@@ -1660,11 +1665,50 @@ function validateBackupManifest(
         'backup manifest action is invalid',
       );
     }
+    const before = validateBackupState(entry.before);
+    const after = validateBackupState(entry.after);
+    const maxBytes = projectTemplateTransactionTargetByteLimit(target.kind);
+    if (
+      (before.kind === 'file' && before.bytes > maxBytes)
+      || (after.kind === 'file' && after.bytes > maxBytes)
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'INVALID_MANIFEST', 'backup entry exceeds its target byte budget',
+      );
+    }
+    const addStateBytes = (
+      state: ProjectTemplateBackupEntryState,
+      template: 'before' | 'after',
+    ): void => {
+      if (state.kind !== 'file') return;
+      if (template === 'before') beforeRecoveryBytes += state.bytes;
+      else afterRecoveryBytes += state.bytes;
+      if (target.kind === 'template-entry') {
+        if (template === 'before') beforeTemplateBytes += state.bytes;
+        else afterTemplateBytes += state.bytes;
+      }
+      if (
+        !Number.isSafeInteger(beforeRecoveryBytes)
+        || !Number.isSafeInteger(afterRecoveryBytes)
+        || !Number.isSafeInteger(beforeTemplateBytes)
+        || !Number.isSafeInteger(afterTemplateBytes)
+        || beforeRecoveryBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRecoveryBytes
+        || afterRecoveryBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRecoveryBytes
+        || beforeTemplateBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes
+        || afterTemplateBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes
+      ) {
+        throw new ProjectTemplateApplyStorageError(
+          'INVALID_MANIFEST', 'backup manifest exceeds its aggregate byte budget',
+        );
+      }
+    };
+    addStateBytes(before, 'before');
+    addStateBytes(after, 'after');
     return {
       target,
       action: entry.action,
-      before: validateBackupState(entry.before),
-      after: validateBackupState(entry.after),
+      before,
+      after,
     };
   });
   const createdTargetDirectories = validateCreatedTargetDirectories(
