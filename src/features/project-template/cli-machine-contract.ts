@@ -6,7 +6,12 @@ import {
 import { ProjectTemplateCliContractError } from './cli-contract-error.js';
 import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
 import { MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES } from './source-descriptor.js';
-import { MAX_TEMPLATE_ENTRIES } from './validation.js';
+import {
+  COMMIT_PATTERN_SOURCE,
+  MAX_SEMVER_LENGTH,
+  MAX_TEMPLATE_ENTRIES,
+  SEMVER_PATTERN_SOURCE,
+} from './validation.js';
 
 export { ProjectTemplateCliContractError } from './cli-contract-error.js';
 
@@ -146,6 +151,14 @@ export interface ProjectTemplateCliRollbackApplyResult {
   readonly backupId: string;
   readonly recoveryState: 'clean';
 }
+export interface ProjectTemplateCliSourceProvenance {
+  readonly kind: 'local-import' | 'github';
+  readonly sourceId: string;
+  readonly revision: string;
+  readonly version: string;
+  readonly archiveId: string;
+  readonly manifestId: string;
+}
 export type ProjectTemplateCliListResult =
   | {
     readonly installed: false;
@@ -155,6 +168,7 @@ export type ProjectTemplateCliListResult =
   | {
     readonly installed: true;
     readonly targetId: string;
+    readonly sourceProvenance: ProjectTemplateCliSourceProvenance;
     readonly backupIds: readonly string[];
     readonly recoveryState: ProjectTemplateCliRecoveryState;
   };
@@ -266,6 +280,8 @@ function apply<T>(fn: (...args: never[]) => T, receiver: unknown, args: unknown[
 }
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const COMMIT_PATTERN = new RegExp(COMMIT_PATTERN_SOURCE, 'u');
+const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE, 'u');
 const ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
 const TOKEN_PATTERN = /(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/u;
 const SYMBOLIC_CODE_PATTERN = /^[A-Z][A-Z0-9_]*$/u;
@@ -398,6 +414,21 @@ function isSafeId(value: ProjectTemplateCliJson | undefined): value is string {
   return typeof value === 'string'
     && apply(CAPTURED_REGEXP_TEST, ID_PATTERN, [value])
     && !apply(CAPTURED_REGEXP_TEST, TOKEN_PATTERN, [value]);
+}
+
+function validateSourceProvenance(value: ProjectTemplateCliJson | undefined): void {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'kind', 'sourceId', 'revision', 'version', 'archiveId', 'manifestId',
+  ])) invalidSchema();
+  if ((value.kind !== 'local-import' && value.kind !== 'github')
+    || !isHash(value.sourceId)
+    || typeof value.revision !== 'string'
+    || !apply(CAPTURED_REGEXP_TEST, COMMIT_PATTERN, [value.revision])
+    || typeof value.version !== 'string'
+    || value.version.length > MAX_SEMVER_LENGTH
+    || !apply(CAPTURED_REGEXP_TEST, SEMVER_PATTERN, [value.version])
+    || !isHash(value.archiveId)
+    || !isHash(value.manifestId)) invalidSchema();
 }
 
 function assertExactResult(
@@ -564,14 +595,19 @@ function validateResult(
   } else {
     if (mode !== 'dry-run') invalidSchema();
     const keys = result.installed === true
-      ? ['installed', 'targetId', 'backupIds', 'recoveryState']
+      ? ['installed', 'targetId', 'sourceProvenance', 'backupIds', 'recoveryState']
       : ['installed', 'backupIds', 'recoveryState'];
     assertExactResult(result, keys);
     if (typeof result.installed !== 'boolean'
       || !isArray(result.backupIds)
       || result.backupIds.length > MAX_BACKUP_IDS
       || !isRecoveryState(result.recoveryState)
-      || (result.installed && !isSafeId(result.targetId))) invalidSchema();
+      || (result.installed && !isHash(result.targetId))) invalidSchema();
+    if (result.installed) {
+      validateSourceProvenance(result.sourceProvenance);
+      if (!isRecord(result.sourceProvenance)
+        || result.sourceProvenance.manifestId !== result.targetId) invalidSchema();
+    }
     const unique = new CAPTURED_SET<string>();
     for (let index = 0; index < result.backupIds.length; index += 1) {
       const backupId = result.backupIds[index]!;

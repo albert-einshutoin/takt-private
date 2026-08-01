@@ -1,6 +1,7 @@
 import { Dirent, type Stats } from 'node:fs';
 import { lstat, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { types } from 'node:util';
 import { inspectTaktpack } from './archive-inspector.js';
 import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
 import {
@@ -35,6 +36,7 @@ const ARRAY_SORT = Array.prototype.sort;
 const NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const DIRENT_IS_DIRECTORY = Dirent.prototype.isDirectory;
 const DIRENT_IS_SYMBOLIC_LINK = Dirent.prototype.isSymbolicLink;
+const TYPES_IS_PROXY = types.isProxy;
 
 interface InspectArchiveProjection {
   readonly archiveSha256: string;
@@ -46,6 +48,18 @@ interface CompanionProjection {
   readonly state: 'first-install' | 'update';
   readonly previousLocksSha256: string;
   readonly contentLock?: { readonly manifestSha256: string };
+  readonly sourceProvenance?: {
+    readonly source: {
+      readonly kind?: 'local-import';
+      readonly commit: string;
+      readonly descriptorSha256: string;
+    };
+    readonly archive: {
+      readonly sha256: string;
+      readonly version: string;
+      readonly manifestSha256: string;
+    };
+  };
 }
 
 interface ApplyGuardProjection {
@@ -85,13 +99,29 @@ export interface ProjectTemplateCliListOptions {
 }
 
 function ownValue(value: unknown, key: string): unknown {
-  if (typeof value !== 'object' || value === null) throw new Error('invalid projection');
+  if (typeof value !== 'object' || value === null || TYPES_IS_PROXY(value)) {
+    throw new Error('invalid projection');
+  }
   const descriptor = REFLECT_APPLY(
     OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
     Object,
     [value, key],
   ) as PropertyDescriptor | undefined;
   if (descriptor === undefined || !('value' in descriptor)) throw new Error('invalid projection');
+  return descriptor.value;
+}
+
+function ownOptionalValue(value: unknown, key: string): unknown {
+  if (typeof value !== 'object' || value === null || TYPES_IS_PROXY(value)) {
+    throw new Error('invalid projection');
+  }
+  const descriptor = REFLECT_APPLY(
+    OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    Object,
+    [value, key],
+  ) as PropertyDescriptor | undefined;
+  if (descriptor === undefined) return undefined;
+  if (!('value' in descriptor)) throw new Error('invalid projection');
   return descriptor.value;
 }
 
@@ -342,7 +372,46 @@ function recoveryRequired(report: unknown): boolean {
 
 type CompanionSnapshot =
   | { readonly installed: false; readonly cohortId: string }
-  | { readonly installed: true; readonly cohortId: string; readonly targetId: string };
+  | {
+    readonly installed: true;
+    readonly cohortId: string;
+    readonly targetId: string;
+    readonly sourceProvenance: {
+      readonly kind: 'local-import' | 'github';
+      readonly sourceId: string;
+      readonly revision: string;
+      readonly version: string;
+      readonly archiveId: string;
+      readonly manifestId: string;
+    };
+  };
+
+function snapshotSourceProvenance(
+  value: unknown,
+): Extract<CompanionSnapshot, { readonly installed: true }>['sourceProvenance'] {
+  // Why: TaktDesk needs immutable provenance to identify an installation, but
+  // raw lock data contains local paths and repository URLs. Project only
+  // validated hashes, the resolved revision, and version across the CLI trust
+  // boundary so list remains useful without becoming a metadata disclosure.
+  const source = ownValue(value, 'source');
+  const archive = ownValue(value, 'archive');
+  const sourceKind = ownOptionalValue(source, 'kind');
+  let kind: 'local-import' | 'github';
+  if (sourceKind === undefined) kind = 'github';
+  else if (sourceKind === 'local-import') kind = 'local-import';
+  else throw new Error('invalid projection');
+  const sourceId = ownValue(source, 'descriptorSha256');
+  const revision = ownValue(source, 'commit');
+  const version = ownValue(archive, 'version');
+  const archiveId = ownValue(archive, 'sha256');
+  const manifestId = ownValue(archive, 'manifestSha256');
+  if (typeof sourceId !== 'string'
+    || typeof revision !== 'string'
+    || typeof version !== 'string'
+    || typeof archiveId !== 'string'
+    || typeof manifestId !== 'string') throw new Error('invalid projection');
+  return { kind, sourceId, revision, version, archiveId, manifestId };
+}
 
 function snapshotCompanion(value: unknown): CompanionSnapshot {
   const state = ownValue(value, 'state');
@@ -356,13 +425,28 @@ function snapshotCompanion(value: unknown): CompanionSnapshot {
   if (typeof targetId !== 'string' || !testPattern(SHA256_PATTERN, targetId)) {
     throw new Error('invalid companion projection');
   }
-  return { installed: true, cohortId, targetId };
+  return {
+    installed: true,
+    cohortId,
+    targetId,
+    sourceProvenance: snapshotSourceProvenance(ownValue(value, 'sourceProvenance')),
+  };
 }
 
 function sameCompanionSnapshot(left: CompanionSnapshot, right: CompanionSnapshot): boolean {
+  // Why: a stable content lock alone is insufficient when another process can
+  // replace only the provenance cohort. Bind every public provenance field to
+  // the second read so the UI never presents mixed source and target state.
   return left.installed === right.installed
     && left.cohortId === right.cohortId
-    && (!left.installed || (right.installed && left.targetId === right.targetId));
+    && (!left.installed || (right.installed
+      && left.targetId === right.targetId
+      && left.sourceProvenance.kind === right.sourceProvenance.kind
+      && left.sourceProvenance.sourceId === right.sourceProvenance.sourceId
+      && left.sourceProvenance.revision === right.sourceProvenance.revision
+      && left.sourceProvenance.version === right.sourceProvenance.version
+      && left.sourceProvenance.archiveId === right.sourceProvenance.archiveId
+      && left.sourceProvenance.manifestId === right.sourceProvenance.manifestId));
 }
 
 export function listProjectTemplatesForCli(
@@ -427,6 +511,7 @@ export async function listProjectTemplatesForCliWithDependencies(
         ? {
           installed: true,
           targetId: companion.targetId,
+          sourceProvenance: companion.sourceProvenance,
           backupIds,
           recoveryState: 'clean',
         }

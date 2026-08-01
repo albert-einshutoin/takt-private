@@ -37,7 +37,13 @@ describe('project template CLI independent review hardening', () => {
       planId: HASH, rolledBack: true, backupId: 'backup-1', recoveryState: 'clean',
     }],
     ['project-template list', {
-      installed: true, targetId: 'team.default', backupIds: ['backup-1'],
+      installed: true, targetId: HASH,
+      sourceProvenance: {
+        kind: 'github', sourceId: HASH,
+        revision: '0123456789abcdef0123456789abcdef01234567',
+        version: '1.0.0', archiveId: HASH, manifestId: HASH,
+      },
+      backupIds: ['backup-1'],
       recoveryState: 'clean',
     }],
   ] as const)('accepts the closed success DTO for %s', (command, result) => {

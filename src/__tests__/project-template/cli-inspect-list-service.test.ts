@@ -11,7 +11,32 @@ import {
 } from '../../features/project-template/cli-inspect-list-service.js';
 
 const SHA = 'a'.repeat(64);
+const SHA_B = 'b'.repeat(64);
+const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const roots: string[] = [];
+
+function localSourceProvenance(descriptorSha256 = SHA) {
+  return {
+    schemaVersion: '1.0' as const,
+    source: {
+      kind: 'local-import' as const,
+      uri: 'private/path-must-not-leak',
+      ref: 'workspace' as const,
+      commit: COMMIT,
+      descriptorSha256,
+    },
+    archive: {
+      sha256: SHA_B,
+      version: '2.1.0',
+      manifestSha256: SHA,
+    },
+    dependencyVerification: {
+      method: 'local-empty-v1' as const,
+      declarationSha256: SHA,
+      count: 0 as const,
+    },
+  };
+}
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -230,6 +255,7 @@ describe('project-template list CLI service', () => {
         state: 'update',
         previousLocksSha256: SHA,
         contentLock: { manifestSha256: SHA },
+        sourceProvenance: localSourceProvenance(),
       })),
       inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
     });
@@ -240,11 +266,20 @@ describe('project-template list CLI service', () => {
         result: {
           installed: true,
           targetId: SHA,
+          sourceProvenance: {
+            kind: 'local-import',
+            sourceId: SHA,
+            revision: COMMIT,
+            version: '2.1.0',
+            archiveId: SHA_B,
+            manifestId: SHA,
+          },
           backupIds: [],
           recoveryState: 'clean',
         },
       },
     });
+    expect(JSON.stringify(outcome)).not.toContain('private/path-must-not-leak');
   });
 
   it('reports first-install with only bounded backup-generation identifiers', async () => {
@@ -274,6 +309,7 @@ describe('project-template list CLI service', () => {
         state: 'update',
         contentLock: { manifestSha256: SHA },
         previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
       })),
       inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
       listBackupIds: vi.fn(async () => backupIds),
@@ -285,6 +321,14 @@ describe('project-template list CLI service', () => {
         result: {
           installed: true,
           targetId: SHA,
+          sourceProvenance: {
+            kind: 'local-import',
+            sourceId: SHA,
+            revision: COMMIT,
+            version: '2.1.0',
+            archiveId: SHA_B,
+            manifestId: SHA,
+          },
           backupIds: ['backup-1', 'backup-2'],
           recoveryState: 'clean',
         },
@@ -298,6 +342,7 @@ describe('project-template list CLI service', () => {
         state: 'update',
         contentLock: { manifestSha256: SHA },
         previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
       })),
     };
     const recovery = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
@@ -331,6 +376,7 @@ describe('project-template list CLI service', () => {
         state: 'update',
         contentLock: { manifestSha256: SHA },
         previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
       })),
       inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
       listBackupIds: vi.fn(async () => {
@@ -352,11 +398,13 @@ describe('project-template list CLI service', () => {
         state: 'update',
         contentLock: { manifestSha256: SHA },
         previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
       })
       .mockReturnValueOnce({
         state: 'update',
         contentLock: { manifestSha256: otherSha },
         previousLocksSha256: otherSha,
+        sourceProvenance: localSourceProvenance(otherSha),
       });
 
     const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
@@ -370,6 +418,57 @@ describe('project-template list CLI service', () => {
       envelope: { status: 'error', error: { code: 'TARGET_DRIFT' } },
     });
     expect(readCompanionLockState).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed when only the installed source provenance changes', async () => {
+    const readCompanionLockState = vi.fn()
+      .mockReturnValueOnce({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
+      })
+      .mockReturnValueOnce({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(SHA_B),
+      });
+
+    const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
+      readCompanionLockState,
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+      listBackupIds: vi.fn(async () => []),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 22,
+      envelope: { status: 'error', error: { code: 'TARGET_DRIFT' } },
+    });
+  });
+
+  it('rejects nested provenance proxies without invoking descriptor traps', async () => {
+    const descriptorTrap = vi.fn(Reflect.getOwnPropertyDescriptor);
+    const sourceProvenance = localSourceProvenance();
+    const hostileSource = new Proxy(sourceProvenance.source, {
+      getOwnPropertyDescriptor: descriptorTrap,
+    });
+    const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
+      readCompanionLockState: vi.fn(() => ({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+        sourceProvenance: { ...sourceProvenance, source: hostileSource },
+      })),
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+      listBackupIds: vi.fn(async () => []),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 23,
+      envelope: { status: 'error', error: { code: 'SECURITY_GUARD' } },
+    });
+    expect(descriptorTrap).not.toHaveBeenCalled();
   });
 
   it('fails as recovery-required when recovery appears during backup collection', async () => {

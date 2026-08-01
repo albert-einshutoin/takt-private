@@ -92,6 +92,53 @@ describe('project template CLI machine contract', () => {
     })).toThrow(ProjectTemplateCliContractError);
   });
 
+  it('accepts only the bounded source provenance projection for installed templates', () => {
+    const provenance = {
+      kind: 'github' as const,
+      sourceId: PLAN_ID,
+      revision: '0123456789abcdef0123456789abcdef01234567',
+      version: '2.1.0',
+      archiveId: 'b'.repeat(64),
+      manifestId: PLAN_ID,
+    };
+    const input = {
+      command: 'project-template list' as const,
+      mode: 'dry-run' as const,
+      result: {
+        installed: true as const,
+        targetId: PLAN_ID,
+        sourceProvenance: provenance,
+        backupIds: [],
+        recoveryState: 'clean' as const,
+      },
+    };
+
+    expect(createProjectTemplateCliSuccess(input)).toMatchObject({
+      result: { sourceProvenance: provenance },
+    });
+    expect(() => createProjectTemplateCliSuccess({
+      ...input,
+      result: {
+        ...input.result,
+        sourceProvenance: { ...provenance, path: '/private/repo' },
+      },
+    } as never)).toThrow(ProjectTemplateCliContractError);
+    expect(() => createProjectTemplateCliSuccess({
+      ...input,
+      result: {
+        ...input.result,
+        sourceProvenance: { ...provenance, revision: 'main' },
+      },
+    })).toThrow(ProjectTemplateCliContractError);
+    expect(() => createProjectTemplateCliSuccess({
+      ...input,
+      result: {
+        ...input.result,
+        sourceProvenance: { ...provenance, manifestId: 'c'.repeat(64) },
+      },
+    })).toThrow(ProjectTemplateCliContractError);
+  });
+
   it.each([
     ['non-finite number', { value: Number.NaN }],
     ['negative zero', { value: -0 }],
