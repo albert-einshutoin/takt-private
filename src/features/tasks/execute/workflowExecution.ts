@@ -149,7 +149,6 @@ async function executeWorkflowWithPinnedGeneration(
   try {
     return await executeWorkflowInternal(workflowConfig, task, cwd, {
       ...options,
-      workflowGenerationWitness: snapshot.witness,
       workflowGenerationSnapshot: snapshot,
     }, runContext);
   } finally {
