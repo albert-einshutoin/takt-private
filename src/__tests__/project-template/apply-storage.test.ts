@@ -23,11 +23,13 @@ import {
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
   openProjectTemplateApplyStorageReadOnly,
+  parseProjectTemplateApplyJournal,
   pruneProjectTemplateBackupGenerations,
   readProjectTemplateApprovalRecord,
   readProjectTemplateBackupManifest,
   removeProjectTemplateBackupGeneration,
   removeProjectTemplateStagingTransaction,
+  resolveProjectTemplateApplyTarget,
   writeProjectTemplateApplyJournal,
   writeProjectTemplateApprovalRecord,
   writeProjectTemplateBackupManifest,
@@ -84,6 +86,135 @@ afterEach(() => {
 });
 
 describe('project template apply storage', () => {
+  it.each([
+    ['content-lock', '.takt-template-lock.json', 'content-lock'],
+    [
+      'repertoire-lock',
+      '.takt-template-repertoire-lock.json',
+      'repertoire-lock',
+    ],
+    [
+      'source-provenance',
+      '.takt-template-source-lock.json',
+      'source-provenance',
+    ],
+  ] as const)(
+    'resolves the schema 1.1 %s target outside template content',
+    async (kind, displayPath, key) => {
+      const storage = await initializeProjectTemplateApplyStorage({
+        repoPath: makeRepo(),
+      });
+      const resolved = resolveProjectTemplateApplyTarget(
+        storage,
+        { kind } as never,
+      );
+      expect(resolved).toMatchObject({
+        target: { kind },
+        key,
+        displayPath,
+      });
+      expect(resolved.absolutePath).toBe(join(storage.repoRoot, displayPath));
+      expect(resolved.stagingRelativePath).toBe(
+        `locks/${displayPath}`,
+      );
+    },
+  );
+
+  it('round-trips a strict schema 1.1 backup target union', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: makeRepo(),
+    });
+    const value = {
+      schemaVersion: '1.1',
+      backupId: 'backup-schema-11',
+      planId: 'a'.repeat(64),
+      preconditionToken: 'b'.repeat(64),
+      createdAt: '2026-08-01T00:00:00.000Z',
+      createdTargetDirectories: [],
+      entries: [
+        { kind: 'content-lock' },
+        { kind: 'repertoire-lock' },
+        { kind: 'source-provenance' },
+      ].map((target) => ({
+        target,
+        action: 'add',
+        before: { kind: 'absent' },
+        after: { kind: 'absent' },
+      })),
+    };
+
+    await writeProjectTemplateBackupManifest({
+      storage,
+      manifest: value as never,
+    });
+    await expect(readProjectTemplateBackupManifest({
+      storage,
+      backupId: value.backupId,
+    })).resolves.toEqual(value);
+  });
+
+  it('reads schema 1.0 recovery manifests but rejects mixed and unknown targets', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: makeRepo(),
+    });
+    const legacy = {
+      ...manifest('backup-schema-10', '2026-08-01T00:00:00.000Z'),
+      entries: [{
+        target: { kind: 'lock' },
+        action: 'add',
+        before: { kind: 'absent' },
+        after: { kind: 'absent' },
+      }],
+    };
+    await writeProjectTemplateBackupManifest({ storage, manifest: legacy });
+    await expect(readProjectTemplateBackupManifest({
+      storage,
+      backupId: legacy.backupId,
+    })).resolves.toEqual(legacy);
+
+    for (const [schemaVersion, target] of [
+      ['1.0', { kind: 'content-lock' }],
+      ['1.1', { kind: 'lock' }],
+      ['1.1', { kind: 'unknown-lock' }],
+      ['1.1', { kind: 'content-lock', path: 'forged' }],
+    ] as const) {
+      await expect(writeProjectTemplateBackupManifest({
+        storage,
+        manifest: {
+          ...legacy,
+          schemaVersion,
+          backupId: `backup-invalid-${schemaVersion.replace('.', '-')}-${target.kind}`,
+          entries: [{ ...legacy.entries[0]!, target }],
+        } as never,
+      })).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    }
+  });
+
+  it('parses schema 1.0 recovery journals and strictly separates 1.1 operations', () => {
+    expect(parseProjectTemplateApplyJournal(journal()))
+      .toEqual(journal());
+    const current = {
+      ...journal(),
+      schemaVersion: '1.1',
+      completedOperations: [
+        'content-lock',
+        'repertoire-lock',
+        'source-provenance',
+      ],
+    };
+    expect(parseProjectTemplateApplyJournal(current)).toEqual(current);
+
+    for (const value of [
+      { ...current, schemaVersion: '2.0' },
+      { ...current, completedOperations: ['lock'] },
+      { ...journal(), completedOperations: ['content-lock'] },
+      { ...current, unexpected: true },
+    ]) {
+      expect(() => parseProjectTemplateApplyJournal(value))
+        .toThrow(expect.objectContaining({ code: 'INVALID_JOURNAL' }));
+    }
+  });
+
   it('opens existing baseline authority read-only and closes all directory FDs', async () => {
     const root = makeRepo();
     const initialized = await initializeProjectTemplateApplyStorage({ repoPath: root });
