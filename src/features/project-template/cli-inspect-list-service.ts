@@ -21,6 +21,7 @@ import {
   ProjectTemplateApplyStorageError,
   readProjectTemplateBackupManifest,
 } from './apply-storage.js';
+import { PROJECT_TEMPLATE_CONTROL_DIRECTORY } from './control-root-contract.js';
 import { MAX_TEMPLATE_ENTRIES } from './validation.js';
 
 const MAX_BACKUP_IDS = 32;
@@ -457,7 +458,9 @@ async function listProjectTemplateBackupIdsReadOnly(
   installed: boolean,
   signal?: AbortSignal,
 ): Promise<readonly string[]> {
-  const controlRoot = join(resolve(cwd), '.takt-control');
+  // Keep the read-only probe on the same canonical control namespace as the
+  // transaction storage. A second literal silently hides installed backups.
+  const controlRoot = join(resolve(cwd), PROJECT_TEMPLATE_CONTROL_DIRECTORY);
   try {
     await awaitActive(lstat(controlRoot), signal);
   } catch (error) {
