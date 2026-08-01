@@ -845,4 +845,32 @@ describe('project template remote production composition', () => {
     await expect(applying).resolves.toMatchObject({ status: 'committed' });
     await expect(disposing).resolves.toBeUndefined();
   });
+
+  it('keeps dispose pending once non-cancellable recovery is admitted', async () => {
+    const value = await fixture();
+    const entered = deferred();
+    const release = deferred();
+    const composition = await createProjectTemplateRemoteProductionCompositionForTest({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+    }, {
+      disposeDrainTimeoutMs: 1,
+      mutationGate: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const recovering = composition.recover({ projectRoot: value.projectRoot });
+    await entered.promise;
+    const disposing = composition.dispose();
+    let disposeSettled = false;
+    void disposing.finally(() => { disposeSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(disposeSettled).toBe(false);
+    release.resolve();
+    await expect(recovering).resolves.toEqual({ status: 'none' });
+    await expect(disposing).resolves.toBeUndefined();
+  });
 });
