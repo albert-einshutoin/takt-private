@@ -17,8 +17,9 @@ import {
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
 const testPattern = (pattern: RegExp, value: string): boolean => (
-  Reflect.apply(CAPTURED_REGEXP_TEST, pattern, [value]) as boolean
+  CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, pattern, [value]) as boolean
 );
 
 export interface ProjectTemplateCliRollbackDerivedPlan {
@@ -147,6 +148,9 @@ export function createProjectTemplateCliRollbackService(
       if (aborted(options.signal)) return failure(mode, 'INTERRUPTED');
       const cwd = resolve(options.cwd);
       if (!testPattern(SAFE_ID, options.backupId)) return failure(mode, 'INVALID_ARGUMENT');
+      if (mode === 'apply' && !testPattern(HASH, options.expectedPlanId)) {
+        return failure(mode, 'INVALID_EXPECTED_PLAN_ID');
+      }
       const initialGuard = guardCode(port.inspectGuard(cwd));
       if (mode === 'apply' && initialGuard !== undefined) return failure(mode, initialGuard);
       let plan: ProjectTemplateCliRollbackDerivedPlan;

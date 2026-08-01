@@ -62,7 +62,6 @@ export function consumeProjectTemplateCliMutationAdmission(value: unknown): void
     || !(CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_SET_HAS, ACTIVE_ADMISSIONS, [value]) as boolean)) {
     throw new ProjectTemplateCliInvalidAdmission();
   }
-  CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_SET_DELETE, ACTIVE_ADMISSIONS, [value]);
   CAPTURED_REFLECT_APPLY(value, undefined, []);
 }
 
@@ -157,17 +156,29 @@ export function startProjectTemplateCliLifecycle(input: {
     // the authority until it reaches commit, rollback, or recovery-required.
   };
 
-  let admitMutation: ProjectTemplateCliMutationAdmission | undefined = (() => {
+  let admitMutation: ProjectTemplateCliMutationAdmission | undefined;
+  const capability = (() => {
+    // The callable checks its own registry membership as well as lifecycle
+    // state because trusted adapters can retain and invoke the function
+    // directly. Settlement must revoke both call paths, not only consume().
+    if (settled || admitMutation !== capability
+      || !(CAPTURED_REFLECT_APPLY(
+        CAPTURED_WEAK_SET_HAS, ACTIVE_ADMISSIONS, [capability],
+      ) as boolean)) {
+      throw new ProjectTemplateCliInvalidAdmission();
+    }
+    if (admitted) {
+      throw new ProjectTemplateCliDuplicateAdmission();
+    }
+    CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_SET_DELETE, ACTIVE_ADMISSIONS, [capability]);
     // This synchronous check is the linearization point: a prior interrupt can
     // never be followed by a newly admitted filesystem mutation.
     if (interrupted || controller.signal.aborted) {
       throw new ProjectTemplateCliPreAdmissionInterrupt();
     }
-    if (admitted) {
-      throw new ProjectTemplateCliDuplicateAdmission();
-    }
     admitted = true;
   }) as ProjectTemplateCliMutationAdmission;
+  admitMutation = capability;
   CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_SET_ADD, ACTIVE_ADMISSIONS, [admitMutation]);
 
   const result = (async (): Promise<ProjectTemplateCliOutcome> => {
