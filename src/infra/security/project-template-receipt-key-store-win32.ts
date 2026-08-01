@@ -564,6 +564,19 @@ interface Win32LockObservation {
   readonly stat: BigIntStats;
 }
 
+type Win32StaleLockRecovery =
+  | { readonly status: 'recovered' }
+  | { readonly status: 'not-stale-or-raced' }
+  | { readonly status: 'fatal-quarantined' };
+
+const WIN32_LOCK_RECOVERED: Win32StaleLockRecovery = { status: 'recovered' };
+const WIN32_LOCK_NOT_RECOVERED: Win32StaleLockRecovery = {
+  status: 'not-stale-or-raced',
+};
+const WIN32_LOCK_FATAL_QUARANTINE: Win32StaleLockRecovery = {
+  status: 'fatal-quarantined',
+};
+
 function defaultProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -726,7 +739,7 @@ function quarantineAndRemoveStaleWin32Lock(
   observation: Win32LockObservation,
   policy: Win32LockPolicy,
   io: Win32ProjectTemplateReceiptKeyStoreIo | undefined,
-): boolean {
+): Win32StaleLockRecovery {
   const quarantineDirectory = mkdtempSync(join(
     dirname(lockPath),
     `.keyring.lock.stale-${observation.record.token}-`,
@@ -749,13 +762,40 @@ function quarantineAndRemoveStaleWin32Lock(
     );
     if (quarantined === undefined) {
       if (restoreQuarantinedWin32Lock(quarantinePath, lockPath, io)) moved = false;
-      return false;
+      // Why: once the canonical name has moved, an unrestorable artifact may
+      // be a live owner. It is a durable blocker; retrying could create a new
+      // lease at the empty canonical path and violate mutual exclusion.
+      return moved ? WIN32_LOCK_FATAL_QUARANTINE : WIN32_LOCK_NOT_RECOVERED;
     }
     unlinkSync(quarantinePath);
     moved = false;
-    return true;
+    return WIN32_LOCK_RECOVERED;
+  } catch {
+    if (!moved) {
+      try {
+        lstatSync(lockPath);
+        return WIN32_LOCK_NOT_RECOVERED;
+      } catch {
+        // Windows providers can report a rename failure after an ambiguous
+        // state transition. An absent or unobservable canonical path must stop
+        // acquisition because ownership can no longer be proven.
+        return WIN32_LOCK_FATAL_QUARANTINE;
+      }
+    }
+    if (restoreQuarantinedWin32Lock(quarantinePath, lockPath, io)) {
+      moved = false;
+      return WIN32_LOCK_NOT_RECOVERED;
+    }
+    return WIN32_LOCK_FATAL_QUARANTINE;
   } finally {
-    if (!moved) rmdirSync(quarantineDirectory);
+    if (!moved) {
+      try {
+        rmdirSync(quarantineDirectory);
+      } catch {
+        // The lock inode is either removed or restored. An empty-directory
+        // cleanup failure must not turn that known state into a lease retry.
+      }
+    }
   }
 }
 
@@ -763,11 +803,15 @@ function recoverStaleLock(
   path: string,
   policy: Win32LockPolicy,
   io: Win32ProjectTemplateReceiptKeyStoreIo | undefined,
-): boolean {
+): Win32StaleLockRecovery {
   let fd: number | undefined;
   try {
     const pathStat = lstatSync(path);
-    if (pathStat.isSymbolicLink() || !pathStat.isFile() || pathStat.nlink !== 1) return false;
+    if (
+      pathStat.isSymbolicLink()
+      || !pathStat.isFile()
+      || pathStat.nlink !== 1
+    ) return WIN32_LOCK_NOT_RECOVERED;
     // libuv opens Windows files with share-delete support. Keeping this seam
     // explicit lets native Windows contract tests model a filesystem/provider
     // that rejects rename while the descriptor is held.
@@ -776,15 +820,18 @@ function recoverStaleLock(
       constants.O_RDONLY,
     )))(path);
     const descriptorStat = fstatSync(fd);
-    if (descriptorStat.dev !== pathStat.dev || descriptorStat.ino !== pathStat.ino) return false;
+    if (
+      descriptorStat.dev !== pathStat.dev
+      || descriptorStat.ino !== pathStat.ino
+    ) return WIN32_LOCK_NOT_RECOVERED;
     const observation = observeStaleWin32Lock(fd, path, policy);
-    if (observation === undefined) return false;
+    if (observation === undefined) return WIN32_LOCK_NOT_RECOVERED;
     io?.beforeStaleLockQuarantine?.(path);
     const revalidated = observeStaleWin32Lock(fd, path, policy, observation);
-    if (revalidated === undefined) return false;
+    if (revalidated === undefined) return WIN32_LOCK_NOT_RECOVERED;
     return quarantineAndRemoveStaleWin32Lock(path, fd, revalidated, policy, io);
   } catch {
-    return false;
+    return WIN32_LOCK_NOT_RECOVERED;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -828,7 +875,11 @@ async function acquireLock(
         releaseOwnedLock(path, openedOwnership, false);
       } else if (fd !== undefined) closeSync(fd);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (!recoverStaleLock(path, policy, io)) {
+      const recovery = recoverStaleLock(path, policy, io);
+      if (recovery.status === 'fatal-quarantined') {
+        throw failure('Quarantined stale lock requires operator recovery');
+      }
+      if (recovery.status === 'not-stale-or-raced') {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, policy.waitMs));
       }
     }
