@@ -235,6 +235,31 @@ describe('owned project template rollback executor', () => {
     expect(readFileSync(value.contentPath, 'utf8')).toBe('foreign\n');
   });
 
+  it('preserves an edit introduced after the journal and before unlink', async () => {
+    const value = await installed();
+    let journalPath = '';
+    let raced = false;
+    const io = createProjectTemplateApplyStorageIo({
+      after(operation, path) {
+        if (!raced && operation === 'rename' && path === journalPath) {
+          raced = true;
+          writeFileSync(value.contentPath, 'foreign-before-unlink\n');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: value.projectRoot, io });
+    journalPath = storage.journalPath;
+    const plan = await deriveProjectTemplateRollbackPlan({ storage, backupId: value.backupId });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'recovery_required' });
+    } finally {
+      lease.release();
+    }
+    expect(readFileSync(value.contentPath, 'utf8')).toBe('foreign-before-unlink\n');
+  });
+
   it('maps an abort before mutation admission without changing the target', async () => {
     const value = await installed();
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: value.projectRoot });

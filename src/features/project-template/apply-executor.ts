@@ -417,6 +417,7 @@ async function removeCreatedTargetDirectories(
 async function publishStaged(
   storage: ProjectTemplateApplyStorage,
   staged: ProjectTemplateStagingFile,
+  expectedCurrent: ProjectTemplateBackupEntryState,
 ): Promise<void> {
   const resolved = resolveProjectTemplateApplyTarget(storage, staged.target);
   await ensureTargetParent(storage, staged.target);
@@ -424,6 +425,11 @@ async function publishStaged(
   // so readers can never observe a committed path with temporary permissions.
   await storage.io.chmod(staged.absolutePath, Number.parseInt(staged.targetMode, 8));
   await storage.io.fsyncFile(staged.absolutePath);
+  if (!stateMatches(
+    await currentState(storage, staged.target),
+    expectedCurrent,
+    storage.platform,
+  )) throw new Error('publish target drifted');
   await storage.io.rename(staged.absolutePath, resolved.absolutePath);
   await storage.io.fsyncDirectory(dirname(resolved.absolutePath));
 }
@@ -431,12 +437,14 @@ async function publishStaged(
 async function deleteTarget(
   storage: ProjectTemplateApplyStorage,
   target: ProjectTemplateApplyTarget,
+  expectedCurrent: ProjectTemplateBackupEntryState,
 ): Promise<void> {
   const resolved = resolveProjectTemplateApplyTarget(storage, target);
-  const stat = await storage.io.lstat(resolved.absolutePath);
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
-    throw new Error('delete target is unsafe');
-  }
+  if (!stateMatches(
+    await currentState(storage, target),
+    expectedCurrent,
+    storage.platform,
+  )) throw new Error('delete target drifted');
   await storage.io.unlink(resolved.absolutePath);
   await storage.io.fsyncDirectory(dirname(resolved.absolutePath));
 }
@@ -773,7 +781,7 @@ async function restoreOperations(
       throw new Error('restore target drifted');
     }
     if (entry.before.kind === 'absent') {
-      await deleteTarget(storage, entry.target);
+      await deleteTarget(storage, entry.target, entry.after);
       continue;
     }
     const blobPath = join(
@@ -793,7 +801,7 @@ async function restoreOperations(
       expectedSha256: entry.before.sha256,
       targetMode: entry.before.mode,
     });
-    await publishStaged(storage, staged);
+    await publishStaged(storage, staged, entry.after);
   }
 }
 
@@ -1113,8 +1121,9 @@ export async function applyProjectTemplatePlan(options: {
       )) {
         throw new Error('target drifted immediately before commit');
       }
-      if (operation.action === 'delete') await deleteTarget(storage, operation.target);
-      else await publishStaged(storage, operation.staged);
+      if (operation.action === 'delete') {
+        await deleteTarget(storage, operation.target, operation.before);
+      } else await publishStaged(storage, operation.staged, operation.before);
       completedOperations.push(intentOperationKey);
       await writeJournal(storage, {
         transactionId,

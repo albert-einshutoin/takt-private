@@ -136,12 +136,19 @@ export function createProjectTemplateCliRollbackService(
         );
       }
       if (mode === 'dry-run') {
-        const recoveryState = plan.recoveryRequired
+        const recoveryRequired = plan.recoveryRequired
+          || initialGuard === 'RECOVERY_REQUIRED';
+        if (initialGuard !== undefined
+          && initialGuard !== 'RECOVERY_REQUIRED'
+          && initialGuard !== 'ACTIVE_RUN') return failure(mode, initialGuard);
+        const recoveryState = recoveryRequired
           ? 'recovery-required' as const : 'clean' as const;
-        const readiness = plan.recoveryRequired || initialGuard !== undefined
-          ? 'recovery-required' as const : 'ready' as const;
-        const reviewCodes = readiness === 'recovery-required'
-          ? ['RECOVERY_REQUIRED'] as const : [] as const;
+        const readiness = recoveryRequired
+          ? 'recovery-required' as const
+          : initialGuard === 'ACTIVE_RUN' ? 'blocked' as const : 'ready' as const;
+        const reviewCodes = recoveryRequired
+          ? ['RECOVERY_REQUIRED'] as const
+          : initialGuard === 'ACTIVE_RUN' ? ['ACTIVE_RUN'] as const : [] as const;
         return {
           envelope: createProjectTemplateCliSuccess({
             command: 'project-template rollback', mode: 'dry-run',

@@ -102,4 +102,17 @@ describe('project template CLI rollback service', () => {
     expect(outcome.envelope).toMatchObject({ status: 'error', error: { code: 'ACTIVE_RUN' } });
     expect(value.derive).not.toHaveBeenCalled();
   });
+
+  it('reports an active run as blocked without inventing recovery state', async () => {
+    const service = createProjectTemplateCliRollbackService(port({
+      inspectGuard: () => ({ passed: false, blocks: [{ code: 'ACTIVE_RUN' }] }),
+    }));
+    const outcome = await service.rollback({
+      cwd: '/safe/repo', backupId: 'backup-1', force: false, mode: 'dry-run',
+    });
+    expect(outcome.envelope).toMatchObject({
+      status: 'success',
+      result: { readiness: 'blocked', recoveryState: 'clean', reviewCodes: ['ACTIVE_RUN'] },
+    });
+  });
 });
