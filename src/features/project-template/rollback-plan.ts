@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { types } from 'node:util';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import {
   readProjectTemplateBackupManifest,
@@ -13,6 +14,14 @@ import { projectTemplateTransactionTargetByteLimit } from './transaction-limits.
 const ROLLBACK_PLAN_DOMAIN = 'takt.project-template.rollback-plan.v1\u0000';
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
+  Object.getOwnPropertyDescriptors;
+const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
+const CAPTURED_OBJECT_PROTOTYPE = Object.prototype;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
+const CAPTURED_TYPES_IS_PROXY = types.isProxy;
 
 export interface ProjectTemplateRollbackPlan {
   readonly schemaVersion: '1.0';
@@ -31,10 +40,53 @@ export interface CreateProjectTemplateRollbackPlanOptions {
 }
 
 function requirePattern(value: unknown, pattern: RegExp): string {
-  if (typeof value !== 'string' || !pattern.test(value)) {
+  if (
+    typeof value !== 'string'
+    || !CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, pattern, [value])
+  ) {
     throw new TypeError('rollback plan witness is invalid');
   }
   return value;
+}
+
+function snapshotExact(
+  value: unknown,
+  expectedKeys: readonly string[],
+): Record<string, unknown> {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      Object,
+      [value],
+    ) !== CAPTURED_OBJECT_PROTOTYPE
+  ) throw new TypeError('rollback plan options are invalid');
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    Object,
+    [value],
+  ) as Record<PropertyKey, PropertyDescriptor>;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    Reflect,
+    [descriptors],
+  ) as PropertyKey[];
+  if (
+    keys.length !== expectedKeys.length
+    || keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))
+  ) throw new TypeError('rollback plan options are invalid');
+  const snapshot: Record<string, unknown> = Object.create(null) as
+    Record<string, unknown>;
+  for (const key of expectedKeys) {
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      throw new TypeError('rollback plan options are invalid');
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot;
 }
 
 function sha256(value: Uint8Array | string): string {
@@ -120,17 +172,23 @@ function requireActive(signal: AbortSignal | undefined): void {
 export function createProjectTemplateRollbackPlan(
   options: CreateProjectTemplateRollbackPlanOptions,
 ): ProjectTemplateRollbackPlan {
-  const backupId = requirePattern(options.backupId, SAFE_ID_PATTERN);
+  const captured = snapshotExact(options, [
+    'backupId',
+    'backupManifestSha256',
+    'currentTargetSha256',
+    'currentCompanionLocksSha256',
+  ]);
+  const backupId = requirePattern(captured['backupId'], SAFE_ID_PATTERN);
   const backupManifestSha256 = requirePattern(
-    options.backupManifestSha256,
+    captured['backupManifestSha256'],
     SHA256_PATTERN,
   );
   const currentTargetSha256 = requirePattern(
-    options.currentTargetSha256,
+    captured['currentTargetSha256'],
     SHA256_PATTERN,
   );
   const currentCompanionLocksSha256 = requirePattern(
-    options.currentCompanionLocksSha256,
+    captured['currentCompanionLocksSha256'],
     SHA256_PATTERN,
   );
   const sealed = {
@@ -153,11 +211,21 @@ export async function deriveProjectTemplateRollbackPlan(options: {
   readonly backupId: string;
   readonly signal?: AbortSignal;
 }): Promise<ProjectTemplateRollbackPlan> {
-  requireActive(options.signal);
+  let captured: Record<string, unknown>;
+  try {
+    captured = snapshotExact(options, ['storage', 'backupId']);
+  } catch {
+    captured = snapshotExact(options, ['storage', 'backupId', 'signal']);
+  }
+  const storage = captured['storage'] as ProjectTemplateApplyStorage;
+  const backupId = requirePattern(captured['backupId'], SAFE_ID_PATTERN);
+  const signal = captured['signal'] as AbortSignal | undefined;
+  requireActive(signal);
   const manifest = await readProjectTemplateBackupManifest({
-    storage: options.storage,
-    backupId: options.backupId,
+    storage,
+    backupId,
   });
+  requireActive(signal);
   if (manifest.schemaVersion !== '1.1' || companionTargetKinds(
     manifest.entries.map((entry) => entry.target),
   ).join(',') !== 'content-lock,repertoire-lock,source-provenance') {
@@ -165,9 +233,10 @@ export async function deriveProjectTemplateRollbackPlan(options: {
   }
   const states = [];
   for (const entry of manifest.entries) {
-    requireActive(options.signal);
-    const state = await currentState(options.storage, entry.target);
-    if (!stateMatches(state, entry.after, options.storage.platform)) {
+    requireActive(signal);
+    const state = await currentState(storage, entry.target);
+    requireActive(signal);
+    if (!stateMatches(state, entry.after, storage.platform)) {
       throw new Error('rollback target drifted from the selected backup');
     }
     states.push({
@@ -182,16 +251,20 @@ export async function deriveProjectTemplateRollbackPlan(options: {
         },
     });
   }
+  requireActive(signal);
   const companion = readProjectTemplateCompanionLockState(
-    options.storage.repoRoot,
+    storage.repoRoot,
   );
+  requireActive(signal);
   if (companion.state !== 'update') {
     throw new Error('rollback requires an exact installed companion cohort');
   }
-  return createProjectTemplateRollbackPlan({
+  const plan = createProjectTemplateRollbackPlan({
     backupId: manifest.backupId,
     backupManifestSha256: sha256(canonicalizeTaktpackJson(manifest)),
     currentTargetSha256: sha256(canonicalizeTaktpackJson(states)),
     currentCompanionLocksSha256: companion.previousLocksSha256,
   });
+  requireActive(signal);
+  return plan;
 }
