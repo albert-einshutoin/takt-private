@@ -39,7 +39,7 @@ it.runIf(process.platform === 'win32')(
     child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
 
     try {
-      await waitForPath(readyPath, 10_000);
+      await waitForPath(readyPath, 10_000, child, () => ({ stdout, stderr }));
       expect(() => acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir }))
         .toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
       writeFileSync(releasePath, 'release\n', { flag: 'wx' });
@@ -63,8 +63,20 @@ it.runIf(process.platform === 'win32')(
   20_000,
 );
 
-async function waitForPath(path: string, timeoutMs: number): Promise<void> {
+async function waitForPath(
+  path: string,
+  timeoutMs: number,
+  child: ReturnType<typeof spawn>,
+  output: () => { stdout: string; stderr: string },
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path) && Date.now() < deadline) await delay(20);
-  if (!existsSync(path)) throw new Error('Windows coordination child did not become ready');
+  while (!existsSync(path) && child.exitCode === null && Date.now() < deadline) await delay(20);
+  if (existsSync(path)) return;
+
+  const { stdout, stderr } = output();
+  throw new Error([
+    `Windows coordination child did not become ready (exitCode=${String(child.exitCode)})`,
+    stdout.trim(),
+    stderr.trim(),
+  ].filter(Boolean).join('\n'));
 }
