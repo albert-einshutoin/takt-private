@@ -31,6 +31,7 @@ import {
   type ProjectTemplateRemotePreviewOperationContext,
 } from './remote-preview-operation.js';
 import { createProjectTemplateSourceProvenancePlan } from './source-provenance-plan.js';
+import { serializeProjectTemplateSourceProvenance } from './source-provenance.js';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -49,6 +50,24 @@ export interface DeriveGithubProjectTemplateRemoteTransactionOptions {
   readonly assertAuthority?: () => void;
 }
 
+export interface DerivedGithubProjectTemplateRemoteTransaction {
+  readonly preview: ProjectTemplateRemoteApplyPreview;
+  readonly contentEntries: readonly (
+    | {
+      readonly path: string;
+      readonly action: 'write';
+      readonly content: Uint8Array;
+      readonly mode: string;
+    }
+    | { readonly path: string; readonly action: 'delete' }
+  )[];
+  readonly companionOutputs: {
+    readonly contentLock: Uint8Array;
+    readonly repertoireLock: Uint8Array;
+    readonly sourceProvenance: Uint8Array;
+  };
+}
+
 function requireActive(
   options: DeriveGithubProjectTemplateRemoteTransactionOptions,
 ): void {
@@ -64,7 +83,7 @@ function requireActive(
  */
 export async function deriveGithubProjectTemplateRemoteTransaction(
   options: DeriveGithubProjectTemplateRemoteTransactionOptions,
-): Promise<ProjectTemplateRemoteApplyPreview> {
+): Promise<DerivedGithubProjectTemplateRemoteTransaction> {
   requireActive(options);
   const { verified, materialized } = options;
   const receipt = verified.receipt;
@@ -220,7 +239,7 @@ export async function deriveGithubProjectTemplateRemoteTransaction(
     entries: materialized.inspection.lockSeed.entries,
   };
   requireActive(options);
-  return createProjectTemplateRemoteApplyPreview({
+  const preview = createProjectTemplateRemoteApplyPreview({
     contentPlan,
     repertoireDependencyPlan: dependencyPlan,
     sourceProvenancePlan: sourcePlan,
@@ -232,5 +251,44 @@ export async function deriveGithubProjectTemplateRemoteTransaction(
         incomingDependencyLock,
       ),
     baselineStrategy: options.baselineStrategy,
+  });
+  const effectiveContents = new Map(
+    materialized.contents.map((item) => [item.path, item.content]),
+  );
+  for (const item of preparedContentPlan.resolvedContents) {
+    effectiveContents.set(item.path, item.content);
+  }
+  const contentEntries: Array<
+    DerivedGithubProjectTemplateRemoteTransaction['contentEntries'][number]
+  > = [];
+  for (const entry of contentPlan.entries) {
+    if (entry.action === 'delete') {
+      contentEntries.push({ path: entry.path, action: 'delete' });
+      continue;
+    }
+    if (entry.action !== 'add' && entry.action !== 'update') continue;
+    const content = effectiveContents.get(entry.path);
+    if (content === undefined || entry.afterMode === undefined) {
+      throw new Error('remote transaction content evidence is incomplete');
+    }
+    contentEntries.push({
+      path: entry.path,
+      action: 'write',
+      content: new Uint8Array(content),
+      mode: entry.afterMode,
+    });
+  }
+  return Object.freeze({
+    preview,
+    contentEntries: Object.freeze(contentEntries),
+    companionOutputs: Object.freeze({
+      contentLock: new TextEncoder().encode(serializeTemplateLock(nextContentLock)),
+      repertoireLock: new TextEncoder().encode(
+        serializeProjectTemplateRepertoireDependencyLock(incomingDependencyLock),
+      ),
+      sourceProvenance: new TextEncoder().encode(
+        serializeProjectTemplateSourceProvenance(sourceProvenance),
+      ),
+    }),
   });
 }

@@ -206,7 +206,7 @@ export async function createGithubProjectTemplateRemotePreview(
     consumeVerifiedGithubTemplateDownloadReceiptApplyClaim(receiptClaim);
   }
 
-  return deriveGithubProjectTemplateRemoteTransaction({
+  return (await deriveGithubProjectTemplateRemoteTransaction({
     verified,
     materialized,
     receiptKey: options.receiptKey,
@@ -215,5 +215,5 @@ export async function createGithubProjectTemplateRemotePreview(
     repertoireInspectionPort: options.repertoireInspectionPort,
     baselineStrategy: options.baselineStrategy,
     operationContext,
-  });
+  })).preview;
 }

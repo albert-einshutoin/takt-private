@@ -3,6 +3,7 @@ import type {
   ProjectTemplateApplyPreviewApprovalEvidence,
 } from './apply-preview-approval.js';
 import {
+  consumeProjectTemplateApplyPreviewApproval,
   validateProjectTemplateApplyPreviewApproval,
 } from './apply-preview-approval.js';
 import type { ProjectTemplateApplyResult } from './apply-executor.js';
@@ -39,6 +40,11 @@ import {
 import {
   deriveGithubProjectTemplateRemoteTransaction,
 } from './remote-transaction-derivation.js';
+import {
+  executeOwnedProjectTemplateCompanionLockTransaction,
+} from './companion-lock-transaction.js';
+import { runProjectTemplateDoctor } from './apply-doctor.js';
+import { readProjectTemplateCompanionLockState } from './companion-lock-state-reader.js';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const REMOTE_APPLY_DERIVATION_TIMEOUT_MS = 5_000;
@@ -457,7 +463,7 @@ export function createProjectTemplateRemoteApplyComposition(
         } finally {
           consumeVerifiedGithubTemplateDownloadReceiptApplyClaim(claim);
         }
-        const preview = await deriveGithubProjectTemplateRemoteTransaction({
+        const derived = await deriveGithubProjectTemplateRemoteTransaction({
           verified,
           materialized,
           receiptKey: options.receiptKey,
@@ -477,6 +483,7 @@ export function createProjectTemplateRemoteApplyComposition(
           options.projectRoot,
           lease as ProjectTemplateMutationLease,
         );
+        const preview = derived.preview;
         if (preview.transactionPlanId !== options.expectedTransactionPlanId) {
           throw new GithubProjectTemplateRemoteApplyError(
             'TRANSACTION_PLAN_MISMATCH',
@@ -504,10 +511,35 @@ export function createProjectTemplateRemoteApplyComposition(
           options.projectRoot,
           lease as ProjectTemplateMutationLease,
         );
-        // Approval and execution are added by the subsequent H11 slices.
-        throw new GithubProjectTemplateRemoteApplyError(
-          'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
-        );
+        return await executeOwnedProjectTemplateCompanionLockTransaction({
+          storage,
+          lease,
+          transactionPlanId: preview.transactionPlanId,
+          preconditionToken: preview.bindings.contentPreconditionToken,
+          outputs: {
+            contentEntries: derived.contentEntries,
+            ...derived.companionOutputs,
+          },
+          async consumeApproval() {
+            return await consumeProjectTemplateApplyPreviewApproval({
+              storage,
+              preview,
+              baselineStrategy: options.baselineStrategy,
+              evidence: options.approvalEvidence,
+            });
+          },
+          runDoctor() {
+            if (!runProjectTemplateDoctor(options.projectRoot).passed) {
+              throw new Error('project template doctor rejected transaction');
+            }
+            // The cohort reader proves all three companion files are from one
+            // semantically consistent generation before commit is durable.
+            if (
+              readProjectTemplateCompanionLockState(options.projectRoot).state
+                !== 'update'
+            ) throw new Error('project template companion cohort is incomplete');
+          },
+        });
       } finally {
         lease.release();
       }

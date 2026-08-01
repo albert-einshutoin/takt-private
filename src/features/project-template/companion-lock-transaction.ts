@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import {
   acquireProjectTemplateApplyLease,
   assertProjectTemplateMutationLeaseOwned,
@@ -27,34 +27,64 @@ import {
 } from './apply-storage.js';
 import {
   linearizePreparedProjectTemplateRemoteTransaction,
+  ProjectTemplateRemoteTransactionLinearizationError,
 } from './remote-transaction-linearization.js';
 
+type TransactionTargetPhase =
+  | `content-entry-${number}`
+  | 'content-lock'
+  | 'repertoire-lock'
+  | 'source-provenance';
+
 export type ProjectTemplateCompanionLockTransactionPhase =
-  | 'content-lock-staged'
-  | 'repertoire-lock-staged'
-  | 'source-provenance-staged'
-  | 'content-lock-backed-up'
-  | 'repertoire-lock-backed-up'
-  | 'source-provenance-backed-up'
+  | `${TransactionTargetPhase}-staged`
+  | `${TransactionTargetPhase}-backed-up`
+  | `${TransactionTargetPhase}-before-fsync`
+  | `${TransactionTargetPhase}-after-fsync`
+  | `${TransactionTargetPhase}-before-rename`
+  | `${TransactionTargetPhase}-after-rename`
+  | `${TransactionTargetPhase}-published`
   | 'journal-durable'
   | 'approval-consumed'
-  | 'content-lock-published'
-  | 'repertoire-lock-published'
-  | 'source-provenance-published'
   | 'committed-marker-durable'
   | 'cleanup-complete';
 
-interface CompanionOutput {
-  readonly target: Exclude<ProjectTemplateApplyTarget,
-    { kind: 'template-entry' } | { kind: 'lock' }>;
-  readonly phasePrefix: 'content-lock' | 'repertoire-lock' | 'source-provenance';
-  readonly content: Uint8Array;
+interface TransactionOutput {
+  readonly target: Exclude<ProjectTemplateApplyTarget, { kind: 'lock' }>;
+  readonly phasePrefix: TransactionTargetPhase;
+  readonly action: 'write' | 'delete';
+  readonly content?: Uint8Array;
+  readonly targetMode?: string;
 }
 
-interface PreparedOperation extends CompanionOutput {
-  readonly staged: ProjectTemplateStagingFile;
+interface PreparedOperation extends TransactionOutput {
+  readonly staged?: ProjectTemplateStagingFile;
   readonly before: ProjectTemplateBackupEntryState;
-  readonly after: Extract<ProjectTemplateBackupEntryState, { kind: 'file' }>;
+  readonly after: ProjectTemplateBackupEntryState;
+}
+
+export class ProjectTemplateCompanionLockRollbackError extends Error {
+  readonly code: ProjectTemplateRemoteTransactionLinearizationError['code'];
+  readonly operatorDetail: string;
+  readonly rollbackFailure = 'OFFLINE_ROLLBACK_FAILED' as const;
+  readonly #rollbackError: unknown;
+
+  constructor(
+    primary: ProjectTemplateRemoteTransactionLinearizationError,
+    rollbackError: unknown,
+  ) {
+    super(primary.message, { cause: primary });
+    this.name = 'ProjectTemplateCompanionLockRollbackError';
+    this.code = primary.code;
+    this.operatorDetail = `${primary.operatorDetail};offline-rollback-failed`;
+    // Retain the secondary failure for trusted diagnostics without exposing a
+    // raw path or secret through the public operator detail.
+    this.#rollbackError = rollbackError;
+  }
+
+  hasRetainedRollbackFailure(): boolean {
+    return this.#rollbackError !== undefined;
+  }
 }
 
 function hash(value: Uint8Array): string {
@@ -124,12 +154,127 @@ async function currentState(
 async function publish(
   storage: ProjectTemplateApplyStorage,
   staged: ProjectTemplateStagingFile,
+  phasePrefix?: TransactionTargetPhase,
+  onPhase?: (phase: ProjectTemplateCompanionLockTransactionPhase) => void,
 ): Promise<void> {
   const target = resolveProjectTemplateApplyTarget(storage, staged.target);
+  if (staged.target.kind === 'template-entry') {
+    const relativeParent = dirname(staged.target.path);
+    let current = storage.targetRoot;
+    for (const segment of [
+      '',
+      ...(relativeParent === '.' ? [] : relativeParent.split('/')),
+    ]) {
+      if (segment !== '') current = join(current, segment);
+      try {
+        const stat = await storage.io.lstat(current);
+        if (
+          stat.isSymbolicLink()
+          || !stat.isDirectory()
+          || stat.dev !== storage.device
+        ) throw new Error('template target parent is unsafe');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await storage.io.mkdir(current, 0o700);
+        await storage.io.fsyncDirectory(dirname(current));
+      }
+    }
+  }
   await storage.io.chmod(staged.absolutePath, 0o600);
+  if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-before-fsync`);
   await storage.io.fsyncFile(staged.absolutePath);
+  if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-after-fsync`);
+  if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-before-rename`);
   await storage.io.rename(staged.absolutePath, target.absolutePath);
+  if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-after-rename`);
   await storage.io.fsyncDirectory(dirname(target.absolutePath));
+}
+
+function targetParentDirectories(
+  storage: ProjectTemplateApplyStorage,
+  target: ProjectTemplateApplyTarget,
+): string[] {
+  if (target.kind !== 'template-entry') return [];
+  const resolved = resolveProjectTemplateApplyTarget(storage, target);
+  const relativeParent = relative(storage.targetRoot, dirname(resolved.absolutePath))
+    .split(sep).join('/');
+  const result = [''];
+  let current = '';
+  for (const segment of relativeParent === '' ? [] : relativeParent.split('/')) {
+    current = current === '' ? segment : `${current}/${segment}`;
+    result.push(current);
+  }
+  return result;
+}
+
+async function collectMissingTargetDirectories(
+  storage: ProjectTemplateApplyStorage,
+  outputs: readonly TransactionOutput[],
+): Promise<string[]> {
+  const candidates = new Set(outputs.flatMap((output) => (
+    targetParentDirectories(storage, output.target)
+  )));
+  const missing: string[] = [];
+  for (const relativePath of [...candidates].sort(
+    (left, right) => left.split('/').length - right.split('/').length
+      || left.localeCompare(right),
+  )) {
+    const absolutePath = relativePath === ''
+      ? storage.targetRoot
+      : join(storage.targetRoot, relativePath);
+    try {
+      const stat = await storage.io.lstat(absolutePath);
+      if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== storage.device) {
+        throw new Error('template target parent is unsafe');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      missing.push(relativePath);
+    }
+  }
+  return missing;
+}
+
+async function removeCreatedTargetDirectories(
+  storage: ProjectTemplateApplyStorage,
+  directories: readonly string[],
+): Promise<void> {
+  for (const relativePath of [...directories].sort(
+    (left, right) => right.split('/').length - left.split('/').length
+      || right.localeCompare(left),
+  )) {
+    const absolutePath = relativePath === ''
+      ? storage.targetRoot
+      : join(storage.targetRoot, relativePath);
+    try {
+      const stat = await storage.io.lstat(absolutePath);
+      if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== storage.device) {
+        throw new Error('created target directory is unsafe');
+      }
+      await storage.io.rmdir(absolutePath);
+      await storage.io.fsyncDirectory(dirname(absolutePath));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTEMPTY' && code !== 'EEXIST') throw error;
+    }
+  }
+}
+
+async function deletePublishedTarget(
+  storage: ProjectTemplateApplyStorage,
+  target: ProjectTemplateApplyTarget,
+): Promise<void> {
+  const resolved = resolveProjectTemplateApplyTarget(storage, target);
+  try {
+    const stat = await storage.io.lstat(resolved.absolutePath);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+      throw new Error('transaction delete target is unsafe');
+    }
+    await storage.io.unlink(resolved.absolutePath);
+    await storage.io.fsyncDirectory(dirname(resolved.absolutePath));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
 }
 
 async function writeJournal(
@@ -158,6 +303,15 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
     readonly transactionPlanId: string;
     readonly preconditionToken: string;
     readonly outputs: {
+      readonly contentEntries?: readonly (
+        | {
+          readonly path: string;
+          readonly action: 'write';
+          readonly content: Uint8Array;
+          readonly mode: string;
+        }
+        | { readonly path: string; readonly action: 'delete' }
+      )[];
       readonly contentLock: Uint8Array;
       readonly repertoireLock: Uint8Array;
       readonly sourceProvenance: Uint8Array;
@@ -166,36 +320,62 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
     readonly runDoctor: () => void | Promise<void>;
     readonly onPhase?: (phase: ProjectTemplateCompanionLockTransactionPhase) => void;
   },
-): Promise<{ readonly status: 'committed'; readonly transactionPlanId: string }> {
+): Promise<{
+  readonly status: 'committed';
+  readonly backupId: string;
+  readonly planId: string;
+}> {
   const storage = options.storage;
   assertOwned(storage, options.lease);
   const transactionId = `remote-${randomUUID()}`;
   const backupId = `backup-${randomUUID()}`;
-  const outputs: readonly CompanionOutput[] = [
-    { target: { kind: 'content-lock' }, phasePrefix: 'content-lock', content: options.outputs.contentLock },
-    { target: { kind: 'repertoire-lock' }, phasePrefix: 'repertoire-lock', content: options.outputs.repertoireLock },
-    { target: { kind: 'source-provenance' }, phasePrefix: 'source-provenance', content: options.outputs.sourceProvenance },
+  const contentOutputs = (options.outputs.contentEntries ?? [])
+      .slice()
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((entry, index): TransactionOutput => entry.action === 'delete'
+        ? {
+            target: { kind: 'template-entry', path: entry.path },
+            phasePrefix: `content-entry-${index}`,
+            action: 'delete',
+          }
+        : {
+            target: { kind: 'template-entry', path: entry.path },
+            phasePrefix: `content-entry-${index}`,
+            action: 'write',
+            content: entry.content,
+            targetMode: entry.mode,
+          });
+  const outputs: readonly TransactionOutput[] = [
+    ...contentOutputs,
+    { target: { kind: 'content-lock' }, phasePrefix: 'content-lock', action: 'write', content: options.outputs.contentLock, targetMode: '0600' },
+    { target: { kind: 'repertoire-lock' }, phasePrefix: 'repertoire-lock', action: 'write', content: options.outputs.repertoireLock, targetMode: '0600' },
+    { target: { kind: 'source-provenance' }, phasePrefix: 'source-provenance', action: 'write', content: options.outputs.sourceProvenance, targetMode: '0600' },
   ];
 
-  return linearizePreparedProjectTemplateRemoteTransaction({
+  try {
+    return await linearizePreparedProjectTemplateRemoteTransaction({
     async prepare() {
       const observed = new Map<string, ProjectTemplateBackupEntryState>();
       for (const output of outputs) {
         observed.set(output.phasePrefix, await currentState(storage, output.target));
         assertOwned(storage, options.lease);
       }
-      const staged: Array<CompanionOutput & { staged: ProjectTemplateStagingFile }> = [];
+      const staged: Array<TransactionOutput & { staged?: ProjectTemplateStagingFile }> = [];
       for (const output of outputs) {
-        staged.push({
-          ...output,
-          staged: await writeProjectTemplateStagingFile({
+        let stagedFile: ProjectTemplateStagingFile | undefined;
+        if (output.action === 'write') {
+          stagedFile = await writeProjectTemplateStagingFile({
             storage,
             transactionId,
             target: output.target,
-            content: output.content,
-            expectedSha256: hash(output.content),
-            targetMode: '0600',
-          }),
+            content: output.content!,
+            expectedSha256: hash(output.content!),
+            targetMode: output.targetMode!,
+          });
+        }
+        staged.push({
+          ...output,
+          ...(stagedFile === undefined ? {} : { staged: stagedFile }),
         });
         assertOwned(storage, options.lease);
         options.onPhase?.(`${output.phasePrefix}-staged`);
@@ -228,23 +408,29 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
         operations.push({
           ...output,
           before: capturedBefore,
-          after: {
-            kind: 'file',
-            sha256: output.staged.sha256,
-            bytes: output.staged.bytes,
-            mode: output.staged.targetMode,
-            blobRelativePath: `blobs/${output.staged.sha256}`,
-          },
+          after: output.action === 'delete'
+            ? { kind: 'absent' }
+            : {
+              kind: 'file',
+              sha256: output.staged!.sha256,
+              bytes: output.staged!.bytes,
+              mode: output.staged!.targetMode,
+              blobRelativePath: `blobs/${output.staged!.sha256}`,
+            },
         });
         options.onPhase?.(`${output.phasePrefix}-backed-up`);
       }
+      const createdTargetDirectories = await collectMissingTargetDirectories(
+        storage,
+        outputs,
+      );
       await writeJournal(storage, {
         transactionId,
         planId: options.transactionPlanId,
         backupId,
         state: 'prepared',
         completedOperations: [],
-        createdTargetDirectories: [],
+        createdTargetDirectories,
         updatedAt: new Date().toISOString(),
       });
       assertOwned(storage, options.lease);
@@ -255,17 +441,24 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
         planId: options.transactionPlanId,
         preconditionToken: options.preconditionToken,
         createdAt: new Date().toISOString(),
-        createdTargetDirectories: [],
+        createdTargetDirectories,
         entries: operations.map((operation) => ({
           target: operation.target,
-          action: operation.before.kind === 'absent' ? 'add' : 'update',
+          action: operation.action === 'delete'
+            ? 'delete'
+            : operation.before.kind === 'absent' ? 'add' : 'update',
           before: operation.before,
           after: operation.after,
         })),
       };
       await writeProjectTemplateBackupManifest({ storage, manifest });
       assertOwned(storage, options.lease);
-      return Object.freeze({ transactionId, backupId, operations });
+      return Object.freeze({
+        transactionId,
+        backupId,
+        operations,
+        createdTargetDirectories,
+      });
     },
     async consumeApproval() {
       const consumed = await options.consumeApproval();
@@ -280,21 +473,32 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
         backupId,
         state: 'committing',
         completedOperations,
-        createdTargetDirectories: [],
+        createdTargetDirectories: prepared.createdTargetDirectories,
         updatedAt: new Date().toISOString(),
       });
       assertOwned(storage, options.lease);
       for (const operation of prepared.operations) {
-        await publish(storage, operation.staged);
+        if (operation.action === 'delete') {
+          await deletePublishedTarget(storage, operation.target);
+        } else {
+          await publish(
+            storage,
+            operation.staged!,
+            operation.phasePrefix,
+            options.onPhase,
+          );
+        }
         assertOwned(storage, options.lease);
-        completedOperations.push(operation.phasePrefix);
+        completedOperations.push(
+          resolveProjectTemplateApplyTarget(storage, operation.target).key,
+        );
         await writeJournal(storage, {
           transactionId,
           planId: options.transactionPlanId,
           backupId,
           state: 'committing',
           completedOperations,
-          createdTargetDirectories: [],
+          createdTargetDirectories: prepared.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
         });
         assertOwned(storage, options.lease);
@@ -308,7 +512,7 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
         backupId,
         state: 'committed',
         completedOperations,
-        createdTargetDirectories: [],
+        createdTargetDirectories: prepared.createdTargetDirectories,
         updatedAt: new Date().toISOString(),
       });
       assertOwned(storage, options.lease);
@@ -320,13 +524,30 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
       options.onPhase?.('cleanup-complete');
       return {
         status: 'committed' as const,
-        transactionPlanId: options.transactionPlanId,
+        backupId,
+        planId: options.transactionPlanId,
       };
     },
     assertAuthority() {
       assertOwned(storage, options.lease);
     },
-  });
+    });
+  } catch (error) {
+    if (error instanceof ProjectTemplateRemoteTransactionLinearizationError) {
+      // Recovery runs under the already-owned lease. It never reacquires or
+      // consults network, receipt, cache, or approval state; a post-consume
+      // failure therefore burns authority while restoring the old cohort.
+      try {
+        await recoverOwnedStorage(storage, options.lease);
+      } catch (rollbackError) {
+        // The durable journal stays available for the next offline recovery.
+        // The wrapper preserves both failures while its public detail remains
+        // deliberately path- and secret-free.
+        throw new ProjectTemplateCompanionLockRollbackError(error, rollbackError);
+      }
+    }
+    throw error;
+  }
 }
 
 async function readJournal(
@@ -379,6 +600,7 @@ async function restoreBefore(
     });
     await publish(storage, staged);
   }
+  await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
   await removeProjectTemplateStagingTransaction({
     storage,
     transactionId: recoveryId,
@@ -389,9 +611,16 @@ async function recoverOwned(
   projectRoot: string,
   lease: ProjectTemplateApplyLease,
 ): Promise<{ readonly status: 'none' | 'committed' | 'rolled-back' }> {
-    const storage = await initializeProjectTemplateApplyStorage({
-      repoPath: projectRoot,
-    });
+  const storage = await initializeProjectTemplateApplyStorage({
+    repoPath: projectRoot,
+  });
+  return recoverOwnedStorage(storage, lease);
+}
+
+async function recoverOwnedStorage(
+  storage: ProjectTemplateApplyStorage,
+  lease: ProjectTemplateApplyLease,
+): Promise<{ readonly status: 'none' | 'committed' | 'rolled-back' }> {
     assertOwned(storage, lease);
     const journal = await readJournal(storage);
     assertOwned(storage, lease);
@@ -440,6 +669,11 @@ async function recoverOwned(
       transactionId: journal.transactionId,
     });
     await removeJournal(storage);
+    await removeProjectTemplateBackupGeneration({
+      storage,
+      backupId: journal.backupId,
+    });
+    await reclaimProjectTemplatePreparationOrphans({ storage });
     return { status: 'rolled-back' };
 }
 
