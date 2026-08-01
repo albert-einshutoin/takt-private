@@ -505,6 +505,12 @@ takt project-template rollback backup-20260801 --cwd ./destination --dry-run --j
 takt project-template rollback backup-20260801 --cwd ./destination --apply --expected-plan-id <sha256> --json
 ```
 
+For an installed template, `list` returns the bounded `sourceProvenance`
+projection: `kind`, immutable `sourceId`, `revision`, `version`, `archiveId`,
+and `manifestId`. It intentionally excludes local paths, repository URLs,
+credentials, and mutable refs. Treat a changed provenance projection during a
+single list operation as target drift rather than displaying mixed state.
+
 Machine output is one closed schema `1.0` envelope with `status`, `command`,
 `mode`, `warnings`, and either `result` or a stable `error.code`. Exit codes are
 `0` success, `20` invalid invocation, `21` review/conflict, `22` drift, `23`

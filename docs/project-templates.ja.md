@@ -432,6 +432,11 @@ takt project-template rollback backup-20260801 --cwd ./destination --dry-run --j
 takt project-template rollback backup-20260801 --cwd ./destination --apply --expected-plan-id <sha256> --json
 ```
 
+templateがinstall済みの場合、`list`はboundedな`sourceProvenance`射影として
+`kind`、immutableな`sourceId`、`revision`、`version`、`archiveId`、`manifestId`を
+返します。local path、repository URL、credential、mutable refは意図的に含めません。
+単一list操作中にprovenance射影が変化した場合は、状態を混在表示せずtarget driftとして扱います。
+
 machine出力はclosed schema `1.0`の単一envelopeです。`status`、`command`、`mode`、
 `warnings`と、`result`または安定した`error.code`を持ちます。exit codeは`0`成功、
 `20`不正な呼び出し、`21`review/conflict、`22`drift、`23`coordination/security guard、
