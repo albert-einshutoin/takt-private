@@ -6,6 +6,7 @@ import {
   createProjectTemplateCliFailure,
   createProjectTemplateCliSuccess,
   projectTemplateCliExitCodeForErrorCode,
+  type ProjectTemplateCliOutcome,
 } from '../features/project-template/cli-machine-contract.js';
 
 const PLAN_ID = 'a'.repeat(64);
@@ -42,6 +43,91 @@ const options = {
 };
 
 describe('personal onboarding template facade', () => {
+  it.each([
+    {
+      name: 'apply request with a dry-run outcome',
+      runOptions: options,
+      outcome: {
+        envelope: createProjectTemplateCliSuccess({
+          command: 'project-template apply', mode: 'dry-run',
+          result: {
+            planId: PLAN_ID, changeCount: 1, conflictCount: 0,
+            dependencyCount: 0, readiness: 'ready', reviewCodes: [],
+          },
+        }),
+        exitCode: 0,
+      },
+    },
+    {
+      name: 'dry-run request with an apply outcome',
+      runOptions: { ...options, mutation: { mode: 'dry-run' as const, force: false } },
+      outcome: fileSuccess(),
+    },
+    {
+      name: 'export outcome',
+      runOptions: { ...options, mutation: { mode: 'dry-run' as const, force: false } },
+      outcome: {
+        envelope: createProjectTemplateCliSuccess({
+          command: 'project-template export', mode: 'dry-run',
+          result: {
+            planId: PLAN_ID, entryCount: 1, archiveBytes: 0,
+            dependencyCount: 0, readiness: 'ready', reviewCodes: [],
+          },
+        }),
+        exitCode: 0,
+      },
+    },
+    {
+      name: 'update outcome',
+      runOptions: options,
+      outcome: {
+        envelope: createProjectTemplateCliSuccess({
+          command: 'project-template update', mode: 'apply',
+          result: {
+            planId: PLAN_ID, updated: true, backupId: 'untrusted-backup',
+            recoveryState: 'clean',
+          },
+        }),
+        exitCode: 0,
+      },
+    },
+  ] as const)('fails closed before post-file components for $name', async ({ runOptions, outcome }) => {
+    const ensureRootGitignore = vi.fn();
+    const ensureGithubLabels = vi.fn();
+    const facade = createPersonalOnboardingTemplateFacade({
+      applyFiles: vi.fn(async () => outcome as ProjectTemplateCliOutcome),
+      ensureRootGitignore,
+      ensureGithubLabels,
+    });
+
+    const report = await facade.run(runOptions);
+
+    expect(ensureRootGitignore).not.toHaveBeenCalled();
+    expect(ensureGithubLabels).not.toHaveBeenCalled();
+    expect(report).toEqual({
+      passed: false,
+      machineOutput: JSON.stringify({
+        schemaVersion: '1.0', status: 'error', command: 'onboard-repo',
+        mode: runOptions.mutation.mode,
+        components: {
+          files: { status: 'error', code: 'PROTOCOL_ERROR' },
+          rootGitignore: { status: 'skipped' },
+          labels: { status: 'skipped' },
+        },
+      }),
+      humanOutput: [
+        'devloopd onboard-repo template error',
+        `Mode: ${runOptions.mutation.mode}`,
+        '- ERROR template files',
+        '- SKIPPED root gitignore',
+        '- SKIPPED github labels',
+      ].join('\n'),
+    });
+    expect(report).not.toHaveProperty('planId');
+    expect(report.machineOutput).not.toMatch(/untrusted-backup|planId/iu);
+    expect(report.humanOutput).not.toMatch(/untrusted-backup|plan/iu);
+  });
+
   it('skips root gitignore and labels when safe file application fails', async () => {
     const applyFiles = vi.fn(async () => fileFailure());
     const ensureRootGitignore = vi.fn();

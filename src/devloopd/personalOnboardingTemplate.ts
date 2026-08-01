@@ -82,6 +82,25 @@ function humanOutput(options: {
   ].join('\n');
 }
 
+function fileErrorOutput(
+  mode: PersonalOnboardingTemplateMutation['mode'],
+  code: string,
+) {
+  const files = { status: 'error' as const, code };
+  const rootGitignore = { status: 'skipped' as const };
+  const labels = { status: 'skipped' as const };
+  return {
+    passed: false,
+    machineOutput: JSON.stringify({
+      schemaVersion: '1.0', status: 'error', command: 'onboard-repo', mode,
+      components: { files, rootGitignore, labels },
+    }),
+    humanOutput: humanOutput({
+      status: 'error', mode, files, rootGitignore, labels,
+    }),
+  };
+}
+
 /**
  * Coordinates only closed safe-service results. Legacy force never reaches a
  * direct filesystem writer: it is carried solely in the exact template
@@ -96,24 +115,15 @@ export function createPersonalOnboardingTemplateFacade(
         await dependencies.applyFiles(options),
       );
       const mode = options.mutation.mode;
+      // Why: this facade grants the file result authority to start later
+      // onboarding components. A valid but unrelated or wrong-mode envelope
+      // must therefore fail closed without publishing any result identifiers.
+      if (
+        outcome.envelope.command !== 'project-template apply'
+        || outcome.envelope.mode !== mode
+      ) return fileErrorOutput(mode, 'PROTOCOL_ERROR');
       if (outcome.envelope.status === 'error') {
-        const files = {
-          status: 'error' as const,
-          code: outcome.envelope.error.code,
-        };
-        const rootGitignore = { status: 'skipped' as const };
-        const labels = { status: 'skipped' as const };
-        const machineOutput = JSON.stringify({
-          schemaVersion: '1.0', status: 'error', command: 'onboard-repo', mode,
-          components: { files, rootGitignore, labels },
-        });
-        return {
-          passed: false,
-          machineOutput,
-          humanOutput: humanOutput({
-            status: 'error', mode, files, rootGitignore, labels,
-          }),
-        };
+        return fileErrorOutput(mode, outcome.envelope.error.code);
       }
 
       const apply = mode === 'apply';
