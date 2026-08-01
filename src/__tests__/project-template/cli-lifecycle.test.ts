@@ -82,6 +82,26 @@ describe('project template CLI lifecycle', () => {
     expect(() => consumeProjectTemplateCliMutationAdmission(retained))
       .toThrow(ProjectTemplateCliInvalidAdmission);
   });
+
+  it('rejects direct use of an unconsumed capability after settlement', async () => {
+    let retained: ProjectTemplateCliMutationAdmission | undefined;
+    const execution = startProjectTemplateCliLifecycle({
+      command: 'project-template apply', mode: 'apply', dispose: () => undefined,
+      handle: async ({ admitMutation }) => {
+        retained = admitMutation;
+        return {
+          envelope: createProjectTemplateCliSuccess({
+            command: 'project-template apply', mode: 'apply',
+            result: { planId: PLAN_ID, applied: true, backupId: 'backup-1', recoveryState: 'clean' },
+          }),
+          exitCode: 0,
+        };
+      },
+    });
+
+    await expect(execution.result).resolves.toMatchObject({ exitCode: 0 });
+    expect(() => retained?.()).toThrow(ProjectTemplateCliInvalidAdmission);
+  });
   it('aborts before mutation admission with exit 130 and disposes once', async () => {
     const entered = deferred();
     const dispose = vi.fn(() => undefined);

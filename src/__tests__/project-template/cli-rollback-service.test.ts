@@ -78,6 +78,34 @@ describe('project template CLI rollback service', () => {
     expect(generic).toMatchObject({ exitCode: 23, envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(execute).not.toHaveBeenCalled();
   });
+
+  it('rejects an invalid plan before admission after global Reflect.apply poisoning', async () => {
+    const execute = vi.fn(async () => ({ status: 'rolled_back' as const, backupId: 'unsafe backup/id' }));
+    const service = createProjectTemplateCliRollbackService(port({
+      derive: async () => ({
+        ...derived,
+        planId: 'not-a-sha256',
+        backupId: 'unsafe backup/id',
+      }),
+      execute,
+    }));
+    const originalReflectApply = Reflect.apply;
+    let outcome: Awaited<ReturnType<typeof service.rollback>> | undefined;
+    try {
+      Reflect.apply = (() => true) as typeof Reflect.apply;
+      outcome = await service.rollback({
+        cwd: '/safe/repo', backupId: 'backup-1', force: false, mode: 'apply',
+        expectedPlanId: 'not-a-sha256',
+      });
+    } finally {
+      Reflect.apply = originalReflectApply;
+    }
+
+    expect(outcome).toMatchObject({
+      envelope: { status: 'error', error: { code: 'INVALID_EXPECTED_PLAN_ID' } },
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
   it('classifies lease release failure as indeterminate', () => {
     expect(settleProjectTemplateRollbackAfterLease(
       { status: 'rolled_back', backupId: 'backup-1' },
