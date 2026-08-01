@@ -43,6 +43,17 @@ interface PlannedExport {
   readonly output: CapturedTaktpackOutputPrecondition;
 }
 
+export type ProjectTemplateCliExportPhase =
+  | 'after-project-root'
+  | 'after-export-plan'
+  | 'after-output-capture'
+  | 'before-dry-run-success'
+  | 'after-final-output-capture';
+
+export interface ProjectTemplateCliExportTestSeam {
+  readonly onPhase?: (phase: ProjectTemplateCliExportPhase) => void;
+}
+
 class CliExportBoundaryError extends Error {
   constructor(readonly code: ProjectTemplateCliErrorCode) {
     super('project template CLI export boundary rejected the operation');
@@ -103,12 +114,15 @@ function calculatePlanId(
 async function createPlannedExport(
   input: ProjectTemplateCliExportInput,
   projectRoot: string,
+  testSeam: ProjectTemplateCliExportTestSeam,
 ): Promise<PlannedExport> {
   const plan = await createProjectTemplateExportPlan(projectRoot, input.exportOptions);
+  testSeam.onPhase?.('after-export-plan');
   input.signal?.throwIfAborted();
   const output = await captureTaktpackOutputPrecondition(input.outputPath, {
     forbiddenRoot: join(projectRoot, '.takt'),
   });
+  testSeam.onPhase?.('after-output-capture');
   input.signal?.throwIfAborted();
   const planId = calculatePlanId(projectRoot, plan, output.projection, input.mutation.force);
   const absentTargetPlanId = calculatePlanId(projectRoot, plan, {
@@ -173,18 +187,20 @@ function mapError(error: unknown): ProjectTemplateCliErrorCode {
 
 export async function executeProjectTemplateCliExport(
   input: ProjectTemplateCliExportInput,
+  testSeam: ProjectTemplateCliExportTestSeam = {},
 ): Promise<ProjectTemplateCliOutcome> {
   const mode = input.mutation.mode;
   try {
     input.signal?.throwIfAborted();
     if (!isAbsolute(input.projectRoot)) throw new CliExportBoundaryError('INVALID_ARGUMENT');
     const projectRoot = await realpath(resolve(input.projectRoot));
+    testSeam.onPhase?.('after-project-root');
     input.signal?.throwIfAborted();
     const initialGuard = guardSummary(projectRoot);
     if (mode === 'apply' && initialGuard.applyError !== undefined) {
       return failure(mode, initialGuard.applyError);
     }
-    const planned = await createPlannedExport(input, projectRoot);
+    const planned = await createPlannedExport(input, projectRoot, testSeam);
     const baseResult = {
       planId: planned.planId,
       entryCount: planned.plan.manifest.entries.length,
@@ -196,6 +212,7 @@ export async function executeProjectTemplateCliExport(
       reviewCodes: initialGuard.reviewCodes,
     };
     if (mode === 'dry-run') {
+      testSeam.onPhase?.('before-dry-run-success');
       input.signal?.throwIfAborted();
       return {
         envelope: createProjectTemplateCliSuccess({
@@ -222,6 +239,7 @@ export async function executeProjectTemplateCliExport(
     const finalOutput = await captureTaktpackOutputPrecondition(input.outputPath, {
       forbiddenRoot: join(projectRoot, '.takt'),
     });
+    testSeam.onPhase?.('after-final-output-capture');
     input.signal?.throwIfAborted();
     const finalPlanId = calculatePlanId(
       projectRoot,
