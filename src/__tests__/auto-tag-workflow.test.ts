@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -24,7 +25,7 @@ type WorkflowStep = {
 
 type WorkflowJob = {
   if?: string;
-  needs?: string;
+  needs?: string | string[];
   permissions?: Record<string, string>;
   outputs?: Record<string, string>;
   steps: WorkflowStep[];
@@ -126,7 +127,11 @@ function runScript(
         timeout: EXEC_TIMEOUT_MS,
       },
     );
-  } catch {
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && 'code' in error
+      && error.code === 'ETIMEDOUT') {
+      throw error;
+    }
     success = false;
   }
   return {
@@ -153,6 +158,7 @@ function validatePackage(
   releaseVersion = '1.2.3',
   options: {
     readonly name?: string;
+    readonly npmDistTag?: 'latest' | 'next';
     readonly environment?: Record<string, string>;
   } = {},
 ): ScriptResult {
@@ -164,7 +170,7 @@ function validatePackage(
   }));
   return runScript(script as string, directory, {
     HEAD_SHA,
-    NPM_DIST_TAG: releaseVersion.includes('-') ? 'next' : 'latest',
+    NPM_DIST_TAG: options.npmDistTag ?? 'latest',
     RELEASE_TAG: `v${releaseVersion}`,
     RELEASE_VERSION: releaseVersion,
     ...options.environment,
@@ -184,6 +190,8 @@ describe('auto-tag workflow release boundary', () => {
     ['Release v0.6.0-rc1', 'v0.6.0-rc1', 'next'],
     ['Release v0.7.0-alpha.1', 'v0.7.0-alpha.1', 'next'],
     ['Release v1.2.3+build.7', 'v1.2.3+build.7', 'latest'],
+    ['Release v1.2.3+build-7', 'v1.2.3+build-7', 'latest'],
+    ['Release v1.2.3-alpha+build-7', 'v1.2.3-alpha+build-7', 'next'],
   ])('accepts the complete release grammar: %s', (title, expectedTag, expectedNpmTag) => {
     const result = validateRelease(title, `release/${expectedTag}`);
     expect(result.success).toBe(true);
@@ -244,6 +252,33 @@ describe('auto-tag workflow release boundary', () => {
     expect(existsSync(sentinel)).toBe(false);
   });
 
+  it.each([
+    ['node', '$(node -e "require(\'node:fs\').writeFileSync(process.env.SENTINEL_PATH, \'x\')")'],
+    ['python', '$(python3 -c "import os; open(os.environ[\'SENTINEL_PATH\'], \'w\').write(\'x\')")'],
+    ['dev-tcp', '$(printf x >/dev/tcp/127.0.0.1/9; touch "$SENTINEL_PATH")'],
+  ])('keeps %s execution syntax inert without claiming an OS network sandbox', (
+    _description,
+    payload,
+  ) => {
+    const result = validateRelease(`Release v1.2.3${payload}`);
+    expect(result).toMatchObject({
+      success: false,
+      commandLog: '',
+      githubEnv: '',
+      githubOutput: '',
+      networkLog: '',
+      sentinelExists: false,
+    });
+  });
+
+  it('fails the test harness when a workflow script exceeds its deadline', () => {
+    expect(() => runScript(
+      'sleep 10',
+      createTemporaryDirectory('takt-auto-tag-timeout-'),
+      {},
+    )).toThrow();
+  });
+
   it('rejects a release title when the branch does not exactly match the tag', () => {
     const result = validateRelease('Release v1.2.3', 'release/v9.9.9');
     expect(result.success).toBe(false);
@@ -263,6 +298,15 @@ describe('auto-tag workflow release boundary', () => {
     });
     expect(result.commandLog).toBe('');
     expect(result.networkLog).toBe('');
+  });
+
+  it.each([
+    ['1.2.3+build-7', 'latest'],
+    ['1.2.3-alpha+build-7', 'next'],
+  ] as const)('independently binds %s to the expected dist-tag %s', (version, npmDistTag) => {
+    const result = validatePackage(version, version, { npmDistTag });
+    expect(result.success).toBe(true);
+    expect(outputMap(result.githubOutput).npm_dist_tag).toBe(npmDistTag);
   });
 
   it.each([
@@ -319,6 +363,11 @@ describe('auto-tag workflow release boundary', () => {
       'sparse-checkout': 'package.json',
       'sparse-checkout-cone-mode': false,
     });
+    const allCheckouts = Object.values(workflow.jobs)
+      .flatMap(job => job.steps)
+      .filter(step => step.uses === 'actions/checkout@v4');
+    expect(allCheckouts.length).toBeGreaterThan(0);
+    expect(allCheckouts.every(step => step.with?.['persist-credentials'] === false)).toBe(true);
   });
 
   it('passes untrusted event data through env and keeps mutation jobs gated', () => {
@@ -334,7 +383,7 @@ describe('auto-tag workflow release boundary', () => {
     expect(workflow.jobs.tag?.permissions).toEqual({ contents: 'write' });
     expect(workflow.jobs.publish?.permissions).toEqual({ contents: 'read' });
     expect(workflow.jobs.tag?.needs).toBe('validate');
-    expect(workflow.jobs.publish?.needs).toBe('tag');
+    expect(workflow.jobs.publish?.needs).toEqual(['tag', 'package']);
     expect(workflow.jobs.validate?.outputs).toEqual({
       commit: '${{ steps.package.outputs.commit }}',
       npm_dist_tag: '${{ steps.package.outputs.npm_dist_tag }}',
@@ -353,7 +402,7 @@ describe('auto-tag workflow release boundary', () => {
       HEAD_SHA: '${{ needs.validate.outputs.commit }}',
       RELEASE_TAG: '${{ needs.validate.outputs.tag }}',
     });
-    expect(findStep('publish', 'Publish package').env?.NPM_DIST_TAG)
+    expect(findStep('publish', 'Publish verified package').env?.NPM_DIST_TAG)
       .toBe('${{ needs.tag.outputs.npm_dist_tag }}');
     expect(findStep('publish', 'Sync next tag on stable release')).toMatchObject({
       if: "needs.tag.outputs.npm_dist_tag == 'latest'",
@@ -367,18 +416,172 @@ describe('auto-tag workflow release boundary', () => {
       .toContain('github.event.pull_request.head.repo.full_name == github.repository');
   });
 
+  it('builds and packs without secrets before a checkout-free publish job', () => {
+    const packageJob = workflow.jobs.package!;
+    const publishJob = workflow.jobs.publish!;
+    const packageCheckout = packageJob.steps.find(step => step.uses === 'actions/checkout@v4');
+    const publishCheckout = publishJob.steps.find(step => step.uses === 'actions/checkout@v4');
+    const publish = findStep('publish', 'Publish verified package');
+    const packageScripts = packageJob.steps.map(step => step.run ?? '').join('\n');
+    const secretSteps = publishJob.steps.filter(step => (
+      JSON.stringify(step.env ?? {}).includes('NPM_TOKEN')
+    ));
+
+    expect(packageJob.needs).toBe('tag');
+    expect(packageJob.outputs).toEqual({ filename: '${{ steps.pack.outputs.filename }}' });
+    expect(packageCheckout?.with).toMatchObject({
+      ref: '${{ needs.tag.outputs.tag }}',
+      'persist-credentials': false,
+    });
+    expect(packageScripts).toContain('npm ci');
+    expect(packageScripts).toContain('npm run build');
+    expect(packageScripts).toContain('npm test');
+    expect(packageScripts).toContain('npm pack');
+    expect(JSON.stringify(packageJob)).not.toContain('NPM_TOKEN');
+    expect(publishJob.needs).toEqual(['tag', 'package']);
+    expect(publishCheckout).toBeUndefined();
+    expect(secretSteps).toEqual([publish, findStep('publish', 'Sync next tag on stable release')]);
+    expect(publish.run).toMatch(
+      /npm publish "\$RUNNER_TEMP\/takt-package\/\$PACKAGE_FILENAME" .*--ignore-scripts/u,
+    );
+    expect(publish.run).not.toMatch(/npm (?:ci|run|test)/u);
+  });
+
+  it('does not expose the publish token to package lifecycle scripts', () => {
+    const directory = createTemporaryDirectory('takt-auto-tag-publish-');
+    const source = join(directory, 'source');
+    const artifact = join(directory, 'takt-package');
+    const sentinel = join(directory, 'lifecycle-token');
+    mkdirSync(source);
+    mkdirSync(artifact);
+    writeFileSync(join(source, 'package.json'), JSON.stringify({
+      name: 'takt-token-boundary-fixture',
+      version: '1.2.3',
+      scripts: {
+        prepublishOnly: 'node -e "require(\'node:fs\').writeFileSync(process.env.SENTINEL_PATH, process.env.NODE_AUTH_TOKEN || \'missing\')"',
+      },
+    }));
+    const packed = execFileSync('npm', [
+      'pack', '--ignore-scripts', '--pack-destination', artifact,
+    ], { cwd: source, encoding: 'utf8', timeout: EXEC_TIMEOUT_MS }).trim();
+    execFileSync('/bin/mv', [join(artifact, packed), join(artifact, 'takt-1.2.3.tgz')], {
+      timeout: EXEC_TIMEOUT_MS,
+    });
+
+    const publish = findStep('publish', 'Publish verified package');
+    expect(() => execFileSync(
+      '/bin/bash',
+      ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', publish.run as string],
+      {
+        cwd: directory,
+        env: {
+          ...process.env,
+          NODE_AUTH_TOKEN: 'must-not-reach-lifecycle',
+          NPM_CONFIG_DRY_RUN: 'true',
+          NPM_DIST_TAG: 'latest',
+          PACKAGE_FILENAME: 'takt-1.2.3.tgz',
+          RUNNER_TEMP: directory,
+          SENTINEL_PATH: sentinel,
+        },
+        stdio: 'pipe',
+        timeout: EXEC_TIMEOUT_MS,
+      },
+    )).not.toThrow();
+    expect(existsSync(sentinel)).toBe(false);
+  });
+
+  it('binds registry verification to the exact package version and expected dist-tag', () => {
+    const verify = findStep('publish', 'Verify published package identity');
+    expect(verify.env).toMatchObject({
+      EXPECTED_DIST_TAG: '${{ needs.tag.outputs.npm_dist_tag }}',
+      EXPECTED_VERSION: '${{ needs.tag.outputs.package_version }}',
+      PACKAGE_NAME: '${{ needs.tag.outputs.package_name }}',
+    });
+    expect(verify.run).toContain(
+      'npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" version',
+    );
+    expect(verify.run).toContain(
+      'npm view "$PACKAGE_NAME" "dist-tags.${EXPECTED_DIST_TAG}"',
+    );
+    expect(verify.run).not.toMatch(/\[ "\$LATEST" = "\$NEXT" \]/u);
+    expect(verify.run).not.toContain('::warning::');
+    expect(verify.run).toMatch(/exit 1/u);
+  });
+
+  it.each([
+    ['matching registry identity', '1.2.3', '1.2.3', true],
+    ['mismatched package version', '9.9.9', '1.2.3', false],
+    ['mismatched dist-tag', '1.2.3', '9.9.9', false],
+  ])('executes exact registry identity verification: %s', (
+    _description,
+    publishedVersion,
+    taggedVersion,
+    expectedSuccess,
+  ) => {
+    const directory = createTemporaryDirectory('takt-auto-tag-registry-');
+    const bin = join(directory, 'bin');
+    const log = join(directory, 'npm.log');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'npm'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$NPM_LOG"
+case "$*" in
+  'view takt@1.2.3 version') printf '%s\\n' "$PUBLISHED_VERSION" ;;
+  'view takt dist-tags.latest') printf '%s\\n' "$TAGGED_VERSION" ;;
+  *) exit 99 ;;
+esac
+`);
+    writeFileSync(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(bin, 'npm'), 0o755);
+    chmodSync(join(bin, 'sleep'), 0o755);
+    let success = true;
+    try {
+      execFileSync(
+        '/bin/bash',
+        ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+          findStep('publish', 'Verify published package identity').run as string],
+        {
+          cwd: directory,
+          env: {
+            ...process.env,
+            EXPECTED_DIST_TAG: 'latest',
+            EXPECTED_VERSION: '1.2.3',
+            NPM_LOG: log,
+            PACKAGE_NAME: 'takt',
+            PATH: `${bin}:${process.env.PATH ?? ''}`,
+            PUBLISHED_VERSION: publishedVersion,
+            TAGGED_VERSION: taggedVersion,
+          },
+          stdio: 'pipe',
+          timeout: EXEC_TIMEOUT_MS,
+        },
+      );
+    } catch {
+      success = false;
+    }
+    expect(success).toBe(expectedSuccess);
+    const commands = readFileSync(log, 'utf8').trim().split('\n');
+    expect(new Set(commands)).toEqual(new Set([
+      'view takt@1.2.3 version',
+      'view takt dist-tags.latest',
+    ]));
+  });
+
   it('uses option-safe, fully qualified tag refspecs in the actual mutation script', () => {
     const script = findStep('tag', 'Create and push tag on PR head commit').run;
     expect(script).toBeDefined();
     const directory = createTemporaryDirectory('takt-auto-tag-mutation-');
     const gitPath = join(directory, 'git');
+    const ghPath = join(directory, 'gh');
     const logPath = join(directory, 'git.log');
     writeFileSync(gitPath, '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$GIT_LOG"\n');
+    writeFileSync(ghPath, '#!/bin/sh\n[ "$*" = "auth setup-git" ]\n');
     chmodSync(gitPath, 0o755);
+    chmodSync(ghPath, 0o755);
     execFileSync('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script as string], {
       env: {
         ...process.env,
         GIT_LOG: logPath,
+        GH_TOKEN: 'test-token',
         HEAD_SHA,
         PATH: `${directory}:${process.env.PATH ?? ''}`,
         RELEASE_TAG: 'v1.2.3',
@@ -397,9 +600,12 @@ describe('auto-tag workflow release boundary', () => {
     expect(script).toBeDefined();
     const directory = createTemporaryDirectory('takt-auto-tag-existing-');
     const gitPath = join(directory, 'git');
+    const ghPath = join(directory, 'gh');
     const logPath = join(directory, 'git.log');
     writeFileSync(gitPath, '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$GIT_LOG"\n[ "$1" != tag ]\n');
+    writeFileSync(ghPath, '#!/bin/sh\n[ "$*" = "auth setup-git" ]\n');
     chmodSync(gitPath, 0o755);
+    chmodSync(ghPath, 0o755);
     expect(() => execFileSync(
       '/bin/bash',
       ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script as string],
@@ -407,6 +613,7 @@ describe('auto-tag workflow release boundary', () => {
         env: {
           ...process.env,
           GIT_LOG: logPath,
+          GH_TOKEN: 'test-token',
           HEAD_SHA,
           PATH: `${directory}:${process.env.PATH ?? ''}`,
           RELEASE_TAG: 'v1.2.3',

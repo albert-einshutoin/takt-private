@@ -52,7 +52,11 @@ jobs:
             exit 1
           fi
 
-          if [[ "$VERSION" == *-* ]]; then
+          # Build metadata is not part of SemVer precedence. Only a hyphen in
+          # the core/prerelease portion marks a prerelease; `+build-7` remains
+          # a stable version.
+          VERSION_WITHOUT_BUILD=${VERSION%%+*}
+          if [[ "$VERSION_WITHOUT_BUILD" == *-* ]]; then
             NPM_DIST_TAG=next
           else
             NPM_DIST_TAG=latest
@@ -90,8 +94,9 @@ jobs:
             echo 'Release tag and version are inconsistent.' >&2
             exit 1
           fi
-          if { [[ "$RELEASE_VERSION" == *-* ]] && [ "$NPM_DIST_TAG" != next ]; } ||
-             { [[ "$RELEASE_VERSION" != *-* ]] && [ "$NPM_DIST_TAG" != latest ]; }; then
+          RELEASE_WITHOUT_BUILD=${RELEASE_VERSION%%+*}
+          if { [[ "$RELEASE_WITHOUT_BUILD" == *-* ]] && [ "$NPM_DIST_TAG" != next ]; } ||
+             { [[ "$RELEASE_WITHOUT_BUILD" != *-* ]] && [ "$NPM_DIST_TAG" != latest ]; }; then
             echo 'npm dist-tag does not match release stability.' >&2
             exit 1
           fi
@@ -126,26 +131,34 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Create and push tag on PR head commit
         id: tag
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA: ${{ needs.validate.outputs.commit }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
+          # checkout must not persist credentials. Install gh's ephemeral Git
+          # credential helper only for this mutation step and short-lived job.
+          gh auth setup-git
           # `--` and a fully qualified refspec keep validated data out of Git's
           # option namespace even if the validation boundary changes later.
           git tag -- "$RELEASE_TAG" "$HEAD_SHA"
           git push -- origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
 
-  publish:
+  package:
     needs: tag
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      filename: ${{ steps.pack.outputs.filename }}
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           ref: ${{ needs.tag.outputs.tag }}
 
       - uses: actions/setup-node@v4
@@ -155,11 +168,65 @@ jobs:
 
       - run: npm ci
 
-      - name: Publish package
+      - run: npm run build
+
+      - run: npm test
+
+      - name: Pack release artifact without credentials
+        id: pack
+        env:
+          EXPECTED_VERSION: ${{ needs.tag.outputs.package_version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/takt-package"
+          PACKAGE_FILE=$(npm pack --ignore-scripts --json | node -e '
+            let input = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", chunk => { input += chunk; });
+            process.stdin.on("end", () => {
+              const result = JSON.parse(input);
+              const expectedFilename = "takt-" + process.env.EXPECTED_VERSION + ".tgz";
+              if (!Array.isArray(result) || result.length !== 1 ||
+                  result[0].name !== "takt" || result[0].version !== process.env.EXPECTED_VERSION ||
+                  result[0].filename !== expectedFilename) process.exit(1);
+              process.stdout.write(result[0].filename);
+            });
+          ')
+          install -m 0600 -- "$PACKAGE_FILE" "$RUNNER_TEMP/takt-package/$PACKAGE_FILE"
+          printf 'filename=%s\n' "$PACKAGE_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: takt-npm-package
+          path: ${{ runner.temp }}/takt-package
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [tag, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download exact release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: takt-npm-package
+          path: ${{ runner.temp }}/takt-package
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish verified package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_DIST_TAG: ${{ needs.tag.outputs.npm_dist_tag }}
-        run: npm publish --tag "$NPM_DIST_TAG"
+          PACKAGE_FILENAME: ${{ needs.package.outputs.filename }}
+        # `--ignore-scripts` is a credential boundary: package-controlled
+        # lifecycle hooks must never execute while NODE_AUTH_TOKEN is present.
+        run: npm publish "$RUNNER_TEMP/takt-package/$PACKAGE_FILENAME" --tag "$NPM_DIST_TAG" --ignore-scripts
 
       - name: Sync next tag on stable release
         if: needs.tag.outputs.npm_dist_tag == 'latest'
@@ -179,25 +246,24 @@ jobs:
             sleep $((attempt * 5))
           done
 
-      - name: Verify dist-tags
+      - name: Verify published package identity
         env:
           EXPECTED_DIST_TAG: ${{ needs.tag.outputs.npm_dist_tag }}
+          EXPECTED_VERSION: ${{ needs.tag.outputs.package_version }}
           PACKAGE_NAME: ${{ needs.tag.outputs.package_name }}
         run: |
           for attempt in 1 2 3 4 5; do
-            LATEST=$(npm view "${PACKAGE_NAME}" dist-tags.latest)
-            NEXT=$(npm view "${PACKAGE_NAME}" dist-tags.next || true)
-
-            echo "Attempt ${attempt}: latest=${LATEST}, next=${NEXT}"
-
-            if [ "$EXPECTED_DIST_TAG" != 'latest' ] || [ "$LATEST" = "$NEXT" ]; then
-              echo "Dist-tags verified."
+            PUBLISHED_VERSION=$(npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" version || true)
+            TAGGED_VERSION=$(npm view "$PACKAGE_NAME" "dist-tags.${EXPECTED_DIST_TAG}" || true)
+            if [ "$PUBLISHED_VERSION" = "$EXPECTED_VERSION" ] &&
+               [ "$TAGGED_VERSION" = "$EXPECTED_VERSION" ]; then
+              echo "Published package identity verified."
               exit 0
             fi
 
             if [ "$attempt" -eq 5 ]; then
-              echo "::warning::dist-tags not synced after 5 attempts (latest=${LATEST}, next=${NEXT}). Registry propagation may be delayed."
-              exit 0
+              echo "Published package identity did not converge after 5 attempts." >&2
+              exit 1
             fi
             sleep $((attempt * 10))
           done
