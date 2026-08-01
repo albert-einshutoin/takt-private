@@ -26,6 +26,9 @@ import {
   areProjectTemplateFileStatsEqual,
   readBoundedProjectTemplateFile,
 } from './bounded-file-read.js';
+import {
+  areProjectTemplateDirectorySnapshotsStable,
+} from './filesystem-scan.js';
 import { parsePortablePath } from './validation.js';
 
 export { PROJECT_TEMPLATE_CONTROL_DIRECTORY } from './control-root-contract.js';
@@ -170,6 +173,16 @@ export interface ProjectTemplateApplyStorage {
   inode: number;
   platform: NodeJS.Platform;
   io: ProjectTemplateApplyStorageIo;
+}
+
+export type ProjectTemplateReadOnlyStoragePhase =
+  | 'repository-opened'
+  | 'control-opened'
+  | 'baselines-opened'
+  | 'all-closed';
+
+export interface ProjectTemplateReadOnlyStorageIoSeam {
+  onPhase?(phase: ProjectTemplateReadOnlyStoragePhase): void;
 }
 
 function projectTemplateApprovalPath(
@@ -1037,6 +1050,132 @@ export async function initializeProjectTemplateApplyStorage(options: {
     await assertControlIgnoreFile(storage, controlIgnorePath, io);
   }
   return storage;
+}
+
+/**
+ * Opens an existing baseline store for preview without creating, syncing,
+ * cleaning, locking, or repairing any control artifact.
+ */
+export async function openProjectTemplateApplyStorageReadOnly(options: {
+  repoPath: string;
+  platform?: NodeJS.Platform;
+  ioSeam?: ProjectTemplateReadOnlyStorageIoSeam;
+}): Promise<ProjectTemplateApplyStorage> {
+  const platform = options.platform ?? process.platform;
+  const io = createProjectTemplateApplyStorageIo({}, platform);
+  const repoRoot = await realpath(resolve(options.repoPath));
+  const controlRoot = join(repoRoot, PROJECT_TEMPLATE_CONTROL_DIRECTORY);
+  const baselinesRoot = join(controlRoot, 'merge-baselines');
+  const paths = [repoRoot, controlRoot, baselinesRoot] as const;
+  const phases = [
+    'repository-opened',
+    'control-opened',
+    'baselines-opened',
+  ] as const;
+  const handles: Awaited<ReturnType<typeof open>>[] = [];
+  const snapshots: Stats[] = [];
+  let primaryError: unknown;
+  try {
+    for (let index = 0; index < paths.length; index += 1) {
+      const path = paths[index]!;
+      const pathBefore = await lstat(path);
+      const resolvedPath = await realpath(path);
+      if (
+        resolvedPath !== path
+        || pathBefore.isSymbolicLink()
+        || !pathBefore.isDirectory()
+        || (
+          index > 0
+          && !isProjectTemplatePrivateDirectoryMode(pathBefore.mode, platform)
+        )
+        || (index > 0 && pathBefore.dev !== snapshots[0]!.dev)
+      ) {
+        throw new ProjectTemplateApplyStorageError(
+          'UNSAFE_CONTROL_ROOT',
+          'project template read-only control directory is unsafe',
+        );
+      }
+      const handle = await open(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY,
+      );
+      handles.push(handle);
+      const opened = await handle.stat();
+      if (!areProjectTemplateDirectorySnapshotsStable(pathBefore, opened)) {
+        throw new ProjectTemplateApplyStorageError(
+          'UNSAFE_CONTROL_ROOT',
+          'project template read-only control directory changed identity',
+        );
+      }
+      snapshots.push(opened);
+      options.ioSeam?.onPhase?.(phases[index]!);
+    }
+    for (let index = 0; index < paths.length; index += 1) {
+      const [openedAfter, pathAfter, resolvedAfter] = await Promise.all([
+        handles[index]!.stat(),
+        lstat(paths[index]!),
+        realpath(paths[index]!),
+      ]);
+      if (
+        resolvedAfter !== paths[index]
+        || !areProjectTemplateDirectorySnapshotsStable(
+          snapshots[index]!,
+          openedAfter,
+        )
+        || !areProjectTemplateDirectorySnapshotsStable(
+          openedAfter,
+          pathAfter,
+        )
+      ) {
+        throw new ProjectTemplateApplyStorageError(
+          'UNSAFE_CONTROL_ROOT',
+          'project template read-only control directory changed identity',
+        );
+      }
+    }
+  } catch (error) {
+    primaryError = error;
+  }
+  for (let index = handles.length - 1; index >= 0; index -= 1) {
+    try {
+      await handles[index]!.close();
+    } catch (error) {
+      primaryError ??= error;
+    }
+  }
+  try {
+    options.ioSeam?.onPhase?.('all-closed');
+  } catch (error) {
+    primaryError ??= error;
+  }
+  if (primaryError !== undefined) {
+    if (primaryError instanceof ProjectTemplateApplyStorageError) {
+      throw primaryError;
+    }
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template read-only control directory cannot be proven safe',
+    );
+  }
+  const repoStat = snapshots[0]!;
+  const baselinesStat = snapshots[2]!;
+  return {
+    repoRoot,
+    targetRoot: join(repoRoot, '.takt'),
+    lockTargetPath: join(repoRoot, '.takt-template-lock.json'),
+    controlRoot,
+    stagingRoot: join(controlRoot, 'staging'),
+    backupsRoot: join(controlRoot, 'backups'),
+    baselinesRoot,
+    baselinesDevice: baselinesStat.dev,
+    baselinesInode: baselinesStat.ino,
+    journalPath: join(controlRoot, 'journal.json'),
+    lockPath: join(controlRoot, 'apply.lock'),
+    device: repoStat.dev,
+    inode: repoStat.ino,
+    platform,
+    io,
+  };
 }
 
 async function assertControlIgnoreFile(

@@ -20,7 +20,9 @@ import type {
   ProjectTemplateIncomingContent,
   ProjectTemplateIncomingInspectionEvidence,
 } from './apply-plan-types.js';
-import { prepareProjectTemplateApplyPlan } from './apply-plan.js';
+import {
+  deriveProjectTemplateApplyPlanFromCurrentTarget,
+} from './apply-plan-derivation.js';
 import { runProjectTemplateDoctor } from './apply-doctor.js';
 import { portablePathKey } from './filesystem-scan.js';
 import {
@@ -514,25 +516,15 @@ async function verifyCompletePlanSemantics(options: {
   baselineStrategy: 'conflict' | 'adopt-identical';
   baseLock?: TemplateLockV1;
 }): Promise<boolean> {
-  const candidatePaths = [
-    ...new Set([
-      ...(options.baseLock?.entries.map((entry) => entry.path) ?? []),
-      ...options.manifest.entries.map((entry) => entry.path),
-    ]),
-  ];
-  const snapshot = await captureProjectTemplateTargetSnapshot(
-    options.projectRoot,
-    candidatePaths,
-  );
-  let expected: ReturnType<typeof prepareProjectTemplateApplyPlan>;
+  let expected: Awaited<ReturnType<
+    typeof deriveProjectTemplateApplyPlanFromCurrentTarget
+  >>;
   try {
-    expected = prepareProjectTemplateApplyPlan({
+    expected = await deriveProjectTemplateApplyPlanFromCurrentTarget({
+      projectRoot: options.projectRoot,
       ...(options.baseLock === undefined ? {} : { baseLock: options.baseLock }),
       baseContents: options.baseContents,
       incomingManifest: options.manifest,
-      localEntries: snapshot.entries,
-      targetRootState: snapshot.rootState,
-      missingPathTracking: snapshot.missingPathTracking,
       incomingContents: [...options.incomingContents].map(([path, content]) => ({
         path,
         content,

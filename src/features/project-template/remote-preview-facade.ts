@@ -4,7 +4,9 @@ import { types } from 'node:util';
 import {
   materializeTaktpackContents,
 } from './archive-inspector.js';
-import { createProjectTemplateApplyPlan } from './apply-plan.js';
+import {
+  deriveProjectTemplateApplyPlanFromCurrentTarget,
+} from './apply-plan-derivation.js';
 import {
   createProjectTemplateRemoteApplyPreview,
   type ProjectTemplateRemoteApplyPreview,
@@ -44,13 +46,16 @@ import { serializeTemplateLock } from './lock.js';
 import {
   createProjectTemplateSourceProvenancePlan,
 } from './source-provenance-plan.js';
-import { captureProjectTemplateTargetSnapshot } from './target-snapshot.js';
 import {
   createRemotePreviewOperationContext,
   requireActiveRemotePreview,
   type ProjectTemplateRemotePreviewOperationContext,
 } from './remote-preview-operation.js';
 import { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
+import {
+  openProjectTemplateApplyStorageReadOnly,
+} from './apply-storage.js';
+import { readProjectTemplateMergeBaseline } from './merge-baseline-store.js';
 
 export {
   GithubProjectTemplateRemotePreviewError,
@@ -256,29 +261,46 @@ export async function createGithubProjectTemplateRemotePreview(
     operationContext,
   );
   requireActiveRemotePreview(operationContext);
-  const candidatePaths = new Set(
-    materialized.inspection.manifest.entries.map((entry) => entry.path),
-  );
+  const baseContents: Array<{ path: string; content: Uint8Array }> = [];
   if (companion.state === 'update') {
-    for (const entry of companion.contentLock.entries) {
-      candidatePaths.add(entry.path);
+    try {
+      const storage = await openProjectTemplateApplyStorageReadOnly({
+        repoPath: options.projectRoot,
+      });
+      requireActiveRemotePreview(operationContext);
+      for (const entry of companion.contentLock.entries) {
+        if (
+          entry.policy !== 'merge'
+          || (entry.path !== 'config.yaml' && entry.path !== 'devloopd.yaml')
+        ) continue;
+        try {
+          const content = await readProjectTemplateMergeBaseline({
+            storage,
+            expectedSha256: entry.sha256,
+          });
+          requireActiveRemotePreview(operationContext);
+          // Detach preview planning bytes from the storage reader's Buffer.
+          baseContents.push({ path: entry.path, content: new Uint8Array(content) });
+        } catch {
+          // Missing or invalid historical bytes are represented by the
+          // planner's fixed BASE_UNAVAILABLE conflict; preview never repairs.
+          requireActiveRemotePreview(operationContext);
+        }
+      }
+    } catch {
+      // An unavailable/unsafe store grants no baseline authority. Planning
+      // remains read-only and reports the same per-entry fixed conflict.
+      requireActiveRemotePreview(operationContext);
     }
   }
-  const target = await captureProjectTemplateTargetSnapshot(
-    options.projectRoot,
-    [...candidatePaths],
-    operationContext,
-  );
-  requireActiveRemotePreview(operationContext);
-  const contentPlan = createProjectTemplateApplyPlan({
+  const preparedContentPlan = await deriveProjectTemplateApplyPlanFromCurrentTarget({
+    projectRoot: options.projectRoot,
     ...(companion.state === 'update'
       ? { baseLock: companion.contentLock }
       : {}),
+    baseContents,
     incomingManifest: materialized.inspection.manifest,
     incomingContents: materialized.contents,
-    localEntries: target.entries,
-    targetRootState: target.rootState,
-    missingPathTracking: target.missingPathTracking,
     incomingInspection: {
       archiveSha256: materialized.inspection.archiveSha256,
       manifestSha256: materialized.inspection.manifestSha256,
@@ -286,7 +308,10 @@ export async function createGithubProjectTemplateRemotePreview(
       compatibilityStatus: materialized.inspection.compatibility.status,
     },
     baselineStrategy: options.baselineStrategy,
+    operationContext,
   });
+  requireActiveRemotePreview(operationContext);
+  const contentPlan = preparedContentPlan.plan;
 
   const incomingDependencyLock = Object.freeze({
     schemaVersion: '1.0' as const,
