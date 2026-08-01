@@ -30,6 +30,7 @@ import type {
   ProjectTemplateCliCommandRequest,
 } from './projectTemplateCommands.js';
 import type { ProjectTemplateCliRemoteProductionRuntime } from '../../infra/github/project-template-cli-remote-production.js';
+import type { ProjectTemplateCliLifecycleContext } from '../../features/project-template/cli-lifecycle.js';
 import { resolveConfigValue } from '../../infra/config/resolveConfigValue.js';
 import { DEFAULT_LANGUAGE } from '../../shared/constants.js';
 import type { Language } from '../../core/models/config-types.js';
@@ -183,7 +184,7 @@ function failure(
 
 async function dispatchProjectTemplateCommand(
   request: ProjectTemplateCliCommandRequest,
-  context: { readonly signal: AbortSignal; readonly admitMutation: () => void },
+  context: ProjectTemplateCliLifecycleContext,
   acquireRemoteRuntime: RemoteRuntimeFactory,
 ): Promise<ProjectTemplateCliOutcome> {
   if (request.command === 'project-template inspect') {
