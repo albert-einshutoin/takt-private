@@ -61,7 +61,7 @@ describe('project template CLI phase 2 contract', () => {
       result: {
         packId: HASH,
         entryCount: 4_096,
-        archiveBytes: 40 * 1024 * 1024,
+        archiveBytes: 32 * 1024 * 1024,
         dependencyCount: 128,
         readiness: 'review-required',
         reviewCodes: ['REVIEW_REQUIRED'],
@@ -87,7 +87,7 @@ describe('project template CLI phase 2 contract', () => {
 
   it.each([
     [{ packId: HASH, entryCount: 4_097, archiveBytes: 1, dependencyCount: 0 }],
-    [{ packId: HASH, entryCount: 1, archiveBytes: 40 * 1024 * 1024 + 1, dependencyCount: 0 }],
+    [{ packId: HASH, entryCount: 1, archiveBytes: 32 * 1024 * 1024 + 1, dependencyCount: 0 }],
     [{ packId: HASH, entryCount: 1, archiveBytes: 1, dependencyCount: 129 }],
   ])('rejects inspect counts beyond matching core limits: %j', (partial) => {
     expect(() => createProjectTemplateCliSuccess({

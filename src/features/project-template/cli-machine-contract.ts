@@ -4,8 +4,8 @@ import {
   snapshotProjectTemplateCliJson,
 } from './cli-bounded-json.js';
 import { ProjectTemplateCliContractError } from './cli-contract-error.js';
-import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
 import { MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES } from './source-descriptor.js';
+import { PROJECT_TEMPLATE_TRANSACTION_LIMITS } from './transaction-limits.js';
 import { MAX_TEMPLATE_ENTRIES } from './validation.js';
 
 export { ProjectTemplateCliContractError } from './cli-contract-error.js';
@@ -42,6 +42,7 @@ export interface ProjectTemplateCliWarning {
 
 export type ProjectTemplateCliErrorCode =
   | 'EXPECTED_PLAN_ID_REQUIRES_APPLY'
+  | 'INVALID_APPLY_INPUT'
   | 'INVALID_ARGUMENT'
   | 'INVALID_EXPECTED_PLAN_ID'
   | 'MISSING_EXPECTED_PLAN_ID'
@@ -54,16 +55,21 @@ export type ProjectTemplateCliErrorCode =
   | 'REVIEW_REQUIRED'
   | 'PLAN_DRIFT'
   | 'BASE_LOCK_DRIFT'
+  | 'ROLLBACK_DRIFT'
   | 'SOURCE_DRIFT'
   | 'TARGET_DRIFT'
   | 'TRANSACTION_PLAN_MISMATCH'
   | 'ACTIVE_RUN'
+  | 'APPLY_GUARD_BLOCKED'
+  | 'APPLY_LEASE_UNAVAILABLE'
   | 'LEASE_UNAVAILABLE'
   | 'SECURITY_GUARD'
   | 'AUTH_FAILED'
   | 'NETWORK_FAILED'
   | 'SOURCE_UNAVAILABLE'
   | 'SOURCE_INTEGRITY_FAILED'
+  | 'BACKUP_UNAVAILABLE'
+  | 'APPLY_FAILED_ROLLED_BACK'
   | 'NO_RECOVERY_STATE'
   | 'PARTIAL_FAILURE'
   | 'RECOVERY_REQUIRED'
@@ -262,6 +268,7 @@ const REVIEW_CODES = Object.freeze({
 
 export const PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES = Object.freeze({
   EXPECTED_PLAN_ID_REQUIRES_APPLY: 20,
+  INVALID_APPLY_INPUT: 20,
   INVALID_ARGUMENT: 20,
   INVALID_EXPECTED_PLAN_ID: 20,
   MISSING_EXPECTED_PLAN_ID: 20,
@@ -275,17 +282,22 @@ export const PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES = Object.freeze({
   REVIEW_REQUIRED: 21,
   BASE_LOCK_DRIFT: 22,
   PLAN_DRIFT: 22,
+  ROLLBACK_DRIFT: 22,
   SOURCE_DRIFT: 22,
   TARGET_DRIFT: 22,
   TRANSACTION_PLAN_MISMATCH: 22,
   ACTIVE_RUN: 23,
+  APPLY_GUARD_BLOCKED: 23,
+  APPLY_LEASE_UNAVAILABLE: 23,
   LEASE_UNAVAILABLE: 23,
   SECURITY_GUARD: 23,
   AUTH_FAILED: 24,
+  BACKUP_UNAVAILABLE: 24,
   NETWORK_FAILED: 24,
   SOURCE_INTEGRITY_FAILED: 24,
   SOURCE_UNAVAILABLE: 24,
   PARTIAL_FAILURE: 25,
+  APPLY_FAILED_ROLLED_BACK: 25,
   RECOVERY_REQUIRED: 25,
   RESULT_INDETERMINATE: 25,
   INTERNAL: 70,
@@ -409,7 +421,7 @@ function validateResult(
     if (!isHash(result.planId)
       || (mode === 'apply' && !isHash(result.packId))
       || !isCount(result.entryCount, MAX_TEMPLATE_ENTRIES)
-      || !isCount(result.archiveBytes, DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes)
+      || !isCount(result.archiveBytes, PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes)
       || !isCount(
         result.dependencyCount,
         MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES,
@@ -423,7 +435,7 @@ function validateResult(
     validateReviewSummary(result);
     if (!isHash(result.packId)
       || !isCount(result.entryCount, MAX_TEMPLATE_ENTRIES)
-      || !isCount(result.archiveBytes, DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes)
+      || !isCount(result.archiveBytes, PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes)
       || !isCount(
         result.dependencyCount,
         MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES,
