@@ -17,6 +17,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { dirname } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   createCoordinationIdentityPolicy,
   type CoordinationDirectoryAuthority,
@@ -181,7 +182,8 @@ function readStableOpenedFile(fd: number, path: string, expectedLength: number):
 
 function stableFile(stat: Stats, bytes: Buffer): CoordinationStableFile {
   const identity = { kind: 'posix' as const, dev: stat.dev, ino: stat.ino };
-  return Object.freeze({ bytes, identity, digest: `${statDigest(stat)}:${bytes.toString('utf8')}` });
+  const contentDigest = createHash('sha256').update(bytes).digest('hex');
+  return Object.freeze({ bytes, identity, digest: `${statDigest(stat)}:${contentDigest}` });
 }
 
 function observation(stat: Stats): CoordinationFileObservation {

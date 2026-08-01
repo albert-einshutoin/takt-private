@@ -2,16 +2,13 @@ import {
   closeSync,
   constants,
   fchmodSync,
-  fstatSync,
   fsyncSync,
   lstatSync,
   linkSync,
   mkdirSync,
   openSync,
-  readSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
   type Stats,
 } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -25,7 +22,11 @@ import {
   CoordinationFilesystemChangedError,
   posixCoordinationFilesystemPolicy,
 } from './coordination-posix-filesystem-policy.js';
-import type { CoordinationStableDirectory } from './coordination-filesystem-types.js';
+import type {
+  CoordinationIdentity,
+  CoordinationStableDirectory,
+  CoordinationStableFile,
+} from './coordination-filesystem-types.js';
 
 const COORDINATION_DIRECTORY_NAME = '.takt-repertoire-coordination';
 const READERS_DIRECTORY_NAME = 'readers';
@@ -45,11 +46,6 @@ const MAX_SNAPSHOT_ATTEMPTS = 8;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
-const FILE_READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
-const FILE_WRITE_EXCLUSIVE_FLAGS = constants.O_WRONLY
-  | constants.O_CREAT
-  | constants.O_EXCL
-  | constants.O_NOFOLLOW;
 const FILE_TYPE_MASK = constants.S_IFMT;
 const FILE_TYPE_REGULAR = constants.S_IFREG;
 const FILE_TYPE_SYMLINK = constants.S_IFLNK;
@@ -90,14 +86,11 @@ const safeArraySome = <T>(value: T[], predicate: (item: T, index: number) => boo
 const safeArraySort = <T>(value: T[]): T[] => (
   safeReflectApply(safeArraySortMethod, value, []) as T[]
 );
-const safeBufferAlloc = Buffer.alloc.bind(Buffer);
-const safeBufferSubarrayMethod = Buffer.prototype.subarray;
+const safeBufferFrom = Buffer.from.bind(Buffer);
+const safeBufferFromUtf8 = (value: string): Buffer => safeBufferFrom(value, 'utf8');
 const safeBufferToStringMethod = Buffer.prototype.toString;
 const safeBufferToString = (value: Buffer, encoding: BufferEncoding): string => (
   safeReflectApply(safeBufferToStringMethod, value, [encoding]) as string
-);
-const safeBufferSubarray = (value: Buffer, start: number, end: number): Buffer => (
-  safeReflectApply(safeBufferSubarrayMethod, value, [start, end]) as Buffer
 );
 const safeDateNow = Date.now.bind(Date);
 const SafeDate = Date;
@@ -108,7 +101,6 @@ const safeDateToISOString = (value: Date): string => (
 const safeJsonParse = JSON.parse.bind(JSON);
 const safeJsonStringify = JSON.stringify.bind(JSON);
 const safeMathMin = Math.min.bind(Math);
-const safeNumber = Number;
 const safeNumberIsSafeInteger = Number.isSafeInteger.bind(Number);
 const safeObjectDefineProperty = Object.defineProperty.bind(Object);
 const safeObjectFreeze = Object.freeze.bind(Object);
@@ -185,10 +177,7 @@ type LeaseRecord = {
   createdAt: string;
 };
 
-type FileIdentity = {
-  dev: number;
-  ino: number;
-};
+type FileIdentity = CoordinationIdentity;
 
 type LeaseEvidence = {
   record: LeaseRecord;
@@ -497,22 +486,14 @@ function createLeaseFile(
   paths.trustedRoot.assertUnchanged();
   assertPrivateDirectory(parentDirectory);
   const publishingPath = `${path}${CLAIM_PUBLISHING_SUFFIX}`;
-  let fd: number | undefined;
-  try {
-    fd = openSync(
-      publishingPath,
-      FILE_WRITE_EXCLUSIVE_FLAGS,
-      PRIVATE_FILE_MODE,
-    );
-    fchmodSync(fd, PRIVATE_FILE_MODE);
-    writeFileSync(fd, `${safeJsonStringify(record)}\n`, 'utf8');
-    fsyncSync(fd);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
+  const bytes = safeBufferFromUtf8(`${safeJsonStringify(record)}\n`);
+  const stagedFile = posixCoordinationFilesystemPolicy.createStagedExclusiveFile(
+    publishingPath,
+    bytes,
+  );
   syncDirectory(parentDirectory);
   paths.trustedRoot.assertUnchanged();
-  const staged = readExactPrivateLease(publishingPath, record.mode);
+  const staged = leaseEvidenceFromStableFile(stagedFile, record.mode);
   assertSameOwner(staged.record, record);
   // Claims become visible only after complete, fsynced bytes have been
   // validated. A crashed staging file remains explicit blocking evidence.
@@ -548,43 +529,18 @@ function readExactPrivateLease(
   path: string,
   expectedMode?: RepertoireCoordinationMode,
 ): LeaseEvidence {
-  let fd: number | undefined;
-  try {
-    const before = lstatSync(path);
-    fd = openSync(path, FILE_READ_FLAGS);
-    const opened = fstatSync(fd);
-    const after = lstatSync(path);
-    assertSamePrivateFile(before, opened, after);
-    if (opened.size <= 0 || opened.size > MAX_LEASE_BYTES) {
-      throw new RepertoireCoordinationError('UNSAFE_STATE');
-    }
-    const raw = readStableBoundedFile(fd, opened, path);
-    const record = parseLeaseRecord(raw, expectedMode);
-    const identity = { dev: opened.dev, ino: opened.ino };
-    return { record, identity, digest: `${fileIdentityDigest(opened)}:${raw}` };
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
+  return leaseEvidenceFromStableFile(
+    posixCoordinationFilesystemPolicy.readStableFile(path, MAX_LEASE_BYTES),
+    expectedMode,
+  );
 }
 
-function assertSamePrivateFile(before: Stats, opened: Stats, after: Stats): void {
-  const expectedUid = currentUid();
-  if (
-    !isFileMode(before.mode)
-    || !isFileMode(opened.mode)
-    || !isFileMode(after.mode)
-    || isSymlinkMode(before.mode)
-    || isSymlinkMode(after.mode)
-    || before.dev !== opened.dev
-    || before.ino !== opened.ino
-    || after.dev !== opened.dev
-    || after.ino !== opened.ino
-    || opened.nlink !== 1
-    || (opened.mode & 0o777) !== PRIVATE_FILE_MODE
-    || (expectedUid !== null && opened.uid !== expectedUid)
-  ) {
-    throw new RepertoireCoordinationError('UNSAFE_STATE');
-  }
+function leaseEvidenceFromStableFile(
+  file: CoordinationStableFile,
+  expectedMode?: RepertoireCoordinationMode,
+): LeaseEvidence {
+  const raw = safeBufferToString(file.bytes, 'utf8');
+  return { record: parseLeaseRecord(raw, expectedMode), identity: file.identity, digest: file.digest };
 }
 
 function parseLeaseRecord(raw: string, expectedMode?: RepertoireCoordinationMode): LeaseRecord {
@@ -1033,8 +989,7 @@ function sameOwnerAndIdentity(
   expected: LeaseRecord,
   identity: FileIdentity,
 ): boolean {
-  return evidence.identity.dev === identity.dev
-    && evidence.identity.ino === identity.ino
+  return posixCoordinationFilesystemPolicy.sameIdentity(evidence.identity, identity)
     && sameOwner(evidence.record, expected);
 }
 
@@ -1064,38 +1019,6 @@ function enforceTombstoneLimits(
   if (mode === 'read' && count >= TOMBSTONE_SOFT_LIMIT) {
     throw new RepertoireCoordinationError('MAINTENANCE_REQUIRED');
   }
-}
-
-function readStableBoundedFile(fd: number, opened: Stats, path: string): string {
-  const buffer = safeBufferAlloc(safeNumber(opened.size) + 1);
-  let offset = 0;
-  while (offset < buffer.length) {
-    const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, offset);
-    if (bytesRead === 0) break;
-    offset += bytesRead;
-  }
-  const final = fstatSync(fd);
-  const pathAfterRead = lstatSync(path);
-  if (
-    offset !== opened.size
-    || final.size !== opened.size
-    || final.dev !== opened.dev
-    || final.ino !== opened.ino
-    || final.mtimeMs !== opened.mtimeMs
-    || final.ctimeMs !== opened.ctimeMs
-    || pathAfterRead.dev !== opened.dev
-    || pathAfterRead.ino !== opened.ino
-  ) {
-    throw new RepertoireCoordinationError('UNSAFE_STATE');
-  }
-  return safeBufferToString(safeBufferSubarray(buffer, 0, offset), 'utf8');
-}
-
-function fileIdentityDigest(stat: Stats): string {
-  return safeArrayJoin(
-    [stat.dev, stat.ino, stat.size, stat.mode, stat.uid, stat.mtimeMs, stat.ctimeMs],
-    ':',
-  );
 }
 
 async function waitForRetry(
