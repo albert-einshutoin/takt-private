@@ -52,9 +52,11 @@ describe('devloopd onboard-repo template entrypoint', () => {
     ['force dry-run', ['--force'], 'FORCE_REQUIRES_APPLY'],
     ['expected dry-run', ['--expected-plan-id', 'a'.repeat(64)], 'EXPECTED_PLAN_ID_REQUIRES_APPLY'],
     ['missing expected', ['--apply'], 'MISSING_EXPECTED_PLAN_ID'],
+    ['invalid source', [], 'INVALID_ARGUMENT'],
   ] as const)('returns one closed JSON error for %s', (_name, flags, code) => {
     const result = run([
-      'onboard-repo', '--cwd', '/not-observed', '--template', './starter.taktpack',
+      'onboard-repo', '--cwd', '/not-observed', '--template',
+      code === 'INVALID_ARGUMENT' ? './starter.zip' : './starter.taktpack',
       '--json', ...flags,
     ]);
 
@@ -65,6 +67,41 @@ describe('devloopd onboard-repo template entrypoint', () => {
       schemaVersion: '1.0', status: 'error', command: 'onboard-repo',
       error: { code },
     });
+    expect(result.stdout).not.toContain('/not-observed');
+  });
+
+  it.each([
+    [
+      'invalid flag combination',
+      ['./starter.taktpack', '--force'],
+      'dry-run',
+      '--force requires --apply',
+    ],
+    [
+      'invalid template source',
+      ['./starter.zip'],
+      'dry-run',
+      '--template must be a local .taktpack or canonical GitHub source',
+    ],
+  ] as const)('renders a human-readable error for %s without --json', (
+    _name,
+    [template, ...flags],
+    mode,
+    message,
+  ) => {
+    const result = run([
+      'onboard-repo', '--cwd', '/not-observed', '--template', template, ...flags,
+    ]);
+
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe([
+      'devloopd onboard-repo template error',
+      `Mode: ${mode}`,
+      `Error: ${message}`,
+      '',
+    ].join('\n'));
+    expect(() => JSON.parse(result.stdout)).toThrow();
     expect(result.stdout).not.toContain('/not-observed');
   });
 });

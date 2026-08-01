@@ -66,19 +66,37 @@ type ArgumentErrorCode =
   | 'MISSING_EXPECTED_PLAN_ID'
   | 'INVALID_EXPECTED_PLAN_ID';
 
+const HUMAN_ARGUMENT_ERRORS: Readonly<Record<ArgumentErrorCode, string>> = {
+  INVALID_ARGUMENT: '--template must be a local .taktpack or canonical GitHub source',
+  FORCE_REQUIRES_APPLY: '--force requires --apply',
+  EXPECTED_PLAN_ID_REQUIRES_APPLY: '--expected-plan-id requires --apply',
+  MISSING_EXPECTED_PLAN_ID: '--apply requires --expected-plan-id from a fresh preview',
+  INVALID_EXPECTED_PLAN_ID: '--expected-plan-id must be a lowercase SHA-256 value',
+};
+
 function argumentFailure(
   mode: 'dry-run' | 'apply',
   code: ArgumentErrorCode,
+  json: boolean,
 ): PersonalOnboardingCommandResult {
-  return {
-    stdout: JSON.stringify({
+  // Argument validation happens before the facade can provide its paired
+  // renderers, so preserve the same explicit human/machine output boundary.
+  const stdout = json
+    ? JSON.stringify({
       schemaVersion: '1.0',
       status: 'error',
       command: 'onboard-repo',
       mode,
       error: { code },
       components: {},
-    }),
+    })
+    : [
+      'devloopd onboard-repo template error',
+      `Mode: ${mode}`,
+      `Error: ${HUMAN_ARGUMENT_ERRORS[code]}`,
+    ].join('\n');
+  return {
+    stdout,
     exitCode: 20,
   };
 }
@@ -127,20 +145,21 @@ export async function executePersonalOnboardingCommand(
   }
 
   const mode = options.apply === true ? 'apply' : 'dry-run';
+  const json = options.json === true;
   if (mode === 'dry-run' && options.force === true) {
-    return argumentFailure(mode, 'FORCE_REQUIRES_APPLY');
+    return argumentFailure(mode, 'FORCE_REQUIRES_APPLY', json);
   }
   if (mode === 'dry-run' && options.expectedPlanId !== undefined) {
-    return argumentFailure(mode, 'EXPECTED_PLAN_ID_REQUIRES_APPLY');
+    return argumentFailure(mode, 'EXPECTED_PLAN_ID_REQUIRES_APPLY', json);
   }
   if (mode === 'apply' && options.expectedPlanId === undefined) {
-    return argumentFailure(mode, 'MISSING_EXPECTED_PLAN_ID');
+    return argumentFailure(mode, 'MISSING_EXPECTED_PLAN_ID', json);
   }
   if (mode === 'apply' && !SHA256.test(options.expectedPlanId!)) {
-    return argumentFailure(mode, 'INVALID_EXPECTED_PLAN_ID');
+    return argumentFailure(mode, 'INVALID_EXPECTED_PLAN_ID', json);
   }
   const parsedSource = source(repoPath, options.template);
-  if (parsedSource === undefined) return argumentFailure(mode, 'INVALID_ARGUMENT');
+  if (parsedSource === undefined) return argumentFailure(mode, 'INVALID_ARGUMENT', json);
 
   const mutation: PersonalOnboardingTemplateMutation = mode === 'apply'
     ? {
@@ -156,7 +175,7 @@ export async function executePersonalOnboardingCommand(
     mutation,
   });
   return {
-    stdout: options.json === true ? result.machineOutput : result.humanOutput,
+    stdout: json ? result.machineOutput : result.humanOutput,
     exitCode: result.passed ? 0 : 1,
     ...(result.planId === undefined ? {} : { planId: result.planId }),
   };
