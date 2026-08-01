@@ -417,11 +417,11 @@ export function createProjectTemplateCliLocalApplyService(
       if (plan.hardConflict || plan.conflictCount > 0) {
         return failure('project-template apply', 'apply', 'HARD_CONFLICT');
       }
+      if (plan.reviewRequired && !plan.forceApplicable) {
+        return failure('project-template apply', 'apply', 'REVIEW_REQUIRED');
+      }
       if (plan.reviewRequired && !options.force) {
         return failure('project-template apply', 'apply', 'APPROVAL_REQUIRED');
-      }
-      if (plan.reviewRequired && options.force && !plan.forceApplicable) {
-        return failure('project-template apply', 'apply', 'REVIEW_REQUIRED');
       }
       if (!plan.defaultApplyPossible && !plan.reviewRequired) {
         return failure('project-template apply', 'apply', 'SECURITY_GUARD');

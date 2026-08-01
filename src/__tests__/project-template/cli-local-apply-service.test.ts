@@ -229,6 +229,52 @@ describe('local project-template CLI diff/apply service', () => {
     expect(admitMutation).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [false, false, 'REVIEW_REQUIRED'],
+    [false, true, 'REVIEW_REQUIRED'],
+    [true, false, 'APPROVAL_REQUIRED'],
+    [true, true, undefined],
+  ] as const)(
+    'classifies review apply with forceApplicable=%s and force=%s as %s',
+    async (forceApplicable, force, errorCode) => {
+      const execute = vi.fn(port().execute);
+      const service = createProjectTemplateCliLocalApplyService(port({
+        derive: vi.fn(async () => ({
+          transactionPlanId: PLAN_ID,
+          changeCount: 1,
+          conflictCount: 0,
+          dependencyCount: 0,
+          reviewRequired: true,
+          hardConflict: false,
+          defaultApplyPossible: false,
+          forceApplicable,
+          authority: Object.freeze({}),
+        })),
+        execute,
+      }));
+
+      const outcome = await service.apply({
+        cwd: '/safe/repo',
+        sourcePath: 'pack.taktpack',
+        currentTaktVersion: '0.48.0',
+        mode: 'apply',
+        expectedPlanId: PLAN_ID,
+        force,
+      });
+
+      if (errorCode === undefined) {
+        expect(outcome).toMatchObject({ exitCode: 0, envelope: { status: 'success' } });
+        expect(execute).toHaveBeenCalledOnce();
+      } else {
+        expect(outcome).toMatchObject({
+          exitCode: 21,
+          envelope: { status: 'error', error: { code: errorCode } },
+        });
+        expect(execute).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it('blocks active-run state before deriving or creating approval state', async () => {
     const derive = vi.fn();
     const execute = vi.fn();
