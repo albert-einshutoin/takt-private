@@ -1,4 +1,5 @@
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -35,13 +36,16 @@ afterEach(() => {
   for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true });
 });
 
-async function fixture(): Promise<{ archivePath: string; targetRoot: string }> {
+async function fixture(options: {
+  readonly commit?: string;
+  readonly workflowName?: string;
+} = {}): Promise<{ archivePath: string; targetRoot: string }> {
   const sourceRoot = root('takt-local-service-source-');
   mkdirSync(join(sourceRoot, '.takt'), { mode: 0o700 });
   mkdirSync(join(sourceRoot, '.takt', 'workflows'), { mode: 0o700 });
   writeFileSync(
     join(sourceRoot, '.takt', 'workflows', 'review.yaml'),
-    `name: review
+    `name: ${options.workflowName ?? 'review'}
 max_steps: 10
 initial_step: review
 steps:
@@ -58,7 +62,7 @@ steps:
       kind: 'local',
       uri: '.',
       ref: 'workspace',
-      commit: 'a'.repeat(40),
+      commit: options.commit ?? 'a'.repeat(40),
     },
   });
   const archivePath = join(sourceRoot, 'template.taktpack');
@@ -244,6 +248,33 @@ describe('production local project-template CLI composition', () => {
     expect(existsSync(join(targetRoot, '.takt-template-lock.json'))).toBe(false);
     expect(existsSync(join(targetRoot, '.takt-template-state', 'apply.lock')))
       .toBe(false);
+  });
+
+  it('classifies a valid archive replacement during lease admission as source integrity drift', async () => {
+    const initial = await fixture();
+    const replacement = await fixture({
+      commit: 'b'.repeat(40),
+      workflowName: 'replacement',
+    });
+    const port = createProductionProjectTemplateCliLocalApplyPort();
+    const derived = await port.derive({
+      cwd: initial.targetRoot,
+      sourcePath: initial.archivePath,
+      currentTaktVersion: '0.48.0',
+    });
+    copyFileSync(replacement.archivePath, initial.archivePath);
+
+    await expect(port.execute({
+      cwd: initial.targetRoot,
+      sourcePath: initial.archivePath,
+      currentTaktVersion: '0.48.0',
+      expectedTransactionPlanId: derived.transactionPlanId,
+      force: true,
+      derived,
+    })).resolves.toEqual({
+      status: 'not_started',
+      code: 'SOURCE_INTEGRITY_FAILED',
+    });
   });
 
   it('maps an abort during the lease-held re-derive and releases the lease', async () => {
