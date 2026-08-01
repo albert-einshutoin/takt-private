@@ -7,9 +7,19 @@ import {
   type ProjectTemplateCliOutcome,
 } from './cli-machine-contract.js';
 import { createProductionProjectTemplateCliRollbackPort } from './rollback-transaction-apply-facade.js';
+import {
+  consumeProjectTemplateCliMutationAdmission,
+  ProjectTemplateCliInvalidAdmission,
+  snapshotProjectTemplateCliOwnData,
+  type ProjectTemplateCliMutationAdmission,
+} from './cli-lifecycle.js';
 
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
+const testPattern = (pattern: RegExp, value: string): boolean => (
+  Reflect.apply(CAPTURED_REGEXP_TEST, pattern, [value]) as boolean
+);
 
 export interface ProjectTemplateCliRollbackDerivedPlan {
   readonly planId: string;
@@ -47,10 +57,10 @@ export type ProjectTemplateCliRollbackOptions = {
   readonly backupId: string;
   readonly force: boolean;
   readonly signal?: AbortSignal;
-  readonly admitMutation?: () => void;
 } & (
   | { readonly mode: 'dry-run' }
-  | { readonly mode: 'apply'; readonly expectedPlanId: string }
+  | { readonly mode: 'apply'; readonly expectedPlanId: string;
+    readonly admitMutation: ProjectTemplateCliMutationAdmission }
 );
 
 export interface ProjectTemplateCliRollbackService {
@@ -91,7 +101,7 @@ ProjectTemplateCliErrorCode | undefined {
 
 function safePlan(value: ProjectTemplateCliRollbackDerivedPlan):
 ProjectTemplateCliRollbackDerivedPlan {
-  if (!HASH.test(value.planId) || !SAFE_ID.test(value.backupId)
+  if (!testPattern(HASH, value.planId) || !testPattern(SAFE_ID, value.backupId)
     || typeof value.recoveryRequired !== 'boolean') throw new Error('invalid rollback plan');
   return Object.freeze({
     planId: value.planId,
@@ -117,10 +127,26 @@ export function createProjectTemplateCliRollbackService(
 ): ProjectTemplateCliRollbackService {
   return Object.freeze({
     async rollback(options: ProjectTemplateCliRollbackOptions): Promise<ProjectTemplateCliOutcome> {
+      try {
+        const snapshot = snapshotProjectTemplateCliOwnData(options,
+          ['cwd', 'backupId', 'force', 'mode'],
+          ['signal', 'expectedPlanId', 'admitMutation']);
+        const applyMode = snapshot['mode'] === 'apply';
+        if ((!applyMode && snapshot['mode'] !== 'dry-run')
+          || (applyMode && (!('expectedPlanId' in snapshot) || !('admitMutation' in snapshot)))
+          || typeof snapshot['cwd'] !== 'string' || typeof snapshot['backupId'] !== 'string'
+          || typeof snapshot['force'] !== 'boolean'
+          || (snapshot['signal'] !== undefined && !(snapshot['signal'] instanceof AbortSignal))) {
+          throw new ProjectTemplateCliInvalidAdmission();
+        }
+        options = snapshot as unknown as ProjectTemplateCliRollbackOptions;
+      } catch {
+        return failure('dry-run', 'SECURITY_GUARD');
+      }
       const mode = options.mode;
       if (aborted(options.signal)) return failure(mode, 'INTERRUPTED');
       const cwd = resolve(options.cwd);
-      if (!SAFE_ID.test(options.backupId)) return failure(mode, 'INVALID_ARGUMENT');
+      if (!testPattern(SAFE_ID, options.backupId)) return failure(mode, 'INVALID_ARGUMENT');
       const initialGuard = guardCode(port.inspectGuard(cwd));
       if (mode === 'apply' && initialGuard !== undefined) return failure(mode, initialGuard);
       let plan: ProjectTemplateCliRollbackDerivedPlan;
@@ -163,9 +189,10 @@ export function createProjectTemplateCliRollbackService(
       const finalGuard = guardCode(port.inspectGuard(cwd));
       if (finalGuard !== undefined) return failure(mode, finalGuard);
       try {
-        options.admitMutation?.();
-      } catch {
-        return failure(mode, aborted(options.signal) ? 'INTERRUPTED' : 'INTERNAL');
+        consumeProjectTemplateCliMutationAdmission(options.admitMutation);
+      } catch (error) {
+        return failure(mode, aborted(options.signal) ? 'INTERRUPTED'
+          : error instanceof ProjectTemplateCliInvalidAdmission ? 'SECURITY_GUARD' : 'INTERNAL');
       }
       let executed: ProjectTemplateCliRollbackExecutionResult;
       try {

@@ -8,9 +8,28 @@ import {
   type ProjectTemplateCliOutcome,
   type ProjectTemplateCliReviewCode,
 } from './cli-machine-contract.js';
+import {
+  consumeProjectTemplateCliMutationAdmission,
+  ProjectTemplateCliInvalidAdmission,
+  snapshotProjectTemplateCliOwnData,
+  type ProjectTemplateCliMutationAdmission,
+} from './cli-lifecycle.js';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_IS_PROXY = types.isProxy;
+const CAPTURED_GET_PROTOTYPE_OF = Object.getPrototypeOf;
+const CAPTURED_GET_OWN_PROPERTY_DESCRIPTORS = Object.getOwnPropertyDescriptors;
+const CAPTURED_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const CAPTURED_OWN_KEYS = Reflect.ownKeys;
+const CAPTURED_OBJECT_CREATE = Object.create;
+const CAPTURED_OBJECT_FREEZE = Object.freeze;
+const CAPTURED_OBJECT_PROTOTYPE = Object.prototype;
+const testPattern = (pattern: RegExp, value: string): boolean => (
+  CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, pattern, [value]) as boolean
+);
 const MAX_COUNT = 10_000;
 
 export type ProjectTemplateCliRemotePortErrorCode =
@@ -100,7 +119,6 @@ export interface ProjectTemplateCliRemoteBaseOptions {
   readonly baselineStrategy: 'conflict' | 'adopt-identical';
   readonly force: boolean;
   readonly signal?: AbortSignal;
-  readonly admitMutation?: () => void;
 }
 
 export type ProjectTemplateCliRemoteMutationOptions =
@@ -108,6 +126,7 @@ export type ProjectTemplateCliRemoteMutationOptions =
   | (ProjectTemplateCliRemoteBaseOptions & {
     readonly mode: 'apply';
     readonly expectedPlanId: string;
+    readonly admitMutation: ProjectTemplateCliMutationAdmission;
   });
 
 export interface ProjectTemplateCliRemoteApplyService {
@@ -159,8 +178,9 @@ function count(value: unknown): value is number {
 }
 
 function snapshotPlan(value: ProjectTemplateCliRemoteDerivedPlan): ProjectTemplateCliRemoteDerivedPlan {
-  if (typeof value !== 'object' || value === null || types.isProxy(value)
-    || Object.getPrototypeOf(value) !== Object.prototype) {
+  if (typeof value !== 'object' || value === null || CAPTURED_IS_PROXY(value)
+    || CAPTURED_REFLECT_APPLY(CAPTURED_GET_PROTOTYPE_OF, Object, [value])
+      !== CAPTURED_OBJECT_PROTOTYPE) {
     throw new ProjectTemplateCliRemotePortError('INTERNAL');
   }
   const keys = [
@@ -168,12 +188,18 @@ function snapshotPlan(value: ProjectTemplateCliRemoteDerivedPlan): ProjectTempla
     'updateAvailable', 'reviewRequired', 'hardConflict', 'defaultApplyPossible',
     'forceApplicable', 'authority',
   ] as const;
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  if (Reflect.ownKeys(descriptors).length !== keys.length) {
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_GET_OWN_PROPERTY_DESCRIPTORS, Object, [value],
+  ) as Record<string, PropertyDescriptor>;
+  const ownKeys = CAPTURED_REFLECT_APPLY(CAPTURED_OWN_KEYS, Reflect, [descriptors]) as PropertyKey[];
+  if (ownKeys.length !== keys.length) {
     throw new ProjectTemplateCliRemotePortError('INTERNAL');
   }
-  const plan = Object.create(null) as Record<string, unknown>;
-  for (const key of keys) {
+  const plan = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_CREATE, Object, [null],
+  ) as Record<string, unknown>;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
     const descriptor = descriptors[key];
     if (descriptor === undefined || !('value' in descriptor)) {
       throw new ProjectTemplateCliRemotePortError('INTERNAL');
@@ -181,7 +207,7 @@ function snapshotPlan(value: ProjectTemplateCliRemoteDerivedPlan): ProjectTempla
     plan[key] = descriptor.value;
   }
   if (typeof plan.transactionPlanId !== 'string'
-    || !SHA256.test(plan.transactionPlanId)
+    || !testPattern(SHA256, plan.transactionPlanId)
     || !count(plan.changeCount) || !count(plan.conflictCount) || !count(plan.dependencyCount)
     || typeof plan.updateAvailable !== 'boolean'
     || typeof plan.reviewRequired !== 'boolean'
@@ -189,16 +215,26 @@ function snapshotPlan(value: ProjectTemplateCliRemoteDerivedPlan): ProjectTempla
     || typeof plan.defaultApplyPossible !== 'boolean'
     || typeof plan.forceApplicable !== 'boolean'
     || (typeof plan.authority !== 'object' && typeof plan.authority !== 'function')
-    || plan.authority === null || types.isProxy(plan.authority)
+    || plan.authority === null || CAPTURED_IS_PROXY(plan.authority)
   ) throw new ProjectTemplateCliRemotePortError('INTERNAL');
-  return Object.freeze({ ...plan }) as unknown as ProjectTemplateCliRemoteDerivedPlan;
+  return CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_FREEZE, Object, [plan],
+  ) as unknown as ProjectTemplateCliRemoteDerivedPlan;
 }
 
 function guardCode(blocks: readonly { readonly code: string }[]): ProjectTemplateCliErrorCode {
-  const codes = new Set(blocks.map((block) => block.code));
-  if (codes.has('RECOVERY_REQUIRED')) return 'RECOVERY_REQUIRED';
-  if (codes.has('ACTIVE_RUN')) return 'ACTIVE_RUN';
-  if (codes.has('SECURITY_GUARD')) return 'SECURITY_GUARD';
+  let recoveryRequired = false;
+  let activeRun = false;
+  let securityGuard = false;
+  for (let index = 0; index < blocks.length; index += 1) {
+    const code = blocks[index]?.code;
+    if (code === 'RECOVERY_REQUIRED') recoveryRequired = true;
+    if (code === 'ACTIVE_RUN') activeRun = true;
+    if (code === 'SECURITY_GUARD') securityGuard = true;
+  }
+  if (recoveryRequired) return 'RECOVERY_REQUIRED';
+  if (activeRun) return 'ACTIVE_RUN';
+  if (securityGuard) return 'SECURITY_GUARD';
   return 'APPLY_GUARD_BLOCKED';
 }
 
@@ -218,29 +254,36 @@ function aborted(signal: AbortSignal | undefined): boolean {
 }
 
 function snapshotPort(value: unknown): ProjectTemplateCliRemoteApplyPort {
-  if (typeof value !== 'object' || value === null || types.isProxy(value)
-    || Object.getPrototypeOf(value) !== Object.prototype) {
+  if (typeof value !== 'object' || value === null || CAPTURED_IS_PROXY(value)
+    || CAPTURED_REFLECT_APPLY(CAPTURED_GET_PROTOTYPE_OF, Object, [value])
+      !== CAPTURED_OBJECT_PROTOTYPE) {
     throw new TypeError('remote apply port is invalid');
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_GET_OWN_PROPERTY_DESCRIPTORS, Object, [value],
+  ) as Record<string, PropertyDescriptor>;
   const keys = ['inspectGuard', 'derive', 'execute'] as const;
-  if (Reflect.ownKeys(descriptors).length !== keys.length) {
+  if ((CAPTURED_REFLECT_APPLY(CAPTURED_OWN_KEYS, Reflect, [descriptors]) as PropertyKey[]).length
+    !== keys.length) {
     throw new TypeError('remote apply port is invalid');
   }
-  const methods = Object.create(null) as Record<string, (...args: never[]) => unknown>;
-  for (const key of keys) {
+  const methods = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_CREATE, Object, [null],
+  ) as Record<string, (...args: never[]) => unknown>;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
     const descriptor = descriptors[key];
     if (descriptor === undefined || !('value' in descriptor)
-      || typeof descriptor.value !== 'function' || types.isProxy(descriptor.value)) {
+      || typeof descriptor.value !== 'function' || CAPTURED_IS_PROXY(descriptor.value)) {
       throw new TypeError('remote apply port is invalid');
     }
     methods[key] = descriptor.value as (...args: never[]) => unknown;
   }
-  return Object.freeze({
+  return CAPTURED_REFLECT_APPLY(CAPTURED_OBJECT_FREEZE, Object, [{
     inspectGuard: methods['inspectGuard']!.bind(value),
     derive: methods['derive']!.bind(value),
     execute: methods['execute']!.bind(value),
-  }) as unknown as ProjectTemplateCliRemoteApplyPort;
+  }]) as unknown as ProjectTemplateCliRemoteApplyPort;
 }
 
 function validBase(options: ProjectTemplateCliRemoteBaseOptions): boolean {
@@ -259,48 +302,42 @@ function snapshotOptions(
   value: unknown,
   mutation: boolean,
 ): ProjectTemplateCliRemoteBaseOptions | ProjectTemplateCliRemoteMutationOptions | undefined {
-  if (typeof value !== 'object' || value === null || types.isProxy(value)
-    || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const modeDescriptor = descriptors['mode'];
-  const mode = modeDescriptor !== undefined && 'value' in modeDescriptor
-    ? modeDescriptor.value : undefined;
-  const required = [
-    'cwd', 'source', 'currentTaktVersion', 'baselineStrategy', 'force',
-    ...(mutation ? ['mode'] : []),
-    ...(mutation && mode === 'apply' ? ['expectedPlanId'] : []),
-  ];
-  const allowed = new Set([...required, 'signal', 'admitMutation']);
-  const keys = Reflect.ownKeys(descriptors);
-  if (keys.some((key) => typeof key !== 'string' || !allowed.has(key))
-    || required.some((key) => !keys.includes(key))) return undefined;
-  const snapshot = Object.create(null) as Record<string, unknown>;
-  for (const key of keys) {
-    const name = key as string;
-    const descriptor = descriptors[name];
-    if (descriptor === undefined || !('value' in descriptor)) return undefined;
-    snapshot[name] = descriptor.value;
+  let snapshot: Readonly<Record<string, unknown>>;
+  try {
+    const mode = mutation ? requestedMode(value) : 'dry-run';
+    snapshot = snapshotProjectTemplateCliOwnData(value,
+      mutation
+        ? mode === 'apply'
+          ? ['cwd', 'source', 'currentTaktVersion', 'baselineStrategy', 'force', 'mode',
+            'expectedPlanId', 'admitMutation']
+          : ['cwd', 'source', 'currentTaktVersion', 'baselineStrategy', 'force', 'mode']
+        : ['cwd', 'source', 'currentTaktVersion', 'baselineStrategy', 'force'],
+      ['signal']);
+  } catch {
+    return undefined;
   }
+  const mode = snapshot['mode'];
   const base = {
     cwd: snapshot['cwd'], source: snapshot['source'],
     currentTaktVersion: snapshot['currentTaktVersion'],
     baselineStrategy: snapshot['baselineStrategy'], force: snapshot['force'],
     ...(snapshot['signal'] === undefined ? {} : { signal: snapshot['signal'] }),
-    ...(snapshot['admitMutation'] === undefined ? {} : { admitMutation: snapshot['admitMutation'] }),
   } as ProjectTemplateCliRemoteBaseOptions;
-  if (!validBase(base)
-    || (base.admitMutation !== undefined && typeof base.admitMutation !== 'function')) return undefined;
+  if (!validBase(base)) return undefined;
   if (!mutation) return Object.freeze(base);
   if (mode === 'dry-run') return Object.freeze({ ...base, mode: 'dry-run' as const });
   if (mode === 'apply' && typeof snapshot['expectedPlanId'] === 'string') {
-    return Object.freeze({ ...base, mode: 'apply' as const, expectedPlanId: snapshot['expectedPlanId'] });
+    return Object.freeze({ ...base, mode: 'apply' as const,
+      expectedPlanId: snapshot['expectedPlanId'], admitMutation: snapshot['admitMutation'] as ProjectTemplateCliMutationAdmission });
   }
   return undefined;
 }
 
 function requestedMode(value: unknown): 'dry-run' | 'apply' {
-  if (typeof value !== 'object' || value === null || types.isProxy(value)) return 'dry-run';
-  const descriptor = Object.getOwnPropertyDescriptor(value, 'mode');
+  if (typeof value !== 'object' || value === null || CAPTURED_IS_PROXY(value)) return 'dry-run';
+  const descriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_GET_OWN_PROPERTY_DESCRIPTOR, Object, [value, 'mode'],
+  ) as PropertyDescriptor | undefined;
   return descriptor !== undefined && 'value' in descriptor && descriptor.value === 'apply'
     ? 'apply' : 'dry-run';
 }
@@ -363,7 +400,7 @@ export function createProjectTemplateCliRemoteApplyService(
     options: Extract<ProjectTemplateCliRemoteMutationOptions, { mode: 'apply' }>,
   ): Promise<ProjectTemplateCliOutcome> => {
     if (!validBase(options)) return failure(command, 'apply', 'INVALID_ARGUMENT');
-    if (!SHA256.test(options.expectedPlanId)) return failure(command, 'apply', 'INVALID_EXPECTED_PLAN_ID');
+    if (!testPattern(SHA256, options.expectedPlanId)) return failure(command, 'apply', 'INVALID_EXPECTED_PLAN_ID');
     const derived = await derive(options, command, 'apply');
     if ('envelope' in derived) return derived;
     if (derived.transactionPlanId !== options.expectedPlanId) return failure(command, 'apply', 'PLAN_DRIFT');
@@ -380,9 +417,10 @@ export function createProjectTemplateCliRemoteApplyService(
       return failure(command, 'apply', 'REVIEW_REQUIRED');
     }
     try {
-      options.admitMutation?.();
-    } catch {
-      return failure(command, 'apply', aborted(options.signal) ? 'INTERRUPTED' : 'INTERNAL');
+      consumeProjectTemplateCliMutationAdmission(options.admitMutation);
+    } catch (error) {
+      return failure(command, 'apply', aborted(options.signal) ? 'INTERRUPTED'
+        : error instanceof ProjectTemplateCliInvalidAdmission ? 'SECURITY_GUARD' : 'INTERNAL');
     }
     try {
       // Cancellation is intentionally not forwarded after this admission
@@ -404,12 +442,13 @@ export function createProjectTemplateCliRemoteApplyService(
         return failure(command, 'apply', code);
       }
       if (result.transactionPlanId !== options.expectedPlanId
-        || !SAFE_ID.test(result.backupId)) return failure(command, 'apply', 'RESULT_INDETERMINATE');
+        || !testPattern(SAFE_ID, result.backupId)) return failure(command, 'apply', 'RESULT_INDETERMINATE');
       return success(command, 'apply', command === 'project-template update'
         ? { planId: result.transactionPlanId, updated: true, backupId: result.backupId, recoveryState: 'clean' }
         : { planId: result.transactionPlanId, applied: true, backupId: result.backupId, recoveryState: 'clean' });
     } catch (error) {
-      return failure(command, 'apply', portFailure(error));
+      return failure(command, 'apply', error instanceof ProjectTemplateCliRemotePortError
+        ? portFailure(error) : 'RESULT_INDETERMINATE');
     }
   };
 
@@ -423,7 +462,9 @@ export function createProjectTemplateCliRemoteApplyService(
     async apply(value: ProjectTemplateCliRemoteMutationOptions) {
       const options = snapshotOptions(value, true) as ProjectTemplateCliRemoteMutationOptions | undefined;
       if (options === undefined) {
-        return failure('project-template apply', requestedMode(value), 'INVALID_ARGUMENT');
+        const mode = requestedMode(value);
+        return failure('project-template apply', mode,
+          mode === 'apply' ? 'SECURITY_GUARD' : 'INVALID_ARGUMENT');
       }
       return options.mode === 'dry-run'
         ? await dry('project-template apply', options)
@@ -432,7 +473,9 @@ export function createProjectTemplateCliRemoteApplyService(
     async update(value: ProjectTemplateCliRemoteMutationOptions) {
       const options = snapshotOptions(value, true) as ProjectTemplateCliRemoteMutationOptions | undefined;
       if (options === undefined) {
-        return failure('project-template update', requestedMode(value), 'INVALID_ARGUMENT');
+        const mode = requestedMode(value);
+        return failure('project-template update', mode,
+          mode === 'apply' ? 'SECURITY_GUARD' : 'INVALID_ARGUMENT');
       }
       return options.mode === 'dry-run'
         ? await dry('project-template update', options)

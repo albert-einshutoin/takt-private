@@ -23,6 +23,12 @@ import {
 } from './cli-machine-contract.js';
 import { TaktpackError } from './errors.js';
 import {
+  consumeProjectTemplateCliMutationAdmission,
+  ProjectTemplateCliInvalidAdmission,
+  snapshotProjectTemplateCliOwnData,
+  type ProjectTemplateCliMutationAdmission,
+} from './cli-lifecycle.js';
+import {
   createProjectTemplateExportPlan,
   getProjectTemplateExportSourceState,
 } from './export-plan.js';
@@ -35,7 +41,7 @@ interface ProjectTemplateCliExportInput {
   readonly exportOptions: ProjectTemplateExportOptions;
   readonly mutation: ProjectTemplateCliMutationOptions;
   readonly signal?: AbortSignal;
-  readonly admitMutation?: () => void;
+  readonly admitMutation?: ProjectTemplateCliMutationAdmission;
 }
 
 interface PlannedExport {
@@ -196,8 +202,24 @@ export async function executeProjectTemplateCliExport(
   input: ProjectTemplateCliExportInput,
   testSeam: ProjectTemplateCliExportTestSeam = {},
 ): Promise<ProjectTemplateCliOutcome> {
-  const mode = input.mutation.mode;
+  let mode: ProjectTemplateCliMutationOptions['mode'] = 'dry-run';
+  let mutationAdmitted = false;
   try {
+    const snapshot = snapshotProjectTemplateCliOwnData(input,
+      ['projectRoot', 'outputPath', 'exportOptions', 'mutation'],
+      ['signal', 'admitMutation']);
+    const mutation = snapshotProjectTemplateCliOwnData(snapshot['mutation'],
+      ['mode', 'force'], ['expectedPlanId']);
+    const applyMode = mutation['mode'] === 'apply';
+    if ((!applyMode && mutation['mode'] !== 'dry-run')
+      || typeof mutation['force'] !== 'boolean'
+      || (applyMode && (!('expectedPlanId' in mutation) || !('admitMutation' in snapshot)))
+      || typeof snapshot['projectRoot'] !== 'string' || typeof snapshot['outputPath'] !== 'string'
+      || (snapshot['signal'] !== undefined && !(snapshot['signal'] instanceof AbortSignal))) {
+      throw new ProjectTemplateCliInvalidAdmission();
+    }
+    mode = mutation['mode'] as ProjectTemplateCliMutationOptions['mode'];
+    input = { ...snapshot, mutation } as unknown as ProjectTemplateCliExportInput;
     input.signal?.throwIfAborted();
     if (!isAbsolute(input.projectRoot)) throw new CliExportBoundaryError('INVALID_ARGUMENT');
     const projectRoot = await realpath(resolve(input.projectRoot));
@@ -230,9 +252,10 @@ export async function executeProjectTemplateCliExport(
         exitCode: 0,
       };
     }
-    if (input.mutation.expectedPlanId !== planned.planId) {
+    const applyMutation = input.mutation as Extract<ProjectTemplateCliMutationOptions, { mode: 'apply' }>;
+    if (applyMutation.expectedPlanId !== planned.planId) {
       const code = planned.output.projection.target.state === 'regular-file'
-        && input.mutation.expectedPlanId === planned.absentTargetPlanId
+        && applyMutation.expectedPlanId === planned.absentTargetPlanId
         ? 'TARGET_DRIFT'
         : 'PLAN_DRIFT';
       return failure(mode, code);
@@ -256,9 +279,11 @@ export async function executeProjectTemplateCliExport(
     );
     if (finalPlanId !== planned.planId) return failure(mode, 'TARGET_DRIFT');
     try {
-      input.admitMutation?.();
-    } catch {
-      return failure(mode, input.signal?.aborted === true ? 'INTERRUPTED' : 'INTERNAL');
+      consumeProjectTemplateCliMutationAdmission(input.admitMutation);
+      mutationAdmitted = true;
+    } catch (error) {
+      return failure(mode, input.signal?.aborted === true ? 'INTERRUPTED'
+        : error instanceof ProjectTemplateCliInvalidAdmission ? 'SECURITY_GUARD' : 'INTERNAL');
     }
     const archive = await writeTaktpackWithOutputPrecondition(
       input.outputPath,
@@ -280,6 +305,10 @@ export async function executeProjectTemplateCliExport(
       exitCode: 0,
     };
   } catch (error) {
+    if (mutationAdmitted) return failure(mode, 'RESULT_INDETERMINATE');
+    if (error instanceof ProjectTemplateCliInvalidAdmission) {
+      return failure(mode, 'SECURITY_GUARD');
+    }
     return failure(mode, mapError(error));
   }
 }

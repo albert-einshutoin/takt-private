@@ -11,6 +11,12 @@ import {
   type ProjectTemplateCliOutcome,
   type ProjectTemplateCliReviewCode,
 } from './cli-machine-contract.js';
+import {
+  consumeProjectTemplateCliMutationAdmission,
+  ProjectTemplateCliInvalidAdmission,
+  snapshotProjectTemplateCliOwnData,
+  type ProjectTemplateCliMutationAdmission,
+} from './cli-lifecycle.js';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -106,7 +112,6 @@ export interface ProjectTemplateCliLocalBaseOptions {
   readonly currentTaktVersion: string;
   readonly force: boolean;
   readonly signal?: AbortSignal;
-  readonly admitMutation?: () => void;
 }
 
 export type ProjectTemplateCliLocalApplyOptions =
@@ -114,6 +119,7 @@ export type ProjectTemplateCliLocalApplyOptions =
   | (ProjectTemplateCliLocalBaseOptions & {
     readonly mode: 'apply';
     readonly expectedPlanId: string;
+    readonly admitMutation: ProjectTemplateCliMutationAdmission;
   });
 
 export interface ProjectTemplateCliLocalApplyService {
@@ -349,6 +355,30 @@ export function createProjectTemplateCliLocalApplyService(
       }
     },
     async apply(options: ProjectTemplateCliLocalApplyOptions): Promise<ProjectTemplateCliOutcome> {
+      const requestedMode = typeof options === 'object' && options !== null
+        && !CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [options])
+        && CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(options, 'mode')?.value === 'apply'
+        ? 'apply' as const : 'dry-run' as const;
+      let safeOptions: ProjectTemplateCliLocalApplyOptions;
+      try {
+        const snapshot = snapshotProjectTemplateCliOwnData(options,
+          ['cwd', 'sourcePath', 'currentTaktVersion', 'force', 'mode'],
+          ['signal', 'expectedPlanId', 'admitMutation']);
+        const applyMode = snapshot['mode'] === 'apply';
+        if ((!applyMode && snapshot['mode'] !== 'dry-run')
+          || (applyMode && (!('expectedPlanId' in snapshot) || !('admitMutation' in snapshot)))
+          || (!applyMode && ('expectedPlanId' in snapshot || 'admitMutation' in snapshot))
+          || typeof snapshot['cwd'] !== 'string' || typeof snapshot['sourcePath'] !== 'string'
+          || typeof snapshot['currentTaktVersion'] !== 'string'
+          || typeof snapshot['force'] !== 'boolean'
+          || (snapshot['signal'] !== undefined && !(snapshot['signal'] instanceof AbortSignal))) {
+          throw new ProjectTemplateCliInvalidAdmission();
+        }
+        safeOptions = snapshot as unknown as ProjectTemplateCliLocalApplyOptions;
+      } catch {
+        return failure('project-template apply', requestedMode, 'SECURITY_GUARD');
+      }
+      options = safeOptions;
       const outputMode = options.mode;
       if (!active(options.signal)) return failure('project-template apply', outputMode, 'INTERRUPTED');
       const cwd = resolve(options.cwd);
@@ -399,10 +429,11 @@ export function createProjectTemplateCliLocalApplyService(
       // Mutation admission begins inside this one trusted call. Cancellation
       // after it starts must never make the CLI abandon executor recovery.
       try {
-        options.admitMutation?.();
-      } catch {
+        consumeProjectTemplateCliMutationAdmission(options.admitMutation);
+      } catch (error) {
         return failure('project-template apply', 'apply',
-          active(options.signal) ? 'INTERNAL' : 'INTERRUPTED');
+          !active(options.signal) ? 'INTERRUPTED'
+            : error instanceof ProjectTemplateCliInvalidAdmission ? 'SECURITY_GUARD' : 'INTERNAL');
       }
       let executed: ProjectTemplateCliLocalExecutionResult;
       try {
