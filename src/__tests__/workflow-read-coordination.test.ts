@@ -30,7 +30,11 @@ import {
   listWorkflowEntries,
   loadWorkflowByIdentifier,
 } from '../infra/config/loaders/workflowLoader.js';
-import { loadPersonaPromptFromPath } from '../infra/config/loaders/agentLoader.js';
+import {
+  loadAgentPrompt,
+  loadPersonaPromptFromPath,
+  validatePersonaPromptPath,
+} from '../infra/config/loaders/agentLoader.js';
 import { resolveFacetByName } from '../infra/config/loaders/resource-resolver.js';
 import { createRepertoireResourceReadAccess } from '../infra/config/loaders/repertoireResourceReadAccess.js';
 import { resolveWorkflowProviderOptionsWithHost } from '../infra/config/loaders/workflowProviderOptionsResolver.js';
@@ -362,6 +366,38 @@ steps:
       writer.release();
     }
     expect(loadPersonaPromptFromPath(personaPath, projectDir)).toBe('You review changes.');
+  });
+
+  it('does not let an ancestor alias bypass persona read coordination on any public path', async () => {
+    createProjectWorkflowWithScopedResources();
+    const aliasRoot = join(projectDir, 'global-config-alias');
+    symlinkSync(configDir, aliasRoot);
+    const personaPath = join(
+      aliasRoot,
+      'repertoire',
+      '@owner',
+      'repo',
+      'facets',
+      'personas',
+      'reviewer.md',
+    );
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+    });
+    try {
+      expect(() => validatePersonaPromptPath(personaPath, projectDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+      expect(() => loadAgentPrompt({ name: 'reviewer', promptFile: personaPath }, projectDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+      expect(() => loadPersonaPromptFromPath(personaPath, projectDir)).toThrow(
+        expect.objectContaining({ code: 'REPERTOIRE_BUSY' }),
+      );
+    } finally {
+      writer.release();
+    }
   });
 
   it.each(['facet', 'partial', 'persona', 'provider'] as const)(

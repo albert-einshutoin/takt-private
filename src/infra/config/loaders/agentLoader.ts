@@ -50,21 +50,30 @@ function getAllowedPromptBases(cwd: string): string[] {
 }
 
 export function validatePersonaPromptPath(personaPath: string, cwd: string): void {
-  assertAllowedPromptPath(personaPath, cwd);
-  if (isRepertoirePromptPath(personaPath)) {
+  const allowed = assertAllowedPromptPath(personaPath, cwd);
+  if (allowed.isRepertoire) {
     readRepertoirePersonaPrompt(personaPath, false);
     return;
   }
   assertPromptExists(personaPath);
 }
 
-function assertAllowedPromptPath(personaPath: string, cwd: string): string {
+type AllowedPromptPath = {
+  isRepertoire: boolean;
+  trustedBaseDir: string;
+};
+
+function assertAllowedPromptPath(personaPath: string, cwd: string): AllowedPromptPath {
   const allowedBase = getAllowedPromptBases(cwd).find((base) => isPathSafe(base, personaPath));
   if (!allowedBase) {
     throw new Error(`Persona prompt file path is not allowed: ${personaPath}`);
   }
-  return alignBasePathSpelling(allowedBase, personaPath);
-
+  return {
+    // Repertoire membership follows filesystem identity, not caller spelling.
+    // Otherwise an ancestor alias can select the uncoordinated resource reader.
+    isRepertoire: isRepertoirePromptPath(personaPath),
+    trustedBaseDir: alignBasePathSpelling(allowedBase, personaPath),
+  };
 }
 
 function alignBasePathSpelling(allowedBase: string, personaPath: string): string {
@@ -90,7 +99,17 @@ function assertPromptExists(personaPath: string): void {
 }
 
 function isRepertoirePromptPath(personaPath: string): boolean {
-  const candidate = relative(getRepertoireDir(), personaPath);
+  const repertoireDir = getRepertoireDir();
+  if (isInsideRepertoire(repertoireDir, personaPath)) return true;
+  try {
+    return isInsideRepertoire(realpathSync(repertoireDir), realpathSync(personaPath));
+  } catch {
+    return false;
+  }
+}
+
+function isInsideRepertoire(repertoireDir: string, personaPath: string): boolean {
+  const candidate = relative(repertoireDir, personaPath);
   return candidate !== '' && !candidate.startsWith('..') && !isAbsolute(candidate);
 }
 
@@ -149,13 +168,13 @@ export function loadAgentPrompt(agent: CustomAgentConfig, cwd: string): string {
 
   if (agent.promptFile) {
     const promptFile = agent.promptFile;
-    const allowedBase = assertAllowedPromptPath(promptFile, cwd);
+    const allowed = assertAllowedPromptPath(promptFile, cwd);
 
-    if (isRepertoirePromptPath(promptFile)) return readRepertoirePersonaPrompt(promptFile, true);
+    if (allowed.isRepertoire) return readRepertoirePersonaPrompt(promptFile, true);
 
     assertPromptExists(promptFile);
 
-    return readStableWorkflowResourceText(agent.promptFile, allowedBase);
+    return readStableWorkflowResourceText(agent.promptFile, allowed.trustedBaseDir);
   }
 
   throw new Error(`Agent ${agent.name} has no prompt defined`);
@@ -163,8 +182,8 @@ export function loadAgentPrompt(agent: CustomAgentConfig, cwd: string): string {
 
 /** Load persona prompt from a resolved path. */
 export function loadPersonaPromptFromPath(personaPath: string, cwd: string): string {
-  const allowedBase = assertAllowedPromptPath(personaPath, cwd);
-  if (isRepertoirePromptPath(personaPath)) return readRepertoirePersonaPrompt(personaPath, true);
+  const allowed = assertAllowedPromptPath(personaPath, cwd);
+  if (allowed.isRepertoire) return readRepertoirePersonaPrompt(personaPath, true);
   assertPromptExists(personaPath);
-  return readStableWorkflowResourceText(personaPath, allowedBase);
+  return readStableWorkflowResourceText(personaPath, allowed.trustedBaseDir);
 }
