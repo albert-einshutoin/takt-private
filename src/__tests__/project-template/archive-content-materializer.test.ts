@@ -50,6 +50,28 @@ async function pack(projectRoot: string): Promise<string> {
   return output;
 }
 
+async function duplicateExpansionPack(projectRoot: string): Promise<string> {
+  const content = `name: review\n# ${'x'.repeat(4 * 1024)}`;
+  for (let index = 0; index < 100; index += 1) {
+    const absolute = join(projectRoot, '.takt', 'workflows', `copy-${index}.yaml`);
+    mkdirSync(dirname(absolute), { recursive: true });
+    writeFileSync(absolute, content);
+  }
+  const plan = await createProjectTemplateExportPlan(projectRoot, {
+    packVersion: '1.0.0',
+    takt: { minVersion: '0.48.0' },
+    source: {
+      kind: 'local',
+      uri: '.',
+      ref: 'workspace',
+      commit: 'a'.repeat(40),
+    },
+  });
+  const output = join(projectRoot, 'duplicate-expansion.taktpack');
+  await writeTaktpack(output, plan);
+  return output;
+}
+
 describe('bounded taktpack content materializer', () => {
   it('reuses canonical streaming inspection and returns manifest-matching blobs only', async () => {
     const projectRoot = root();
@@ -111,5 +133,22 @@ describe('bounded taktpack content materializer', () => {
       },
     })).rejects.toMatchObject({ code: 'ARCHIVE_READ_FAILED' });
     expect(failedPhases.at(-1)).toBe('close');
+  });
+
+  it('rejects duplicate-path expansion before allocating resolved path bytes', async () => {
+    const projectRoot = root();
+    const archive = await duplicateExpansionPack(projectRoot);
+
+    let pathAllocations = 0;
+    await expect(materializeTaktpackContentsWithIoSeam(archive, {
+      limits: { maxTotalBytes: 128 * 1024 },
+    }, {
+      onMaterializedPathAllocation() {
+        pathAllocations += 1;
+      },
+    } as never)).rejects.toMatchObject({
+      code: 'ARCHIVE_LIMIT_EXCEEDED',
+    });
+    expect(pathAllocations).toBe(0);
   });
 });
