@@ -30,4 +30,23 @@ describe('project-template shell completions', () => {
       for (const option of mutation) expect(line).not.toContain(option);
     }
   });
+
+  it('keeps the English and Japanese operator contracts synchronized', () => {
+    const guides = [
+      readFileSync(resolve('docs/project-templates.md'), 'utf8'),
+      readFileSync(resolve('docs/project-templates.ja.md'), 'utf8'),
+    ];
+    for (const guide of guides) {
+      for (const command of commands) {
+        expect(guide).toContain(`\`${command}\``);
+      }
+      for (const option of [...common, ...mutation]) expect(guide).toContain(option);
+      for (const code of ['`0`', '`20`', '`21`', '`22`', '`23`', '`24`', '`25`', '`70`', '`130`']) {
+        expect(guide).toContain(code);
+      }
+      expect(guide).toContain('process-local');
+      expect(guide).toContain('devloopd onboard-repo');
+      expect(guide).toContain('TaktDesk');
+    }
+  });
 });
