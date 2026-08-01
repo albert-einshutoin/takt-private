@@ -52,7 +52,7 @@ async function pack(projectRoot: string): Promise<string> {
 
 async function duplicateExpansionPack(projectRoot: string): Promise<string> {
   const content = `name: review\n# ${'x'.repeat(4 * 1024)}`;
-  for (let index = 0; index < 100; index += 1) {
+  for (let index = 0; index < 4; index += 1) {
     const absolute = join(projectRoot, '.takt', 'workflows', `copy-${index}.yaml`);
     mkdirSync(dirname(absolute), { recursive: true });
     writeFileSync(absolute, content);
@@ -141,7 +141,7 @@ describe('bounded taktpack content materializer', () => {
 
     let pathAllocations = 0;
     await expect(materializeTaktpackContentsWithIoSeam(archive, {
-      limits: { maxTotalBytes: 128 * 1024 },
+      limits: { maxTotalBytes: 12 * 1024 },
     }, {
       onMaterializedPathAllocation() {
         pathAllocations += 1;
