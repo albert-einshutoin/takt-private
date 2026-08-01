@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   calculateProjectTemplateManifestSha256,
 } from '../../features/project-template/binding.js';
@@ -22,9 +31,29 @@ import {
   renderProjectTemplateApplyPreviewJson,
 } from '../../features/project-template/apply-preview.js';
 import { serializeTemplateLock } from '../../features/project-template/lock.js';
+import {
+  consumeProjectTemplateApplyPreviewApproval,
+  issueTrustedProjectTemplateApplyPreviewApproval,
+} from '../../features/project-template/apply-preview-approval.js';
+import {
+  initializeProjectTemplateApplyStorage,
+} from '../../features/project-template/apply-storage.js';
+import { canonicalizeTaktpackJson } from '../../features/project-template/canonical-json.js';
 
 const RECEIPT_KEY = '9'.repeat(64);
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true });
+});
+
+function repository(): string {
+  const value = mkdtempSync(join(tmpdir(), 'takt-remote-approval-'));
+  roots.push(value);
+  mkdirSync(join(value, '.takt'), { mode: 0o700 });
+  return value;
+}
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -213,5 +242,65 @@ describe('remote project template composite preview', () => {
       ...options,
       nextContentLockSha256: undefined,
     } as never)).toThrow();
+  });
+
+  it('approval explicitly binds previewId and transactionPlanId single-use', async () => {
+    const projectRoot = repository();
+    const value = preview();
+    const now = new Date('2026-08-01T00:00:00.000Z');
+    const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'adopt-identical',
+      now,
+    });
+    const recordPath = join(
+      projectRoot,
+      '.takt-template-state',
+      'approvals',
+      `${evidence.approvalId}.json`,
+    );
+    const record = JSON.parse(readFileSync(recordPath, 'utf8')) as Record<string, unknown>;
+    expect(record['previewId']).toBe(value.previewId);
+    expect(record['transactionPlanId']).toBe(value.transactionPlanId);
+
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'adopt-identical',
+      evidence,
+      now: new Date('2026-08-01T00:01:00.000Z'),
+    })).resolves.toBe(true);
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'adopt-identical',
+      evidence,
+      now: new Date('2026-08-01T00:01:00.000Z'),
+    })).resolves.toBe(false);
+
+    const tamperedEvidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      preview: value,
+      baselineStrategy: 'adopt-identical',
+      now,
+    });
+    const tamperedPath = join(
+      projectRoot,
+      '.takt-template-state',
+      'approvals',
+      `${tamperedEvidence.approvalId}.json`,
+    );
+    const tampered = JSON.parse(readFileSync(tamperedPath, 'utf8')) as Record<string, unknown>;
+    tampered['transactionPlanId'] = '0'.repeat(64);
+    writeFileSync(tamperedPath, `${canonicalizeTaktpackJson(tampered)}\n`, { mode: 0o600 });
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'adopt-identical',
+      evidence: tamperedEvidence,
+      now: new Date('2026-08-01T00:01:00.000Z'),
+    })).resolves.toBe(false);
   });
 });
