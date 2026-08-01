@@ -25,6 +25,9 @@ import {
 } from './source-provenance.js';
 import type { TemplateLockV1 } from './types.js';
 import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from './repertoire-dependency-canonical.js';
+import {
   requireActiveRemotePreview,
   type ProjectTemplateRemotePreviewOperationContext,
 } from './remote-preview-operation.js';
@@ -89,6 +92,15 @@ export interface ProjectTemplateUpdateCompanionLockState {
 export type ProjectTemplateCompanionLockState =
   | ProjectTemplateFirstInstallCompanionLockState
   | ProjectTemplateUpdateCompanionLockState;
+
+export type ProjectTemplateCompanionLockStateIoPhase =
+  | 'root-opened'
+  | 'before-final-revalidation'
+  | 'root-closed';
+
+export interface ProjectTemplateCompanionLockStateIoSeam {
+  onPhase?(phase: ProjectTemplateCompanionLockStateIoPhase): void;
+}
 
 function fail(code: ProjectTemplateCompanionLockStateErrorCode): never {
   throw new ProjectTemplateCompanionLockStateError(code);
@@ -216,8 +228,10 @@ function verifyCohortStable(observed: readonly ObservedLock[]): void {
     const lock = observed[index]!;
     if (isOpened(lock)) {
       let pathStat: Stats;
+      let openedStat: Stats;
       try {
         pathStat = lstatSync(lock.path);
+        openedStat = fstatSync(lock.fd);
       } catch {
         fail('UNSAFE_LOCK');
       }
@@ -225,7 +239,7 @@ function verifyCohortStable(observed: readonly ObservedLock[]): void {
         pathStat.isSymbolicLink()
         || !pathStat.isFile()
         || !sameStats(lock.before, pathStat)
-        || !sameStats(lock.before, fstatSync(lock.fd))
+        || !sameStats(lock.before, openedStat)
       ) fail('UNSAFE_LOCK');
     } else {
       try {
@@ -293,6 +307,32 @@ function parseContentLock(content: Uint8Array): Readonly<TemplateLockV1> {
   return Object.freeze(parsed);
 }
 
+function verifyCohortSemantics(
+  content: Readonly<TemplateLockV1>,
+  repertoire: ProjectTemplateRepertoireDependencyLockV1,
+  source: ProjectTemplateSourceProvenanceV1,
+): void {
+  const declarationSha256 =
+    calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+      repertoire.dependencies,
+    );
+  if (
+    content.manifestSha256 !== repertoire.manifestSha256
+    || content.manifestSha256 !== source.archive.manifestSha256
+    || content.packVersion !== source.archive.version
+    || content.source.kind !== 'github'
+    || content.source.uri !== source.source.repositoryUrl
+    || content.source.ref !== source.source.releaseTag
+    || content.source.commit !== source.source.commit
+    || repertoire.sourceDescriptorSha256
+      !== source.source.descriptorSha256
+    || repertoire.dependencies.length
+      !== source.dependencyVerification.count
+    || declarationSha256
+      !== source.dependencyVerification.declarationSha256
+  ) fail('INVALID_LOCK');
+}
+
 /**
  * Reads the formal content, repertoire, and source locks as one cohort.
  *
@@ -304,6 +344,29 @@ function parseContentLock(content: Uint8Array): Readonly<TemplateLockV1> {
 export function readProjectTemplateCompanionLockState(
   projectRoot: string,
   operationContext?: ProjectTemplateRemotePreviewOperationContext,
+): ProjectTemplateCompanionLockState {
+  return readProjectTemplateCompanionLockStateInternal(
+    projectRoot,
+    operationContext,
+    {},
+  );
+}
+
+export function readProjectTemplateCompanionLockStateWithIoSeam(
+  projectRoot: string,
+  ioSeam: ProjectTemplateCompanionLockStateIoSeam,
+): ProjectTemplateCompanionLockState {
+  return readProjectTemplateCompanionLockStateInternal(
+    projectRoot,
+    undefined,
+    ioSeam,
+  );
+}
+
+function readProjectTemplateCompanionLockStateInternal(
+  projectRoot: string,
+  operationContext: ProjectTemplateRemotePreviewOperationContext | undefined,
+  ioSeam: ProjectTemplateCompanionLockStateIoSeam,
 ): ProjectTemplateCompanionLockState {
   if (operationContext !== undefined) {
     requireActiveRemotePreview(operationContext);
@@ -317,21 +380,21 @@ export function readProjectTemplateCompanionLockState(
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) fail('UNSAFE_ROOT');
 
-  let rootFd: number;
-  try {
-    rootFd = openSync(
-      absoluteRoot,
-      constants.O_RDONLY | NO_FOLLOW | DIRECTORY_FLAG,
-    );
-    verifyRootStable(absoluteRoot, rootFd, rootStat);
-  } catch (error) {
-    if (error instanceof ProjectTemplateCompanionLockStateError) throw error;
-    fail('UNSAFE_ROOT');
-  }
-
+  let rootFd: number | undefined;
   const observed: ObservedLock[] = [];
   let closeFailure = false;
   try {
+    try {
+      rootFd = openSync(
+        absoluteRoot,
+        constants.O_RDONLY | NO_FOLLOW | DIRECTORY_FLAG,
+      );
+      ioSeam.onPhase?.('root-opened');
+      verifyRootStable(absoluteRoot, rootFd, rootStat);
+    } catch (error) {
+      if (error instanceof ProjectTemplateCompanionLockStateError) throw error;
+      fail('UNSAFE_ROOT');
+    }
     observed.push(observe(join(absoluteRoot, CONTENT_LOCK_PATH)));
     observed.push(observe(join(
       absoluteRoot,
@@ -353,6 +416,9 @@ export function readProjectTemplateCompanionLockState(
       if (operationContext !== undefined) {
         requireActiveRemotePreview(operationContext);
       }
+      ioSeam.onPhase?.('before-final-revalidation');
+      verifyCohortStable(observed);
+      verifyRootStable(absoluteRoot, rootFd, rootStat);
       return Object.freeze({
         state: 'first-install' as const,
         previousLocksSha256: previousLocksSha256(undefined),
@@ -375,6 +441,7 @@ export function readProjectTemplateCompanionLockState(
       if (error instanceof ProjectTemplateCompanionLockStateError) throw error;
       fail('INVALID_LOCK');
     }
+    verifyCohortSemantics(contentLock, repertoireLock, sourceProvenance);
     const lockSha256 = Object.freeze({
       [CONTENT_LOCK_PATH]: sha256(content.content),
       [PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH]:
@@ -384,6 +451,9 @@ export function readProjectTemplateCompanionLockState(
     if (operationContext !== undefined) {
       requireActiveRemotePreview(operationContext);
     }
+    ioSeam.onPhase?.('before-final-revalidation');
+    verifyCohortStable(observed);
+    verifyRootStable(absoluteRoot, rootFd, rootStat);
     return Object.freeze({
       state: 'update' as const,
       contentLock,
@@ -398,10 +468,13 @@ export function readProjectTemplateCompanionLockState(
     } catch {
       closeFailure = true;
     }
-    try {
-      closeSync(rootFd);
-    } catch {
-      closeFailure = true;
+    if (rootFd !== undefined) {
+      try {
+        closeSync(rootFd);
+        ioSeam.onPhase?.('root-closed');
+      } catch {
+        closeFailure = true;
+      }
     }
     if (closeFailure) fail('UNREADABLE_LOCK');
   }
