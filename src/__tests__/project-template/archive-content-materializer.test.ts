@@ -146,7 +146,7 @@ describe('bounded taktpack content materializer', () => {
       onMaterializedPathAllocation() {
         pathAllocations += 1;
       },
-    } as never)).rejects.toMatchObject({
+    })).rejects.toMatchObject({
       code: 'ARCHIVE_LIMIT_EXCEEDED',
     });
     expect(pathAllocations).toBe(0);

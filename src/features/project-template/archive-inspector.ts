@@ -353,6 +353,11 @@ export interface TaktpackInspectorIoSeam {
   onPhase?(phase: TaktpackInspectorIoPhase): void;
 }
 
+export interface TaktpackMaterializerIoSeam extends TaktpackInspectorIoSeam {
+  /** Test-only observation point immediately before an independent path copy. */
+  onMaterializedPathAllocation?(path: string, bytes: number): void;
+}
+
 export interface MaterializedTaktpackContent {
   readonly path: string;
   readonly content: Uint8Array;
@@ -697,8 +702,11 @@ export function inspectTaktpack(
 export async function materializeTaktpackContentsWithIoSeam(
   archivePath: string,
   options: InspectTaktpackOptions = {},
-  ioSeam: TaktpackInspectorIoSeam = {},
+  ioSeam: TaktpackMaterializerIoSeam = {},
 ): Promise<MaterializedTaktpackContents> {
+  // Resolve synchronously so a caller cannot mutate the limit object while the
+  // archive inspection is awaiting filesystem I/O.
+  const limits = resolveTaktpackLimits(options.limits);
   const retainedBlobs = new Map<string, Buffer>();
   const inspection = await inspectTaktpackWithExpectedLinks(
     archivePath,
@@ -707,8 +715,8 @@ export async function materializeTaktpackContentsWithIoSeam(
     1,
     retainedBlobs,
   );
-  const contents = inspection.manifest.entries.map((entry) => {
-    const retained = retainedBlobs.get(entry.sha256);
+  const retainedFor = (sha256: string): Buffer => {
+    const retained = retainedBlobs.get(sha256);
     if (retained === undefined) {
       throw new TaktpackError(
         'MISSING_ARCHIVE_ENTRY',
@@ -716,8 +724,34 @@ export async function materializeTaktpackContentsWithIoSeam(
         'manifest.entries',
       );
     }
+    return retained;
+  };
+  let resolvedTotalBytes = 0;
+  for (const entry of inspection.manifest.entries) {
+    const retained = retainedFor(entry.sha256);
+    // The archive stores each digest once, but materialization deliberately
+    // creates independent bytes per manifest path. Account for that expanded
+    // size before making any path copy so repeated digest references cannot
+    // turn a bounded archive into an unbounded allocation.
+    if (retained.byteLength > limits.maxTotalBytes - resolvedTotalBytes) {
+      throw new TaktpackError(
+        'ARCHIVE_LIMIT_EXCEEDED',
+        'materialized archive contents exceed the total byte limit',
+        'contents',
+      );
+    }
+    resolvedTotalBytes += retained.byteLength;
+  }
+
+  const contents = inspection.manifest.entries.map(({ path, sha256 }) => {
+    const retained = retainedFor(sha256);
+    try {
+      ioSeam.onMaterializedPathAllocation?.(path, retained.byteLength);
+    } catch (error) {
+      throw normalizeInspectorIoError(error, 'contents');
+    }
     return Object.freeze({
-      path: entry.path,
+      path,
       // Each manifest path receives independent bytes. A caller editing its
       // preview copy cannot alias another path or a later materialization.
       content: new Uint8Array(retained),
