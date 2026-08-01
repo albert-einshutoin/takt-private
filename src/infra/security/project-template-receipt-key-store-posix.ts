@@ -6,17 +6,20 @@ import {
   fchmodSync,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
   openSync,
   readSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
   type BigIntStats,
 } from 'node:fs';
-import { isAbsolute, join, normalize, resolve } from 'node:path';
+import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import {
   parseProjectTemplateReceiptKeySnapshot,
   PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES,
@@ -335,6 +338,17 @@ interface PosixLockPolicy {
   readonly isProcessAlive: (pid: number) => boolean;
 }
 
+interface PosixLockOwnerRecord {
+  readonly pid: number;
+  readonly createdAtMs: number;
+  readonly token: string;
+}
+
+interface PosixLockObservation {
+  readonly record: PosixLockOwnerRecord;
+  readonly stat: BigIntStats;
+}
+
 function defaultProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -344,13 +358,170 @@ function defaultProcessAlive(pid: number): boolean {
   }
 }
 
+function parseCanonicalLockOwner(bytes: Uint8Array): PosixLockOwnerRecord | undefined {
+  const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8');
+  const parsed = JSON.parse(text) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  const descriptors = Object.getOwnPropertyDescriptors(parsed);
+  if (
+    Reflect.ownKeys(parsed).length !== 3
+    || !('value' in (descriptors['pid'] ?? {}))
+    || !('value' in (descriptors['createdAtMs'] ?? {}))
+    || !('value' in (descriptors['token'] ?? {}))
+  ) return undefined;
+  const pid = descriptors['pid']!.value as unknown;
+  const createdAtMs = descriptors['createdAtMs']!.value as unknown;
+  const token = descriptors['token']!.value as unknown;
+  if (
+    !Number.isSafeInteger(pid)
+    || (pid as number) < 1
+    || typeof createdAtMs !== 'number'
+    || !Number.isFinite(createdAtMs)
+    || createdAtMs < 0
+    || typeof token !== 'string'
+    || !/^[a-f0-9]{32}$/.test(token)
+  ) return undefined;
+  const record = { pid: pid as number, createdAtMs, token };
+  return text === JSON.stringify(record) ? record : undefined;
+}
+
+function observeStaleLock(
+  fd: number,
+  path: string,
+  policy: PosixLockPolicy,
+  expected?: PosixLockObservation,
+  afterRename = false,
+): PosixLockObservation | undefined {
+  const initial = fstatSync(fd, { bigint: true });
+  if (
+    !initial.isFile()
+    || initial.nlink !== 1n
+    || initial.uid !== BigInt(expectedUid())
+    || (initial.mode & 0o777n) !== 0o600n
+    || initial.size < 1n
+    || initial.size > 512n
+  ) return undefined;
+  const first = Buffer.alloc(Number(initial.size) + 1);
+  const second = Buffer.alloc(Number(initial.size) + 1);
+  try {
+    const readExact = (buffer: Buffer): number => {
+      let offset = 0;
+      while (offset < buffer.byteLength) {
+        const count = readSync(fd, buffer, offset, buffer.byteLength - offset, offset);
+        if (count === 0) break;
+        offset += count;
+      }
+      return offset;
+    };
+    const firstLength = readExact(first);
+    const secondLength = readExact(second);
+    const finalDescriptor = fstatSync(fd, { bigint: true });
+    const finalPath = lstatSync(path, { bigint: true });
+    if (
+      BigInt(firstLength) !== initial.size
+      || firstLength !== secondLength
+      || !timingSafeEqual(
+        first.subarray(0, firstLength),
+        second.subarray(0, secondLength),
+      )
+      || !sameFileState(initial, finalDescriptor)
+      || finalPath.dev !== finalDescriptor.dev
+      || finalPath.ino !== finalDescriptor.ino
+      || finalPath.mode !== finalDescriptor.mode
+      || finalPath.uid !== finalDescriptor.uid
+      || finalPath.nlink !== 1n
+      || (expected !== undefined && (
+        expected.stat.dev !== finalDescriptor.dev
+        || expected.stat.ino !== finalDescriptor.ino
+        || expected.stat.size !== finalDescriptor.size
+        || expected.stat.mode !== finalDescriptor.mode
+        || expected.stat.uid !== finalDescriptor.uid
+        || expected.stat.nlink !== finalDescriptor.nlink
+        || expected.stat.mtimeNs !== finalDescriptor.mtimeNs
+        || expected.stat.birthtimeNs !== finalDescriptor.birthtimeNs
+        || (!afterRename && expected.stat.ctimeNs !== finalDescriptor.ctimeNs)
+      ))
+    ) return undefined;
+    const record = parseCanonicalLockOwner(second.subarray(0, secondLength));
+    const now = policy.now();
+    if (
+      record === undefined
+      || !Number.isFinite(now)
+      || now < 0
+      || record.createdAtMs > now
+      || now - record.createdAtMs < policy.staleAfterMs
+    ) return undefined;
+    if (
+      expected !== undefined
+      && (
+        record.pid !== expected.record.pid
+        || record.createdAtMs !== expected.record.createdAtMs
+        || record.token !== expected.record.token
+      )
+    ) return undefined;
+    let alive: boolean;
+    try {
+      alive = policy.isProcessAlive(record.pid);
+    } catch {
+      return undefined;
+    }
+    if (typeof alive !== 'boolean' || alive) return undefined;
+    return { record, stat: finalDescriptor };
+  } finally {
+    first.fill(0);
+    second.fill(0);
+  }
+}
+
+function restoreQuarantinedLock(quarantinePath: string, lockPath: string): boolean {
+  try {
+    // link(2) is the available POSIX no-clobber primitive in Node. It restores
+    // the moved inode only when no newer lock already owns the canonical path.
+    linkSync(quarantinePath, lockPath);
+    unlinkSync(quarantinePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function quarantineAndRemoveStaleLock(
+  lockPath: string,
+  fd: number,
+  observation: PosixLockObservation,
+  policy: PosixLockPolicy,
+): boolean {
+  const quarantineDirectory = mkdtempSync(join(
+    dirname(lockPath),
+    `.keyring.lock.stale-${observation.record.token}-`,
+  ));
+  const quarantinePath = join(quarantineDirectory, 'owner');
+  let moved = false;
+  try {
+    // Node does not expose renameat2(RENAME_NOREPLACE). Renaming into a freshly
+    // created private empty directory gives an atomic same-filesystem move with
+    // a destination that cannot already exist, eliminating close-then-unlink.
+    renameSync(lockPath, quarantinePath);
+    moved = true;
+    const quarantined = observeStaleLock(fd, quarantinePath, policy, observation, true);
+    if (quarantined === undefined) {
+      if (restoreQuarantinedLock(quarantinePath, lockPath)) moved = false;
+      return false;
+    }
+    unlinkSync(quarantinePath);
+    moved = false;
+    return true;
+  } finally {
+    if (!moved) rmdirSync(quarantineDirectory);
+  }
+}
+
 function recoverStaleLock(
   lockPath: string,
   policy: PosixLockPolicy,
   io: PosixProjectTemplateReceiptKeyStoreIo | undefined,
 ): boolean {
   let fd: number | undefined;
-  let bytes: Buffer | undefined;
   try {
     const pathStat = lstatSync(lockPath);
     if (
@@ -362,85 +533,16 @@ function recoverStaleLock(
     ) return false;
     fd = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
     const descriptorStat = fstatSync(fd);
-    if (
-      !descriptorStat.isFile()
-      || descriptorStat.nlink !== 1
-      || descriptorStat.uid !== expectedUid()
-      || (descriptorStat.mode & 0o777) !== 0o600
-      || descriptorStat.dev !== pathStat.dev
-      || descriptorStat.ino !== pathStat.ino
-      || descriptorStat.size < 1
-      || descriptorStat.size > 512
-    ) return false;
-    bytes = Buffer.alloc(descriptorStat.size + 1);
-    let offset = 0;
-    while (offset < bytes.byteLength) {
-      const count = readSync(fd, bytes, offset, bytes.byteLength - offset, offset);
-      if (count === 0) break;
-      offset += count;
-    }
-    const finalDescriptor = fstatSync(fd);
-    const finalPath = lstatSync(lockPath);
-    if (
-      offset !== descriptorStat.size
-      || finalDescriptor.dev !== descriptorStat.dev
-      || finalDescriptor.ino !== descriptorStat.ino
-      || finalDescriptor.size !== descriptorStat.size
-      || finalDescriptor.nlink !== 1
-      || finalPath.dev !== descriptorStat.dev
-      || finalPath.ino !== descriptorStat.ino
-      || finalPath.nlink !== 1
-    ) return false;
-    const parsed = JSON.parse(bytes.subarray(0, offset).toString('utf8')) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
-    const descriptors = Object.getOwnPropertyDescriptors(parsed);
-    if (
-      Reflect.ownKeys(parsed).length !== 3
-      || !('value' in (descriptors['pid'] ?? {}))
-      || !('value' in (descriptors['createdAtMs'] ?? {}))
-      || !('value' in (descriptors['token'] ?? {}))
-    ) return false;
-    const pid = descriptors['pid']!.value as unknown;
-    const createdAtMs = descriptors['createdAtMs']!.value as unknown;
-    const token = descriptors['token']!.value as unknown;
-    const now = policy.now();
-    if (
-      !Number.isSafeInteger(pid)
-      || (pid as number) < 1
-      || typeof createdAtMs !== 'number'
-      || !Number.isFinite(createdAtMs)
-      || !Number.isFinite(now)
-      || createdAtMs < 0
-      || now < 0
-      || createdAtMs > now
-      || now - createdAtMs < policy.staleAfterMs
-      || typeof token !== 'string'
-      || !/^[a-f0-9]{32}$/.test(token)
-    ) return false;
-    let alive: boolean;
-    try {
-      alive = policy.isProcessAlive(pid as number);
-    } catch {
-      return false;
-    }
-    if (typeof alive !== 'boolean' || alive) return false;
+    if (descriptorStat.dev !== pathStat.dev || descriptorStat.ino !== pathStat.ino) return false;
+    const observation = observeStaleLock(fd, lockPath, policy);
+    if (observation === undefined) return false;
     io?.beforeStaleLockUnlink?.(lockPath);
-    const beforeUnlink = lstatSync(lockPath);
-    if (
-      beforeUnlink.dev !== descriptorStat.dev
-      || beforeUnlink.ino !== descriptorStat.ino
-      || beforeUnlink.nlink !== 1
-    ) return false;
-    closeSync(fd);
-    fd = undefined;
-    // Node has no unlinkat-with-inode predicate. Rechecking immediately before
-    // unlink narrows the unavoidable pathname race without deleting on doubt.
-    unlinkSync(lockPath);
-    return true;
+    const revalidated = observeStaleLock(fd, lockPath, policy, observation);
+    if (revalidated === undefined) return false;
+    return quarantineAndRemoveStaleLock(lockPath, fd, revalidated, policy);
   } catch {
     return false;
   } finally {
-    bytes?.fill(0);
     if (fd !== undefined) closeSync(fd);
   }
 }
