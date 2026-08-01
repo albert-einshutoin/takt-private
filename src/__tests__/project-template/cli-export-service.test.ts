@@ -274,4 +274,62 @@ describe('project template CLI export service', () => {
     });
     expect(readdirSync(join(fixture.root, 'exports'))).toEqual([]);
   });
+
+  it.each([
+    'after-project-root',
+    'after-export-plan',
+    'after-output-capture',
+    'before-dry-run-success',
+  ] as const)('rechecks abort %s before returning a dry-run plan', async (abortPhase) => {
+    const fixture = makeFixture();
+    const controller = new AbortController();
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: { mode: 'dry-run', force: false },
+      signal: controller.signal,
+    }, {
+      onPhase(phase) {
+        if (phase === abortPhase) controller.abort();
+      },
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 130,
+      envelope: { status: 'error', error: { code: 'INTERRUPTED' } },
+    });
+    expect(readdirSync(join(fixture.root, 'exports'))).toEqual([]);
+  });
+
+  it('rechecks abort after the final apply authority capture before writer admission', async () => {
+    const fixture = makeFixture();
+    const dry = await dryRun(fixture.root, fixture.outputPath);
+    expect(dry.envelope.status).toBe('success');
+    if (dry.envelope.status !== 'success') return;
+    const controller = new AbortController();
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply',
+        force: false,
+        expectedPlanId: dry.envelope.result.planId,
+      },
+      signal: controller.signal,
+    }, {
+      onPhase(phase) {
+        if (phase === 'after-final-output-capture') controller.abort();
+      },
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 130,
+      envelope: { status: 'error', error: { code: 'INTERRUPTED' } },
+    });
+    expect(readdirSync(join(fixture.root, 'exports'))).toEqual([]);
+  });
 });
