@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readSync,
   readFileSync,
   realpathSync,
@@ -536,6 +537,54 @@ describe('Windows project template receipt key store', () => {
     await expect(store.read()).rejects.toThrow(/lease is unavailable/i);
     expect(openedWithShareDeleteSeam).toBe(true);
     expect(readFileSync(lockPath, 'utf8')).toBe(staleRecord);
+  });
+
+  it('fails closed when a quarantined Windows lock cannot be restored', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+    });
+    await healthy.write(registry());
+    const lockPath = join(directory, '.keyring.lock');
+    const staleRecord = JSON.stringify({
+      pid: 424242,
+      createdAtMs: 1,
+      token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    writeFileSync(lockPath, staleRecord, { mode: 0o600 });
+    let livenessChecks = 0;
+    const store = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      io: {
+        linkStaleLock() {
+          const error = new Error('hard links unsupported') as NodeJS.ErrnoException;
+          error.code = 'EPERM';
+          throw error;
+        },
+      },
+      leasePolicy: {
+        attempts: 3,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive() {
+          livenessChecks += 1;
+          return livenessChecks === 3;
+        },
+      },
+    });
+
+    await expect(store.read()).rejects.toThrow(
+      'Quarantined stale lock requires operator recovery',
+    );
+    expect(livenessChecks).toBe(3);
+    expect(existsSync(lockPath)).toBe(false);
+    const artifacts = readdirSync(directory)
+      .filter((name) => name.startsWith('.keyring.lock.stale-'));
+    expect(artifacts).toHaveLength(1);
+    expect(readFileSync(join(directory, artifacts[0]!, 'owner'), 'utf8')).toBe(staleRecord);
   });
 
   it('rejects same-size in-place DPAPI ciphertext changes', async () => {
