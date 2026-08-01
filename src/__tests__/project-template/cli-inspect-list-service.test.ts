@@ -153,6 +153,29 @@ describe('project-template inspect CLI service', () => {
     });
     expect(JSON.stringify(outcome)).not.toContain(marker);
   });
+
+  it('returns INTERRUPTED when the signal aborts while core inspection is awaited', async () => {
+    const controller = new AbortController();
+    const outcome = await inspectProjectTemplateForCliWithDependencies({
+      cwd: '/safe/repo',
+      sourcePath: 'template.taktpack',
+      signal: controller.signal,
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => {
+        controller.abort();
+        return {
+          archiveSha256: SHA,
+          manifest: { entries: [] },
+          compatibility: { status: 'compatible' },
+        };
+      }),
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 130,
+      envelope: { status: 'error', error: { code: 'INTERRUPTED' } },
+    });
+  });
 });
 
 describe('project-template list CLI service', () => {
@@ -198,6 +221,7 @@ describe('project-template list CLI service', () => {
       readCompanionLockState: vi.fn(() => ({
         state: 'update',
         contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
       })),
       inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
       listBackupIds: vi.fn(async () => backupIds),
@@ -221,6 +245,7 @@ describe('project-template list CLI service', () => {
       readCompanionLockState: vi.fn(() => ({
         state: 'update',
         contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
       })),
     };
     const recovery = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
@@ -242,5 +267,76 @@ describe('project-template list CLI service', () => {
       exitCode: 23,
       envelope: { status: 'error', error: { code: 'SECURITY_GUARD' } },
     });
+  });
+
+  it('returns INTERRUPTED when cancellation arrives while backups are awaited', async () => {
+    const controller = new AbortController();
+    const outcome = await listProjectTemplatesForCliWithDependencies({
+      cwd: '/safe/repo',
+      signal: controller.signal,
+    }, {
+      readCompanionLockState: vi.fn(() => ({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+      })),
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+      listBackupIds: vi.fn(async () => {
+        controller.abort();
+        return [];
+      }),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 130,
+      envelope: { status: 'error', error: { code: 'INTERRUPTED' } },
+    });
+  });
+
+  it('fails closed when the companion cohort changes during backup collection', async () => {
+    const otherSha = 'b'.repeat(64);
+    const readCompanionLockState = vi.fn()
+      .mockReturnValueOnce({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+      })
+      .mockReturnValueOnce({
+        state: 'update',
+        contentLock: { manifestSha256: otherSha },
+        previousLocksSha256: otherSha,
+      });
+
+    const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
+      readCompanionLockState,
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+      listBackupIds: vi.fn(async () => []),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 22,
+      envelope: { status: 'error', error: { code: 'TARGET_DRIFT' } },
+    });
+    expect(readCompanionLockState).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails as recovery-required when recovery appears during backup collection', async () => {
+    const inspectApplyGuard = vi.fn()
+      .mockReturnValueOnce({ blocks: [] })
+      .mockReturnValueOnce({ blocks: [{ code: 'RECOVERY_REQUIRED' }] });
+    const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
+      readCompanionLockState: vi.fn(() => ({
+        state: 'first-install',
+        previousLocksSha256: SHA,
+      })),
+      inspectApplyGuard,
+      listBackupIds: vi.fn(async () => []),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RECOVERY_REQUIRED' } },
+    });
+    expect(inspectApplyGuard).toHaveBeenCalledTimes(2);
   });
 });
