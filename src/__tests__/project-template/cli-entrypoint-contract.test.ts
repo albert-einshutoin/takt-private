@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -171,6 +171,139 @@ await program.parseAsync(process.argv);
       schemaVersion: '1.0', status: 'error', error: { code: 'INTERRUPTED' },
     });
   }, 15_000);
+
+  it('survives repeated SIGINT after admission until terminal drain and listener cleanup', async () => {
+    const cache = resolve('node_modules/.cache');
+    await mkdir(cache, { recursive: true });
+    const root = await mkdtemp(join(cache, 'takt-cli-admitted-sigint-'));
+    roots.push(root);
+    const admitted = join(root, 'admitted');
+    const release = join(root, 'release');
+    const cleaned = join(root, 'listener-cleaned');
+    const fixture = join(root, 'admitted-sigint-entrypoint.ts');
+    const adapterUrl = pathToFileURL(resolve('src/app/cli/projectTemplateCommands.ts')).href;
+    const machineUrl = pathToFileURL(resolve('src/features/project-template/cli-machine-contract.ts')).href;
+    const lifecycleUrl = pathToFileURL(resolve('src/features/project-template/cli-lifecycle.ts')).href;
+    const productionUrl = pathToFileURL(resolve('src/app/cli/projectTemplateCommandProduction.ts')).href;
+    await writeFile(fixture, `
+import { existsSync, writeFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { Command } from 'commander';
+import { registerProjectTemplateCommands } from ${JSON.stringify(adapterUrl)};
+import { createProjectTemplateCliSuccess } from ${JSON.stringify(machineUrl)};
+import { consumeProjectTemplateCliMutationAdmission } from ${JSON.stringify(lifecycleUrl)};
+import { createProjectTemplateCliCommandProductionDependencies } from ${JSON.stringify(productionUrl)};
+const production = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+let installedInterrupt;
+const program = new Command().name('takt').exitOverride();
+program.option('--cwd <path>');
+registerProjectTemplateCommands(program, {
+  ...production,
+  installInterrupt(interrupt) {
+    installedInterrupt = interrupt;
+    return production.installInterrupt(interrupt);
+  },
+  async dispatch(_request, context) {
+    consumeProjectTemplateCliMutationAdmission(context.admitMutation);
+    writeFileSync(${JSON.stringify(admitted)}, 'admitted');
+    const deadline = Date.now() + 8_000;
+    while (!existsSync(${JSON.stringify(release)})) {
+      if (Date.now() >= deadline) throw new Error('release gate timeout');
+      await delay(10);
+    }
+    return {
+      envelope: createProjectTemplateCliSuccess({
+        command: 'project-template apply', mode: 'apply',
+        result: {
+          planId: '${'a'.repeat(64)}', applied: true,
+          backupId: 'backup-terminal', recoveryState: 'clean',
+        },
+      }),
+      exitCode: 0,
+    };
+  },
+});
+await program.parseAsync(process.argv);
+writeFileSync(
+  ${JSON.stringify(cleaned)},
+  String(process.listeners('SIGINT').includes(installedInterrupt)),
+);
+`);
+    const child = spawn(runner, [
+      fixture, '--', 'project-template', 'apply', './fixture.taktpack',
+      '--apply', '--expected-plan-id', 'a'.repeat(64), '--json',
+    ], {
+      cwd: resolve('.'),
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let closed = false;
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
+    const closePromise = new Promise<number | null>((resolveExit, reject) => {
+      child.once('error', reject);
+      child.once('close', (code) => {
+        closed = true;
+        resolveExit(code);
+      });
+    });
+    const waitForFile = async (path: string, label: string): Promise<void> => {
+      const startedAt = Date.now();
+      while (true) {
+        try {
+          await access(path);
+          return;
+        } catch {
+          if (closed || Date.now() - startedAt > 8_000) {
+            throw new Error(`${label} timeout: ${stdout} ${stderr}`);
+          }
+          await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+        }
+      }
+    };
+
+    try {
+      await waitForFile(admitted, 'mutation admission');
+      child.kill('SIGINT');
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+      child.kill('SIGINT');
+      await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+      expect(closed).toBe(false);
+
+      await writeFile(release, 'release');
+      const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+        const timeout = setTimeout(() => reject(new Error('child drain timeout')), 8_000);
+        closePromise.then((code) => {
+          clearTimeout(timeout);
+          resolveExit(code);
+        }, (error: unknown) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+      });
+
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe('');
+      expect(stdout.trim().split('\n')).toHaveLength(1);
+      expect(JSON.parse(stdout)).toMatchObject({
+        schemaVersion: '1.0', status: 'success',
+        command: 'project-template apply', mode: 'apply',
+        result: { applied: true, backupId: 'backup-terminal', recoveryState: 'clean' },
+      });
+      await waitForFile(cleaned, 'listener cleanup');
+      expect(await readFile(cleaned, 'utf8')).toBe('false');
+    } finally {
+      if (!closed) {
+        child.kill('SIGKILL');
+        await Promise.race([
+          closePromise.catch(() => null),
+          new Promise((resolveWait) => setTimeout(resolveWait, 2_000)),
+        ]);
+      }
+    }
+  }, 20_000);
 
   it.each([
     ['per-command', ['project-template', 'list', '--wat', 'value']],
