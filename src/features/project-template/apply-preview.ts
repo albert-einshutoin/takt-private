@@ -77,6 +77,8 @@ const PREVIEW_REVIEW_DOMAIN =
   'takt.project-template.apply-preview-review.v1\u0000';
 const REMOTE_TRANSACTION_PLAN_DOMAIN =
   'takt.project-template.remote-transaction-plan.v1\u0000';
+const REMOTE_RECEIPT_BINDING_DOMAIN =
+  'takt.project-template.remote-receipt-binding.v1\u0000';
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_ARRAY_RECEIVER = Array;
 const CAPTURED_JSON_RECEIVER = JSON;
@@ -718,7 +720,12 @@ export function createProjectTemplateRemoteApplyPreview(
   freeze(compositionConflicts);
 
   const transactionBody = freeze({
-    receiptKey: options.receiptKey,
+    // Bind authenticated receipt provenance without retaining the cache
+    // locator itself in the process-local preview seal.
+    receiptIdentitySha256: hashDomainBody(
+      REMOTE_RECEIPT_BINDING_DOMAIN,
+      options.receiptKey,
+    ),
     contentPlanId: contentPlan.planId,
     contentPreconditionToken: contentPlan.preconditionToken,
     repertoireDependencyPlanId: dependencyPlan.planId,

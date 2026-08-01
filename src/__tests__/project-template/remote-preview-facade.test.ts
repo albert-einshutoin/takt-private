@@ -155,7 +155,13 @@ async function fixture() {
     verifier: verifier(),
   });
   const projectRoot = temp('takt-remote-target-');
-  return { cacheRoot, prepared, projectRoot, artifactPath: materialized.cachePath };
+  return {
+    cacheRoot,
+    prepared,
+    projectRoot,
+    artifactPath: materialized.cachePath,
+    archive,
+  };
 }
 
 function facadeOptions(value: Awaited<ReturnType<typeof fixture>>) {
@@ -196,11 +202,12 @@ describe('GitHub project template remote preview production facade', () => {
   it('retires receipt authority before a downstream repertoire failure', async () => {
     const value = await fixture();
     const closed: string[] = [];
+    const secret = 'private-inspection-secret';
     await expect(createGithubProjectTemplateRemotePreview({
       ...facadeOptions(value),
-      repertoireInspectionPort: { inspect: () => { throw new Error('private'); } },
+      repertoireInspectionPort: { inspect: () => { throw new Error(secret); } },
       receiptIo: { close(_fd, kind) { closed.push(kind); } },
-    })).rejects.toThrow();
+    })).rejects.not.toThrow(secret);
     expect(closed).toContain('artifact');
     expect(closed).toContain('receipt');
 
@@ -220,5 +227,57 @@ describe('GitHub project template remote preview production facade', () => {
     expect(() => renderProjectTemplateApplyPreviewJson(preview)).not.toThrow();
     await expect(createGithubProjectTemplateRemotePreview(facadeOptions(value)))
       .rejects.toMatchObject({ code: 'CACHE_INVALID' });
+  });
+
+  it('consumes a claim when abort or second-pass materialization fails', async () => {
+    const aborted = await fixture();
+    const controller = new AbortController();
+    await expect(createGithubProjectTemplateRemotePreview({
+      ...facadeOptions(aborted),
+      signal: controller.signal,
+      receiptIo: {
+        close(_fd, kind) {
+          if (kind === 'artifact') controller.abort();
+        },
+      },
+    })).rejects.toThrow(/aborted/);
+    await expect(createGithubProjectTemplateRemotePreview(facadeOptions(aborted)))
+      .resolves.toMatchObject({ schemaVersion: '1.0' });
+
+    const drift = await fixture();
+    let changed = false;
+    await expect(createGithubProjectTemplateRemotePreview({
+      ...facadeOptions(drift),
+      receiptIo: {
+        close(_fd, kind) {
+          if (!changed && kind === 'artifact') {
+            changed = true;
+            writeFileSync(drift.artifactPath, Buffer.from('changed'), {
+              mode: 0o600,
+            });
+          }
+        },
+      },
+    })).rejects.toThrow();
+    writeFileSync(drift.artifactPath, drift.archive, { mode: 0o600 });
+    await expect(createGithubProjectTemplateRemotePreview(facadeOptions(drift)))
+      .resolves.toMatchObject({ schemaVersion: '1.0' });
+  });
+
+  it('rejects Proxy options without executing traps', async () => {
+    const value = await fixture();
+    const options = facadeOptions(value);
+    let traps = 0;
+    const proxy = new Proxy(options, {
+      getPrototypeOf() { traps += 1; return Object.prototype; },
+      ownKeys() { traps += 1; return Reflect.ownKeys(options); },
+      getOwnPropertyDescriptor(_target, key) {
+        traps += 1;
+        return Reflect.getOwnPropertyDescriptor(options, key);
+      },
+    });
+    await expect(createGithubProjectTemplateRemotePreview(proxy))
+      .rejects.toThrow(/options/);
+    expect(traps).toBe(0);
   });
 });

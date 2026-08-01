@@ -28,6 +28,7 @@ import type { TemplateLockV1 } from './types.js';
 const CONTENT_LOCK_PATH = '.takt-template-lock.json';
 const MAX_CONTENT_LOCK_BYTES = 4 * 1024 * 1024;
 const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+const DIRECTORY_FLAG = process.platform === 'win32' ? 0 : constants.O_DIRECTORY;
 const PREVIOUS_LOCKS_DOMAIN =
   'takt.project-template.previous-companion-locks.v1\u0000';
 
@@ -188,6 +189,24 @@ function closeAll(observed: readonly ObservedLock[]): void {
   if (closeFailed) fail('UNREADABLE_LOCK');
 }
 
+function verifyRootStable(path: string, fd: number, before: Stats): void {
+  let opened: Stats;
+  let current: Stats;
+  try {
+    opened = fstatSync(fd);
+    current = lstatSync(path);
+  } catch {
+    fail('UNSAFE_ROOT');
+  }
+  if (
+    !opened.isDirectory()
+    || current.isSymbolicLink()
+    || !current.isDirectory()
+    || !sameStats(before, opened)
+    || !sameStats(before, current)
+  ) fail('UNSAFE_ROOT');
+}
+
 function verifyCohortStable(observed: readonly ObservedLock[]): void {
   for (let index = 0; index < observed.length; index += 1) {
     const lock = observed[index]!;
@@ -290,7 +309,20 @@ export function readProjectTemplateCompanionLockState(
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) fail('UNSAFE_ROOT');
 
+  let rootFd: number;
+  try {
+    rootFd = openSync(
+      absoluteRoot,
+      constants.O_RDONLY | NO_FOLLOW | DIRECTORY_FLAG,
+    );
+    verifyRootStable(absoluteRoot, rootFd, rootStat);
+  } catch (error) {
+    if (error instanceof ProjectTemplateCompanionLockStateError) throw error;
+    fail('UNSAFE_ROOT');
+  }
+
   const observed: ObservedLock[] = [];
+  let closeFailure = false;
   try {
     observed.push(observe(join(absoluteRoot, CONTENT_LOCK_PATH)));
     observed.push(observe(join(
@@ -304,6 +336,7 @@ export function readProjectTemplateCompanionLockState(
     const present = observed.filter(isOpened).length;
     if (present !== 0 && present !== 3) fail('MIXED_STATE');
     verifyCohortStable(observed);
+    verifyRootStable(absoluteRoot, rootFd, rootStat);
 
     if (present === 0) {
       return Object.freeze({
@@ -343,6 +376,16 @@ export function readProjectTemplateCompanionLockState(
       previousLocksSha256: previousLocksSha256(lockSha256),
     });
   } finally {
-    closeAll(observed);
+    try {
+      closeAll(observed);
+    } catch {
+      closeFailure = true;
+    }
+    try {
+      closeSync(rootFd);
+    } catch {
+      closeFailure = true;
+    }
+    if (closeFailure) fail('UNREADABLE_LOCK');
   }
 }

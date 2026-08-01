@@ -60,6 +60,7 @@ export interface CreateGithubProjectTemplateRemotePreviewOptions {
   readonly baselineStrategy: 'conflict' | 'adopt-identical';
   readonly dependencyInspectionTimeoutMs?: number;
   readonly receiptIo?: GithubTemplateDownloadReceiptOfflineReadIo;
+  readonly signal?: AbortSignal;
 }
 
 function sha256(value: string): string {
@@ -88,6 +89,7 @@ function exactOptions(
     'baselineStrategy',
     'dependencyInspectionTimeoutMs',
     'receiptIo',
+    'signal',
   ]);
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const keys = Reflect.ownKeys(descriptors);
@@ -148,7 +150,25 @@ function exactOptions(
         receiptIo:
           descriptors['receiptIo'].value as GithubTemplateDownloadReceiptOfflineReadIo,
       }),
+    ...(descriptors['signal'] === undefined
+      ? {}
+      : { signal: descriptors['signal'].value as AbortSignal }),
   });
+}
+
+const ABORTED_GETTER = Object.getOwnPropertyDescriptor(
+  AbortSignal.prototype,
+  'aborted',
+)?.get;
+
+function isAborted(signal: AbortSignal | undefined): boolean {
+  if (signal === undefined) return false;
+  try {
+    if (ABORTED_GETTER === undefined) return true;
+    return Reflect.apply(ABORTED_GETTER, signal, []) as boolean;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -160,6 +180,7 @@ export async function createGithubProjectTemplateRemotePreview(
   value: CreateGithubProjectTemplateRemotePreviewOptions,
 ): Promise<ProjectTemplateRemoteApplyPreview> {
   const options = exactOptions(value);
+  if (isAborted(options.signal)) throw new Error('remote preview aborted');
   const cacheRoot = resolve(options.cacheRoot);
   const verified = await readGithubTemplateDownloadReceiptByReceiptKey({
     cacheRoot,
@@ -186,6 +207,7 @@ export async function createGithubProjectTemplateRemotePreview(
       cacheRoot,
       archiveSha256: claimed.artifactSha256,
     });
+    if (isAborted(options.signal)) throw new Error('remote preview aborted');
     materialized = await materializeTaktpackContents(
       artifactPaths.artifactPath,
       { currentTaktVersion: options.currentTaktVersion },
