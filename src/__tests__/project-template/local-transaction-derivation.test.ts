@@ -53,18 +53,29 @@ async function fixture(
 describe('local project template transaction derivation', () => {
   it.each([
     {
-      kind: 'github' as const,
-      uri: 'https://github.com/example/template' as const,
-      ref: 'v1.0.0',
-      commit: COMMIT,
+      source: {
+        kind: 'github' as const,
+        uri: 'https://github.com/example/template' as const,
+        ref: 'v1.0.0',
+        commit: COMMIT,
+      },
+      descriptorSha256:
+        'b9a66c249c398972a2a2cdb3f4c9ae55819b39db115ab24579da83b8c9133fd9',
     },
     {
-      kind: 'git' as const,
-      uri: 'https://git.example.com/team/template.git' as const,
-      ref: 'refs/tags/v1.0.0',
-      commit: COMMIT,
+      source: {
+        kind: 'git' as const,
+        uri: 'https://git.example.com/team/template.git' as const,
+        ref: 'refs/tags/v1.0.0',
+        commit: COMMIT,
+      },
+      descriptorSha256:
+        '7064d80c9b176b7c07ad820b4ab3086d2969bf924ef901dc07449ade6dc88eee',
     },
-  ])('imports a $kind-origin pack as local data without granting remote authority', async (remoteSource) => {
+  ])('imports a $source.kind-origin pack as local data without granting remote authority', async ({
+    source: remoteSource,
+    descriptorSha256,
+  }) => {
     const { archivePath, targetRoot } = await fixture(remoteSource);
 
     const derived = await deriveLocalProjectTemplateTransaction({
@@ -89,7 +100,9 @@ describe('local project template transaction derivation', () => {
       uri: '.',
       ref: 'workspace',
       commit: remoteSource.commit,
-      descriptorSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      // Why: the fixed contract value proves normalization cannot silently
+      // discard the original remote kind, URI, or ref from provenance.
+      descriptorSha256,
     });
     expect(derived.contentEntries).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: 'workflows/review.yaml', action: 'write' }),
