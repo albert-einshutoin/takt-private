@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,6 +16,8 @@ import {
   createGithubProjectTemplateRemotePreview,
   createProjectTemplateExportPlan,
   renderProjectTemplateApplyPreviewJson,
+  prepareProjectTemplateApplyPlan,
+  captureProjectTemplateTargetSnapshot,
   writeTaktpack,
 } from '../../features/project-template/index.js';
 import {
@@ -36,6 +39,24 @@ import {
   serializeProjectTemplateSourceDescriptor,
   type ProjectTemplateSourceDescriptorV1,
 } from '../../features/project-template/source-descriptor.js';
+import { serializeTemplateLock } from '../../features/project-template/lock.js';
+import {
+  PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+  serializeProjectTemplateRepertoireDependencyLock,
+} from '../../features/project-template/repertoire-dependency-lock.js';
+import {
+  PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+  serializeProjectTemplateSourceProvenance,
+} from '../../features/project-template/source-provenance.js';
+import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from '../../features/project-template/repertoire-dependency-canonical.js';
+import {
+  initializeProjectTemplateApplyStorage,
+} from '../../features/project-template/apply-storage.js';
+import {
+  writeProjectTemplateMergeBaseline,
+} from '../../features/project-template/merge-baseline-store.js';
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const SECRET = 'remote-preview-test-key';
@@ -67,11 +88,15 @@ function verifier(): GithubTemplateDownloadReceiptVerifier {
 
 async function fixture(
   sourceInput = 'github:acme/template@main',
+  template = {
+    path: 'workflows/review.yaml',
+    content: 'name: review\n',
+  },
 ) {
   const sourceRoot = temp('takt-remote-source-');
-  const sourcePath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
+  const sourcePath = join(sourceRoot, '.takt', template.path);
   mkdirSync(dirname(sourcePath), { recursive: true });
-  writeFileSync(sourcePath, 'name: review\n');
+  writeFileSync(sourcePath, template.content);
   const exportPlan = await createProjectTemplateExportPlan(sourceRoot, {
     packVersion: '1.2.3',
     takt: { minVersion: '0.48.0' },
@@ -81,6 +106,7 @@ async function fixture(
       ref: 'v1.2.3',
       commit: COMMIT,
     },
+    policies: { [template.path]: 'merge' },
   });
   const packPath = join(sourceRoot, 'source.taktpack');
   await writeTaktpack(packPath, exportPlan);
@@ -163,7 +189,83 @@ async function fixture(
     projectRoot,
     artifactPath: materialized.cachePath,
     archive,
+    exportPlan,
+    template,
   };
+}
+
+async function installSemanticUpdateState(
+  value: Awaited<ReturnType<typeof fixture>>,
+  base: string,
+  local: string,
+): Promise<void> {
+  const baseSha256 = createHash('sha256').update(base).digest('hex');
+  const previousManifestSha256 = 'c'.repeat(64);
+  mkdirSync(join(value.projectRoot, '.takt'), { recursive: true });
+  writeFileSync(join(value.projectRoot, '.takt', 'config.yaml'), local);
+  writeFileSync(join(value.projectRoot, '.takt-template-lock.json'), serializeTemplateLock({
+    schemaVersion: '1.0',
+    manifestSha256: previousManifestSha256,
+    packVersion: '1.1.0',
+    source: {
+      kind: 'github',
+      uri: 'https://github.com/acme/template',
+      ref: 'v1.1.0',
+      commit: COMMIT,
+    },
+    capabilities: [],
+    entries: [{
+      path: 'config.yaml',
+      policy: 'merge',
+      mode: '0644',
+      sha256: baseSha256,
+      capabilities: [],
+    }],
+  }));
+  writeFileSync(
+    join(value.projectRoot, PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH),
+    serializeProjectTemplateRepertoireDependencyLock({
+      schemaVersion: '1.0',
+      sourceDescriptorSha256: 'a'.repeat(64),
+      manifestSha256: previousManifestSha256,
+      dependencies: [],
+    }),
+  );
+  writeFileSync(
+    join(value.projectRoot, PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH),
+    serializeProjectTemplateSourceProvenance({
+      schemaVersion: '1.0',
+      source: {
+        owner: 'acme',
+        repo: 'template',
+        repositoryUrl: 'https://github.com/acme/template',
+        canonicalSource: 'github:acme/template@main',
+        requestedRef: 'main',
+        releaseTag: 'v1.1.0',
+        commit: COMMIT,
+        descriptorSha256: 'a'.repeat(64),
+      },
+      archive: {
+        sha256: 'b'.repeat(64),
+        version: '1.1.0',
+        manifestSha256: previousManifestSha256,
+      },
+      dependencyVerification: {
+        method: 'github-ref-to-commit-v1',
+        declarationSha256:
+          calculateProjectTemplateRepertoireDependencyDeclarationSha256([]),
+        count: 0,
+      },
+    }),
+  );
+  const storage = await initializeProjectTemplateApplyStorage({
+    repoPath: value.projectRoot,
+  });
+  await writeProjectTemplateMergeBaseline({
+    storage,
+    expectedSha256: baseSha256,
+    content: Buffer.from(base),
+  });
 }
 
 function facadeOptions(value: Awaited<ReturnType<typeof fixture>>) {
@@ -208,6 +310,86 @@ describe('GitHub project template remote preview production facade', () => {
     await expect(createGithubProjectTemplateRemotePreview(facadeOptions(value)))
       .resolves.toMatchObject({ schemaVersion: '1.0', hardConflict: false });
   });
+
+  it('uses the owned formal baseline for a semantic three-way update preview', async () => {
+    const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+    const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+    const incoming = `${base}timezone: Asia/Tokyo\n`;
+    const value = await fixture('github:acme/template@main', {
+      path: 'config.yaml',
+      content: incoming,
+    });
+    await installSemanticUpdateState(value, base, local);
+
+    const preview = await createGithubProjectTemplateRemotePreview(
+      facadeOptions(value),
+    );
+    expect(preview.hardConflict).toBe(false);
+
+    const target = await captureProjectTemplateTargetSnapshot(
+      value.projectRoot,
+      ['config.yaml'],
+    );
+    const expected = prepareProjectTemplateApplyPlan({
+      baseLock: JSON.parse(readFileSync(
+        join(value.projectRoot, '.takt-template-lock.json'),
+        'utf8',
+      )),
+      baseContents: [{ path: 'config.yaml', content: Buffer.from(base) }],
+      incomingManifest: value.exportPlan.manifest,
+      incomingContents: [{ path: 'config.yaml', content: Buffer.from(incoming) }],
+      localEntries: target.entries,
+      targetRootState: target.rootState,
+      missingPathTracking: target.missingPathTracking,
+      incomingInspection: {
+        archiveSha256: value.prepared.receipt.payload.archive.sha256,
+        manifestSha256: value.prepared.receipt.payload.archive.manifestSha256,
+        currentTaktVersion: '0.48.0',
+        compatibilityStatus: 'compatible',
+      },
+      baselineStrategy: 'adopt-identical',
+    });
+    expect(preview.bindings.contentPlanId).toBe(expected.plan.planId);
+  });
+
+  it.each(['missing', 'tampered'] as const)(
+    'reports BASE_UNAVAILABLE without repairing a %s formal baseline',
+    async (state) => {
+      const base = 'provider_routing:\n  personas:\n    planner: codex\n';
+      const local = 'provider_routing:\n  personas:\n    planner: claude\n';
+      const incoming = `${base}timezone: Asia/Tokyo\n`;
+      const value = await fixture('github:acme/template@main', {
+        path: 'config.yaml',
+        content: incoming,
+      });
+      await installSemanticUpdateState(value, base, local);
+      const baseSha256 = createHash('sha256').update(base).digest('hex');
+      const baselinePath = join(
+        value.projectRoot,
+        '.takt-template-state',
+        'merge-baselines',
+        baseSha256,
+      );
+      if (state === 'missing') rmSync(baselinePath);
+      else writeFileSync(baselinePath, 'private tampered baseline');
+
+      const before = state === 'missing'
+        ? 'absent'
+        : readFileSync(baselinePath, 'utf8');
+      const preview = await createGithubProjectTemplateRemotePreview(
+        facadeOptions(value),
+      );
+      expect(preview.hardConflict).toBe(true);
+      expect(preview.contentHardConflicts).toContainEqual({
+        code: 'CONTENT_ENTRY_CONFLICT',
+        path: 'config.yaml',
+        reasonCode: 'BASE_UNAVAILABLE',
+      });
+      expect(state === 'missing'
+        ? (existsSync(baselinePath) ? 'present' : 'absent')
+        : readFileSync(baselinePath, 'utf8')).toBe(before);
+    },
+  );
 
   it('retires receipt authority before a downstream repertoire failure', async () => {
     const value = await fixture();
