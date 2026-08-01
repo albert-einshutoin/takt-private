@@ -873,4 +873,51 @@ describe('project template remote production composition', () => {
     await expect(recovering).resolves.toEqual({ status: 'none' });
     await expect(disposing).resolves.toBeUndefined();
   });
+
+  it('drains rollback failure before reporting disposal cleanup separately', async () => {
+    const value = await fixture({ invalidDoctor: true });
+    const store = memoryStore();
+    store.dispose = async () => { throw new Error(`cleanup ${value.projectRoot}`); };
+    const entered = deferred();
+    const release = deferred();
+    const composition = await createProjectTemplateRemoteProductionCompositionForTest({
+      keyStore: store, resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+    }, {
+      disposeDrainTimeoutMs: 1,
+      mutationGate: async () => { entered.resolve(); await release.promise; },
+    });
+    const receipt = await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    const preview = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    });
+    const approval = await composition.approve({
+      projectRoot: value.projectRoot, previewId: preview.previewId,
+      transactionPlanId: preview.transactionPlanId, baselineStrategy: 'conflict',
+    });
+    const applying = composition.apply({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      previewId: preview.previewId, transactionPlanId: preview.transactionPlanId,
+      approvalId: approval.approvalId, projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
+    });
+    await entered.promise;
+    const disposing = composition.dispose();
+    release.resolve();
+    const applyFailure = await applying.catch((error: unknown) => error);
+    expect(applyFailure).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(existsSync(join(value.projectRoot, '.takt', 'workflows', 'review.yaml')))
+      .toBe(false);
+    const disposeFailure = await disposing.catch((error: unknown) => error);
+    expect(disposeFailure).not.toBe(applyFailure);
+    expect(disposeFailure).toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(JSON.stringify(applyFailure)).not.toContain(value.projectRoot);
+  });
 });

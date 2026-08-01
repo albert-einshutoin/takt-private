@@ -20,6 +20,7 @@ import {
   writeProjectTemplateStagingFile,
   type ProjectTemplateApplyJournal,
   type ProjectTemplateApplyStorage,
+  type ProjectTemplateApplyStorageIo,
   type ProjectTemplateApplyTarget,
   type ProjectTemplateBackupEntryState,
   type ProjectTemplateBackupManifest,
@@ -710,6 +711,7 @@ async function restoreBefore(
   journal: ProjectTemplateApplyJournal,
   manifest: ProjectTemplateBackupManifest,
   backupBytes: ReadonlyMap<string, Buffer>,
+  beforeTargetRestore?: (target: ProjectTemplateApplyTarget) => void,
 ): Promise<void> {
   const recoveryId = `recovery-${randomUUID()}`;
   const restored = journal.state === 'rolling-back'
@@ -729,6 +731,7 @@ async function restoreBefore(
   for (const entry of [...manifest.entries].reverse()) {
     const target = resolveProjectTemplateApplyTarget(storage, entry.target);
     if (restored.includes(target.key)) continue;
+    beforeTargetRestore?.(entry.target);
     const actual = await currentState(storage, entry.target);
     if (!stateMatches(actual, entry.before, storage.platform)) {
       if (!stateMatches(actual, entry.after, storage.platform)) recoveryBlocked();
@@ -798,19 +801,10 @@ async function preflightRecoveryBackupBytes(
   return result;
 }
 
-async function recoverOwned(
-  projectRoot: string,
-  lease: ProjectTemplateApplyLease,
-): Promise<{ readonly status: 'none' | 'committed' | 'rolled-back' }> {
-  const storage = await initializeProjectTemplateApplyStorage({
-    repoPath: projectRoot,
-  });
-  return recoverOwnedStorage(storage, lease);
-}
-
 async function recoverOwnedStorage(
   storage: ProjectTemplateApplyStorage,
   lease: ProjectTemplateApplyLease,
+  beforeTargetRestore?: (target: ProjectTemplateApplyTarget) => void,
 ): Promise<{ readonly status: 'none' | 'committed' | 'rolled-back' }> {
     assertOwned(storage, lease);
     const journal = await readJournal(storage);
@@ -876,7 +870,9 @@ async function recoverOwnedStorage(
     } catch {
       throw new ProjectTemplateCompanionLockRecoveryError();
     }
-    await restoreBefore(storage, journal, manifest, backupBytes);
+    await restoreBefore(
+      storage, journal, manifest, backupBytes, beforeTargetRestore,
+    );
     assertOwned(storage, lease);
     await removeProjectTemplateStagingTransaction({
       storage,
@@ -894,12 +890,39 @@ async function recoverOwnedStorage(
 export async function recoverProjectTemplateCompanionLockTransaction(
   options: { readonly projectRoot: string },
 ): Promise<{ readonly status: 'none' | 'committed' | 'rolled-back' }> {
+  return await recoverProjectTemplateCompanionLockTransactionInternal(options);
+}
+
+/** @internal Fault and race orchestration for recovery tests. */
+export async function recoverProjectTemplateCompanionLockTransactionForTest(
+  options: {
+    readonly projectRoot: string;
+    readonly io?: ProjectTemplateApplyStorageIo;
+    readonly beforeTargetRestore?: (target: ProjectTemplateApplyTarget) => void;
+  },
+): Promise<{ readonly status: 'none' | 'committed' | 'rolled-back' }> {
+  return await recoverProjectTemplateCompanionLockTransactionInternal(options);
+}
+
+async function recoverProjectTemplateCompanionLockTransactionInternal(
+  options: {
+    readonly projectRoot: string;
+    readonly io?: ProjectTemplateApplyStorageIo;
+    readonly beforeTargetRestore?: (target: ProjectTemplateApplyTarget) => void;
+  },
+): Promise<{ readonly status: 'none' | 'committed' | 'rolled-back' }> {
   const lease = acquireProjectTemplateApplyLease(options.projectRoot);
   let result:
     { readonly status: 'none' | 'committed' | 'rolled-back' } | undefined;
   let primaryError: unknown;
   try {
-    result = await recoverOwned(options.projectRoot, lease);
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: options.projectRoot,
+      ...(options.io === undefined ? {} : { io: options.io }),
+    });
+    result = await recoverOwnedStorage(
+      storage, lease, options.beforeTargetRestore,
+    );
   } catch (error) {
     primaryError = error;
   }

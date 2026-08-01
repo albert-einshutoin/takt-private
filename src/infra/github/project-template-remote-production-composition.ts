@@ -119,6 +119,7 @@ export interface ProjectTemplateRemoteProductionComposition {
 
 interface ProjectTemplateRemoteProductionCompositionTestControl {
   readonly disposeDrainTimeoutMs?: number;
+  readonly mutationGate?: () => Promise<void>;
   readonly operationGate?: (
     operation: 'download' | 'preview' | 'approve' | 'recover',
   ) => Promise<void>;
@@ -209,10 +210,13 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
   const now = source['now'] === undefined ? Date.now : source['now'];
   const handleTtlMs = source['handleTtlMs'] ?? DEFAULT_HANDLE_TTL_MS;
   const handleLimit = source['handleLimit'] ?? MAX_HANDLES;
-  const testControl = exactRecord(control, [], ['disposeDrainTimeoutMs', 'operationGate']);
+  const testControl = exactRecord(
+    control, [], ['disposeDrainTimeoutMs', 'operationGate', 'mutationGate'],
+  );
   const disposeDrainTimeoutMs = testControl['disposeDrainTimeoutMs']
     ?? DISPOSE_DRAIN_TIMEOUT_MS;
   const operationGate = testControl['operationGate'];
+  const mutationGate = testControl['mutationGate'];
   if (
     typeof now !== 'function'
     || types.isProxy(now)
@@ -230,6 +234,8 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
     || disposeDrainTimeoutMs > DISPOSE_DRAIN_TIMEOUT_MS
     || (operationGate !== undefined
       && (typeof operationGate !== 'function' || types.isProxy(operationGate)))
+    || (mutationGate !== undefined
+      && (typeof mutationGate !== 'function' || types.isProxy(mutationGate)))
   ) failure('INVALID_ARGUMENT');
 
   const keyStore = source['keyStore'] as ProjectTemplateReceiptKeyStore;
@@ -288,6 +294,7 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
   let disposePromise: Promise<void> | undefined;
   let lastNow = Number.NEGATIVE_INFINITY;
   let activeOperations = 0;
+  let activeMutations = 0;
   let drainWaiter: (() => void) | undefined;
   const shutdown = new AbortController();
 
@@ -372,6 +379,7 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
   const operation = async <T>(
     kind: HandleKind | undefined,
     run: (context: OperationContext) => Promise<T>,
+    preserveAdmittedMutationResult = false,
   ): Promise<T> => {
     available();
     activeOperations += 1;
@@ -391,7 +399,7 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
       await revokeExpired(revoked, nowMs);
       current(epoch);
       const result = await run({ epoch, nowMs });
-      current(epoch);
+      if (!preserveAdmittedMutationResult) current(epoch);
       return result;
     } catch (error) {
       if (error instanceof ProjectTemplateRemoteProductionCompositionError) throw error;
@@ -511,7 +519,7 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
       });
     },
     async apply(input: unknown) {
-      return await operation(undefined, async ({ nowMs }) => {
+      return await operation(undefined, async ({ epoch, nowMs }) => {
         const options = exactRecord(input, [
           'cacheRoot', 'receiptKey', 'previewId', 'transactionPlanId', 'approvalId',
           'projectRoot', 'currentTaktVersion', 'baselineStrategy',
@@ -528,21 +536,32 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
           || handle.projectRoot !== text(options, 'projectRoot')
           || handle.baselineStrategy !== strategy(options)
         ) failure('UNKNOWN_APPROVAL');
-        const result = await applyComposition.apply({
-          cacheRoot: text(options, 'cacheRoot'), receiptKey,
-          expectedTransactionPlanId: handle.preview.transactionPlanId,
-          approvalEvidence: handle.evidence,
-          projectRoot: handle.projectRoot,
-          currentTaktVersion: text(options, 'currentTaktVersion'),
-          baselineStrategy: handle.baselineStrategy,
-          signal: operationSignal(options['signal']),
-        });
+        const admissionSignal = operationSignal(options['signal']);
+        if (admissionSignal.aborted) failure('OPERATION_FAILED');
+        current(epoch);
+        activeMutations += 1;
+        let result;
+        try {
+          if (mutationGate !== undefined) await Reflect.apply(
+            mutationGate as () => Promise<void>, undefined, [],
+          );
+          result = await applyComposition.apply({
+            cacheRoot: text(options, 'cacheRoot'), receiptKey,
+            expectedTransactionPlanId: handle.preview.transactionPlanId,
+            approvalEvidence: handle.evidence,
+            projectRoot: handle.projectRoot,
+            currentTaktVersion: text(options, 'currentTaktVersion'),
+            baselineStrategy: handle.baselineStrategy,
+          });
+        } finally {
+          activeMutations -= 1;
+        }
         if (result.status !== 'committed') failure('OPERATION_FAILED');
         return Object.freeze({
           status: 'committed' as const,
           transactionPlanId: handle.preview.transactionPlanId,
         });
-      });
+      }, true);
     },
     async recover(input: unknown) {
       return await operation(undefined, async ({ epoch }) => {
@@ -551,10 +570,18 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
           operationGate as (operation: 'recover') => Promise<void>, undefined, ['recover'],
         );
         current(epoch);
-        return Object.freeze(await recoverProjectTemplateCompanionLockTransaction({
-          projectRoot: text(options, 'projectRoot'),
-        }));
-      });
+        activeMutations += 1;
+        try {
+          if (mutationGate !== undefined) await Reflect.apply(
+            mutationGate as () => Promise<void>, undefined, [],
+          );
+          return Object.freeze(await recoverProjectTemplateCompanionLockTransaction({
+            projectRoot: text(options, 'projectRoot'),
+          }));
+        } finally {
+          activeMutations -= 1;
+        }
+      }, true);
     },
     dispose() {
       if (disposePromise !== undefined) return disposePromise;
@@ -565,6 +592,7 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
         if (activeOperations > 0) {
           await new Promise<void>((resolve) => {
             const timer = setTimeout(() => {
+              if (activeMutations > 0) return;
               drainWaiter = undefined;
               resolve();
             }, disposeDrainTimeoutMs as number);
