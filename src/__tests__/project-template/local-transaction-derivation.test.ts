@@ -76,9 +76,9 @@ describe('local project template transaction derivation', () => {
     });
     expect(derived.contentEntries).toEqual([
       expect.objectContaining({
-        path: '.takt/workflows/review.yaml',
+        path: 'workflows/review.yaml',
         action: 'write',
-        mode: '100644',
+        mode: '0644',
       }),
     ]);
   });
@@ -101,8 +101,8 @@ describe('local project template transaction derivation', () => {
     }
     const content = first.contentEntries[0];
     if (content?.action !== 'write') throw new Error('expected content write');
-    mkdirSync(dirname(join(targetRoot, content.path)), { recursive: true });
-    writeFileSync(join(targetRoot, content.path), content.content);
+    mkdirSync(dirname(join(targetRoot, '.takt', content.path)), { recursive: true });
+    writeFileSync(join(targetRoot, '.takt', content.path), content.content);
 
     const existing = await deriveLocalProjectTemplateTransaction({
       archivePath,
