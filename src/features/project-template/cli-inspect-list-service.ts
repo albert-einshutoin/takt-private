@@ -29,6 +29,9 @@ const BACKUP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
 const REGEXP_TEST = RegExp.prototype.test;
 const REFLECT_APPLY = Reflect.apply;
+const ARRAY_IS_ARRAY = Array.isArray;
+const ARRAY_SORT = Array.prototype.sort;
+const NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const DIRENT_IS_DIRECTORY = Dirent.prototype.isDirectory;
 const DIRENT_IS_SYMBOLIC_LINK = Dirent.prototype.isSymbolicLink;
 
@@ -40,6 +43,7 @@ interface InspectArchiveProjection {
 
 interface CompanionProjection {
   readonly state: 'first-install' | 'update';
+  readonly previousLocksSha256: string;
   readonly contentLock?: { readonly manifestSha256: string };
 }
 
@@ -60,7 +64,11 @@ export interface ProjectTemplateCliInspectListDependencies {
   ) => Promise<InspectArchiveProjection>;
   readonly readCompanionLockState: (cwd: string) => CompanionProjection;
   readonly inspectApplyGuard: (options: { readonly repoPath: string }) => ApplyGuardProjection;
-  readonly listBackupIds: (cwd: string, installed: boolean) => Promise<readonly string[]>;
+  readonly listBackupIds: (
+    cwd: string,
+    installed: boolean,
+    signal?: AbortSignal,
+  ) => Promise<readonly string[]>;
 }
 
 export interface ProjectTemplateCliInspectOptions {
@@ -94,10 +102,22 @@ function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
 
+function requireActive(signal: AbortSignal | undefined): void {
+  if (isAborted(signal)) throw new Error('project template CLI operation interrupted');
+}
+
+async function awaitActive<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  requireActive(signal);
+  const value = await promise;
+  requireActive(signal);
+  return value;
+}
+
 function snapshotStringArray(value: unknown, maxItems: number): string[] {
-  if (!Array.isArray(value)) throw new Error('invalid projection');
+  if (!REFLECT_APPLY(ARRAY_IS_ARRAY, Array, [value])) throw new Error('invalid projection');
   const length = ownValue(value, 'length');
-  if (!Number.isSafeInteger(length) || (length as number) < 0 || (length as number) > maxItems) {
+  if (!REFLECT_APPLY(NUMBER_IS_SAFE_INTEGER, Number, [length])
+    || (length as number) < 0 || (length as number) > maxItems) {
     throw new Error('invalid projection');
   }
   const result: string[] = [];
@@ -189,9 +209,10 @@ function snapshotInspection(value: unknown): {
   if (typeof packId !== 'string' || !testPattern(SHA256_PATTERN, packId)) {
     throw new Error('invalid projection');
   }
-  if (!Array.isArray(entries)) throw new Error('invalid projection');
+  if (!REFLECT_APPLY(ARRAY_IS_ARRAY, Array, [entries])) throw new Error('invalid projection');
   const entryCount = ownValue(entries, 'length');
-  if (!Number.isSafeInteger(entryCount) || (entryCount as number) < 0
+  if (!REFLECT_APPLY(NUMBER_IS_SAFE_INTEGER, Number, [entryCount])
+    || (entryCount as number) < 0
     || (entryCount as number) > MAX_TEMPLATE_ENTRIES) {
     throw new Error('invalid projection');
   }
@@ -249,35 +270,41 @@ export async function inspectProjectTemplateForCliWithDependencies(
   const cwd = resolve(options.cwd);
   const sourcePath = resolve(cwd, options.sourcePath);
   try {
-    const [cwdBefore, cwdRealpath, sourceBefore, sourceRealpath] = await Promise.all([
-      dependencies.lstat(cwd),
-      dependencies.realpath(cwd),
-      dependencies.lstat(sourcePath),
+    const cwdBefore = await awaitActive(dependencies.lstat(cwd), options.signal);
+    const cwdRealpath = await awaitActive(dependencies.realpath(cwd), options.signal);
+    const sourceBefore = await awaitActive(dependencies.lstat(sourcePath), options.signal);
+    const sourceRealpath = await awaitActive(
       dependencies.realpath(sourcePath),
-    ]);
+      options.signal,
+    );
     if (cwdRealpath !== cwd || !cwdBefore.isDirectory() || cwdBefore.isSymbolicLink()
       || sourceRealpath !== sourcePath
       || !sourceBefore.isFile() || sourceBefore.isSymbolicLink() || sourceBefore.nlink !== 1
       || sourceBefore.size > DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes) {
       return outcomeFailure('project-template inspect', 'SOURCE_INTEGRITY_FAILED');
     }
-    const inspection = await dependencies.inspectTaktpack(sourcePath, {
-      signal: options.signal,
-      currentTaktVersion: options.currentTaktVersion,
-      limits: DEFAULT_TAKTPACK_LIMITS,
-    });
-    const [cwdAfter, cwdRealpathAfter, sourceAfter, sourceRealpathAfter] = await Promise.all([
-      dependencies.lstat(cwd),
-      dependencies.realpath(cwd),
-      dependencies.lstat(sourcePath),
+    const inspection = await awaitActive(
+      dependencies.inspectTaktpack(sourcePath, {
+        signal: options.signal,
+        currentTaktVersion: options.currentTaktVersion,
+        limits: DEFAULT_TAKTPACK_LIMITS,
+      }),
+      options.signal,
+    );
+    const cwdAfter = await awaitActive(dependencies.lstat(cwd), options.signal);
+    const cwdRealpathAfter = await awaitActive(dependencies.realpath(cwd), options.signal);
+    const sourceAfter = await awaitActive(dependencies.lstat(sourcePath), options.signal);
+    const sourceRealpathAfter = await awaitActive(
       dependencies.realpath(sourcePath),
-    ]);
+      options.signal,
+    );
     if (cwdRealpathAfter !== cwd || !isStableDirectory(cwdBefore, cwdAfter)
       || sourceRealpathAfter !== sourcePath
       || !isStableFile(sourceBefore, sourceAfter)) {
       return outcomeFailure('project-template inspect', 'SOURCE_INTEGRITY_FAILED');
     }
     const projected = snapshotInspection(inspection);
+    requireActive(options.signal);
     return outcomeSuccess('project-template inspect', {
       packId: projected.packId,
       entryCount: projected.entryCount,
@@ -296,9 +323,12 @@ export async function inspectProjectTemplateForCliWithDependencies(
 
 function recoveryRequired(report: unknown): boolean {
   const blocks = ownValue(report, 'blocks');
-  if (!Array.isArray(blocks)) throw new Error('invalid guard projection');
+  if (!REFLECT_APPLY(ARRAY_IS_ARRAY, Array, [blocks])) {
+    throw new Error('invalid guard projection');
+  }
   const length = ownValue(blocks, 'length');
-  if (!Number.isSafeInteger(length) || (length as number) < 0 || (length as number) > 8_192) {
+  if (!REFLECT_APPLY(NUMBER_IS_SAFE_INTEGER, Number, [length])
+    || (length as number) < 0 || (length as number) > 8_192) {
     throw new Error('invalid guard projection');
   }
   for (let index = 0; index < (length as number); index += 1) {
@@ -309,15 +339,29 @@ function recoveryRequired(report: unknown): boolean {
   return false;
 }
 
-function snapshotCompanion(value: unknown): { installed: false } | { installed: true; targetId: string } {
+type CompanionSnapshot =
+  | { readonly installed: false; readonly cohortId: string }
+  | { readonly installed: true; readonly cohortId: string; readonly targetId: string };
+
+function snapshotCompanion(value: unknown): CompanionSnapshot {
   const state = ownValue(value, 'state');
-  if (state === 'first-install') return { installed: false };
+  const cohortId = ownValue(value, 'previousLocksSha256');
+  if (typeof cohortId !== 'string' || !testPattern(SHA256_PATTERN, cohortId)) {
+    throw new Error('invalid companion projection');
+  }
+  if (state === 'first-install') return { installed: false, cohortId };
   if (state !== 'update') throw new Error('invalid companion projection');
   const targetId = ownValue(ownValue(value, 'contentLock'), 'manifestSha256');
   if (typeof targetId !== 'string' || !testPattern(SHA256_PATTERN, targetId)) {
     throw new Error('invalid companion projection');
   }
-  return { installed: true, targetId };
+  return { installed: true, cohortId, targetId };
+}
+
+function sameCompanionSnapshot(left: CompanionSnapshot, right: CompanionSnapshot): boolean {
+  return left.installed === right.installed
+    && left.cohortId === right.cohortId
+    && (!left.installed || (right.installed && left.targetId === right.targetId));
 }
 
 export function listProjectTemplatesForCli(
@@ -337,20 +381,45 @@ export async function listProjectTemplatesForCliWithDependencies(
   const cwd = resolve(options.cwd);
   try {
     const companion = snapshotCompanion(dependencies.readCompanionLockState(cwd));
+    requireActive(options.signal);
     if (recoveryRequired(dependencies.inspectApplyGuard({ repoPath: cwd }))) {
       return outcomeFailure('project-template list', 'RECOVERY_REQUIRED');
     }
-    if (isAborted(options.signal)) {
-      return outcomeFailure('project-template list', 'INTERRUPTED');
-    }
+    requireActive(options.signal);
     const backupIds = snapshotStringArray(
-      await dependencies.listBackupIds(cwd, companion.installed),
+      await awaitActive(
+        dependencies.listBackupIds(cwd, companion.installed, options.signal),
+        options.signal,
+      ),
       MAX_BACKUP_IDS,
     );
     for (const backupId of backupIds) {
       if (!testPattern(BACKUP_ID_PATTERN, backupId)) throw new Error('invalid backup id');
     }
-    backupIds.sort();
+    REFLECT_APPLY(ARRAY_SORT, backupIds, []);
+    let companionAfter: CompanionSnapshot | undefined;
+    let companionAfterError: unknown;
+    try {
+      companionAfter = snapshotCompanion(dependencies.readCompanionLockState(cwd));
+    } catch (error) {
+      companionAfterError = error;
+    }
+    requireActive(options.signal);
+    if (recoveryRequired(dependencies.inspectApplyGuard({ repoPath: cwd }))) {
+      return outcomeFailure('project-template list', 'RECOVERY_REQUIRED');
+    }
+    requireActive(options.signal);
+    if (companionAfterError !== undefined) {
+      if (companionAfterError instanceof ProjectTemplateCompanionLockStateError
+        && companionAfterError.code === 'MIXED_STATE') {
+        return outcomeFailure('project-template list', 'TARGET_DRIFT');
+      }
+      throw companionAfterError;
+    }
+    if (companionAfter === undefined || !sameCompanionSnapshot(companion, companionAfter)) {
+      return outcomeFailure('project-template list', 'TARGET_DRIFT');
+    }
+    requireActive(options.signal);
     return outcomeSuccess(
       'project-template list',
       companion.installed
@@ -386,20 +455,25 @@ export async function listProjectTemplatesForCliWithDependencies(
 async function listProjectTemplateBackupIdsReadOnly(
   cwd: string,
   installed: boolean,
+  signal?: AbortSignal,
 ): Promise<readonly string[]> {
   const controlRoot = join(resolve(cwd), '.takt-control');
   try {
-    await lstat(controlRoot);
+    await awaitActive(lstat(controlRoot), signal);
   } catch (error) {
+    requireActive(signal);
     const code = typeof error === 'object' && error !== null
       ? OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(error, 'code')?.value
       : undefined;
     if (code === 'ENOENT' && !installed) return [];
     throw error;
   }
-  const storage = await openProjectTemplateApplyStorageReadOnly({ repoPath: cwd });
-  const backupsBefore = await storage.io.lstat(storage.backupsRoot);
-  const resolvedBefore = await storage.io.realpath(storage.backupsRoot);
+  const storage = await awaitActive(
+    openProjectTemplateApplyStorageReadOnly({ repoPath: cwd }),
+    signal,
+  );
+  const backupsBefore = await awaitActive(storage.io.lstat(storage.backupsRoot), signal);
+  const resolvedBefore = await awaitActive(storage.io.realpath(storage.backupsRoot), signal);
   if (resolvedBefore !== storage.backupsRoot || !backupsBefore.isDirectory()
     || backupsBefore.isSymbolicLink() || backupsBefore.dev !== storage.device) {
     throw new ProjectTemplateApplyStorageError(
@@ -409,13 +483,16 @@ async function listProjectTemplateBackupIdsReadOnly(
   }
   // Why: asking the storage boundary for at most 32 entries makes the 33rd
   // generation a hard failure before it can become an unbounded CLI result.
-  const entries = await storage.io.readdir(storage.backupsRoot, MAX_BACKUP_IDS);
+  const entries = await awaitActive(
+    storage.io.readdir(storage.backupsRoot, MAX_BACKUP_IDS),
+    signal,
+  );
   const backupIds: string[] = [];
   for (const entry of entries) {
     const backupId = snapshotBackupDirent(entry);
     const generationPath = join(storage.backupsRoot, backupId);
-    const generationBefore = await storage.io.lstat(generationPath);
-    const generationRealpath = await storage.io.realpath(generationPath);
+    const generationBefore = await awaitActive(storage.io.lstat(generationPath), signal);
+    const generationRealpath = await awaitActive(storage.io.realpath(generationPath), signal);
     if (generationRealpath !== generationPath || !generationBefore.isDirectory()
       || generationBefore.isSymbolicLink() || generationBefore.dev !== storage.device) {
       throw new ProjectTemplateApplyStorageError(
@@ -423,8 +500,8 @@ async function listProjectTemplateBackupIdsReadOnly(
         'backup generation cannot be proven safe',
       );
     }
-    await readProjectTemplateBackupManifest({ storage, backupId });
-    const generationAfter = await storage.io.lstat(generationPath);
+    await awaitActive(readProjectTemplateBackupManifest({ storage, backupId }), signal);
+    const generationAfter = await awaitActive(storage.io.lstat(generationPath), signal);
     if (!isStableDirectory(generationBefore, generationAfter)) {
       throw new ProjectTemplateApplyStorageError(
         'UNSAFE_CONTROL_ROOT',
@@ -433,14 +510,15 @@ async function listProjectTemplateBackupIdsReadOnly(
     }
     backupIds.push(backupId);
   }
-  const backupsAfter = await storage.io.lstat(storage.backupsRoot);
-  const resolvedAfter = await storage.io.realpath(storage.backupsRoot);
+  const backupsAfter = await awaitActive(storage.io.lstat(storage.backupsRoot), signal);
+  const resolvedAfter = await awaitActive(storage.io.realpath(storage.backupsRoot), signal);
   if (resolvedAfter !== storage.backupsRoot || !isStableDirectory(backupsBefore, backupsAfter)) {
     throw new ProjectTemplateApplyStorageError(
       'UNSAFE_CONTROL_ROOT',
       'backup directory changed during inspection',
     );
   }
+  requireActive(signal);
   return backupIds;
 }
 

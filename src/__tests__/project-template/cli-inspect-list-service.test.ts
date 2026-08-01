@@ -176,6 +176,27 @@ describe('project-template inspect CLI service', () => {
       envelope: { status: 'error', error: { code: 'INTERRUPTED' } },
     });
   });
+
+  it('rechecks cancellation after the final source identity await', async () => {
+    const controller = new AbortController();
+    let realpathCalls = 0;
+    const outcome = await inspectProjectTemplateForCliWithDependencies({
+      cwd: '/safe/repo',
+      sourcePath: 'template.taktpack',
+      signal: controller.signal,
+    }, inspectDependencies({
+      realpath: vi.fn(async (path: string) => {
+        realpathCalls += 1;
+        if (realpathCalls === 4) controller.abort();
+        return path;
+      }),
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 130,
+      envelope: { status: 'error', error: { code: 'INTERRUPTED' } },
+    });
+  });
 });
 
 describe('project-template list CLI service', () => {
@@ -212,7 +233,7 @@ describe('project-template list CLI service', () => {
         result: { installed: false, backupIds: [], recoveryState: 'clean' },
       },
     });
-    expect(listBackupIds).toHaveBeenCalledWith('/safe/repo', false);
+    expect(listBackupIds).toHaveBeenCalledWith('/safe/repo', false, undefined);
   });
 
   it('returns only the installed target and a bounded backup generation list', async () => {
