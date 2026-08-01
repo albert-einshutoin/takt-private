@@ -26,6 +26,7 @@ export interface ExceededInfo {
   newMaxSteps: number;
   currentIteration: number;
   resumePoint?: WorkflowResumePoint;
+  workflowGenerationWitness?: string;
 }
 
 /** Result of workflow execution */
@@ -87,6 +88,8 @@ export interface WorkflowExecutionOptions {
   retryNote?: string;
   /** Resume point for workflow_call-aware retries */
   resumePoint?: WorkflowResumePoint;
+  /** Generation loaded under the runtime repertoire snapshot. */
+  workflowGenerationWitness?: string;
   /** Source direct run metadata for resumed direct executions */
   directResume?: DirectResumeMetadata;
   /** Override report directory name (e.g. "20260201-015714-foptng") */

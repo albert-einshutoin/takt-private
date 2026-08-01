@@ -8,17 +8,18 @@ export interface ResolvedTaskRetryMetadata {
   resumePoint?: WorkflowResumePoint;
   currentIteration?: number;
   maxSteps?: number;
+  workflowGenerationWitness?: string;
   preserveExisting?: boolean;
 }
 
 type TerminalTaskUpdates = Omit<
   Partial<TaskRecord>,
-  'start_step' | 'resume_point' | 'exceeded_current_iteration' | 'exceeded_max_steps'
+  'start_step' | 'resume_point' | 'exceeded_current_iteration' | 'exceeded_max_steps' | 'workflow_generation_witness'
 >;
 
 type ClearedRetryTaskRecord = Omit<
   TaskRecord,
-  'start_step' | 'resume_point' | 'exceeded_current_iteration' | 'exceeded_max_steps'
+  'start_step' | 'resume_point' | 'exceeded_current_iteration' | 'exceeded_max_steps' | 'workflow_generation_witness'
 >;
 
 export function buildClaimedTaskRecord(task: TaskRecord): TaskRecord {
@@ -51,6 +52,9 @@ export function buildTerminalTaskRecord(
     ...updates,
     ...(nextRetryMetadata?.startStep ? { start_step: nextRetryMetadata.startStep } : {}),
     ...(nextRetryMetadata?.resumePoint ? { resume_point: nextRetryMetadata.resumePoint } : {}),
+    ...(nextRetryMetadata?.workflowGenerationWitness
+      ? { workflow_generation_witness: nextRetryMetadata.workflowGenerationWitness }
+      : {}),
     ...exceededMetadata,
   };
 }
@@ -87,6 +91,9 @@ export function buildRetryTaskRecord(
     // them to a different workflow can start that workflow already over budget.
     exceeded_current_iteration: preservesResumeBudget ? task.exceeded_current_iteration : undefined,
     exceeded_max_steps: preservesResumeBudget ? task.exceeded_max_steps : undefined,
+    workflow_generation_witness: preservesResumeBudget
+      ? task.workflow_generation_witness
+      : undefined,
   };
 }
 
@@ -120,6 +127,7 @@ function clearRetryMetadata(task: TaskRecord): ClearedRetryTaskRecord {
     'resume_point',
     'exceeded_current_iteration',
     'exceeded_max_steps',
+    'workflow_generation_witness',
   ]);
   return Object.fromEntries(
     Object.entries(task).filter(([key]) => !retryMetadataKeys.has(key)),

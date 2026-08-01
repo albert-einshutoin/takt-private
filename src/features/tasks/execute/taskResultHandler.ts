@@ -125,6 +125,9 @@ export function persistExceededTaskResult(
     newMaxSteps: exceeded.newMaxSteps,
     currentIteration: exceeded.currentIteration,
     ...(exceeded.resumePoint ? { resumePoint: exceeded.resumePoint } : {}),
+    ...(exceeded.workflowGenerationWitness
+      ? { workflowGenerationWitness: exceeded.workflowGenerationWitness }
+      : {}),
     ...(context?.worktreePath ? { worktreePath: context.worktreePath } : {}),
     ...(context?.copyWorkspacePath ? { copyWorkspacePath: context.copyWorkspacePath } : {}),
     ...(context?.branch ? { branch: context.branch } : {}),

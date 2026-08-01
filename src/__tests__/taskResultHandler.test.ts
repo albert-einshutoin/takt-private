@@ -50,6 +50,7 @@ describe('persistExceededTaskResult', () => {
       currentStep: 'reviewers',
       newMaxSteps: 60,
       currentIteration: 30,
+      workflowGenerationWitness: 'a'.repeat(64),
     });
 
     const { tasks } = loadTasksFile(testDir);
@@ -59,6 +60,7 @@ describe('persistExceededTaskResult', () => {
     expect(row.start_step).toBeUndefined();
     expect(row.exceeded_max_steps).toBe(60);
     expect(row.exceeded_current_iteration).toBe(30);
+    expect(row.workflow_generation_witness).toBe('a'.repeat(64));
     expect(mockInfo).toHaveBeenCalledWith(
       `Task "${task.name}" exceeded iteration limit at step "reviewers"`,
     );

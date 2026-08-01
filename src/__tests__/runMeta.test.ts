@@ -42,6 +42,19 @@ describe('RunMetaManager', () => {
     vi.clearAllMocks();
   });
 
+  it('persists the execution generation witness before workflow progress begins', () => {
+    const witness = 'a'.repeat(64);
+
+    new RunMetaManager(createRunPaths(), 'Generation A task', 'default', undefined, {
+      workflowGenerationWitness: witness,
+    });
+
+    const initialMeta = JSON.parse(String(mockWriteRunMeta.mock.calls[0]![1])) as {
+      workflow_generation_witness?: string;
+    };
+    expect(initialMeta.workflow_generation_witness).toBe(witness);
+  });
+
   it('rejects DebugLogger-reserved slugs for actual run metadata', () => {
     const paths = {
       ...createRunPaths(),

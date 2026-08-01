@@ -166,6 +166,9 @@ async function executeWorkflowInternal(
         newMaxSteps: request.maxSteps + workflowMaxSteps,
         currentIteration: request.currentIteration,
         ...(resumePoint ? { resumePoint } : {}),
+        ...(options.workflowGenerationWitness
+          ? { workflowGenerationWitness: options.workflowGenerationWitness }
+          : {}),
       };
     },
   );
