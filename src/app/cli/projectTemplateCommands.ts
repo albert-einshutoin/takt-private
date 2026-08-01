@@ -183,7 +183,8 @@ export function registerProjectTemplateCommands(
     .description('Portable .takt project template operations')
     .exitOverride()
     .allowUnknownOption(true)
-    .option('--cwd <path>', 'Project root');
+    .option('--cwd <path>', 'Project root')
+    .option('--json', 'Explicitly request the always-machine JSON output contract');
 
   const settle = async (
     command: ProjectTemplateCliCommand,
@@ -402,6 +403,20 @@ export function registerProjectTemplateCommands(
         command: 'project-template rollback', backupId, mutation: parsedMutation,
       });
     });
+
+  group.action(async (_flags: CommonFlags, command: Command) => {
+    if (hasUnknownOption(command)) {
+      // Preserve the existing UNKNOWN_OPTION parser lifecycle for unknown
+      // children and group options; only the genuinely omitted child is the
+      // new INVALID_ARGUMENT root-command case.
+      command.error('invalid project-template invocation');
+      return;
+    }
+    // Why: the root command is recognized as a machine invocation, so an
+    // omitted child must settle through the same single-envelope lifecycle
+    // instead of Commander's implicit help-and-success behavior.
+    await invalid('project-template', 'dry-run', 'INVALID_ARGUMENT');
+  });
 
   return group;
 }

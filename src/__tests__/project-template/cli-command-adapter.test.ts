@@ -40,6 +40,7 @@ function outcome(
 
 function harness(overrides: Partial<ProjectTemplateCliCommandAdapterDependencies> = {}) {
   const writes: string[] = [];
+  const exitCodes: number[] = [];
   const requests: ProjectTemplateCliCommandRequest[] = [];
   const admissions: string[] = [];
   const dispatch = vi.fn(async (
@@ -58,7 +59,7 @@ function harness(overrides: Partial<ProjectTemplateCliCommandAdapterDependencies
     dispatch,
     dispose,
     writeStdout(chunk) { writes.push(chunk); },
-    setExitCode() {},
+    setExitCode(code) { exitCodes.push(code); },
     installInterrupt() { return () => {}; },
     cwd() { return '/workspace'; },
     currentTaktVersion: '0.48.0',
@@ -68,7 +69,7 @@ function harness(overrides: Partial<ProjectTemplateCliCommandAdapterDependencies
   program.configureOutput({ writeErr() {} });
   program.option('--cwd <path>');
   registerProjectTemplateCommands(program, dependencies);
-  return { admissions, dispatch, dispose, program, requests, writes };
+  return { admissions, dispatch, dispose, exitCodes, program, requests, writes };
 }
 
 describe('project-template CLI command adapter', () => {
@@ -90,6 +91,40 @@ describe('project-template CLI command adapter', () => {
       expect(help).toContain('--expected-plan-id <sha256>');
       expect(help).toContain('--force');
     }
+  });
+
+  it('returns one canonical INVALID_ARGUMENT envelope for a JSON group invocation', async () => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', '--json', '--cwd=/workspace',
+    ]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(value.exitCodes).toEqual([20]);
+    expect(value.writes).toHaveLength(1);
+    expect(value.writes[0]!.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template', mode: 'dry-run',
+      error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
+  it('keeps the always-machine INVALID_ARGUMENT contract without --json', async () => {
+    const value = harness();
+    await value.program.parseAsync(['node', 'takt', 'project-template']);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(value.exitCodes).toEqual([20]);
+    expect(value.writes).toHaveLength(1);
+    expect(value.writes[0]!.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template', mode: 'dry-run',
+      error: { code: 'INVALID_ARGUMENT' },
+    });
   });
 
   it('dispatches canonical GitHub and local sources without exposing authority', async () => {

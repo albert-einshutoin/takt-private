@@ -50,6 +50,27 @@ describe('project template CLI machine contract', () => {
     expect('result' in failure).toBe(false);
   });
 
+  it('admits the root command only as a dry-run failure identity', () => {
+    expect(createProjectTemplateCliFailure({
+      command: 'project-template',
+      mode: 'dry-run',
+      code: 'INVALID_ARGUMENT',
+    })).toMatchObject({
+      command: 'project-template', mode: 'dry-run', status: 'error',
+      error: { code: 'INVALID_ARGUMENT' },
+    });
+    expect(() => createProjectTemplateCliFailure({
+      command: 'project-template',
+      mode: 'apply',
+      code: 'INVALID_ARGUMENT',
+    })).toThrow(ProjectTemplateCliContractError);
+    expect(() => createProjectTemplateCliSuccess({
+      command: 'project-template',
+      mode: 'dry-run',
+      result: { installed: false, backupIds: [], recoveryState: 'clean' },
+    } as never)).toThrow(ProjectTemplateCliContractError);
+  });
+
   it('rejects forged envelopes instead of trusting TypeScript at runtime', () => {
     const forged = {
       schemaVersion: '1.0',

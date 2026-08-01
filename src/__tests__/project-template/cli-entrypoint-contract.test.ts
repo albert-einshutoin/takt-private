@@ -70,6 +70,52 @@ describe('project-template CLI entrypoint contract', () => {
     }
   });
 
+  it.each([
+    ['plain', ['project-template', '--json']],
+    ['root cwd', ['--cwd', '/private/root-cwd', 'project-template', '--json']],
+    ['attached root cwd', ['--cwd=/private/root-cwd', 'project-template', '--json']],
+    ['group cwd', ['project-template', '--cwd', '/private/group-cwd', '--json']],
+    ['attached group cwd', ['project-template', '--cwd=/private/group-cwd', '--json']],
+  ] as const)('returns one JSON INVALID_ARGUMENT envelope when %s omits the child', (
+    _name,
+    args,
+  ) => {
+    const result = run(args);
+
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template', mode: 'dry-run',
+      error: { code: 'INVALID_ARGUMENT' },
+    });
+    expect(result.stdout).not.toContain('/private/');
+  });
+
+  it.each([
+    ['plain', ['project-template']],
+    ['root cwd', ['--cwd', '/private/root-cwd', 'project-template']],
+    ['attached root cwd', ['--cwd=/private/root-cwd', 'project-template']],
+    ['group cwd', ['project-template', '--cwd', '/private/group-cwd']],
+    ['attached group cwd', ['project-template', '--cwd=/private/group-cwd']],
+  ] as const)('keeps one machine envelope when %s omits the child without --json', (
+    _name,
+    args,
+  ) => {
+    const result = run(args);
+
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template', mode: 'dry-run',
+      error: { code: 'INVALID_ARGUMENT' },
+    });
+    expect(result.stdout).not.toContain('/private/');
+  });
+
   it('honors root and per-command cwd while keeping one JSON document', async () => {
     const root = await mkdtemp(join(tmpdir(), 'takt-cli-entrypoint-'));
     roots.push(root);

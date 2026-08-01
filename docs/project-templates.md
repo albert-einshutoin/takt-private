@@ -457,6 +457,11 @@ accept `--cwd <path>` and `--json`. Commands that can mutate default to
 `--dry-run`; mutation requires both `--apply` and the exact
 `--expected-plan-id <sha256>` returned by a fresh preview.
 
+The group name alone is not an operation. `takt project-template` (with or
+without `--json` or `--cwd`) returns one schema `1.0` error envelope with
+`command: "project-template"`, `INVALID_ARGUMENT`, and exit `20`. Only
+`takt project-template --help` returns help with exit `0`.
+
 | Command | Operand | Additional options | Mutation |
 |---|---|---|---|
 | `export` | output `.taktpack` | `--pack-version`, `--min-takt-version`, `--source-commit` | dry-run/apply |

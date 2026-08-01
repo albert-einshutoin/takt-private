@@ -19,6 +19,7 @@ export const PROJECT_TEMPLATE_CLI_SCHEMA_VERSION = '1.0' as const;
 
 export type ProjectTemplateCliMode = 'dry-run' | 'apply';
 export type ProjectTemplateCliCommand =
+  | 'project-template'
   | 'project-template export'
   | 'project-template inspect'
   | 'project-template diff'
@@ -227,6 +228,7 @@ interface ProjectTemplateCliFailureVariant<
 }
 
 export type ProjectTemplateCliFailureEnvelope =
+  | ProjectTemplateCliFailureVariant<'project-template', 'dry-run'>
   | ProjectTemplateCliFailureVariant<'project-template export', ProjectTemplateCliMode>
   | ProjectTemplateCliFailureVariant<'project-template inspect', 'dry-run'>
   | ProjectTemplateCliFailureVariant<'project-template diff', 'dry-run'>
@@ -291,6 +293,7 @@ const MAX_CHANGES = 8_192;
 const MAX_REVIEW_CODES = 32;
 
 const COMMANDS = new CAPTURED_SET<ProjectTemplateCliCommand>([
+  'project-template',
   'project-template export',
   'project-template inspect',
   'project-template diff',
@@ -675,10 +678,14 @@ export function snapshotProjectTemplateCliEnvelope(value: unknown): ProjectTempl
       command === 'project-template inspect'
       || command === 'project-template diff'
       || command === 'project-template list'
+      || command === 'project-template'
     )
   ) invalidSchema();
   const warnings = validateWarnings(snapshot.warnings);
   if (snapshot.status === 'success') {
+    // The root identity exists only to report an omitted child command. It can
+    // never represent a successful operation or borrow a child result shape.
+    if (command === 'project-template') invalidSchema();
     if (!hasExactKeys(snapshot, [
       'schemaVersion', 'command', 'status', 'mode', 'result', 'warnings',
     ])) invalidSchema();

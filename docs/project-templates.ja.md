@@ -385,6 +385,11 @@ portableな運用境界には `takt project-template` を使います。全コ�
 `--dry-run` で、変更にはfresh previewが返した完全一致の
 `--expected-plan-id <sha256>` と `--apply` の両方が必要です。
 
+group名だけでは操作になりません。`takt project-template` は`--json`や`--cwd`の
+有無にかかわらず、`command: "project-template"`、`INVALID_ARGUMENT`、exit `20`を持つ
+schema `1.0` error envelopeを1件だけ返します。`takt project-template --help`だけは
+helpを表示してexit `0`を返します。
+
 | コマンド | 引数 | 追加オプション | 変更 |
 |---|---|---|---|
 | `export` | 出力 `.taktpack` | `--pack-version`, `--min-takt-version`, `--source-commit` | dry-run/apply |
