@@ -38,6 +38,9 @@ import {
   serializeProjectTemplateSourceDescriptor,
   type ProjectTemplateSourceDescriptorV1,
 } from '../../features/project-template/source-descriptor.js';
+import {
+  verifyImmutableGithubDependencySources,
+} from '../../features/repertoire/github-ref-resolver.js';
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const ASSET_NAME = 'template.taktpack';
@@ -145,8 +148,12 @@ async function createFixture(options: FixtureOptions = {}) {
   };
   const checksum = `${archiveSha}  ${ASSET_NAME}\n`;
   const metadata: GithubTemplateSourceMetadataPort = {
-    async resolveRefToCommit() {
-      return { commit: COMMIT };
+    async resolveRefToCommit(input) {
+      return {
+        commit: input.owner === 'acme' && input.repo === 'dependency'
+          ? descriptor.repertoireDependencies[0]!.commit
+          : COMMIT,
+      };
     },
     async readFileAtCommit() {
       return new TextEncoder().encode(
@@ -178,6 +185,11 @@ async function createFixture(options: FixtureOptions = {}) {
         : 'github:acme/template@main',
     ),
     metadata,
+    verifyDependencies: (dependencies) =>
+      verifyImmutableGithubDependencySources({
+        dependencies,
+        resolver: metadata,
+      }),
   });
   const controlRoot = join(projectRoot, '.takt-template-state');
   mkdirSync(controlRoot, { mode: 0o700 });
@@ -243,6 +255,11 @@ describe('GitHub template authenticated download receipt D1', () => {
           requestedRef: 'main',
           releaseTag: 'v1.2.3',
           commit: COMMIT,
+          dependencyVerification: {
+            method: 'github-ref-to-commit-v1',
+            declarationSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+            count: 1,
+          },
         },
         release: {
           releaseId: 101,
@@ -278,6 +295,7 @@ describe('GitHub template authenticated download receipt D1', () => {
     );
     expect(signedText).toContain('"algorithm": "hmac-sha256"');
     expect(signedText).toContain('"keyId": "receipt-key-1"');
+    expect(signedText).toContain('"method": "github-ref-to-commit-v1"');
     expect(signedText).not.toContain('"tag"');
     expect(Object.isFrozen(prepared)).toBe(true);
     expect(Object.isFrozen(prepared.receipt.payload.source.sourceDescriptor))

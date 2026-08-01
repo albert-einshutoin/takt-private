@@ -26,6 +26,24 @@ const DESCRIPTOR = serializeProjectTemplateSourceDescriptor({
   },
   repertoireDependencies: [],
 });
+const DEPENDENCY_COMMIT = 'abcdef0123456789abcdef0123456789abcdef01';
+const DEPENDENCY_DESCRIPTOR = serializeProjectTemplateSourceDescriptor({
+  schemaVersion: '1.0',
+  pack: {
+    version: '1.2.3',
+    releaseTag: 'v1.2.3',
+    assetName: ASSET_NAME,
+    checksumAssetName: CHECKSUM_NAME,
+    sha256: SHA256,
+  },
+  repertoireDependencies: [{
+    scope: '@acme/dependency',
+    version: '2.0.0',
+    source: 'github:acme/dependency@v2.0.0',
+    commit: DEPENDENCY_COMMIT,
+    capabilities: ['edit'],
+  }],
+});
 
 describe('authenticated project-template source resolver F3', () => {
   it('projects all metadata, bounds checksum collection, and disposes once', async () => {
@@ -85,6 +103,77 @@ describe('authenticated project-template source resolver F3', () => {
     }
     expect(value.openReleaseAsset.mock.calls[0]![0].signal)
       .toBe(controller.signal);
+  });
+
+  it('verifies dependency tags before release metadata with the same credential, deadline, and signal', async () => {
+    const controller = new AbortController();
+    const value = harness({
+      signal: controller.signal,
+      descriptor: DEPENDENCY_DESCRIPTOR,
+      dependencyCommit: DEPENDENCY_COMMIT,
+      includeDependencyResolutionResponse: true,
+    });
+
+    const resolved = await resolveAuthenticatedGithubTemplateSource({
+      ...value.options,
+      verifyDependencySources: true,
+    }, value.dependencies);
+
+    expect(resolved.dependencyVerification).toMatchObject({
+      method: 'github-ref-to-commit-v1',
+      count: 1,
+    });
+    expect(value.acquireCredential).toHaveBeenCalledTimes(1);
+    expect(value.requestMetadata).toHaveBeenCalledTimes(5);
+    expect(value.requestMetadata.mock.calls.map(([request]) => request.path))
+      .toEqual([
+        '/repos/octo/demo/commits/main',
+        '/repos/octo/demo/contents/.takt-template-source.json?ref=' + COMMIT,
+        '/repos/octo/demo/commits/v1.2.3',
+        '/repos/acme/dependency/commits/v2.0.0',
+        '/repos/octo/demo/releases/tags/v1.2.3',
+      ]);
+    expect(value.requestMetadata.mock.calls.every(([request]) =>
+      request.deadlineMs === 10_000
+      && request.signal === controller.signal
+    )).toBe(true);
+  });
+
+  it('skips dependency network resolution for advisory-compatible resolution', async () => {
+    const value = harness({ descriptor: DEPENDENCY_DESCRIPTOR });
+
+    const resolved = await resolveAuthenticatedGithubTemplateSource(
+      value.options,
+      value.dependencies,
+    );
+
+    expect(resolved).not.toHaveProperty('dependencyVerification');
+    expect(value.requestMetadata).toHaveBeenCalledTimes(4);
+    expect(value.requestMetadata.mock.calls.some(([request]) =>
+      request.path.includes('/repos/acme/dependency/commits/')
+    )).toBe(false);
+  });
+
+  it('stops before release/checksum authority when a dependency tag was republished', async () => {
+    const value = harness({
+      descriptor: DEPENDENCY_DESCRIPTOR,
+      dependencyCommit: 'ffffffffffffffffffffffffffffffffffffffff',
+      includeDependencyResolutionResponse: true,
+    });
+
+    await expect(resolveAuthenticatedGithubTemplateSource({
+      ...value.options,
+      verifyDependencySources: true,
+    }, value.dependencies)).rejects.toMatchObject({
+      code: 'UNVERIFIED_DEPENDENCY_SOURCE',
+    });
+
+    expect(value.requestMetadata).toHaveBeenCalledTimes(4);
+    expect(value.requestMetadata.mock.calls.some(([request]) =>
+      request.path.includes('/releases/tags/')
+    )).toBe(false);
+    expect(value.openReleaseAsset).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('redacts metadata failure and disposes the credential exactly once', async () => {
@@ -509,6 +598,9 @@ function harness(overrides: {
   readonly checksumIterable?: AsyncIterable<Uint8Array>;
   readonly openReleaseAsset?: () => AsyncIterable<Uint8Array>;
   readonly disposeThrows?: boolean;
+  readonly descriptor?: string;
+  readonly dependencyCommit?: string;
+  readonly includeDependencyResolutionResponse?: boolean;
 } = {}) {
   const receivers: Array<{
     readonly kind: 'dependency' | 'asset';
@@ -523,8 +615,13 @@ function harness(overrides: {
   const credential = Object.freeze({ dispose });
   const rawBodies = [
     Buffer.from(JSON.stringify({ sha: COMMIT })),
-    Buffer.from(DESCRIPTOR),
+    Buffer.from(overrides.descriptor ?? DESCRIPTOR),
     Buffer.from(JSON.stringify({ sha: COMMIT })),
+    ...(overrides.includeDependencyResolutionResponse === true
+      ? [Buffer.from(JSON.stringify({
+        sha: overrides.dependencyCommit ?? DEPENDENCY_COMMIT,
+      }))]
+      : []),
     Buffer.from(JSON.stringify({
       id: 101,
       tag_name: 'v1.2.3',

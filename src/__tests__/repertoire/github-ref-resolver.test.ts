@@ -151,4 +151,65 @@ describe('verifyImmutableGithubDependencySources', () => {
     });
     expect(resolveRefToCommit).not.toHaveBeenCalled();
   });
+
+  it('captures the resolver receiver and method before the first await', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const resolver = {
+      marker: 'original',
+      async resolveRefToCommit(
+        this: { marker: string },
+        input: { repo: string },
+      ) {
+        expect(this).toBe(resolver);
+        if (input.repo === 'alpha') await gate;
+        return {
+          commit: input.repo === 'alpha'
+            ? DEPENDENCIES[0]!.commit
+            : DEPENDENCIES[1]!.commit,
+        };
+      },
+    };
+    const pending = verifyImmutableGithubDependencySources({
+      dependencies: DEPENDENCIES,
+      resolver,
+    });
+    await Promise.resolve();
+    resolver.resolveRefToCommit = vi.fn(async () => {
+      throw new Error('SECRET replacement');
+    });
+    release();
+
+    await expect(pending).resolves.toMatchObject({ count: 2 });
+    expect(resolver.resolveRefToCommit).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-canonical declarations before invoking the resolver', async () => {
+    const resolveRefToCommit = vi.fn();
+    await expect(verifyImmutableGithubDependencySources({
+      dependencies: [...DEPENDENCIES].reverse(),
+      resolver: { resolveRefToCommit },
+    })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(resolveRefToCommit).not.toHaveBeenCalled();
+  });
+
+  it('maps abort and resolver details to finite non-secret errors', async () => {
+    const controller = new AbortController();
+    controller.abort('SECRET abort reason');
+    const error = await verifyImmutableGithubDependencySources({
+      dependencies: DEPENDENCIES,
+      resolver: {
+        async resolveRefToCommit() {
+          throw new Error('token SECRET https://api.github.com/private');
+        },
+      },
+      signal: controller.signal,
+    }).catch((reason: unknown) => reason);
+
+    expect(error).toMatchObject({ code: 'ABORTED' });
+    expect(String(error)).not.toContain('SECRET');
+    expect(String(error)).not.toContain('https://');
+  });
 });

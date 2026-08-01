@@ -16,6 +16,9 @@ import {
   calculateProjectTemplateSourceDescriptorSha256,
   serializeProjectTemplateSourceDescriptor,
 } from '../../features/project-template/source-descriptor.js';
+import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from '../../features/project-template/repertoire-dependency-canonical.js';
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const ARCHIVE_SHA = 'a'.repeat(64);
@@ -1181,6 +1184,16 @@ async function resolveDownloadAuthorityFixture() {
       'github:acme/template@main',
     ),
     metadata: createPort().port,
+    async verifyDependencies(dependencies) {
+      return Object.freeze({
+        method: 'github-ref-to-commit-v1' as const,
+        declarationSha256:
+          calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+            dependencies,
+          ),
+        count: dependencies.length,
+      });
+    },
   });
 }
 

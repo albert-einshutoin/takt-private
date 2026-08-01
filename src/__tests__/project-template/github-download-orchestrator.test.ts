@@ -42,9 +42,15 @@ import type {
   GithubTemplateSourceResolverPort,
 } from '../../features/project-template/github-source-resolver-port.js';
 import {
+  verifyImmutableGithubDependencySources,
+} from '../../features/repertoire/github-ref-resolver.js';
+import {
   serializeProjectTemplateSourceDescriptor,
   type ProjectTemplateSourceDescriptorV1,
 } from '../../features/project-template/source-descriptor.js';
+import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from '../../features/project-template/repertoire-dependency-canonical.js';
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const OTHER_COMMIT = '1123456789abcdef0123456789abcdef01234567';
@@ -105,10 +111,15 @@ async function makeFixture() {
   const checksum = `${archiveSha}  ${ASSET_NAME}\n`;
   const calls: string[] = [];
   let commit = COMMIT;
+  let dependencyCommit = descriptor.repertoireDependencies[0]!.commit;
   const metadata: GithubTemplateSourceMetadataPort = {
-    async resolveRefToCommit() {
+    async resolveRefToCommit(input) {
       calls.push('resolve-ref');
-      return { commit };
+      return {
+        commit: input.owner === 'acme' && input.repo === 'dependency'
+          ? dependencyCommit
+          : commit,
+      };
     },
     async readFileAtCommit() {
       calls.push('read-descriptor');
@@ -141,6 +152,16 @@ async function makeFixture() {
   calls.length = 0;
   const resolverInputs: GithubTemplateSourceResolutionInput[] = [];
   const resolverMethods: string[] = [];
+  const verifyDependencies = (
+    dependencies: ProjectTemplateSourceDescriptorV1[
+      'repertoireDependencies'
+    ],
+    signal?: AbortSignal,
+  ) => verifyImmutableGithubDependencySources({
+    dependencies,
+    resolver: metadata,
+    ...(signal === undefined ? {} : { signal }),
+  });
   const resolver: GithubTemplateSourceResolverPort = {
     async resolveAdvisory(input) {
       resolverMethods.push('resolveAdvisory');
@@ -160,6 +181,8 @@ async function makeFixture() {
         source: parseProjectTemplateGithubSourceSpec(input.source),
         metadata,
         ...(input.current === undefined ? {} : { current: input.current }),
+        verifyDependencies: (dependencies) =>
+          verifyDependencies(dependencies, input.signal),
       });
     },
   };
@@ -212,8 +235,12 @@ async function makeFixture() {
     setCommit(value: string) {
       commit = value;
     },
+    setDependencyCommit(value: string) {
+      dependencyCommit = value;
+    },
     source: 'github:acme/template@main',
     verifier,
+    verifyDependencies,
   };
 }
 
@@ -241,6 +268,8 @@ describe('GitHub template download orchestrator O1', () => {
           source: parseProjectTemplateGithubSourceSpec(input.source),
           metadata: fixture.metadata,
           ...(input.current === undefined ? {} : { current: input.current }),
+          verifyDependencies: (dependencies) =>
+            fixture.verifyDependencies(dependencies, input.signal),
         });
       },
     };
@@ -506,6 +535,7 @@ describe('GitHub template download orchestrator O1', () => {
       'resolve-ref',
       'read-descriptor',
       'resolve-ref',
+      'resolve-ref',
       'get-release',
       'read-checksum',
     ]);
@@ -527,6 +557,84 @@ describe('GitHub template download orchestrator O1', () => {
       'download',
     );
     lease.release();
+  });
+
+  it('stops dependency republish before release, authority, archive, cache, or signing', async () => {
+    const fixture = await makeFixture();
+    fixture.setDependencyCommit('ffffffffffffffffffffffffffffffffffffffff');
+    const claim = vi.spyOn(
+      githubUpdateCheck,
+      'claimResolvedGithubTemplateSourceForDownload',
+    );
+    const materialize = vi.spyOn(
+      githubDownloadStorage,
+      'materializeGithubTemplateCache',
+    );
+    const acquireSigningKey = vi.spyOn(
+      fixture.authenticator,
+      'acquireSigningKey',
+    );
+
+    await expect(downloadGithubTemplateSource({
+      projectRoot: fixture.projectRoot,
+      source: fixture.source,
+      advisory: fixture.advisory,
+      resolver: fixture.resolver,
+      asset: fixture.asset,
+      cacheRoot: fixture.cacheRoot,
+      authenticator: fixture.authenticator,
+      verifier: fixture.verifier,
+    })).rejects.toMatchObject({ code: 'SOURCE_RESOLUTION_FAILED' });
+
+    expect(fixture.calls).toEqual([
+      'resolve-ref',
+      'read-descriptor',
+      'resolve-ref',
+      'resolve-ref',
+    ]);
+    expect(claim).not.toHaveBeenCalled();
+    expect(fixture.assetCalls).toEqual([]);
+    expect(materialize).not.toHaveBeenCalled();
+    expect(acquireSigningKey).not.toHaveBeenCalled();
+  });
+
+  it('reports SOURCE_DRIFT when fresh dependency evidence no longer binds the advisory declaration', async () => {
+    const fixture = await makeFixture();
+    const original = fixture.resolver.resolveForDownload;
+    const resolver: GithubTemplateSourceResolverPort = {
+      resolveAdvisory: fixture.resolver.resolveAdvisory,
+      async resolveForDownload(input) {
+        const fresh = await Reflect.apply(
+          original,
+          fixture.resolver,
+          [input],
+        );
+        return Object.freeze({
+          ...fresh,
+          declaredDependencies: Object.freeze([]),
+          dependencyVerification: Object.freeze({
+            method: 'github-ref-to-commit-v1' as const,
+            declarationSha256:
+              calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+                [],
+              ),
+            count: 0,
+          }),
+        });
+      },
+    };
+
+    await expect(downloadGithubTemplateSource({
+      projectRoot: fixture.projectRoot,
+      source: fixture.source,
+      advisory: fixture.advisory,
+      resolver,
+      asset: fixture.asset,
+      cacheRoot: fixture.cacheRoot,
+      authenticator: fixture.authenticator,
+      verifier: fixture.verifier,
+    })).rejects.toMatchObject({ code: 'SOURCE_DRIFT' });
+    expect(fixture.assetCalls).toEqual([]);
   });
 
   it('rejects advisory ineligibility before guard, lease, metadata, or asset work', async () => {
@@ -708,6 +816,8 @@ describe('GitHub template download orchestrator O1', () => {
             fresh = await resolveGithubTemplateSource({
               source: parseProjectTemplateGithubSourceSpec(input.source),
               metadata: fixture.metadata,
+              verifyDependencies: (dependencies) =>
+                fixture.verifyDependencies(dependencies, input.signal),
               current: {
                 owner: fixture.advisory.source.owner,
                 repo: fixture.advisory.source.repo,
