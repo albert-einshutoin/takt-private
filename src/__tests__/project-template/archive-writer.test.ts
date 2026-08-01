@@ -6,7 +6,9 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -264,6 +266,50 @@ describe('taktpack deterministic writer', () => {
     expect(readdirSync(root).some((name) => (
       name.endsWith('.tmp') || name.endsWith('.rollback')
     ))).toBe(false);
+  });
+
+  it('rejects same-inode same-size force drift even when mtime is restored', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'digest-cas.taktpack');
+    const approved = 'approved-original';
+    const foreign = 'foreign--original';
+    expect(Buffer.byteLength(foreign)).toBe(Buffer.byteLength(approved));
+    writeFileSync(output, approved);
+    utimesSync(output, 1_700_000_000, 1_700_000_000);
+    const originalTimes = statSync(output);
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'force-cas') {
+            writeFileSync(output, foreign);
+            utimesSync(
+              output,
+              originalTimes.atimeMs / 1_000,
+              originalTimes.mtimeMs / 1_000,
+            );
+          }
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(readFileSync(output, 'utf8')).toBe(foreign);
+    expect(readdirSync(root).filter((name) => (
+      name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toHaveLength(2);
   });
 
   it('restores the approved target with no-replace when publication fails after evacuation', async () => {
