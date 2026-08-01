@@ -1,10 +1,12 @@
 import { createHash, createHmac } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   unlinkSync,
@@ -64,6 +66,12 @@ import {
 import {
   issueTrustedProjectTemplateApplyPreviewApproval,
 } from '../../features/project-template/apply-preview-approval.js';
+import { runProjectTemplateDoctor } from '../../features/project-template/apply-doctor.js';
+import { readProjectTemplateCompanionLockState } from '../../features/project-template/companion-lock-state-reader.js';
+import {
+  hasProjectTemplateApprovalClaim,
+  initializeProjectTemplateApplyStorage,
+} from '../../features/project-template/apply-storage.js';
 
 const roots: string[] = [];
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
@@ -114,7 +122,15 @@ async function storedFixture() {
   const sourceRoot = root('takt-remote-apply-source-');
   const sourcePath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
   mkdirSync(join(sourceRoot, '.takt', 'workflows'), { recursive: true });
-  writeFileSync(sourcePath, 'name: review\n');
+  writeFileSync(sourcePath, `name: review
+initial_step: review
+max_steps: 1
+steps:
+  - name: review
+    rules:
+      - condition: done
+        next: COMPLETE
+`);
   const exportPlan = await createProjectTemplateExportPlan(sourceRoot, {
     packVersion: '1.2.3',
     takt: { minVersion: '0.48.0' },
@@ -672,12 +688,26 @@ describe('GitHub project template remote transaction apply facade', () => {
       ...options,
       approvalEvidence: { ...approval },
     } as never)).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
-    await expect(composition.apply({
+    const result = await composition.apply({
       ...options,
       approvalEvidence: approval,
-    } as never)).rejects.toMatchObject({
-      code: 'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
+    } as never);
+    expect(result).toMatchObject({
+      status: 'committed',
+      planId: preview.transactionPlanId,
     });
+    expect(readFileSync(join(value.projectRoot, '.takt', 'workflows', 'review.yaml'), 'utf8'))
+      .toContain('name: review');
+    expect(readProjectTemplateCompanionLockState(value.projectRoot).state).toBe('update');
+    expect(runProjectTemplateDoctor(value.projectRoot).passed).toBe(true);
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: value.projectRoot });
+    expect(existsSync(storage.journalPath)).toBe(false);
+    expect(readdirSync(storage.stagingRoot)).toEqual([]);
+    expect(readdirSync(storage.backupsRoot)).toEqual([result.backupId]);
+    await expect(hasProjectTemplateApprovalClaim({
+      storage,
+      approvalId: approval.approvalId,
+    })).resolves.toBe(true);
   });
 
   it('rejects an expired original approval before execution', async () => {
@@ -711,7 +741,7 @@ describe('GitHub project template remote transaction apply facade', () => {
     } as never)).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
   });
 
-  it('reserves one concurrent approval consumer and burns it after a post-consume failure', async () => {
+  it('commits exactly one concurrent approval consumer and burns its approval', async () => {
     const value = await storedFixture();
     const preview = await createGithubProjectTemplateRemotePreview({
       cacheRoot: value.cacheRoot,
@@ -742,9 +772,27 @@ describe('GitHub project template remote transaction apply facade', () => {
       composition.apply(options as never),
       composition.apply(options as never),
     ]);
-    expect(concurrent.every((result) => result.status === 'rejected')).toBe(true);
+    const fulfilled = concurrent.filter((result) => result.status === 'fulfilled');
+    const rejected = concurrent.filter((result) => result.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(fulfilled[0]).toMatchObject({
+      value: { status: 'committed', planId: preview.transactionPlanId },
+    });
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: { code: 'TRUSTED_INFRASTRUCTURE_UNAVAILABLE' },
+    });
+    expect(readProjectTemplateCompanionLockState(value.projectRoot).state).toBe('update');
+    expect(runProjectTemplateDoctor(value.projectRoot).passed).toBe(true);
+    expect(readFileSync(join(value.projectRoot, '.takt', 'workflows', 'review.yaml'), 'utf8'))
+      .toContain('name: review');
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: value.projectRoot });
+    await expect(hasProjectTemplateApprovalClaim({
+      storage,
+      approvalId: approval.approvalId,
+    })).resolves.toBe(true);
     await expect(composition.apply(options as never)).rejects.toMatchObject({
-      code: 'APPROVAL_INVALID',
+      code: 'TRANSACTION_PLAN_MISMATCH',
     });
   });
 });
