@@ -31,6 +31,19 @@ describe('project-template CLI entrypoint contract', () => {
       .toBe(true);
     expect(isProjectTemplateCliInvocation(['--quiet', 'project-template', 'list']))
       .toBe(true);
+    expect(isProjectTemplateCliInvocation(['-qc', 'project-template', 'list']))
+      .toBe(true);
+    expect(isProjectTemplateCliInvocation([
+      '-tproject-template', 'project-template', 'list',
+    ])).toBe(true);
+    expect(isProjectTemplateCliInvocation(['-wdefault', 'project-template', 'list']))
+      .toBe(true);
+    expect(isProjectTemplateCliInvocation(['-i123', 'project-template', 'list']))
+      .toBe(true);
+    expect(isProjectTemplateCliInvocation(['--wat', 'project-template', 'list']))
+      .toBe(true);
+    expect(isProjectTemplateCliInvocation(['--wat', 'project-template', 'run']))
+      .toBe(false);
     expect(isProjectTemplateCliInvocation(['--task', 'project-template', 'run']))
       .toBe(false);
     expect(isProjectTemplateCliInvocation(['--task=project-template', 'run']))
@@ -154,6 +167,12 @@ await program.parseAsync(process.argv);
   it.each([
     ['per-command', ['project-template', 'list', '--wat', 'value']],
     ['root', ['--wat', 'value', 'project-template', 'list']],
+    ['root unknown flag', ['--wat', 'project-template', 'list']],
+    ['root short cluster', ['-qc', 'project-template', 'list', '--wat', 'value']],
+    [
+      'root attached short value',
+      ['-tproject-template', 'project-template', 'list', '--wat', 'value'],
+    ],
     [
       'group apply-shaped',
       [
