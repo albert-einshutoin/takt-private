@@ -292,7 +292,11 @@ async function execute(options: {
     let revocationFailed = false;
     if (storage !== undefined && evidence !== undefined) {
       try {
-        await revokeProjectTemplateApplyPreviewApproval({ storage, evidence });
+        const revoked = await revokeProjectTemplateApplyPreviewApproval({
+          storage,
+          evidence,
+        });
+        if (!revoked) revocationFailed = true;
       } catch {
         revocationFailed = true;
       }
