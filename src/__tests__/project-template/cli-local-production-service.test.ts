@@ -277,6 +277,70 @@ describe('production local project-template CLI composition', () => {
     });
   });
 
+  it('classifies valid companion cohort replacement during lease admission as base-lock drift', async () => {
+    const initial = await fixture({ commit: 'a'.repeat(40) });
+    const replacement = await fixture({ commit: 'b'.repeat(40) });
+    for (const value of [initial, replacement]) {
+      const service = createProductionProjectTemplateCliLocalApplyService();
+      const common = {
+        cwd: value.targetRoot,
+        sourcePath: value.archivePath,
+        currentTaktVersion: '0.48.0',
+        force: true,
+      };
+      const preview = await service.diff(common);
+      if (preview.envelope.status !== 'success') throw new Error('preview failed');
+      expect((await service.apply({
+        ...common,
+        mode: 'apply',
+        expectedPlanId: preview.envelope.result.planId,
+      })).exitCode).toBe(0);
+    }
+    const port = createProductionProjectTemplateCliLocalApplyPort();
+    const derived = await port.derive({
+      cwd: initial.targetRoot,
+      sourcePath: initial.archivePath,
+      currentTaktVersion: '0.48.0',
+    });
+    for (const path of [
+      '.takt-template-lock.json',
+      '.takt-template-repertoire-lock.json',
+      '.takt-template-source-lock.json',
+    ]) copyFileSync(join(replacement.targetRoot, path), join(initial.targetRoot, path));
+
+    await expect(port.execute({
+      cwd: initial.targetRoot,
+      sourcePath: initial.archivePath,
+      currentTaktVersion: '0.48.0',
+      expectedTransactionPlanId: derived.transactionPlanId,
+      force: false,
+      derived,
+    })).resolves.toEqual({ status: 'not_started', code: 'BASE_LOCK_DRIFT' });
+  });
+
+  it('classifies target replacement during lease admission as target drift', async () => {
+    const value = await fixture();
+    const port = createProductionProjectTemplateCliLocalApplyPort();
+    const derived = await port.derive({
+      cwd: value.targetRoot,
+      sourcePath: value.archivePath,
+      currentTaktVersion: '0.48.0',
+    });
+    const target = join(value.targetRoot, '.takt', 'workflows', 'review.yaml');
+    mkdirSync(join(target, '..'), { recursive: true });
+    writeFileSync(target, 'foreign\n');
+
+    await expect(port.execute({
+      cwd: value.targetRoot,
+      sourcePath: value.archivePath,
+      currentTaktVersion: '0.48.0',
+      expectedTransactionPlanId: derived.transactionPlanId,
+      force: true,
+      derived,
+    })).resolves.toEqual({ status: 'not_started', code: 'TARGET_DRIFT' });
+    expect(readFileSync(target, 'utf8')).toBe('foreign\n');
+  });
+
   it('maps an abort during the lease-held re-derive and releases the lease', async () => {
     const { archivePath, targetRoot } = await fixture();
     const port = createProductionProjectTemplateCliLocalApplyPort();

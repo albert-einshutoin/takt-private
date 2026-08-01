@@ -36,6 +36,10 @@ import { ProjectTemplateValidationError, TaktpackError } from './errors.js';
 
 interface ActiveLocalDerivation {
   readonly transactionPlanId: string;
+  readonly incomingArchiveSha256?: string;
+  readonly incomingManifestSha256: string;
+  readonly previousLocksSha256: string;
+  readonly contentPreconditionToken: string;
   state: 'active' | 'consumed';
 }
 
@@ -68,6 +72,16 @@ async function derive(options: {
   });
   LOCAL_DERIVATION_AUTHORITIES.set(authority, {
     transactionPlanId: derived.preview.transactionPlanId,
+    ...(derived.preview.bindings.incomingArchiveSha256 === undefined
+      ? {}
+      : {
+        incomingArchiveSha256:
+          derived.preview.bindings.incomingArchiveSha256,
+      }),
+    incomingManifestSha256: derived.preview.bindings.incomingManifestSha256,
+    previousLocksSha256: derived.preview.bindings.previousLocksSha256,
+    contentPreconditionToken:
+      derived.preview.bindings.contentPreconditionToken,
     state: 'active',
   });
   const conflicts = conflictCount(derived);
@@ -111,9 +125,29 @@ function deriveFailure(
   if (
     error instanceof TaktpackError
     || error instanceof ProjectTemplateValidationError
-    || error instanceof ProjectTemplateCompanionLockStateError
   ) return { status: 'not_started', code: 'SOURCE_INTEGRITY_FAILED' };
+  if (error instanceof ProjectTemplateCompanionLockStateError) {
+    return { status: 'not_started', code: 'BASE_LOCK_DRIFT' };
+  }
   return { status: 'not_started', code: 'SECURITY_GUARD' };
+}
+
+function freshPlanDrift(
+  authority: ActiveLocalDerivation,
+  fresh: DerivedLocalProjectTemplateTransaction,
+): ProjectTemplateCliLocalExecutionResult {
+  const bindings = fresh.preview.bindings;
+  if (
+    bindings.incomingArchiveSha256 !== authority.incomingArchiveSha256
+    || bindings.incomingManifestSha256 !== authority.incomingManifestSha256
+  ) return { status: 'not_started', code: 'SOURCE_INTEGRITY_FAILED' };
+  if (bindings.previousLocksSha256 !== authority.previousLocksSha256) {
+    return { status: 'not_started', code: 'BASE_LOCK_DRIFT' };
+  }
+  if (bindings.contentPreconditionToken !== authority.contentPreconditionToken) {
+    return { status: 'not_started', code: 'TARGET_DRIFT' };
+  }
+  return { status: 'not_started', code: 'PLAN_DRIFT' };
 }
 
 /** @internal Finalizes the closed result only after lease cleanup is proven. */
@@ -194,7 +228,7 @@ async function execute(options: {
         lease as ProjectTemplateMutationLease,
       );
       if (fresh.preview.transactionPlanId !== options.expectedTransactionPlanId) {
-        return { status: 'not_started', code: 'TARGET_DRIFT' };
+        return freshPlanDrift(authority, fresh);
       }
       if (fresh.preview.hardConflict || conflictCount(fresh) !== 0) {
         return { status: 'not_started', code: 'SECURITY_GUARD' };
