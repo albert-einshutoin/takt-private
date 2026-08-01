@@ -939,12 +939,23 @@ function scanReleased(
   }
   const digests: string[] = [];
   const evidence: LeaseEvidence[] = [];
+  let releasePublishing = false;
   for (const containerName of entries) {
     // Release is published by an atomic directory rename. A visible staging
     // container is therefore a bounded in-flight transition, never evidence
     // that can authorize another lease from a partial tombstone snapshot.
     if (containerName.endsWith(RELEASE_PUBLISHING_SUFFIX)) {
-      throw new RepertoireCoordinationError('WRITER_PENDING');
+      const baseName = containerName.slice(0, -RELEASE_PUBLISHING_SUFFIX.length);
+      if (!safeRegExpTest(RELEASED_CONTAINER_PATTERN, baseName)) {
+        throw new RepertoireCoordinationError('UNSAFE_STATE');
+      }
+      const publishingContainer = join(directory, containerName);
+      const publishingBefore = readListedDirectoryIdentity(publishingContainer);
+      const publishingAfter = readListedDirectoryIdentity(publishingContainer);
+      if (publishingBefore !== publishingAfter) throw SNAPSHOT_CHANGED;
+      releasePublishing = true;
+      safeArrayPush(digests, `${containerName}:${publishingBefore}`);
+      continue;
     }
     const match = safeRegExpExec(RELEASED_CONTAINER_PATTERN, containerName);
     if (!match) throw new RepertoireCoordinationError('UNSAFE_STATE');
@@ -972,11 +983,21 @@ function scanReleased(
   }
   const after = readDirectoryIdentity(directory);
   if (before !== after) throw SNAPSHOT_CHANGED;
+  if (releasePublishing) throw new RepertoireCoordinationError('WRITER_PENDING');
   return {
     digest: `${before}:${safeArrayJoin(digests, ',')}`,
     count: entries.length,
     evidence,
   };
+}
+
+function readListedDirectoryIdentity(path: string): string {
+  try {
+    return readDirectoryIdentity(path);
+  } catch (error) {
+    if (isMissingError(error)) throw SNAPSHOT_CHANGED;
+    throw error;
+  }
 }
 
 function readListedLease(path: string, mode?: RepertoireCoordinationMode): LeaseEvidence {

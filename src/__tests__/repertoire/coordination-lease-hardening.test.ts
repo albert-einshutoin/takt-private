@@ -10,11 +10,12 @@ import {
   lstatSync,
   linkSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 type FsOperation =
@@ -552,6 +553,75 @@ describe('repertoire coordination hardening', () => {
     expect(releasedFiles(root)).toHaveLength(2);
   });
 
+  it.each(['evil-name', 'file', 'symlink', 'wrong-mode'] as const)(
+    'rejects unsafe released publishing %s evidence instead of treating it as contention',
+    async (kind) => {
+      const root = makeRoot();
+      const seed = await acquire(root, 'write');
+      seed.release();
+      const [releasedArtifact] = releasedFiles(root);
+      const releasedDirectory = dirname(dirname(releasedArtifact!));
+      const validBase = basename(dirname(releasedArtifact!));
+      const staging = join(
+        releasedDirectory,
+        kind === 'evil-name' ? 'evil.publishing' : `${validBase}.publishing`,
+      );
+      if (kind === 'file') {
+        writeFileSync(staging, 'not a directory\n', { mode: 0o600 });
+      } else if (kind === 'symlink') {
+        const target = join(root, 'released-staging-target');
+        mkdirSync(target, { mode: 0o700 });
+        symlinkSync(target, staging);
+      } else {
+        mkdirSync(staging, { mode: kind === 'wrong-mode' ? 0o755 : 0o700 });
+      }
+
+      expect(() => acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root }))
+        .toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
+      expect(existsSync(staging)).toBe(true);
+    },
+  );
+
+  it('keeps a valid stale released publishing directory busy without cleaning it', async () => {
+    const root = makeRoot();
+    const seed = await acquire(root, 'write');
+    seed.release();
+    const [releasedArtifact] = releasedFiles(root);
+    const staging = `${dirname(releasedArtifact!)}.publishing`;
+    mkdirSync(staging, { mode: 0o700 });
+
+    expect(() => acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root }))
+      .toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
+    await expect(acquire(root, 'read', 50)).rejects.toMatchObject({ code: 'TIMEOUT' });
+    expect(existsSync(staging)).toBe(true);
+  });
+
+  it('retries when a listed released publishing directory is atomically finalized', async () => {
+    const root = makeRoot();
+    const seed = await acquire(root, 'write');
+    seed.release();
+    const [releasedArtifact] = releasedFiles(root);
+    const record = JSON.parse(readFileSync(releasedArtifact!, 'utf8')) as Record<string, unknown>;
+    const releasedDirectory = realpathSync(dirname(dirname(releasedArtifact!)));
+    const final = join(
+      releasedDirectory,
+      `${'ab'.repeat(32)}.${String(record['pid'])}.${String(record['token'])}.write.released`,
+    );
+    const staging = `${final}.publishing`;
+    mkdirSync(staging, { mode: 0o700 });
+    writeFileSync(join(staging, 'lease.released'), readFileSync(releasedArtifact!), { mode: 0o600 });
+    fsFault.afterReaddir = (path) => {
+      if (path !== releasedDirectory) return false;
+      fsFault.actualRenameSync!(staging, final);
+      return true;
+    };
+
+    const lease = acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root });
+    lease.release();
+    expect(existsSync(staging)).toBe(false);
+    expect(existsSync(final)).toBe(true);
+  });
+
   it('fails closed when a released tombstone no longer matches its filename', async () => {
     const root = makeRoot();
     const lease = await acquire(root, 'write');
@@ -621,6 +691,18 @@ describe('repertoire coordination hardening', () => {
     await expect(acquire(root, 'write', 50))
       .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
     expect(fsFault.readCalls).toBe(0);
+  });
+
+  it('counts a valid released publishing directory toward the hard limit', async () => {
+    const root = makeRoot();
+    await seedReleasedTombstones(root, 4_096);
+    const [releasedArtifact] = releasedFiles(root);
+    const staging = `${dirname(releasedArtifact!)}.publishing`;
+    mkdirSync(staging, { mode: 0o700 });
+
+    await expect(acquire(root, 'write', 50))
+      .rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
+    expect(existsSync(staging)).toBe(true);
   });
 
   it.each([
