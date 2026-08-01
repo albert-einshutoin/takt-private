@@ -230,7 +230,7 @@ function snapshotInspection(value: unknown): {
   packId: string;
   entryCount: number;
   readiness: 'ready' | 'review-required' | 'blocked';
-  reviewCodes: readonly ('REVIEW_REQUIRED')[];
+  reviewCodes: readonly ('HARD_CONFLICT' | 'REVIEW_REQUIRED')[];
 } {
   const packId = ownValue(value, 'archiveSha256');
   const manifest = ownValue(value, 'manifest');
@@ -263,7 +263,7 @@ function snapshotInspection(value: unknown): {
       packId,
       entryCount: entryCount as number,
       readiness: 'blocked',
-      reviewCodes: ['REVIEW_REQUIRED'],
+      reviewCodes: ['HARD_CONFLICT'],
     };
   }
   throw new Error('invalid projection');

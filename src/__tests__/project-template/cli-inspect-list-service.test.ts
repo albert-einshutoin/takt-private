@@ -123,6 +123,30 @@ describe('project-template inspect CLI service', () => {
     }));
   });
 
+  it('reports incompatible archive inspection as a hard conflict', async () => {
+    const outcome = await inspectProjectTemplateForCliWithDependencies({
+      cwd: '/safe/repo',
+      sourcePath: 'template.taktpack',
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => ({
+        archiveSha256: SHA,
+        manifest: { entries: [] },
+        compatibility: { status: 'incompatible' },
+      })),
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        status: 'success',
+        result: {
+          readiness: 'blocked',
+          reviewCodes: ['HARD_CONFLICT'],
+        },
+      },
+    });
+  });
+
   it('fails closed when the source identity changes during inspection', async () => {
     let sourceReads = 0;
     const outcome = await inspectProjectTemplateForCliWithDependencies({
