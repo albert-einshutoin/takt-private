@@ -1,0 +1,277 @@
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { executeProjectTemplateCliExport } from '../../features/project-template/cli-export-service.js';
+import type { ProjectTemplateExportOptions } from '../../features/project-template/archive-types.js';
+
+const cleanupRoots = new Set<string>();
+const exportOptions: ProjectTemplateExportOptions = {
+  packVersion: '1.0.0',
+  takt: { minVersion: '0.48.0' },
+  source: {
+    kind: 'local',
+    uri: '.',
+    ref: 'workspace',
+    commit: 'a'.repeat(40),
+  },
+};
+
+function makeFixture(): { root: string; sourcePath: string; outputPath: string } {
+  const root = mkdtempSync(join(tmpdir(), 'takt-cli-export-'));
+  cleanupRoots.add(root);
+  const sourcePath = join(root, '.takt', 'workflows', 'review.yaml');
+  mkdirSync(join(sourcePath, '..'), { recursive: true });
+  writeFileSync(sourcePath, 'name: review\n');
+  const outputDir = join(root, 'exports');
+  mkdirSync(outputDir);
+  return { root, sourcePath, outputPath: join(outputDir, 'template.taktpack') };
+}
+
+function dryRun(root: string, outputPath: string, force = false) {
+  return executeProjectTemplateCliExport({
+    projectRoot: root,
+    outputPath,
+    exportOptions,
+    mutation: { mode: 'dry-run', force },
+  });
+}
+
+afterEach(() => {
+  for (const root of cleanupRoots) rmSync(root, { recursive: true, force: true });
+  cleanupRoots.clear();
+});
+
+describe('project template CLI export service', () => {
+  it('returns a deterministic closed dry-run DTO without writing an archive', async () => {
+    const fixture = makeFixture();
+
+    const first = await dryRun(fixture.root, fixture.outputPath);
+    const second = await dryRun(fixture.root, fixture.outputPath);
+
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        command: 'project-template export',
+        mode: 'dry-run',
+        status: 'success',
+        result: {
+          planId: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          entryCount: 1,
+          archiveBytes: 0,
+          dependencyCount: 0,
+          readiness: 'ready',
+          reviewCodes: [],
+        },
+      },
+    });
+    expect(existsSync(fixture.outputPath)).toBe(false);
+    expect(JSON.stringify(first)).not.toContain(fixture.root);
+  });
+
+  it('binds source snapshots and output preconditions into the plan id', async () => {
+    const fixture = makeFixture();
+    const beforeSourceChange = await dryRun(fixture.root, fixture.outputPath, true);
+    writeFileSync(fixture.sourcePath, 'name: changed\n');
+    const afterSourceChange = await dryRun(fixture.root, fixture.outputPath, true);
+    writeFileSync(fixture.outputPath, 'existing archive');
+    const afterTargetChange = await dryRun(fixture.root, fixture.outputPath, true);
+
+    expect(beforeSourceChange.envelope.status).toBe('success');
+    expect(afterSourceChange.envelope.status).toBe('success');
+    expect(afterTargetChange.envelope.status).toBe('success');
+    if (
+      beforeSourceChange.envelope.status === 'success'
+      && afterSourceChange.envelope.status === 'success'
+      && afterTargetChange.envelope.status === 'success'
+    ) {
+      expect(afterSourceChange.envelope.result.planId)
+        .not.toBe(beforeSourceChange.envelope.result.planId);
+      expect(afterTargetChange.envelope.result.planId)
+        .not.toBe(afterSourceChange.envelope.result.planId);
+    }
+  });
+
+  it('requires the exact fresh plan id before invoking the archive writer', async () => {
+    const fixture = makeFixture();
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: { mode: 'apply', force: false, expectedPlanId: 'f'.repeat(64) },
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 22,
+      envelope: { status: 'error', error: { code: 'PLAN_DRIFT' } },
+    });
+    expect(existsSync(fixture.outputPath)).toBe(false);
+    expect(readdirSync(join(fixture.root, 'exports'))).toEqual([]);
+  });
+
+  it('delegates the only archive write to the core atomic writer after re-planning', async () => {
+    const fixture = makeFixture();
+    const plan = await dryRun(fixture.root, fixture.outputPath);
+    expect(plan.envelope.status).toBe('success');
+    if (plan.envelope.status !== 'success') return;
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply',
+        force: false,
+        expectedPlanId: plan.envelope.result.planId,
+      },
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        status: 'success',
+        mode: 'apply',
+        result: {
+          planId: plan.envelope.result.planId,
+          packId: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          entryCount: 1,
+          archiveBytes: expect.any(Number),
+          dependencyCount: 0,
+          readiness: 'ready',
+          reviewCodes: [],
+        },
+      },
+    });
+    expect(readFileSync(fixture.outputPath).byteLength).toBeGreaterThan(0);
+    expect(readdirSync(join(fixture.root, 'exports'))).toEqual(['template.taktpack']);
+  });
+
+  it('detects source and absent-to-present output drift with zero writes', async () => {
+    const sourceFixture = makeFixture();
+    const sourcePlan = await dryRun(sourceFixture.root, sourceFixture.outputPath);
+    expect(sourcePlan.envelope.status).toBe('success');
+    if (sourcePlan.envelope.status !== 'success') return;
+    writeFileSync(sourceFixture.sourcePath, 'name: drifted\n');
+    const sourceOutcome = await executeProjectTemplateCliExport({
+      projectRoot: sourceFixture.root,
+      outputPath: sourceFixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply', force: false, expectedPlanId: sourcePlan.envelope.result.planId,
+      },
+    });
+    expect(sourceOutcome).toMatchObject({
+      exitCode: 22,
+      envelope: { status: 'error', error: { code: 'PLAN_DRIFT' } },
+    });
+    expect(existsSync(sourceFixture.outputPath)).toBe(false);
+
+    const targetFixture = makeFixture();
+    const targetPlan = await dryRun(targetFixture.root, targetFixture.outputPath, true);
+    expect(targetPlan.envelope.status).toBe('success');
+    if (targetPlan.envelope.status !== 'success') return;
+    writeFileSync(targetFixture.outputPath, 'do not replace');
+    const targetOutcome = await executeProjectTemplateCliExport({
+      projectRoot: targetFixture.root,
+      outputPath: targetFixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply', force: true, expectedPlanId: targetPlan.envelope.result.planId,
+      },
+    });
+    expect(targetOutcome).toMatchObject({
+      exitCode: 22,
+      envelope: { status: 'error', error: { code: 'TARGET_DRIFT' } },
+    });
+    expect(readFileSync(targetFixture.outputPath, 'utf8')).toBe('do not replace');
+  });
+
+  it.each(['symlink', 'hardlink'] as const)(
+    'never replaces an unsafe %s output even with force',
+    async (kind) => {
+      const fixture = makeFixture();
+      const protectedPath = join(fixture.root, 'protected');
+      writeFileSync(protectedPath, 'protected');
+      if (kind === 'symlink') symlinkSync(protectedPath, fixture.outputPath);
+      else linkSync(protectedPath, fixture.outputPath);
+
+      const outcome = await dryRun(fixture.root, fixture.outputPath, true);
+
+      expect(outcome).toMatchObject({
+        exitCode: 23,
+        envelope: { status: 'error', error: { code: 'SECURITY_GUARD' } },
+      });
+      expect(readFileSync(protectedPath, 'utf8')).toBe('protected');
+    },
+  );
+
+  it('does not let force bypass an active run', async () => {
+    const fixture = makeFixture();
+    const runDir = join(fixture.root, '.takt', 'runs', 'active-run');
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, 'meta.json'), JSON.stringify({
+      task: 'active task',
+      workflow: 'subscription-devloop',
+      status: 'running',
+      startTime: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    const plan = await dryRun(fixture.root, fixture.outputPath, true);
+    expect(plan).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        status: 'success',
+        result: { readiness: 'blocked', reviewCodes: ['ACTIVE_RUN'] },
+      },
+    });
+    expect(plan.envelope.status).toBe('success');
+    if (plan.envelope.status !== 'success') return;
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply', force: true, expectedPlanId: plan.envelope.result.planId,
+      },
+    });
+    expect(outcome).toMatchObject({
+      exitCode: 23,
+      envelope: { status: 'error', error: { code: 'ACTIVE_RUN' } },
+    });
+    expect(existsSync(fixture.outputPath)).toBe(false);
+  });
+
+  it('honors a pre-aborted signal without leaving an archive or temp file', async () => {
+    const fixture = makeFixture();
+    const controller = new AbortController();
+    controller.abort();
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: { mode: 'dry-run', force: false },
+      signal: controller.signal,
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 130,
+      envelope: { status: 'error', error: { code: 'INTERRUPTED' } },
+    });
+    expect(readdirSync(join(fixture.root, 'exports'))).toEqual([]);
+  });
+});
