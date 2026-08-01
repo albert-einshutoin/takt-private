@@ -245,4 +245,45 @@ describe('project template receipt authentication runtime', () => {
     expect(store.registry?.keys.filter((key) => key.state === 'active')).toHaveLength(1);
     expect(store.registry?.keys.some((key) => key.keyId === rotatedKey)).toBe(true);
   });
+
+  it('zeroizes random and failed-persistence key ownership', async () => {
+    const generated = new Uint8Array(32).fill(31);
+    await createProjectTemplateReceiptAuthenticationRuntime({
+      keyStore: memoryStore(),
+      randomBytes: () => generated,
+    });
+    expect(generated.every((byte) => byte === 0)).toBe(true);
+
+    let failedSecret: Uint8Array | undefined;
+    const failingStore: ProjectTemplateReceiptKeyStore = {
+      async read() { return undefined; },
+      async write() {},
+      async withExclusiveLease(operation) {
+        return await operation({
+          snapshot: undefined,
+          async compareAndSwap(_generation, next) {
+            failedSecret = next.keys[0]?.secret;
+            throw new Error('persist failure');
+          },
+        });
+      },
+      async dispose() {},
+    };
+    await expect(createProjectTemplateReceiptAuthenticationRuntime({
+      keyStore: failingStore,
+      randomBytes: () => new Uint8Array(32).fill(32),
+    })).rejects.toThrow('persist failure');
+    expect(failedSecret?.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it('classifies hostile verifier requests as invalid', async () => {
+    const runtime = await createProjectTemplateReceiptAuthenticationRuntime({
+      keyStore: memoryStore(),
+      randomBytes: () => new Uint8Array(32).fill(33),
+    });
+    const hostile = new Proxy({}, {
+      get() { throw new Error('hostile getter'); },
+    });
+    await expect(runtime.verifier.verify(hostile as never)).resolves.toBe('invalid');
+  });
 });
