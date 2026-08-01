@@ -308,6 +308,13 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
   const current = (epoch: number): void => {
     if (disposed || epoch !== operationEpoch) failure('DISPOSED');
   };
+  const expiresAfter = (completionNow: number): number => {
+    const expiresAt = completionNow + (handleTtlMs as number);
+    if (!Number.isFinite(expiresAt) || expiresAt > Number.MAX_SAFE_INTEGER) {
+      failure('OPERATION_FAILED');
+    }
+    return expiresAt;
+  };
   const active = <T extends { readonly expiresAt: number }>(
     map: Map<string, T>,
     id: string,
@@ -419,7 +426,7 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
 
   return Object.freeze({
     async download(input: unknown) {
-      return await operation('receipts', async ({ epoch, nowMs }) => {
+      return await operation('receipts', async ({ epoch }) => {
         const options = exactRecord(input, [
           'projectRoot', 'cacheRoot', 'source', 'advisory',
         ], ['signal']);
@@ -437,8 +444,9 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
         if (operationGate !== undefined) await Reflect.apply(
           operationGate as (operation: 'download') => Promise<void>, undefined, ['download'],
         );
+        const completionNow = time();
         current(epoch);
-        receipts.set(result.receiptKey, { expiresAt: nowMs + (handleTtlMs as number) });
+        receipts.set(result.receiptKey, { expiresAt: expiresAfter(completionNow) });
         return Object.freeze({ receiptKey: result.receiptKey });
       });
     },
@@ -465,10 +473,12 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
         if (operationGate !== undefined) await Reflect.apply(
           operationGate as (operation: 'preview') => Promise<void>, undefined, ['preview'],
         );
+        const completionNow = time();
         current(epoch);
+        if (receipt.expiresAt <= completionNow) failure('UNKNOWN_RECEIPT');
         previews.set(preview.previewId, {
           receiptKey, preview, projectRoot, baselineStrategy,
-          expiresAt: Math.min(receipt.expiresAt, nowMs + (handleTtlMs as number)),
+          expiresAt: Math.min(receipt.expiresAt, expiresAfter(completionNow)),
         });
         return Object.freeze({
           previewId: preview.previewId,
@@ -498,10 +508,16 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
           preview: handle.preview,
           baselineStrategy: handle.baselineStrategy,
         });
-        if (operationGate !== undefined) await Reflect.apply(
-          operationGate as (operation: 'approve') => Promise<void>, undefined, ['approve'],
-        );
-        if (disposed || epoch !== operationEpoch) {
+        let completionNow: number | undefined;
+        try {
+          if (operationGate !== undefined) await Reflect.apply(
+            operationGate as (operation: 'approve') => Promise<void>, undefined, ['approve'],
+          );
+          completionNow = time();
+          current(epoch);
+          if (handle.expiresAt <= completionNow) failure('UNKNOWN_PREVIEW');
+          expiresAfter(completionNow);
+        } catch (publicationError) {
           try {
             const storage = await initializeProjectTemplateApplyStorage({
               repoPath: handle.projectRoot,
@@ -512,9 +528,13 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
           } catch {
             // The public approval is never published; durable validation remains fail-closed.
           }
-          failure('DISPOSED');
+          throw publicationError;
         }
-        approvals.set(evidence.approvalId, { ...handle, evidence });
+        approvals.set(evidence.approvalId, {
+          ...handle,
+          evidence,
+          expiresAt: Math.min(handle.expiresAt, expiresAfter(completionNow)),
+        });
         return Object.freeze({ approvalId: evidence.approvalId });
       });
     },

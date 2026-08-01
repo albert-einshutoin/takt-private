@@ -813,6 +813,88 @@ describe('project template remote production composition', () => {
     await composition.dispose();
   });
 
+  it.each(['preview', 'approve'] as const)(
+    'does not publish %s authority when its parent expires at the completion boundary',
+    async (operation) => {
+      const value = await fixture();
+      let now = 0;
+      let armed = false;
+      const entered = deferred();
+      const release = deferred();
+      const composition = await createProjectTemplateRemoteProductionCompositionForTest({
+        keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+        repertoireInspectionPort: {
+          inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+        },
+        now: () => now,
+        handleTtlMs: 10,
+      }, {
+        operationGate: async (candidate) => {
+          if (!armed || candidate !== operation) return;
+          entered.resolve();
+          await release.promise;
+        },
+      });
+      const receipt = await composition.download({
+        projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+        source: value.source, advisory: value.advisory,
+      });
+      const preview = operation === 'approve' ? await composition.preview({
+        cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+        projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+        baselineStrategy: 'conflict',
+      }) : undefined;
+      armed = true;
+      const pending = operation === 'preview' ? composition.preview({
+        cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+        projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+        baselineStrategy: 'conflict',
+      }) : composition.approve({
+        projectRoot: value.projectRoot, previewId: preview!.previewId,
+        transactionPlanId: preview!.transactionPlanId, baselineStrategy: 'conflict',
+      });
+      await entered.promise;
+      now = 10;
+      release.resolve();
+      await expect(pending).rejects.toMatchObject({
+        code: operation === 'preview' ? 'UNKNOWN_RECEIPT' : 'UNKNOWN_PREVIEW',
+      });
+      await composition.dispose();
+    },
+  );
+
+  it.each([Number.NaN, -1])(
+    'fails closed on invalid publication clock %s',
+    async (completionNow) => {
+      const value = await fixture();
+      let now = 0;
+      const entered = deferred();
+      const release = deferred();
+      const composition = await createProjectTemplateRemoteProductionCompositionForTest({
+        keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+        repertoireInspectionPort: {
+          inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+        },
+        now: () => now,
+      }, {
+        operationGate: async (operation) => {
+          if (operation !== 'download') return;
+          entered.resolve();
+          await release.promise;
+        },
+      });
+      const pending = composition.download({
+        projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+        source: value.source, advisory: value.advisory,
+      });
+      await entered.promise;
+      now = completionNow;
+      release.resolve();
+      await expect(pending).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
+      await composition.dispose();
+    },
+  );
+
   it('returns one stable rejected dispose promise without exposing cleanup details', async () => {
     const value = await fixture();
     const store = memoryStore();
