@@ -145,9 +145,10 @@ export async function runWindowsDpapiCurrentUserProcess(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
+    const timerState: { handle?: unknown } = {};
 
     const cleanup = () => {
-      dependencies.clearTimer(timer);
+      dependencies.clearTimer(timerState.handle);
       child.stdout.removeListener('data', onStdout);
       child.stderr.removeListener('data', onStderr);
       child.removeListener('error', onError as (...args: never[]) => void);
@@ -178,8 +179,8 @@ export async function runWindowsDpapiCurrentUserProcess(
       stdoutBytes += chunk.byteLength;
       if (stdoutBytes > request.maxOutputBytes) {
         chunk.fill(0);
-        child.kill();
         rejectOnce(failure('DPAPI output exceeds bounded maximum'));
+        child.kill();
         return;
       }
       stdout.push(chunk);
@@ -188,8 +189,8 @@ export async function runWindowsDpapiCurrentUserProcess(
       if (settled) return;
       stderrBytes += value.byteLength;
       if (stderrBytes > DPAPI_MAX_BYTES) {
-        child.kill();
         rejectOnce(failure('DPAPI stderr exceeds bounded maximum'));
+        child.kill();
       }
     };
     const onError = () => rejectOnce(failure('DPAPI CurrentUser process failed'));
@@ -222,10 +223,10 @@ export async function runWindowsDpapiCurrentUserProcess(
     child.stderr.on('data', onStderr);
     child.once('error', onError);
     child.once('close', onClose);
-    const timer = dependencies.setTimer(() => {
+    timerState.handle = dependencies.setTimer(() => {
       if (settled) return;
-      child.kill();
       rejectOnce(failure('DPAPI CurrentUser process timed out'));
+      child.kill();
     }, DPAPI_TIMEOUT_MS);
     child.stdin.end(Buffer.from(request.input).toString('base64'));
   });
@@ -282,6 +283,9 @@ function readBoundedCiphertext(
 ): Uint8Array {
   const beforePath = lstatSync(path);
   if (beforePath.isSymbolicLink()) throw failure('Key registry is a reparse link');
+  if (realpathSync(path) !== path) {
+    throw failure('Key registry canonical identity mismatch');
+  }
   const fd = openSync(path, constants.O_RDONLY);
   let output: Uint8Array | undefined;
   let primaryFailure: unknown;
@@ -290,7 +294,7 @@ function readBoundedCiphertext(
     if (!before.isFile() || before.nlink !== 1 || beforePath.dev !== before.dev || beforePath.ino !== before.ino) {
       throw failure('Key registry path identity mismatch');
     }
-    if (before.size > DPAPI_MAX_BYTES) throw failure('DPAPI key registry exceeds bounded maximum');
+    if (before.size >= DPAPI_MAX_BYTES) throw failure('DPAPI key registry exceeds bounded maximum');
     io?.afterInitialFileStat?.(path);
     const buffer = Buffer.alloc(before.size + 1);
     try {
@@ -299,7 +303,11 @@ function readBoundedCiphertext(
       while (offset < buffer.byteLength) {
         const count = Reflect.apply(read, io, [fd, buffer, offset,
           buffer.byteLength - offset, offset]) as number;
-        if (!Number.isSafeInteger(count) || count < 0) throw failure('Ciphertext partial read failed');
+        if (
+          !Number.isSafeInteger(count)
+          || count < 0
+          || count > buffer.byteLength - offset
+        ) throw failure('Ciphertext partial read failed');
         if (count === 0) break;
         offset += count;
       }
@@ -315,6 +323,7 @@ function readBoundedCiphertext(
         || before.nlink !== after.nlink
         || afterPath.dev !== after.dev
         || afterPath.ino !== after.ino
+        || realpathSync(path) !== path
       ) throw failure('DPAPI key registry changed during bounded read');
       output = Uint8Array.from(buffer.subarray(0, offset));
     } finally {

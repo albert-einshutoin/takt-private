@@ -212,6 +212,28 @@ describe('POSIX project template receipt key store', () => {
       },
     });
     await expect(closeFailure.read()).rejects.toThrow(/close failure/i);
+
+    let closedAfterRace = false;
+    const combined = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        afterInitialFileStat(path) {
+          if (path.endsWith('keyring.json')) appendFileSync(path, 'x');
+        },
+        close(fd) {
+          closeSync(fd);
+          closedAfterRace = true;
+          throw new Error('combined close failure');
+        },
+      },
+    });
+    const combinedResult = await Promise.allSettled([combined.read()]);
+    const reason = combinedResult[0]?.status === 'rejected'
+      ? combinedResult[0].reason as AggregateError
+      : undefined;
+    expect(reason).toBeInstanceOf(AggregateError);
+    expect(reason?.errors).toHaveLength(2);
+    expect(closedAfterRace).toBe(true);
   });
 
   it('loops partial reads without allocating beyond size plus one', async () => {
@@ -231,7 +253,7 @@ describe('POSIX project template receipt key store', () => {
       },
     });
     expect(await partial.read()).toEqual(registry());
-    expect(maximumRequested).toBeLessThanOrEqual(64 * 1024 + 1);
+    expect(maximumRequested).toBeLessThanOrEqual(64 * 1024);
     expect(readBuffer?.every((byte) => byte === 0)).toBe(true);
   });
 });

@@ -140,7 +140,7 @@ function readBoundedRegistryFile(
   try {
     assertRegularOwnedFile(path, fd);
     const initial = fstatSync(fd);
-    if (initial.size > PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
+    if (initial.size >= PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
       throw failure('Key registry exceeds the bounded maximum');
     }
     io?.afterInitialFileStat?.(path);
@@ -158,7 +158,11 @@ function readBoundedRegistryFile(
           buffer.byteLength - offset,
           offset,
         ]) as number;
-        if (!Number.isSafeInteger(count) || count < 0) {
+        if (
+          !Number.isSafeInteger(count)
+          || count < 0
+          || count > buffer.byteLength - offset
+        ) {
           throw failure('Key registry partial read failed');
         }
         if (count === 0) break;

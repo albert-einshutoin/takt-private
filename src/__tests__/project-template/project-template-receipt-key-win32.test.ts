@@ -201,7 +201,7 @@ describe('Windows project template receipt key store', () => {
       },
     });
     expect(await partial.read()).toEqual(registry());
-    expect(maximumRequested).toBeLessThanOrEqual(64 * 1024 + 1);
+    expect(maximumRequested).toBeLessThanOrEqual(64 * 1024);
     expect(readBuffer?.every((byte) => byte === 0)).toBe(true);
   });
 
@@ -255,6 +255,11 @@ describe('Windows project template receipt key store', () => {
 
   it('settles DPAPI timeout once and ignores late successful close', async () => {
     const child = fakeChild();
+    child.kill = () => {
+      child.killed = true;
+      child.emit('close', 0);
+      return true;
+    };
     const promise = runWindowsDpapiCurrentUserProcess(dpapiRequest(), {
       spawnProcess: () => child,
       setTimer(callback) {
@@ -264,6 +269,8 @@ describe('Windows project template receipt key store', () => {
       clearTimer() {},
     });
     await expect(promise).rejects.toThrow(/timed out/i);
+    expect(child.stdout.listenerCount('data')).toBe(0);
+    expect(child.stderr.listenerCount('data')).toBe(0);
     child.stdout.end(Buffer.from('BwgJ', 'ascii'));
     child.emit('close', 0);
   });
