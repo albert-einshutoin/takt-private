@@ -1,13 +1,21 @@
-import type { Stats } from 'node:fs';
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readdirSync, rmSync, type Stats } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaktpackError } from '../../features/project-template/errors.js';
 import {
   inspectProjectTemplateForCliWithDependencies,
+  listProjectTemplatesForCli,
   listProjectTemplatesForCliWithDependencies,
   type ProjectTemplateCliInspectListDependencies,
 } from '../../features/project-template/cli-inspect-list-service.js';
 
 const SHA = 'a'.repeat(64);
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 function stableFile(size = 1024): Stats {
   return {
@@ -129,6 +137,22 @@ describe('project-template inspect CLI service', () => {
 });
 
 describe('project-template list CLI service', () => {
+  it('keeps a new repository byte-for-byte untouched while listing', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-cli-list-'));
+    roots.push(root);
+    const before = readdirSync(root);
+
+    const outcome = await listProjectTemplatesForCli({ cwd: root });
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        result: { installed: false, backupIds: [], recoveryState: 'clean' },
+      },
+    });
+    expect(readdirSync(root)).toEqual(before);
+  });
+
   it('reports first-install with only bounded backup-generation identifiers', async () => {
     const listBackupIds = vi.fn(async () => [] as const);
     const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: '/safe/repo' }, {
