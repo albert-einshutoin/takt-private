@@ -37,6 +37,7 @@ const fsFault = vi.hoisted(() => ({
   afterLeaseWrite: undefined as (() => void) | undefined,
   actualRenameSync: undefined as typeof import('node:fs').renameSync | undefined,
   actualWriteFileSync: undefined as typeof import('node:fs').writeFileSync | undefined,
+  openFds: new Set<number>(),
   readCalls: 0,
 }));
 
@@ -94,7 +95,9 @@ vi.mock('node:fs', async (importOriginal) => {
     },
     openSync(...args: Parameters<typeof actual.openSync>) {
       fail('openSync');
-      return actual.openSync(...args);
+      const fd = actual.openSync(...args);
+      fsFault.openFds.add(fd);
+      return fd;
     },
     fchmodSync(...args: Parameters<typeof actual.fchmodSync>) {
       fail('fchmodSync');
@@ -114,7 +117,9 @@ vi.mock('node:fs', async (importOriginal) => {
     },
     closeSync(...args: Parameters<typeof actual.closeSync>) {
       fail('closeSync');
-      return actual.closeSync(...args);
+      const result = actual.closeSync(...args);
+      fsFault.openFds.delete(args[0]);
+      return result;
     },
     fstatSync(...args: Parameters<typeof actual.fstatSync>) {
       fail('fstatSync');
@@ -153,12 +158,31 @@ afterEach(() => {
   fsFault.beforeReleaseMutation = undefined;
   fsFault.afterReaddir = undefined;
   fsFault.afterLeaseWrite = undefined;
+  fsFault.openFds.clear();
   fsFault.readCalls = 0;
   cryptoFault.nextRandomBytes = undefined;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('repertoire coordination hardening', () => {
+  it('closes the trusted root descriptor after failed acquisition and failed release', async () => {
+    const root = makeRoot();
+    const owner = await acquire(root, 'write');
+    const ownerFdCount = fsFault.openFds.size;
+    expect(ownerFdCount).toBe(1);
+
+    await expect(acquire(root, 'read', 50))
+      .rejects.toMatchObject({ code: 'WRITER_PENDING' });
+    expect(fsFault.openFds.size).toBe(ownerFdCount);
+
+    fsFault.beforeReleaseMutation = () => {
+      throw new Error('forced release failure');
+    };
+    expect(() => owner.release()).toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
+    expect(fsFault.openFds.size).toBe(0);
+    expect(() => owner.release()).not.toThrow();
+  });
+
   it('uses module-captured intrinsics when a waiting writer times out after hook0 poison', async () => {
     const root = makeRoot();
     const owner = await acquire(root, 'write');
