@@ -219,7 +219,10 @@ function addMutationOptions(command: Command): Command {
     .option('--dry-run', 'Plan only (default)')
     .option('--apply', 'Apply the exact expected plan')
     .option('--expected-plan-id <sha256>', 'Required with --apply')
-    .option('--force', 'Approve reviewable changes; valid only with --apply');
+    .option(
+      '--force',
+      'Approve reviewable apply/overwrite only; never export policy/capability approval',
+    );
 }
 
 function collectBounded(maxItems: number) {

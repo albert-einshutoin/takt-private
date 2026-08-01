@@ -91,6 +91,9 @@ describe('project-template CLI command adapter', () => {
       expect(help).toContain('--expected-plan-id <sha256>');
       expect(help).toContain('--force');
     }
+    const exportHelp = group.commands.find((command) => command.name() === 'export')!
+      .helpInformation();
+    expect(exportHelp).toContain('never export policy/capability approval');
   });
 
   it('returns one canonical INVALID_ARGUMENT envelope for a JSON group invocation', async () => {

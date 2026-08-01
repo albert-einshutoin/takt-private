@@ -185,6 +185,63 @@ describe('project-template real CLI process E2E', () => {
     });
   }, 60_000);
 
+  it('requires the same explicit policy approval across fresh export processes', () => {
+    const source = repo();
+    writeTemplateProject(source);
+    const configPath = join(source.path, '.takt', 'config.yaml');
+    writeFileSync(configPath, 'language: ja\n');
+    execFileSync('git', ['add', '.takt/config.yaml'], { cwd: source.path, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'add project-owned config'], {
+      cwd: source.path, stdio: 'pipe',
+    });
+    const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: source.path, encoding: 'utf8',
+    }).trim();
+    const outputRoot = join(source.path, 'artifacts');
+    const outputPath = join(outputRoot, 'approved.taktpack');
+    mkdirSync(outputRoot);
+    const common = [
+      'project-template', 'export', outputPath,
+      '--cwd', source.path,
+      '--pack-version', '1.0.0',
+      '--min-takt-version', '0.48.0',
+      '--source-commit', sourceCommit,
+      '--json',
+    ];
+
+    const missingPreview = expectEnvelope(runCli(
+      source.path, isolated.env, [...common, '--dry-run'],
+    ), 21);
+    expect(missingPreview).toMatchObject({
+      status: 'error', mode: 'dry-run', error: { code: 'REVIEW_REQUIRED' },
+    });
+
+    const approval = ['--approve-policy', 'config.yaml=managed'];
+    const approvedPreview = expectEnvelope(runCli(
+      source.path, isolated.env, [...common, ...approval, '--dry-run'],
+    ), 0);
+    const planId = approvedPreview.result?.['planId'];
+    expect(planId).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/u));
+
+    const missingApply = expectEnvelope(runCli(source.path, isolated.env, [
+      ...common, '--apply', '--expected-plan-id', String(planId), '--force',
+    ]), 21);
+    expect(missingApply).toMatchObject({
+      status: 'error', mode: 'apply', error: { code: 'REVIEW_REQUIRED' },
+    });
+    expect(existsSync(outputPath)).toBe(false);
+    expect(readdirSync(outputRoot)).toEqual([]);
+
+    const approvedApply = expectEnvelope(runCli(source.path, isolated.env, [
+      ...common, ...approval,
+      '--apply', '--expected-plan-id', String(planId), '--force',
+    ]), 0);
+    expect(approvedApply).toMatchObject({
+      status: 'success', mode: 'apply', result: { planId },
+    });
+    expect(statSync(outputPath).isFile()).toBe(true);
+  }, 60_000);
+
   it('applies a local pack from a fresh plan and exposes its durable backup in list', () => {
     const source = repo();
     const target = repo();
