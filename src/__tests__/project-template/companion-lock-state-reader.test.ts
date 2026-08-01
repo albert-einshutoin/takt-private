@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  renameSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -14,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   ProjectTemplateCompanionLockStateError,
   readProjectTemplateCompanionLockState,
+  readProjectTemplateCompanionLockStateWithIoSeam,
 } from '../../features/project-template/companion-lock-state-reader.js';
 import {
   serializeProjectTemplateRepertoireDependencyLock,
@@ -24,6 +26,9 @@ import {
   PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
 } from '../../features/project-template/source-provenance.js';
 import { serializeTemplateLock } from '../../features/project-template/lock.js';
+import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from '../../features/project-template/repertoire-dependency-canonical.js';
 
 const CONTENT_LOCK_PATH = '.takt-template-lock.json';
 const roots: string[] = [];
@@ -46,7 +51,7 @@ function contentLock(): Record<string, unknown> {
     source: {
       kind: 'github',
       uri: 'https://github.com/acme/takt-template',
-      ref: 'refs/tags/v2.1.0',
+      ref: 'v2.1.0',
       commit: '0123456789abcdef0123456789abcdef01234567',
     },
     capabilities: [],
@@ -83,7 +88,8 @@ function sourceLock(): Record<string, unknown> {
     },
     dependencyVerification: {
       method: 'github-ref-to-commit-v1',
-      declarationSha256: 'd'.repeat(64),
+      declarationSha256:
+        calculateProjectTemplateRepertoireDependencyDeclarationSha256([]),
       count: 0,
     },
   };
@@ -154,13 +160,117 @@ describe('project template companion lock state reader', () => {
     [CONTENT_LOCK_PATH],
     [PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH],
     [PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH],
-  ])('rejects a mixed absent/present state when %s alone exists', (path) => {
+    [CONTENT_LOCK_PATH, PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH],
+    [CONTENT_LOCK_PATH, PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH],
+    [PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+      PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH],
+  ])('rejects every mixed absent/present state: %s', (...paths) => {
     const projectRoot = root();
-    writeFileSync(join(projectRoot, path), canonicalContents()[path]!);
+    for (const path of paths) {
+      writeFileSync(join(projectRoot, path), canonicalContents()[path]!);
+    }
     expectStateError(
       () => readProjectTemplateCompanionLockState(projectRoot),
       'MIXED_STATE',
     );
+  });
+
+  it.each([
+    ['content manifest', (content: Record<string, unknown>) => {
+      content['manifestSha256'] = 'f'.repeat(64);
+    }],
+    ['content version', (content: Record<string, unknown>) => {
+      content['packVersion'] = '2.2.0';
+    }],
+    ['content repository', (content: Record<string, unknown>) => {
+      (content['source'] as Record<string, unknown>)['uri'] =
+        'https://github.com/other/takt-template';
+    }],
+    ['content release ref', (content: Record<string, unknown>) => {
+      (content['source'] as Record<string, unknown>)['ref'] = 'v2.2.0';
+    }],
+    ['content commit', (content: Record<string, unknown>) => {
+      (content['source'] as Record<string, unknown>)['commit'] = 'f'.repeat(40);
+    }],
+  ])('rejects cross-lock identity drift: %s', (_label, mutateContent) => {
+    const projectRoot = root();
+    const changed = contentLock();
+    mutateContent(changed);
+    const contents = canonicalContents();
+    writeFileSync(join(projectRoot, CONTENT_LOCK_PATH), serializeTemplateLock(changed));
+    for (const path of [
+      PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+      PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+    ]) writeFileSync(join(projectRoot, path), contents[path]!);
+    expectStateError(
+      () => readProjectTemplateCompanionLockState(projectRoot),
+      'INVALID_LOCK',
+    );
+  });
+
+  it('rejects repertoire descriptor and declaration evidence drift', () => {
+    for (const kind of ['descriptor', 'declaration'] as const) {
+      const projectRoot = root();
+      const repertoire = repertoireLock();
+      const source = sourceLock();
+      if (kind === 'descriptor') {
+        repertoire['sourceDescriptorSha256'] = 'f'.repeat(64);
+      } else {
+        (source['dependencyVerification'] as Record<string, unknown>)[
+          'declarationSha256'
+        ] = 'f'.repeat(64);
+      }
+      writeFileSync(
+        join(projectRoot, CONTENT_LOCK_PATH),
+        serializeTemplateLock(contentLock()),
+      );
+      writeFileSync(
+        join(projectRoot, PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH),
+        serializeProjectTemplateRepertoireDependencyLock(repertoire),
+      );
+      writeFileSync(
+        join(projectRoot, PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH),
+        serializeProjectTemplateSourceProvenance(source),
+      );
+      expectStateError(
+        () => readProjectTemplateCompanionLockState(projectRoot),
+        'INVALID_LOCK',
+      );
+    }
+  });
+
+  it('revalidates lock paths after parsing and closes every opened handle', () => {
+    const projectRoot = root();
+    writeAll(projectRoot);
+    const replacement = join(projectRoot, 'replacement.json');
+    writeFileSync(replacement, canonicalContents()[CONTENT_LOCK_PATH]!);
+    const phases: string[] = [];
+    expectStateError(
+      () => readProjectTemplateCompanionLockStateWithIoSeam(projectRoot, {
+        onPhase(phase) {
+          phases.push(phase);
+          if (phase === 'before-final-revalidation') {
+            renameSync(replacement, join(projectRoot, CONTENT_LOCK_PATH));
+          }
+        },
+      }),
+      'UNSAFE_LOCK',
+    );
+    expect(phases).toContain('root-closed');
+  });
+
+  it('closes the root descriptor when an early post-open check fails', () => {
+    const phases: string[] = [];
+    expectStateError(
+      () => readProjectTemplateCompanionLockStateWithIoSeam(root(), {
+        onPhase(phase) {
+          phases.push(phase);
+          if (phase === 'root-opened') throw new Error('private root failure');
+        },
+      }),
+      'UNSAFE_ROOT',
+    );
+    expect(phases.at(-1)).toBe('root-closed');
   });
 
   it.each([
