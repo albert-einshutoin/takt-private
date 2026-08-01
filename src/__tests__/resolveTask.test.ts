@@ -52,7 +52,11 @@ function createTempProjectDir(): string {
 }
 
 function createTask(overrides: Partial<TaskInfo> = {}): TaskInfo {
-  const baseData = { task: 'Run task', workflow: 'default' } as NonNullable<TaskInfo['data']>;
+  const baseData = {
+    task: 'Run task',
+    workflow: 'default',
+    workflow_generation_witness: 'a'.repeat(64),
+  } as NonNullable<TaskInfo['data']>;
   const data = overrides.data === undefined
     ? baseData
     : overrides.data === null
@@ -204,7 +208,7 @@ describe('resolveTaskExecution', () => {
       configuredStartStep: 'review',
       resumePoint: task.data?.resume_point,
       initialIteration: 7,
-      generationWitness: expect.stringMatching(/^[0-9a-f]{64}$/),
+      generationWitness: 'a'.repeat(64),
     }));
   });
 
@@ -500,7 +504,29 @@ describe('resolveTaskExecution', () => {
     expect(result.retrySource).toEqual({
       storedMaxSteps: 50,
       initialIteration: 50,
-      generationWitness: 'missing-workflow-generation',
+      generationWitness: 'a'.repeat(64),
+    });
+  });
+
+  it('fails closed for legacy continuation metadata without a generation witness', async () => {
+    const root = createTempProjectDir();
+    const task = createTask({
+      data: ({
+        task: 'Legacy retry',
+        workflow: 'default',
+        resume_point: {
+          version: 1,
+          stack: [{ workflow: 'default', step: 'review', kind: 'agent' }],
+          iteration: 2,
+          elapsed_ms: 10,
+        },
+        workflow_generation_witness: undefined,
+      } as unknown) as NonNullable<TaskInfo['data']>,
+    });
+
+    await expect(resolveTaskExecutionStrict(task, root)).rejects.toMatchObject({
+      name: 'WorkflowDiscoveryReadError',
+      message: 'Workflow discovery failed',
     });
   });
 

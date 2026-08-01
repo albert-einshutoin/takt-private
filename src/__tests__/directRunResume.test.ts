@@ -84,7 +84,6 @@ vi.mock('../features/tasks/resume/directInstructMode.js', () => ({
 }));
 
 import { resumeDirectRun } from '../features/tasks/resume/index.js';
-import { buildWorkflowGenerationWitness } from '../features/tasks/execute/workflowRetryGeneration.js';
 
 const resumePoint: WorkflowResumePoint = {
   version: 1,
@@ -124,6 +123,7 @@ function createRun(overrides?: Record<string, unknown>) {
       currentIteration: 5,
       iterations: 50,
       resumePoint,
+      workflowGenerationWitness: 'a'.repeat(64),
       ...overrides,
     },
   };
@@ -153,6 +153,19 @@ describe('resumeDirectRun', () => {
     expect(mockInfo).toHaveBeenCalledTimes(1);
     expect(mockInfo).toHaveBeenCalledWith('No resumable direct run found. Use `takt list` for queued tasks.');
     expect(mockSelectOption).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a legacy direct continuation without a generation witness', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun({
+      workflowGenerationWitness: undefined,
+    }));
+    mockSelectOption.mockResolvedValueOnce('requeue');
+
+    await expect(resumeDirectRun('/project')).rejects.toMatchObject({
+      name: 'WorkflowDiscoveryReadError',
+      message: 'Workflow discovery failed',
+    });
+    expect(mockExecuteTaskWithResult).not.toHaveBeenCalled();
   });
 
   it('Given a resumable direct run, When the menu is shown, Then only direct-run actions are offered', async () => {
@@ -373,7 +386,7 @@ describe('resumeDirectRun', () => {
     expect(mockExecuteTaskWithResult).toHaveBeenCalledWith(expect.objectContaining({
       retrySource: expect.objectContaining({
         resumePoint,
-        generationWitness: buildWorkflowGenerationWitness(workflow, '/project', '/project'),
+        generationWitness: 'a'.repeat(64),
       }),
     }));
   });

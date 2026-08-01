@@ -26,10 +26,8 @@ import { getTaskSlugFromTaskDir } from '../../../shared/utils/taskPaths.js';
 import { resolveConfigValue } from '../../../infra/config/resolveConfigValue.js';
 import { stageTaskSpecForExecution } from './taskSpecContext.js';
 import { resolveReusedWorktreeExecution } from './reusedWorktree.js';
-import {
-  buildWorkflowGenerationWitness,
-  type WorkflowRetrySource,
-} from './workflowRetryGeneration.js';
+import type { WorkflowRetrySource } from './workflowRetryGeneration.js';
+import { WorkflowDiscoveryReadError } from '../../../infra/config/loaders/workflowDiscoveryError.js';
 
 const log = createLogger('task');
 
@@ -313,6 +311,12 @@ export async function resolveTaskExecution(
 
   const resolvedReportDirName = reportDirName ?? generateReportDir(task.content, { timezone });
   const needsWorkflowRetryContext = resumePoint !== undefined || data.exceeded_current_iteration !== undefined;
+  const persistedGenerationWitness = normalizedData.workflow_generation_witness;
+  if (needsWorkflowRetryContext && typeof persistedGenerationWitness !== 'string') {
+    // Legacy continuation metadata cannot prove which workflow generation
+    // produced its cursor. A task without a cursor remains an explicit fresh run.
+    throw new WorkflowDiscoveryReadError();
+  }
   const workflowConfig = needsWorkflowRetryContext
     ? loadWorkflowByIdentifier(workflowIdentifier, defaultCwd, { lookupCwd: execCwd })
     : undefined;
@@ -340,9 +344,7 @@ export async function resolveTaskExecution(
       ...(initialIterationOverride !== undefined
         ? { initialIteration: initialIterationOverride }
         : {}),
-      generationWitness: workflowConfig
-        ? buildWorkflowGenerationWitness(workflowConfig, defaultCwd, execCwd)
-        : 'missing-workflow-generation',
+      generationWitness: persistedGenerationWitness as string,
     }
     : undefined;
 
