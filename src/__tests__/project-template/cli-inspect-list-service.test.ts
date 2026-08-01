@@ -1,4 +1,11 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, type Stats } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+  type Stats,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -263,6 +270,45 @@ describe('project-template list CLI service', () => {
       },
     });
     expect(readdirSync(root)).toEqual(before);
+  });
+
+  it('prioritizes a real non-terminal recovery journal over a mixed companion cohort', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-cli-list-recovery-mixed-'));
+    roots.push(root);
+    const controlRoot = join(root, '.takt-template-state');
+    mkdirSync(controlRoot, { recursive: true });
+    writeFileSync(join(controlRoot, 'journal.json'), JSON.stringify({
+      schemaVersion: '1.0',
+      transactionId: 'transaction-1',
+      planId: SHA,
+      backupId: 'backup-1',
+      state: 'committing',
+      completedOperations: [],
+      createdTargetDirectories: [],
+      updatedAt: '2026-08-02T00:00:00.000Z',
+    }));
+    // One lock from the three-file cohort is a real interrupted mixed state.
+    writeFileSync(join(root, '.takt-template-lock.json'), '{}');
+
+    const outcome = await listProjectTemplatesForCli({ cwd: root });
+
+    expect(outcome).toMatchObject({
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RECOVERY_REQUIRED' } },
+    });
+  });
+
+  it('keeps an ordinary mixed companion cohort classified as source integrity failure', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-cli-list-mixed-'));
+    roots.push(root);
+    writeFileSync(join(root, '.takt-template-lock.json'), '{}');
+
+    const outcome = await listProjectTemplatesForCli({ cwd: root });
+
+    expect(outcome).toMatchObject({
+      exitCode: 24,
+      envelope: { status: 'error', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
   });
 
   it('reads installed state from the canonical project-template control root', async () => {

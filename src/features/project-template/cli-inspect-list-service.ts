@@ -465,11 +465,12 @@ export async function listProjectTemplatesForCliWithDependencies(
   }
   const cwd = resolve(options.cwd);
   try {
-    const companion = snapshotCompanion(dependencies.readCompanionLockState(cwd));
     requireActive(options.signal);
     if (recoveryRequired(dependencies.inspectApplyGuard({ repoPath: cwd }))) {
       return outcomeFailure('project-template list', 'RECOVERY_REQUIRED');
     }
+    requireActive(options.signal);
+    const companion = snapshotCompanion(dependencies.readCompanionLockState(cwd));
     requireActive(options.signal);
     const backupIds = snapshotStringArray(
       await awaitActive(
