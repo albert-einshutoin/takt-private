@@ -12,8 +12,12 @@ vi.mock('../infra/config/loaders/workflowCallResolver.js', () => ({
 }));
 
 import {
+  bindWorkflowGenerationSnapshot,
+  buildWorkflowGenerationSnapshot,
   buildWorkflowGenerationWitness,
+  disposeWorkflowGenerationSnapshot,
   snapshotWorkflowRetrySource,
+  type WorkflowGenerationSnapshot,
 } from '../features/tasks/execute/workflowRetryGeneration.js';
 import {
   attachWorkflowOpaqueRef,
@@ -72,6 +76,50 @@ describe('workflow retry generation witness', () => {
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(second).toBe(first);
     expect(mockResolveWorkflowCallTarget).toHaveBeenCalledTimes(6);
+  });
+
+  it('pins equal-named call edges by exact parent object identity', () => {
+    const root = callWorkflow('root', ['left', 'right']);
+    const left = callWorkflow('duplicate-parent', ['leaf']);
+    const right = {
+      ...callWorkflow('duplicate-parent', ['leaf']),
+      description: 'distinct parent generation',
+    };
+    const leftLeaf = agentWorkflow('left-leaf');
+    const rightLeaf = agentWorkflow('right-leaf');
+    mockResolveWorkflowCallTarget.mockImplementation((
+      parent: WorkflowConfig,
+      identifier: string,
+    ) => {
+      if (parent === root) return identifier === 'left' ? left : right;
+      if (parent === left) return leftLeaf;
+      if (parent === right) return rightLeaf;
+      return null;
+    });
+
+    const snapshot = buildWorkflowGenerationSnapshot(root, '/project', '/project', readContext);
+    const resolve = bindWorkflowGenerationSnapshot(snapshot, root);
+
+    const pinnedLeft = resolve(root, 'left', 'call-0');
+    const pinnedRight = resolve(root, 'right', 'call-1');
+    expect(resolve(pinnedLeft!, 'leaf', 'call-0')).toBe(leftLeaf);
+    expect(resolve(pinnedRight!, 'leaf', 'call-0')).toBe(rightLeaf);
+  });
+
+  it('rejects forged and disposed run snapshots with the stable discovery taxonomy', () => {
+    const root = callWorkflow('root', ['child']);
+    const child = agentWorkflow('child');
+    mockResolveWorkflowCallTarget.mockReturnValue(child);
+    const snapshot = buildWorkflowGenerationSnapshot(root, '/project', '/project', readContext);
+    const resolve = bindWorkflowGenerationSnapshot(snapshot, root);
+
+    expect(() => bindWorkflowGenerationSnapshot(
+      { witness: snapshot.witness } as WorkflowGenerationSnapshot,
+      root,
+    )).toThrowError(WorkflowDiscoveryReadError);
+    disposeWorkflowGenerationSnapshot(snapshot);
+    expect(() => resolve(root, 'child', 'call-0')).toThrowError(WorkflowDiscoveryReadError);
+    expect(() => disposeWorkflowGenerationSnapshot(snapshot)).not.toThrow();
   });
 
   it('bounds cycles without recursively resolving the repeated reference', () => {

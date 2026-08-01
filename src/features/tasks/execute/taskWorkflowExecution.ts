@@ -17,7 +17,8 @@ import {
 } from '../../project-template/apply-lease.js';
 import { prepareWorkflowRuntimeRead } from './workflowRuntimeReadBoundary.js';
 import {
-  buildWorkflowGenerationWitness,
+  buildWorkflowGenerationSnapshot,
+  disposeWorkflowGenerationSnapshot,
   resolveWorkflowRetryOverrides,
   snapshotWorkflowRetrySource,
 } from './workflowRetryGeneration.js';
@@ -96,61 +97,69 @@ export async function executeTaskWorkflow(
         reason: `Workflow "${safeWorkflowIdentifier}" not found.`,
       });
     }
-    const workflowGenerationWitness = buildWorkflowGenerationWitness(
+    const workflowGenerationSnapshot = buildWorkflowGenerationSnapshot(
       workflowConfig,
       projectCwd,
       cwd,
       readContext,
     );
-    const retryOverrides = safeRetrySource === undefined
-      ? { startStep, resumePoint, maxStepsOverride, initialIterationOverride }
-      : resolveWitnessedRetryOverrides(
-        workflowConfig,
-        projectCwd,
-        cwd,
-        safeRetrySource,
-        workflowGenerationWitness,
-        readContext,
-      );
-    log.debug('Running workflow', {
-      name: workflowConfig.name,
-      steps: workflowConfig.steps.map((s: { name: string }) => s.name),
-    });
+    try {
+      const workflowGenerationWitness = workflowGenerationSnapshot.witness;
+      const retryOverrides = safeRetrySource === undefined
+        ? { startStep, resumePoint, maxStepsOverride, initialIterationOverride }
+        : resolveWitnessedRetryOverrides(
+          workflowConfig,
+          projectCwd,
+          cwd,
+          safeRetrySource,
+          workflowGenerationWitness,
+          readContext,
+        );
+      log.debug('Running workflow', {
+        name: workflowConfig.name,
+        steps: workflowConfig.steps.map((s: { name: string }) => s.name),
+      });
 
-    const config = resolveWorkflowConfigValues(projectCwd, ['language', 'personaProviders', 'providerRouting', 'providerProfiles']);
-    const providerOptions = resolveProviderOptionsWithTrace(projectCwd);
-    return workflowExecutor(workflowConfig, task, cwd, {
-      projectCwd,
-      language: config.language,
-      provider: agentOverrides?.provider,
-      model: agentOverrides?.model,
-      providerOptions: providerOptions.value,
-      providerOptionsSource: providerOptions.source,
-      providerOptionsOriginResolver: providerOptions.originResolver,
-      personaProviders: config.personaProviders,
-      providerRouting: config.providerRouting,
-      providerProfiles: config.providerProfiles,
-      interactiveUserInput,
-      interactiveMetadata,
-      startStep: retryOverrides.startStep,
-      retryNote,
-      resumePoint: retryOverrides.resumePoint,
-      directResume,
-      reportDirName,
-      abortSignal,
-      taskPrefix,
-      taskColorIndex,
-      taskDisplayLabel,
-      maxStepsOverride: retryOverrides.maxStepsOverride,
-      initialIterationOverride: retryOverrides.initialIterationOverride,
-      workflowGenerationWitness,
-      currentTaskIssueNumber,
-      traceTaskMetadata,
-      onRunningEvidencePublished,
-      ...(projectTemplateRunStartPermit
-        ? { projectTemplateRunStartPermit }
-        : {}),
-    });
+      const config = resolveWorkflowConfigValues(projectCwd, ['language', 'personaProviders', 'providerRouting', 'providerProfiles']);
+      const providerOptions = resolveProviderOptionsWithTrace(projectCwd);
+      const execution = workflowExecutor(workflowConfig, task, cwd, {
+        projectCwd,
+        language: config.language,
+        provider: agentOverrides?.provider,
+        model: agentOverrides?.model,
+        providerOptions: providerOptions.value,
+        providerOptionsSource: providerOptions.source,
+        providerOptionsOriginResolver: providerOptions.originResolver,
+        personaProviders: config.personaProviders,
+        providerRouting: config.providerRouting,
+        providerProfiles: config.providerProfiles,
+        interactiveUserInput,
+        interactiveMetadata,
+        startStep: retryOverrides.startStep,
+        retryNote,
+        resumePoint: retryOverrides.resumePoint,
+        directResume,
+        reportDirName,
+        abortSignal,
+        taskPrefix,
+        taskColorIndex,
+        taskDisplayLabel,
+        maxStepsOverride: retryOverrides.maxStepsOverride,
+        initialIterationOverride: retryOverrides.initialIterationOverride,
+        workflowGenerationWitness,
+        workflowGenerationSnapshot,
+        currentTaskIssueNumber,
+        traceTaskMetadata,
+        onRunningEvidencePublished,
+        ...(projectTemplateRunStartPermit
+          ? { projectTemplateRunStartPermit }
+          : {}),
+      });
+      return execution.finally(() => disposeWorkflowGenerationSnapshot(workflowGenerationSnapshot));
+    } catch (error) {
+      disposeWorkflowGenerationSnapshot(workflowGenerationSnapshot);
+      throw error;
+    }
     };
 
     // Global repertoire is always acquired before the project run-start mutex.

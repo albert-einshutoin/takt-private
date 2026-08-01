@@ -8,8 +8,11 @@ import { getWorkflowStepKind } from '../core/workflow/step-kind.js';
 import { snapshotWorkflowRuntimeRead } from '../features/tasks/execute/workflowRuntimeReadBoundary.js';
 import { executeTaskWorkflow } from '../features/tasks/execute/taskWorkflowExecution.js';
 import {
+  bindWorkflowGenerationSnapshot,
   buildWorkflowGenerationWitness,
+  buildWorkflowGenerationSnapshot,
   resolveWorkflowRetryOverrides,
+  type WorkflowGenerationSnapshot,
   type WorkflowRetrySource,
 } from '../features/tasks/execute/workflowRetryGeneration.js';
 import { loadWorkflowByIdentifierWithReadContext } from '../infra/config/loaders/workflowResolver.js';
@@ -17,6 +20,10 @@ import { resolveWorkflowCallTarget } from '../infra/config/loaders/workflowCallR
 import { invalidateGlobalConfigCache } from '../infra/config/global/globalConfig.js';
 import { invalidateAllResolvedConfigCache } from '../infra/config/resolveConfigValue.js';
 import { WorkflowDiscoveryReadError } from '../infra/config/loaders/workflowDiscoveryError.js';
+import {
+  createWorkflowCallResolver,
+  createWorkflowExecutionContext,
+} from '../features/tasks/execute/workflowExecutionContext.js';
 
 const DIRECT = `name: direct
 initial_step: work
@@ -70,6 +77,7 @@ interface CapturedGeneration {
   workflow: WorkflowConfig;
   witness: string;
   stack: WorkflowResumePointEntry[];
+  snapshot: WorkflowGenerationSnapshot;
 }
 
 describe('portable retry workflow references', () => {
@@ -189,6 +197,130 @@ describe('portable retry workflow references', () => {
     })).toThrowError(WorkflowDiscoveryReadError);
   });
 
+  it('keeps the run-start child generation after a provider wait and disk mutation', () => {
+    const generationA = captureGeneration(deskA, 'root', 1);
+    const effectiveWorkflow = { ...generationA.workflow };
+    const resolver = createWorkflowCallResolver(
+      createWorkflowExecutionContext(generationA.workflow, deskA),
+      generationA.snapshot,
+      effectiveWorkflow,
+    );
+    writeFileSync(
+      join(deskA, '.takt', 'workflows', 'child.yaml'),
+      CHILD.replace('name: child', 'name: child\ndescription: generation B'),
+    );
+
+    const child = resolver?.({
+      parentWorkflow: effectiveWorkflow,
+      identifier: './child.yaml',
+      stepName: 'delegate',
+      projectCwd: deskA,
+      lookupCwd: deskA,
+    });
+
+    expect(child?.description).toBeUndefined();
+  });
+
+  it('passes the pinned callable tree through the production task boundary', async () => {
+    await expect(executeTaskWorkflow({
+      task: 'pinned production composition',
+      cwd: deskA,
+      projectCwd: deskA,
+      workflowIdentifier: 'root',
+    }, (workflow, _task, _cwd, options) => Promise.resolve().then(() => {
+      writeFileSync(
+        join(deskA, '.takt', 'workflows', 'child.yaml'),
+        CHILD.replace('name: child', 'name: child\ndescription: generation B'),
+      );
+      const resolver = createWorkflowCallResolver(
+        createWorkflowExecutionContext(workflow, deskA),
+        options.workflowGenerationSnapshot,
+        workflow,
+      );
+      const child = resolver?.({
+        parentWorkflow: workflow,
+        identifier: './child.yaml',
+        stepName: 'delegate',
+        projectCwd: deskA,
+        lookupCwd: deskA,
+      });
+      expect(child?.description).toBeUndefined();
+      return { success: true };
+    }))).resolves.toEqual({ success: true });
+  });
+
+  it('rejects an A to B to A cursor even when the current witness returns to A', async () => {
+    const generationA = captureGeneration(deskB, 'root', 3);
+    const childPath = join(deskB, '.takt', 'workflows', 'child.yaml');
+    writeFileSync(childPath, `name: child
+subworkflow:
+  callable: true
+initial_step: b_only
+max_steps: 5
+steps:
+  - name: b_only
+    instruction: generation B only
+`);
+    const generationB = captureGeneration(deskB, 'root', 2);
+    writeFileSync(childPath, CHILD);
+    let executorCalled = false;
+
+    await expect(executeTaskWorkflow({
+      task: 'ABA cursor rejection',
+      cwd: deskB,
+      projectCwd: deskB,
+      workflowIdentifier: 'root',
+      retrySource: {
+        resumePoint: {
+          version: 1,
+          stack: generationB.stack,
+          iteration: 4,
+          elapsed_ms: 1234,
+        },
+        generationWitness: generationA.witness,
+      },
+    }, async () => {
+      executorCalled = true;
+      return { success: true };
+    })).rejects.toThrowError(WorkflowDiscoveryReadError);
+    expect(executorCalled).toBe(false);
+  });
+
+  it.each([
+    ['complete', undefined],
+    ['bootstrap failure', new Error('bootstrap failure')],
+    ['provider throw', new Error('provider throw')],
+    ['abort', new Error('aborted')],
+  ] as const)('disposes the task-owned snapshot after %s settlement', async (scenario, failure) => {
+    let borrowedSnapshot: WorkflowGenerationSnapshot | undefined;
+    let borrowedWorkflow: WorkflowConfig | undefined;
+    const abortController = new AbortController();
+    const execution = executeTaskWorkflow({
+      task: `snapshot lifetime ${scenario}`,
+      cwd: deskA,
+      projectCwd: deskA,
+      workflowIdentifier: 'root',
+      abortSignal: abortController.signal,
+    }, (workflow, _task, _cwd, options) => {
+      borrowedSnapshot = options.workflowGenerationSnapshot;
+      borrowedWorkflow = workflow;
+      if (scenario === 'abort') {
+        return new Promise((_resolve, reject) => {
+          options.abortSignal?.addEventListener('abort', () => reject(failure), { once: true });
+          queueMicrotask(() => abortController.abort());
+        });
+      }
+      return failure ? Promise.reject(failure) : Promise.resolve({ success: true });
+    });
+
+    if (failure) await expect(execution).rejects.toBe(failure);
+    else await expect(execution).resolves.toEqual({ success: true });
+    expect(borrowedSnapshot).toBeDefined();
+    expect(borrowedWorkflow).toBeDefined();
+    expect(() => bindWorkflowGenerationSnapshot(borrowedSnapshot!, borrowedWorkflow!))
+      .toThrowError(WorkflowDiscoveryReadError);
+  });
+
   function captureGeneration(
     desk: string,
     identifier: string,
@@ -224,10 +356,12 @@ describe('portable retry workflow references', () => {
             current = child;
           }
         }
+        const snapshot = buildWorkflowGenerationSnapshot(workflow, desk, desk, readContext);
         return {
           workflow,
-          witness: buildWorkflowGenerationWitness(workflow, desk, desk, readContext),
+          witness: snapshot.witness,
           stack,
+          snapshot,
         };
       },
     });

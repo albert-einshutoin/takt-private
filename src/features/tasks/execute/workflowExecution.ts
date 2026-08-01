@@ -231,7 +231,11 @@ async function executeWorkflowInternal(
       traceTaskMetadata: options.traceTaskMetadata,
       phase1ProcessSafetyByStep,
       systemStepServicesFactory: createDefaultSystemStepServices,
-      workflowCallResolver: createWorkflowCallResolver(workflowExecutionContext),
+      workflowCallResolver: createWorkflowCallResolver(
+        workflowExecutionContext,
+        options.workflowGenerationSnapshot,
+        bootstrap.effectiveWorkflowConfig,
+      ),
     });
 
     eventBridge = bindWorkflowExecutionEvents({

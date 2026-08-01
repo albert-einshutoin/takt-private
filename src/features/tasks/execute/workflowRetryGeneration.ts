@@ -44,6 +44,22 @@ export interface WorkflowRetryOverrides {
   readonly initialIterationOverride?: number;
 }
 
+const workflowGenerationSnapshotBrand: unique symbol = Symbol('WorkflowGenerationSnapshot');
+
+export interface WorkflowGenerationSnapshot {
+  readonly witness: string;
+  readonly [workflowGenerationSnapshotBrand]: true;
+}
+
+export type PinnedWorkflowCallResolver = (
+  parentWorkflow: WorkflowConfig,
+  identifier: string,
+  stepName: string,
+) => WorkflowConfig | null;
+
+const workflowGenerationSnapshots = new WeakSet<object>();
+const workflowGenerationSnapshotStates = new WeakMap<object, WorkflowGenerationSnapshotState>();
+
 /**
  * Hash the complete callable workflow tree, not only the root file. A retry
  * stack is meaningful only for the exact generation that produced it; a
@@ -55,9 +71,70 @@ export function buildWorkflowGenerationWitness(
   lookupCwd: string,
   readContext: InternalWorkflowReadContext,
 ): string {
-  const state: TraversalState = { nodes: 0, steps: 0, bytes: 0, memo: new Map() };
+  const snapshot = buildWorkflowGenerationSnapshot(workflow, projectCwd, lookupCwd, readContext);
+  try {
+    return snapshot.witness;
+  } finally {
+    disposeWorkflowGenerationSnapshot(snapshot);
+  }
+}
+
+export function buildWorkflowGenerationSnapshot(
+  workflow: WorkflowConfig,
+  projectCwd: string,
+  lookupCwd: string,
+  readContext: InternalWorkflowReadContext,
+): WorkflowGenerationSnapshot {
+  const state: TraversalState = {
+    nodes: 0,
+    steps: 0,
+    bytes: 0,
+    memo: new Map(),
+    edges: new WeakMap(),
+  };
   const tree = captureWorkflowTree(workflow, projectCwd, lookupCwd, readContext, [], 1, state);
-  return hashCanonical(tree);
+  const snapshot: WorkflowGenerationSnapshot = Object.freeze({
+    witness: hashCanonical(tree),
+    [workflowGenerationSnapshotBrand]: true as const,
+  });
+  workflowGenerationSnapshots.add(snapshot);
+  workflowGenerationSnapshotStates.set(snapshot, {
+    capturedRoot: workflow,
+    boundRuntimeRoot: undefined,
+    edges: state.edges,
+    disposed: false,
+  });
+  return snapshot;
+}
+
+/** Bind the immutable callable tree to the root object actually given to the engine. */
+export function bindWorkflowGenerationSnapshot(
+  snapshot: WorkflowGenerationSnapshot,
+  runtimeRoot: WorkflowConfig,
+): PinnedWorkflowCallResolver {
+  const state = requireWorkflowGenerationSnapshotState(snapshot);
+  if (state.disposed) throw new WorkflowDiscoveryReadError();
+  if (state.boundRuntimeRoot && state.boundRuntimeRoot !== runtimeRoot) {
+    throw new WorkflowDiscoveryReadError();
+  }
+  state.boundRuntimeRoot = runtimeRoot;
+  return (parentWorkflow, identifier, stepName) => {
+    if (state.disposed || !state.capturedRoot) throw new WorkflowDiscoveryReadError();
+    const capturedParent = parentWorkflow === state.boundRuntimeRoot
+      ? state.capturedRoot
+      : parentWorkflow;
+    return resolvePinnedWorkflowCall(state.edges, capturedParent, identifier, stepName);
+  };
+}
+
+/** Release the run-owned root reference as soon as execution finishes or aborts. */
+export function disposeWorkflowGenerationSnapshot(snapshot: WorkflowGenerationSnapshot): void {
+  const state = requireWorkflowGenerationSnapshotState(snapshot);
+  if (state.disposed) return;
+  state.disposed = true;
+  state.capturedRoot = undefined;
+  state.boundRuntimeRoot = undefined;
+  state.edges = new WeakMap();
 }
 
 export function resolveWorkflowRetryOverrides(
@@ -182,6 +259,19 @@ interface TraversalState {
   steps: number;
   bytes: number;
   memo: Map<string, number>;
+  edges: WeakMap<WorkflowConfig, Map<string, PinnedWorkflowEdge>>;
+}
+
+interface PinnedWorkflowEdge {
+  readonly child: WorkflowConfig | null;
+  readonly identifier: string;
+}
+
+interface WorkflowGenerationSnapshotState {
+  capturedRoot: WorkflowConfig | undefined;
+  boundRuntimeRoot: WorkflowConfig | undefined;
+  edges: WeakMap<WorkflowConfig, Map<string, PinnedWorkflowEdge>>;
+  disposed: boolean;
 }
 
 interface WorkflowAncestor {
@@ -235,35 +325,97 @@ function captureWorkflowTree(
     );
     if (!child) {
       children.push({ step: step.name, missing: true });
+      registerPinnedEdge(state.edges, workflow, step.name, step.call, null);
       continue;
     }
+    const childTree = captureWorkflowTree(
+      child,
+      projectCwd,
+      lookupCwd,
+      readContext,
+      nextAncestors,
+      depth + 1,
+      state,
+    );
+    registerPinnedEdge(
+      state.edges,
+      workflow,
+      step.name,
+      step.call,
+      child,
+    );
     children.push({
       step: step.name,
-      workflow: captureWorkflowTree(
-        child,
-        projectCwd,
-        lookupCwd,
-        readContext,
-        nextAncestors,
-        depth + 1,
-        state,
-      ),
+      workflow: childTree,
     });
   }
   // Opaque references contain absolute source-path hashes and are intentionally
   // excluded from the persisted tree. Deterministic traversal IDs retain DAG
   // and cycle topology while allowing an identical .takt tree to move hosts.
-  const trustInfo = getWorkflowTrustInfo(workflow, projectCwd);
   return {
     id,
     workflow,
-    trust: {
-      source: trustInfo.source,
-      isProjectTrustRoot: trustInfo.isProjectTrustRoot,
-      isProjectWorkflowRoot: trustInfo.isProjectWorkflowRoot,
-    },
+    trust: getPortableWorkflowTrust(workflow, projectCwd),
     children,
   };
+}
+
+function getPortableWorkflowTrust(workflow: WorkflowConfig, projectCwd: string) {
+  const trustInfo = getWorkflowTrustInfo(workflow, projectCwd);
+  return {
+    source: trustInfo.source,
+    isProjectTrustRoot: trustInfo.isProjectTrustRoot,
+    isProjectWorkflowRoot: trustInfo.isProjectWorkflowRoot,
+  };
+}
+
+function registerPinnedEdge(
+  edges: WeakMap<WorkflowConfig, Map<string, PinnedWorkflowEdge>>,
+  parentWorkflow: WorkflowConfig,
+  stepName: string,
+  identifier: string,
+  child: WorkflowConfig | null,
+): void {
+  let parentEdges = edges.get(parentWorkflow);
+  if (!parentEdges) {
+    parentEdges = new Map();
+    edges.set(parentWorkflow, parentEdges);
+  }
+  const existing = parentEdges.get(stepName);
+  if (existing && (existing.identifier !== identifier || existing.child !== child)) {
+    throw new WorkflowDiscoveryReadError();
+  }
+  parentEdges.set(stepName, Object.freeze({ child, identifier }));
+}
+
+function resolvePinnedWorkflowCall(
+  edges: WeakMap<WorkflowConfig, Map<string, PinnedWorkflowEdge>>,
+  parentWorkflow: WorkflowConfig,
+  identifier: string,
+  stepName: string,
+): WorkflowConfig | null {
+  const step = parentWorkflow.steps.find((candidate) => candidate.name === stepName);
+  if (!step || !isWorkflowCallStep(step) || step.call !== identifier) {
+    throw new WorkflowDiscoveryReadError();
+  }
+  const edge = edges.get(parentWorkflow)?.get(stepName);
+  if (!edge || edge.identifier !== identifier) throw new WorkflowDiscoveryReadError();
+  return edge.child;
+}
+
+function requireWorkflowGenerationSnapshotState(
+  snapshot: WorkflowGenerationSnapshot,
+): WorkflowGenerationSnapshotState {
+  if (
+    typeof snapshot !== 'object'
+    || snapshot === null
+    || !workflowGenerationSnapshots.has(snapshot)
+  ) {
+    throw new WorkflowDiscoveryReadError();
+  }
+  const state = workflowGenerationSnapshotStates.get(snapshot);
+  if (!state) throw new WorkflowDiscoveryReadError();
+  return state;
 }
 
 function hashCanonical(value: unknown): string {
