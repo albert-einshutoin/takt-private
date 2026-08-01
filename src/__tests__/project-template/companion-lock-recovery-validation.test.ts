@@ -244,6 +244,20 @@ describe('companion lock rollback current-state guard', () => {
     })).resolves.toEqual({ status: 'rolled-back' });
   });
 
+  it('recovers a template entry at the 512-character portable-path boundary', async () => {
+    const path = `${'a'.repeat(255)}/${'b'.repeat(254)}/c`;
+    const value = await recoveryFixture({
+      completedOperations: [`entry:${path}`],
+      entries: [{
+        target: { kind: 'template-entry', path }, action: 'update',
+        before: 'old', after: 'new', current: 'after',
+      }],
+    });
+    await expect(recoverProjectTemplateCompanionLockTransaction({
+      projectRoot: value.projectRoot,
+    })).resolves.toEqual({ status: 'rolled-back' });
+  });
+
   it('accepts the exact 32 MiB cohort boundary', async () => {
     const entries = largeCohortEntries(32);
     const value = await recoveryFixture({

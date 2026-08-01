@@ -40,6 +40,7 @@ import {
   type ProjectTemplateBackupManifest,
 } from '../../features/project-template/apply-storage.js';
 import { canonicalizeTaktpackJson } from '../../features/project-template/canonical-json.js';
+import { MAX_TEMPLATE_PATH_LENGTH } from '../../features/project-template/validation.js';
 
 const roots: string[] = [];
 
@@ -213,6 +214,19 @@ describe('project template apply storage', () => {
       expect(() => parseProjectTemplateApplyJournal(value))
         .toThrow(expect.objectContaining({ code: 'INVALID_JOURNAL' }));
     }
+  });
+
+  it('accepts an operation key carrying the maximum portable path', () => {
+    const path = `${'a'.repeat(255)}/${'b'.repeat(254)}/c`;
+    expect(path).toHaveLength(MAX_TEMPLATE_PATH_LENGTH);
+    const value = {
+      ...journal(), schemaVersion: '1.1' as const,
+      completedOperations: [`entry:${path}`],
+    };
+    expect(parseProjectTemplateApplyJournal(value)).toEqual(value);
+    expect(() => parseProjectTemplateApplyJournal({
+      ...value, completedOperations: [`entry:${path}x`],
+    })).toThrow(expect.objectContaining({ code: 'INVALID_JOURNAL' }));
   });
 
   it('opens existing baseline authority read-only and closes all directory FDs', async () => {
