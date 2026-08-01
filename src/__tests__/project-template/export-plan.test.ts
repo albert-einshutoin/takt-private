@@ -189,6 +189,23 @@ describe('project template export plan', () => {
     expect(outcome).toMatchObject({ code: 'EXPORT_REVIEW_REQUIRED' });
   });
 
+  it('matches a large reverse-ordered policy set through canonical lookup', async () => {
+    const files: Record<string, string> = {};
+    const policies: Record<string, 'merge'> = {};
+    for (let index = 255; index >= 0; index -= 1) {
+      const path = `workflows/review-${String(index).padStart(3, '0')}.yaml`;
+      files[path] = 'name: review\n';
+      policies[path] = 'merge';
+    }
+    const root = makeProject(files);
+    const plan = await createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source, policies,
+    });
+    expect(plan.manifest.entries).toHaveLength(256);
+    expect(plan.manifest.entries[0]?.path).toBe('workflows/review-000.yaml');
+    expect(plan.manifest.entries[255]?.path).toBe('workflows/review-255.yaml');
+  });
+
   it('does not treat an inherited policy as explicit approval', async () => {
     const root = makeProject({ 'config.yaml': 'language: ja\n' });
     const inheritedPolicies = Object.create({

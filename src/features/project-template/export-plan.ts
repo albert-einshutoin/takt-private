@@ -88,6 +88,24 @@ function incrementReason(
   reasons[reason] = (reasons[reason] ?? 0) + 1;
 }
 
+function findPolicyApprovalIndex(
+  entries: readonly Readonly<{ path: string }>[],
+  path: string,
+): number {
+  // Why: the approval snapshot is canonical path order. Binary search keeps the
+  // public 4096-entry bound from becoming a quadratic argv-to-scan CPU surface.
+  let lower = 0;
+  let upper = entries.length - 1;
+  while (lower <= upper) {
+    const middle = (lower + upper) >>> 1;
+    const candidate = entries[middle]!.path;
+    if (candidate === path) return middle;
+    if (candidate < path) lower = middle + 1;
+    else upper = middle - 1;
+  }
+  return -1;
+}
+
 /**
  * Converts the redacted scanner result into immutable archive metadata.
  * Excluded paths stay in the report only: runtime and secret paths are never
@@ -152,15 +170,10 @@ export async function createProjectTemplateExportPlan(
       throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'capability inspection is incomplete', entryField);
     }
 
-    let explicitPolicy: Exclude<TemplateEntryPolicy, 'excluded'> | undefined;
-    for (let index = 0; index < policyEntries.length; index += 1) {
-      const entry = policyEntries[index]!;
-      if (entry.path === result.relativePath) {
-        explicitPolicy = entry.policy;
-        matchedPolicies[index] = true;
-        break;
-      }
-    }
+    const policyIndex = findPolicyApprovalIndex(policyEntries, result.relativePath);
+    const explicitPolicy: Exclude<TemplateEntryPolicy, 'excluded'> | undefined =
+      policyIndex < 0 ? undefined : policyEntries[policyIndex]!.policy;
+    if (policyIndex >= 0) matchedPolicies[policyIndex] = true;
     if (result.classification === 'project-owned' && explicitPolicy === undefined) {
       throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'project-owned entry requires an explicit policy', entryField);
     }
