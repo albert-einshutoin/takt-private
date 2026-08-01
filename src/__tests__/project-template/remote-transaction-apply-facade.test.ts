@@ -19,7 +19,12 @@ import {
 } from '../../features/project-template/index.js';
 import {
   createProjectTemplateRemoteApplyComposition,
+  claimProjectTemplateRemoteApplyLeaseForExecution,
+  consumeProjectTemplateRemoteApplyLeaseExecutionClaim,
 } from '../../features/project-template/remote-transaction-apply-facade.js';
+import {
+  acquireProjectTemplateApplyLease,
+} from '../../features/project-template/apply-lease.js';
 import {
   storeGithubTemplateDownloadReceipt,
   type GithubTemplateDownloadReceiptVerifier,
@@ -230,6 +235,49 @@ describe('GitHub project template remote transaction apply facade', () => {
       expect(readFileSync(targetSentinel, 'utf8')).toBe('target unchanged');
     },
   );
+
+  it('accepts one genuine owned lease claim and rejects its structural clone', () => {
+    const projectRoot = root('takt-remote-apply-lease-');
+    const lease = acquireProjectTemplateApplyLease(projectRoot);
+    try {
+      const claim = claimProjectTemplateRemoteApplyLeaseForExecution({
+        projectRoot,
+        lease,
+      });
+      expect(() => consumeProjectTemplateRemoteApplyLeaseExecutionClaim({
+        projectRoot,
+        claim: { ...claim },
+      } as never)).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+      expect(() => consumeProjectTemplateRemoteApplyLeaseExecutionClaim({
+        projectRoot,
+        claim,
+      })).not.toThrow();
+      expect(() => consumeProjectTemplateRemoteApplyLeaseExecutionClaim({
+        projectRoot,
+        claim,
+      })).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    } finally {
+      lease.release();
+    }
+  });
+
+  it('rejects a released lease and an active lease owned by another project', () => {
+    const projectRoot = root('takt-remote-apply-lease-owner-');
+    const otherRoot = root('takt-remote-apply-lease-other-');
+    const active = acquireProjectTemplateApplyLease(projectRoot);
+    try {
+      expect(() => claimProjectTemplateRemoteApplyLeaseForExecution({
+        projectRoot: otherRoot,
+        lease: active,
+      })).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+    } finally {
+      active.release();
+    }
+    expect(() => claimProjectTemplateRemoteApplyLeaseForExecution({
+      projectRoot,
+      lease: active,
+    })).toThrow(expect.objectContaining({ code: 'INVALID_AUTHORITY' }));
+  });
 
   it.each([
     ['cache drift', 'CACHE_INVALID', (value: Awaited<ReturnType<typeof storedFixture>>) => {
