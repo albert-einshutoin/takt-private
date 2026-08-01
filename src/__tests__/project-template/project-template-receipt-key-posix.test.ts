@@ -459,6 +459,81 @@ describe('POSIX project template receipt key store', () => {
     expect(readFileSync(lockPath, 'utf8')).toBe('replacement-owner\n');
   });
 
+  it('preserves a same-inode lock that becomes live and young before stale recovery', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
+    await healthy.write(registry());
+    const lockPath = join(directory, '.keyring.lock');
+    const staleRecord = JSON.stringify({
+      pid: 424242,
+      createdAtMs: 1,
+      token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    const liveRecord = JSON.stringify({
+      pid: 515151,
+      createdAtMs: 999,
+      token: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    writeFileSync(lockPath, staleRecord, { mode: 0o600 });
+    let mutated = false;
+    const store = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        beforeStaleLockUnlink(path) {
+          if (mutated) return;
+          mutated = true;
+          writeFileSync(path, liveRecord);
+        },
+      },
+      leasePolicy: {
+        attempts: 2,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive: (pid) => pid === 515151,
+      },
+    });
+
+    await expect(store.read()).rejects.toThrow(/lease is unavailable/i);
+    expect(readFileSync(lockPath, 'utf8')).toBe(liveRecord);
+    expect(lstatSync(lockPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('preserves a same-inode lock whose mode changes before stale recovery', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
+    await healthy.write(registry());
+    const lockPath = join(directory, '.keyring.lock');
+    const staleRecord = JSON.stringify({
+      pid: 424242,
+      createdAtMs: 1,
+      token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    writeFileSync(lockPath, staleRecord, { mode: 0o600 });
+    let mutated = false;
+    const store = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        beforeStaleLockUnlink(path) {
+          if (mutated) return;
+          mutated = true;
+          chmodSync(path, 0o644);
+        },
+      },
+      leasePolicy: {
+        attempts: 2,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive: () => false,
+      },
+    });
+
+    await expect(store.read()).rejects.toThrow(/lease is unavailable/i);
+    expect(readFileSync(lockPath, 'utf8')).toBe(staleRecord);
+    expect(lstatSync(lockPath).mode & 0o777).toBe(0o644);
+  });
+
   it('zeroizes the first POSIX hash when its observer throws', async () => {
     const directory = join(root(), 'keys');
     const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
