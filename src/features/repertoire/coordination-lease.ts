@@ -18,6 +18,11 @@ import {
 import { randomBytes, randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import {
+  createCoordinationPlatformPolicy,
+  type CoordinationRootAuthority,
+  type CoordinationRootEvidence,
+} from './coordination-platform-policy.js';
 
 const COORDINATION_DIRECTORY_NAME = '.takt-repertoire-coordination';
 const READERS_DIRECTORY_NAME = 'readers';
@@ -201,20 +206,8 @@ type CoordinationPaths = {
   trustedRoot: TrustedConfigRoot;
 };
 
-type TrustedRootEvidence = {
-  readonly dev: number;
-  readonly ino: number;
-  readonly mode: number;
-  readonly uid: number;
-};
-
-type TrustedConfigRoot = {
-  readonly canonicalRoot: string;
-  readonly evidence: TrustedRootEvidence;
-  readonly lexicalRoot: string;
-  close(): void;
-  assertUnchanged(): void;
-};
+type TrustedConfigRoot = CoordinationRootAuthority;
+type TrustedRootEvidence = CoordinationRootEvidence;
 
 type CoordinationSnapshot = {
   digest: string;
@@ -225,6 +218,14 @@ type CoordinationSnapshot = {
 };
 
 const SNAPSHOT_CHANGED = Symbol('repertoire-coordination-snapshot-changed');
+const coordinationPlatformPolicy = createCoordinationPlatformPolicy({
+  platform: safePlatform,
+  openPosixRootAuthority,
+  // Phase 1 intentionally has no mode-bit fallback on Windows. Until the
+  // native owner/DACL/reparse bridge is approved and shipped, acquisition is
+  // rejected before prepareCoordinationPaths can create its private subtree.
+  loadWindowsBridge: () => undefined,
+});
 
 /**
  * Acquires a process-wide lease for the global repertoire.
@@ -420,7 +421,7 @@ function throwAfterClosingTrustedRoot(paths: CoordinationPaths | undefined, erro
 }
 
 function prepareCoordinationPaths(globalConfigDir: string): CoordinationPaths {
-  const trustedRoot = assertTrustedConfigRoot(globalConfigDir);
+  const trustedRoot = coordinationPlatformPolicy.openRootAuthority(globalConfigDir);
   try {
     // Child paths are based on the proven canonical leaf. Ancestor aliases
     // such as macOS /tmp remain valid, while a symlink at the .takt leaf does not.
@@ -448,7 +449,7 @@ function prepareCoordinationPaths(globalConfigDir: string): CoordinationPaths {
   }
 }
 
-function assertTrustedConfigRoot(path: string): TrustedConfigRoot {
+function openPosixRootAuthority(path: string): TrustedConfigRoot {
   const before = lstatSync(path);
   assertTrustedConfigRootStat(before);
   const canonicalRoot = realpathSync(path);
