@@ -71,6 +71,12 @@ function memoryStore(): ProjectTemplateReceiptKeyStore & { disposed: boolean } {
   };
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 async function fixture(options: { readonly invalidDoctor?: boolean } = {}) {
   const sourceRoot = temp('takt-production-source-');
   const sourcePath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
@@ -669,6 +675,100 @@ describe('project template remote production composition', () => {
     await expect(approveSecond()).rejects.toMatchObject({
       code: 'HANDLE_LIMIT_EXCEEDED',
     });
+    await composition.dispose();
+  });
+
+  it.each(['download', 'preview', 'approve', 'recover'] as const)(
+    'rejects a late %s completion after the bounded dispose drain',
+    async (blockedOperation) => {
+      const value = await fixture();
+      const entered = deferred();
+      const release = deferred();
+      const composition = await createProjectTemplateRemoteProductionComposition({
+        keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+        repertoireInspectionPort: {
+          inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+        },
+        disposeDrainTimeoutMs: 1,
+        operationGate: async (operation) => {
+          if (operation !== blockedOperation) return;
+          entered.resolve();
+          await release.promise;
+        },
+      });
+      const receipt = blockedOperation === 'download' ? undefined : await composition.download({
+        projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+        source: value.source, advisory: value.advisory,
+      });
+      const preview = blockedOperation === 'approve' && receipt !== undefined
+        ? await composition.preview({
+          cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+          projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+          baselineStrategy: 'conflict',
+        })
+        : undefined;
+      const pending = blockedOperation === 'download'
+        ? composition.download({
+          projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+          source: value.source, advisory: value.advisory,
+        })
+        : blockedOperation === 'preview'
+          ? composition.preview({
+            cacheRoot: value.cacheRoot, receiptKey: receipt!.receiptKey,
+            projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+            baselineStrategy: 'conflict',
+          })
+          : blockedOperation === 'approve'
+            ? composition.approve({
+              projectRoot: value.projectRoot, previewId: preview!.previewId,
+              transactionPlanId: preview!.transactionPlanId, baselineStrategy: 'conflict',
+            })
+            : composition.recover({ projectRoot: value.projectRoot });
+      await entered.promise;
+      const firstDispose = composition.dispose();
+      const secondDispose = composition.dispose();
+      expect(secondDispose).toBe(firstDispose);
+      await firstDispose;
+      release.resolve();
+      await expect(pending).rejects.toMatchObject({ code: 'DISPOSED' });
+      expect(composition.dispose()).toBe(firstDispose);
+    },
+  );
+
+  it('uses one operation-start clock snapshot across validation, sweep, and reservation', async () => {
+    const value = await fixture();
+    let readings = [0];
+    let calls = 0;
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+      now: () => readings[Math.min(calls++, readings.length - 1)]!,
+      handleTtlMs: 10,
+    });
+    const receipt = await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    expect(calls).toBe(1);
+
+    readings = [9, 11];
+    calls = 0;
+    const preview = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    });
+    expect(calls).toBe(1);
+
+    readings = [9, 11];
+    calls = 0;
+    await expect(composition.approve({
+      projectRoot: value.projectRoot, previewId: preview.previewId,
+      transactionPlanId: preview.transactionPlanId, baselineStrategy: 'conflict',
+    })).resolves.toHaveProperty('approvalId');
+    expect(calls).toBe(1);
     await composition.dispose();
   });
 });
