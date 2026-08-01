@@ -119,6 +119,89 @@ describe('project-template CLI command adapter', () => {
     expect(writes.join('')).not.toMatch(/authority|receipt|approval|cache/iu);
   });
 
+  it('treats an exact current Takt version as a runtime assertion, not an override', async () => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', 'apply', './template.taktpack',
+      '--current-takt-version', '0.48.0',
+    ]);
+
+    expect(value.dispatch).toHaveBeenCalledOnce();
+    expect(value.requests[0]).toMatchObject({
+      command: 'project-template apply',
+      currentTaktVersion: '0.48.0',
+    });
+  });
+
+  it.each([
+    ['apply higher', 'apply', './template.taktpack', '99.0.0'],
+    ['apply lower', 'apply', './template.taktpack', '0.1.0'],
+    ['apply invalid', 'apply', './template.taktpack', 'not-semver'],
+    ['update higher', 'update', 'github:owner/template@v1.0.0', '99.0.0'],
+    ['update lower', 'update', 'github:owner/template@v1.0.0', '0.1.0'],
+    ['update invalid', 'update', 'github:owner/template@v1.0.0', 'not-semver'],
+  ] as const)('rejects a mismatched runtime assertion before %s mutation', async (
+    _label,
+    command,
+    source,
+    assertedVersion,
+  ) => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', command, source,
+      '--current-takt-version', assertedVersion,
+      '--apply', '--expected-plan-id', PLAN_ID, '--force',
+    ]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.admissions).toEqual([]);
+    expect(value.writes).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      status: 'error', mode: 'apply', error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
+  it('rejects a changed runtime assertion between dry-run and exact-plan apply', async () => {
+    const preview = harness();
+    await preview.program.parseAsync([
+      'node', 'takt', 'project-template', 'apply', './template.taktpack',
+      '--current-takt-version', '0.48.0', '--dry-run',
+    ]);
+    const apply = harness();
+    await apply.program.parseAsync([
+      'node', 'takt', 'project-template', 'apply', './template.taktpack',
+      '--current-takt-version', '99.0.0', '--apply',
+      '--expected-plan-id', PLAN_ID, '--force',
+    ]);
+
+    expect(preview.dispatch).toHaveBeenCalledOnce();
+    expect(apply.dispatch).not.toHaveBeenCalled();
+    expect(apply.admissions).toEqual([]);
+    expect(JSON.parse(apply.writes[0]!)).toMatchObject({
+      status: 'error', command: 'project-template apply', mode: 'apply',
+      error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
+  it.each([
+    ['inspect', './template.taktpack'],
+    ['diff', './template.taktpack'],
+  ] as const)('rejects mismatched runtime assertions for read-only %s too', async (
+    command,
+    source,
+  ) => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', command, source,
+      '--current-takt-version', '99.0.0',
+    ]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      status: 'error', mode: 'dry-run', error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
   it('rejects force-only and expected-plan drift options before dispatch', async () => {
     const force = harness();
     await force.program.parseAsync([

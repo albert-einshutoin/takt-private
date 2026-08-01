@@ -471,6 +471,14 @@ accept `--cwd <path>` and `--json`. Commands that can mutate default to
 explicitly classified as reviewable. It never bypasses a hard conflict,
 recovery state, active run, lease, integrity check, target drift, or plan drift.
 
+`--current-takt-version` is an optional caller assertion retained for TaktDesk
+compatibility; it is not a simulation or override. When present, it must
+exactly equal the version of the Takt binary executing the command. A higher,
+lower, or invalid value returns `INVALID_ARGUMENT` before dispatch, including
+for an exact-plan `--apply --force`. Compatibility checks always use the actual
+runtime version, so changing this assertion between preview and apply cannot
+bypass a hard conflict.
+
 Local transfer example:
 
 ```sh

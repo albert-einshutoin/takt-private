@@ -263,13 +263,24 @@ export function registerProjectTemplateCommands(
     flags: CommonFlags,
     request: Omit<ProjectTemplateCliCommandRequest, 'cwd' | 'json' | 'currentTaktVersion'>,
   ): Promise<void> => {
+    if (flags.currentTaktVersion !== undefined
+      && flags.currentTaktVersion !== dependencies.currentTaktVersion) {
+      // Why: compatibility is a mutation security boundary. Treat the option
+      // as a caller/runtime assertion so neither preview nor apply can replace
+      // the version of the binary that is actually executing the operation.
+      await invalid(
+        request.command,
+        request.mutation?.mode ?? 'dry-run',
+        'INVALID_ARGUMENT',
+      );
+      return;
+    }
     const cwd = requestedCwd(root, command, flags, dependencies);
     const fullRequest: ProjectTemplateCliCommandRequest = {
       ...request,
       cwd,
       json: flags.json === true,
-      currentTaktVersion:
-        flags.currentTaktVersion ?? dependencies.currentTaktVersion,
+      currentTaktVersion: dependencies.currentTaktVersion,
     };
     await settle(
       fullRequest.command,
@@ -281,7 +292,7 @@ export function registerProjectTemplateCommands(
   addCommonOptions(group.command('inspect')
     .description('Inspect a local .taktpack without mutation')
     .argument('[source]', 'Local .taktpack path')
-    .option('--current-takt-version <version>', 'Compatibility version'))
+    .option('--current-takt-version <version>', 'Assert the executing Takt version'))
     .action(async (source: string | undefined, flags: CommonFlags, command: Command) => {
       if (hasUnknownOption(command)) {
         await invalid('project-template inspect', 'dry-run', 'UNKNOWN_OPTION');
@@ -345,7 +356,7 @@ export function registerProjectTemplateCommands(
     const command = group.command(name)
       .description(`${name} a local or canonical GitHub project template`)
       .argument('[source]', 'Local .taktpack path or canonical GitHub source')
-      .option('--current-takt-version <version>', 'Compatibility version');
+      .option('--current-takt-version <version>', 'Assert the executing Takt version');
     (mutating ? addMutationOptions(command) : addCommonOptions(command))
       .action(async (source: string | undefined, flags: CommonFlags, action: Command) => {
         const machineCommand = `project-template ${name}` as ProjectTemplateCliCommand;

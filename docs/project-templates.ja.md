@@ -399,6 +399,12 @@ portableな運用境界には `takt project-template` を使います。全コ�
 承認します。hard conflict、recovery state、active run、lease、integrity check、
 target drift、plan driftは迂回しません。
 
+`--current-takt-version` はTaktDesk互換のために残す任意のruntime一致確認であり、
+simulationやoverrideではありません。指定時は実行中Takt binaryのversionと完全一致が
+必要です。高い値、低い値、形式不正な値はいずれもdispatch前に`INVALID_ARGUMENT`となり、
+完全一致planの`--apply --force`でも同じです。互換性判定は常に実runtime versionを使うため、
+previewとapplyの間でこの値を変えてもhard conflictを迂回できません。
+
 local移行例:
 
 ```sh
