@@ -353,6 +353,16 @@ export interface TaktpackInspectorIoSeam {
   onPhase?(phase: TaktpackInspectorIoPhase): void;
 }
 
+export interface MaterializedTaktpackContent {
+  readonly path: string;
+  readonly content: Uint8Array;
+}
+
+export interface MaterializedTaktpackContents {
+  readonly inspection: TaktpackInspectResult;
+  readonly contents: readonly MaterializedTaktpackContent[];
+}
+
 function normalizeInspectorIoError(error: unknown, field: string): Error {
   if (error instanceof TaktpackError) return error;
   return new TaktpackError(
@@ -367,6 +377,7 @@ async function inspectTaktpackWithExpectedLinks(
   options: InspectTaktpackOptions = {},
   ioSeam: TaktpackInspectorIoSeam = {},
   expectedLinks: 1 | 2 = 1,
+  retainedBlobs?: Map<string, Buffer>,
 ): Promise<TaktpackInspectResult> {
   const currentVersion = options.currentTaktVersion === undefined
     ? undefined
@@ -564,6 +575,10 @@ async function inspectTaktpackWithExpectedLinks(
           }
           detections.push(classification.detectedCapabilities);
         }
+        // Why: preview needs owned bytes but must not add a second tar parser.
+        // Retention happens only after the existing bounded hash, index, order,
+        // padding, and semantic checks for this content-addressed blob.
+        retainedBlobs?.set(hash, Buffer.from(content));
       }
     }
     if (metadata === undefined || manifest === undefined || report === undefined) {
@@ -677,4 +692,46 @@ export function inspectTaktpack(
   options: InspectTaktpackOptions = {},
 ): Promise<TaktpackInspectResult> {
   return inspectTaktpackWithIoSeam(archivePath, options);
+}
+
+export async function materializeTaktpackContentsWithIoSeam(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+  ioSeam: TaktpackInspectorIoSeam = {},
+): Promise<MaterializedTaktpackContents> {
+  const retainedBlobs = new Map<string, Buffer>();
+  const inspection = await inspectTaktpackWithExpectedLinks(
+    archivePath,
+    options,
+    ioSeam,
+    1,
+    retainedBlobs,
+  );
+  const contents = inspection.manifest.entries.map((entry) => {
+    const retained = retainedBlobs.get(entry.sha256);
+    if (retained === undefined) {
+      throw new TaktpackError(
+        'MISSING_ARCHIVE_ENTRY',
+        'manifest content was not retained from the verified archive',
+        'manifest.entries',
+      );
+    }
+    return Object.freeze({
+      path: entry.path,
+      // Each manifest path receives independent bytes. A caller editing its
+      // preview copy cannot alias another path or a later materialization.
+      content: new Uint8Array(retained),
+    });
+  });
+  return Object.freeze({
+    inspection,
+    contents: Object.freeze(contents),
+  });
+}
+
+export function materializeTaktpackContents(
+  archivePath: string,
+  options: InspectTaktpackOptions = {},
+): Promise<MaterializedTaktpackContents> {
+  return materializeTaktpackContentsWithIoSeam(archivePath, options);
 }

@@ -62,12 +62,11 @@ describe('bounded taktpack content materializer', () => {
     expect(result.inspection.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(result.inspection.compatibility.status).toBe('compatible');
     expect(result.contents.map((entry) => entry.path)).toEqual([
-      'agents/reviewer.md',
       'workflows/review-copy.yaml',
       'workflows/review.yaml',
     ]);
     expect(result.contents.map((entry) => Buffer.from(entry.content).toString('utf8')))
-      .toEqual(['review carefully\n', 'name: review\n', 'name: review\n']);
+      .toEqual(['name: review\n', 'name: review\n']);
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.contents)).toBe(true);
     expect(result.contents.every((entry) => Object.isFrozen(entry))).toBe(true);
