@@ -14,13 +14,13 @@ const PLAN_ID = 'a'.repeat(64);
 describe('project template CLI machine contract', () => {
   it('renders exactly one canonical JSON object followed by one newline', () => {
     const envelope = createProjectTemplateCliSuccess({
-      command: 'project-template preview',
+      command: 'project-template inspect',
       mode: 'dry-run',
-      result: { planId: PLAN_ID, changed: false },
+      result: { packId: PLAN_ID, entryCount: 0, valid: true },
     });
 
     expect(presentProjectTemplateCliEnvelope(envelope)).toBe(
-      `{"command":"project-template preview","mode":"dry-run","result":{"changed":false,"planId":"${PLAN_ID}"},"schemaVersion":"1.0","status":"success","warnings":[]}\n`,
+      `{"command":"project-template inspect","mode":"dry-run","result":{"entryCount":0,"packId":"${PLAN_ID}","valid":true},"schemaVersion":"1.0","status":"success","warnings":[]}\n`,
     );
     expect(presentProjectTemplateCliEnvelope(envelope).split('\n')).toHaveLength(2);
   });
@@ -46,7 +46,7 @@ describe('project template CLI machine contract', () => {
   it('rejects forged envelopes instead of trusting TypeScript at runtime', () => {
     const forged = {
       schemaVersion: '1.0',
-      command: 'project-template preview',
+      command: 'project-template inspect',
       status: 'success',
       mode: 'dry-run',
       result: { changed: false },
@@ -79,7 +79,7 @@ describe('project template CLI machine contract', () => {
     [{ leaseId: 'lease-1' }],
   ])('rejects machine fields that could disclose local or authority data: %j', (result) => {
     expect(() => createProjectTemplateCliSuccess({
-      command: 'project-template preview',
+      command: 'project-template inspect',
       mode: 'dry-run',
       result,
     })).toThrow(ProjectTemplateCliContractError);
@@ -93,7 +93,7 @@ describe('project template CLI machine contract', () => {
     ['symbol key', { [Symbol('hidden')]: 'value' }],
   ])('rejects unsafe JSON graph shape: %s', (_label, result) => {
     expect(() => createProjectTemplateCliSuccess({
-      command: 'project-template preview',
+      command: 'project-template inspect',
       mode: 'dry-run',
       result,
     })).toThrow(ProjectTemplateCliContractError);
@@ -114,7 +114,7 @@ describe('project template CLI machine contract', () => {
 
     for (const result of [getter, proxy, cycle, deep, tooManyNodes, tooManyBytes]) {
       expect(() => createProjectTemplateCliSuccess({
-        command: 'project-template preview',
+        command: 'project-template inspect',
         mode: 'dry-run',
         result,
       })).toThrow(ProjectTemplateCliContractError);
@@ -164,9 +164,9 @@ describe('project template CLI machine contract', () => {
     const write = vi.fn(() => undefined);
     const outcome = {
       envelope: createProjectTemplateCliSuccess({
-        command: 'project-template preview',
+        command: 'project-template inspect',
         mode: 'dry-run',
-        result: { changed: false },
+        result: { packId: PLAN_ID, entryCount: 0, valid: true },
       }),
       exitCode: 0 as const,
     };
@@ -198,7 +198,7 @@ describe('project template CLI machine contract', () => {
     const statusGetter = vi.fn(() => 'success');
     const envelope = Object.defineProperty({
       schemaVersion: '1.0',
-      command: 'project-template preview',
+      command: 'project-template inspect',
       mode: 'dry-run',
       result: null,
       warnings: [],

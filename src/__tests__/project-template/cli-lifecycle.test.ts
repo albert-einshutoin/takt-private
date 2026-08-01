@@ -6,6 +6,8 @@ import {
   startProjectTemplateCliLifecycle,
 } from '../../features/project-template/cli-lifecycle.js';
 
+const PLAN_ID = 'a'.repeat(64);
+
 function deferred(): {
   readonly promise: Promise<void>;
   readonly resolve: () => void;
@@ -91,7 +93,7 @@ describe('project template CLI lifecycle', () => {
           envelope: createProjectTemplateCliSuccess({
             command: 'project-template apply',
             mode: 'apply',
-            result: { applied: true },
+            result: { planId: PLAN_ID, applied: true },
           }),
           exitCode: 0,
         };
@@ -115,7 +117,7 @@ describe('project template CLI lifecycle', () => {
   it('redacts unexpected failures into the internal category and disposes once', async () => {
     const dispose = vi.fn(() => undefined);
     const execution = startProjectTemplateCliLifecycle({
-      command: 'project-template preview',
+      command: 'project-template inspect',
       mode: 'dry-run',
       dispose,
       handle: () => Promise.reject(new Error('/Users/alice/.takt/credential leaked')),
@@ -134,7 +136,7 @@ describe('project template CLI lifecycle', () => {
 
   it('maps synchronous handler throws and disposal rejection to internal', async () => {
     const execution = startProjectTemplateCliLifecycle({
-      command: 'project-template preview',
+      command: 'project-template inspect',
       mode: 'dry-run',
       dispose: () => Promise.reject(new Error('dispose failed')),
       handle: (() => {
@@ -160,7 +162,7 @@ describe('project template CLI lifecycle', () => {
           envelope: createProjectTemplateCliSuccess({
             command: 'project-template apply',
             mode: 'apply',
-            result: { applied: true },
+            result: { planId: PLAN_ID, applied: true },
           }),
           exitCode: 0,
         };
@@ -168,8 +170,8 @@ describe('project template CLI lifecycle', () => {
     });
 
     await expect(execution.result).resolves.toMatchObject({
-      exitCode: 70,
-      envelope: { status: 'error', error: { code: 'INTERNAL' } },
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RESULT_INDETERMINATE' } },
     });
   });
 
@@ -203,7 +205,7 @@ describe('project template CLI lifecycle', () => {
           envelope: createProjectTemplateCliSuccess({
             command: 'project-template apply',
             mode: 'apply',
-            result: { applied: true },
+            result: { planId: PLAN_ID, applied: true },
           }),
           exitCode: 0,
         };

@@ -1,5 +1,7 @@
 import {
   createProjectTemplateCliFailure,
+  snapshotProjectTemplateCliOutcome,
+  type ProjectTemplateCliCommand,
   type ProjectTemplateCliMode,
   type ProjectTemplateCliOutcome,
 } from './cli-machine-contract.js';
@@ -29,7 +31,7 @@ class ProjectTemplateCliDuplicateAdmission extends Error {
 }
 
 function failureOutcome(
-  command: string,
+  command: ProjectTemplateCliCommand,
   mode: ProjectTemplateCliMode,
   code:
     | 'INTERRUPTED'
@@ -49,7 +51,7 @@ function failureOutcome(
 }
 
 export function startProjectTemplateCliLifecycle(input: {
-  readonly command: string;
+  readonly command: ProjectTemplateCliCommand;
   readonly mode: ProjectTemplateCliMode;
   readonly dispose: () => void | Promise<void>;
   readonly handle: (
@@ -86,10 +88,10 @@ export function startProjectTemplateCliLifecycle(input: {
   const result = (async (): Promise<ProjectTemplateCliOutcome> => {
     let outcome: ProjectTemplateCliOutcome;
     try {
-      outcome = await input.handle({
+      outcome = snapshotProjectTemplateCliOutcome(await input.handle({
         signal: controller.signal,
         admitMutation,
-      });
+      }));
       if (interrupted && !admitted) {
         outcome = failureOutcome(input.command, input.mode, 'INTERRUPTED');
       }
@@ -99,8 +101,6 @@ export function startProjectTemplateCliLifecycle(input: {
         && (interrupted || error instanceof ProjectTemplateCliPreAdmissionInterrupt)
       ) {
         outcome = failureOutcome(input.command, input.mode, 'INTERRUPTED');
-      } else if (error instanceof ProjectTemplateCliDuplicateAdmission) {
-        outcome = failureOutcome(input.command, input.mode, 'INTERNAL');
       } else if (admitted) {
         outcome = failureOutcome(input.command, input.mode, 'RESULT_INDETERMINATE');
       } else {
@@ -120,7 +120,7 @@ export function startProjectTemplateCliLifecycle(input: {
         admitted ? 'RECOVERY_REQUIRED' : 'INTERNAL',
       );
     }
-    return outcome;
+    return snapshotProjectTemplateCliOutcome(outcome);
   })();
 
   return Object.freeze({ interrupt, result });

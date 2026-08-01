@@ -13,17 +13,21 @@ const HASH = 'a'.repeat(64);
 
 describe('project template CLI independent review hardening', () => {
   it.each([
-    ['project-template export', { packId: HASH, entryCount: 2, byteLength: 512 }],
+    ['project-template export', { planId: HASH, packId: HASH, entryCount: 2, byteLength: 512 }],
     ['project-template inspect', { packId: HASH, entryCount: 2, valid: true }],
     ['project-template diff', { planId: HASH, changeCount: 2, conflictCount: 0 }],
     ['project-template apply', { planId: HASH, applied: true }],
     ['project-template update', { planId: HASH, updateAvailable: true }],
     ['project-template rollback', { planId: HASH, rolledBack: true }],
-    ['project-template list', { templateIds: ['base', 'team.default'] }],
+    ['project-template list', { installed: true, targetId: 'team.default', backupIds: ['backup-1'] }],
   ] as const)('accepts the closed success DTO for %s', (command, result) => {
     expect(createProjectTemplateCliSuccess({
       command,
-      mode: command === 'project-template apply' ? 'apply' : 'dry-run',
+      mode: command === 'project-template apply'
+        || command === 'project-template export'
+        || command === 'project-template rollback'
+        ? 'apply'
+        : 'dry-run',
       result,
     }).result).toEqual(result);
   });
@@ -58,12 +62,12 @@ describe('project template CLI independent review hardening', () => {
     const envelope = createProjectTemplateCliSuccess({
       command: 'project-template list',
       mode: 'dry-run',
-      result: { templateIds: ['base'] },
+      result: { installed: false, backupIds: ['backup-1'] },
     });
 
     expect(Object.isFrozen(envelope)).toBe(true);
     expect(Object.isFrozen(envelope.result)).toBe(true);
-    expect(Object.isFrozen((envelope.result as { templateIds: string[] }).templateIds)).toBe(true);
+    expect(Object.isFrozen((envelope.result as { backupIds: string[] }).backupIds)).toBe(true);
   });
 
   it('bounds huge strings and array lengths before expensive traversal', () => {
@@ -96,7 +100,7 @@ describe('project template CLI independent review hardening', () => {
         envelope: createProjectTemplateCliSuccess({
           command: 'project-template list',
           mode: 'dry-run',
-          result: { templateIds: ['base'] },
+          result: { installed: false, backupIds: ['backup-1'] },
         }),
         exitCode: 0,
       }),
