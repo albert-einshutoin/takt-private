@@ -8,6 +8,7 @@ import {
 } from '../../features/project-template/cli-machine-contract.js';
 import {
   registerProjectTemplateCommands,
+  settleProjectTemplateParserFailure,
   type ProjectTemplateCliCommandAdapterDependencies,
   type ProjectTemplateCliCommandRequest,
 } from '../../app/cli/projectTemplateCommands.js';
@@ -64,6 +65,7 @@ function harness(overrides: Partial<ProjectTemplateCliCommandAdapterDependencies
     ...overrides,
   };
   const program = new Command().name('takt').exitOverride();
+  program.configureOutput({ writeErr() {} });
   program.option('--cwd <path>');
   registerProjectTemplateCommands(program, dependencies);
   return { admissions, dispatch, dispose, program, requests, writes };
@@ -189,5 +191,58 @@ describe('project-template CLI command adapter', () => {
       status: 'error', error: { code: 'INTERRUPTED' },
     });
     expect(value.dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['root', ['--credential-path', '/secret', 'project-template', 'list']],
+    ['group', ['project-template', '--credential-path', '/secret', 'list']],
+    ['subcommand', ['project-template', 'unexpected']],
+  ] as const)('settles %s parser failures through the registered lifecycle', async (_name, args) => {
+    const value = harness();
+    await expect(value.program.parseAsync(['node', 'takt', ...args])).rejects.toBeDefined();
+
+    await expect(settleProjectTemplateParserFailure(
+      value.program, 'project-template list', 'dry-run',
+    )).resolves.toBe(true);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(value.writes).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      status: 'error', error: { code: 'UNKNOWN_OPTION' },
+    });
+    expect(value.writes[0]).not.toContain('/secret');
+  });
+
+  it('closes installInterrupt failure through disposal and one envelope', async () => {
+    const value = harness({
+      installInterrupt() { throw new Error('listener install failed'); },
+    });
+
+    await value.program.parseAsync(['node', 'takt', 'project-template', 'list']);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(value.writes).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      status: 'error', error: { code: 'INTERNAL' },
+    });
+  });
+
+  it('classifies interrupt-listener removal failure before the single write', async () => {
+    const value = harness({
+      installInterrupt() {
+        return () => { throw new Error('listener removal failed'); };
+      },
+    });
+
+    await value.program.parseAsync(['node', 'takt', 'project-template', 'list']);
+
+    expect(value.dispatch).toHaveBeenCalledOnce();
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(value.writes).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      status: 'error', error: { code: 'INTERNAL' },
+    });
   });
 });

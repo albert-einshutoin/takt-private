@@ -14,12 +14,9 @@ import { installImmediateSigintExit } from './immediateSigintExit.js';
 import { installOpencodeExitCleanup } from './opencodeExitCleanup.js';
 import { isProjectTemplateCliInvocation } from './projectTemplateInvocation.js';
 import {
-  createProjectTemplateCliFailure,
-  projectTemplateCliExitCodeForErrorCode,
-  startProjectTemplateCliLifecycle,
-  writeProjectTemplateCliOutcome,
   type ProjectTemplateCliCommand,
 } from '../../features/project-template/index.js';
+import { settleProjectTemplateParserFailure } from './projectTemplateCommands.js';
 
 const projectTemplateInvocation = isProjectTemplateCliInvocation(
   process.argv.slice(2),
@@ -50,21 +47,9 @@ function requestedProjectTemplateCommand(): ProjectTemplateCliCommand {
 async function writeProjectTemplateEntrypointFailure(): Promise<void> {
   const command = requestedProjectTemplateCommand();
   const mode = process.argv.includes('--apply') ? 'apply' : 'dry-run';
-  const code = 'UNKNOWN_OPTION' as const;
-  const execution = startProjectTemplateCliLifecycle({
-    command, mode, async dispose() {},
-    async handle() {
-      return {
-        envelope: createProjectTemplateCliFailure({ command, mode, code }),
-        exitCode: projectTemplateCliExitCodeForErrorCode(code),
-      };
-    },
-  });
-  const outcome = await execution.result;
-  await writeProjectTemplateCliOutcome(outcome, (chunk) => {
-    process.stdout.write(chunk);
-  });
-  process.exitCode = outcome.exitCode;
+  if (!await settleProjectTemplateParserFailure(program, command, mode)) {
+    throw new Error('project template parser lifecycle is unavailable');
+  }
 }
 
 (async () => {

@@ -50,6 +50,21 @@ export interface ProjectTemplateCliCommandAdapterDependencies {
   readonly currentTaktVersion: string;
 }
 
+const parserFailureHandlers = new WeakMap<
+Command,
+(command: ProjectTemplateCliCommand, mode: 'dry-run' | 'apply') => Promise<void>
+>();
+
+export function settleProjectTemplateParserFailure(
+  root: Command,
+  command: ProjectTemplateCliCommand,
+  mode: 'dry-run' | 'apply',
+): Promise<boolean> {
+  const handler = parserFailureHandlers.get(root);
+  if (handler === undefined) return Promise.resolve(false);
+  return handler(command, mode).then(() => true);
+}
+
 interface MutationFlags {
   readonly apply?: boolean;
   readonly dryRun?: boolean;
@@ -169,15 +184,34 @@ export function registerProjectTemplateCommands(
       current?: ReturnType<typeof startProjectTemplateCliLifecycle>;
     } = {};
     let interruptedBeforeStart = false;
-    const removeInterrupt = dependencies.installInterrupt(() => {
-      if (lifecycleState.current === undefined) interruptedBeforeStart = true;
-      else lifecycleState.current.interrupt();
-    });
+    let removeInterrupt: (() => void) | undefined;
     const lifecycle = startProjectTemplateCliLifecycle({
       command,
       mode,
-      dispose: dependencies.dispose,
+      async dispose() {
+        let disposalError: unknown;
+        try {
+          await dependencies.dispose();
+        } catch (error) {
+          disposalError = error;
+        }
+        let listenerError: unknown;
+        try {
+          removeInterrupt?.();
+        } catch (error) {
+          listenerError = error;
+        }
+        if (disposalError !== undefined && listenerError !== undefined) {
+          throw new AggregateError([disposalError, listenerError], 'project template cleanup failed');
+        }
+        if (disposalError !== undefined) throw disposalError;
+        if (listenerError !== undefined) throw listenerError;
+      },
       async handle(context) {
+        removeInterrupt = dependencies.installInterrupt(() => {
+          if (lifecycleState.current === undefined) interruptedBeforeStart = true;
+          else lifecycleState.current.interrupt();
+        });
         // Yield once so the returned lifecycle can receive a SIGINT that fired
         // during listener installation before dispatch can admit mutation.
         await Promise.resolve();
@@ -186,13 +220,9 @@ export function registerProjectTemplateCommands(
     });
     lifecycleState.current = lifecycle;
     if (interruptedBeforeStart) lifecycle.interrupt();
-    try {
-      const result = await lifecycle.result;
-      await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
-      dependencies.setExitCode(result.exitCode);
-    } finally {
-      removeInterrupt();
-    }
+    const result = await lifecycle.result;
+    await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
+    dependencies.setExitCode(result.exitCode);
   };
 
   const invalid = (
@@ -200,6 +230,10 @@ export function registerProjectTemplateCommands(
     mode: 'dry-run' | 'apply',
     code: ProjectTemplateCliErrorCode,
   ): Promise<void> => settle(command, mode, async () => failure(command, mode, code));
+
+  parserFailureHandlers.set(root, (command, mode) => (
+    invalid(command, mode, 'UNKNOWN_OPTION')
+  ));
 
   const hasUnknownOption = (command: Command): boolean => (
     command.args.length !== command.processedArgs.length
