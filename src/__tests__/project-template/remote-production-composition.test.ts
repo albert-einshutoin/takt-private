@@ -176,7 +176,8 @@ describe('project template remote production composition', () => {
       },
     });
     expect(Reflect.ownKeys(composition)).toEqual([
-      'download', 'preview', 'approve', 'apply', 'recover', 'dispose',
+      'download', 'preview', 'approve', 'apply', 'applyWithInternalApproval',
+      'recover', 'dispose',
     ]);
     const downloaded = await composition.download({
       projectRoot: value.projectRoot,
@@ -192,7 +193,13 @@ describe('project template remote production composition', () => {
       currentTaktVersion: '0.48.0',
       baselineStrategy: 'conflict',
     });
-    expect(Reflect.ownKeys(previewed)).toEqual(['previewId', 'transactionPlanId']);
+    expect(Reflect.ownKeys(previewed)).toEqual([
+      'previewId', 'transactionPlanId', 'summary',
+    ]);
+    expect(Reflect.ownKeys(previewed.summary)).toEqual([
+      'changeCount', 'conflictCount', 'dependencyCount', 'reviewRequired',
+      'hardConflict', 'defaultApplyPossible',
+    ]);
     await expect(composition.approve({
       projectRoot: value.projectRoot,
       previewId: previewed.previewId,
@@ -219,6 +226,7 @@ describe('project template remote production composition', () => {
     });
     expect(applied).toEqual({
       status: 'committed', transactionPlanId: previewed.transactionPlanId,
+      backupId: expect.stringMatching(/^backup-/),
     });
     expect(readFileSync(join(value.projectRoot, '.takt', 'workflows', 'review.yaml'), 'utf8'))
       .toContain('name: review');

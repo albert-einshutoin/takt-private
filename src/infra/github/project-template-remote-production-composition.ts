@@ -21,6 +21,9 @@ import {
 import {
   createProjectTemplateRemoteApplyComposition,
 } from '../../features/project-template/remote-transaction-apply-facade.js';
+import {
+  readGithubProjectTemplateRemoteTransactionSummary,
+} from '../../features/project-template/remote-transaction-derivation.js';
 import type { ProjectTemplateRepertoireDependencyInspectionPort } from '../../features/project-template/repertoire-dependency-inspection-port.js';
 import type { ProjectTemplateReceiptKeyStore } from '../security/project-template-receipt-key-store.js';
 import {
@@ -90,6 +93,14 @@ export interface ProjectTemplateRemoteProductionComposition {
   }): Promise<{
     readonly previewId: string;
     readonly transactionPlanId: string;
+    readonly summary: {
+      readonly changeCount: number;
+      readonly conflictCount: number;
+      readonly dependencyCount: number;
+      readonly reviewRequired: boolean;
+      readonly hardConflict: boolean;
+      readonly defaultApplyPossible: boolean;
+    };
   }>;
   approve(options: {
     readonly projectRoot: string;
@@ -110,6 +121,22 @@ export interface ProjectTemplateRemoteProductionComposition {
   }): Promise<{
     readonly status: 'committed';
     readonly transactionPlanId: string;
+    readonly backupId: string;
+  }>;
+  /** @internal CLI path: approval authority is issued only under apply lease. */
+  applyWithInternalApproval(options: {
+    readonly cacheRoot: string;
+    readonly receiptKey: string;
+    readonly previewId: string;
+    readonly transactionPlanId: string;
+    readonly projectRoot: string;
+    readonly currentTaktVersion: string;
+    readonly baselineStrategy: 'conflict' | 'adopt-identical';
+    readonly signal?: AbortSignal;
+  }): Promise<{
+    readonly status: 'committed';
+    readonly transactionPlanId: string;
+    readonly backupId: string;
   }>;
   recover(options: { readonly projectRoot: string }): Promise<{
     readonly status: 'none' | 'committed' | 'rolled-back';
@@ -470,6 +497,8 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
           signal: operationSignal(options['signal']),
         });
         if (preview.transactionPlanId === undefined) failure('OPERATION_FAILED');
+        const summary = readGithubProjectTemplateRemoteTransactionSummary(preview);
+        if (summary === undefined) failure('OPERATION_FAILED');
         if (operationGate !== undefined) await Reflect.apply(
           operationGate as (operation: 'preview') => Promise<void>, undefined, ['preview'],
         );
@@ -483,6 +512,7 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
         return Object.freeze({
           previewId: preview.previewId,
           transactionPlanId: preview.transactionPlanId,
+          summary,
         });
       });
     },
@@ -580,6 +610,51 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
         return Object.freeze({
           status: 'committed' as const,
           transactionPlanId: handle.preview.transactionPlanId,
+          backupId: result.backupId,
+        });
+      }, true);
+    },
+    async applyWithInternalApproval(input: unknown) {
+      return await operation(undefined, async ({ epoch, nowMs }) => {
+        const options = exactRecord(input, [
+          'cacheRoot', 'receiptKey', 'previewId', 'transactionPlanId',
+          'projectRoot', 'currentTaktVersion', 'baselineStrategy',
+        ], ['signal']);
+        const previewId = text(options, 'previewId');
+        const handle = active(previews, previewId, 'UNKNOWN_PREVIEW', nowMs);
+        previews.delete(previewId);
+        const receiptKey = text(options, 'receiptKey');
+        if (
+          handle.receiptKey !== receiptKey
+          || handle.preview.transactionPlanId !== text(options, 'transactionPlanId')
+          || handle.projectRoot !== text(options, 'projectRoot')
+          || handle.baselineStrategy !== strategy(options)
+        ) failure('UNKNOWN_PREVIEW');
+        const admissionSignal = operationSignal(options['signal']);
+        if (admissionSignal.aborted) failure('OPERATION_FAILED');
+        current(epoch);
+        activeMutations += 1;
+        let result;
+        try {
+          if (mutationGate !== undefined) await Reflect.apply(
+            mutationGate as () => Promise<void>, undefined, [],
+          );
+          result = await applyComposition.applyWithInternalApproval({
+            cacheRoot: text(options, 'cacheRoot'),
+            receiptKey,
+            expectedTransactionPlanId: handle.preview.transactionPlanId,
+            projectRoot: handle.projectRoot,
+            currentTaktVersion: text(options, 'currentTaktVersion'),
+            baselineStrategy: handle.baselineStrategy,
+          });
+        } finally {
+          activeMutations -= 1;
+        }
+        if (result.status !== 'committed') failure('OPERATION_FAILED');
+        return Object.freeze({
+          status: 'committed' as const,
+          transactionPlanId: handle.preview.transactionPlanId,
+          backupId: result.backupId,
         });
       }, true);
     },

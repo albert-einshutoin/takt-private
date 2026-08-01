@@ -152,6 +152,9 @@ export {
   createProjectTemplateRemoteProductionComposition,
   ProjectTemplateRemoteProductionCompositionError,
 } from './infra/github/project-template-remote-production-composition.js';
+export {
+  createProjectTemplateCliRemoteProductionRuntime,
+} from './infra/github/project-template-cli-remote-production.js';
 export type {
   ProjectTemplateGithubArchiveAssetPortDependencies,
 } from './infra/github/project-template-github-archive-asset-port.js';
@@ -168,6 +171,10 @@ export type {
   ProjectTemplateRemoteProductionComposition,
   ProjectTemplateRemoteProductionCompositionErrorCode,
 } from './infra/github/project-template-remote-production-composition.js';
+export type {
+  ProjectTemplateCliRemoteProductionOptions,
+  ProjectTemplateCliRemoteProductionRuntime,
+} from './infra/github/project-template-cli-remote-production.js';
 export type {
   ProjectTemplateManifestV1,
   ProjectTemplateGithubRefSourceSpec,
