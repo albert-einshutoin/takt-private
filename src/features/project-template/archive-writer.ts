@@ -441,6 +441,7 @@ function sameTargetIdentity(
 function sameEvacuatedTargetIdentity(
   expected: TaktpackOutputTargetSnapshot,
   actual: import('node:fs').Stats,
+  expectedLinks: number,
 ): boolean {
   // rename can advance ctime while preserving the file object. The remaining
   // identity and content metadata still prove which inode was evacuated.
@@ -448,7 +449,7 @@ function sameEvacuatedTargetIdentity(
     && !actual.isSymbolicLink()
     && actual.dev === expected.dev
     && actual.ino === expected.ino
-    && actual.nlink === expected.nlink
+    && actual.nlink === expectedLinks
     && actual.size === expected.size
     && actual.mode === expected.mode
     && actual.uid === expected.uid
@@ -459,6 +460,12 @@ function sameEvacuatedTargetIdentity(
 function verifyEvacuatedTargetWitness(
   expected: TaktpackOutputTargetSnapshot,
   path: string,
+  expectedLinks: number,
+  ioSeam: TaktpackWriterIoSeam,
+  closePhase:
+    | 'evacuated-witness-close'
+    | 'rollback-restored-witness-close'
+    | 'rollback-final-witness-close',
 ): boolean {
   let fd: number;
   try {
@@ -466,9 +473,12 @@ function verifyEvacuatedTargetWitness(
   } catch {
     return false;
   }
+  let verified = false;
   try {
     const before = fstatSync(fd);
-    if (!sameEvacuatedTargetIdentity(expected, before)) return false;
+    if (!sameEvacuatedTargetIdentity(expected, before, expectedLinks)) {
+      return false;
+    }
     const digest = createHash('sha256');
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let position = 0;
@@ -485,13 +495,26 @@ function verifyEvacuatedTargetWitness(
       position += bytesRead;
     }
     const after = fstatSync(fd);
-    return areProjectTemplateFileStatsEqual(before, after)
+    verified = areProjectTemplateFileStatsEqual(before, after)
       && digest.digest('hex') === expected.sha256;
   } catch {
-    return false;
+    verified = false;
   } finally {
-    closeSync(fd);
+    // Why: a close failure makes the descriptor lifecycle uncertain. It must
+    // invalidate the witness without escaping past the post-rename recovery
+    // branch, which is responsible for retaining the rollback evidence.
+    try {
+      ioSeam.onPhase?.(closePhase);
+    } catch {
+      verified = false;
+    }
+    try {
+      closeSync(fd);
+    } catch {
+      verified = false;
+    }
   }
+  return verified;
 }
 
 function resolveAuthorizedOutputPath(outputPath: string): string {
@@ -607,7 +630,15 @@ export type TaktpackWriterIoPhase =
   | 'archive-read'
   | 'file-fsync'
   | 'force-cas'
+  | 'evacuated-witness-close'
   | 'authority-link'
+  | 'rollback-restored-directory-fsync'
+  | 'rollback-restored-witness'
+  | 'rollback-restored-witness-close'
+  | 'rollback-unlink'
+  | 'rollback-final-directory-fsync'
+  | 'rollback-final-witness'
+  | 'rollback-final-witness-close'
   | 'publish'
   | 'post-publish'
   | 'post-link-unlink'
@@ -956,6 +987,9 @@ export async function writeTaktpackWithIoSeam(
           if (!verifyEvacuatedTargetWitness(
             authorityState.projection.target.snapshot,
             rollbackPath,
+            1,
+            ioSeam,
+            'evacuated-witness-close',
           )) {
             retainRecoveryArtifacts = true;
             try {
@@ -984,9 +1018,42 @@ export async function writeTaktpackWithIoSeam(
             );
           }
           if (rollbackPath !== undefined) {
+            const target = authorityState.projection.target;
+            const heldDirectoryFd = directoryFd;
+            if (target.state !== 'regular-file' || heldDirectoryFd === undefined) {
+              retainRecoveryArtifacts = true;
+              throw unsafeOutputTarget('outputPath', 'published');
+            }
             try {
               linkSync(rollbackPath, outputPath);
+
+              // Why: restoration is not safely reportable as not-published
+              // until both directory transitions and the exact old content
+              // are durable. The two-link witness protects the rollback unlink;
+              // the final one-link witness proves the restored public name.
+              ioSeam.onPhase?.('rollback-restored-directory-fsync');
+              syncHeldTaktpackOutputDirectory(heldDirectoryFd);
+              ioSeam.onPhase?.('rollback-restored-witness');
+              if (!verifyEvacuatedTargetWitness(
+                target.snapshot,
+                outputPath,
+                2,
+                ioSeam,
+                'rollback-restored-witness-close',
+              )) throw unsafeOutputTarget('outputPath', 'published');
+
+              ioSeam.onPhase?.('rollback-unlink');
               unlinkSync(rollbackPath);
+              ioSeam.onPhase?.('rollback-final-directory-fsync');
+              syncHeldTaktpackOutputDirectory(heldDirectoryFd);
+              ioSeam.onPhase?.('rollback-final-witness');
+              if (!verifyEvacuatedTargetWitness(
+                target.snapshot,
+                outputPath,
+                1,
+                ioSeam,
+                'rollback-final-witness-close',
+              )) throw unsafeOutputTarget('outputPath', 'published');
               rollbackPath = undefined;
             } catch {
               retainRecoveryArtifacts = true;
