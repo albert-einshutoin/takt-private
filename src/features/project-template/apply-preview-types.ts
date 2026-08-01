@@ -25,6 +25,16 @@ export interface ProjectTemplateRemoteApplyPreviewOptions
   readonly baselineStrategy: 'conflict' | 'adopt-identical';
 }
 
+/** @internal Inputs accepted only by the trusted local archive derivation. */
+export interface ProjectTemplateLocalApplyPreviewOptions
+  extends ProjectTemplateApplyPreviewOptions {
+  readonly sourceProvenancePlan: ProjectTemplateSourceProvenancePlan;
+  readonly previousLocksSha256: string;
+  readonly nextContentLockSha256: string;
+  readonly nextRepertoireLockSha256: string;
+  readonly baselineStrategy: 'conflict' | 'adopt-identical';
+}
+
 /** A cross-plan composition failure safe to show on a review surface. */
 export type ProjectTemplateApplyPreviewCompositionConflictCode =
   | 'MANIFEST_BINDING_MISMATCH'
@@ -90,7 +100,7 @@ export interface ProjectTemplateApplyPreview {
   readonly defaultApplyPossible: boolean;
 }
 
-export interface ProjectTemplateRemoteApplyPreview
+export interface ProjectTemplateTransactionApplyPreview
   extends ProjectTemplateApplyPreview {
   readonly transactionPlanId: string;
   readonly sourceHardConflict: boolean;
@@ -103,3 +113,10 @@ export interface ProjectTemplateRemoteApplyPreview
     readonly nextRepertoireLockSha256: string;
   };
 }
+
+
+export interface ProjectTemplateRemoteApplyPreview
+  extends ProjectTemplateTransactionApplyPreview {}
+
+export interface ProjectTemplateLocalApplyPreview
+  extends ProjectTemplateTransactionApplyPreview {}
