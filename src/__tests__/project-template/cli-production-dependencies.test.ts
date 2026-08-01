@@ -241,6 +241,56 @@ describe('project-template production command dependencies', () => {
     expect(await readdir(root)).toEqual(['.takt']);
   });
 
+  it('rejects an invalid export commit with captured regexp intrinsics before planning', async () => {
+    const root = await createExportFixture();
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+    const originalTest = RegExp.prototype.test;
+    const originalApply = Reflect.apply;
+    const controller = new AbortController();
+    controller.abort();
+    let outcome: ProjectTemplateCliOutcome;
+    try {
+      RegExp.prototype.test = () => true;
+      Reflect.apply = (() => true) as typeof Reflect.apply;
+      outcome = await dependencies.dispatch(exportRequest(root, 'g'.repeat(40)), {
+        signal: controller.signal,
+        admitMutation: vi.fn(),
+      });
+    } finally {
+      RegExp.prototype.test = originalTest;
+      Reflect.apply = originalApply;
+      await dependencies.dispose();
+    }
+
+    expect(outcome!).toMatchObject({
+      exitCode: 20,
+      envelope: { command: 'project-template export', error: { code: 'INVALID_ARGUMENT' } },
+    });
+    expect(await readdir(root)).toEqual(['.takt']);
+  });
+
+  it('rejects a proxied non-string export commit without coercion or planning', async () => {
+    const root = await createExportFixture();
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+    const propertyRead = vi.fn(() => {
+      throw new Error('commit proxy was coerced');
+    });
+    const sourceCommit = new Proxy({}, { get: propertyRead });
+
+    const outcome = await dependencies.dispatch(
+      exportRequest(root, sourceCommit as never),
+      context(),
+    );
+    await dependencies.dispose();
+
+    expect(outcome).toMatchObject({
+      exitCode: 20,
+      envelope: { command: 'project-template export', error: { code: 'INVALID_ARGUMENT' } },
+    });
+    expect(propertyRead).not.toHaveBeenCalled();
+    expect(await readdir(root)).toEqual(['.takt']);
+  });
+
   it('keeps a runtime construction failure primary while disposal stays bounded', async () => {
     const primary = new Error('runtime construction failed');
     const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0', {

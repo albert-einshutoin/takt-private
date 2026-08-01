@@ -36,9 +36,18 @@ import { resolveConfigValue } from '../../infra/config/resolveConfigValue.js';
 import { DEFAULT_LANGUAGE } from '../../shared/constants.js';
 import type { Language } from '../../core/models/config-types.js';
 
+// Why: export admission must not become permissive if runtime code replaces
+// RegExp.prototype.test, an instance method lookup, or Reflect.apply later.
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
 // Why: repository export must accept exactly the commit formats that its manifest can validate.
 const COMMIT_PATTERN = new RegExp(COMMIT_PATTERN_SOURCE, 'u');
 const REMOTE_DEADLINE_MS = 30_000;
+
+function isValidCommit(value: unknown): value is string {
+  return typeof value === 'string'
+    && CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, COMMIT_PATTERN, [value]) as boolean;
+}
 
 function privateDirectory(path: string): string {
   try {
@@ -208,8 +217,7 @@ async function dispatchProjectTemplateCommand(
       || request.mutation === undefined
       || metadata?.packVersion === undefined
       || metadata.minTaktVersion === undefined
-      || metadata.sourceCommit === undefined
-      || !COMMIT_PATTERN.test(metadata.sourceCommit)
+      || !isValidCommit(metadata.sourceCommit)
     ) return failure(request, 'INVALID_ARGUMENT');
     return await executeProjectTemplateCliExport({
       projectRoot: request.cwd,
