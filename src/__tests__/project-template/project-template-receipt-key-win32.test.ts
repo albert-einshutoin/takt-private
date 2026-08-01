@@ -2,6 +2,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
 } from 'node:fs';
@@ -20,7 +21,7 @@ import {
 const roots: string[] = [];
 
 function root(): string {
-  const value = mkdtempSync(join(tmpdir(), 'takt-receipt-dpapi-'));
+  const value = realpathSync(mkdtempSync(join(tmpdir(), 'takt-receipt-dpapi-')));
   roots.push(value);
   return value;
 }
