@@ -202,10 +202,24 @@ export type ProjectTemplateCliSuccessEnvelope =
   | ProjectTemplateCliSuccessVariant<'project-template rollback', 'apply', ProjectTemplateCliRollbackApplyResult>
   | ProjectTemplateCliSuccessVariant<'project-template list', 'dry-run', ProjectTemplateCliListResult>;
 
-export interface ProjectTemplateCliFailureEnvelope extends ProjectTemplateCliEnvelopeBase {
+interface ProjectTemplateCliFailureVariant<
+  C extends ProjectTemplateCliCommand,
+  M extends ProjectTemplateCliMode,
+> extends ProjectTemplateCliEnvelopeBase {
   readonly status: 'error';
+  readonly command: C;
+  readonly mode: M;
   readonly error: { readonly code: ProjectTemplateCliErrorCode };
 }
+
+export type ProjectTemplateCliFailureEnvelope =
+  | ProjectTemplateCliFailureVariant<'project-template export', ProjectTemplateCliMode>
+  | ProjectTemplateCliFailureVariant<'project-template inspect', 'dry-run'>
+  | ProjectTemplateCliFailureVariant<'project-template diff', 'dry-run'>
+  | ProjectTemplateCliFailureVariant<'project-template apply', ProjectTemplateCliMode>
+  | ProjectTemplateCliFailureVariant<'project-template update', ProjectTemplateCliMode>
+  | ProjectTemplateCliFailureVariant<'project-template rollback', ProjectTemplateCliMode>
+  | ProjectTemplateCliFailureVariant<'project-template list', 'dry-run'>;
 
 export type ProjectTemplateCliEnvelope =
   | ProjectTemplateCliSuccessEnvelope
@@ -575,6 +589,14 @@ export function snapshotProjectTemplateCliEnvelope(value: unknown): ProjectTempl
     || (snapshot.mode !== 'dry-run' && snapshot.mode !== 'apply')
     || (snapshot.status !== 'success' && snapshot.status !== 'error')) invalidSchema();
   const command = snapshot.command as ProjectTemplateCliCommand;
+  if (
+    snapshot.mode === 'apply'
+    && (
+      command === 'project-template inspect'
+      || command === 'project-template diff'
+      || command === 'project-template list'
+    )
+  ) invalidSchema();
   const warnings = validateWarnings(snapshot.warnings);
   if (snapshot.status === 'success') {
     if (!hasExactKeys(snapshot, [
@@ -605,7 +627,7 @@ export function snapshotProjectTemplateCliEnvelope(value: unknown): ProjectTempl
     mode: snapshot.mode,
     error: Object.freeze({ code }),
     warnings,
-  });
+  }) as ProjectTemplateCliFailureEnvelope;
 }
 
 export function snapshotProjectTemplateCliOutcome(value: unknown): ProjectTemplateCliOutcome {

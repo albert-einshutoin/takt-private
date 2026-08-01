@@ -85,6 +85,23 @@ describe('project template CLI phase 2 contract', () => {
     );
   });
 
+  it('rejects apply mode for read-only inspect/diff/list envelopes', () => {
+    for (const command of [
+      'project-template inspect',
+      'project-template diff',
+      'project-template list',
+    ]) {
+      expect(() => parseProjectTemplateCliEnvelopeJson(JSON.stringify({
+        schemaVersion: '1.0',
+        command,
+        status: 'error',
+        mode: 'apply',
+        error: { code: 'INVALID_ARGUMENT' },
+        warnings: [],
+      }))).toThrow(ProjectTemplateCliContractError);
+    }
+  });
+
   it.each([
     [{ packId: HASH, entryCount: 4_097, archiveBytes: 1, dependencyCount: 0 }],
     [{ packId: HASH, entryCount: 1, archiveBytes: 32 * 1024 * 1024 + 1, dependencyCount: 0 }],
