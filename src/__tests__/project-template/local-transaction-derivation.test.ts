@@ -33,6 +33,7 @@ async function fixture(): Promise<{ archivePath: string; targetRoot: string }> {
   const sourcePath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
   mkdirSync(dirname(sourcePath), { recursive: true });
   writeFileSync(sourcePath, 'name: review\n');
+  writeFileSync(join(sourceRoot, '.takt', 'config.yaml'), 'model: local\n');
   const plan = await createProjectTemplateExportPlan(sourceRoot, {
     packVersion: '1.0.0',
     takt: { minVersion: '0.48.0' },
@@ -74,11 +75,17 @@ describe('local project template transaction derivation', () => {
     expect(sourceLock.dependencyVerification).toMatchObject({
       method: 'local-empty-v1', count: 0,
     });
-    expect(derived.contentEntries).toEqual([
+    expect(derived.contentEntries).toEqual(expect.arrayContaining([
       expect.objectContaining({
         path: 'workflows/review.yaml',
         action: 'write',
         mode: '0644',
+      }),
+    ]));
+    expect(derived.mergeBaselines).toEqual([
+      expect.objectContaining({
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        content: new TextEncoder().encode('model: local\n'),
       }),
     ]);
   });
