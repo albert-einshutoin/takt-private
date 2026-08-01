@@ -739,7 +739,7 @@ describe('project template remote production composition', () => {
     },
   );
 
-  it('uses one operation-start clock snapshot across validation, sweep, and reservation', async () => {
+  it('uses one admission and one publication clock snapshot per handle operation', async () => {
     const value = await fixture();
     let readings = [0];
     let calls = 0;
@@ -755,24 +755,61 @@ describe('project template remote production composition', () => {
       projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
       source: value.source, advisory: value.advisory,
     });
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
 
-    readings = [9, 11];
+    readings = [9];
     calls = 0;
     const preview = await composition.preview({
       cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
       projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
       baselineStrategy: 'conflict',
     });
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
 
-    readings = [9, 11];
+    readings = [9];
     calls = 0;
     await expect(composition.approve({
       projectRoot: value.projectRoot, previewId: preview.previewId,
       transactionPlanId: preview.transactionPlanId, baselineStrategy: 'conflict',
     })).resolves.toHaveProperty('approvalId');
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
+    await composition.dispose();
+  });
+
+  it('starts a downloaded handle TTL at publication after an async operation', async () => {
+    const value = await fixture();
+    let now = 0;
+    let armed = true;
+    const entered = deferred();
+    const release = deferred();
+    const composition = await createProjectTemplateRemoteProductionCompositionForTest({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+      now: () => now,
+      handleTtlMs: 10,
+    }, {
+      operationGate: async (operation) => {
+        if (!armed || operation !== 'download') return;
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const downloading = composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    await entered.promise;
+    now = 11;
+    armed = false;
+    release.resolve();
+    const receipt = await downloading;
+    await expect(composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    })).resolves.toHaveProperty('previewId');
     await composition.dispose();
   });
 
