@@ -30,6 +30,7 @@ interface RemoteAuthority {
 }
 
 const AUTHORITIES = new WeakMap<object, RemoteAuthority>();
+const DEFAULT_RUNTIME_DISPOSE_DRAIN_TIMEOUT_MS = 30_000;
 
 export interface ProjectTemplateCliRemoteProductionOptions {
   readonly cacheRoot: string;
@@ -89,26 +90,40 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
   readonly cacheRoot: string;
   readonly resolver: GithubTemplateSourceResolverPort;
   readonly composition: ProjectTemplateRemoteProductionComposition;
+  readonly disposeDrainTimeoutMs?: number;
 }): ProjectTemplateCliRemoteProductionRuntime {
   const { cacheRoot, resolver, composition } = value;
+  const disposeDrainTimeoutMs = value.disposeDrainTimeoutMs
+    ?? DEFAULT_RUNTIME_DISPOSE_DRAIN_TIMEOUT_MS;
   const shutdown = new AbortController();
   let state: 'active' | 'disposing' | 'disposed' = 'active';
-  let activeOperations = 0;
-  let resolveDrain: (() => void) | undefined;
+  let activeDerivations = 0;
+  let activeExecutions = 0;
+  let resolveDerivationDrain: (() => void) | undefined;
+  let resolveExecutionDrain: (() => void) | undefined;
   let disposePromise: Promise<void> | undefined;
-  const enter = (): (() => void) => {
+  const enter = (kind: 'derive' | 'execute'): (() => void) => {
     if (state !== 'active') {
       throw new ProjectTemplateCliRemotePortError('SOURCE_UNAVAILABLE');
     }
-    activeOperations += 1;
+    if (kind === 'derive') activeDerivations += 1;
+    else activeExecutions += 1;
     let left = false;
     return () => {
       if (left) return;
       left = true;
-      activeOperations -= 1;
-      if (activeOperations === 0) {
-        resolveDrain?.();
-        resolveDrain = undefined;
+      if (kind === 'derive') {
+        activeDerivations -= 1;
+        if (activeDerivations === 0) {
+          resolveDerivationDrain?.();
+          resolveDerivationDrain = undefined;
+        }
+      } else {
+        activeExecutions -= 1;
+        if (activeExecutions === 0) {
+          resolveExecutionDrain?.();
+          resolveExecutionDrain = undefined;
+        }
       }
     };
   };
@@ -129,7 +144,7 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
       }
     },
     async derive(options) {
-      const leave = enter();
+      const leave = enter('derive');
       try {
         const signal = operationSignal(options.signal);
         const advisory = await resolver.resolveAdvisory({
@@ -187,7 +202,7 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
       }
     },
     async execute(options) {
-      const leave = enter();
+      const leave = enter('execute');
       try {
         const key = options.derived.authority;
         const authority = typeof key === 'object' && key !== null
@@ -228,8 +243,25 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
     state = 'disposing';
     shutdown.abort();
     disposePromise = (async () => {
-      if (activeOperations !== 0) {
-        await new Promise<void>((resolve) => { resolveDrain = resolve; });
+      if (activeExecutions !== 0) {
+        await new Promise<void>((resolve) => { resolveExecutionDrain = resolve; });
+      }
+      if (activeDerivations !== 0) {
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          const finish = (): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (resolveDerivationDrain === finish) {
+              resolveDerivationDrain = undefined;
+            }
+            resolve();
+          };
+          const timer = setTimeout(finish, disposeDrainTimeoutMs);
+          timer.unref?.();
+          resolveDerivationDrain = finish;
+        });
       }
       try {
         await composition.dispose();

@@ -327,4 +327,45 @@ describe('project template remote CLI production runtime', () => {
     await first;
     expect(dispose).toHaveBeenCalledOnce();
   });
+
+  it('bounds pre-admission drain when resolver ignores abort without abandoning execute drain', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'takt-cli-remote-bounded-dispose-'));
+    roots.push(cwd);
+    let releaseResolver!: () => void;
+    const resolverGate = new Promise<void>((resolve) => { releaseResolver = resolve; });
+    const resolveAdvisory = vi.fn(async () => {
+        await resolverGate;
+        return { updateState: 'update-available', hardBlocked: false } as
+          GithubTemplateSourceAdvisory;
+      });
+    const resolver = {
+      resolveAdvisory,
+      async resolveForDownload() { throw new Error('not called'); },
+    } satisfies GithubTemplateSourceResolverPort;
+    const dispose = vi.fn(async () => undefined);
+    const composition = {
+      async download() { throw new Error('must not be called'); },
+      async preview() { throw new Error('must not be called'); },
+      async approve() { throw new Error('must not be called'); },
+      async apply() { throw new Error('must not be called'); },
+      async applyWithInternalApproval() { throw new Error('must not be called'); },
+      async recover() { return { status: 'none' as const }; }, dispose,
+    } satisfies ProjectTemplateRemoteProductionComposition;
+    const runtime = createProjectTemplateCliRemoteProductionRuntimeForTest({
+      cacheRoot: join(cwd, 'cache'), resolver, composition,
+      disposeDrainTimeoutMs: 10,
+    });
+    const outcome = runtime.service.diff({
+      cwd, source: 'github:owner/template@v1.0.0',
+      currentTaktVersion: '0.48.0', baselineStrategy: 'conflict', force: false,
+    });
+    await vi.waitFor(() => expect(resolveAdvisory).toHaveBeenCalledOnce());
+
+    await runtime.dispose();
+    expect(dispose).toHaveBeenCalledOnce();
+    releaseResolver();
+    await expect(outcome).resolves.toMatchObject({
+      envelope: { error: { code: 'SOURCE_UNAVAILABLE' } },
+    });
+  });
 });
