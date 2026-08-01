@@ -130,4 +130,42 @@ describe('devloopd onboard-repo command compatibility', () => {
     expect(result).toEqual({ stdout: machineOutput, exitCode: 1 });
     expect(result.stdout).not.toContain('files applied');
   });
+
+  it('preserves the dry-run plan through JSON and human apply handoff', async () => {
+    const machineOutput = JSON.stringify({
+      schemaVersion: '1.0', status: 'success', command: 'onboard-repo',
+      mode: 'dry-run', planId: PLAN_ID,
+      components: {
+        files: { status: 'success' }, rootGitignore: { status: 'success' },
+        labels: { status: 'success' },
+      },
+    });
+    const humanOutput = `devloopd onboard-repo template success\nPlan: ${PLAN_ID}`;
+    const templateRun = vi.fn()
+      .mockResolvedValueOnce({ passed: true, planId: PLAN_ID, machineOutput, humanOutput })
+      .mockResolvedValueOnce({
+        passed: true,
+        machineOutput: JSON.stringify({
+          schemaVersion: '1.0', status: 'success', command: 'onboard-repo', mode: 'apply',
+        }),
+        humanOutput: 'devloopd onboard-repo template success',
+      });
+    const value = dependencies(templateRun);
+
+    const preview = await executePersonalOnboardingCommand({
+      cwd: '/repo', template: './starter.taktpack', json: true,
+    }, value);
+    const applied = await executePersonalOnboardingCommand({
+      cwd: '/repo', template: './starter.taktpack', apply: true,
+      expectedPlanId: preview.planId,
+    }, value);
+
+    expect(preview).toEqual({ stdout: machineOutput, exitCode: 0, planId: PLAN_ID });
+    expect(humanOutput).toContain(`Plan: ${preview.planId}`);
+    expect(templateRun).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      mutation: { mode: 'apply', force: false, expectedPlanId: PLAN_ID },
+    }));
+    expect(applied.exitCode).toBe(0);
+    expect(applied).not.toHaveProperty('planId');
+  });
 });

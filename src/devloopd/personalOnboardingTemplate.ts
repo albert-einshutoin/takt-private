@@ -54,12 +54,21 @@ function backupId(outcome: ProjectTemplateCliOutcome): string | undefined {
   return typeof result['backupId'] === 'string' ? result['backupId'] : undefined;
 }
 
+function previewPlanId(outcome: ProjectTemplateCliOutcome): string | undefined {
+  if (outcome.envelope.status !== 'success' || outcome.envelope.mode !== 'dry-run') {
+    return undefined;
+  }
+  const result = outcome.envelope.result as Record<string, unknown>;
+  return typeof result['planId'] === 'string' ? result['planId'] : undefined;
+}
+
 function humanOutput(options: {
   readonly status: 'success' | 'partial' | 'error';
   readonly mode: 'dry-run' | 'apply';
   readonly files: ComponentSummary;
   readonly rootGitignore: ComponentSummary;
   readonly labels: ComponentSummary;
+  readonly planId?: string;
   readonly backupId?: string;
 }): string {
   return [
@@ -68,6 +77,7 @@ function humanOutput(options: {
     `- ${options.files.status.toUpperCase()} template files`,
     `- ${options.rootGitignore.status.toUpperCase()} root gitignore`,
     `- ${options.labels.status.toUpperCase()} github labels`,
+    ...(options.planId === undefined ? [] : [`Plan: ${options.planId}`]),
     ...(options.backupId === undefined ? [] : [`Backup: ${options.backupId}`]),
   ].join('\n');
 }
@@ -108,6 +118,7 @@ export function createPersonalOnboardingTemplateFacade(
 
       const apply = mode === 'apply';
       const files = { status: 'success' as const, changed: apply };
+      const candidatePlanId = previewPlanId(outcome);
       const retainedBackupId = backupId(outcome);
       let rootGitignore: ComponentSummary;
       try {
@@ -149,16 +160,22 @@ export function createPersonalOnboardingTemplateFacade(
       }
       const passed = rootGitignore.status === 'success' && labels.status === 'success';
       const status = passed ? 'success' as const : 'partial' as const;
+      // Why: a file preview is actionable only when the entire onboarding
+      // assembly succeeded. Partial or apply results must not look reusable.
+      const retainedPlanId = passed ? candidatePlanId : undefined;
       const machine = {
         schemaVersion: '1.0', status, command: 'onboard-repo', mode,
+        ...(retainedPlanId === undefined ? {} : { planId: retainedPlanId }),
         ...(retainedBackupId === undefined ? {} : { backupId: retainedBackupId }),
         components: { files, rootGitignore, labels },
       };
       return {
         passed,
+        ...(retainedPlanId === undefined ? {} : { planId: retainedPlanId }),
         machineOutput: JSON.stringify(machine),
         humanOutput: humanOutput({
           status, mode, files, rootGitignore, labels,
+          ...(retainedPlanId === undefined ? {} : { planId: retainedPlanId }),
           ...(retainedBackupId === undefined ? {} : { backupId: retainedBackupId }),
         }),
       };

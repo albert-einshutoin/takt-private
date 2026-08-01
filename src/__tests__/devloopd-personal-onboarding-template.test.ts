@@ -194,13 +194,67 @@ describe('personal onboarding template facade', () => {
       repoPath: '/repo', repo: 'owner/repo', apply: false,
     });
     expect(report.passed).toBe(true);
+    expect(report.planId).toBe(PLAN_ID);
     expect(JSON.parse(report.machineOutput)).toMatchObject({
-      status: 'success', mode: 'dry-run',
+      status: 'success', mode: 'dry-run', planId: PLAN_ID,
       components: {
         files: { status: 'success', changed: false },
         rootGitignore: { status: 'success', changed: false },
         labels: { status: 'success', changed: false },
       },
     });
+    expect(report.humanOutput).toContain(`Plan: ${PLAN_ID}`);
+  });
+
+  it.each([
+    ['apply', options, fileSuccess()],
+    ['error', options, fileFailure()],
+  ] as const)('does not publish a preview plan for %s output', async (_name, runOptions, outcome) => {
+    const facade = createPersonalOnboardingTemplateFacade({
+      applyFiles: vi.fn(async () => outcome),
+      ensureRootGitignore: vi.fn(() => ({
+        status: 'exists' as const, name: 'root gitignore', message: 'already present',
+      })),
+      ensureGithubLabels: vi.fn(async () => [{
+        status: 'exists' as const, name: 'github label', message: 'already present',
+      }]),
+    });
+
+    const report = await facade.run(runOptions);
+
+    expect(report).not.toHaveProperty('planId');
+    expect(JSON.parse(report.machineOutput)).not.toHaveProperty('planId');
+    expect(report.humanOutput).not.toContain('Plan:');
+  });
+
+  it('does not publish a dry-run plan when a post-file component is partial', async () => {
+    const facade = createPersonalOnboardingTemplateFacade({
+      applyFiles: vi.fn(async () => ({
+        envelope: createProjectTemplateCliSuccess({
+          command: 'project-template apply', mode: 'dry-run',
+          result: {
+            planId: PLAN_ID, changeCount: 1, conflictCount: 0,
+            dependencyCount: 0, readiness: 'ready', reviewCodes: [],
+          },
+        }),
+        exitCode: 0,
+      })),
+      ensureRootGitignore: vi.fn(() => ({
+        status: 'exists' as const, name: 'root gitignore', message: 'already present',
+      })),
+      ensureGithubLabels: vi.fn(async () => [{
+        status: 'fail' as const, name: 'github label', message: 'failed',
+      }]),
+    });
+
+    const report = await facade.run({
+      ...options,
+      mutation: { mode: 'dry-run', force: false },
+    });
+
+    expect(report.passed).toBe(false);
+    expect(report).not.toHaveProperty('planId');
+    expect(JSON.parse(report.machineOutput)).not.toHaveProperty('planId');
+    expect(report.humanOutput).not.toContain('Plan:');
   });
 });

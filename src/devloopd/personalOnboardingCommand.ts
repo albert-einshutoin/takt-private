@@ -29,6 +29,7 @@ export interface PersonalOnboardingTemplateRunOptions {
 export interface PersonalOnboardingTemplateCommandFacade {
   run(options: PersonalOnboardingTemplateRunOptions): Promise<{
     readonly passed: boolean;
+    readonly planId?: string;
     readonly machineOutput: string;
     readonly humanOutput: string;
   }>;
@@ -55,6 +56,7 @@ export interface PersonalOnboardingCommandDependencies {
 export interface PersonalOnboardingCommandResult {
   readonly stdout: string;
   readonly exitCode: number;
+  readonly planId?: string;
 }
 
 type ArgumentErrorCode =
@@ -156,5 +158,6 @@ export async function executePersonalOnboardingCommand(
   return {
     stdout: options.json === true ? result.machineOutput : result.humanOutput,
     exitCode: result.passed ? 0 : 1,
+    ...(result.planId === undefined ? {} : { planId: result.planId }),
   };
 }
