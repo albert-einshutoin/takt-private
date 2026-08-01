@@ -900,6 +900,32 @@ function classifyPublishingPair(
 function assertPublishingOnly(path: string): void {
   const stat = lstatPublishingPath(path);
   const expectedUid = currentUid();
+  if (stat.nlink === 2) {
+    const activePath = path.slice(0, -CLAIM_PUBLISHING_SUFFIX.length);
+    let active: Stats;
+    try {
+      active = lstatSync(activePath);
+    } catch {
+      throw new RepertoireCoordinationError('UNSAFE_STATE');
+    }
+    // The directory listing can race with the publisher's no-replace link:
+    // a publishing-only entry may become the legitimate nlink=2 pair before
+    // it is inspected. Restart from a fresh listing only when the current
+    // active name proves that exact transition; an unrelated hard link stays
+    // unsafe rather than being mistaken for progress.
+    if (
+      isFileMode(active.mode)
+      && !isSymlinkMode(active.mode)
+      && active.dev === stat.dev
+      && active.ino === stat.ino
+      && active.nlink === 2
+      && stat.size >= 0
+      && stat.size <= MAX_LEASE_BYTES
+      && (active.mode & 0o777) === PRIVATE_FILE_MODE
+      && (expectedUid === null || active.uid === expectedUid)
+    ) throw SNAPSHOT_CHANGED;
+    throw new RepertoireCoordinationError('UNSAFE_STATE');
+  }
   if (
     !isFileMode(stat.mode)
     || isSymlinkMode(stat.mode)

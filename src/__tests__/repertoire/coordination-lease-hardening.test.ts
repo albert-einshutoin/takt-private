@@ -40,6 +40,7 @@ const fsFault = vi.hoisted(() => ({
   afterClaimLink: undefined as (() => void) | undefined,
   afterClaimUnlink: undefined as (() => void) | undefined,
   actualRenameSync: undefined as typeof import('node:fs').renameSync | undefined,
+  actualLinkSync: undefined as typeof import('node:fs').linkSync | undefined,
   actualWriteFileSync: undefined as typeof import('node:fs').writeFileSync | undefined,
   actualUnlinkSync: undefined as typeof import('node:fs').unlinkSync | undefined,
   openFds: new Set<number>(),
@@ -65,6 +66,7 @@ vi.mock('node:crypto', async (importOriginal) => {
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   fsFault.actualRenameSync = actual.renameSync;
+  fsFault.actualLinkSync = actual.linkSync;
   fsFault.actualWriteFileSync = actual.writeFileSync;
   fsFault.actualUnlinkSync = actual.unlinkSync;
   const fail = (operation: FsOperation): void => {
@@ -190,6 +192,53 @@ afterEach(() => {
 });
 
 describe('repertoire coordination hardening', () => {
+  it('retries when a publishing-only writer becomes a linked pair after root listing', async () => {
+    const root = makeRoot();
+    const seed = await acquire(root, 'write');
+    seed.release();
+    const [released] = releasedFiles(root);
+    const coordinationRoot = realpathSync(join(root, '.takt-repertoire-coordination'));
+    const activePath = join(coordinationRoot, 'writer.intent');
+    const publishingPath = `${activePath}.publishing`;
+    writeFileSync(publishingPath, readFileSync(released!), { mode: 0o600 });
+    fsFault.afterReaddir = (path) => {
+      if (path !== coordinationRoot) return false;
+      fsFault.actualLinkSync!(publishingPath, activePath);
+      return true;
+    };
+
+    expect(() => acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root }))
+      .toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
+    expect(lstatSync(activePath).nlink).toBe(2);
+    expect(lstatSync(publishingPath).nlink).toBe(2);
+  });
+
+  it('removes only its valid losing staging claim after publication gets EEXIST', async () => {
+    const root = makeRoot();
+    const seed = await acquire(root, 'write');
+    seed.release();
+    const [released] = releasedFiles(root);
+    const winnerBytes = readFileSync(released!);
+    const activePath = join(root, '.takt-repertoire-coordination', 'writer.intent');
+    let loserRecord: Record<string, unknown> | undefined;
+    let winnerIdentity: { dev: number; ino: number } | undefined;
+    fsFault.afterLeaseWrite = () => {
+      loserRecord = JSON.parse(readFileSync(`${activePath}.publishing`, 'utf8')) as Record<string, unknown>;
+      fsFault.actualWriteFileSync!(activePath, winnerBytes, { mode: 0o600, flag: 'wx' });
+      const winner = lstatSync(activePath);
+      winnerIdentity = { dev: winner.dev, ino: winner.ino };
+    };
+
+    await expect(acquire(root, 'write', 50))
+      .rejects.toMatchObject({ code: 'TIMEOUT' });
+
+    const winnerAfter = lstatSync(activePath);
+    expect(loserRecord).toMatchObject({ version: 1, mode: 'write', pid: process.pid });
+    expect(readFileSync(activePath)).toEqual(winnerBytes);
+    expect({ dev: winnerAfter.dev, ino: winnerAfter.ino }).toEqual(winnerIdentity);
+    expect(existsSync(`${activePath}.publishing`)).toBe(false);
+  });
+
   it('treats a stable winner plus a different-inode writer staging claim as busy', async () => {
     const root = makeRoot();
     let observedCode: string | undefined;
