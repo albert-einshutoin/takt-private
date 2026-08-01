@@ -32,7 +32,6 @@ function fixture() {
     ['c:\\users\\alice\\.takt', directory(1n, 4n)],
   ]);
   const key = (path: string) => path.toLowerCase();
-  const closeRoot = vi.fn();
   const dependencies = {
     capturedHomeDirectory: HOME,
     lstat(path: string) {
@@ -42,11 +41,8 @@ function fixture() {
       if (!stats.has(key(path))) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
       return path;
     },
-    openRoot: vi.fn(() => 41),
-    fstatRoot: vi.fn(() => stats.get(key(ROOT))!),
-    closeRoot,
   };
-  return { closeRoot, dependencies, stats };
+  return { dependencies, stats };
 }
 
 describe('Windows coordination root authority', () => {
@@ -61,11 +57,8 @@ describe('Windows coordination root authority', () => {
     expect(authority.evidence).toEqual({
       dev: '1',
       ino: '4',
-      mtimeNs: '10',
-      ctimeNs: '11',
     });
     expect(Object.values(authority.evidence).every((value) => typeof value === 'string')).toBe(true);
-    expect(dependencies.openRoot).toHaveBeenCalledWith(ROOT);
   });
 
   it.each([
@@ -84,7 +77,6 @@ describe('Windows coordination root authority', () => {
     const open = createWindowsRootAuthorityOpener(dependencies);
 
     expect(() => open(candidate)).toThrow(CoordinationWindowsRootAuthorityError);
-    expect(dependencies.openRoot).not.toHaveBeenCalled();
   });
 
   it('rejects a canonical alias and cross-volume target before opening it', () => {
@@ -93,7 +85,6 @@ describe('Windows coordination root authority', () => {
     const open = createWindowsRootAuthorityOpener(dependencies);
 
     expect(() => open(ROOT)).toThrow(CoordinationWindowsRootAuthorityError);
-    expect(dependencies.openRoot).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -108,7 +99,6 @@ describe('Windows coordination root authority', () => {
     const open = createWindowsRootAuthorityOpener(dependencies);
 
     expect(() => open(ROOT)).toThrow(CoordinationWindowsRootAuthorityError);
-    expect(dependencies.openRoot).not.toHaveBeenCalled();
   });
 
   it('fails closed when path and retained descriptor identity diverge', () => {
@@ -120,15 +110,13 @@ describe('Windows coordination root authority', () => {
     expect(() => authority.assertUnchanged()).toThrow(CoordinationWindowsRootAuthorityError);
   });
 
-  it('closes the retained descriptor exactly once', () => {
-    const { closeRoot, dependencies } = fixture();
+  it('uses no Windows directory descriptor and terminalizes close once', () => {
+    const { dependencies } = fixture();
     const authority = createWindowsRootAuthorityOpener(dependencies)(ROOT);
 
     authority.close();
     authority.close();
 
-    expect(closeRoot).toHaveBeenCalledOnce();
-    expect(closeRoot).toHaveBeenCalledWith(41);
     expect(() => authority.assertUnchanged()).toThrow(CoordinationWindowsRootAuthorityError);
   });
 });

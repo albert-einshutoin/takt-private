@@ -1,12 +1,4 @@
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
-  openSync,
-  realpathSync,
-  type BigIntStats,
-} from 'node:fs';
+import { lstatSync, realpathSync, type BigIntStats } from 'node:fs';
 import { userInfo } from 'node:os';
 import { win32 } from 'node:path';
 
@@ -26,8 +18,6 @@ export type WindowsRootFileStat = {
 export type WindowsRootIdentityEvidence = {
   readonly dev: string;
   readonly ino: string;
-  readonly mtimeNs: string;
-  readonly ctimeNs: string;
 };
 
 export type WindowsCoordinationRootAuthority = {
@@ -42,9 +32,6 @@ export type WindowsRootAuthorityDependencies = {
   readonly capturedHomeDirectory: string;
   lstat(path: string): WindowsRootFileStat | undefined;
   realpath(path: string): string;
-  openRoot(path: string): number;
-  fstatRoot(fd: number): WindowsRootFileStat;
-  closeRoot(fd: number): void;
 };
 
 /** Generic failure that never exposes a profile path or filesystem detail. */
@@ -68,7 +55,6 @@ export function createWindowsRootAuthorityOpener(
   const expectedRoot = validateAndBuildExpectedRoot(capturedHomeDirectory);
 
   return (path: string): WindowsCoordinationRootAuthority => {
-    let fd: number | undefined;
     try {
       assertExactDefaultRoot(path, expectedRoot);
       assertTrustedHierarchy(dependencies, capturedHomeDirectory, path);
@@ -83,13 +69,9 @@ export function createWindowsRootAuthorityOpener(
       if (before.dev !== home.dev) throw failed();
       assertExistingCoordinationChildren(dependencies, path, before.dev);
 
-      fd = dependencies.openRoot(path);
-      const opened = requireTrustedDirectory(dependencies.fstatRoot(fd));
       const after = requireTrustedDirectory(dependencies.lstat(path));
-      if (!sameStableStat(before, opened) || !sameStableStat(before, after)) throw failed();
+      if (!sameRootIdentity(before, after)) throw failed();
 
-      const retainedFd = fd;
-      fd = undefined;
       let closed = false;
       const evidence = Object.freeze(toEvidence(before));
       return Object.freeze({
@@ -103,11 +85,9 @@ export function createWindowsRootAuthorityOpener(
             const currentCanonicalRoot = dependencies.realpath(path);
             assertExactDefaultRoot(currentCanonicalRoot, expectedRoot);
             const pathname = requireTrustedDirectory(dependencies.lstat(path));
-            const descriptor = requireTrustedDirectory(dependencies.fstatRoot(retainedFd));
             if (
               pathname.dev.toString() !== evidence.dev
               || pathname.ino.toString() !== evidence.ino
-              || !sameStableStat(pathname, descriptor)
             ) throw failed();
             assertExistingCoordinationChildren(dependencies, path, pathname.dev);
           } catch {
@@ -119,21 +99,11 @@ export function createWindowsRootAuthorityOpener(
           // Terminalize before close: Windows may recycle the numeric handle
           // even when the close operation itself reports an error.
           closed = true;
-          try {
-            dependencies.closeRoot(retainedFd);
-          } catch {
-            throw failed();
-          }
+          // Directory handles are intentionally not opened on Windows. The
+          // regular sentinel fd becomes the retained lifetime seal later.
         },
       });
     } catch {
-      if (fd !== undefined) {
-        try {
-          dependencies.closeRoot(fd);
-        } catch {
-          // The public result remains the same redacted authority failure.
-        }
-      }
       throw failed();
     }
   };
@@ -152,14 +122,6 @@ const builtinWindowsDependencies: WindowsRootAuthorityDependencies = {
     }
   },
   realpath: realpathSync,
-  openRoot(path): number {
-    // Do not use O_DIRECTORY, O_NOFOLLOW, fchmod, or POSIX mode authority on Windows.
-    return openSync(path, constants.O_RDONLY);
-  },
-  fstatRoot(fd): WindowsRootFileStat {
-    return fromBigIntStat(fstatSync(fd, { bigint: true }));
-  },
-  closeRoot: closeSync,
 };
 
 /** Production opener; captures the OS profile independently of env overrides. */
@@ -240,19 +202,15 @@ function requireTrustedDirectory(stat: WindowsRootFileStat | undefined): Windows
   return stat;
 }
 
-function sameStableStat(left: WindowsRootFileStat, right: WindowsRootFileStat): boolean {
+function sameRootIdentity(left: WindowsRootFileStat, right: WindowsRootFileStat): boolean {
   return left.dev === right.dev
-    && left.ino === right.ino
-    && left.mtimeNs === right.mtimeNs
-    && left.ctimeNs === right.ctimeNs;
+    && left.ino === right.ino;
 }
 
 function toEvidence(stat: WindowsRootFileStat): WindowsRootIdentityEvidence {
   return {
     dev: stat.dev.toString(),
     ino: stat.ino.toString(),
-    mtimeNs: stat.mtimeNs.toString(),
-    ctimeNs: stat.ctimeNs.toString(),
   };
 }
 

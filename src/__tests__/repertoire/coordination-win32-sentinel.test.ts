@@ -31,7 +31,12 @@ function fixture(existing = false) {
   if (existing) fdStats.set(52, paths.get(SENTINEL)!);
   let bytes = existing ? canonical : Buffer.alloc(0);
   const close = vi.fn();
-  const rootAuthority = { assertUnchanged: vi.fn(), close: vi.fn(), evidence: { dev: '1' } };
+  const rootAuthority = {
+    canonicalRoot: ROOT,
+    assertUnchanged: vi.fn(),
+    close: vi.fn(),
+    evidence: { dev: '1' },
+  };
   const dependencies = {
     lstat: (path: string) => paths.get(path),
     openDirectory: vi.fn(() => 41),
@@ -63,7 +68,6 @@ describe('Windows coordination root sentinel', () => {
     const value = fixture();
     const authority = openWindowsCoordinationSentinel({
       rootAuthority: value.rootAuthority,
-      coordinationRoot: SUBTREE,
       dependencies: value.dependencies,
     });
 
@@ -71,6 +75,7 @@ describe('Windows coordination root sentinel', () => {
     expect(value.bytes().toString('utf8')).toBe(`{"version":1,"token":"${TOKEN}"}\n`);
     expect(value.bytes().toString('utf8')).not.toMatch(/dev|ino|mtime|ctime/i);
     expect(authority.token).toBe(TOKEN);
+    expect(value.dependencies.openDirectory).not.toHaveBeenCalled();
   });
 
   it('opens and retains an existing valid sentinel without rewriting it', () => {
@@ -78,7 +83,6 @@ describe('Windows coordination root sentinel', () => {
     const before = value.bytes();
     const authority = openWindowsCoordinationSentinel({
       rootAuthority: value.rootAuthority,
-      coordinationRoot: SUBTREE,
       dependencies: value.dependencies,
     });
 
@@ -99,7 +103,6 @@ describe('Windows coordination root sentinel', () => {
 
       expect(() => openWindowsCoordinationSentinel({
         rootAuthority: value.rootAuthority,
-        coordinationRoot: SUBTREE,
         dependencies: value.dependencies,
       })).toThrow(CoordinationWindowsSentinelError);
     },
@@ -109,7 +112,6 @@ describe('Windows coordination root sentinel', () => {
     const value = fixture(true);
     const authority = openWindowsCoordinationSentinel({
       rootAuthority: value.rootAuthority,
-      coordinationRoot: SUBTREE,
       dependencies: value.dependencies,
     });
     value.paths.set(SENTINEL, { ...value.paths.get(SENTINEL)!, ino: 99n });
@@ -121,14 +123,13 @@ describe('Windows coordination root sentinel', () => {
     const value = fixture(true);
     const authority = openWindowsCoordinationSentinel({
       rootAuthority: value.rootAuthority,
-      coordinationRoot: SUBTREE,
       dependencies: value.dependencies,
     });
 
     authority.close();
     authority.close();
 
-    expect(value.close.mock.calls).toEqual([[52], [41]]);
+    expect(value.close.mock.calls).toEqual([[52]]);
     expect(value.rootAuthority.close).toHaveBeenCalledOnce();
   });
 });

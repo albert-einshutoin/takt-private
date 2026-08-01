@@ -29,6 +29,7 @@ export type WindowsSentinelFileStat = {
 };
 
 export type WindowsSentinelRootAuthority = {
+  readonly canonicalRoot: string;
   readonly evidence: { readonly dev: string };
   assertUnchanged(): void;
   close(): void;
@@ -36,7 +37,6 @@ export type WindowsSentinelRootAuthority = {
 
 export type WindowsSentinelDependencies = {
   lstat(path: string): WindowsSentinelFileStat | undefined;
-  openDirectory(path: string): number;
   openSentinelExclusive(path: string): number;
   openSentinelRead(path: string): number;
   fstat(fd: number): WindowsSentinelFileStat;
@@ -62,22 +62,23 @@ export class CoordinationWindowsSentinelError extends Error {
 
 export function openWindowsCoordinationSentinel(options: {
   readonly rootAuthority: WindowsSentinelRootAuthority;
-  readonly coordinationRoot: string;
   readonly dependencies?: WindowsSentinelDependencies;
 }): WindowsCoordinationSentinelAuthority {
   const dependencies = options.dependencies ?? builtinDependencies;
-  const sentinelPath = win32.join(options.coordinationRoot, SENTINEL_FILENAME);
-  let directoryFd: number | undefined;
+  const coordinationRoot = win32.join(
+    options.rootAuthority.canonicalRoot,
+    '.takt-repertoire-coordination',
+  );
+  const sentinelPath = win32.join(coordinationRoot, SENTINEL_FILENAME);
   let sentinelFd: number | undefined;
   try {
     options.rootAuthority.assertUnchanged();
-    const directoryBefore = requireDirectory(dependencies.lstat(options.coordinationRoot));
+    const directoryBefore = requireDirectory(dependencies.lstat(coordinationRoot));
     if (directoryBefore.dev.toString() !== options.rootAuthority.evidence.dev) throw failed();
-    directoryFd = dependencies.openDirectory(options.coordinationRoot);
-    const directoryOpened = requireDirectory(dependencies.fstat(directoryFd));
-    const directoryAfter = requireDirectory(dependencies.lstat(options.coordinationRoot));
-    assertSameLiveObject(directoryBefore, directoryOpened);
-    assertSameLiveObject(directoryBefore, directoryAfter);
+    const directoryAfter = requireDirectory(dependencies.lstat(coordinationRoot));
+    if (directoryBefore.dev !== directoryAfter.dev || directoryBefore.ino !== directoryAfter.ino) {
+      throw failed();
+    }
 
     let created = false;
     try {
@@ -111,9 +112,7 @@ export function openWindowsCoordinationSentinel(options: {
     }
     options.rootAuthority.assertUnchanged();
 
-    const retainedDirectoryFd = directoryFd;
     const retainedSentinelFd = sentinelFd;
-    directoryFd = undefined;
     sentinelFd = undefined;
     let closed = false;
     return Object.freeze({
@@ -122,13 +121,11 @@ export function openWindowsCoordinationSentinel(options: {
         try {
           if (closed) throw failed();
           options.rootAuthority.assertUnchanged();
-          const directoryPath = requireDirectory(dependencies.lstat(options.coordinationRoot));
-          const directoryHandle = requireDirectory(dependencies.fstat(retainedDirectoryFd));
+          const directoryPath = requireDirectory(dependencies.lstat(coordinationRoot));
           if (
             directoryPath.dev !== directoryBefore.dev
             || directoryPath.ino !== directoryBefore.ino
           ) throw failed();
-          assertSameLiveObject(directoryPath, directoryHandle);
 
           const sentinelPathStat = requireSentinel(dependencies.lstat(sentinelPath));
           const sentinelHandle = requireSentinel(dependencies.fstat(retainedSentinelFd));
@@ -148,7 +145,7 @@ export function openWindowsCoordinationSentinel(options: {
         if (closed) return;
         closed = true;
         let closeFailed = false;
-        for (const fd of [retainedSentinelFd, retainedDirectoryFd]) {
+        for (const fd of [retainedSentinelFd]) {
           try {
             dependencies.close(fd);
           } catch {
@@ -164,7 +161,7 @@ export function openWindowsCoordinationSentinel(options: {
       },
     });
   } catch {
-    for (const fd of [sentinelFd, directoryFd]) {
+    for (const fd of [sentinelFd]) {
       if (fd === undefined) continue;
       try {
         dependencies.close(fd);
@@ -260,7 +257,6 @@ const builtinDependencies: WindowsSentinelDependencies = {
       throw error;
     }
   },
-  openDirectory: (path) => openSync(path, constants.O_RDONLY),
   openSentinelExclusive: (path) => openSync(
     path,
     constants.O_RDWR | constants.O_CREAT | constants.O_EXCL,
