@@ -145,7 +145,6 @@ export async function runWindowsDpapiCurrentUserProcess(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
-    let timer: unknown;
 
     const cleanup = () => {
       dependencies.clearTimer(timer);
@@ -223,7 +222,7 @@ export async function runWindowsDpapiCurrentUserProcess(
     child.stderr.on('data', onStderr);
     child.once('error', onError);
     child.once('close', onClose);
-    timer = dependencies.setTimer(() => {
+    const timer = dependencies.setTimer(() => {
       if (settled) return;
       child.kill();
       rejectOnce(failure('DPAPI CurrentUser process timed out'));
@@ -318,26 +317,30 @@ function readBoundedCiphertext(
         || afterPath.ino !== after.ino
       ) throw failure('DPAPI key registry changed during bounded read');
       output = Uint8Array.from(buffer.subarray(0, offset));
-      return output;
     } finally {
       buffer.fill(0);
     }
   } catch (error) {
     primaryFailure = error;
     output?.fill(0);
-    throw error;
-  } finally {
-    try {
-      Reflect.apply(io?.close ?? closeSync, io, [fd]);
-    } catch (closeError) {
-      output?.fill(0);
-      if (primaryFailure === undefined) throw closeError;
-      throw new AggregateError(
-        [primaryFailure, closeError],
-        'Key registry read and close both failed',
-      );
-    }
   }
+  let closeFailure: unknown;
+  try {
+    Reflect.apply(io?.close ?? closeSync, io, [fd]);
+  } catch (error) {
+    closeFailure = error;
+    output?.fill(0);
+  }
+  if (primaryFailure !== undefined && closeFailure !== undefined) {
+    throw new AggregateError(
+      [primaryFailure, closeFailure],
+      'Key registry read and close both failed',
+    );
+  }
+  if (primaryFailure !== undefined) throw primaryFailure;
+  if (closeFailure !== undefined) throw closeFailure;
+  if (output === undefined) throw failure('DPAPI key registry bounded read failed');
+  return output;
 }
 
 function cloneRegistry(registry: ProjectTemplateReceiptKeyRegistry) {
