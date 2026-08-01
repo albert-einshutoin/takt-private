@@ -169,9 +169,9 @@ describe('repertoire read permit private boundary', () => {
     });
     let calls = 0;
     try {
-      await expect(withRepertoireReadPermit({ globalConfigDir: root, operation: () => {
+      await expect(withRepertoireReadPermit({ globalConfigDir: root, timeoutMs: 30, operation: () => {
         calls += 1;
-      } })).rejects.toMatchObject({ code: 'WRITER_PENDING' });
+      } })).rejects.toMatchObject({ code: 'TIMEOUT' });
       expect(calls).toBe(0);
     } finally {
       writer.release();

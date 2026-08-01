@@ -187,7 +187,7 @@ ${stepFields}`);
     expect(loadWorkflowByIdentifier('@owner/repo/review', projectDir)?.name).toBe('coordinated-workflow');
   });
 
-  it('acquires global repertoire before the project run-start mutex', async () => {
+  it('waits for global repertoire before acquiring the project run-start mutex', async () => {
     createProjectRuntimeWorkflow();
     const mutexPath = resolveProjectTemplateRunStartMutexPath(projectDir);
     const writer = await acquireRepertoireCoordinationLease({
@@ -212,7 +212,8 @@ ${stepFields}`);
     } finally {
       writer.release();
     }
-    await expect(executionFailure).resolves.toMatchObject({ code: 'WRITER_PENDING' });
+    await expect(executionFailure).resolves.toEqual({ success: true });
+    expect(executorCalled).toBe(true);
   });
 
   it('releases both read boundaries before awaiting an unresolved executor Promise', async () => {
