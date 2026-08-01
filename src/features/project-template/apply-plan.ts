@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import { TextDecoder, types } from 'node:util';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import { calculateProjectTemplateManifestSha256 } from './binding.js';
-import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
+import {
+  DEFAULT_TAKTPACK_LIMITS,
+  MAX_PROJECT_TEMPLATE_COHORT_BYTES,
+} from './archive-types.js';
 import { ProjectTemplateValidationError } from './errors.js';
 import { portablePathKey } from './filesystem-scan.js';
 import { parseTemplateLock } from './lock.js';
@@ -49,7 +52,6 @@ import {
 const MAX_DIFF_INPUT_BYTES = 64 * 1024;
 const MAX_DIFF_LINES = 1_000;
 const MAX_DIFF_OUTPUT_CHARS = 16 * 1024;
-const MAX_LOCAL_TOTAL_BYTES = 32 * 1024 * 1024;
 const APPLY_PLAN_SEALS = new WeakMap<object, {
   readonly canonicalBody: string;
   readonly planId: string;
@@ -367,7 +369,7 @@ function parseLocalEntries(value: unknown): ProjectTemplateLocalSnapshotEntry[] 
       invalidInput('local entry bytes must be a nonnegative safe integer', `${field}.bytes`);
     }
     const bytes = entry['bytes'] as number;
-    if (bytes > MAX_LOCAL_TOTAL_BYTES) {
+    if (bytes > MAX_PROJECT_TEMPLATE_COHORT_BYTES) {
       throw new ProjectTemplateValidationError(
         'LIMIT_EXCEEDED',
         'local entry exceeds the snapshot byte limit',
@@ -375,7 +377,7 @@ function parseLocalEntries(value: unknown): ProjectTemplateLocalSnapshotEntry[] 
       );
     }
     totalBytes += bytes;
-    if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
+    if (totalBytes > MAX_PROJECT_TEMPLATE_COHORT_BYTES) {
       throw new ProjectTemplateValidationError(
         'LIMIT_EXCEEDED',
         'local entries exceed the snapshot byte budget',

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, relative, sep } from 'node:path';
+import { PROJECT_TEMPLATE_TRANSACTION_LIMITS } from './transaction-limits.js';
 import {
   acquireProjectTemplateApplyLease,
   assertProjectTemplateMutationLeaseOwned,
@@ -103,7 +104,6 @@ function hash(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-const MAX_RECOVERY_BACKUP_BYTES = 4 * 1024 * 1024;
 
 function mode(value: number): string {
   return `0${(value & 0o777).toString(8).padStart(3, '0')}`;
@@ -591,7 +591,7 @@ async function readJournal(
   try {
     const content = await storage.io.readFile(
       storage.journalPath,
-      4 * 1024 * 1024,
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxJournalBytes,
     );
     return parseProjectTemplateApplyJournal(
       JSON.parse(content.toString('utf8')) as unknown,
@@ -785,7 +785,10 @@ async function preflightRecoveryBackupBytes(
     const target = resolveProjectTemplateApplyTarget(storage, entry.target);
     if (!restoreKeys.has(target.key) || entry.before.kind === 'absent') continue;
     totalBytes += entry.before.bytes;
-    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_RECOVERY_BACKUP_BYTES) {
+    if (
+      !Number.isSafeInteger(totalBytes)
+      || totalBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes
+    ) {
       recoveryBlocked();
     }
     const content = await storage.io.readPrivateFile(

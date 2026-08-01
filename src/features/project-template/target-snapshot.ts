@@ -9,7 +9,10 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
+import {
+  DEFAULT_TAKTPACK_LIMITS,
+  MAX_PROJECT_TEMPLATE_COHORT_BYTES,
+} from './archive-types.js';
 import {
   areProjectTemplateFileStatsEqual,
 } from './bounded-file-read.js';
@@ -30,8 +33,7 @@ import {
 } from './remote-preview-operation.js';
 
 const execFileAsync = promisify(execFile);
-const MAX_LOCAL_FILE_BYTES = 32 * 1024 * 1024;
-const MAX_LOCAL_TOTAL_BYTES = 32 * 1024 * 1024;
+const MAX_LOCAL_FILE_BYTES = MAX_PROJECT_TEMPLATE_COHORT_BYTES;
 const MAX_DIFF_CONTENT_BYTES = 64 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
 const GIT_TIMEOUT_MS = 5_000;
@@ -616,7 +618,7 @@ export async function captureProjectTemplateTargetSnapshot(
     if (capturedActualPaths.has(entry.entry.path)) continue;
     capturedActualPaths.add(entry.entry.path);
     totalBytes += entry.entry.bytes;
-    if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
+    if (totalBytes > MAX_PROJECT_TEMPLATE_COHORT_BYTES) {
       throw new TaktpackError(
         'ARCHIVE_LIMIT_EXCEEDED',
         'project template target exceeds the snapshot byte budget',
@@ -631,7 +633,7 @@ export async function captureProjectTemplateTargetSnapshot(
     if (entry === undefined || capturedActualPaths.has(entry.entry.path)) continue;
     capturedActualPaths.add(entry.entry.path);
     totalBytes += entry.entry.bytes;
-    if (totalBytes > MAX_LOCAL_TOTAL_BYTES) {
+    if (totalBytes > MAX_PROJECT_TEMPLATE_COHORT_BYTES) {
       throw new TaktpackError(
         'ARCHIVE_LIMIT_EXCEEDED',
         'project template target exceeds the snapshot byte budget',

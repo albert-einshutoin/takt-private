@@ -40,7 +40,13 @@ import {
   type ProjectTemplateBackupManifest,
 } from '../../features/project-template/apply-storage.js';
 import { canonicalizeTaktpackJson } from '../../features/project-template/canonical-json.js';
-import { MAX_TEMPLATE_PATH_LENGTH } from '../../features/project-template/validation.js';
+import {
+  MAX_TEMPLATE_ENTRIES,
+  MAX_TEMPLATE_PATH_LENGTH,
+} from '../../features/project-template/validation.js';
+import {
+  PROJECT_TEMPLATE_TRANSACTION_LIMITS,
+} from '../../features/project-template/transaction-limits.js';
 
 const roots: string[] = [];
 
@@ -227,6 +233,113 @@ describe('project template apply storage', () => {
     expect(() => parseProjectTemplateApplyJournal({
       ...value, completedOperations: [`entry:${path}x`],
     })).toThrow(expect.objectContaining({ code: 'INVALID_JOURNAL' }));
+  });
+
+  it('bounds canonical maximum journal evidence below its shared reader cap', () => {
+    const paths = Array.from({ length: MAX_TEMPLATE_ENTRIES }, (_, index) => {
+      const suffix = index.toString(16).padStart(4, '0');
+      return `${'a'.repeat(251)}${suffix}/${'b'.repeat(254)}/c`;
+    });
+    const completedOperations = [
+      ...paths.map((path) => `entry:${path}`),
+      'content-lock', 'repertoire-lock', 'source-provenance',
+    ];
+    const createdTargetDirectories = [
+      '',
+      ...paths.map((path) => path.split('/')[0]!).sort(),
+      ...paths.map((path) => path.slice(0, path.lastIndexOf('/'))).sort(),
+    ];
+    const value: ProjectTemplateApplyJournal = {
+      ...journal(), schemaVersion: '1.1', state: 'rolling-back',
+      completedOperations, createdTargetDirectories,
+    };
+    const bytes = Buffer.byteLength(`${canonicalizeTaktpackJson(
+      parseProjectTemplateApplyJournal(value),
+    )}\n`);
+    expect(completedOperations).toHaveLength(
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxOperations,
+    );
+    expect(createdTargetDirectories).toHaveLength(
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxCreatedTargetDirectories,
+    );
+    expect(bytes).toBeLessThanOrEqual(
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxJournalBytes,
+    );
+  });
+
+  it('round-trips canonical maximum manifest evidence within the shared cap', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    const paths = Array.from({ length: MAX_TEMPLATE_ENTRIES }, (_, index) => {
+      const suffix = index.toString(16).padStart(4, '0');
+      return `${'a'.repeat(251)}${suffix}/${'b'.repeat(254)}/c`;
+    });
+    const digest = 'c'.repeat(64);
+    const state = {
+      kind: 'file' as const, sha256: digest, bytes: Number.MAX_SAFE_INTEGER,
+      mode: '0644', blobRelativePath: `blobs/${digest}`,
+      modifiedAt: '2026-08-01T00:00:00.000Z',
+    };
+    const value: ProjectTemplateBackupManifest = {
+      schemaVersion: '1.1', backupId: 'backup-maximum-evidence',
+      planId: 'a'.repeat(64), preconditionToken: 'b'.repeat(64),
+      createdAt: '2026-08-01T00:00:00.000Z',
+      createdTargetDirectories: [
+        '',
+        ...paths.map((path) => path.split('/')[0]!).sort(),
+        ...paths.map((path) => path.slice(0, path.lastIndexOf('/'))).sort(),
+      ],
+      entries: [
+        ...paths.map((path) => ({
+          target: { kind: 'template-entry' as const, path },
+          action: 'update' as const, before: state, after: state,
+        })),
+        ...(['content-lock', 'repertoire-lock', 'source-provenance'] as const)
+          .map((kind) => ({
+            target: { kind }, action: 'update' as const, before: state, after: state,
+          })),
+      ],
+    };
+    const manifestPath = await writeProjectTemplateBackupManifest({ storage, manifest: value });
+    expect(readFileSync(manifestPath).byteLength).toBeLessThanOrEqual(
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes,
+    );
+    await expect(readProjectTemplateBackupManifest({
+      storage, backupId: value.backupId,
+    })).resolves.toEqual(value);
+    writeFileSync(
+      manifestPath,
+      Buffer.alloc(PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes + 1),
+    );
+    await expect(readProjectTemplateBackupManifest({
+      storage, backupId: value.backupId,
+    })).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+  });
+
+  it('rejects one operation beyond the shared manifest bound before storage IO', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    let writes = 0;
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation) { if (operation === 'write') writes += 1; },
+    });
+    const entries = Array.from({
+      length: PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxOperations + 1,
+    }, (_, index) => ({
+      target: { kind: 'template-entry' as const, path: `overflow/${index}.yaml` },
+      action: 'add' as const,
+      before: { kind: 'absent' as const },
+      after: { kind: 'absent' as const },
+    }));
+    await expect(writeProjectTemplateBackupManifest({
+      storage,
+      manifest: {
+        schemaVersion: '1.1', backupId: 'backup-overflow',
+        planId: 'a'.repeat(64), preconditionToken: 'b'.repeat(64),
+        createdAt: '2026-08-01T00:00:00.000Z',
+        createdTargetDirectories: [], entries,
+      },
+      io,
+    })).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    expect(writes).toBe(0);
   });
 
   it('opens existing baseline authority read-only and closes all directory FDs', async () => {

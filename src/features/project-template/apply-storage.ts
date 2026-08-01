@@ -31,6 +31,10 @@ import {
 } from './filesystem-scan.js';
 import { parsePortablePath } from './validation.js';
 import {
+  PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX,
+  PROJECT_TEMPLATE_TRANSACTION_LIMITS,
+} from './transaction-limits.js';
+import {
   PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
 } from './repertoire-dependency-lock.js';
 import {
@@ -44,7 +48,6 @@ const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const MAX_CONTROL_DIRECTORY_ENTRIES = 8_192;
 const MAX_CONTROL_TREE_DEPTH = 16;
-const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_APPROVAL_BYTES = 64 * 1024;
 const CONTROL_GITIGNORE_CONTENT = Buffer.from(PROJECT_TEMPLATE_CONTROL_GITIGNORE_TEXT);
 const CAPTURED_JSON_PARSE = JSON.parse;
@@ -1029,7 +1032,18 @@ async function ensurePrivateParents(
   relativePath: string,
   io: ProjectTemplateApplyStorageIo,
 ): Promise<void> {
-  const segments = safeRelativePath(relativePath).split('/');
+  // This path is produced only by resolveProjectTemplateApplyTarget after the
+  // caller path is validated. Its internal `entries/` prefix legitimately
+  // makes a maximum-length portable target longer than the public path bound.
+  const segments = relativePath.split('/');
+  if (
+    (segments[0] !== 'entries' && segments[0] !== 'locks')
+    || segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_PATH', 'project template staging path is unsafe',
+    );
+  }
   let current = root;
   for (const segment of segments.slice(0, -1)) {
     current = join(current, segment);
@@ -1598,7 +1612,7 @@ function validateBackupManifest(
       'entries',
     ])
     || !Array.isArray(manifest.entries)
-    || manifest.entries.length > MAX_CONTROL_DIRECTORY_ENTRIES
+    || manifest.entries.length > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxOperations
   ) {
     throw new ProjectTemplateApplyStorageError(
       'INVALID_MANIFEST',
@@ -1691,7 +1705,10 @@ function validateCreatedTargetDirectories(
   value: unknown,
   code: 'INVALID_MANIFEST' | 'INVALID_JOURNAL',
 ): string[] {
-  if (!Array.isArray(value) || value.length > MAX_CONTROL_DIRECTORY_ENTRIES) {
+  if (
+    !Array.isArray(value)
+    || value.length > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxCreatedTargetDirectories
+  ) {
     throw new ProjectTemplateApplyStorageError(code, 'created target directories are invalid');
   }
   const seen = new Set<string>();
@@ -1726,6 +1743,12 @@ export async function writeProjectTemplateBackupManifest(options: {
   io?: ProjectTemplateApplyStorageIo;
 }): Promise<string> {
   const manifest = validateBackupManifest(options.manifest);
+  const content = Buffer.from(`${canonicalizeTaktpackJson(manifest)}\n`);
+  if (content.byteLength > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST', 'backup manifest exceeds its serialized byte budget',
+    );
+  }
   const io = options.io ?? options.storage.io;
   const backupRoot = join(options.storage.backupsRoot, manifest.backupId);
   await ensurePrivateDirectory(
@@ -1737,7 +1760,7 @@ export async function writeProjectTemplateBackupManifest(options: {
   return writePrivateDurableFile({
     storage: options.storage,
     finalPath: join(backupRoot, 'manifest.json'),
-    content: Buffer.from(`${canonicalizeTaktpackJson(manifest)}\n`),
+    content,
     replace: false,
     io,
   });
@@ -1780,11 +1803,12 @@ export function parseProjectTemplateApplyJournal(
     || typeof journal.state !== 'string'
     || !validStates.has(journal.state)
     || !Array.isArray(journal.completedOperations)
-    || journal.completedOperations.length > MAX_CONTROL_DIRECTORY_ENTRIES
+    || journal.completedOperations.length
+      > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxOperations
     || journal.completedOperations.some(
       (operation) => (
         typeof operation !== 'string'
-        || operation.length > 512
+        || operation.length > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxOperationKeyLength
         || !isOperationKeyForSchema(operation, journal.schemaVersion!)
       ),
     )
@@ -1815,9 +1839,11 @@ function isOperationKeyForSchema(
   value: string,
   schemaVersion: '1.0' | '1.1',
 ): boolean {
-  if (value.startsWith('entry:')) {
+  if (value.startsWith(PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX)) {
     try {
-      return value === `entry:${safeRelativePath(value.slice('entry:'.length))}`;
+      return value === `${PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX}${safeRelativePath(
+        value.slice(PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX.length),
+      )}`;
     } catch {
       return false;
     }
@@ -1835,10 +1861,16 @@ export async function writeProjectTemplateApplyJournal(options: {
   io?: ProjectTemplateApplyStorageIo;
 }): Promise<string> {
   const journal = parseProjectTemplateApplyJournal(options.journal);
+  const content = Buffer.from(`${canonicalizeTaktpackJson(journal)}\n`);
+  if (content.byteLength > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxJournalBytes) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_JOURNAL', 'apply journal exceeds its serialized byte budget',
+    );
+  }
   return writePrivateDurableFile({
     storage: options.storage,
     finalPath: options.storage.journalPath,
-    content: Buffer.from(`${canonicalizeTaktpackJson(journal)}\n`),
+    content,
     replace: true,
     io: options.io ?? options.storage.io,
   });
@@ -1854,7 +1886,10 @@ export async function readProjectTemplateBackupManifest(options: {
   const manifestPath = join(options.storage.backupsRoot, backupId, 'manifest.json');
   let parsed: unknown;
   try {
-    parsed = JSON.parse((await io.readFile(manifestPath, MAX_MANIFEST_BYTES)).toString('utf8'));
+    parsed = JSON.parse((await io.readFile(
+      manifestPath,
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes,
+    )).toString('utf8'));
   } catch {
     throw new ProjectTemplateApplyStorageError(
       'INVALID_MANIFEST',
