@@ -85,6 +85,8 @@ import { executeAndCompleteTask } from '../features/tasks/execute/taskExecution.
 import { TaskRunner } from '../infra/task/runner.js';
 import type { WorkflowConfig } from '../core/models/index.js';
 import type { WorkflowExecutionOptions } from '../features/tasks/execute/types.js';
+import { buildWorkflowGenerationWitness } from '../features/tasks/execute/workflowRetryGeneration.js';
+import { snapshotWorkflowRuntimeRead } from '../features/tasks/execute/workflowRuntimeReadBoundary.js';
 
 // --- Helpers ---
 
@@ -113,6 +115,10 @@ function writeExceededRecord(testDir: string, overrides: Record<string, unknown>
     start_step: 'implement',
     exceeded_max_steps: 60,
     exceeded_current_iteration: 30,
+    workflow_generation_witness: buildTestWorkflowGenerationWitness(
+      buildTestWorkflowConfig(),
+      testDir,
+    ),
     ...overrides,
   };
   writeFileSync(
@@ -137,6 +143,10 @@ function writeFailedRecord(testDir: string, overrides: Record<string, unknown> =
     failure: {
       error: 'Boom after retry',
     },
+    workflow_generation_witness: buildTestWorkflowGenerationWitness(
+      buildTestWorkflowConfig(),
+      testDir,
+    ),
     ...overrides,
   };
   writeFileSync(
@@ -162,6 +172,21 @@ function buildTestWorkflowConfig(): WorkflowConfig {
       },
     ],
   };
+}
+
+function buildTestWorkflowGenerationWitness(
+  workflow: WorkflowConfig,
+  projectCwd: string,
+  lookupCwd = projectCwd,
+): string {
+  return snapshotWorkflowRuntimeRead({
+    snapshot: (readContext) => buildWorkflowGenerationWitness(
+      workflow,
+      projectCwd,
+      lookupCwd,
+      readContext,
+    ),
+  });
 }
 
 function applyDefaultMocks(): void {
@@ -357,10 +382,11 @@ describe('シナリオ3・4: requeue → re-execution passes exceeded metadata t
   });
 
   it('scenario 7: failed requeue raises maxStepsOverride beyond the restored iteration', async () => {
-    vi.mocked(loadWorkflowByIdentifier).mockReturnValue({
+    const generationA = {
       ...buildTestWorkflowConfig(),
       maxSteps: 50,
-    });
+    };
+    vi.mocked(loadWorkflowByIdentifier).mockReturnValue(generationA);
     const resumePoint = {
       version: 1 as const,
       stack: [
@@ -373,6 +399,7 @@ describe('シナリオ3・4: requeue → re-execution passes exceeded metadata t
       worktree: true,
       worktree_path: cloneDir,
       resume_point: resumePoint,
+      workflow_generation_witness: buildTestWorkflowGenerationWitness(generationA, testDir, cloneDir),
     });
 
     runner.requeueTask('task-a', ['failed'], 'plan', undefined, resumePoint);
@@ -391,7 +418,7 @@ describe('シナリオ3・4: requeue → re-execution passes exceeded metadata t
   });
 
   it('scenario 6: re-execution trims workflow_call resume_point to the root step when the child no longer resolves', async () => {
-    vi.mocked(loadWorkflowByIdentifier).mockReturnValue({
+    const generationA: WorkflowConfig = {
       name: 'test-workflow',
       maxSteps: 30,
       initialStep: 'delegate',
@@ -406,7 +433,8 @@ describe('シナリオ3・4: requeue → re-execution passes exceeded metadata t
           rules: [],
         },
       ],
-    });
+    };
+    vi.mocked(loadWorkflowByIdentifier).mockReturnValue(generationA);
     writeExceededRecord(testDir, {
       worktree: true,
       worktree_path: cloneDir,
@@ -420,6 +448,7 @@ describe('シナリオ3・4: requeue → re-execution passes exceeded metadata t
         iteration: 30,
         elapsed_ms: 183245,
       },
+      workflow_generation_witness: buildTestWorkflowGenerationWitness(generationA, testDir, cloneDir),
     });
 
     runner.requeueExceededTask('task-a');
