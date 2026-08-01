@@ -798,4 +798,51 @@ describe('project template remote production composition', () => {
     });
     expect(JSON.stringify(firstError)).not.toContain(value.projectRoot);
   });
+
+  it('keeps dispose pending once a non-cancellable apply mutation starts', async () => {
+    const value = await fixture();
+    const entered = deferred();
+    const release = deferred();
+    const composition = await createProjectTemplateRemoteProductionCompositionForTest({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+    }, {
+      disposeDrainTimeoutMs: 1,
+      mutationGate: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const receipt = await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    const preview = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    });
+    const approval = await composition.approve({
+      projectRoot: value.projectRoot, previewId: preview.previewId,
+      transactionPlanId: preview.transactionPlanId, baselineStrategy: 'conflict',
+    });
+    const applying = composition.apply({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      previewId: preview.previewId, transactionPlanId: preview.transactionPlanId,
+      approvalId: approval.approvalId, projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
+    });
+    await entered.promise;
+    const disposing = composition.dispose();
+    expect(composition.dispose()).toBe(disposing);
+    let disposeSettled = false;
+    void disposing.finally(() => { disposeSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(disposeSettled).toBe(false);
+    release.resolve();
+    await expect(applying).resolves.toMatchObject({ status: 'committed' });
+    await expect(disposing).resolves.toBeUndefined();
+  });
 });

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -308,6 +309,74 @@ describe('companion lock rollback current-state guard', () => {
     })).rejects.toMatchObject({ code: 'RECOVERY_BLOCKED' });
     expect(readFileSync(targetPath, 'utf8')).toBe('third-party');
   });
+
+  const rollbackFaults = [
+    ['before', 'rename', 'journal', 1], ['after', 'rename', 'journal', 1],
+    ['before', 'unlink', 'entry:workflows/add.yaml', 0],
+    ['after', 'unlink', 'entry:workflows/add.yaml', 0],
+    ...[
+      'entry:workflows/update.yaml', 'content-lock',
+      'repertoire-lock', 'source-provenance',
+    ].flatMap((key) => [
+      ['before', 'rename', key, 0] as const,
+      ['after', 'rename', key, 0] as const,
+    ]),
+    ...[2, 3, 4, 5, 6].flatMap((ordinal) => [
+      ['before', 'rename', 'journal', ordinal] as const,
+      ['after', 'rename', 'journal', ordinal] as const,
+    ]),
+    ['before', 'unlink', 'journal', 0],
+  ] as const;
+
+  it.each(rollbackFaults)(
+    'restarts after rolling rollback fault %s %s %s %i',
+    async (timing, operation, targetKey, journalOrdinal) => {
+      const entries: readonly EntrySpec[] = [
+        { target: { kind: 'template-entry', path: 'workflows/add.yaml' }, action: 'add', after: 'new-add', current: 'after' },
+        { target: { kind: 'template-entry', path: 'workflows/update.yaml' }, action: 'update', before: 'old-update', after: 'new-update', current: 'after' },
+        { target: { kind: 'content-lock' }, action: 'delete', before: 'old-content', current: 'after' },
+        { target: { kind: 'repertoire-lock' }, action: 'update', before: 'old-repertoire', after: 'new-repertoire', current: 'after' },
+        { target: { kind: 'source-provenance' }, action: 'update', before: 'old-source', after: 'new-source', current: 'after' },
+      ];
+      const value = await recoveryFixture({
+        completedOperations: [
+          'entry:workflows/add.yaml', 'entry:workflows/update.yaml',
+          'content-lock', 'repertoire-lock', 'source-provenance',
+        ],
+        entries,
+      });
+      const targetPath = targetKey === 'journal'
+        ? value.storage.journalPath
+        : resolveProjectTemplateApplyTarget(
+          value.storage,
+          targetKey.startsWith('entry:')
+            ? { kind: 'template-entry', path: targetKey.slice('entry:'.length) }
+            : { kind: targetKey } as ProjectTemplateApplyTarget,
+        ).absolutePath;
+      let journalRenames = 0;
+      let injected = false;
+      const fail = (observedOperation: string, path: string) => {
+        if (injected || observedOperation !== operation || path !== targetPath) return;
+        if (targetKey === 'journal' && operation === 'rename'
+          && ++journalRenames !== journalOrdinal) return;
+        injected = true;
+        throw new Error('injected rolling rollback fault');
+      };
+      const io = createProjectTemplateApplyStorageIo({ [timing]: fail });
+      await expect(recoverProjectTemplateCompanionLockTransactionForTest({
+        projectRoot: value.projectRoot, io,
+      })).rejects.toBeDefined();
+      expect(injected).toBe(true);
+      await expect(recoverProjectTemplateCompanionLockTransaction({
+        projectRoot: value.projectRoot,
+      })).resolves.toMatchObject({ status: expect.stringMatching(/none|rolled-back/) });
+      for (const entry of entries) {
+        const path = resolveProjectTemplateApplyTarget(value.storage, entry.target).absolutePath;
+        if (entry.before === undefined) expect(existsSync(path)).toBe(false);
+        else expect(readFileSync(path, 'utf8')).toBe(entry.before);
+      }
+    },
+  );
 
   it.each([
     ['add', undefined, 'new', 'intruder'],
