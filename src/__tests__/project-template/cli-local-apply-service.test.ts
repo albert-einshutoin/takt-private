@@ -135,6 +135,42 @@ describe('local project-template CLI diff/apply service', () => {
     expect(JSON.stringify(diff)).not.toContain('authority');
   });
 
+  it.each([
+    ['diff', 'APPLY_LEASE_PRESENT', 'LEASE_UNAVAILABLE'],
+    ['apply', 'APPLY_LEASE_UNKNOWN', 'LEASE_UNAVAILABLE'],
+    ['diff', 'UNRECOGNIZED_SECURITY_BLOCK', 'SECURITY_GUARD'],
+    ['apply', 'UNRECOGNIZED_SECURITY_BLOCK', 'SECURITY_GUARD'],
+  ] as const)('reports %s guard %s as non-reviewable %s', async (
+    command,
+    blockCode,
+    errorCode,
+  ) => {
+    const service = createProjectTemplateCliLocalApplyService(port({
+      inspectGuard: vi.fn(() => ({ passed: false, blocks: [{ code: blockCode }] })),
+    }));
+    const options = {
+      cwd: '/safe/repo',
+      sourcePath: 'pack.taktpack',
+      currentTaktVersion: '0.48.0',
+      force: false,
+    };
+
+    const outcome = command === 'diff'
+      ? await service.diff(options)
+      : await service.apply({ ...options, mode: 'dry-run' });
+
+    expect(outcome).toMatchObject({
+      exitCode: 23,
+      envelope: {
+        command: `project-template ${command}`,
+        status: 'error',
+        mode: 'dry-run',
+        error: { code: errorCode },
+      },
+    });
+    expect(JSON.stringify(outcome)).not.toContain('REVIEW_REQUIRED');
+  });
+
   it('rejects expected-plan drift before mutation admission', async () => {
     const admitMutation = vi.fn();
     const execute = vi.fn();

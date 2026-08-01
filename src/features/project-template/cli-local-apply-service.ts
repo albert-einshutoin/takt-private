@@ -256,8 +256,14 @@ function snapshotPlan(value: unknown): ProjectTemplateCliLocalDerivedPlan {
   };
 }
 
+type ProjectTemplateCliLocalGuardCode =
+  | 'ACTIVE_RUN'
+  | 'LEASE_UNAVAILABLE'
+  | 'RECOVERY_REQUIRED'
+  | 'SECURITY_GUARD';
+
 function guardCode(report: ReturnType<ProjectTemplateCliLocalApplyPort['inspectGuard']>):
-ProjectTemplateCliErrorCode | undefined {
+ProjectTemplateCliLocalGuardCode | undefined {
   if (report.passed) return undefined;
   const codes = report.blocks.map((block) => block.code);
   if (codes.includes('RECOVERY_REQUIRED') || codes.includes('RECOVERY_REQUIRED_UNKNOWN')) {
@@ -288,15 +294,16 @@ function review(plan: ProjectTemplateCliLocalDerivedPlan): {
 function previewOutcome(
   command: 'project-template diff' | 'project-template apply',
   plan: ProjectTemplateCliLocalDerivedPlan,
-  guardFailure?: ProjectTemplateCliErrorCode,
+  guardFailure?: ProjectTemplateCliLocalGuardCode,
 ): ProjectTemplateCliOutcome {
+  if (guardFailure === 'LEASE_UNAVAILABLE' || guardFailure === 'SECURITY_GUARD') {
+    return failure(command, 'dry-run', guardFailure);
+  }
   const summary = guardFailure === 'RECOVERY_REQUIRED'
     ? { readiness: 'recovery-required' as const, reviewCodes: ['RECOVERY_REQUIRED'] as const }
     : guardFailure === 'ACTIVE_RUN'
       ? { readiness: 'blocked' as const, reviewCodes: ['ACTIVE_RUN'] as const }
-      : guardFailure === undefined
-        ? review(plan)
-        : { readiness: 'blocked' as const, reviewCodes: ['REVIEW_REQUIRED'] as const };
+      : review(plan);
   return success(command, 'dry-run', {
     planId: plan.transactionPlanId,
     changeCount: plan.changeCount,
