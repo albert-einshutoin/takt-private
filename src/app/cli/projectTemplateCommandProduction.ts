@@ -17,7 +17,6 @@ import {
 import { initializeProjectTemplateApplyStorage } from '../../features/project-template/apply-storage.js';
 import { createProjectTemplateGithubSourceComposition } from '../../infra/github/project-template-github-source-composition.js';
 import { createProjectTemplateCliRemoteProductionRuntime } from '../../infra/github/project-template-cli-remote-production.js';
-import { createProjectTemplateInstalledRepertoireDependencyInspectionPort } from '../../infra/repertoire/project-template-repertoire-dependency-inspector.js';
 import { createPosixProjectTemplateReceiptKeyStore } from '../../infra/security/project-template-receipt-key-store-posix.js';
 import { createWin32ProjectTemplateReceiptKeyStore } from '../../infra/security/project-template-receipt-key-store-win32.js';
 import {
@@ -92,6 +91,11 @@ async function createRemoteRuntime(projectRoot: string) {
   const github = createProjectTemplateGithubSourceComposition({
     deadlineMs: performance.now() + REMOTE_DEADLINE_MS,
   });
+  const {
+    createProjectTemplateInstalledRepertoireDependencyInspectionPort,
+  } = await import(
+    '../../infra/repertoire/project-template-repertoire-dependency-inspector.js'
+  );
   const keyStore = process.platform === 'win32'
     ? createWin32ProjectTemplateReceiptKeyStore({ directory: keyRoot })
     : createPosixProjectTemplateReceiptKeyStore({ directory: keyRoot });

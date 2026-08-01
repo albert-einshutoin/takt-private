@@ -28,20 +28,11 @@ import { previewPrompts } from '../../features/prompt/index.js';
 import { showCatalog } from '../../features/catalog/index.js';
 import { computeReviewMetrics, formatReviewMetrics, parseSinceDuration, purgeOldEvents } from '../../features/analytics/index.js';
 import { doctorWorkflowCommand, initWorkflowCommand } from '../../features/workflowAuthoring/index.js';
-import { cliVersion, program, resolvedCwd } from './program.js';
-import { registerProjectTemplateCommands } from './projectTemplateCommands.js';
-import {
-  createProjectTemplateCliCommandProductionDependencies,
-} from './projectTemplateCommandProduction.js';
+import { program, resolvedCwd } from './program.js';
 import { resolveAgentOverrides, resolveWorkflowCliOption } from './helpers.js';
 import { repertoireAddCommand } from '../../commands/repertoire/add.js';
 import { repertoireRemoveCommand } from '../../commands/repertoire/remove.js';
 import { repertoireListCommand } from '../../commands/repertoire/list.js';
-
-registerProjectTemplateCommands(
-  program,
-  createProjectTemplateCliCommandProductionDependencies(cliVersion),
-);
 
 program
   .command('release-info')

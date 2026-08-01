@@ -24,9 +24,18 @@ const projectTemplateInvocation = isProjectTemplateCliInvocation(
 if (!projectTemplateInvocation) checkForUpdates();
 
 // Import in dependency order
-import { program, runPreActionHook } from './program.js';
+import { cliVersion, program, runPreActionHook } from './program.js';
 import './commands.js';
+import { registerProjectTemplateCommands } from './projectTemplateCommands.js';
+import {
+  createProjectTemplateCliCommandProductionDependencies,
+} from './projectTemplateCommandProduction.js';
 import { executeInteractiveDefaultActionLoop } from './routing.js';
+
+registerProjectTemplateCommands(
+  program,
+  createProjectTemplateCliCommandProductionDependencies(cliVersion),
+);
 
 if (projectTemplateInvocation) {
   program.exitOverride();
