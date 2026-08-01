@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -10,6 +18,9 @@ import { createProjectTemplateExportPlan } from '../../features/project-template
 import {
   acquireProjectTemplateApplyLease,
 } from '../../features/project-template/apply-lease.js';
+import {
+  settleProjectTemplateCliLocalExecutionAfterLease,
+} from '../../features/project-template/local-transaction-apply-facade.js';
 
 const roots: string[] = [];
 
@@ -26,6 +37,19 @@ afterEach(() => {
 async function fixture(): Promise<{ archivePath: string; targetRoot: string }> {
   const sourceRoot = root('takt-local-service-source-');
   mkdirSync(join(sourceRoot, '.takt'), { mode: 0o700 });
+  mkdirSync(join(sourceRoot, '.takt', 'workflows'), { mode: 0o700 });
+  writeFileSync(
+    join(sourceRoot, '.takt', 'workflows', 'review.yaml'),
+    `name: review
+max_steps: 10
+initial_step: review
+steps:
+  - name: review
+    rules:
+      - condition: done
+        next: COMPLETE
+`,
+  );
   const exportPlan = await createProjectTemplateExportPlan(sourceRoot, {
     packVersion: '1.0.0',
     takt: { minVersion: '0.48.0' },
@@ -42,6 +66,19 @@ async function fixture(): Promise<{ archivePath: string; targetRoot: string }> {
 }
 
 describe('production local project-template CLI composition', () => {
+  it('reports an indeterminate result when lease release cannot be proven', () => {
+    const committed = {
+      status: 'committed' as const,
+      backupId: 'backup-1',
+      transactionPlanId: 'a'.repeat(64),
+    };
+
+    expect(settleProjectTemplateCliLocalExecutionAfterLease(
+      committed,
+      () => { throw new Error('release failed'); },
+    )).toEqual({ status: 'indeterminate' });
+  });
+
   it('re-derives under lease and commits the exact first-install cohort', async () => {
     const { archivePath, targetRoot } = await fixture();
     const service = createProductionProjectTemplateCliLocalApplyService();
@@ -75,8 +112,128 @@ describe('production local project-template CLI composition', () => {
       '.takt-template-repertoire-lock.json',
       '.takt-template-source-lock.json',
     ]) expect(existsSync(join(targetRoot, path))).toBe(true);
+    expect(readFileSync(
+      join(targetRoot, '.takt', 'workflows', 'review.yaml'),
+      'utf8',
+    )).toContain('initial_step: review');
     expect(existsSync(join(targetRoot, '.takt-template-state', 'apply.lock')))
       .toBe(false);
+  });
+
+  it('keeps an exact local 111 cohort without issuing a second approval', async () => {
+    const { archivePath, targetRoot } = await fixture();
+    const service = createProductionProjectTemplateCliLocalApplyService();
+    const common = {
+      cwd: targetRoot,
+      sourcePath: archivePath,
+      currentTaktVersion: '0.48.0',
+      force: true,
+    };
+    const firstPreview = await service.diff(common);
+    if (firstPreview.envelope.status !== 'success') throw new Error('preview failed');
+    const first = await service.apply({
+      ...common,
+      mode: 'apply',
+      expectedPlanId: firstPreview.envelope.result.planId,
+    });
+    expect(first.exitCode).toBe(0);
+    const approvalRoot = join(targetRoot, '.takt-template-state', 'approvals');
+    const approvalsBefore = readdirSync(approvalRoot).sort();
+
+    const secondPreview = await service.diff({ ...common, force: false });
+    if (secondPreview.envelope.status !== 'success') throw new Error('preview failed');
+    expect(secondPreview.envelope.result.readiness).toBe('ready');
+    const second = await service.apply({
+      ...common,
+      force: false,
+      mode: 'apply',
+      expectedPlanId: secondPreview.envelope.result.planId,
+    });
+
+    expect(second.exitCode).toBe(0);
+    expect(readdirSync(approvalRoot).sort()).toEqual(approvalsBefore);
+  });
+
+  it('does not mutate when target or companion evidence drifts after diff', async () => {
+    const targetFixture = await fixture();
+    const service = createProductionProjectTemplateCliLocalApplyService();
+    const common = {
+      cwd: targetFixture.targetRoot,
+      sourcePath: targetFixture.archivePath,
+      currentTaktVersion: '0.48.0',
+      force: true,
+    };
+    const preview = await service.diff(common);
+    if (preview.envelope.status !== 'success') throw new Error('preview failed');
+    mkdirSync(join(targetFixture.targetRoot, '.takt', 'workflows'), { recursive: true });
+    const foreignPath = join(
+      targetFixture.targetRoot,
+      '.takt',
+      'workflows',
+      'review.yaml',
+    );
+    writeFileSync(foreignPath, 'name: foreign\n');
+    const drift = await service.apply({
+      ...common,
+      mode: 'apply',
+      expectedPlanId: preview.envelope.result.planId,
+    });
+    expect(drift).toMatchObject({
+      envelope: { status: 'error', error: { code: 'PLAN_DRIFT' } },
+    });
+    expect(readFileSync(foreignPath, 'utf8')).toBe('name: foreign\n');
+    expect(existsSync(join(targetFixture.targetRoot, '.takt-template-lock.json')))
+      .toBe(false);
+
+    const installed = await fixture();
+    const installService = createProductionProjectTemplateCliLocalApplyService();
+    const installCommon = {
+      cwd: installed.targetRoot,
+      sourcePath: installed.archivePath,
+      currentTaktVersion: '0.48.0',
+      force: true,
+    };
+    const installPreview = await installService.diff(installCommon);
+    if (installPreview.envelope.status !== 'success') throw new Error('preview failed');
+    expect((await installService.apply({
+      ...installCommon,
+      mode: 'apply',
+      expectedPlanId: installPreview.envelope.result.planId,
+    })).exitCode).toBe(0);
+    const updatePreview = await installService.diff(installCommon);
+    if (updatePreview.envelope.status !== 'success') throw new Error('preview failed');
+    const sourceLock = join(installed.targetRoot, '.takt-template-source-lock.json');
+    writeFileSync(sourceLock, 'foreign\n');
+    const cohortDrift = await installService.apply({
+      ...installCommon,
+      mode: 'apply',
+      expectedPlanId: updatePreview.envelope.result.planId,
+    });
+    expect(cohortDrift).toMatchObject({
+      envelope: { status: 'error', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
+    expect(readFileSync(sourceLock, 'utf8')).toBe('foreign\n');
+  });
+
+  it('maps pre-admission abort to 130 without creating lease state', async () => {
+    const { archivePath, targetRoot } = await fixture();
+    const controller = new AbortController();
+    controller.abort();
+    const result = await createProductionProjectTemplateCliLocalApplyService().apply({
+      cwd: targetRoot,
+      sourcePath: archivePath,
+      currentTaktVersion: '0.48.0',
+      force: true,
+      mode: 'apply',
+      expectedPlanId: 'a'.repeat(64),
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({
+      exitCode: 130,
+      envelope: { status: 'error', error: { code: 'INTERRUPTED' } },
+    });
+    expect(existsSync(join(targetRoot, '.takt-template-state'))).toBe(false);
   });
 
   it('leaves no approval artifact when an existing lease blocks admission', async () => {

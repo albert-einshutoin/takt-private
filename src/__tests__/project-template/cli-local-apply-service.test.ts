@@ -214,6 +214,31 @@ describe('local project-template CLI diff/apply service', () => {
     });
   });
 
+  it.each([
+    ['INTERRUPTED', 130],
+    ['SOURCE_INTEGRITY_FAILED', 24],
+    ['PLAN_DRIFT', 22],
+    ['TARGET_DRIFT', 22],
+  ] as const)('preserves the closed %s execution result', async (code, exitCode) => {
+    const service = createProjectTemplateCliLocalApplyService(port({
+      execute: vi.fn(async () => ({ status: 'not_started', code })),
+    }));
+
+    const outcome = await service.apply({
+      cwd: '/safe/repo',
+      sourcePath: 'pack.taktpack',
+      currentTaktVersion: '0.48.0',
+      mode: 'apply',
+      expectedPlanId: PLAN_ID,
+      force: false,
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode,
+      envelope: { status: 'error', error: { code } },
+    });
+  });
+
   it('returns only closed commit fields from an admitted apply', async () => {
     const service = createProjectTemplateCliLocalApplyService(port({
       execute: vi.fn(async () => ({
