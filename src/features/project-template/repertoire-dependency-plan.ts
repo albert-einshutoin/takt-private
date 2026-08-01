@@ -23,6 +23,7 @@ import {
 import type {
   ProjectTemplateRepertoireDependencyChangeCode,
   ProjectTemplateRepertoireDependencyInstalledConflictCode,
+  ProjectTemplateLocalEmptyRepertoireDependencyPlanOptions,
   ProjectTemplateRepertoireDependencyMetadataChangeCode,
   ProjectTemplateRepertoireDependencyPlan,
   ProjectTemplateRepertoireDependencyPlanAction,
@@ -35,6 +36,7 @@ import type {
 export type {
   ProjectTemplateRepertoireDependencyChangeCode,
   ProjectTemplateRepertoireDependencyInstalledConflictCode,
+  ProjectTemplateLocalEmptyRepertoireDependencyPlanOptions,
   ProjectTemplateRepertoireDependencyMetadataChangeCode,
   ProjectTemplateRepertoireDependencyPlan,
   ProjectTemplateRepertoireDependencyPlanAction,
@@ -48,6 +50,8 @@ export type {
 
 const PLAN_ID_DOMAIN =
   'takt.project-template.repertoire-dependency-plan.v1\u0000';
+const LOCAL_EMPTY_PRECONDITION_DOMAIN =
+  'takt.project-template.local-empty-dependency-precondition.v1\u0000';
 const REFS_TAGS_PREFIX = 'refs/tags/';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -216,6 +220,28 @@ function snapshotOptions(value: unknown): {
     incomingLock,
     previousRaw: snapshotPreviousRaw(previousEnvelope),
   });
+}
+
+function snapshotLocalEmptyOptions(value: unknown): {
+  readonly incomingLock: ProjectTemplateRepertoireDependencyLockV1;
+  readonly previousRaw: PreviousRawSnapshot;
+} {
+  const options = exactDataValues(
+    value,
+    ['incomingLock', 'previousLock'],
+    'localEmptyRepertoireDependencyPlan',
+  );
+  const incomingLock = parseIncomingLock(options['incomingLock']);
+  if (incomingLock.dependencies.length !== 0) {
+    invalidOptions('localEmptyRepertoireDependencyPlan.incomingLock.dependencies');
+  }
+  const previousRaw = snapshotPreviousRaw(
+    exactDataValuesByState(options['previousLock']),
+  );
+  if (previousRaw.state === 'unavailable') {
+    invalidOptions('localEmptyRepertoireDependencyPlan.previousLock.state');
+  }
+  return freeze({ incomingLock, previousRaw });
 }
 
 function exactDataValuesByState(value: unknown): Record<string, unknown> {
@@ -709,28 +735,19 @@ export function calculateProjectTemplateRepertoireDependencyPlanId(
   return hashPlanBody(body);
 }
 
-/**
- * Consumes exactly one G2 planning claim and creates a review-only dependency
- * delta. All caller-controlled lock material is snapshotted first so invalid
- * incoming input never burns authority, while invalid persisted evidence is a
- * sealed conflict that cannot be bypassed with exception handling.
- */
-export function createProjectTemplateRepertoireDependencyPlan(
-  value: ProjectTemplateRepertoireDependencyPlanOptions,
+/** Builds the common sealed plan after its authority-specific input boundary. */
+function createPlanFromSnapshots(
+  incomingLock: ProjectTemplateRepertoireDependencyLockV1,
+  previous: PreviousSnapshot,
+  inspection: ProjectTemplateRepertoireDependencyInspectionSnapshot,
 ): ProjectTemplateRepertoireDependencyPlan {
-  const options = snapshotOptions(value);
-  const inspection =
-    consumeProjectTemplateRepertoireDependencyInspectionPlanningClaim(
-      options.inspectionClaim,
-    );
-  const previous = parsePrevious(options.previousRaw);
   const declarationSha256 =
     calculateProjectTemplateRepertoireDependencyDeclarationSha256(
-      options.incomingLock.dependencies,
+      incomingLock.dependencies,
     );
   const bindingMatches =
-    inspection.sourceDescriptorSha256 === options.incomingLock.sourceDescriptorSha256
-    && inspection.manifestSha256 === options.incomingLock.manifestSha256
+    inspection.sourceDescriptorSha256 === incomingLock.sourceDescriptorSha256
+    && inspection.manifestSha256 === incomingLock.manifestSha256
     && inspection.declarationSha256 === declarationSha256;
   const globalConflicts:
     ProjectTemplateRepertoireDependencyPlanGlobalConflictCode[] = [];
@@ -746,15 +763,15 @@ export function createProjectTemplateRepertoireDependencyPlan(
   if (previous.lock !== undefined) {
     if (
       previous.lock.sourceDescriptorSha256
-      !== options.incomingLock.sourceDescriptorSha256
+      !== incomingLock.sourceDescriptorSha256
     ) append(metadataChanges, 'SOURCE_DESCRIPTOR_SHA256_CHANGED');
-    if (previous.lock.manifestSha256 !== options.incomingLock.manifestSha256) {
+    if (previous.lock.manifestSha256 !== incomingLock.manifestSha256) {
       append(metadataChanges, 'MANIFEST_SHA256_CHANGED');
     }
   }
   freeze(metadataChanges);
   const dependencies = buildEntries(
-    options.incomingLock.dependencies,
+    incomingLock.dependencies,
     previous,
     inspection,
     bindingMatches,
@@ -790,8 +807,8 @@ export function createProjectTemplateRepertoireDependencyPlan(
   const body = freeze({
     schemaVersion: '1.0' as const,
     preconditionToken: inspection.preconditionToken,
-    sourceDescriptorSha256: options.incomingLock.sourceDescriptorSha256,
-    manifestSha256: options.incomingLock.manifestSha256,
+    sourceDescriptorSha256: incomingLock.sourceDescriptorSha256,
+    manifestSha256: incomingLock.manifestSha256,
     declarationSha256,
     previousLockState: previous.state,
     ...(previous.lockSha256 === undefined
@@ -804,7 +821,7 @@ export function createProjectTemplateRepertoireDependencyPlan(
     reviewRequired,
     hardConflict,
     defaultApplyPossible: !reviewRequired && !hardConflict,
-    ...(!hardConflict ? { nextLock: options.incomingLock } : {}),
+    ...(!hardConflict ? { nextLock: incomingLock } : {}),
   });
   const canonicalBody = canonicalPlanBody(body);
   const plan = freeze({
@@ -832,4 +849,67 @@ export function createProjectTemplateRepertoireDependencyPlan(
     canonicalBody,
   ]);
   return plan;
+}
+
+/**
+ * Consumes exactly one G2 planning claim and creates a review-only dependency
+ * delta. All caller-controlled lock material is snapshotted first so invalid
+ * incoming input never burns authority, while invalid persisted evidence is a
+ * sealed conflict that cannot be bypassed with exception handling.
+ */
+export function createProjectTemplateRepertoireDependencyPlan(
+  value: ProjectTemplateRepertoireDependencyPlanOptions,
+): ProjectTemplateRepertoireDependencyPlan {
+  const options = snapshotOptions(value);
+  const inspection =
+    consumeProjectTemplateRepertoireDependencyInspectionPlanningClaim(
+      options.inspectionClaim,
+    );
+  return createPlanFromSnapshots(
+    options.incomingLock,
+    parsePrevious(options.previousRaw),
+    inspection,
+  );
+}
+
+function calculateLocalEmptyPreconditionToken(
+  incomingLock: ProjectTemplateRepertoireDependencyLockV1,
+  previous: PreviousSnapshot,
+): string {
+  const hash = CAPTURED_CREATE_HASH('sha256');
+  const body = canonicalLock(incomingLock)
+    + '\u0000' + previous.state
+    + '\u0000' + (previous.lockSha256 ?? '');
+  CAPTURED_REFLECT_APPLY(CAPTURED_HASH_UPDATE, hash, [
+    LOCAL_EMPTY_PRECONDITION_DOMAIN + body,
+    'utf8',
+  ]);
+  return CAPTURED_REFLECT_APPLY(CAPTURED_HASH_DIGEST, hash, ['hex']) as string;
+}
+
+/**
+ * Builds the dependency member of a local archive transaction without
+ * fabricating an external installation inspection. This boundary is valid
+ * only for the schema 1.0 empty repertoire set, where there is nothing for an
+ * external authority to observe.
+ */
+export function createLocalEmptyProjectTemplateRepertoireDependencyPlan(
+  value: ProjectTemplateLocalEmptyRepertoireDependencyPlanOptions,
+): ProjectTemplateRepertoireDependencyPlan {
+  const options = snapshotLocalEmptyOptions(value);
+  const previous = parsePrevious(options.previousRaw);
+  const declarationSha256 =
+    calculateProjectTemplateRepertoireDependencyDeclarationSha256([]);
+  const inspection = freeze({
+    kind: 'project-template-repertoire-dependency-inspection-snapshot' as const,
+    sourceDescriptorSha256: options.incomingLock.sourceDescriptorSha256,
+    manifestSha256: options.incomingLock.manifestSha256,
+    declarationSha256,
+    preconditionToken: calculateLocalEmptyPreconditionToken(
+      options.incomingLock,
+      previous,
+    ),
+    observations: freeze([] as ProjectTemplateRepertoireDependencyObservation[]),
+  });
+  return createPlanFromSnapshots(options.incomingLock, previous, inspection);
 }
