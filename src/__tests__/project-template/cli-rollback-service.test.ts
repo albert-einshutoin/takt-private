@@ -3,6 +3,7 @@ import {
   createProjectTemplateCliRollbackService,
   type ProjectTemplateCliRollbackPort,
 } from '../../features/project-template/cli-rollback-service.js';
+import { settleProjectTemplateRollbackAfterLease } from '../../features/project-template/rollback-transaction-apply-facade.js';
 
 const planId = 'a'.repeat(64);
 const derived = Object.freeze({
@@ -22,6 +23,12 @@ function port(overrides: Partial<ProjectTemplateCliRollbackPort> = {}): ProjectT
 }
 
 describe('project template CLI rollback service', () => {
+  it('classifies lease release failure as indeterminate', () => {
+    expect(settleProjectTemplateRollbackAfterLease(
+      { status: 'rolled_back', backupId: 'backup-1' },
+      () => { throw new Error('release failed'); },
+    )).toEqual({ status: 'indeterminate' });
+  });
   it('returns only the closed dry-run contract', async () => {
     const service = createProjectTemplateCliRollbackService(port());
     const outcome = await service.rollback({
