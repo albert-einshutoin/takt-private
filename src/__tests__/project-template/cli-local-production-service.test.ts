@@ -39,13 +39,16 @@ afterEach(() => {
 async function fixture(options: {
   readonly commit?: string;
   readonly workflowName?: string;
+  readonly invalidWorkflow?: boolean;
 } = {}): Promise<{ archivePath: string; targetRoot: string }> {
   const sourceRoot = root('takt-local-service-source-');
   mkdirSync(join(sourceRoot, '.takt'), { mode: 0o700 });
   mkdirSync(join(sourceRoot, '.takt', 'workflows'), { mode: 0o700 });
   writeFileSync(
     join(sourceRoot, '.takt', 'workflows', 'review.yaml'),
-    `name: ${options.workflowName ?? 'review'}
+    options.invalidWorkflow
+      ? 'name: review\n'
+      : `name: ${options.workflowName ?? 'review'}
 max_steps: 10
 initial_step: review
 steps:
@@ -82,6 +85,33 @@ describe('production local project-template CLI composition', () => {
       committed,
       () => { throw new Error('release failed'); },
     )).toEqual({ status: 'indeterminate' });
+  });
+
+  it('reports indeterminate when a failed transaction cannot prove approval revocation', async () => {
+    const { archivePath, targetRoot } = await fixture({ invalidWorkflow: true });
+    const service = createProductionProjectTemplateCliLocalApplyService();
+    const common = {
+      cwd: targetRoot,
+      sourcePath: archivePath,
+      currentTaktVersion: '0.48.0',
+      force: true,
+    };
+    const preview = await service.diff(common);
+    if (preview.envelope.status !== 'success') throw new Error('preview failed');
+
+    const result = await service.apply({
+      ...common,
+      mode: 'apply',
+      expectedPlanId: preview.envelope.result.planId,
+    });
+
+    expect(result).toMatchObject({
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RESULT_INDETERMINATE' } },
+    });
+    expect(existsSync(join(targetRoot, '.takt-template-lock.json'))).toBe(false);
+    expect(existsSync(join(targetRoot, '.takt-template-state', 'apply.lock')))
+      .toBe(false);
   });
 
   it('re-derives under lease and commits the exact first-install cohort', async () => {
