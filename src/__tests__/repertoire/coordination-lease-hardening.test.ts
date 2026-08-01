@@ -22,6 +22,7 @@ type FsOperation =
   | 'fstatSync'
   | 'fsyncSync'
   | 'lstatSync'
+  | 'linkSync'
   | 'mkdirSync'
   | 'openSync'
   | 'readSync'
@@ -35,6 +36,7 @@ const fsFault = vi.hoisted(() => ({
   beforeReleaseMutation: undefined as ((path: string) => void) | undefined,
   afterReaddir: undefined as ((path: string) => boolean | void) | undefined,
   afterLeaseWrite: undefined as (() => void) | undefined,
+  afterClaimLink: undefined as (() => void) | undefined,
   actualRenameSync: undefined as typeof import('node:fs').renameSync | undefined,
   actualWriteFileSync: undefined as typeof import('node:fs').writeFileSync | undefined,
   openFds: new Set<number>(),
@@ -88,6 +90,14 @@ vi.mock('node:fs', async (importOriginal) => {
       runHook0();
       fail('lstatSync');
       return actual.lstatSync(...args);
+    },
+    linkSync(...args: Parameters<typeof actual.linkSync>) {
+      fail('linkSync');
+      const result = actual.linkSync(...args);
+      const hook = fsFault.afterClaimLink;
+      fsFault.afterClaimLink = undefined;
+      hook?.();
+      return result;
     },
     mkdirSync(...args: Parameters<typeof actual.mkdirSync>) {
       fail('mkdirSync');
@@ -147,6 +157,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 import {
   acquireRepertoireCoordinationLease,
+  acquireRepertoireCoordinationReadLeaseImmediate,
   type RepertoireCoordinationLease,
 } from '../../features/repertoire/coordination-lease.js';
 
@@ -158,6 +169,7 @@ afterEach(() => {
   fsFault.beforeReleaseMutation = undefined;
   fsFault.afterReaddir = undefined;
   fsFault.afterLeaseWrite = undefined;
+  fsFault.afterClaimLink = undefined;
   fsFault.openFds.clear();
   fsFault.readCalls = 0;
   cryptoFault.nextRandomBytes = undefined;
@@ -165,6 +177,31 @@ afterEach(() => {
 });
 
 describe('repertoire coordination hardening', () => {
+  it('treats an active-plus-publishing claim pair as busy, never malformed or granted', async () => {
+    const root = makeRoot();
+    let observedCode: string | undefined;
+    let boundedReader: Promise<RepertoireCoordinationLease> | undefined;
+    fsFault.afterClaimLink = () => {
+      try {
+        const unexpected = acquireRepertoireCoordinationReadLeaseImmediate({
+          globalConfigDir: root,
+        });
+        unexpected.release();
+        observedCode = 'GRANTED';
+      } catch (error) {
+        observedCode = (error as { code?: string }).code;
+      }
+      boundedReader = acquire(root, 'read', 500);
+    };
+
+    const lease = await acquire(root, 'read');
+    expect(observedCode).toBe('WRITER_PENDING');
+    if (boundedReader === undefined) throw new Error('bounded reader was not started');
+    const peer = await boundedReader;
+    peer.release();
+    lease.release();
+  });
+
   it('closes the trusted root descriptor after failed acquisition and failed release', async () => {
     const root = makeRoot();
     const owner = await acquire(root, 'write');
@@ -172,7 +209,7 @@ describe('repertoire coordination hardening', () => {
     expect(ownerFdCount).toBe(1);
 
     await expect(acquire(root, 'read', 50))
-      .rejects.toMatchObject({ code: 'WRITER_PENDING' });
+      .rejects.toMatchObject({ code: 'TIMEOUT' });
     expect(fsFault.openFds.size).toBe(ownerFdCount);
 
     fsFault.beforeReleaseMutation = () => {
@@ -228,7 +265,7 @@ describe('repertoire coordination hardening', () => {
       restorePoisonedIntrinsics(originals);
     }
 
-    expect(caught).toMatchObject({ code: 'WRITER_PENDING' });
+    expect(caught).toMatchObject({ code: 'TIMEOUT' });
     expect(containsToken(observed, writerToken)).toBe(false);
     expect(String(caught)).not.toContain(writerToken);
     owner.release();

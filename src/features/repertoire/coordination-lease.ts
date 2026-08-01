@@ -5,12 +5,14 @@ import {
   fstatSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readSync,
   readdirSync,
   realpathSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
   type BigIntStats,
   type Stats,
@@ -29,7 +31,9 @@ const READERS_DIRECTORY_NAME = 'readers';
 const RELEASED_DIRECTORY_NAME = 'released';
 const RELEASED_ARTIFACT_FILENAME = 'lease.released';
 const RELEASE_PUBLISHING_SUFFIX = '.publishing';
+const CLAIM_PUBLISHING_SUFFIX = '.publishing';
 const WRITER_INTENT_FILENAME = 'writer.intent';
+const WRITER_INTENT_PUBLISHING_FILENAME = `${WRITER_INTENT_FILENAME}${CLAIM_PUBLISHING_SUFFIX}`;
 const LEASE_VERSION = 1;
 const MAX_LEASE_BYTES = 4_096;
 const MAX_READER_CLAIMS = 4_096;
@@ -211,6 +215,7 @@ type TrustedRootEvidence = CoordinationRootEvidence;
 
 type CoordinationSnapshot = {
   digest: string;
+  claimPublishing: boolean;
   readers: LeaseEvidence[];
   released: LeaseEvidence[];
   writer: LeaseEvidence | undefined;
@@ -244,11 +249,8 @@ export async function acquireRepertoireCoordinationLease(
     throwIfAborted(options.signal);
     paths = prepareCoordinationPaths(options.globalConfigDir);
     const deadline = safeDateNow() + (options.timeoutMs ?? 5_000);
-    const initial = scanStableState(paths);
-    enforceTombstoneLimits(initial.releasedCount, options.mode);
-
     return options.mode === 'read'
-      ? acquireReadLease(paths, options.signal)
+      ? await acquireReadLeaseBounded(paths, deadline, options.signal)
       : await acquireWriteLease(paths, deadline, options.signal);
   } catch (error) {
     return throwAfterClosingTrustedRoot(paths, error);
@@ -265,11 +267,24 @@ export function acquireRepertoireCoordinationReadLeaseImmediate(
     validateOptions(validated);
     throwIfAborted(validated.signal);
     paths = prepareCoordinationPaths(validated.globalConfigDir);
-    const initial = scanStableState(paths);
-    enforceTombstoneLimits(initial.releasedCount, 'read');
     return acquireReadLease(paths, validated.signal);
   } catch (error) {
     return throwAfterClosingTrustedRoot(paths, error);
+  }
+}
+
+async function acquireReadLeaseBounded(
+  paths: CoordinationPaths,
+  deadline: number,
+  signal: AbortSignal | undefined,
+): Promise<RepertoireCoordinationLease> {
+  while (true) {
+    try {
+      return acquireReadLease(paths, signal);
+    } catch (error) {
+      if (!isWriterPending(error)) throw error;
+      await waitForRetry(paths, deadline, signal);
+    }
   }
 }
 
@@ -279,7 +294,7 @@ function acquireReadLease(
 ): RepertoireCoordinationLease {
   const before = scanStableState(paths);
   enforceTombstoneLimits(before.releasedCount, 'read');
-  if (before.writer !== undefined) {
+  if (before.writer !== undefined || before.claimPublishing) {
     throw new RepertoireCoordinationError('WRITER_PENDING');
   }
 
@@ -294,7 +309,7 @@ function acquireReadLease(
     const after = scanStableState(paths);
     enforceTombstoneLimits(after.releasedCount, 'read');
     assertPublishedLease(after.readers, record, identity);
-    if (after.writer !== undefined) {
+    if (after.writer !== undefined || after.claimPublishing) {
       claimState = retireAfterFailedAcquire(paths, claimPath, record, identity, paths.readers);
       if (claimState !== 'retired') throw new RepertoireCoordinationError('UNSAFE_STATE');
       throw new RepertoireCoordinationError('WRITER_PENDING');
@@ -332,6 +347,10 @@ async function acquireWriteLease(
       throw error;
     }
     enforceTombstoneLimits(state.releasedCount, 'write');
+    if (state.writer !== undefined || state.claimPublishing) {
+      await waitForRetry(paths, deadline, signal);
+      continue;
+    }
     try {
       identity = createLeaseFile(paths, paths.writerIntent, record, paths.root);
       claimState = 'published';
@@ -573,10 +592,11 @@ function createLeaseFile(
 ): FileIdentity {
   paths.trustedRoot.assertUnchanged();
   assertPrivateDirectory(parentDirectory);
+  const publishingPath = `${path}${CLAIM_PUBLISHING_SUFFIX}`;
   let fd: number | undefined;
   try {
     fd = openSync(
-      path,
+      publishingPath,
       FILE_WRITE_EXCLUSIVE_FLAGS,
       PRIVATE_FILE_MODE,
     );
@@ -588,9 +608,35 @@ function createLeaseFile(
   }
   syncDirectory(parentDirectory);
   paths.trustedRoot.assertUnchanged();
-  const published = readExactPrivateLease(path, record.mode);
-  assertSameOwner(published.record, record);
+  const staged = readExactPrivateLease(publishingPath, record.mode);
+  assertSameOwner(staged.record, record);
+  // Claims become visible only after complete, fsynced bytes have been
+  // validated. A crashed staging file remains explicit blocking evidence.
   paths.trustedRoot.assertUnchanged();
+  try {
+    // Hard-link publication preserves O_EXCL/no-replace semantics. rename(2)
+    // could overwrite an already-published writer intent after staging.
+    linkSync(publishingPath, path);
+  } catch (error) {
+    if (isAlreadyExistsError(error)) {
+      const owned = readExactPrivateLease(publishingPath, record.mode);
+      if (!sameOwnerAndIdentity(owned, record, staged.identity)) {
+        throw new RepertoireCoordinationError('UNSAFE_STATE');
+      }
+      unlinkSync(publishingPath);
+      syncDirectory(parentDirectory);
+      paths.trustedRoot.assertUnchanged();
+    }
+    throw error;
+  }
+  paths.trustedRoot.assertUnchanged();
+  unlinkSync(publishingPath);
+  syncDirectory(parentDirectory);
+  paths.trustedRoot.assertUnchanged();
+  const published = readExactPrivateLease(path, record.mode);
+  if (!sameOwnerAndIdentity(published, record, staged.identity)) {
+    throw new RepertoireCoordinationError('UNSAFE_STATE');
+  }
   return published.identity;
 }
 
@@ -705,6 +751,7 @@ function scanStateOnce(
       entry !== READERS_DIRECTORY_NAME
       && entry !== RELEASED_DIRECTORY_NAME
       && entry !== WRITER_INTENT_FILENAME
+      && entry !== WRITER_INTENT_PUBLISHING_FILENAME
     ) {
       throw new RepertoireCoordinationError('UNSAFE_STATE');
     }
@@ -718,7 +765,17 @@ function scanStateOnce(
 
   const readers = scanReaders(paths.readers);
   const released = scanReleased(paths.released, enforceHardLimit);
+  const writerPublishing = safeArrayIncludes(rootEntries, WRITER_INTENT_PUBLISHING_FILENAME);
+  if (writerPublishing && safeArrayIncludes(rootEntries, WRITER_INTENT_FILENAME)) {
+    assertPublishingPair(
+      paths.writerIntent,
+      `${paths.writerIntent}${CLAIM_PUBLISHING_SUFFIX}`,
+    );
+  } else if (writerPublishing) {
+    assertPublishingOnly(`${paths.writerIntent}${CLAIM_PUBLISHING_SUFFIX}`);
+  }
   const writer = safeArrayIncludes(rootEntries, WRITER_INTENT_FILENAME)
+    && !writerPublishing
     ? readListedLease(paths.writerIntent, 'write')
     : undefined;
   const rootAfter = readDirectoryIdentity(paths.root);
@@ -729,10 +786,12 @@ function scanStateOnce(
     safeArrayJoin(rootEntries, ','),
     readers.digest,
     released.digest,
+    writerPublishing ? 'writer-publishing' : '-',
     writer?.digest ?? '-',
   ], '|');
   return {
     digest,
+    claimPublishing: readers.publishing || writerPublishing,
     readers: readers.evidence,
     released: released.evidence,
     writer,
@@ -740,7 +799,11 @@ function scanStateOnce(
   };
 }
 
-function scanReaders(directory: string): { digest: string; evidence: LeaseEvidence[] } {
+function scanReaders(directory: string): {
+  digest: string;
+  evidence: LeaseEvidence[];
+  publishing: boolean;
+} {
   const before = readDirectoryIdentity(directory);
   const entries = sortedDirectoryEntries(directory);
   if (entries.length > MAX_READER_CLAIMS) {
@@ -748,9 +811,36 @@ function scanReaders(directory: string): { digest: string; evidence: LeaseEviden
   }
   const evidence: LeaseEvidence[] = [];
   const digests: string[] = [];
+  let publishing = false;
   for (const filename of entries) {
+    if (!filename.endsWith(CLAIM_PUBLISHING_SUFFIX)) continue;
+    const activeFilename = filename.slice(0, -CLAIM_PUBLISHING_SUFFIX.length);
+    if (!safeRegExpTest(READER_FILENAME_PATTERN, activeFilename)) {
+      throw new RepertoireCoordinationError('UNSAFE_STATE');
+    }
+    if (!safeArrayIncludes(entries, activeFilename)) {
+      assertPublishingOnly(join(directory, filename));
+    }
+    publishing = true;
+  }
+  for (const filename of entries) {
+    if (filename.endsWith(CLAIM_PUBLISHING_SUFFIX)) {
+      safeArrayPush(digests, `${filename}:publishing`);
+      continue;
+    }
     const match = safeRegExpExec(READER_FILENAME_PATTERN, filename);
     if (!match) throw new RepertoireCoordinationError('UNSAFE_STATE');
+    if (safeArrayIncludes(entries, `${filename}${CLAIM_PUBLISHING_SUFFIX}`)) {
+      // linkSync briefly exposes the complete inode with nlink=2. The paired
+      // staging name proves this is still a known publication transition;
+      // never parse or grant it until only the active nlink=1 name remains.
+      assertPublishingPair(
+        join(directory, filename),
+        join(directory, `${filename}${CLAIM_PUBLISHING_SUFFIX}`),
+      );
+      safeArrayPush(digests, `${filename}:paired-publishing`);
+      continue;
+    }
     const lease = readListedLease(join(directory, filename), 'read');
     if (`${lease.record.pid}` !== match[1] || lease.record.token !== match[2]) {
       throw new RepertoireCoordinationError('UNSAFE_STATE');
@@ -760,7 +850,49 @@ function scanReaders(directory: string): { digest: string; evidence: LeaseEviden
   }
   const after = readDirectoryIdentity(directory);
   if (before !== after) throw SNAPSHOT_CHANGED;
-  return { digest: `${before}:${safeArrayJoin(digests, ',')}`, evidence };
+  return { digest: `${before}:${safeArrayJoin(digests, ',')}`, evidence, publishing };
+}
+
+function assertPublishingPair(activePath: string, publishingPath: string): void {
+  const active = lstatPublishingPath(activePath);
+  const publishing = lstatPublishingPath(publishingPath);
+  const expectedUid = currentUid();
+  if (
+    !isFileMode(active.mode)
+    || !isFileMode(publishing.mode)
+    || isSymlinkMode(active.mode)
+    || isSymlinkMode(publishing.mode)
+    || active.dev !== publishing.dev
+    || active.ino !== publishing.ino
+    || active.nlink !== 2
+    || publishing.nlink !== 2
+    || (active.mode & 0o777) !== PRIVATE_FILE_MODE
+    || (publishing.mode & 0o777) !== PRIVATE_FILE_MODE
+    || (expectedUid !== null && (active.uid !== expectedUid || publishing.uid !== expectedUid))
+  ) throw new RepertoireCoordinationError('UNSAFE_STATE');
+}
+
+function assertPublishingOnly(path: string): void {
+  const stat = lstatPublishingPath(path);
+  const expectedUid = currentUid();
+  if (
+    !isFileMode(stat.mode)
+    || isSymlinkMode(stat.mode)
+    || stat.nlink !== 1
+    || stat.size < 0
+    || stat.size > MAX_LEASE_BYTES
+    || (stat.mode & 0o777) !== PRIVATE_FILE_MODE
+    || (expectedUid !== null && stat.uid !== expectedUid)
+  ) throw new RepertoireCoordinationError('UNSAFE_STATE');
+}
+
+function lstatPublishingPath(path: string): Stats {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (isMissingError(error)) throw SNAPSHOT_CHANGED;
+    throw error;
+  }
 }
 
 function scanReleased(

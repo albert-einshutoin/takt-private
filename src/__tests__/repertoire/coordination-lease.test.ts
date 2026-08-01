@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
   chownSync,
@@ -39,6 +40,10 @@ type CoordinationModule = {
     signal?: AbortSignal;
     timeoutMs?: number;
   }): Promise<RepertoireCoordinationLease>;
+  acquireRepertoireCoordinationReadLeaseImmediate(options: {
+    globalConfigDir: string;
+    signal?: AbortSignal;
+  }): RepertoireCoordinationLease;
 };
 
 const moduleSourcePath = fileURLToPath(
@@ -127,7 +132,7 @@ describeContract(
       await waitForWriterIntent(globalConfigDir);
 
       await expect(acquire(globalConfigDir, 'read', 500))
-        .rejects.toMatchObject({ code: 'WRITER_PENDING' });
+        .rejects.toMatchObject({ code: 'TIMEOUT' });
 
       await reader.release();
       const writer = await writerPromise;
@@ -414,6 +419,87 @@ describeContract(
       const next = await acquire(globalConfigDir, 'read', 500);
       await next.release();
     });
+
+    it.each(['', '{', '{"version":1'])(
+      'never grants through incomplete published-claim staging bytes %j',
+      async (bytes) => {
+        const globalConfigDir = makeGlobalConfigDir();
+        const seed = await acquire(globalConfigDir, 'read');
+        seed.release();
+        const readers = join(globalConfigDir, '.takt-repertoire-coordination', 'readers');
+        const staging = join(readers, `123.${randomUUID()}.lease.publishing`);
+        writeFileSync(staging, bytes, { mode: 0o600 });
+
+        expect(() => coordination.acquireRepertoireCoordinationReadLeaseImmediate({
+          globalConfigDir,
+        })).toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
+        await expect(acquire(globalConfigDir, 'read', 30))
+          .rejects.toMatchObject({ code: 'TIMEOUT' });
+        const controller = new AbortController();
+        const aborted = coordination.acquireRepertoireCoordinationLease({
+          globalConfigDir,
+          mode: 'read',
+          timeoutMs: 500,
+          signal: controller.signal,
+        });
+        controller.abort();
+        await expect(aborted)
+          .rejects.toMatchObject({ code: 'ABORTED' });
+        expect(() => coordination.acquireRepertoireCoordinationReadLeaseImmediate({
+          globalConfigDir,
+        })).toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
+        await expect(acquire(globalConfigDir, 'write', 30))
+          .rejects.toMatchObject({ code: 'TIMEOUT' });
+        expect(readFileSync(staging, 'utf8')).toBe(bytes);
+      },
+    );
+
+    it.each(['mismatched', 'nlink3'] as const)(
+      'rejects a %s active-plus-publishing claim pair as unsafe',
+      async (kind) => {
+        const globalConfigDir = makeGlobalConfigDir();
+        const seed = await acquire(globalConfigDir, 'read');
+        seed.release();
+        const readers = join(globalConfigDir, '.takt-repertoire-coordination', 'readers');
+        const active = join(readers, `123.${randomUUID()}.lease`);
+        const publishing = `${active}.publishing`;
+        writeFileSync(publishing, 'partial', { mode: 0o600 });
+        if (kind === 'mismatched') {
+          writeFileSync(active, 'foreign', { mode: 0o600 });
+        } else {
+          linkSync(publishing, active);
+          linkSync(publishing, join(globalConfigDir, 'third-link'));
+        }
+
+        await expect(acquire(globalConfigDir, 'read', 50))
+          .rejects.toMatchObject({ code: 'UNSAFE_STATE' });
+      },
+    );
+
+    it.each(['symlink', 'hardlink', 'oversize'] as const)(
+      'rejects an unsafe %s publishing-only claim before granting',
+      async (kind) => {
+        const globalConfigDir = makeGlobalConfigDir();
+        const seed = await acquire(globalConfigDir, 'read');
+        seed.release();
+        const readers = join(globalConfigDir, '.takt-repertoire-coordination', 'readers');
+        const staging = join(readers, `123.${randomUUID()}.lease.publishing`);
+        const source = join(globalConfigDir, `${kind}-source`);
+        if (kind === 'symlink') {
+          writeFileSync(source, 'foreign', { mode: 0o600 });
+          symlinkSync(source, staging);
+        } else if (kind === 'hardlink') {
+          writeFileSync(source, 'foreign', { mode: 0o600 });
+          linkSync(source, staging);
+        } else {
+          writeFileSync(staging, Buffer.alloc(4_097), { mode: 0o600 });
+        }
+
+        expect(() => coordination.acquireRepertoireCoordinationReadLeaseImmediate({
+          globalConfigDir,
+        })).toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
+      },
+    );
 
     it('publishes the fixed global-before-project lock order as an external contract', () => {
       expect(coordination.REPERTOIRE_COORDINATION_LOCK_ORDER).toEqual([
