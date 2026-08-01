@@ -26,6 +26,12 @@ import {
   MAX_SOURCE_REF_LENGTH,
   requireSemVer,
 } from './validation.js';
+import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from './repertoire-dependency-canonical.js';
+import type {
+  VerifiedGithubDependencySourceEvidence,
+} from '../repertoire/github-ref-resolver.js';
 
 const RECEIPT_SCHEMA_VERSION = '1.0';
 const RECEIPT_KIND = 'github-template-download-receipt';
@@ -86,6 +92,7 @@ export interface GithubTemplateDownloadReceiptV1 {
       readonly releaseTag: string;
       readonly commit: string;
       readonly descriptorSha256: string;
+      readonly dependencyVerification: VerifiedGithubDependencySourceEvidence;
       /**
        * Dependency entries are declarations from the authenticated descriptor.
        * They are not resolved dependency authorities.
@@ -313,6 +320,23 @@ function createPayload(
   materialized: MaterializedGithubTemplateCache,
 ): GithubTemplateDownloadReceiptV1['payload'] {
   const inspection = materialized.inspection;
+  const dependencyVerification = resolved.dependencyVerification
+    ?? (
+      descriptor.repertoireDependencies.length === 0
+        ? Object.freeze({
+          method: 'github-ref-to-commit-v1' as const,
+          declarationSha256:
+            calculateProjectTemplateRepertoireDependencyDeclarationSha256([]),
+          count: 0,
+        })
+        : undefined
+    );
+  if (dependencyVerification === undefined) {
+    throw receiptError(
+      'INVALID_AUTHORITY',
+      'GitHub template dependency authority is not verified',
+    );
+  }
   return deepFreeze({
     source: {
       owner: resolved.owner,
@@ -323,6 +347,7 @@ function createPayload(
       releaseTag: resolved.releaseTag,
       commit: resolved.commit,
       descriptorSha256: resolved.descriptorSha256,
+      dependencyVerification,
       // Keep dependency declarations inside their signed descriptor. D1 does
       // not promote declarations into resolved dependency authorities.
       sourceDescriptor: descriptor,
@@ -438,6 +463,18 @@ function requirePositiveInteger(
   return value as number;
 }
 
+function requireNonNegativeInteger(
+  value: unknown,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  if (
+    !Number.isSafeInteger(value)
+    || (value as number) < 0
+    || (value as number) > maximum
+  ) throw new Error();
+  return value as number;
+}
+
 function parseReceiptStructure(
   value: unknown,
 ): GithubTemplateDownloadReceiptV1 {
@@ -464,8 +501,13 @@ function parseReceiptStructure(
       'releaseTag',
       'commit',
       'descriptorSha256',
+      'dependencyVerification',
       'sourceDescriptor',
     ]);
+    const dependencyVerification = ownDataRecord(
+      source['dependencyVerification'],
+      ['method', 'declarationSha256', 'count'],
+    );
     const release = ownDataRecord(payload['release'], [
       'releaseId',
       'assetId',
@@ -500,7 +542,7 @@ function parseReceiptStructure(
     );
     if (
       Object.keys(payload).length !== 3
-      || Object.keys(source).length !== 9
+      || Object.keys(source).length !== 10
       || Object.keys(release).length !== 7
       || Object.keys(archive).length !== 6
       || authentication['algorithm'] !== 'hmac-sha256'
@@ -537,6 +579,19 @@ function parseReceiptStructure(
             source['descriptorSha256'],
             SHA256_PATTERN,
           ),
+          dependencyVerification: {
+            method: requireString(
+              dependencyVerification['method'],
+              /^github-ref-to-commit-v1$/,
+            ) as 'github-ref-to-commit-v1',
+            declarationSha256: requireString(
+              dependencyVerification['declarationSha256'],
+              SHA256_PATTERN,
+            ),
+            count: requireNonNegativeInteger(
+              dependencyVerification['count'],
+            ),
+          },
           sourceDescriptor: descriptor,
         },
         release: {
@@ -652,6 +707,12 @@ function parseReceiptStructure(
       || calculateProjectTemplateSourceDescriptorSha256(
         sourceReceipt.sourceDescriptor,
       ) !== sourceReceipt.descriptorSha256
+      || sourceReceipt.dependencyVerification.count
+        !== sourceReceipt.sourceDescriptor.repertoireDependencies.length
+      || sourceReceipt.dependencyVerification.declarationSha256
+        !== calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+          sourceReceipt.sourceDescriptor.repertoireDependencies,
+        )
       || descriptorPack.releaseTag !== sourceReceipt.releaseTag
       || descriptorPack.version !== archiveReceipt.version
       || descriptorPack.sha256 !== archiveReceipt.sha256
