@@ -390,6 +390,108 @@ describe('taktpack deterministic writer', () => {
     expect(readFileSync(output, 'utf8')).toBe('approved-old');
   });
 
+  it('syncs and re-witnesses the staging parent after rollback removal', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'staging-durable-restore.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    const phases: string[] = [];
+
+    await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          phases.push(phase);
+          if (phase === 'authority-link') throw new Error('link unavailable');
+        },
+      },
+    ).catch(() => undefined);
+
+    expect(phases.indexOf('rollback-unlink'))
+      .toBeLessThan(phases.indexOf('rollback-staging-directory-fsync'));
+    expect(phases.indexOf('rollback-staging-directory-fsync'))
+      .toBeLessThan(phases.indexOf('rollback-staging-parent-witness'));
+    expect(phases.indexOf('rollback-staging-parent-witness'))
+      .toBeLessThan(phases.indexOf('rollback-final-directory-fsync'));
+  });
+
+  it('preserves a foreign staging-parent replacement at rollback unlink', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    const movedRoot = `${root}-moved`;
+    roots.push(movedRoot);
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'staging-swap-restore.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    let foreignRollback: string | undefined;
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'authority-link') throw new Error('link unavailable');
+          if (String(phase) !== 'rollback-unlink') return;
+          const rollbackName = readdirSync(root)
+            .find((name) => name.endsWith('.rollback'))!;
+          renameSync(root, movedRoot);
+          mkdirSync(root);
+          foreignRollback = join(root, rollbackName);
+          writeFileSync(foreignRollback, 'foreign-staging-entry');
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(foreignRollback).toBeDefined();
+    expect(readFileSync(foreignRollback!, 'utf8')).toBe('foreign-staging-entry');
+    expect(readdirSync(movedRoot).some((name) => (
+      name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toBe(true);
+  });
+
+  it('durably removes staging entries on a successful authorized publish', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'staging-success.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    const phases: string[] = [];
+
+    await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      { onPhase: (phase) => phases.push(phase) },
+    );
+
+    for (const entry of ['temp', 'rollback'] as const) {
+      expect(phases.indexOf(`staging-${entry}-unlink`))
+        .toBeLessThan(phases.indexOf(`staging-${entry}-directory-fsync`));
+      expect(phases.indexOf(`staging-${entry}-directory-fsync`))
+        .toBeLessThan(phases.indexOf(`staging-${entry}-parent-witness`));
+    }
+  });
+
   it.each([
     'rollback-restored-directory-fsync',
     'rollback-restored-witness',
