@@ -401,6 +401,34 @@ describe('package exports contract', () => {
     expect(declarationEntry).not.toContain('acquireProjectTemplateApplyLease');
   });
 
+  it('exports only the safe production local apply service factory', () => {
+    const result = runSelfReferenceImport(`
+      const api = await import('takt');
+      process.stdout.write(JSON.stringify({
+        serviceFactory: typeof api.createProductionProjectTemplateCliLocalApplyService,
+        rawPortFactory: typeof api.createProductionProjectTemplateCliLocalApplyPort,
+        approvalIssuer: typeof api.issueOwnedProjectTemplateApplyPreviewApproval,
+      }));
+    `);
+    expect(JSON.parse(result)).toEqual({
+      serviceFactory: 'function',
+      rawPortFactory: 'undefined',
+      approvalIssuer: 'undefined',
+    });
+
+    const declarationEntry = readFileSync(
+      join(packageRoot, 'dist', 'index.d.ts'),
+      'utf8',
+    );
+    expect(declarationEntry).toContain(
+      'createProductionProjectTemplateCliLocalApplyService',
+    );
+    expect(declarationEntry).not.toContain(
+      'createProductionProjectTemplateCliLocalApplyPort',
+    );
+    expect(declarationEntry).not.toContain('ProjectTemplateCliLocalApplyPort');
+  });
+
   it('preserves every documented bin mapping and its built entrypoint', () => {
     expect(packageContract.bin).toEqual({
       takt: './bin/takt',
