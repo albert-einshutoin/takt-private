@@ -100,6 +100,7 @@ export type ProjectTemplateApplyResult =
 export type ProjectTemplateRollbackResult =
   | { status: 'not_started'; code: ProjectTemplateRollbackNotStartedCode; message: string }
   | { status: 'rolled_back'; backupId: string }
+  | { status: 'indeterminate'; backupId: string }
   | { status: 'recovery_required'; code: 'RECOVERY_REQUIRED'; backupId: string; message: string };
 
 export type ProjectTemplateRecoveryResult =
@@ -1403,10 +1404,19 @@ async function performOwnedRollback(options: {
         updatedAt: new Date().toISOString(),
       }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
       assertOwned();
-      await removeProjectTemplateStagingTransaction({ storage, transactionId });
-      assertOwned();
       if (options.drainTerminalJournal) {
-        await removeRollbackJournal(storage);
+        try {
+          await removeProjectTemplateStagingTransaction({ storage, transactionId });
+          assertOwned();
+          await removeRollbackJournal(storage);
+          assertOwned();
+        } catch {
+          // The target is durably rolled back, but cleanup/release certainty is
+          // part of the CLI result contract and cannot be reported as success.
+          return { status: 'indeterminate', backupId: manifest.backupId };
+        }
+      } else {
+        await removeProjectTemplateStagingTransaction({ storage, transactionId });
         assertOwned();
       }
       return { status: 'rolled_back', backupId: manifest.backupId };

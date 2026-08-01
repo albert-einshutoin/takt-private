@@ -57,6 +57,7 @@ export function settleProjectTemplateRollbackAfterLease(
 function project(result: ProjectTemplateRollbackResult):
 ProjectTemplateCliRollbackExecutionResult {
   if (result.status === 'rolled_back') return result;
+  if (result.status === 'indeterminate') return result;
   if (result.status === 'recovery_required') {
     return { status: 'recovery_required', backupId: result.backupId };
   }

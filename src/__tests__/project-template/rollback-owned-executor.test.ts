@@ -259,6 +259,35 @@ describe('owned project template rollback executor', () => {
     expect(readFileSync(value.contentPath)).toEqual(before);
   });
 
+  it('reports terminal cleanup failure as indeterminate', async () => {
+    const value = await installed();
+    let journalPath = '';
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (operation === 'unlink' && path === journalPath) {
+          throw new Error('injected terminal journal cleanup failure');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io,
+    });
+    journalPath = storage.journalPath;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toEqual({ status: 'indeterminate', backupId: value.backupId });
+    } finally {
+      lease.release();
+    }
+    expect(existsSync(value.contentPath)).toBe(false);
+  });
+
   it('rejects a structural clone of the sealed rollback authority', async () => {
     const value = await installed();
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: value.projectRoot });
