@@ -101,9 +101,8 @@ describe('project template remote CLI service', () => {
     expect(execute).not.toHaveBeenCalled();
   });
   it('returns only the closed safe diff DTO from a fresh derivation', async () => {
-    const admitMutation = vi.fn();
     const service = createProjectTemplateCliRemoteApplyService(port());
-    const outcome = await service.diff({ ...base, admitMutation });
+    const outcome = await service.diff(base);
 
     expect(outcome).toEqual({
       exitCode: 0,
@@ -119,7 +118,6 @@ describe('project template remote CLI service', () => {
     expect(JSON.stringify(outcome)).not.toMatch(
       /receipt|previewId|approval|evidence|verifier|cache|authority/iu,
     );
-    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('re-derives in a new process and admits only an exact expected plan', async () => {

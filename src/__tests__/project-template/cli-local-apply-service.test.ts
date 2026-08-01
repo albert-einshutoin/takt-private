@@ -98,14 +98,12 @@ describe('local project-template CLI diff/apply service', () => {
     expect(execute).not.toHaveBeenCalled();
   });
   it('returns the same closed dry-run plan for diff and apply', async () => {
-    const admitMutation = vi.fn();
     const service = createProjectTemplateCliLocalApplyService(port());
     const options = {
       cwd: '/safe/repo',
       sourcePath: 'pack.taktpack',
       currentTaktVersion: '0.48.0',
       force: false,
-      admitMutation,
     };
 
     const diff = await service.diff(options);
@@ -135,7 +133,6 @@ describe('local project-template CLI diff/apply service', () => {
       },
     });
     expect(JSON.stringify(diff)).not.toContain('authority');
-    expect(admitMutation).not.toHaveBeenCalled();
   });
 
   it('rejects expected-plan drift before mutation admission', async () => {
