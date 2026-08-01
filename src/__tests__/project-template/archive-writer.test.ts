@@ -173,6 +173,63 @@ describe('taktpack deterministic writer', () => {
     expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
+  it('publishes nothing and cleans staging when the authorized parent swaps at commit', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    const movedDirectory = join(root, 'moved-exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'pack.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'publish') {
+            renameSync(outputDirectory, movedDirectory);
+            mkdirSync(outputDirectory);
+          }
+        },
+      },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readdirSync(outputDirectory)).toEqual([]);
+    expect(readdirSync(movedDirectory)).toEqual([]);
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('rolls back the exact approved target if post-publication identity is lost', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'post-publish-race.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'post-publish') {
+            rmSync(output);
+            writeFileSync(output, 'foreign-replacement');
+          }
+        },
+      },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readFileSync(output, 'utf8')).toBe('approved-old');
+    expect(readdirSync(root).some((name) => (
+      name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toBe(false);
+  });
+
   it('treats directory fsync as unsupported on Windows without reporting failure', () => {
     let calls = 0;
 

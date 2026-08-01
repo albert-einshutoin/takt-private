@@ -664,9 +664,15 @@ export async function writeTaktpackWithIoSeam(
     throw new TaktpackError('SOURCE_CHANGED', 'project template root changed after planning', 'projectRoot');
   }
   const outputDirectory = dirname(outputPath);
+  // Why: staging one level above the authorized directory keeps cleanup
+  // reachable when that directory is renamed during a failed pre-commit race,
+  // while remaining on the same filesystem for atomic link/rename publish.
+  const stagingDirectory = authorityState === undefined
+    ? outputDirectory
+    : dirname(outputDirectory);
   const tempPath = join(
-    outputDirectory,
-    `.${basename(outputPath)}.${process.pid}.${randomUUID()}.tmp`,
+    stagingDirectory,
+    `.${basename(outputDirectory)}.${basename(outputPath)}.${process.pid}.${randomUUID()}.tmp`,
   );
   let archiveHash = createHash('sha256');
   let bytes = 0;
@@ -803,8 +809,8 @@ export async function writeTaktpackWithIoSeam(
         assertAuthorizedTarget(authorityState);
         if (force && authorityState.projection.target.state === 'regular-file') {
           rollbackPath = join(
-            outputDirectory,
-            `.${basename(outputPath)}.${process.pid}.${randomUUID()}.rollback`,
+            stagingDirectory,
+            `.${basename(outputDirectory)}.${basename(outputPath)}.${process.pid}.${randomUUID()}.rollback`,
           );
           linkSync(outputPath, rollbackPath);
           publicationExpectedTarget = lstatSync(outputPath);
