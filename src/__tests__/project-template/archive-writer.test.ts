@@ -344,6 +344,128 @@ describe('taktpack deterministic writer', () => {
     ))).toBe(false);
   });
 
+  it('durably proves an evacuated target restoration before reporting not-published', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'durable-restore.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    const phases: string[] = [];
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          phases.push(phase);
+          if (phase === 'authority-link') throw new Error('link unavailable');
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'ARCHIVE_WRITE_FAILED',
+      artifactState: 'not-published',
+    });
+    expect(phases).toEqual(expect.arrayContaining([
+      'rollback-restored-directory-fsync',
+      'rollback-restored-witness',
+      'rollback-unlink',
+      'rollback-final-directory-fsync',
+      'rollback-final-witness',
+    ]));
+    expect(phases.indexOf('rollback-restored-directory-fsync'))
+      .toBeLessThan(phases.indexOf('rollback-restored-witness'));
+    expect(phases.indexOf('rollback-restored-witness'))
+      .toBeLessThan(phases.indexOf('rollback-unlink'));
+    expect(phases.indexOf('rollback-unlink'))
+      .toBeLessThan(phases.indexOf('rollback-final-directory-fsync'));
+    expect(phases.indexOf('rollback-final-directory-fsync'))
+      .toBeLessThan(phases.indexOf('rollback-final-witness'));
+    expect(readFileSync(output, 'utf8')).toBe('approved-old');
+  });
+
+  it.each([
+    'rollback-restored-directory-fsync',
+    'rollback-restored-witness',
+    'rollback-unlink',
+    'rollback-final-directory-fsync',
+    'rollback-final-witness',
+  ] as const)(
+    'retains recovery evidence when %s cannot prove restoration',
+    async (failedPhase) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const outputDirectory = join(root, 'exports');
+      mkdirSync(outputDirectory);
+      const output = join(outputDirectory, 'uncertain-restore.taktpack');
+      writeFileSync(output, 'approved-old');
+      const captured = await captureTaktpackOutputPrecondition(output);
+
+      const error = await writeTaktpackWithOutputPrecondition(
+        output,
+        plan,
+        captured.authority,
+        { force: true },
+        {
+          onPhase(phase) {
+            if (phase === 'authority-link') throw new Error('link unavailable');
+            if (String(phase) === failedPhase) throw new Error('restore uncertain');
+          },
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: 'UNSAFE_OUTPUT_TARGET',
+        artifactState: 'published',
+      });
+      expect(readFileSync(output, 'utf8')).toBe('approved-old');
+      expect(readdirSync(root).some((name) => (
+        name.endsWith('.tmp') || name.endsWith('.rollback')
+      ))).toBe(true);
+    },
+  );
+
+  it('routes an evacuated-witness close failure through retained recovery', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'witness-close.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (String(phase) === 'evacuated-witness-close') {
+            throw new Error('close failed');
+          }
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(readFileSync(output, 'utf8')).toBe('approved-old');
+    expect(readdirSync(root).filter((name) => (
+      name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toHaveLength(2);
+  });
+
   it('does not overwrite a foreign insertion when publishing an authorized absent target', async () => {
     const root = makeRoot();
     writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
