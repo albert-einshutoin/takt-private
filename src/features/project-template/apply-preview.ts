@@ -25,6 +25,8 @@ import type {
   ProjectTemplateApplyPreviewCompositionConflictCode,
   ProjectTemplateApplyPreviewContentHardConflict,
   ProjectTemplateApplyPreviewOptions,
+  ProjectTemplateLocalApplyPreview,
+  ProjectTemplateLocalApplyPreviewOptions,
   ProjectTemplateRemoteApplyPreview,
   ProjectTemplateRemoteApplyPreviewOptions,
 } from './apply-preview-types.js';
@@ -35,6 +37,8 @@ export type {
   ProjectTemplateApplyPreviewCompositionConflictCode,
   ProjectTemplateApplyPreviewContentHardConflict,
   ProjectTemplateApplyPreviewOptions,
+  ProjectTemplateLocalApplyPreview,
+  ProjectTemplateLocalApplyPreviewOptions,
   ProjectTemplateRemoteApplyPreview,
   ProjectTemplateRemoteApplyPreviewOptions,
 } from './apply-preview-types.js';
@@ -79,6 +83,10 @@ const REMOTE_TRANSACTION_PLAN_DOMAIN =
   'takt.project-template.remote-transaction-plan.v1\u0000';
 const REMOTE_RECEIPT_BINDING_DOMAIN =
   'takt.project-template.remote-receipt-binding.v1\u0000';
+const LOCAL_TRANSACTION_PLAN_DOMAIN =
+  'takt.project-template.local-transaction-plan.v1\u0000';
+const LOCAL_ARCHIVE_IMPORT_BINDING_DOMAIN =
+  'takt.project-template.local-archive-import-binding.v1\u0000';
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_ARRAY_RECEIVER = Array;
 const CAPTURED_JSON_RECEIVER = JSON;
@@ -676,15 +684,96 @@ function snapshotRemoteOptions(
   });
 }
 
-/**
- * Composes the three reviewed plans into one non-authorizing remote preview.
- * Receipt identity remains only in the transaction hash input and is never
- * rendered or persisted as source provenance.
- */
-export function createProjectTemplateRemoteApplyPreview(
-  value: ProjectTemplateRemoteApplyPreviewOptions,
+function snapshotLocalOptions(
+  value: unknown,
+): ProjectTemplateLocalApplyPreviewOptions {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [value],
+    ) !== CAPTURED_OBJECT_PROTOTYPE
+  ) invalidPreview('localApplyPreview');
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as Record<PropertyKey, PropertyDescriptor>;
+  const expected = [
+    'contentPlan',
+    'repertoireDependencyPlan',
+    'sourceProvenancePlan',
+    'previousLocksSha256',
+    'nextContentLockSha256',
+    'nextRepertoireLockSha256',
+    'baselineStrategy',
+  ] as const;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [descriptors],
+  ) as PropertyKey[];
+  if (keys.length !== expected.length) invalidPreview('localApplyPreview');
+  for (let index = 0; index < expected.length; index += 1) {
+    const descriptor = descriptors[expected[index]!];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      invalidPreview('localApplyPreview');
+    }
+  }
+  for (let index = 0; index < keys.length; index += 1) {
+    let allowed = false;
+    for (let expectedIndex = 0; expectedIndex < expected.length; expectedIndex += 1) {
+      if (keys[index] === expected[expectedIndex]) allowed = true;
+    }
+    if (!allowed) invalidPreview('localApplyPreview');
+  }
+  const sha256Pattern = /^[a-f0-9]{64}$/;
+  for (const key of [
+    'previousLocksSha256',
+    'nextContentLockSha256',
+    'nextRepertoireLockSha256',
+  ] as const) {
+    if (
+      typeof descriptors[key]!.value !== 'string'
+      || !sha256Pattern.test(descriptors[key]!.value as string)
+    ) invalidPreview(`localApplyPreview.${key}`);
+  }
+  const baselineStrategy = descriptors['baselineStrategy']!.value;
+  if (baselineStrategy !== 'conflict' && baselineStrategy !== 'adopt-identical') {
+    invalidPreview('localApplyPreview.baselineStrategy');
+  }
+  return freeze({
+    contentPlan: descriptors['contentPlan']!.value as ProjectTemplateApplyPlan,
+    repertoireDependencyPlan:
+      descriptors['repertoireDependencyPlan']!.value as ProjectTemplateRepertoireDependencyPlan,
+    sourceProvenancePlan:
+      descriptors['sourceProvenancePlan']!.value as ProjectTemplateLocalApplyPreviewOptions['sourceProvenancePlan'],
+    previousLocksSha256: descriptors['previousLocksSha256']!.value as string,
+    nextContentLockSha256:
+      descriptors['nextContentLockSha256']!.value as string,
+    nextRepertoireLockSha256:
+      descriptors['nextRepertoireLockSha256']!.value as string,
+    baselineStrategy,
+  });
+}
+
+interface TransactionPreviewConfiguration {
+  readonly transactionPlanDomain: string;
+  readonly identityBinding: { readonly [key: string]: ReviewValue };
+  readonly expectedAuthority: 'github' | 'local-import';
+  readonly surfaceName: 'remote' | 'local';
+}
+
+/** Composes the shared three-plan transaction seal after input authentication. */
+function createTransactionApplyPreview(
+  options:
+    | ProjectTemplateRemoteApplyPreviewOptions
+    | ProjectTemplateLocalApplyPreviewOptions,
+  configuration: TransactionPreviewConfiguration,
 ): ProjectTemplateRemoteApplyPreview {
-  const options = snapshotRemoteOptions(value);
   const contentPlan = assertSealedProjectTemplateApplyPlan(options.contentPlan);
   const dependencyPlan = requireSealedDependencyPlan(
     options.repertoireDependencyPlan,
@@ -693,6 +782,11 @@ export function createProjectTemplateRemoteApplyPreview(
     options.sourceProvenancePlan,
   );
   const source = sourcePlan.nextProvenance;
+  const localAuthority = 'kind' in source.source
+    && source.source.kind === 'local-import';
+  if (
+    (configuration.expectedAuthority === 'local-import') !== localAuthority
+  ) invalidPreview('transactionApplyPreview.sourceProvenancePlan');
   const basePreview = createProjectTemplateApplyPreview({
     contentPlan,
     repertoireDependencyPlan: dependencyPlan,
@@ -720,12 +814,7 @@ export function createProjectTemplateRemoteApplyPreview(
   freeze(compositionConflicts);
 
   const transactionBody = freeze({
-    // Bind authenticated receipt provenance without retaining the cache
-    // locator itself in the process-local preview seal.
-    receiptIdentitySha256: hashDomainBody(
-      REMOTE_RECEIPT_BINDING_DOMAIN,
-      options.receiptKey,
-    ),
+    ...configuration.identityBinding,
     contentPlanId: contentPlan.planId,
     contentPreconditionToken: contentPlan.preconditionToken,
     repertoireDependencyPlanId: dependencyPlan.planId,
@@ -748,7 +837,7 @@ export function createProjectTemplateRemoteApplyPreview(
     baselineStrategy: options.baselineStrategy,
   }) as unknown as ReviewValue;
   const transactionPlanId = hashDomainBody(
-    REMOTE_TRANSACTION_PLAN_DOMAIN,
+    configuration.transactionPlanDomain,
     canonicalJson(transactionBody),
   );
   const bindings = freeze({
@@ -822,7 +911,7 @@ export function createProjectTemplateRemoteApplyPreview(
     + ',"hardConflict":' + CAPTURED_STRING(hardConflict)
     + ',"defaultApplyPossible":' + CAPTURED_STRING(defaultApplyPossible)
     + '}}';
-  const human = 'project-template-remote-apply-preview schema=1.0\n'
+  const human = `project-template-${configuration.surfaceName}-apply-preview schema=1.0\n`
     + `previewId=${canonicalString(previewId)}\n`
     + `transactionPlanId=${canonicalString(transactionPlanId)}\n`
     + `sourceChanges=${canonicalJson(sourcePlan.changes)}\n`
@@ -839,6 +928,62 @@ export function createProjectTemplateRemoteApplyPreview(
     }),
   ]);
   return preview;
+}
+
+/**
+ * Composes the three reviewed plans into one non-authorizing remote preview.
+ * Receipt identity remains only in the transaction hash input and is never
+ * rendered or persisted as source provenance.
+ */
+export function createProjectTemplateRemoteApplyPreview(
+  value: ProjectTemplateRemoteApplyPreviewOptions,
+): ProjectTemplateRemoteApplyPreview {
+  const options = snapshotRemoteOptions(value);
+  return createTransactionApplyPreview(options, freeze({
+    transactionPlanDomain: REMOTE_TRANSACTION_PLAN_DOMAIN,
+    identityBinding: freeze({
+      receiptIdentitySha256: hashDomainBody(
+        REMOTE_RECEIPT_BINDING_DOMAIN,
+        options.receiptKey,
+      ),
+    }),
+    expectedAuthority: 'github' as const,
+    surfaceName: 'remote' as const,
+  }));
+}
+
+/**
+ * Composes a local archive transaction without manufacturing remote receipt
+ * authority. The archive, manifest, and descriptor identity form a dedicated
+ * domain-separated import binding inside the transaction seal.
+ */
+export function createProjectTemplateLocalApplyPreview(
+  value: ProjectTemplateLocalApplyPreviewOptions,
+): ProjectTemplateLocalApplyPreview {
+  const options = snapshotLocalOptions(value);
+  const sourcePlan = assertProjectTemplateSourceProvenancePlan(
+    options.sourceProvenancePlan,
+  );
+  const source = sourcePlan.nextProvenance;
+  if (!('kind' in source.source) || source.source.kind !== 'local-import') {
+    invalidPreview('localApplyPreview.sourceProvenancePlan');
+  }
+  const archiveIdentity = freeze({
+    archiveSha256: source.archive.sha256,
+    manifestSha256: source.archive.manifestSha256,
+    sourceDescriptorSha256: source.source.descriptorSha256,
+  }) as unknown as ReviewValue;
+  return createTransactionApplyPreview(options, freeze({
+    transactionPlanDomain: LOCAL_TRANSACTION_PLAN_DOMAIN,
+    identityBinding: freeze({
+      localArchiveImportIdentitySha256: hashDomainBody(
+        LOCAL_ARCHIVE_IMPORT_BINDING_DOMAIN,
+        canonicalJson(archiveIdentity),
+      ),
+    }),
+    expectedAuthority: 'local-import' as const,
+    surfaceName: 'local' as const,
+  }));
 }
 
 /** @internal Approval binding over the exact canonical surface shown to users. */

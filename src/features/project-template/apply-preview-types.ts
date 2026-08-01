@@ -115,8 +115,8 @@ export interface ProjectTemplateTransactionApplyPreview
 }
 
 
-export interface ProjectTemplateRemoteApplyPreview
-  extends ProjectTemplateTransactionApplyPreview {}
+export type ProjectTemplateRemoteApplyPreview =
+  ProjectTemplateTransactionApplyPreview;
 
-export interface ProjectTemplateLocalApplyPreview
-  extends ProjectTemplateTransactionApplyPreview {}
+export type ProjectTemplateLocalApplyPreview =
+  ProjectTemplateTransactionApplyPreview;
