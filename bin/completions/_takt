@@ -1,0 +1,23 @@
+#compdef takt
+
+_takt_project_template() {
+  local -a commands common mutation
+  commands=(export inspect diff apply update rollback list)
+  common=(--cwd --json)
+  mutation=(--dry-run --apply --expected-plan-id --force)
+  if (( CURRENT == 3 )); then
+    _describe 'project template command' commands
+    return
+  fi
+  case ${words[3]} in
+    inspect|diff) _values 'option' $common --current-takt-version ;;
+    list) _values 'option' $common ;;
+    export) _values 'option' $common $mutation --pack-version --min-takt-version --source-commit ;;
+    apply|update) _values 'option' $common $mutation --current-takt-version ;;
+    rollback) _values 'option' $common $mutation ;;
+  esac
+}
+
+if [[ ${words[2]} == project-template ]]; then
+  _takt_project_template
+fi
