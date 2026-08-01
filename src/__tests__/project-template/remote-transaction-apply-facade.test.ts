@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyGithubProjectTemplateRemoteTransaction,
+  createGithubProjectTemplateRemotePreview,
   createProjectTemplateExportPlan,
   writeTaktpack,
 } from '../../features/project-template/index.js';
@@ -193,7 +194,12 @@ async function storedFixture() {
     artifactPath: materialized.cachePath,
     receiptPath,
     prepared,
+    projectRoot: root('takt-remote-apply-target-'),
   };
+}
+
+function flipFirstHexBit(value: string): string {
+  return `${value[0] === '0' ? '1' : '0'}${value.slice(1)}`;
 }
 
 describe('GitHub project template remote transaction apply facade', () => {
@@ -317,4 +323,41 @@ describe('GitHub project template remote transaction apply facade', () => {
       expect(readFileSync(sentinel, 'utf8')).toBe('unchanged');
     },
   );
+
+  it('rejects a one-bit expected transaction drift after fresh rederivation', async () => {
+    const value = await storedFixture();
+    const inspectionPort = {
+      inspect() {
+        return { witnessSha256: 'e'.repeat(64), observations: [] };
+      },
+    };
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort,
+      baselineStrategy: 'conflict',
+    });
+    let applyInspections = 0;
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: {
+        inspect() {
+          applyInspections += 1;
+          return { witnessSha256: 'e'.repeat(64), observations: [] };
+        },
+      },
+    });
+
+    await expect(composition.apply({
+      ...publicOptions(value.cacheRoot, value.projectRoot),
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: flipFirstHexBit(preview.transactionPlanId),
+    } as never)).rejects.toMatchObject({
+      code: 'TRANSACTION_PLAN_MISMATCH',
+    });
+    expect(applyInspections).toBe(1);
+  });
 });
