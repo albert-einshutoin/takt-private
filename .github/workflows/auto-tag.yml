@@ -132,6 +132,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Verify checkout commit binding
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Expected release commit is not a full lowercase SHA.' >&2
+            exit 1
+          fi
+          CHECKED_OUT_COMMIT=$(git rev-parse --verify 'HEAD^{commit}')
+          if [ "$CHECKED_OUT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+            echo 'Release checkout no longer matches the validated commit.' >&2
+            exit 1
+          fi
 
       - name: Create and push tag on PR head commit
         id: tag

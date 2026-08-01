@@ -432,6 +432,25 @@ describe('auto-tag workflow release boundary', () => {
       .toContain('github.event.pull_request.head.repo.full_name == github.repository');
   });
 
+  it('binds the tag checkout and pre-mutation verification to the validated commit', () => {
+    const tagJob = workflow.jobs.tag!;
+    const tagCheckout = tagJob.steps.find(step => step.uses === ACTION_PINS.checkout);
+    const verify = findStep('tag', 'Verify checkout commit binding');
+    const verifyIndex = tagJob.steps.indexOf(verify);
+    const mutationIndex = tagJob.steps.indexOf(findStep('tag', 'Create and push tag on PR head commit'));
+
+    expect(tagCheckout?.with).toMatchObject({
+      ref: '${{ needs.validate.outputs.commit }}',
+      'fetch-depth': 0,
+      'persist-credentials': false,
+    });
+    expect(verify.env).toEqual({
+      EXPECTED_COMMIT: '${{ needs.validate.outputs.commit }}',
+    });
+    expect(verifyIndex).toBeGreaterThan(tagJob.steps.indexOf(tagCheckout!));
+    expect(verifyIndex).toBeLessThan(mutationIndex);
+  });
+
   it('builds and packs without secrets before a checkout-free publish job', () => {
     const packageJob = workflow.jobs.package!;
     const publishJob = workflow.jobs.publish!;
@@ -578,6 +597,49 @@ esac
       actualSuccess = false;
     }
     expect(actualSuccess).toBe(success);
+  });
+
+  it.each([
+    ['matching validated commit', HEAD_SHA, true],
+    ['missing validated commit object', undefined, false],
+    ['wrong checked-out commit', 'e'.repeat(40), false],
+  ])('executes tag checkout binding and rejects %s', (
+    _description,
+    checkedOutCommit,
+    expectedSuccess,
+  ) => {
+    const directory = createTemporaryDirectory('takt-auto-tag-checkout-binding-');
+    const git = join(directory, 'git');
+    writeFileSync(git, `#!/bin/sh
+case "$*" in
+  'rev-parse --verify HEAD^{commit}')
+    [ -n "$CHECKED_OUT_COMMIT" ] || exit 1
+    printf '%s\\n' "$CHECKED_OUT_COMMIT"
+    ;;
+  *) exit 99 ;;
+esac
+`);
+    chmodSync(git, 0o755);
+    let actualSuccess = true;
+    try {
+      execFileSync('/bin/bash', [
+        '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+        findStep('tag', 'Verify checkout commit binding').run as string,
+      ], {
+        cwd: directory,
+        env: {
+          ...process.env,
+          CHECKED_OUT_COMMIT: checkedOutCommit ?? '',
+          EXPECTED_COMMIT: HEAD_SHA,
+          PATH: `${directory}:${process.env.PATH ?? ''}`,
+        },
+        stdio: 'pipe',
+        timeout: EXEC_TIMEOUT_MS,
+      });
+    } catch {
+      actualSuccess = false;
+    }
+    expect(actualSuccess).toBe(expectedSuccess);
   });
 
   it('binds registry verification to the exact package version and expected dist-tag', () => {
