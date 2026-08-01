@@ -15,6 +15,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -244,19 +245,26 @@ describe('POSIX project template receipt key store', () => {
     await healthy.write(registry());
     let maximumRequested = 0;
     let readBuffer: Uint8Array | undefined;
+    let readPasses = 0;
+    const hashes: Uint8Array[] = [];
     const partial = createPosixProjectTemplateReceiptKeyStore({
       directory,
       io: {
         read(fd, buffer, offset, length, position) {
           maximumRequested = Math.max(maximumRequested, buffer.byteLength);
           readBuffer = buffer;
+          if (position === 0) readPasses += 1;
           return readSync(fd, buffer, offset, Math.min(length, 3), position);
         },
+        onHashBuffer(buffer) { hashes.push(buffer); },
       },
     });
     expect(await partial.read()).toEqual(registry());
     expect(maximumRequested).toBeLessThanOrEqual(64 * 1024);
     expect(readBuffer?.every((byte) => byte === 0)).toBe(true);
+    expect(readPasses).toBe(2);
+    expect(hashes).toHaveLength(2);
+    expect(hashes.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
   });
 
   it('never unlinks another owner lock after timeout or path replacement', async () => {
@@ -309,6 +317,26 @@ describe('POSIX project template receipt key store', () => {
       },
     });
     await expect(raced.read()).rejects.toThrow(/changed/i);
+
+    await healthy.write(registry());
+    let pass = 0;
+    const betweenReads = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        read(fd, buffer, offset, length, position) {
+          if (position === 0) pass += 1;
+          if (pass === 2 && position === 0) {
+            const bytes = readFileSync(join(directory, 'keyring.json'));
+            const text = bytes.toString('utf8')
+              .replace('"generation":1', '"generation":2');
+            writeFileSync(join(directory, 'keyring.json'), text);
+            bytes.fill(0);
+          }
+          return readSync(fd, buffer, offset, length, position);
+        },
+      },
+    });
+    await expect(betweenReads.read()).rejects.toThrow(/changed/i);
   });
 
   it('zeroizes every parse-owned decoded secret on success and partial failure', () => {

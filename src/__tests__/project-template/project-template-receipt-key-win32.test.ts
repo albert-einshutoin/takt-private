@@ -3,6 +3,7 @@ import {
   appendFileSync,
   closeSync,
   copyFileSync,
+  existsSync,
   ftruncateSync,
   mkdirSync,
   mkdtempSync,
@@ -189,6 +190,8 @@ describe('Windows project template receipt key store', () => {
     await healthy.write(registry());
     let maximumRequested = 0;
     let readBuffer: Uint8Array | undefined;
+    let readPasses = 0;
+    const hashes: Uint8Array[] = [];
     const partial = createWin32ProjectTemplateReceiptKeyStore({
       directory,
       dpapi: reversibleDpapi(),
@@ -196,13 +199,41 @@ describe('Windows project template receipt key store', () => {
         read(fd, buffer, offset, length, position) {
           maximumRequested = Math.max(maximumRequested, buffer.byteLength);
           readBuffer = buffer;
+          if (position === 0) readPasses += 1;
           return readSync(fd, buffer, offset, Math.min(length, 2), position);
         },
+        onHashBuffer(buffer) { hashes.push(buffer); },
       },
     });
     expect(await partial.read()).toEqual(registry());
     expect(maximumRequested).toBeLessThanOrEqual(64 * 1024);
     expect(readBuffer?.every((byte) => byte === 0)).toBe(true);
+    expect(readPasses).toBe(2);
+    expect(hashes).toHaveLength(2);
+    expect(hashes.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
+
+    let closeFailed = false;
+    const combined = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      io: {
+        afterInitialFileStat(path) {
+          if (path.endsWith('keyring.dpapi')) appendFileSync(path, 'x');
+        },
+        close(fd) {
+          closeSync(fd);
+          closeFailed = true;
+          throw new Error('ciphertext close failure');
+        },
+      },
+    });
+    const combinedResult = await Promise.allSettled([combined.read()]);
+    const reason = combinedResult[0]?.status === 'rejected'
+      ? combinedResult[0].reason as AggregateError
+      : undefined;
+    expect(reason).toBeInstanceOf(AggregateError);
+    expect(reason?.errors).toHaveLength(2);
+    expect(closeFailed).toBe(true);
   });
 
   it('does not report a false failure after a published rename', async () => {
@@ -403,6 +434,33 @@ describe('Windows project template receipt key store', () => {
       },
     });
     await expect(raced.read()).rejects.toThrow(/changed/i);
+
+    await healthy.write(registry());
+    let pass = 0;
+    const betweenReads = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      io: {
+        read(fd, buffer, offset, length, position) {
+          if (position === 0) pass += 1;
+          if (pass === 2 && position === 0) {
+            const path = join(directory, 'keyring.dpapi');
+            const ciphertext = readFileSync(path);
+            const plaintext = Uint8Array.from(ciphertext, (byte) => byte ^ 0xa5);
+            const text = Buffer.from(plaintext).toString('utf8')
+              .replace('"generation":1', '"generation":2');
+            writeFileSync(
+              path,
+              Uint8Array.from(Buffer.from(text), (byte) => byte ^ 0xa5),
+            );
+            plaintext.fill(0);
+            ciphertext.fill(0);
+          }
+          return readSync(fd, buffer, offset, length, position);
+        },
+      },
+    });
+    await expect(betweenReads.read()).rejects.toThrow(/changed/i);
   });
 });
 

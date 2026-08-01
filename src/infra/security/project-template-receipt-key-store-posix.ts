@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   closeSync,
   constants,
@@ -14,6 +14,7 @@ import {
   renameSync,
   unlinkSync,
   writeFileSync,
+  type BigIntStats,
 } from 'node:fs';
 import { isAbsolute, join, normalize, resolve } from 'node:path';
 import {
@@ -38,11 +39,16 @@ export interface PosixProjectTemplateReceiptKeyStoreIo {
   readonly beforeFinalFileStat?: (path: string) => void;
   readonly read?: typeof readSync;
   readonly close?: typeof closeSync;
+  readonly onHashBuffer?: (buffer: Uint8Array) => void;
 }
 
 export interface PosixProjectTemplateReceiptKeyStoreOptions {
   readonly directory: string;
   readonly io?: PosixProjectTemplateReceiptKeyStoreIo;
+  readonly leasePolicy?: {
+    readonly attempts: number;
+    readonly waitMs: number;
+  };
 }
 
 function failure(message: string): ProjectTemplateReceiptKeyStoreError {
@@ -117,15 +123,18 @@ function assertRegularOwnedFile(path: string, fd: number): void {
 }
 
 function sameFileState(
-  before: ReturnType<typeof fstatSync>,
-  after: ReturnType<typeof fstatSync>,
+  before: BigIntStats,
+  after: BigIntStats,
 ): boolean {
   return before.dev === after.dev
     && before.ino === after.ino
     && before.size === after.size
     && before.mode === after.mode
     && before.uid === after.uid
-    && before.nlink === after.nlink;
+    && before.nlink === after.nlink
+    && before.mtimeNs === after.mtimeNs
+    && before.ctimeNs === after.ctimeNs
+    && before.birthtimeNs === after.birthtimeNs;
 }
 
 function readBoundedRegistryFile(
@@ -139,14 +148,14 @@ function readBoundedRegistryFile(
   let primaryFailure: unknown;
   try {
     assertRegularOwnedFile(path, fd);
-    const initial = fstatSync(fd);
-    if (initial.size >= PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
+    const initial = fstatSync(fd, { bigint: true });
+    if (initial.size >= BigInt(PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES)) {
       throw failure('Key registry exceeds the bounded maximum');
     }
     io?.afterInitialFileStat?.(path);
     // Why: size+1 detects growth without allocating in proportion to a raced
     // file. The configured cap remains 64 KiB plus the single sentinel byte.
-    const buffer = Buffer.alloc(initial.size + 1);
+    const buffer = Buffer.alloc(Number(initial.size) + 1);
     try {
       let offset = 0;
       const read = io?.read ?? readSync;
@@ -168,18 +177,55 @@ function readBoundedRegistryFile(
         if (count === 0) break;
         offset += count;
       }
+      if (BigInt(offset) !== initial.size) {
+        throw failure('Key registry changed during bounded read');
+      }
+      const firstHash = createHash('sha256').update(buffer.subarray(0, offset)).digest();
+      io?.onHashBuffer?.(firstHash);
+      buffer.fill(0);
+      let rereadOffset = 0;
+      let contentStable = false;
+      let secondHash: Buffer | undefined;
+      try {
+        while (rereadOffset < buffer.byteLength) {
+          const count = Reflect.apply(read, io, [
+            fd,
+            buffer,
+            rereadOffset,
+            buffer.byteLength - rereadOffset,
+            rereadOffset,
+          ]) as number;
+          if (
+            !Number.isSafeInteger(count)
+            || count < 0
+            || count > buffer.byteLength - rereadOffset
+          ) throw failure('Key registry partial read failed');
+          if (count === 0) break;
+          rereadOffset += count;
+        }
+        secondHash = createHash('sha256')
+          .update(buffer.subarray(0, rereadOffset))
+          .digest();
+        io?.onHashBuffer?.(secondHash);
+        contentStable = rereadOffset === offset
+          && timingSafeEqual(firstHash, secondHash);
+      } finally {
+        firstHash.fill(0);
+        secondHash?.fill(0);
+      }
       io?.beforeFinalFileStat?.(path);
-      const finalDescriptorStat = fstatSync(fd);
-      const finalPathStat = lstatSync(path);
+      const finalDescriptorStat = fstatSync(fd, { bigint: true });
+      const finalPathStat = lstatSync(path, { bigint: true });
       if (
-        offset !== initial.size
+        BigInt(rereadOffset) !== initial.size
+        || !contentStable
         || !sameFileState(initial, finalDescriptorStat)
         || finalPathStat.dev !== finalDescriptorStat.dev
         || finalPathStat.ino !== finalDescriptorStat.ino
         || finalPathStat.mode !== finalDescriptorStat.mode
-        || finalPathStat.nlink !== 1
+        || finalPathStat.nlink !== 1n
       ) throw failure('Key registry changed during bounded read');
-      output = Uint8Array.from(buffer.subarray(0, offset));
+      output = Uint8Array.from(buffer.subarray(0, rereadOffset));
     } finally {
       buffer.fill(0);
     }
@@ -270,25 +316,60 @@ function publishSnapshot(
   }
 }
 
-async function acquireLock(lockPath: string): Promise<number> {
-  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+interface OwnedLock {
+  readonly fd: number;
+  readonly dev: number;
+  readonly ino: number;
+}
+
+async function acquireLock(
+  lockPath: string,
+  attempts: number,
+  waitMs: number,
+): Promise<OwnedLock> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let fd: number | undefined;
+    let openedOwnership: OwnedLock | undefined;
     try {
-      const fd = openSync(
+      fd = openSync(
         lockPath,
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
         0o600,
       );
+      const opened = fstatSync(fd);
+      openedOwnership = { fd, dev: opened.dev, ino: opened.ino };
       fchmodSync(fd, 0o600);
       writeFileSync(fd, `${process.pid}\n`, 'utf8');
       fsyncSync(fd);
       assertRegularOwnedFile(lockPath, fd);
-      return fd;
+      const stat = fstatSync(fd);
+      return { fd, dev: stat.dev, ino: stat.ino };
     } catch (error) {
+      if (openedOwnership !== undefined) releaseOwnedLock(lockPath, openedOwnership);
+      else if (fd !== undefined) closeSync(fd);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, LOCK_WAIT_MS));
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, waitMs));
     }
   }
   throw failure('Key store exclusive lease is unavailable');
+}
+
+function releaseOwnedLock(lockPath: string, ownership: OwnedLock): void {
+  const descriptorStat = fstatSync(ownership.fd);
+  let pathStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    pathStat = lstatSync(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  closeSync(ownership.fd);
+  if (
+    descriptorStat.dev === ownership.dev
+    && descriptorStat.ino === ownership.ino
+    && pathStat?.dev === ownership.dev
+    && pathStat.ino === ownership.ino
+    && pathStat.nlink === 1
+  ) unlinkSync(lockPath);
 }
 
 export function createPosixProjectTemplateReceiptKeyStore(
@@ -300,6 +381,14 @@ export function createPosixProjectTemplateReceiptKeyStore(
   }
   const registryPath = join(directory, REGISTRY_NAME);
   const lockPath = join(directory, LOCK_NAME);
+  const leaseAttempts = options.leasePolicy?.attempts ?? LOCK_ATTEMPTS;
+  const leaseWaitMs = options.leasePolicy?.waitMs ?? LOCK_WAIT_MS;
+  if (
+    !Number.isSafeInteger(leaseAttempts)
+    || leaseAttempts < 1
+    || !Number.isSafeInteger(leaseWaitMs)
+    || leaseWaitMs < 0
+  ) throw failure('Key store lease policy is invalid');
   let disposed = false;
 
   function available(): void {
@@ -313,10 +402,10 @@ export function createPosixProjectTemplateReceiptKeyStore(
   ): Promise<T> {
     available();
     const directoryFd = ensureDirectory(directory);
-    let lockFd: number | undefined;
+    let ownedLock: OwnedLock | undefined;
     let snapshot: ProjectTemplateReceiptKeySnapshot | undefined;
     try {
-      lockFd = await acquireLock(lockPath);
+      ownedLock = await acquireLock(lockPath, leaseAttempts, leaseWaitMs);
       snapshot = readSnapshot(registryPath, options.io);
       let committed = false;
       const result = await operation(Object.freeze({
@@ -350,8 +439,7 @@ export function createPosixProjectTemplateReceiptKeyStore(
       return result;
     } finally {
       zeroizeSnapshot(snapshot);
-      if (lockFd !== undefined) closeSync(lockFd);
-      if (existsSync(lockPath)) unlinkSync(lockPath);
+      if (ownedLock !== undefined) releaseOwnedLock(lockPath, ownedLock);
       fsyncSync(directoryFd);
       closeSync(directoryFd);
     }

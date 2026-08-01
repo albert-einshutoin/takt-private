@@ -35,6 +35,10 @@ export interface ProjectTemplateReceiptKeyStoreLease {
   ): Promise<ProjectTemplateReceiptKeySnapshot | undefined>;
 }
 
+export interface ProjectTemplateReceiptKeyParseOwnershipSeam {
+  readonly onOwnedSecretBuffer?: (buffer: Uint8Array) => void;
+}
+
 /** Internal persistence port. It deliberately has no import/export operation. */
 export interface ProjectTemplateReceiptKeyStore {
   read(): Promise<ProjectTemplateReceiptKeyRegistry | undefined>;
@@ -232,6 +236,7 @@ export function serializeProjectTemplateReceiptKeySnapshot(
 
 export function parseProjectTemplateReceiptKeyRegistry(
   bytes: Uint8Array,
+  ownership?: ProjectTemplateReceiptKeyParseOwnershipSeam,
 ): ProjectTemplateReceiptKeyRegistry {
   if (bytes.byteLength > PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
     throw new ProjectTemplateReceiptKeyStoreError(
@@ -248,34 +253,41 @@ export function parseProjectTemplateReceiptKeyRegistry(
   if (record['schemaVersion'] !== 1 || !Array.isArray(record['keys'])) {
     throw new ProjectTemplateReceiptKeyStoreError('Invalid key registry schema');
   }
-  const keys = record['keys'].map((value): ProjectTemplateReceiptKeyEntry => {
-    const hasSecret = typeof value === 'object'
-      && value !== null
-      && Reflect.ownKeys(value).includes('secret');
-    const entry = exactRecord(
-      value,
-      hasSecret ? ['keyId', 'state', 'secret'] : ['keyId', 'state'],
-    );
-    const encoded = entry['secret'];
-    let secret: Uint8Array | undefined;
-    if (encoded !== undefined) {
-      if (typeof encoded !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(encoded)) {
-        throw new ProjectTemplateReceiptKeyStoreError('Invalid encoded key secret');
+  const keys: ProjectTemplateReceiptKeyEntry[] = [];
+  try {
+    for (const value of record['keys']) {
+      const hasSecret = typeof value === 'object'
+        && value !== null
+        && Reflect.ownKeys(value).includes('secret');
+      const entry = exactRecord(
+        value,
+        hasSecret ? ['keyId', 'state', 'secret'] : ['keyId', 'state'],
+      );
+      const encoded = entry['secret'];
+      let secret: Uint8Array | undefined;
+      if (encoded !== undefined) {
+        if (typeof encoded !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(encoded)) {
+          throw new ProjectTemplateReceiptKeyStoreError('Invalid encoded key secret');
+        }
+        const decoded = Buffer.from(encoded, 'base64url');
+        ownership?.onOwnedSecretBuffer?.(decoded);
+        try {
+          secret = Uint8Array.from(decoded);
+          ownership?.onOwnedSecretBuffer?.(secret);
+        } finally {
+          decoded.fill(0);
+        }
       }
-      const decoded = Buffer.from(encoded, 'base64url');
-      try {
-        secret = Uint8Array.from(decoded);
-      } finally {
-        decoded.fill(0);
-      }
+      keys.push({
+        keyId: entry['keyId'] as string,
+        state: entry['state'] as ProjectTemplateReceiptKeyState,
+        ...(secret === undefined ? {} : { secret }),
+      });
     }
-    return {
-      keyId: entry['keyId'] as string,
-      state: entry['state'] as ProjectTemplateReceiptKeyState,
-      ...(secret === undefined ? {} : { secret }),
-    };
-  });
-  return validateProjectTemplateReceiptKeyRegistry({ schemaVersion: 1, keys });
+    return validateProjectTemplateReceiptKeyRegistry({ schemaVersion: 1, keys });
+  } finally {
+    for (const key of keys) key.secret?.fill(0);
+  }
 }
 
 export function parseProjectTemplateReceiptKeySnapshot(

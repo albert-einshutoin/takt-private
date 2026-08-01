@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   closeSync,
@@ -82,12 +82,20 @@ export interface Win32ProjectTemplateReceiptKeyStoreIo {
   readonly read?: typeof readSync;
   readonly close?: typeof closeSync;
   readonly fsyncDirectory?: (directory: string) => void;
+  readonly onHashBuffer?: (buffer: Uint8Array) => void;
 }
 
 export interface Win32ProjectTemplateReceiptKeyStoreOptions {
   readonly directory: string;
   readonly dpapi?: ProjectTemplateReceiptDpapiAdapter;
   readonly io?: Win32ProjectTemplateReceiptKeyStoreIo;
+  readonly leasePolicy?: {
+    readonly attempts: number;
+    readonly waitMs: number;
+    readonly staleAfterMs: number;
+    readonly now: () => number;
+    readonly isProcessAlive: (pid: number) => boolean;
+  };
 }
 
 function failure(message: string): ProjectTemplateReceiptKeyStoreError {
@@ -295,13 +303,18 @@ function readBoundedCiphertext(
   let output: Uint8Array | undefined;
   let primaryFailure: unknown;
   try {
-    const before = fstatSync(fd);
-    if (!before.isFile() || before.nlink !== 1 || beforePath.dev !== before.dev || beforePath.ino !== before.ino) {
+    const before = fstatSync(fd, { bigint: true });
+    if (
+      !before.isFile()
+      || before.nlink !== 1n
+      || BigInt(beforePath.dev) !== before.dev
+      || BigInt(beforePath.ino) !== before.ino
+    ) {
       throw failure('Key registry path identity mismatch');
     }
-    if (before.size >= DPAPI_MAX_BYTES) throw failure('DPAPI key registry exceeds bounded maximum');
+    if (before.size >= BigInt(DPAPI_MAX_BYTES)) throw failure('DPAPI key registry exceeds bounded maximum');
     io?.afterInitialFileStat?.(path);
-    const buffer = Buffer.alloc(before.size + 1);
+    const buffer = Buffer.alloc(Number(before.size) + 1);
     try {
       let offset = 0;
       const read = io?.read ?? readSync;
@@ -316,21 +329,61 @@ function readBoundedCiphertext(
         if (count === 0) break;
         offset += count;
       }
+      if (BigInt(offset) !== before.size) {
+        throw failure('DPAPI key registry changed during bounded read');
+      }
+      const firstHash = createHash('sha256').update(buffer.subarray(0, offset)).digest();
+      io?.onHashBuffer?.(firstHash);
+      buffer.fill(0);
+      let rereadOffset = 0;
+      let contentStable = false;
+      let secondHash: Buffer | undefined;
+      try {
+        while (rereadOffset < buffer.byteLength) {
+          const count = Reflect.apply(read, io, [
+            fd,
+            buffer,
+            rereadOffset,
+            buffer.byteLength - rereadOffset,
+            rereadOffset,
+          ]) as number;
+          if (
+            !Number.isSafeInteger(count)
+            || count < 0
+            || count > buffer.byteLength - rereadOffset
+          ) throw failure('Ciphertext partial read failed');
+          if (count === 0) break;
+          rereadOffset += count;
+        }
+        secondHash = createHash('sha256')
+          .update(buffer.subarray(0, rereadOffset))
+          .digest();
+        io?.onHashBuffer?.(secondHash);
+        contentStable = rereadOffset === offset
+          && timingSafeEqual(firstHash, secondHash);
+      } finally {
+        firstHash.fill(0);
+        secondHash?.fill(0);
+      }
       io?.beforeFinalFileStat?.(path);
-      const after = fstatSync(fd);
-      const afterPath = lstatSync(path);
+      const after = fstatSync(fd, { bigint: true });
+      const afterPath = lstatSync(path, { bigint: true });
       if (
-        offset !== before.size
+        BigInt(rereadOffset) !== before.size
+        || !contentStable
         || before.dev !== after.dev
         || before.ino !== after.ino
         || before.size !== after.size
         || before.mode !== after.mode
         || before.nlink !== after.nlink
+        || before.mtimeNs !== after.mtimeNs
+        || before.ctimeNs !== after.ctimeNs
+        || before.birthtimeNs !== after.birthtimeNs
         || afterPath.dev !== after.dev
         || afterPath.ino !== after.ino
         || realpathSync(path) !== path
       ) throw failure('DPAPI key registry changed during bounded read');
-      output = Uint8Array.from(buffer.subarray(0, offset));
+      output = Uint8Array.from(buffer.subarray(0, rereadOffset));
     } finally {
       buffer.fill(0);
     }
@@ -477,19 +530,202 @@ async function publishSnapshot(
   }
 }
 
-async function acquireLock(path: string): Promise<number> {
-  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+interface Win32OwnedLock {
+  readonly fd: number;
+  readonly dev: number;
+  readonly ino: number;
+  readonly token: string;
+}
+
+interface Win32LockPolicy {
+  readonly attempts: number;
+  readonly waitMs: number;
+  readonly staleAfterMs: number;
+  readonly now: () => number;
+  readonly isProcessAlive: (pid: number) => boolean;
+}
+
+function defaultProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function recoverStaleLock(path: string, policy: Win32LockPolicy): boolean {
+  let fd: number | undefined;
+  let bytes: Buffer | undefined;
+  try {
+    const pathStat = lstatSync(path);
+    if (pathStat.isSymbolicLink() || !pathStat.isFile() || pathStat.nlink !== 1) return false;
+    fd = openSync(path, constants.O_RDONLY);
+    const descriptorStat = fstatSync(fd);
+    if (
+      !descriptorStat.isFile()
+      || descriptorStat.nlink !== 1
+      || descriptorStat.dev !== pathStat.dev
+      || descriptorStat.ino !== pathStat.ino
+      || descriptorStat.size < 1
+      || descriptorStat.size > 512
+    ) return false;
+    bytes = Buffer.alloc(descriptorStat.size + 1);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const count = readSync(fd, bytes, offset, bytes.byteLength - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    const finalDescriptor = fstatSync(fd);
+    const finalPath = lstatSync(path);
+    if (
+      offset !== descriptorStat.size
+      || finalDescriptor.dev !== descriptorStat.dev
+      || finalDescriptor.ino !== descriptorStat.ino
+      || finalDescriptor.size !== descriptorStat.size
+      || finalPath.dev !== descriptorStat.dev
+      || finalPath.ino !== descriptorStat.ino
+    ) return false;
+    const parsed = JSON.parse(bytes.subarray(0, offset).toString('utf8')) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(parsed);
+    if (
+      Reflect.ownKeys(parsed).length !== 3
+      || !('value' in (descriptors['pid'] ?? {}))
+      || !('value' in (descriptors['createdAtMs'] ?? {}))
+      || !('value' in (descriptors['token'] ?? {}))
+    ) return false;
+    const pid = descriptors['pid']!.value as unknown;
+    const createdAtMs = descriptors['createdAtMs']!.value as unknown;
+    const token = descriptors['token']!.value as unknown;
+    const now = policy.now();
+    if (
+      !Number.isSafeInteger(pid)
+      || (pid as number) < 1
+      || typeof createdAtMs !== 'number'
+      || !Number.isFinite(createdAtMs)
+      || createdAtMs < 0
+      || createdAtMs > now
+      || now - createdAtMs < policy.staleAfterMs
+      || typeof token !== 'string'
+      || !/^[a-f0-9]{32}$/.test(token)
+    ) return false;
+    let alive: boolean;
     try {
-      const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-      writeFileSync(fd, `${process.pid}\n`, 'utf8');
+      alive = policy.isProcessAlive(pid as number);
+    } catch {
+      return false;
+    }
+    if (alive) return false;
+    const beforeUnlink = lstatSync(path);
+    if (
+      beforeUnlink.dev !== descriptorStat.dev
+      || beforeUnlink.ino !== descriptorStat.ino
+      || beforeUnlink.nlink !== 1
+    ) return false;
+    closeSync(fd);
+    fd = undefined;
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    bytes?.fill(0);
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+async function acquireLock(
+  path: string,
+  policy: Win32LockPolicy,
+): Promise<Win32OwnedLock> {
+  for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
+    let fd: number | undefined;
+    let openedOwnership: Win32OwnedLock | undefined;
+    try {
+      fd = openSync(path, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL, 0o600);
+      const token = randomUUID().replaceAll('-', '');
+      const opened = fstatSync(fd);
+      openedOwnership = { fd, dev: opened.dev, ino: opened.ino, token };
+      writeFileSync(fd, JSON.stringify({
+        pid: process.pid,
+        createdAtMs: policy.now(),
+        token,
+      }), 'utf8');
       fsyncSync(fd);
-      return fd;
+      const descriptorStat = fstatSync(fd);
+      const pathStat = lstatSync(path);
+      if (
+        !descriptorStat.isFile()
+        || descriptorStat.nlink !== 1
+        || descriptorStat.dev !== pathStat.dev
+        || descriptorStat.ino !== pathStat.ino
+      ) throw failure('Key store lock identity mismatch');
+      return {
+        fd,
+        dev: descriptorStat.dev,
+        ino: descriptorStat.ino,
+        token,
+      };
     } catch (error) {
+      if (openedOwnership !== undefined) {
+        releaseOwnedLock(path, openedOwnership, false);
+      } else if (fd !== undefined) closeSync(fd);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, LOCK_WAIT_MS));
+      if (!recoverStaleLock(path, policy)) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, policy.waitMs));
+      }
     }
   }
   throw failure('Key store exclusive lease is unavailable');
+}
+
+function releaseOwnedLock(
+  path: string,
+  ownership: Win32OwnedLock,
+  requireToken = true,
+): void {
+  const descriptorStat = fstatSync(ownership.fd);
+  let tokenMatches = !requireToken;
+  if (requireToken && descriptorStat.size > 0 && descriptorStat.size <= 512) {
+    const bytes = Buffer.alloc(descriptorStat.size);
+    const tokenBytes = Buffer.from(ownership.token, 'ascii');
+    try {
+      let offset = 0;
+      while (offset < bytes.byteLength) {
+        const count = readSync(
+          ownership.fd,
+          bytes,
+          offset,
+          bytes.byteLength - offset,
+          offset,
+        );
+        if (count === 0) break;
+        offset += count;
+      }
+      tokenMatches = offset === descriptorStat.size
+        && bytes.subarray(0, offset).includes(tokenBytes);
+    } finally {
+      bytes.fill(0);
+      tokenBytes.fill(0);
+    }
+  }
+  let pathStat: ReturnType<typeof lstatSync> | undefined;
+  try {
+    pathStat = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  closeSync(ownership.fd);
+  if (
+    descriptorStat.dev === ownership.dev
+    && descriptorStat.ino === ownership.ino
+    && pathStat?.dev === ownership.dev
+    && pathStat.ino === ownership.ino
+    && pathStat.nlink === 1
+    && tokenMatches
+  ) unlinkSync(path);
 }
 
 export function createWin32ProjectTemplateReceiptKeyStore(
@@ -501,6 +737,23 @@ export function createWin32ProjectTemplateReceiptKeyStore(
   if (dpapi.scope !== 'CurrentUser') throw failure('DPAPI scope must be CurrentUser');
   const registryPath = join(directory, REGISTRY_NAME);
   const lockPath = join(directory, LOCK_NAME);
+  const leasePolicy: Win32LockPolicy = options.leasePolicy ?? {
+    attempts: LOCK_ATTEMPTS,
+    waitMs: LOCK_WAIT_MS,
+    staleAfterMs: 30_000,
+    now: Date.now,
+    isProcessAlive: defaultProcessAlive,
+  };
+  if (
+    !Number.isSafeInteger(leasePolicy.attempts)
+    || leasePolicy.attempts < 1
+    || !Number.isSafeInteger(leasePolicy.waitMs)
+    || leasePolicy.waitMs < 0
+    || !Number.isFinite(leasePolicy.staleAfterMs)
+    || leasePolicy.staleAfterMs < 1
+    || typeof leasePolicy.now !== 'function'
+    || typeof leasePolicy.isProcessAlive !== 'function'
+  ) throw failure('Key store lease policy is invalid');
   let disposed = false;
 
   async function withExclusiveLease<T>(
@@ -510,7 +763,7 @@ export function createWin32ProjectTemplateReceiptKeyStore(
   ): Promise<T> {
     if (disposed) throw failure('Key store is disposed');
     validateDirectory(directory);
-    const lockFd = await acquireLock(lockPath);
+    const ownedLock = await acquireLock(lockPath, leasePolicy);
     let snapshot: ProjectTemplateReceiptKeySnapshot | undefined;
     try {
       snapshot = await readSnapshot(registryPath, dpapi, options.io);
@@ -542,8 +795,7 @@ export function createWin32ProjectTemplateReceiptKeyStore(
       return result;
     } finally {
       zeroizeSnapshot(snapshot);
-      closeSync(lockFd);
-      if (existsSync(lockPath)) unlinkSync(lockPath);
+      releaseOwnedLock(lockPath, ownedLock);
     }
   }
 
