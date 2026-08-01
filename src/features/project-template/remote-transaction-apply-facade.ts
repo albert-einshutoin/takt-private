@@ -1,6 +1,28 @@
 import { types } from 'node:util';
 import type { ProjectTemplateApplyApprovalEvidence } from './apply-approval.js';
 import type { ProjectTemplateApplyResult } from './apply-executor.js';
+import {
+  inspectProjectTemplateApplyGuard,
+} from './apply-guard.js';
+import {
+  acquireProjectTemplateApplyLease,
+} from './apply-lease.js';
+import {
+  assertClaimedVerifiedGithubTemplateDownloadReceiptForPreview,
+  claimVerifiedGithubTemplateDownloadReceiptForApply,
+  consumeVerifiedGithubTemplateDownloadReceiptApplyClaim,
+  readGithubTemplateDownloadReceiptByReceiptKey,
+} from './github-download-receipt-offline-read.js';
+import type {
+  GithubTemplateDownloadReceiptVerifier,
+} from './github-download-receipt-storage.js';
+import type {
+  ProjectTemplateRepertoireDependencyInspectionPort,
+} from './repertoire-dependency-inspection-port.js';
+import {
+  deriveGithubTemplateDownloadArtifactPaths,
+} from './github-download-receipt-paths.js';
+import { materializeTaktpackContents } from './archive-inspector.js';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -29,8 +51,45 @@ export interface ApplyGithubProjectTemplateRemoteTransactionOptions {
   readonly signal?: AbortSignal;
 }
 
+interface ProjectTemplateRemoteApplyCompositionDependencies {
+  readonly verifier: GithubTemplateDownloadReceiptVerifier;
+  readonly repertoireInspectionPort:
+    ProjectTemplateRepertoireDependencyInspectionPort;
+}
+
+export interface ProjectTemplateRemoteApplyComposition {
+  apply(
+    value: ApplyGithubProjectTemplateRemoteTransactionOptions,
+  ): Promise<ProjectTemplateApplyResult>;
+}
+
 function invalidOptions(): never {
   throw new GithubProjectTemplateRemoteApplyError('INVALID_OPTIONS');
+}
+
+function snapshotMethodPort<Method extends (...args: never[]) => unknown>(
+  value: unknown,
+  methodName: string,
+): { readonly receiver: object; readonly method: Method } {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || Array.isArray(value)
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) invalidOptions();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  const descriptor = descriptors[methodName];
+  if (
+    keys.length !== 1
+    || keys[0] !== methodName
+    || descriptor === undefined
+    || !('value' in descriptor)
+    || typeof descriptor.value !== 'function'
+    || types.isProxy(descriptor.value)
+  ) invalidOptions();
+  return Object.freeze({ receiver: value, method: descriptor.value as Method });
 }
 
 function snapshotOptions(
@@ -116,4 +175,108 @@ export async function applyGithubProjectTemplateRemoteTransaction(
   throw new GithubProjectTemplateRemoteApplyError(
     'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
   );
+}
+
+/** @internal Trusted infrastructure composition; intentionally not root-exported. */
+export function createProjectTemplateRemoteApplyComposition(
+  value: ProjectTemplateRemoteApplyCompositionDependencies,
+): ProjectTemplateRemoteApplyComposition {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || Array.isArray(value)
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) invalidOptions();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (
+    keys.length !== 2
+    || !keys.includes('verifier')
+    || !keys.includes('repertoireInspectionPort')
+    || Object.values(descriptors).some((descriptor) => !('value' in descriptor))
+  ) invalidOptions();
+  const verifier = snapshotMethodPort<
+    GithubTemplateDownloadReceiptVerifier['verify']
+  >(descriptors['verifier']!.value, 'verify');
+  const inspection = snapshotMethodPort<
+    ProjectTemplateRepertoireDependencyInspectionPort['inspect']
+  >(descriptors['repertoireInspectionPort']!.value, 'inspect');
+  const trusted = Object.freeze({
+    verifier: Object.freeze({
+      verify: Object.freeze((request: Parameters<
+        GithubTemplateDownloadReceiptVerifier['verify']
+      >[0]) => Reflect.apply(verifier.method, verifier.receiver, [request])),
+    }),
+    repertoireInspectionPort: Object.freeze({
+      inspect: Object.freeze((request: Parameters<
+        ProjectTemplateRepertoireDependencyInspectionPort['inspect']
+      >[0]) => Reflect.apply(inspection.method, inspection.receiver, [request])),
+    }),
+  });
+  return Object.freeze({
+    async apply(
+      input: ApplyGithubProjectTemplateRemoteTransactionOptions,
+    ): Promise<ProjectTemplateApplyResult> {
+      const options = snapshotOptions(input);
+      const initialGuard = inspectProjectTemplateApplyGuard({
+        repoPath: options.projectRoot,
+      });
+      if (!initialGuard.passed) {
+        throw new GithubProjectTemplateRemoteApplyError(
+          'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
+        );
+      }
+      const lease = acquireProjectTemplateApplyLease(options.projectRoot);
+      try {
+        const ownedGuard = inspectProjectTemplateApplyGuard({
+          repoPath: options.projectRoot,
+          ownedLease: lease,
+        });
+        if (!ownedGuard.passed) {
+          throw new GithubProjectTemplateRemoteApplyError(
+            'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
+          );
+        }
+        const verified = await readGithubTemplateDownloadReceiptByReceiptKey({
+          cacheRoot: options.cacheRoot,
+          receiptKey: options.receiptKey,
+          verifier: trusted.verifier,
+        });
+        // Reservation follows the fresh authenticated read synchronously.
+        const claim = claimVerifiedGithubTemplateDownloadReceiptForApply(
+          verified,
+        );
+        try {
+          const claimed =
+            assertClaimedVerifiedGithubTemplateDownloadReceiptForPreview(
+              claim,
+              {
+                cacheRoot: options.cacheRoot,
+                receiptKey: options.receiptKey,
+                artifactSha256: verified.artifactSha256,
+              },
+            );
+          const artifactPaths = deriveGithubTemplateDownloadArtifactPaths({
+            cacheRoot: options.cacheRoot,
+            archiveSha256: claimed.artifactSha256,
+          });
+          await materializeTaktpackContents(artifactPaths.artifactPath, {
+            currentTaktVersion: options.currentTaktVersion,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          });
+        } finally {
+          consumeVerifiedGithubTemplateDownloadReceiptApplyClaim(claim);
+        }
+        // The subsequent fresh cohort/approval/executor stages are added by
+        // the remaining H11 TDD slices. No verified value escapes this call.
+        void trusted.repertoireInspectionPort;
+        throw new GithubProjectTemplateRemoteApplyError(
+          'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
+        );
+      } finally {
+        lease.release();
+      }
+    },
+  });
 }
