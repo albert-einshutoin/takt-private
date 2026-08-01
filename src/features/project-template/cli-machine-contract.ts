@@ -255,6 +255,7 @@ const CAPTURED_OBJECT_FREEZE = Object.freeze;
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const CAPTURED_NUMBER_RECEIVER = Number;
+const CAPTURED_SET = Set;
 const CAPTURED_SET_HAS = Set.prototype.has;
 const CAPTURED_SET_ADD = Set.prototype.add;
 const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
@@ -273,7 +274,7 @@ const MAX_BACKUP_IDS = 32;
 const MAX_CHANGES = 8_192;
 const MAX_REVIEW_CODES = 32;
 
-const COMMANDS = new Set<ProjectTemplateCliCommand>([
+const COMMANDS = new CAPTURED_SET<ProjectTemplateCliCommand>([
   'project-template export',
   'project-template inspect',
   'project-template diff',
@@ -424,7 +425,7 @@ function validateReviewSummary(
   if (!isArray(result.reviewCodes) || result.reviewCodes.length > MAX_REVIEW_CODES) {
     invalidSchema();
   }
-  const unique = new Set<ProjectTemplateCliReviewCode>();
+  const unique = new CAPTURED_SET<ProjectTemplateCliReviewCode>();
   for (let index = 0; index < result.reviewCodes.length; index += 1) {
     const value = result.reviewCodes[index]!;
     const code = value as ProjectTemplateCliReviewCode;
@@ -571,7 +572,7 @@ function validateResult(
       || result.backupIds.length > MAX_BACKUP_IDS
       || !isRecoveryState(result.recoveryState)
       || (result.installed && !isSafeId(result.targetId))) invalidSchema();
-    const unique = new Set<string>();
+    const unique = new CAPTURED_SET<string>();
     for (let index = 0; index < result.backupIds.length; index += 1) {
       const backupId = result.backupIds[index]!;
       if (!isSafeId(backupId) || apply(CAPTURED_SET_HAS, unique, [backupId])) {
@@ -586,7 +587,7 @@ function validateResult(
 function validateWarnings(value: ProjectTemplateCliJson | undefined): readonly ProjectTemplateCliWarning[] {
   if (value === undefined || !isArray(value) || value.length > MAX_WARNINGS) invalidSchema();
   const warnings: ProjectTemplateCliWarning[] = [];
-  const unique = new Set<ProjectTemplateCliWarningCode>();
+  const unique = new CAPTURED_SET<ProjectTemplateCliWarningCode>();
   for (let index = 0; index < value.length; index += 1) {
     const warning = value[index]!;
     if (!isRecord(warning) || !hasExactKeys(warning, ['code']) || typeof warning.code !== 'string') {
