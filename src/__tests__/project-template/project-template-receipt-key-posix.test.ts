@@ -38,7 +38,7 @@ function registry(): ProjectTemplateReceiptKeyRegistry {
   return {
     schemaVersion: 1,
     keys: [{
-      keyId: 'receipt-key-1',
+      keyId: 'receipt-key-11111111111111111111111111111111',
       state: 'active',
       secret: new Uint8Array(32).fill(5),
     }],
@@ -55,7 +55,7 @@ describe('POSIX project template receipt key store', () => {
     expect(lstatSync(directory).mode & 0o777).toBe(0o700);
     expect(lstatSync(join(directory, 'keyring.json')).mode & 0o777).toBe(0o600);
     expect(readFileSync(join(directory, 'keyring.json'), 'utf8')).toBe(
-      '{"schemaVersion":1,"keys":[{"keyId":"receipt-key-1","state":"active","secret":"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"}]}',
+      '{"schemaVersion":1,"keys":[{"keyId":"receipt-key-11111111111111111111111111111111","state":"active","secret":"BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU"}]}',
     );
     expect(await store.read()).toEqual(registry());
   });
@@ -96,7 +96,7 @@ describe('POSIX project template receipt key store', () => {
     const oversized: ProjectTemplateReceiptKeyRegistry = {
       schemaVersion: 1,
       keys: Array.from({ length: 17 }, (_, index) => ({
-        keyId: `receipt-key-${index}`,
+        keyId: `receipt-key-${index.toString(16).padStart(32, '0')}`,
         state: index === 0 ? 'active' as const : 'verify-only' as const,
         secret: new Uint8Array(32).fill(index),
       })),
@@ -121,7 +121,7 @@ describe('POSIX project template receipt key store', () => {
     await expect(store.write({
       schemaVersion: 1,
       keys: [{
-        keyId: 'receipt-key-2',
+        keyId: 'receipt-key-22222222222222222222222222222222',
         state: 'active',
         secret: new Uint8Array(32).fill(6),
       }],

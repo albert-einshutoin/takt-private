@@ -36,7 +36,7 @@ function registry(): ProjectTemplateReceiptKeyRegistry {
   return {
     schemaVersion: 1,
     keys: [{
-      keyId: 'receipt-key-windows',
+      keyId: 'receipt-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       state: 'active',
       secret: new Uint8Array(32).fill(11),
     }],
@@ -66,7 +66,9 @@ describe('Windows project template receipt key store', () => {
     await store.write(registry());
 
     const persisted = readFileSync(join(directory, 'keyring.dpapi'));
-    expect(persisted.includes(Buffer.from('receipt-key-windows'))).toBe(false);
+    expect(persisted.includes(Buffer.from(
+      'receipt-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    ))).toBe(false);
     expect(persisted.includes(Buffer.alloc(32, 11))).toBe(false);
     expect(await createWin32ProjectTemplateReceiptKeyStore({
       directory,

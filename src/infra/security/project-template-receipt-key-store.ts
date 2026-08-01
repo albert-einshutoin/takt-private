@@ -5,7 +5,6 @@ export const PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES = 64 * 1024;
 export const PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_KEYS = 16;
 
 const KEY_ID_PATTERN = /^receipt-key-[a-f0-9]{32}$/;
-const LEGACY_TEST_KEY_ID_PATTERN = /^receipt-key-[a-z0-9-]{1,48}$/;
 
 export type ProjectTemplateReceiptKeyState =
   | 'active'
@@ -72,8 +71,7 @@ function exactRecord(
 }
 
 function validKeyId(keyId: unknown): keyId is string {
-  return typeof keyId === 'string'
-    && (KEY_ID_PATTERN.test(keyId) || LEGACY_TEST_KEY_ID_PATTERN.test(keyId));
+  return typeof keyId === 'string' && KEY_ID_PATTERN.test(keyId);
 }
 
 function cloneEntry(entry: ProjectTemplateReceiptKeyEntry): ProjectTemplateReceiptKeyEntry {
