@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   executeOwnedProjectTemplateCompanionLockTransaction,
+  ProjectTemplateCompanionLockRecoveryError,
   ProjectTemplateCompanionLockRollbackError,
   recoverProjectTemplateCompanionLockTransaction,
   type ProjectTemplateCompanionLockTransactionPhase,
@@ -38,6 +39,8 @@ import {
 
 const CONTENT_LOCK_PATH = '.takt-template-lock.json';
 const CONTENT_ENTRY_PATH = '.takt/workflows/review.yaml';
+const BASELINE = new TextEncoder().encode('name: next\n');
+const BASELINE_SHA256 = createHash('sha256').update(BASELINE).digest('hex');
 const roots: string[] = [];
 
 function makeRepo(): string {
@@ -82,16 +85,23 @@ function readCohort(projectRoot: string): Readonly<Record<string, string>> {
 }
 
 const CRASH_PHASES = [
+  'merge-baseline-0-staged',
   'content-entry-0-staged',
   'content-lock-staged',
   'repertoire-lock-staged',
   'source-provenance-staged',
+  'merge-baseline-0-backed-up',
   'content-entry-0-backed-up',
   'content-lock-backed-up',
   'repertoire-lock-backed-up',
   'source-provenance-backed-up',
   'journal-durable',
   'approval-consumed',
+  'merge-baseline-0-before-fsync',
+  'merge-baseline-0-after-fsync',
+  'merge-baseline-0-before-rename',
+  'merge-baseline-0-after-rename',
+  'merge-baseline-0-published',
   'content-entry-0-before-fsync',
   'content-entry-0-after-fsync',
   'content-entry-0-before-rename',
@@ -126,7 +136,9 @@ describe('project template companion lock transaction crash recovery', () => {
     ).previousLocksSha256;
     let approvalConsumes = 0;
     try {
-      await expect(executeOwnedProjectTemplateCompanionLockTransaction({
+      let observedError: unknown;
+      try {
+        await executeOwnedProjectTemplateCompanionLockTransaction({
         storage,
         lease,
         transactionPlanId: 'a'.repeat(64),
@@ -149,11 +161,21 @@ describe('project template companion lock transaction crash recovery', () => {
             writeFileSync(join(projectRoot, CONTENT_LOCK_PATH), 'foreign\n');
           }
         },
-      })).rejects.toThrow();
+        });
+      } catch (error) {
+        observedError = error;
+      }
+      expect(observedError).toBeInstanceOf(ProjectTemplateCompanionLockRollbackError);
       expect(approvalConsumes).toBe(0);
     } finally {
       lease.release();
     }
+    expect(readFileSync(join(projectRoot, CONTENT_LOCK_PATH), 'utf8'))
+      .toBe('foreign\n');
+    await expect(recoverProjectTemplateCompanionLockTransaction({ projectRoot }))
+      .rejects.toBeInstanceOf(ProjectTemplateCompanionLockRecoveryError);
+    expect(readFileSync(join(projectRoot, CONTENT_LOCK_PATH), 'utf8'))
+      .toBe('foreign\n');
   });
 
   it('publishes merge baselines inside the rollback and recovery transaction', async () => {
@@ -161,8 +183,6 @@ describe('project template companion lock transaction crash recovery', () => {
     const oldCohort = cohort('old');
     const newCohort = cohort('new');
     writeCohort(projectRoot, oldCohort);
-    const baseline = new TextEncoder().encode('name: next\n');
-    const baselineSha256 = createHash('sha256').update(baseline).digest('hex');
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
     const lease = acquireProjectTemplateApplyLease(projectRoot);
     try {
@@ -172,7 +192,7 @@ describe('project template companion lock transaction crash recovery', () => {
         transactionPlanId: 'a'.repeat(64),
         preconditionToken: 'b'.repeat(64),
         outputs: {
-          mergeBaselines: [{ sha256: baselineSha256, content: baseline }],
+          mergeBaselines: [{ sha256: BASELINE_SHA256, content: BASELINE }],
           contentLock: newCohort[CONTENT_LOCK_PATH]!,
           repertoireLock:
             newCohort[PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH]!,
@@ -183,8 +203,8 @@ describe('project template companion lock transaction crash recovery', () => {
         async runDoctor() {
           await expect(readProjectTemplateMergeBaseline({
             storage,
-            expectedSha256: baselineSha256,
-          })).resolves.toEqual(Buffer.from(baseline));
+            expectedSha256: BASELINE_SHA256,
+          })).resolves.toEqual(Buffer.from(BASELINE));
         },
       });
     } finally {
@@ -192,8 +212,8 @@ describe('project template companion lock transaction crash recovery', () => {
     }
     await expect(readProjectTemplateMergeBaseline({
       storage,
-      expectedSha256: baselineSha256,
-    })).resolves.toEqual(Buffer.from(baseline));
+      expectedSha256: BASELINE_SHA256,
+    })).resolves.toEqual(Buffer.from(BASELINE));
   });
 
   it.each(CRASH_PHASES)(
@@ -215,6 +235,7 @@ describe('project template companion lock transaction crash recovery', () => {
           transactionPlanId: 'a'.repeat(64),
           preconditionToken: 'b'.repeat(64),
           outputs: {
+            mergeBaselines: [{ sha256: BASELINE_SHA256, content: BASELINE }],
             contentEntries: [{
               path: 'workflows/review.yaml',
               action: 'write',
@@ -261,6 +282,10 @@ describe('project template companion lock transaction crash recovery', () => {
       );
       expect(existsSync(storage.journalPath)).toBe(false);
       expect(readdirSync(storage.stagingRoot)).toEqual([]);
+      expect(existsSync(join(storage.baselinesRoot, BASELINE_SHA256))).toBe(
+        crashPhase === 'committed-marker-durable'
+          || crashPhase === 'cleanup-complete',
+      );
       expect(readdirSync(storage.backupsRoot)).toHaveLength(
         crashPhase === 'committed-marker-durable'
           || crashPhase === 'cleanup-complete' ? 1 : 0,
@@ -282,6 +307,7 @@ describe('project template companion lock transaction crash recovery', () => {
       transactionPlanId: 'a'.repeat(64),
       preconditionToken: 'b'.repeat(64),
       outputs: {
+        mergeBaselines: [{ sha256: BASELINE_SHA256, content: BASELINE }],
         contentEntries: [{
           path: 'workflows/review.yaml',
           action: 'write' as const,
@@ -303,6 +329,7 @@ describe('project template companion lock transaction crash recovery', () => {
       expect(readCohort(projectRoot)).toEqual(Object.freeze(Object.fromEntries(
         TARGET_PATHS.map((path) => [path, new TextDecoder().decode(oldCohort[path]!)]),
       )));
+      expect(existsSync(join(storage.baselinesRoot, BASELINE_SHA256))).toBe(false);
       await expect(execute()).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
       expect(approvalConsumes).toBe(2);
     } finally {

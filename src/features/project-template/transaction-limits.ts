@@ -1,4 +1,7 @@
-import { MAX_PROJECT_TEMPLATE_COHORT_BYTES } from './archive-types.js';
+import {
+  DEFAULT_TAKTPACK_LIMITS,
+  MAX_PROJECT_TEMPLATE_COHORT_BYTES,
+} from './archive-types.js';
 import { DEFAULT_PROJECT_TEMPLATE_MAX_NODES } from './classifier-types.js';
 import {
   MAX_PROJECT_TEMPLATE_CONTENT_LOCK_BYTES,
@@ -17,7 +20,9 @@ export const PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX = 'entry:';
 
 const MAX_OPERATION_KEY_LENGTH =
   PROJECT_TEMPLATE_ENTRY_OPERATION_PREFIX.length + MAX_TEMPLATE_PATH_LENGTH;
-const MAX_OPERATIONS = MAX_TEMPLATE_ENTRIES + 3;
+export const MAX_PROJECT_TEMPLATE_MERGE_BASELINE_BYTES =
+  DEFAULT_TAKTPACK_LIMITS.maxBlobBytes;
+const MAX_OPERATIONS = MAX_TEMPLATE_ENTRIES + 5;
 const MAX_CREATED_TARGET_DIRECTORIES = DEFAULT_PROJECT_TEMPLATE_MAX_NODES + 1;
 const SERIALIZED_CONTROL_FIXED_BYTES = 4 * 1024;
 // Portable paths cannot contain JSON escape characters, while this fixed
@@ -55,7 +60,7 @@ export const PROJECT_TEMPLATE_TRANSACTION_LIMITS = Object.freeze({
 
 export function projectTemplateTransactionTargetByteLimit(
   kind: 'template-entry' | 'lock' | 'content-lock'
-    | 'repertoire-lock' | 'source-provenance',
+    | 'repertoire-lock' | 'source-provenance' | 'merge-baseline',
 ): number {
   if (kind === 'content-lock' || kind === 'lock') {
     return PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxContentLockBytes;
@@ -65,6 +70,9 @@ export function projectTemplateTransactionTargetByteLimit(
   }
   if (kind === 'source-provenance') {
     return PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxSourceProvenanceBytes;
+  }
+  if (kind === 'merge-baseline') {
+    return MAX_PROJECT_TEMPLATE_MERGE_BASELINE_BYTES;
   }
   return PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes;
 }

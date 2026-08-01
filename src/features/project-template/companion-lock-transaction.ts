@@ -34,9 +34,11 @@ import {
   linearizePreparedProjectTemplateRemoteTransaction,
   ProjectTemplateRemoteTransactionLinearizationError,
 } from './remote-transaction-linearization.js';
+import { readProjectTemplateCompanionLockState } from './companion-lock-state-reader.js';
 
 type TransactionTargetPhase =
   | `content-entry-${number}`
+  | `merge-baseline-${number}`
   | 'content-lock'
   | 'repertoire-lock'
   | 'source-provenance';
@@ -340,6 +342,7 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
     readonly lease: ProjectTemplateApplyLease;
     readonly transactionPlanId: string;
     readonly preconditionToken: string;
+    readonly expectedPreviousLocksSha256?: string;
     readonly outputs: {
       readonly contentEntries?: readonly (
         | {
@@ -350,6 +353,10 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
         }
         | { readonly path: string; readonly action: 'delete' }
       )[];
+      readonly mergeBaselines?: readonly {
+        readonly sha256: string;
+        readonly content: Uint8Array;
+      }[];
       readonly contentLock: Uint8Array;
       readonly repertoireLock: Uint8Array;
       readonly sourceProvenance: Uint8Array;
@@ -383,7 +390,27 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
             content: entry.content,
             targetMode: entry.mode,
           });
+  const baselineOutputs = (options.outputs.mergeBaselines ?? [])
+    .slice()
+    .sort((left, right) => left.sha256.localeCompare(right.sha256))
+    .map((entry, index): TransactionOutput => ({
+      target: { kind: 'merge-baseline', sha256: entry.sha256 },
+      phasePrefix: `merge-baseline-${index}`,
+      action: 'write',
+      content: entry.content,
+      targetMode: '0600',
+    }));
+  if (
+    new Set(baselineOutputs.map((output) => (
+      (output.target as { sha256: string }).sha256
+    ))).size !== baselineOutputs.length
+    || baselineOutputs.some((output) => (
+      hash(output.content!)
+      !== (output.target as { sha256: string }).sha256
+    ))
+  ) throw new Error('merge baseline outputs are invalid');
   const outputs: readonly TransactionOutput[] = [
+    ...baselineOutputs,
     ...contentOutputs,
     { target: { kind: 'content-lock' }, phasePrefix: 'content-lock', action: 'write', content: options.outputs.contentLock, targetMode: '0600' },
     { target: { kind: 'repertoire-lock' }, phasePrefix: 'repertoire-lock', action: 'write', content: options.outputs.repertoireLock, targetMode: '0600' },
@@ -398,8 +425,17 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
         observed.set(output.phasePrefix, await currentState(storage, output.target));
         assertOwned(storage, options.lease);
       }
+      const effectiveOutputs = outputs.filter((output) => {
+        if (output.target.kind !== 'merge-baseline') return true;
+        const before = observed.get(output.phasePrefix)!;
+        if (before.kind === 'absent') return true;
+        if (before.sha256 !== output.target.sha256) {
+          throw new Error('merge baseline target is not immutable');
+        }
+        return false;
+      });
       const staged: Array<TransactionOutput & { staged?: ProjectTemplateStagingFile }> = [];
-      for (const output of outputs) {
+      for (const output of effectiveOutputs) {
         let stagedFile: ProjectTemplateStagingFile | undefined;
         if (output.action === 'write') {
           stagedFile = await writeProjectTemplateStagingFile({
@@ -460,7 +496,7 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
       }
       const createdTargetDirectories = await collectMissingTargetDirectories(
         storage,
-        outputs,
+        effectiveOutputs,
       );
       await writeJournal(storage, {
         transactionId,
@@ -499,6 +535,15 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
       });
     },
     async consumeApproval() {
+      if (options.expectedPreviousLocksSha256 !== undefined) {
+        assertOwned(storage, options.lease);
+        const current = readProjectTemplateCompanionLockState(storage.repoRoot);
+        assertOwned(storage, options.lease);
+        if (
+          current.previousLocksSha256
+          !== options.expectedPreviousLocksSha256
+        ) throw new Error('project template companion lock cohort changed');
+      }
       const consumed = await options.consumeApproval();
       if (consumed) options.onPhase?.('approval-consumed');
       return consumed;

@@ -331,7 +331,8 @@ export type ProjectTemplateApplyTarget =
   | { kind: 'lock' }
   | { kind: 'content-lock' }
   | { kind: 'repertoire-lock' }
-  | { kind: 'source-provenance' };
+  | { kind: 'source-provenance' }
+  | { kind: 'merge-baseline'; sha256: string };
 
 export interface ResolvedProjectTemplateApplyTarget {
   target: ProjectTemplateApplyTarget;
@@ -857,6 +858,24 @@ export function resolveProjectTemplateApplyTarget(
       displayPath: '.takt-template-lock.json',
     };
   }
+  if (value.kind === 'merge-baseline') {
+    if (
+      !hasExactDataKeys(value, ['kind', 'sha256'])
+      || !/^[a-f0-9]{64}$/.test(value.sha256)
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_PATH',
+        'project template merge baseline target is invalid',
+      );
+    }
+    return {
+      target: { kind: 'merge-baseline', sha256: value.sha256 },
+      key: `baseline:${value.sha256}`,
+      absolutePath: join(storage.baselinesRoot, value.sha256),
+      stagingRelativePath: `baselines/${value.sha256}`,
+      displayPath: `.takt-template-state/merge-baselines/${value.sha256}`,
+    };
+  }
   const companion = value.kind === 'content-lock'
     ? {
         key: 'content-lock',
@@ -949,6 +968,20 @@ function validateManifestTarget(
       path: safeRelativePath((target as { path: string }).path),
     };
   }
+  if (target.kind === 'merge-baseline') {
+    if (
+      schemaVersion !== '1.1'
+      || !hasExactDataKeys(value, ['kind', 'sha256'])
+      || typeof target.sha256 !== 'string'
+      || !/^[a-f0-9]{64}$/.test(target.sha256)
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'INVALID_MANIFEST',
+        'backup manifest merge baseline target is invalid',
+      );
+    }
+    return { kind: 'merge-baseline', sha256: target.sha256 };
+  }
   const expectedKinds = schemaVersion === '1.0'
     ? ['lock'] as const
     : ['content-lock', 'repertoire-lock', 'source-provenance'] as const;
@@ -1038,7 +1071,7 @@ async function ensurePrivateParents(
   // makes a maximum-length portable target longer than the public path bound.
   const segments = relativePath.split('/');
   if (
-    !['entries', 'lock', 'locks'].includes(segments[0]!)
+    !['entries', 'lock', 'locks', 'baselines'].includes(segments[0]!)
     || segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
   ) {
     throw new ProjectTemplateApplyStorageError(
@@ -1651,7 +1684,9 @@ function validateBackupManifest(
     );
     const targetKey = target.kind === 'template-entry'
       ? `entry:${target.path}`
-      : target.kind;
+      : target.kind === 'merge-baseline'
+        ? `baseline:${target.sha256}`
+        : target.kind;
     if (paths.has(targetKey)) {
       throw new ProjectTemplateApplyStorageError(
         'INVALID_MANIFEST',
@@ -1894,7 +1929,8 @@ function isOperationKeyForSchema(
   }
   return schemaVersion === '1.0'
     ? value === 'lock'
-    : value === 'content-lock'
+    : /^baseline:[a-f0-9]{64}$/.test(value)
+      || value === 'content-lock'
       || value === 'repertoire-lock'
       || value === 'source-provenance';
 }

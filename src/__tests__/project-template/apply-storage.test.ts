@@ -127,6 +127,22 @@ describe('project template apply storage', () => {
     },
   );
 
+  it('resolves a content-addressed schema 1.1 merge baseline target', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: makeRepo(),
+    });
+    const sha256 = 'd'.repeat(64);
+    expect(resolveProjectTemplateApplyTarget(storage, {
+      kind: 'merge-baseline',
+      sha256,
+    })).toMatchObject({
+      target: { kind: 'merge-baseline', sha256 },
+      key: `baseline:${sha256}`,
+      absolutePath: join(storage.baselinesRoot, sha256),
+      stagingRelativePath: `baselines/${sha256}`,
+    });
+  });
+
   it('round-trips a strict schema 1.1 backup target union', async () => {
     const storage = await initializeProjectTemplateApplyStorage({
       repoPath: makeRepo(),
@@ -139,6 +155,7 @@ describe('project template apply storage', () => {
       createdAt: '2026-08-01T00:00:00.000Z',
       createdTargetDirectories: [],
       entries: [
+        { kind: 'merge-baseline', sha256: 'd'.repeat(64) },
         { kind: 'content-lock' },
         { kind: 'repertoire-lock' },
         { kind: 'source-provenance' },
@@ -184,6 +201,7 @@ describe('project template apply storage', () => {
       ['1.1', { kind: 'lock' }],
       ['1.1', { kind: 'unknown-lock' }],
       ['1.1', { kind: 'content-lock', path: 'forged' }],
+      ['1.1', { kind: 'merge-baseline', sha256: 'invalid' }],
     ] as const) {
       await expect(writeProjectTemplateBackupManifest({
         storage,
@@ -204,6 +222,7 @@ describe('project template apply storage', () => {
       ...journal(),
       schemaVersion: '1.1',
       completedOperations: [
+        `baseline:${'d'.repeat(64)}`,
         'content-lock',
         'repertoire-lock',
         'source-provenance',
@@ -242,6 +261,8 @@ describe('project template apply storage', () => {
     });
     const completedOperations = [
       ...paths.map((path) => `entry:${path}`),
+      `baseline:${'d'.repeat(64)}`,
+      `baseline:${'e'.repeat(64)}`,
       'content-lock', 'repertoire-lock', 'source-provenance',
     ];
     const createdTargetDirectories = [

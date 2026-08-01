@@ -7,13 +7,14 @@ import {
   ProjectTemplateApplyStorageError,
   type ProjectTemplateApplyStorage,
 } from './apply-storage.js';
-import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
+import {
+  MAX_PROJECT_TEMPLATE_MERGE_BASELINE_BYTES,
+} from './transaction-limits.js';
 
 // Every semantic-config blob accepted by archive inspection and apply planning
 // must fit in the immutable baseline store. Sharing the canonical blob limit
 // prevents a plan from succeeding for content that execution can never retain.
-export const MAX_PROJECT_TEMPLATE_MERGE_BASELINE_BYTES =
-  DEFAULT_TAKTPACK_LIMITS.maxBlobBytes;
+export { MAX_PROJECT_TEMPLATE_MERGE_BASELINE_BYTES } from './transaction-limits.js';
 const MAX_BASELINE_DIRECTORY_ENTRIES = 8_192;
 
 function sha256(content: Uint8Array): string {
