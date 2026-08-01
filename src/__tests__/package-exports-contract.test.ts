@@ -285,6 +285,7 @@ describe('package exports contract', () => {
         consume: typeof api.consumeProjectTemplateApplyPreviewApproval,
         revoke: typeof api.revokeProjectTemplateApplyPreviewApproval,
         isEvidence: typeof api.isProjectTemplateApplyPreviewApprovalEvidence,
+        createRemote: typeof api.createGithubProjectTemplateRemotePreview,
       }));
     `);
     expect(JSON.parse(result)).toEqual({
@@ -297,6 +298,7 @@ describe('package exports contract', () => {
       consume: 'undefined',
       revoke: 'undefined',
       isEvidence: 'undefined',
+      createRemote: 'function',
     });
 
     expectTypeOf<ProjectTemplateApplyPreview>()
@@ -304,7 +306,14 @@ describe('package exports contract', () => {
     expectTypeOf<ProjectTemplateApplyPreviewBindings>()
       .toHaveProperty('repertoireDependencyPlanId');
     expectTypeOf<ProjectTemplateApplyPreviewCompositionConflictCode>()
-      .toEqualTypeOf<'MANIFEST_BINDING_MISMATCH'>();
+      .toEqualTypeOf<
+        | 'MANIFEST_BINDING_MISMATCH'
+        | 'SOURCE_MANIFEST_BINDING_MISMATCH'
+        | 'SOURCE_ARCHIVE_BINDING_MISMATCH'
+        | 'SOURCE_DESCRIPTOR_BINDING_MISMATCH'
+        | 'SOURCE_DEPENDENCY_BINDING_MISMATCH'
+        | 'SOURCE_VERSION_BINDING_MISMATCH'
+      >();
     expectTypeOf<ProjectTemplateApplyPreviewContentHardConflict>()
       .toHaveProperty('code');
     expectTypeOf<ProjectTemplateApplyPreviewApprovalEvidence>()
@@ -322,6 +331,9 @@ describe('package exports contract', () => {
       'ProjectTemplateApplyPreviewCompositionConflictCode',
       'ProjectTemplateApplyPreviewContentHardConflict',
       'ProjectTemplateApplyPreviewApprovalEvidence',
+      'createGithubProjectTemplateRemotePreview',
+      'ProjectTemplateRemoteApplyPreview',
+      'ProjectTemplateSourceProvenanceV1',
     ]) expect(declarationEntry).toContain(exported);
     for (const forbidden of [
       'createProjectTemplateApplyPreview',

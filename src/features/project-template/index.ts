@@ -17,6 +17,14 @@ export {
   serializeProjectTemplateSourceDescriptor,
   calculateProjectTemplateSourceDescriptorSha256,
 } from './source-descriptor.js';
+export {
+  PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+  MAX_PROJECT_TEMPLATE_SOURCE_PROVENANCE_BYTES,
+  parseProjectTemplateSourceProvenance,
+  parseProjectTemplateSourceProvenanceJson,
+  serializeProjectTemplateSourceProvenance,
+  calculateProjectTemplateSourceProvenanceSha256,
+} from './source-provenance.js';
 export type {
   ProjectTemplateSourceDescriptorPackV1,
   ProjectTemplateRepertoireCapabilityV1,
@@ -119,12 +127,22 @@ export {
   renderProjectTemplateApplyPreviewHuman,
   renderProjectTemplateApplyPreviewJson,
 } from './apply-preview.js';
+export {
+  createGithubProjectTemplateRemotePreview,
+} from './remote-preview-facade.js';
+export type {
+  CreateGithubProjectTemplateRemotePreviewOptions,
+} from './remote-preview-facade.js';
 export type {
   ProjectTemplateApplyPreview,
   ProjectTemplateApplyPreviewBindings,
   ProjectTemplateApplyPreviewCompositionConflictCode,
   ProjectTemplateApplyPreviewContentHardConflict,
+  ProjectTemplateRemoteApplyPreview,
 } from './apply-preview-types.js';
+export type {
+  ProjectTemplateSourceProvenanceV1,
+} from './source-provenance.js';
 export type {
   ProjectTemplateApplyPreviewApprovalEvidence,
 } from './apply-preview-approval.js';
