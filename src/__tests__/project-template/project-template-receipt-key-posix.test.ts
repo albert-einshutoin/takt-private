@@ -3,6 +3,7 @@ import {
   chmodSync,
   closeSync,
   copyFileSync,
+  existsSync,
   ftruncateSync,
   linkSync,
   lstatSync,
@@ -388,5 +389,92 @@ describe('POSIX project template receipt key store', () => {
     expect(owned.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
     valid.fill(0);
     invalid.fill(0);
+  });
+
+  it('recovers only an old POSIX lock owned by a confirmed dead process', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
+    await healthy.write(registry());
+    const lockPath = join(directory, '.keyring.lock');
+    const ownerRecord = (createdAtMs: number) => JSON.stringify({
+      pid: 424242,
+      createdAtMs,
+      token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    writeFileSync(lockPath, ownerRecord(1), { mode: 0o600 });
+    const deadOwner = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      leasePolicy: {
+        attempts: 3,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive: () => false,
+      },
+    });
+    await expect(deadOwner.read()).resolves.toEqual(registry());
+    expect(existsSync(lockPath)).toBe(false);
+
+    const rejected = async (
+      content: string,
+      isProcessAlive: () => boolean,
+    ) => {
+      writeFileSync(lockPath, content, { mode: 0o600 });
+      const store = createPosixProjectTemplateReceiptKeyStore({
+        directory,
+        leasePolicy: {
+          attempts: 2,
+          waitMs: 1,
+          staleAfterMs: 100,
+          now: () => 1_000,
+          isProcessAlive,
+        },
+      });
+      await expect(store.read()).rejects.toThrow(/lease is unavailable/i);
+      expect(readFileSync(lockPath, 'utf8')).toBe(content);
+      unlinkSync(lockPath);
+    };
+    await rejected(ownerRecord(1), () => true);
+    await rejected(ownerRecord(950), () => false);
+    await rejected('{malformed', () => false);
+
+    writeFileSync(lockPath, ownerRecord(1), { mode: 0o600 });
+    const replaced = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        beforeStaleLockUnlink(path) {
+          unlinkSync(path);
+          writeFileSync(path, 'replacement-owner\n', { mode: 0o600 });
+        },
+      },
+      leasePolicy: {
+        attempts: 2,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive: () => false,
+      },
+    });
+    await expect(replaced.read()).rejects.toThrow(/lease is unavailable/i);
+    expect(readFileSync(lockPath, 'utf8')).toBe('replacement-owner\n');
+  });
+
+  it('zeroizes the first POSIX hash when its observer throws', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
+    await healthy.write(registry());
+    let observed: Uint8Array | undefined;
+    const store = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        onHashBuffer(buffer) {
+          observed = buffer;
+          throw new Error('hash observer failure');
+        },
+      },
+    });
+    await expect(store.read()).rejects.toThrow('hash observer failure');
+    expect(observed).toHaveLength(32);
+    expect(observed?.every((byte) => byte === 0)).toBe(true);
   });
 });

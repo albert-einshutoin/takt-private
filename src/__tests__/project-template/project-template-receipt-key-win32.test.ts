@@ -462,6 +462,29 @@ describe('Windows project template receipt key store', () => {
     });
     await expect(betweenReads.read()).rejects.toThrow(/changed/i);
   });
+
+  it('zeroizes the first Windows hash when its observer throws', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+    });
+    await healthy.write(registry());
+    let observed: Uint8Array | undefined;
+    const store = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      io: {
+        onHashBuffer(buffer) {
+          observed = buffer;
+          throw new Error('hash observer failure');
+        },
+      },
+    });
+    await expect(store.read()).rejects.toThrow('hash observer failure');
+    expect(observed).toHaveLength(32);
+    expect(observed?.every((byte) => byte === 0)).toBe(true);
+  });
 });
 
 function dpapiRequest() {
