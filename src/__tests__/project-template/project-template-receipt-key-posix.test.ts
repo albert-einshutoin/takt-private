@@ -1,9 +1,11 @@
 import {
   chmodSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -21,7 +23,7 @@ import type {
 const roots: string[] = [];
 
 function root(): string {
-  const value = mkdtempSync(join(tmpdir(), 'takt-receipt-keys-'));
+  const value = realpathSync(mkdtempSync(join(tmpdir(), 'takt-receipt-keys-')));
   roots.push(value);
   return value;
 }
@@ -87,6 +89,10 @@ describe('POSIX project template receipt key store', () => {
     await expect(store.read()).rejects.toThrow(/mode/i);
 
     chmodSync(join(directory, 'keyring.json'), 0o600);
+    linkSync(join(directory, 'keyring.json'), join(directory, 'keyring.alias'));
+    await expect(store.read()).rejects.toThrow(/nlink/i);
+    rmSync(join(directory, 'keyring.alias'));
+
     const oversized: ProjectTemplateReceiptKeyRegistry = {
       schemaVersion: 1,
       keys: Array.from({ length: 17 }, (_, index) => ({
