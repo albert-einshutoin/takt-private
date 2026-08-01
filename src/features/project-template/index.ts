@@ -118,7 +118,10 @@ export {
   writeProjectTemplateCliOutcome,
 } from './cli-machine-contract.js';
 export type {
+  ProjectTemplateCliApplyOptions,
+  ProjectTemplateCliCommand,
   ProjectTemplateCliEnvelope,
+  ProjectTemplateCliErrorCode,
   ProjectTemplateCliExitCode,
   ProjectTemplateCliFailureEnvelope,
   ProjectTemplateCliJson,
@@ -127,6 +130,9 @@ export type {
   ProjectTemplateCliOutcome,
   ProjectTemplateCliSuccessEnvelope,
   ProjectTemplateCliWarning,
+  ProjectTemplateCliWarningCode,
+  ProjectTemplateCliDryRunOptions,
+  ProjectTemplateCliResult,
 } from './cli-machine-contract.js';
 export { startProjectTemplateCliLifecycle } from './cli-lifecycle.js';
 export type {
