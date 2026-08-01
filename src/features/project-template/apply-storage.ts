@@ -44,6 +44,7 @@ import {
 
 export { PROJECT_TEMPLATE_CONTROL_DIRECTORY } from './control-root-contract.js';
 export const DEFAULT_PROJECT_TEMPLATE_BACKUP_GENERATIONS = 5;
+export const MAX_PROJECT_TEMPLATE_LISTED_BACKUPS = 32;
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -1984,6 +1985,91 @@ export async function readProjectTemplateBackupManifest(options: {
     );
   }
   return manifest;
+}
+
+/**
+ * Lists complete backup generations without allowing the control directory to
+ * become an unbounded input. The directory and every generation are witnessed
+ * before and after manifest validation so callers never receive IDs collected
+ * across a pathname replacement race.
+ */
+export async function listProjectTemplateBackupIdsBounded(options: {
+  storage: ProjectTemplateApplyStorage;
+  io?: ProjectTemplateApplyStorageIo;
+}): Promise<string[]> {
+  const io = options.io ?? options.storage.io;
+  const backupsBefore = await io.lstat(options.storage.backupsRoot);
+  const backupsRealpathBefore = await io.realpath(options.storage.backupsRoot);
+  if (
+    backupsRealpathBefore !== options.storage.backupsRoot
+    || !backupsBefore.isDirectory()
+    || backupsBefore.isSymbolicLink()
+    || backupsBefore.dev !== options.storage.device
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'backup directory cannot be proven safe',
+    );
+  }
+  // Why: the storage iterator throws while observing the 33rd entry. This is
+  // a resource bound, not a presentation truncation that could hide drift.
+  const entries = await io.readdir(
+    options.storage.backupsRoot,
+    MAX_PROJECT_TEMPLATE_LISTED_BACKUPS,
+  );
+  const generations: Array<{ backupId: string; createdAt: string }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'backup root contains an unsafe entry',
+      );
+    }
+    const backupId = assertSafeIdentifier(entry.name, 'backupId');
+    const generationPath = join(options.storage.backupsRoot, backupId);
+    const generationBefore = await io.lstat(generationPath);
+    const generationRealpath = await io.realpath(generationPath);
+    if (
+      generationRealpath !== generationPath
+      || !generationBefore.isDirectory()
+      || generationBefore.isSymbolicLink()
+      || generationBefore.dev !== options.storage.device
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'backup generation cannot be proven safe',
+      );
+    }
+    const manifest = await readProjectTemplateBackupManifest({
+      storage: options.storage,
+      backupId,
+      io,
+    });
+    const generationAfter = await io.lstat(generationPath);
+    if (!areProjectTemplateDirectorySnapshotsStable(generationBefore, generationAfter)) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'backup generation changed during inspection',
+      );
+    }
+    generations.push({ backupId, createdAt: manifest.createdAt });
+  }
+  const backupsAfter = await io.lstat(options.storage.backupsRoot);
+  const backupsRealpathAfter = await io.realpath(options.storage.backupsRoot);
+  if (
+    backupsRealpathAfter !== options.storage.backupsRoot
+    || !areProjectTemplateDirectorySnapshotsStable(backupsBefore, backupsAfter)
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'backup directory changed during inspection',
+    );
+  }
+  generations.sort((left, right) => (
+    right.createdAt.localeCompare(left.createdAt)
+    || right.backupId.localeCompare(left.backupId)
+  ));
+  return generations.map(({ backupId }) => backupId);
 }
 
 async function removeControlTree(
