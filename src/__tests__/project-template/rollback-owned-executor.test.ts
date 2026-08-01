@@ -260,6 +260,39 @@ describe('owned project template rollback executor', () => {
     expect(readFileSync(value.contentPath, 'utf8')).toBe('foreign-before-unlink\n');
   });
 
+  it('preserves an edit introduced after staging fsync and before restore rename', async () => {
+    const value = await installed();
+    const updated = await applyVersion(value.projectRoot, 11);
+    let stagingRoot = '';
+    let raced = false;
+    const io = createProjectTemplateApplyStorageIo({
+      after(operation, path) {
+        if (!raced && operation === 'file-fsync' && path.startsWith(stagingRoot)) {
+          raced = true;
+          writeFileSync(value.contentPath, 'foreign-before-rename\n');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io,
+    });
+    stagingRoot = storage.stagingRoot;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: updated.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'recovery_required' });
+    } finally {
+      lease.release();
+    }
+    expect(raced).toBe(true);
+    expect(readFileSync(value.contentPath, 'utf8')).toBe('foreign-before-rename\n');
+  });
+
   it('maps an abort before mutation admission without changing the target', async () => {
     const value = await installed();
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: value.projectRoot });
