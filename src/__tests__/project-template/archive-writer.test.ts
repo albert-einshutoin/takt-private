@@ -40,6 +40,31 @@ function writeProjectFile(root: string, path: string, content: string): void {
   writeFileSync(absolutePath, content);
 }
 
+function recoveryFiles(root: string): string[] {
+  if (!existsSync(root)) return [];
+  const found: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.name === 'archive.tmp' || entry.name === 'rollback') {
+        found.push(path);
+      }
+    }
+  };
+  visit(root);
+  return found;
+}
+
+function recoveryDirectories(root: string): string[] {
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory()
+      && (entry.name.startsWith('.taktpack-recovery-')
+        || entry.name.startsWith('.taktpack-cleanup-')))
+    .map((entry) => join(root, entry.name));
+}
+
 async function makePlan(root: string) {
   return createProjectTemplateExportPlan(root, {
     packVersion: '1.0.0',
@@ -145,7 +170,7 @@ describe('taktpack deterministic writer', () => {
       { force: true },
     )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
     expect(existsSync(output)).toBe(false);
-    expect(readdirSync(movedDirectory)).toEqual([]);
+    expect(recoveryDirectories(movedDirectory)).toHaveLength(0);
     expect(readdirSync(outputDirectory)).toEqual([]);
   });
 
@@ -200,7 +225,7 @@ describe('taktpack deterministic writer', () => {
       },
     )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
     expect(readdirSync(outputDirectory)).toEqual([]);
-    expect(readdirSync(movedDirectory)).toEqual([]);
+    expect(recoveryDirectories(movedDirectory)).toHaveLength(1);
     expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
@@ -230,9 +255,7 @@ describe('taktpack deterministic writer', () => {
       },
     ).catch((caught: unknown) => caught);
     expect(readFileSync(output, 'utf8')).toBe('foreign-replacement');
-    expect(readdirSync(root).filter((name) => (
-      name.endsWith('.tmp') || name.endsWith('.rollback')
-    ))).toHaveLength(2);
+    expect(recoveryFiles(outputDirectory)).toHaveLength(2);
     expect(error).toMatchObject({
       code: 'UNSAFE_OUTPUT_TARGET',
       artifactState: 'published',
@@ -263,9 +286,7 @@ describe('taktpack deterministic writer', () => {
       },
     )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
     expect(readFileSync(output, 'utf8')).toBe('foreign-racer');
-    expect(readdirSync(root).some((name) => (
-      name.endsWith('.tmp') || name.endsWith('.rollback')
-    ))).toBe(false);
+    expect(recoveryFiles(root).length).toBeGreaterThan(0);
   });
 
   it('rejects same-inode same-size force drift even when mtime is restored', async () => {
@@ -307,9 +328,7 @@ describe('taktpack deterministic writer', () => {
       artifactState: 'published',
     });
     expect(readFileSync(output, 'utf8')).toBe(foreign);
-    expect(readdirSync(root).filter((name) => (
-      name.endsWith('.tmp') || name.endsWith('.rollback')
-    ))).toHaveLength(2);
+    expect(recoveryFiles(outputDirectory)).toHaveLength(2);
   });
 
   it('restores the approved target with no-replace when publication fails after evacuation', async () => {
@@ -339,9 +358,7 @@ describe('taktpack deterministic writer', () => {
       artifactState: 'not-published',
     });
     expect(readFileSync(output, 'utf8')).toBe('approved-old');
-    expect(readdirSync(root).some((name) => (
-      name.endsWith('.tmp') || name.endsWith('.rollback')
-    ))).toBe(false);
+    expect(recoveryFiles(outputDirectory)).toEqual([]);
   });
 
   it('durably proves an evacuated target restoration before reporting not-published', async () => {
@@ -427,8 +444,6 @@ describe('taktpack deterministic writer', () => {
     writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
     const plan = await makePlan(root);
     const outputDirectory = join(root, 'exports');
-    const movedRoot = `${root}-moved`;
-    roots.push(movedRoot);
     mkdirSync(outputDirectory);
     const output = join(outputDirectory, 'staging-swap-restore.taktpack');
     writeFileSync(output, 'approved-old');
@@ -444,11 +459,9 @@ describe('taktpack deterministic writer', () => {
         onPhase(phase) {
           if (phase === 'authority-link') throw new Error('link unavailable');
           if (String(phase) !== 'rollback-unlink') return;
-          const rollbackName = readdirSync(root)
-            .find((name) => name.endsWith('.rollback'))!;
-          renameSync(root, movedRoot);
-          mkdirSync(root);
-          foreignRollback = join(root, rollbackName);
+          foreignRollback = recoveryFiles(outputDirectory)
+            .find((path) => path.endsWith('/rollback'))!;
+          renameSync(foreignRollback, `${foreignRollback}.original`);
           writeFileSync(foreignRollback, 'foreign-staging-entry');
         },
       },
@@ -460,9 +473,7 @@ describe('taktpack deterministic writer', () => {
     });
     expect(foreignRollback).toBeDefined();
     expect(readFileSync(foreignRollback!, 'utf8')).toBe('foreign-staging-entry');
-    expect(readdirSync(movedRoot).some((name) => (
-      name.endsWith('.tmp') || name.endsWith('.rollback')
-    ))).toBe(true);
+    expect(existsSync(`${foreignRollback!}.original`)).toBe(true);
   });
 
   it('durably removes staging entries on a successful authorized publish', async () => {
@@ -490,13 +501,16 @@ describe('taktpack deterministic writer', () => {
       expect(phases.indexOf(`staging-${entry}-directory-fsync`))
         .toBeLessThan(phases.indexOf(`staging-${entry}-parent-witness`));
     }
+    expect(phases.indexOf('recovery-directory-close'))
+      .toBeLessThan(phases.indexOf('output-directory-close'));
+    expect(phases.indexOf('output-directory-close'))
+      .toBeLessThan(phases.indexOf('staging-directory-close'));
+    expect(recoveryDirectories(outputDirectory)).toEqual([]);
   });
 
   it('never path-unlinks a foreign staging entry during authority cleanup', async () => {
     const projectRoot = makeRoot();
     const outputRoot = makeRoot();
-    const movedOutputRoot = `${outputRoot}-moved`;
-    roots.push(movedOutputRoot);
     writeProjectFile(projectRoot, 'workflows/a.yaml', 'name: a\n');
     const plan = await makePlan(projectRoot);
     const outputDirectory = join(outputRoot, 'exports');
@@ -512,14 +526,11 @@ describe('taktpack deterministic writer', () => {
       {},
       {
         onPhase(phase) {
-          if (phase !== 'pipeline') return;
-          const tempName = readdirSync(outputRoot)
-            .find((name) => name.endsWith('.tmp'))!;
-          renameSync(outputRoot, movedOutputRoot);
-          mkdirSync(outputRoot);
-          foreignTemp = join(outputRoot, tempName);
+          if (String(phase) !== 'staging-temp-unlink') return;
+          foreignTemp = recoveryFiles(outputDirectory)
+            .find((path) => path.endsWith('/archive.tmp'))!;
+          renameSync(foreignTemp, `${foreignTemp}.original`);
           writeFileSync(foreignTemp, 'foreign-staging-entry');
-          throw new Error('pipeline failed after staging parent swap');
         },
       },
     ).catch((caught: unknown) => caught);
@@ -563,6 +574,66 @@ describe('taktpack deterministic writer', () => {
   });
 
   it.each([
+    ['pipeline', 'ARCHIVE_WRITE_FAILED'],
+    ['archive-read', 'ARCHIVE_WRITE_FAILED'],
+    ['file-fsync', 'DURABILITY_FAILED'],
+  ] as const)(
+    'preserves the original %s failure after private pre-publish cleanup',
+    async (failedPhase, code) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const outputDirectory = join(root, 'exports');
+      mkdirSync(outputDirectory);
+      const output = join(outputDirectory, 'pre-publish-failure.taktpack');
+      const captured = await captureTaktpackOutputPrecondition(output);
+
+      const error = await writeTaktpackWithOutputPrecondition(
+        output,
+        plan,
+        captured.authority,
+        {},
+        {
+          onPhase(phase) {
+            if (phase === failedPhase) throw new Error('pre-publish failure');
+          },
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code, artifactState: 'not-published' });
+      expect(existsSync(output)).toBe(false);
+      expect(recoveryDirectories(outputDirectory)).toEqual([]);
+    },
+  );
+
+  it('preserves an authority-mode pre-publish abort after private cleanup', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'pre-publish-abort.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    const controller = new AbortController();
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { signal: controller.signal },
+      {
+        onPhase(phase) {
+          if (phase === 'archive-read') controller.abort();
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ name: 'AbortError' });
+    expect(existsSync(output)).toBe(false);
+    expect(recoveryDirectories(outputDirectory)).toEqual([]);
+  });
+
+  it.each([
     'rollback-restored-directory-fsync',
     'rollback-restored-witness',
     'rollback-unlink',
@@ -598,9 +669,7 @@ describe('taktpack deterministic writer', () => {
         artifactState: 'published',
       });
       expect(readFileSync(output, 'utf8')).toBe('approved-old');
-      expect(readdirSync(root).some((name) => (
-        name.endsWith('.tmp') || name.endsWith('.rollback')
-      ))).toBe(true);
+      expect(recoveryFiles(outputDirectory).length).toBeGreaterThan(0);
     },
   );
 
@@ -649,9 +718,7 @@ describe('taktpack deterministic writer', () => {
         artifactState: 'published',
       });
       expect(readFileSync(output, 'utf8')).toBe(foreign);
-      expect(readdirSync(root).some((name) => (
-        name.endsWith('.tmp') || name.endsWith('.rollback')
-      ))).toBe(true);
+      expect(recoveryFiles(outputDirectory).length).toBeGreaterThan(0);
     },
   );
 
@@ -684,9 +751,7 @@ describe('taktpack deterministic writer', () => {
       artifactState: 'published',
     });
     expect(readFileSync(output, 'utf8')).toBe('approved-old');
-    expect(readdirSync(root).filter((name) => (
-      name.endsWith('.tmp') || name.endsWith('.rollback')
-    ))).toHaveLength(2);
+    expect(recoveryFiles(outputDirectory)).toHaveLength(2);
   });
 
   it('does not overwrite a foreign insertion when publishing an authorized absent target', async () => {

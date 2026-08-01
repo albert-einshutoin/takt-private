@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -365,8 +366,20 @@ describe('project template CLI export service', () => {
       envelope: { status: 'error', error: { code: 'RESULT_INDETERMINATE' } },
     });
     expect(readFileSync(fixture.outputPath, 'utf8')).toBe('foreign-replacement');
-    expect(readdirSync(fixture.root).filter((name) => (
-      name.endsWith('.tmp') || name.endsWith('.rollback')
-    ))).toHaveLength(2);
+    const outputDirectory = join(fixture.root, 'exports');
+    const recoveryDirectories = readdirSync(outputDirectory)
+      .filter((name) => name.startsWith('.taktpack-recovery-'));
+    expect(recoveryDirectories).toHaveLength(1);
+    const recoveryDirectory = join(outputDirectory, recoveryDirectories[0]!);
+    const recoveryStat = statSync(recoveryDirectory);
+    expect(recoveryStat.isDirectory()).toBe(true);
+    expect(recoveryStat.mode & 0o777).toBe(0o700);
+    if (typeof process.getuid === 'function') {
+      expect(recoveryStat.uid).toBe(process.getuid());
+    }
+    expect(readdirSync(recoveryDirectory).sort()).toEqual([
+      'archive.tmp',
+      'rollback',
+    ]);
   });
 });

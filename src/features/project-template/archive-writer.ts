@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
+  chmodSync,
   constants,
   createReadStream,
   createWriteStream,
@@ -9,10 +10,13 @@ import {
   fstatSync,
   linkSync,
   lstatSync,
+  mkdtempSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
@@ -73,22 +77,26 @@ interface TaktpackOutputTargetSnapshot {
 export interface TaktpackOutputPreconditionProjection {
   readonly schemaVersion: '1.0';
   readonly pathSha256: string;
-  readonly parent: {
-    readonly dev: number;
-    readonly ino: number;
-    readonly mode: number;
-    readonly uid: number;
-    readonly gid: number;
-  };
+  readonly parent: TaktpackDirectorySnapshot;
+  readonly stagingParent: TaktpackDirectorySnapshot;
   readonly target: { readonly state: 'absent' } | {
     readonly state: 'regular-file';
     readonly snapshot: TaktpackOutputTargetSnapshot;
   };
 }
 
+interface TaktpackDirectorySnapshot {
+  readonly dev: number;
+  readonly ino: number;
+  readonly mode: number;
+  readonly uid: number;
+  readonly gid: number;
+}
+
 interface TaktpackOutputAuthorityState {
   readonly canonicalPath: string;
   readonly directory: string;
+  readonly stagingDirectory: string;
   readonly projection: TaktpackOutputPreconditionProjection;
   consumed: boolean;
 }
@@ -182,17 +190,42 @@ export async function captureTaktpackOutputPrecondition(
   const requestedDirectory = dirname(resolve(outputPath));
   let directory: string;
   let parent: Awaited<ReturnType<typeof lstat>>;
+  let stagingDirectory: string;
+  let stagingParent: Awaited<ReturnType<typeof lstat>>;
   try {
     directory = await realpath(requestedDirectory);
     parent = await lstat(directory);
+    // The authorized output directory is also the staging parent. A fresh
+    // private child namespace remains attached to this inode if the public
+    // path is renamed, so recovery evidence is retained without trusting the
+    // path that replaced it.
+    stagingDirectory = directory;
+    if (await realpath(stagingDirectory) !== stagingDirectory) {
+      throw unsafeOutputCapture();
+    }
+    stagingParent = await lstat(stagingDirectory);
   } catch {
     throw unsafeOutputCapture();
   }
-  if (!parent.isDirectory() || parent.isSymbolicLink()) throw unsafeOutputCapture();
+  if (
+    !parent.isDirectory()
+    || parent.isSymbolicLink()
+    || !stagingParent.isDirectory()
+    || stagingParent.isSymbolicLink()
+  ) throw unsafeOutputCapture();
   const permissions = parent.mode & 0o7777;
-  if ((permissions & 0o002) !== 0 && (permissions & 0o1000) === 0) {
+  const stagingPermissions = stagingParent.mode & 0o7777;
+  if ((permissions & 0o022) !== 0) {
     throw unsafeOutputCapture();
   }
+  if ((stagingPermissions & 0o022) !== 0) {
+    throw unsafeOutputCapture();
+  }
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  if (
+    currentUid !== undefined
+    && (parent.uid !== currentUid || stagingParent.uid !== currentUid)
+  ) throw unsafeOutputCapture();
   const canonicalPath = join(directory, basename(outputPath));
   if (options.forbiddenRoot !== undefined) {
     let forbiddenRoot: string;
@@ -233,6 +266,13 @@ export async function captureTaktpackOutputPrecondition(
       uid: parent.uid,
       gid: parent.gid,
     }),
+    stagingParent: Object.freeze({
+      dev: stagingParent.dev,
+      ino: stagingParent.ino,
+      mode: stagingParent.mode,
+      uid: stagingParent.uid,
+      gid: stagingParent.gid,
+    }),
     target,
   });
   // Why: the token contains no forgeable data. Its commit authority lives only
@@ -241,6 +281,7 @@ export async function captureTaktpackOutputPrecondition(
   OUTPUT_AUTHORITIES.set(authority, {
     canonicalPath,
     directory,
+    stagingDirectory,
     projection,
     consumed: false,
   });
@@ -409,7 +450,7 @@ function fsyncDirectory(path: string): void {
 }
 
 function sameParentIdentity(
-  expected: TaktpackOutputPreconditionProjection['parent'],
+  expected: TaktpackDirectorySnapshot,
   actual: import('node:fs').Stats,
 ): boolean {
   return actual.isDirectory()
@@ -419,6 +460,44 @@ function sameParentIdentity(
     && actual.mode === expected.mode
     && actual.uid === expected.uid
     && actual.gid === expected.gid;
+}
+
+function assertAuthorizedStagingParent(
+  state: TaktpackOutputAuthorityState,
+  directoryFd: number,
+): void {
+  let pathStat: import('node:fs').Stats;
+  let heldStat: import('node:fs').Stats;
+  try {
+    pathStat = lstatSync(state.stagingDirectory);
+    heldStat = fstatSync(directoryFd);
+  } catch {
+    throw unsafeOutputTarget();
+  }
+  if (
+    !sameParentIdentity(state.projection.stagingParent, pathStat)
+    || !sameParentIdentity(state.projection.stagingParent, heldStat)
+  ) throw unsafeOutputTarget();
+}
+
+function assertAuthorizedRecoveryDirectory(
+  path: string,
+  expected: TaktpackDirectorySnapshot,
+  directoryFd: number,
+): void {
+  let pathStat: import('node:fs').Stats;
+  let heldStat: import('node:fs').Stats;
+  try {
+    pathStat = lstatSync(path);
+    heldStat = fstatSync(directoryFd);
+  } catch {
+    throw unsafeOutputTarget();
+  }
+  if (
+    !sameParentIdentity(expected, pathStat)
+    || !sameParentIdentity(expected, heldStat)
+    || (pathStat.mode & 0o777) !== 0o700
+  ) throw unsafeOutputTarget();
 }
 
 function sameTargetIdentity(
@@ -517,6 +596,56 @@ function verifyEvacuatedTargetWitness(
   return verified;
 }
 
+function capturePrivateRecoveryFileWitness(
+  path: string,
+  expectedUid: number,
+): TaktpackOutputTargetSnapshot | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return undefined;
+  }
+  let witness: TaktpackOutputTargetSnapshot | undefined;
+  try {
+    const before = fstatSync(fd);
+    if (
+      !before.isFile()
+      || before.isSymbolicLink()
+      || before.nlink !== 1
+      || before.uid !== expectedUid
+      || (before.mode & 0o777) !== 0o600
+    ) return undefined;
+    const digest = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    while (position < before.size) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        0,
+        Math.min(buffer.byteLength, before.size - position),
+        position,
+      );
+      if (bytesRead <= 0) return undefined;
+      digest.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    const after = fstatSync(fd);
+    if (!areProjectTemplateFileStatsEqual(before, after)) return undefined;
+    witness = outputTargetSnapshot(after, digest.digest('hex'));
+  } catch {
+    witness = undefined;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      witness = undefined;
+    }
+  }
+  return witness;
+}
+
 function resolveAuthorizedOutputPath(outputPath: string): string {
   if (!isAbsolute(outputPath)) throw unsafeOutputTarget();
   let directory: string;
@@ -603,6 +732,31 @@ function assertPublishedTarget(
   ) throw unsafeOutputTarget();
 }
 
+function assertStagingFileIdentity(
+  path: string,
+  expected: Pick<import('node:fs').Stats,
+    'dev' | 'ino' | 'size' | 'mode' | 'uid' | 'gid'>,
+  expectedLinks: number,
+): void {
+  let actual: import('node:fs').Stats;
+  try {
+    actual = lstatSync(path);
+  } catch {
+    throw unsafeOutputTarget();
+  }
+  if (
+    !actual.isFile()
+    || actual.isSymbolicLink()
+    || actual.dev !== expected.dev
+    || actual.ino !== expected.ino
+    || actual.size !== expected.size
+    || actual.mode !== expected.mode
+    || actual.uid !== expected.uid
+    || actual.gid !== expected.gid
+    || actual.nlink !== expectedLinks
+  ) throw unsafeOutputTarget();
+}
+
 export function syncTaktpackOutputDirectory(
   path: string,
   platform: NodeJS.Platform = process.platform,
@@ -625,6 +779,57 @@ function syncHeldTaktpackOutputDirectory(
   return 'synced';
 }
 
+function unlinkAuthorizedStagingEntry(
+  path: string,
+  phases: Readonly<{
+    unlink: Extract<TaktpackWriterIoPhase,
+      'rollback-unlink' | 'staging-temp-unlink' | 'staging-rollback-unlink'>;
+    directoryFsync: Extract<TaktpackWriterIoPhase,
+      | 'rollback-staging-directory-fsync'
+      | 'staging-temp-directory-fsync'
+      | 'staging-rollback-directory-fsync'>;
+    parentWitness: Extract<TaktpackWriterIoPhase,
+      | 'rollback-staging-parent-witness'
+      | 'staging-temp-parent-witness'
+      | 'staging-rollback-parent-witness'>;
+  }>,
+  state: TaktpackOutputAuthorityState,
+  stagingDirectoryFd: number,
+  recoveryDirectory: string,
+  recoveryDirectorySnapshot: TaktpackDirectorySnapshot,
+  recoveryDirectoryFd: number,
+  ioSeam: TaktpackWriterIoSeam,
+  assertEntry: () => void,
+): void {
+  assertAuthorizedStagingParent(state, stagingDirectoryFd);
+  assertAuthorizedRecoveryDirectory(
+    recoveryDirectory,
+    recoveryDirectorySnapshot,
+    recoveryDirectoryFd,
+  );
+  assertEntry();
+  ioSeam.onPhase?.(phases.unlink);
+  // A seam may model a parent exchange immediately before the destructive
+  // syscall, so path and held descriptor authority are checked again here.
+  assertAuthorizedStagingParent(state, stagingDirectoryFd);
+  assertAuthorizedRecoveryDirectory(
+    recoveryDirectory,
+    recoveryDirectorySnapshot,
+    recoveryDirectoryFd,
+  );
+  assertEntry();
+  unlinkSync(path);
+  ioSeam.onPhase?.(phases.directoryFsync);
+  syncHeldTaktpackOutputDirectory(recoveryDirectoryFd);
+  ioSeam.onPhase?.(phases.parentWitness);
+  assertAuthorizedStagingParent(state, stagingDirectoryFd);
+  assertAuthorizedRecoveryDirectory(
+    recoveryDirectory,
+    recoveryDirectorySnapshot,
+    recoveryDirectoryFd,
+  );
+}
+
 export type TaktpackWriterIoPhase =
   | 'pipeline'
   | 'archive-read'
@@ -636,9 +841,22 @@ export type TaktpackWriterIoPhase =
   | 'rollback-restored-witness'
   | 'rollback-restored-witness-close'
   | 'rollback-unlink'
+  | 'rollback-staging-directory-fsync'
+  | 'rollback-staging-parent-witness'
   | 'rollback-final-directory-fsync'
   | 'rollback-final-witness'
   | 'rollback-final-witness-close'
+  | 'staging-temp-unlink'
+  | 'staging-temp-directory-fsync'
+  | 'staging-temp-parent-witness'
+  | 'staging-rollback-unlink'
+  | 'staging-rollback-directory-fsync'
+  | 'staging-rollback-parent-witness'
+  | 'recovery-quarantine'
+  | 'recovery-directory-close'
+  | 'quarantine-directory-close'
+  | 'output-directory-close'
+  | 'staging-directory-close'
   | 'publish'
   | 'post-publish'
   | 'post-link-unlink'
@@ -817,17 +1035,14 @@ export async function writeTaktpackWithIoSeam(
     throw new TaktpackError('SOURCE_CHANGED', 'project template root changed after planning', 'projectRoot');
   }
   const outputDirectory = dirname(outputPath);
-  // Why: staging one level above the authorized directory keeps cleanup
-  // reachable when that directory is renamed during a failed pre-commit race,
-  // while remaining on the same filesystem for atomic link/rename publish.
   const stagingDirectory = authorityState === undefined
     ? outputDirectory
-    : dirname(outputDirectory);
-  const tempPath = join(
+    : authorityState.stagingDirectory;
+  let tempPath = join(
     stagingDirectory,
     authorityState === undefined
       ? `.${basename(outputDirectory)}.${basename(outputPath)}.${process.pid}.${randomUUID()}.tmp`
-      : `.taktpack-recovery.${randomUUID()}.tmp`,
+      : '.uninitialized-taktpack-recovery',
   );
   let archiveHash = createHash('sha256');
   let bytes = 0;
@@ -836,9 +1051,14 @@ export async function writeTaktpackWithIoSeam(
   let published = false;
   let result: WriteTaktpackResult | undefined;
   let directoryFd: number | undefined;
+  let stagingDirectoryFd: number | undefined;
+  let recoveryDirectory: string | undefined;
+  let recoveryDirectoryFd: number | undefined;
+  let recoveryDirectorySnapshot: TaktpackDirectorySnapshot | undefined;
   let rollbackPath: string | undefined;
   let authorityPublishedSnapshot: import('node:fs').Stats | undefined;
   let retainRecoveryArtifacts = false;
+  let restorationPending = false;
 
   const failAuthorityPublication = (error: unknown): never => {
     if (
@@ -853,6 +1073,9 @@ export async function writeTaktpackWithIoSeam(
     retainRecoveryArtifacts = true;
     throw unsafeOutputTarget('outputPath', 'published');
   };
+  const failAuthorityCleanup = (): never => {
+    throw unsafeOutputTarget('outputPath', 'published');
+  };
   try {
     if (authorityState !== undefined) {
       try {
@@ -860,11 +1083,55 @@ export async function writeTaktpackWithIoSeam(
           authorityState.directory,
           constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
         );
+        stagingDirectoryFd = openSync(
+          authorityState.stagingDirectory,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
       } catch {
         throw unsafeOutputTarget();
       }
       assertAuthorizedParent(authorityState, directoryFd);
+      assertAuthorizedStagingParent(authorityState, stagingDirectoryFd);
       assertAuthorizedTarget(authorityState);
+      try {
+        recoveryDirectory = mkdtempSync(join(
+          authorityState.stagingDirectory,
+          '.taktpack-recovery-',
+        ));
+        chmodSync(recoveryDirectory, 0o700);
+        recoveryDirectoryFd = openSync(
+          recoveryDirectory,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
+        const recoveryStat = fstatSync(recoveryDirectoryFd);
+        if (
+          recoveryStat.dev !== authorityState.projection.stagingParent.dev
+          || recoveryStat.uid !== authorityState.projection.stagingParent.uid
+        ) throw unsafeOutputTarget();
+        recoveryDirectorySnapshot = Object.freeze({
+          dev: recoveryStat.dev,
+          ino: recoveryStat.ino,
+          mode: recoveryStat.mode,
+          uid: recoveryStat.uid,
+          gid: recoveryStat.gid,
+        });
+        assertAuthorizedRecoveryDirectory(
+          recoveryDirectory,
+          recoveryDirectorySnapshot,
+          recoveryDirectoryFd,
+        );
+        syncHeldTaktpackOutputDirectory(stagingDirectoryFd);
+        assertAuthorizedStagingParent(authorityState, stagingDirectoryFd);
+        assertAuthorizedRecoveryDirectory(
+          recoveryDirectory,
+          recoveryDirectorySnapshot,
+          recoveryDirectoryFd,
+        );
+        tempPath = join(recoveryDirectory, 'archive.tmp');
+      } catch {
+        retainRecoveryArtifacts = true;
+        throw unsafeOutputTarget();
+      }
     }
     for (const [sourceIndex, file] of sourceState.files.entries()) {
       const field = `sourceFiles[${sourceIndex}]`;
@@ -884,6 +1151,8 @@ export async function writeTaktpackWithIoSeam(
 
     if (authorityState !== undefined) {
       assertAuthorizedParent(authorityState, directoryFd);
+      if (stagingDirectoryFd === undefined) throw unsafeOutputTarget();
+      assertAuthorizedStagingParent(authorityState, stagingDirectoryFd);
       assertAuthorizedTarget(authorityState);
     }
     const output = createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
@@ -976,14 +1245,30 @@ export async function writeTaktpackWithIoSeam(
       options.signal?.throwIfAborted();
       if (authorityState !== undefined) {
         assertAuthorizedParent(authorityState, directoryFd);
+        if (stagingDirectoryFd === undefined) throw unsafeOutputTarget();
+        assertAuthorizedStagingParent(authorityState, stagingDirectoryFd);
         assertAuthorizedTarget(authorityState);
         if (force && authorityState.projection.target.state === 'regular-file') {
-          rollbackPath = join(
-            stagingDirectory,
-            `.taktpack-recovery.${randomUUID()}.rollback`,
+          if (
+            recoveryDirectory === undefined
+            || recoveryDirectoryFd === undefined
+            || recoveryDirectorySnapshot === undefined
+          ) throw unsafeOutputTarget();
+          assertAuthorizedStagingParent(authorityState, stagingDirectoryFd!);
+          assertAuthorizedRecoveryDirectory(
+            recoveryDirectory,
+            recoveryDirectorySnapshot,
+            recoveryDirectoryFd,
           );
+          rollbackPath = join(recoveryDirectory, 'rollback');
           ioSeam.onPhase?.('force-cas');
           renameSync(outputPath, rollbackPath);
+          assertAuthorizedStagingParent(authorityState, stagingDirectoryFd!);
+          assertAuthorizedRecoveryDirectory(
+            recoveryDirectory,
+            recoveryDirectorySnapshot,
+            recoveryDirectoryFd,
+          );
           if (!verifyEvacuatedTargetWitness(
             authorityState.projection.target.snapshot,
             rollbackPath,
@@ -1001,7 +1286,25 @@ export async function writeTaktpackWithIoSeam(
             }
             throw unsafeOutputTarget('outputPath', 'published');
           }
+          assertAuthorizedStagingParent(authorityState, stagingDirectoryFd!);
+          assertAuthorizedRecoveryDirectory(
+            recoveryDirectory,
+            recoveryDirectorySnapshot,
+            recoveryDirectoryFd,
+          );
         }
+        if (
+          recoveryDirectory === undefined
+          || recoveryDirectoryFd === undefined
+          || recoveryDirectorySnapshot === undefined
+          || stagingDirectoryFd === undefined
+        ) throw unsafeOutputTarget();
+        assertAuthorizedStagingParent(authorityState, stagingDirectoryFd);
+        assertAuthorizedRecoveryDirectory(
+          recoveryDirectory,
+          recoveryDirectorySnapshot,
+          recoveryDirectoryFd,
+        );
         authorityPublishedSnapshot = lstatSync(tempPath);
         try {
           // Same-device hard-link creation is atomic no-replace on POSIX and
@@ -1020,11 +1323,20 @@ export async function writeTaktpackWithIoSeam(
           if (rollbackPath !== undefined) {
             const target = authorityState.projection.target;
             const heldDirectoryFd = directoryFd;
-            if (target.state !== 'regular-file' || heldDirectoryFd === undefined) {
+            if (
+              target.state !== 'regular-file'
+              || heldDirectoryFd === undefined
+            ) {
               retainRecoveryArtifacts = true;
               throw unsafeOutputTarget('outputPath', 'published');
             }
             try {
+              assertAuthorizedStagingParent(authorityState, stagingDirectoryFd!);
+              assertAuthorizedRecoveryDirectory(
+                recoveryDirectory!,
+                recoveryDirectorySnapshot!,
+                recoveryDirectoryFd!,
+              );
               linkSync(rollbackPath, outputPath);
 
               // Why: restoration is not safely reportable as not-published
@@ -1041,20 +1353,14 @@ export async function writeTaktpackWithIoSeam(
                 ioSeam,
                 'rollback-restored-witness-close',
               )) throw unsafeOutputTarget('outputPath', 'published');
+              assertAuthorizedStagingParent(authorityState, stagingDirectoryFd!);
+              assertAuthorizedRecoveryDirectory(
+                recoveryDirectory!,
+                recoveryDirectorySnapshot!,
+                recoveryDirectoryFd!,
+              );
 
-              ioSeam.onPhase?.('rollback-unlink');
-              unlinkSync(rollbackPath);
-              ioSeam.onPhase?.('rollback-final-directory-fsync');
-              syncHeldTaktpackOutputDirectory(heldDirectoryFd);
-              ioSeam.onPhase?.('rollback-final-witness');
-              if (!verifyEvacuatedTargetWitness(
-                target.snapshot,
-                outputPath,
-                1,
-                ioSeam,
-                'rollback-final-witness-close',
-              )) throw unsafeOutputTarget('outputPath', 'published');
-              rollbackPath = undefined;
+              restorationPending = true;
             } catch {
               retainRecoveryArtifacts = true;
               throw unsafeOutputTarget('outputPath', 'published');
@@ -1065,6 +1371,12 @@ export async function writeTaktpackWithIoSeam(
         try {
           ioSeam.onPhase?.('post-publish');
           assertAuthorizedParent(authorityState, directoryFd);
+          assertAuthorizedStagingParent(authorityState, stagingDirectoryFd);
+          assertAuthorizedRecoveryDirectory(
+            recoveryDirectory,
+            recoveryDirectorySnapshot,
+            recoveryDirectoryFd,
+          );
           assertPublishedTarget(authorityState, authorityPublishedSnapshot, 2);
         } catch (error) {
           failAuthorityPublication(error);
@@ -1104,19 +1416,12 @@ export async function writeTaktpackWithIoSeam(
         } catch (error) {
           failAuthorityPublication(error);
         }
-        unlinkSync(tempPath);
-        if (rollbackPath !== undefined) {
-          unlinkSync(rollbackPath);
-          rollbackPath = undefined;
-        }
-        syncHeldTaktpackOutputDirectory(directoryFd);
-        try {
-          assertAuthorizedParent(authorityState, directoryFd);
-          assertPublishedTarget(authorityState, authorityPublishedSnapshot!, 1);
-        } catch {
-          retainRecoveryArtifacts = true;
-          throw unsafeOutputTarget('outputPath', 'published');
-        }
+        if (
+          stagingDirectoryFd === undefined
+          || recoveryDirectoryFd === undefined
+          || recoveryDirectory === undefined
+          || recoveryDirectorySnapshot === undefined
+        ) failAuthorityPublication(unsafeOutputTarget());
       }
     } catch (error) {
       if (authorityState !== undefined && published) {
@@ -1140,26 +1445,252 @@ export async function writeTaktpackWithIoSeam(
         published ? 'published' : 'not-published',
       );
   } finally {
-    if (directoryFd !== undefined) {
-      try {
-        closeSync(directoryFd);
-      } catch {
-        // A close failure cannot change the already determined artifact state.
-      }
-    }
     try {
       ioSeam.onPhase?.('cleanup');
-      if (!retainRecoveryArtifacts && existsSync(tempPath)) unlinkSync(tempPath);
-      if (
-        !retainRecoveryArtifacts
-        && rollbackPath !== undefined
-        && existsSync(rollbackPath)
-      ) unlinkSync(rollbackPath);
+      if (!retainRecoveryArtifacts && authorityState !== undefined) {
+        if (
+          directoryFd === undefined
+          || stagingDirectoryFd === undefined
+          || recoveryDirectoryFd === undefined
+          || recoveryDirectory === undefined
+          || recoveryDirectorySnapshot === undefined
+        ) failAuthorityCleanup();
+        const heldOutputDirectoryFd = directoryFd!;
+        const heldStagingDirectoryFd = stagingDirectoryFd!;
+        const heldRecoveryDirectoryFd = recoveryDirectoryFd!;
+        const heldRecoveryDirectory = recoveryDirectory!;
+        const heldRecoveryDirectorySnapshot = recoveryDirectorySnapshot!;
+        const heldPublishedSnapshot = authorityPublishedSnapshot;
+        let heldTempWitness:
+          | import('node:fs').Stats
+          | TaktpackOutputTargetSnapshot
+          | undefined = heldPublishedSnapshot;
+        assertAuthorizedParent(authorityState, heldOutputDirectoryFd);
+        assertAuthorizedStagingParent(authorityState, heldStagingDirectoryFd);
+        assertAuthorizedRecoveryDirectory(
+          heldRecoveryDirectory,
+          heldRecoveryDirectorySnapshot,
+          heldRecoveryDirectoryFd,
+        );
+
+        // Why: Node has no unlinkat/renameat2 authority API. As in the stale
+        // lock recovery boundary, moving the whole private 0700 namespace into
+        // a fresh private quarantine makes fixed child names safe to inspect
+        // and remove. Same-UID arbitrary malicious filesystem actors remain
+        // outside this boundary; parent ownership and write bits are sealed.
+        const quarantineRoot = mkdtempSync(join(
+          authorityState.stagingDirectory,
+          '.taktpack-cleanup-',
+        ));
+        chmodSync(quarantineRoot, 0o700);
+        const quarantineFd = openSync(
+          quarantineRoot,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
+        let quarantineClosed = false;
+        try {
+          const quarantineStat = fstatSync(quarantineFd);
+          const quarantineSnapshot: TaktpackDirectorySnapshot = Object.freeze({
+            dev: quarantineStat.dev,
+            ino: quarantineStat.ino,
+            mode: quarantineStat.mode,
+            uid: quarantineStat.uid,
+            gid: quarantineStat.gid,
+          });
+          if (
+            quarantineStat.dev !== authorityState.projection.stagingParent.dev
+            || quarantineStat.uid !== authorityState.projection.stagingParent.uid
+          ) failAuthorityCleanup();
+          assertAuthorizedRecoveryDirectory(
+            quarantineRoot,
+            quarantineSnapshot,
+            quarantineFd,
+          );
+          const quarantinedRecovery = join(quarantineRoot, 'owned');
+          ioSeam.onPhase?.('recovery-quarantine');
+          assertAuthorizedStagingParent(authorityState, heldStagingDirectoryFd);
+          assertAuthorizedRecoveryDirectory(
+            heldRecoveryDirectory,
+            heldRecoveryDirectorySnapshot,
+            heldRecoveryDirectoryFd,
+          );
+          renameSync(heldRecoveryDirectory, quarantinedRecovery);
+          recoveryDirectory = quarantinedRecovery;
+          tempPath = join(quarantinedRecovery, 'archive.tmp');
+          if (rollbackPath !== undefined) rollbackPath = join(
+            quarantinedRecovery,
+            'rollback',
+          );
+          syncHeldTaktpackOutputDirectory(heldStagingDirectoryFd);
+          syncHeldTaktpackOutputDirectory(quarantineFd);
+          assertAuthorizedStagingParent(authorityState, heldStagingDirectoryFd);
+          assertAuthorizedRecoveryDirectory(
+            quarantinedRecovery,
+            heldRecoveryDirectorySnapshot,
+            heldRecoveryDirectoryFd,
+          );
+          const allowed = new Set(['archive.tmp', 'rollback']);
+          const recoveryEntries = readdirSync(quarantinedRecovery);
+          if (recoveryEntries.some((name) => !allowed.has(name))) {
+            failAuthorityCleanup();
+          }
+
+          const tempPresent = recoveryEntries.includes('archive.tmp');
+          if (tempPresent && heldTempWitness === undefined) {
+            const freshWitness = capturePrivateRecoveryFileWitness(
+              tempPath,
+              authorityState.projection.stagingParent.uid,
+            );
+            if (freshWitness === undefined) failAuthorityCleanup();
+            heldTempWitness = freshWitness;
+          }
+          if (tempPresent && heldTempWitness === undefined) {
+            failAuthorityCleanup();
+          }
+
+          const unlinkTemp = (): void => unlinkAuthorizedStagingEntry(
+            tempPath,
+            {
+              unlink: 'staging-temp-unlink',
+              directoryFsync: 'staging-temp-directory-fsync',
+              parentWitness: 'staging-temp-parent-witness',
+            },
+            authorityState,
+            heldStagingDirectoryFd,
+            quarantinedRecovery,
+            heldRecoveryDirectorySnapshot,
+            heldRecoveryDirectoryFd,
+            ioSeam,
+            () => assertStagingFileIdentity(
+              tempPath,
+              heldTempWitness!,
+              published ? 2 : 1,
+            ),
+          );
+          const unlinkRollback = (): void => {
+            const target = authorityState.projection.target;
+            if (rollbackPath === undefined || target.state !== 'regular-file') {
+              throw unsafeOutputTarget('outputPath', 'published');
+            }
+            unlinkAuthorizedStagingEntry(
+              rollbackPath,
+              {
+                unlink: restorationPending
+                  ? 'rollback-unlink'
+                  : 'staging-rollback-unlink',
+                directoryFsync: restorationPending
+                  ? 'rollback-staging-directory-fsync'
+                  : 'staging-rollback-directory-fsync',
+                parentWitness: restorationPending
+                  ? 'rollback-staging-parent-witness'
+                  : 'staging-rollback-parent-witness',
+              },
+              authorityState,
+              heldStagingDirectoryFd,
+              quarantinedRecovery,
+              heldRecoveryDirectorySnapshot,
+              heldRecoveryDirectoryFd,
+              ioSeam,
+              () => {
+                if (!verifyEvacuatedTargetWitness(
+                  target.snapshot,
+                  rollbackPath!,
+                  restorationPending ? 2 : 1,
+                  ioSeam,
+                  'rollback-final-witness-close',
+                )) throw unsafeOutputTarget('outputPath', 'published');
+              },
+            );
+            rollbackPath = undefined;
+          };
+
+          if (restorationPending) unlinkRollback();
+          else if (tempPresent) unlinkTemp();
+          if (restorationPending) {
+            ioSeam.onPhase?.('rollback-final-directory-fsync');
+            syncHeldTaktpackOutputDirectory(heldOutputDirectoryFd);
+            ioSeam.onPhase?.('rollback-final-witness');
+            const target = authorityState.projection.target;
+            if (
+              target.state !== 'regular-file'
+              || !verifyEvacuatedTargetWitness(
+                target.snapshot,
+                outputPath,
+                1,
+                ioSeam,
+                'rollback-final-witness-close',
+              )
+            ) failAuthorityCleanup();
+            if (tempPresent) unlinkTemp();
+          } else if (rollbackPath !== undefined) {
+            unlinkRollback();
+          }
+          if (published) {
+            syncHeldTaktpackOutputDirectory(heldOutputDirectoryFd);
+            assertAuthorizedParent(authorityState, heldOutputDirectoryFd);
+            assertPublishedTarget(authorityState, heldPublishedSnapshot!, 1);
+          }
+
+          ioSeam.onPhase?.('recovery-directory-close');
+          closeSync(heldRecoveryDirectoryFd);
+          recoveryDirectoryFd = undefined;
+          rmdirSync(quarantinedRecovery);
+          syncHeldTaktpackOutputDirectory(quarantineFd);
+          assertAuthorizedRecoveryDirectory(
+            quarantineRoot,
+            quarantineSnapshot,
+            quarantineFd,
+          );
+          ioSeam.onPhase?.('quarantine-directory-close');
+          closeSync(quarantineFd);
+          quarantineClosed = true;
+          rmdirSync(quarantineRoot);
+          syncHeldTaktpackOutputDirectory(heldStagingDirectoryFd);
+          assertAuthorizedStagingParent(authorityState, heldStagingDirectoryFd);
+          recoveryDirectory = undefined;
+          recoveryDirectorySnapshot = undefined;
+        } finally {
+          if (!quarantineClosed) {
+            try { closeSync(quarantineFd); } catch { /* retained uncertainty */ }
+          }
+        }
+      } else if (!retainRecoveryArtifacts && authorityState === undefined) {
+        if (existsSync(tempPath)) unlinkSync(tempPath);
+        if (rollbackPath !== undefined && existsSync(rollbackPath)) {
+          unlinkSync(rollbackPath);
+        }
+      }
     } catch (caughtCleanupError) {
       // Cleanup must never replace the primary failure: callers need the
       // operation that caused the archive to fail, without a raw temp path.
-      if (primaryError === undefined) {
+      if (authorityState !== undefined) {
+        retainRecoveryArtifacts = true;
+        primaryError = unsafeOutputTarget('outputPath', 'published');
+      } else if (primaryError === undefined) {
         cleanupFailure = caughtCleanupError;
+      }
+    }
+    const heldDirectories = [
+      { fd: recoveryDirectoryFd, phase: 'recovery-directory-close' as const },
+      { fd: directoryFd, phase: 'output-directory-close' as const },
+      { fd: stagingDirectoryFd, phase: 'staging-directory-close' as const },
+    ];
+    for (const { fd, phase } of heldDirectories) {
+      if (fd === undefined) continue;
+      let closeFailed = false;
+      try {
+        ioSeam.onPhase?.(phase);
+      } catch {
+        closeFailed = true;
+      }
+      try {
+        closeSync(fd);
+      } catch {
+        closeFailed = true;
+      }
+      if (closeFailed && authorityState !== undefined) {
+        retainRecoveryArtifacts = true;
+        primaryError = unsafeOutputTarget('outputPath', 'published');
       }
     }
   }
