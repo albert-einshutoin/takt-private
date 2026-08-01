@@ -264,6 +264,32 @@ describe('GitHub project template remote preview production facade', () => {
       .resolves.toMatchObject({ schemaVersion: '1.0' });
   });
 
+  it('propagates one signal and absolute deadline and rejects a late inspection abort', async () => {
+    const value = await fixture();
+    const controller = new AbortController();
+    let observedDeadline: number | undefined;
+    await expect(createGithubProjectTemplateRemotePreview({
+      ...facadeOptions(value),
+      signal: controller.signal,
+      dependencyInspectionTimeoutMs: 5_000,
+      repertoireInspectionPort: {
+        inspect(request) {
+          expect(request.signal).toBe(controller.signal);
+          observedDeadline = request.deadlineMs;
+          controller.abort('private abort reason');
+          return { witnessSha256: 'e'.repeat(64), observations: [] };
+        },
+      },
+    })).rejects.toMatchObject({
+      code: 'ABORTED',
+      message: 'GitHub project template remote preview was aborted',
+    });
+    expect(observedDeadline).toBeTypeOf('number');
+
+    await expect(createGithubProjectTemplateRemotePreview(facadeOptions(value)))
+      .resolves.toMatchObject({ schemaVersion: '1.0' });
+  });
+
   it('rejects Proxy options without executing traps', async () => {
     const value = await fixture();
     const options = facadeOptions(value);

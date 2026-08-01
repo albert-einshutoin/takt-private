@@ -151,4 +151,25 @@ describe('bounded taktpack content materializer', () => {
     });
     expect(pathAllocations).toBe(0);
   });
+
+  it('checks late cancellation during materialization and still closes the archive', async () => {
+    const projectRoot = root();
+    const archive = await pack(projectRoot);
+    const controller = new AbortController();
+    const phases: TaktpackInspectorIoPhase[] = [];
+
+    await expect(materializeTaktpackContentsWithIoSeam(archive, {
+      signal: controller.signal,
+      deadlineMs: performance.now() + 5_000,
+    } as never, {
+      onPhase(phase) {
+        phases.push(phase);
+        if (phase === 'read') controller.abort();
+      },
+    })).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'project template remote preview was aborted',
+    });
+    expect(phases.at(-1)).toBe('close');
+  });
 });
