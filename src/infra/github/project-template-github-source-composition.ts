@@ -298,12 +298,14 @@ export function createProjectTemplateGithubSourceComposition(
 
   const resolve = (
     inputValue: GithubTemplateSourceResolutionInput,
+    verifyDependencySources: boolean,
   ): Promise<ResolvedGithubTemplateSource> => {
     const input = snapshotResolutionInput(inputValue);
     return resolveAuthenticatedGithubTemplateSource({
       source: input.source,
       checksumAssets: archive,
       deadlineMs: context.deadlineMs,
+      verifyDependencySources,
       ...(input.current === undefined ? {} : { current: input.current }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     }, resolverDependencies);
@@ -314,7 +316,7 @@ export function createProjectTemplateGithubSourceComposition(
     ): Promise<GithubTemplateSourceAdvisory> => {
       // Input and F3 failures are already finite public contracts. Keep them
       // outside the demotion boundary so callers retain their precise code.
-      const resolved = await resolve(input);
+      const resolved = await resolve(input, false);
       try {
         return demoteResolvedGithubTemplateSourceToAdvisory(resolved);
       } catch {
@@ -331,7 +333,7 @@ export function createProjectTemplateGithubSourceComposition(
     }),
     resolveForDownload: Object.freeze(async (
       input: GithubTemplateSourceResolutionInput,
-    ) => resolve(input)),
+    ) => resolve(input, true)),
   });
   return Object.freeze({ resolver, archive });
 }

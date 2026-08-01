@@ -1,4 +1,4 @@
-import { TextDecoder } from 'node:util';
+import { TextDecoder, types } from 'node:util';
 import {
   DEFAULT_TAKTPACK_LIMITS,
 } from './archive-types.js';
@@ -23,6 +23,12 @@ import {
   compareSemVer,
   requireSemVer,
 } from './validation.js';
+import type {
+  VerifiedGithubDependencySourceEvidence,
+} from '../repertoire/github-ref-resolver.js';
+import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from './repertoire-dependency-canonical.js';
 
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -43,6 +49,7 @@ export type GithubTemplateSourceResolutionErrorCode =
   | 'ASSET_TOO_LARGE'
   | 'INVALID_CHECKSUM'
   | 'CHECKSUM_MISMATCH'
+  | 'UNVERIFIED_DEPENDENCY_SOURCE'
   | 'INVALID_CURRENT_EVIDENCE'
   | 'INVALID_AUTHORITY';
 
@@ -129,6 +136,9 @@ export interface ResolveGithubTemplateSourceOptions {
   readonly source: ProjectTemplateGithubSourceSpec;
   readonly metadata: GithubTemplateSourceMetadataPort;
   readonly current?: GithubTemplateCurrentSourceEvidence;
+  readonly verifyDependencies?: (
+    dependencies: readonly ProjectTemplateRepertoireDependencyV1[],
+  ) => Promise<VerifiedGithubDependencySourceEvidence>;
 }
 
 /**
@@ -163,6 +173,7 @@ export interface ResolvedGithubTemplateSource {
    */
   readonly declaredDependencies:
     readonly ProjectTemplateRepertoireDependencyV1[];
+  readonly dependencyVerification?: VerifiedGithubDependencySourceEvidence;
   readonly updateState: GithubTemplateUpdateState;
   readonly hardBlocked: boolean;
   readonly downloadEligible: boolean;
@@ -210,6 +221,7 @@ export interface GithubTemplateSourceAdvisory {
 interface ResolvedGithubTemplateSourceAuthority {
   readonly result: ResolvedGithubTemplateSource;
   readonly descriptor: ProjectTemplateSourceDescriptorV1;
+  readonly dependencyVerification?: VerifiedGithubDependencySourceEvidence;
   state:
     | 'active'
     | 'demoting'
@@ -378,6 +390,11 @@ export function claimResolvedGithubTemplateSourceForDownload(
   value: unknown,
 ): ClaimedResolvedGithubTemplateSourceForDownload {
   const authority = requireActiveResolvedAuthority(value);
+  if (authority.dependencyVerification === undefined) {
+    invalidResolvedAuthority(
+      'unverified resolved GitHub template source authority',
+    );
+  }
   // The existing authority is deliberately advanced instead of copying its
   // provenance into a second authority: one state cell makes concurrent
   // download, discard, and receipt ownership mutually exclusive.
@@ -489,6 +506,12 @@ export async function resolveGithubTemplateSource(
     })),
   );
   const descriptor = parseDescriptorPayload(descriptorPayload);
+  const declaredDependencies = Object.freeze(
+    descriptor.repertoireDependencies.map((dependency) => Object.freeze({
+      ...dependency,
+      capabilities: Object.freeze([...dependency.capabilities]),
+    })),
+  );
 
   if (
     source.kind === 'github-release-asset'
@@ -516,6 +539,68 @@ export async function resolveGithubTemplateSource(
       'descriptor release tag does not resolve to requested commit',
       'descriptor.pack.releaseTag',
     );
+  }
+
+  // Dependency refs are verified after the pack tag is pinned but before any
+  // release/checksum side effect. A republished dependency therefore cannot
+  // advance the flow to archive authority, cache, or receipt signing.
+  let dependencyVerification: VerifiedGithubDependencySourceEvidence
+    | undefined;
+  if (options.verifyDependencies !== undefined) {
+    try {
+      const evidence = await options.verifyDependencies(declaredDependencies);
+      const descriptors: Record<string, PropertyDescriptor | undefined> = (
+        typeof evidence === 'object'
+        && evidence !== null
+        && !types.isProxy(evidence)
+      ) ? Object.getOwnPropertyDescriptors(evidence) : {};
+      const method = descriptors['method'];
+      const declarationSha256 = descriptors['declarationSha256'];
+      const count = descriptors['count'];
+      if (
+        typeof evidence !== 'object'
+        || evidence === null
+        || Array.isArray(evidence)
+        || types.isProxy(evidence)
+        || Object.getPrototypeOf(evidence) !== Object.prototype
+        || Reflect.ownKeys(evidence).length !== 3
+        || method === undefined
+        || !('value' in method)
+        || method.value !== 'github-ref-to-commit-v1'
+        || declarationSha256 === undefined
+        || !('value' in declarationSha256)
+        || typeof declarationSha256.value !== 'string'
+        || count === undefined
+        || !('value' in count)
+        || count.value !== declaredDependencies.length
+        || !Number.isSafeInteger(count.value)
+        || !SHA256_PATTERN.test(declarationSha256.value)
+        || declarationSha256.value
+          !== calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+            declaredDependencies,
+          )
+      ) throw new Error();
+      dependencyVerification = Object.freeze({
+        method: 'github-ref-to-commit-v1',
+        declarationSha256: declarationSha256.value,
+        count: count.value as number,
+      });
+    } catch {
+      resolutionError(
+        'UNVERIFIED_DEPENDENCY_SOURCE',
+        'GitHub dependency sources could not be verified',
+        'descriptor.repertoireDependencies',
+      );
+    }
+  } else if (declaredDependencies.length === 0) {
+    // Empty declarations require no remote call, but still receive explicit
+    // evidence so legacy zero-dependency downloads remain unambiguous.
+    dependencyVerification = Object.freeze({
+      method: 'github-ref-to-commit-v1',
+      declarationSha256:
+        calculateProjectTemplateRepertoireDependencyDeclarationSha256([]),
+      count: 0,
+    });
   }
 
   const releasePayload = await callMetadataPort(
@@ -605,13 +690,6 @@ export async function resolveGithubTemplateSource(
     source,
     options.current,
   );
-  const declaredDependencies = Object.freeze(
-    descriptor.repertoireDependencies.map((dependency) => Object.freeze({
-      ...dependency,
-      capabilities: Object.freeze([...dependency.capabilities]),
-    })),
-  );
-
   const result: ResolvedGithubTemplateSource = Object.freeze({
     kind: 'resolved-github-template-source',
     owner,
@@ -632,6 +710,9 @@ export async function resolveGithubTemplateSource(
     sha256: descriptor.pack.sha256,
     version: descriptor.pack.version,
     declaredDependencies,
+    ...(dependencyVerification === undefined
+      ? {}
+      : { dependencyVerification }),
     ...update,
   });
   const descriptorSnapshot = parseProjectTemplateSourceDescriptorJson(
@@ -651,6 +732,9 @@ export async function resolveGithubTemplateSource(
         ),
       ),
     }),
+    ...(dependencyVerification === undefined
+      ? {}
+      : { dependencyVerification }),
     state: 'active',
   });
   return result;

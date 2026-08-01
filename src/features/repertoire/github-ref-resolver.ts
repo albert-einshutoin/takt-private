@@ -5,9 +5,6 @@
  * When the spec omits @{ref}, queries the GitHub API for the default branch.
  */
 
-/** Injectable function for calling `gh api` (enables unit testing without network). */
-export type GhExecFn = (args: string[]) => string;
-
 import { types } from 'node:util';
 import {
   calculateProjectTemplateRepertoireDependencyDeclarationSha256,
@@ -20,8 +17,15 @@ import {
   parseProjectTemplateGithubSourceSpec,
 } from '../project-template/github-source-spec.js';
 
+/** Injectable function for calling `gh api` (enables unit testing without network). */
+export type GhExecFn = (args: string[]) => string;
+
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const ABORT_SIGNAL_ABORTED_GETTER = Object.getOwnPropertyDescriptor(
+  AbortSignal.prototype,
+  'aborted',
+)?.get;
 
 export interface GithubDependencyRefResolverPort {
   resolveRefToCommit(input: Readonly<{
@@ -59,7 +63,14 @@ function verificationError(
 function signalAborted(signal: AbortSignal | undefined): boolean {
   if (signal === undefined) return false;
   try {
-    return signal.aborted;
+    if (ABORT_SIGNAL_ABORTED_GETTER === undefined) {
+      verificationError('INVALID_ARGUMENT');
+    }
+    return CAPTURED_REFLECT_APPLY(
+      ABORT_SIGNAL_ABORTED_GETTER,
+      signal,
+      [],
+    ) as boolean;
   } catch {
     verificationError('INVALID_ARGUMENT');
   }

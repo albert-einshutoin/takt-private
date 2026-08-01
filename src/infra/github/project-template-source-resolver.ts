@@ -13,6 +13,9 @@ import {
   parseProjectTemplateGithubSourceSpec,
 } from '../../features/project-template/github-source-spec.js';
 import {
+  verifyImmutableGithubDependencySources,
+} from '../../features/repertoire/github-ref-resolver.js';
+import {
   requestProjectTemplateGithubApiMetadata,
   type RequestProjectTemplateGithubApiMetadataOptions,
 } from './project-template-api-transport.js';
@@ -45,6 +48,7 @@ export interface ResolveAuthenticatedGithubTemplateSourceOptions {
   readonly checksumAssets: GithubTemplateArchiveAssetPort;
   readonly deadlineMs: number;
   readonly signal?: AbortSignal;
+  readonly verifyDependencySources?: boolean;
 }
 
 export interface ProjectTemplateSourceResolverDependencies {
@@ -76,6 +80,7 @@ interface OptionSnapshot {
   readonly checksumAssets: ChecksumPortSnapshot;
   readonly deadlineMs: number;
   readonly signal?: AbortSignal;
+  readonly verifyDependencySources: boolean;
 }
 
 interface CredentialSnapshot {
@@ -201,18 +206,24 @@ function snapshotOptions(
   ) ? Reflect.ownKeys(value) : [];
   const hasCurrent = keys.includes('current');
   const hasSignal = keys.includes('signal');
+  const hasVerifyDependencySources = keys.includes('verifyDependencySources');
   const record = exactDataRecord(value, [
     'source',
     ...(hasCurrent ? ['current'] : []),
     'checksumAssets',
     'deadlineMs',
     ...(hasSignal ? ['signal'] : []),
+    ...(hasVerifyDependencySources ? ['verifyDependencySources'] : []),
   ]);
   if (
     typeof record['source'] !== 'string'
     || typeof record['deadlineMs'] !== 'number'
     || !Number.isFinite(record['deadlineMs'])
     || record['deadlineMs'] < 0
+    || (
+      record['verifyDependencySources'] !== undefined
+      && typeof record['verifyDependencySources'] !== 'boolean'
+    )
   ) throw invalidArgument();
   const current = snapshotCurrent(record['current']);
   const signal = snapshotSignal(record['signal']);
@@ -220,6 +231,8 @@ function snapshotOptions(
     source: record['source'],
     checksumAssets: snapshotChecksumPort(record['checksumAssets']),
     deadlineMs: record['deadlineMs'],
+    verifyDependencySources:
+      record['verifyDependencySources'] === true,
     ...(current === undefined ? {} : { current }),
     ...(signal === undefined ? {} : { signal }),
   });
@@ -654,6 +667,18 @@ export async function resolveAuthenticatedGithubTemplateSource(
       ...(options.current === undefined
         ? {}
         : { current: options.current }),
+      ...(options.verifyDependencySources
+        ? {
+          verifyDependencies: (dependencies) =>
+            verifyImmutableGithubDependencySources({
+              dependencies,
+              resolver: metadata.facade,
+              ...(options.signal === undefined
+                ? {}
+                : { signal: options.signal }),
+            }),
+        }
+        : {}),
     });
     if (signalAborted(options.signal)) {
       throw Object.freeze(new GithubTemplateSourceResolutionError(
