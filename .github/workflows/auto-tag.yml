@@ -14,9 +14,14 @@ jobs:
       startsWith(github.event.pull_request.head.ref, 'release/') &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
-      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.package.outputs.commit }}
+      npm_dist_tag: ${{ steps.package.outputs.npm_dist_tag }}
+      package_name: ${{ steps.package.outputs.package_name }}
+      package_version: ${{ steps.package.outputs.package_version }}
+      tag: ${{ steps.package.outputs.tag }}
     steps:
       - name: Validate release title and branch
         id: release
@@ -47,7 +52,64 @@ jobs:
             exit 1
           fi
 
-          printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            NPM_DIST_TAG=next
+          else
+            NPM_DIST_TAG=latest
+          fi
+
+          # These values remain job-local until package.json from the exact PR
+          # head independently confirms the same release identity.
+          {
+            printf 'NPM_DIST_TAG=%s\n' "$NPM_DIST_TAG"
+            printf 'RELEASE_TAG=%s\n' "$TAG"
+            printf 'RELEASE_VERSION=%s\n' "$VERSION"
+          } >> "$GITHUB_ENV"
+
+      - name: Read package metadata from PR head
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          sparse-checkout: package.json
+          sparse-checkout-cone-mode: false
+
+      - name: Bind validated release metadata
+        id: package
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Fail closed before emitting any output. A taggable release is one
+          # immutable tuple: event head, title/branch version, package version,
+          # package name, tag, and npm dist-tag.
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'PR head commit is not a full lowercase SHA.' >&2
+            exit 1
+          fi
+          if [ "$RELEASE_TAG" != "v${RELEASE_VERSION}" ]; then
+            echo 'Release tag and version are inconsistent.' >&2
+            exit 1
+          fi
+          if { [[ "$RELEASE_VERSION" == *-* ]] && [ "$NPM_DIST_TAG" != next ]; } ||
+             { [[ "$RELEASE_VERSION" != *-* ]] && [ "$NPM_DIST_TAG" != latest ]; }; then
+            echo 'npm dist-tag does not match release stability.' >&2
+            exit 1
+          fi
+
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PACKAGE_NAME" != takt ] || [ "$PACKAGE_VERSION" != "$RELEASE_VERSION" ]; then
+            echo 'package.json does not match the validated release.' >&2
+            exit 1
+          fi
+
+          {
+            printf 'commit=%s\n' "$HEAD_SHA"
+            printf 'npm_dist_tag=%s\n' "$NPM_DIST_TAG"
+            printf 'package_name=%s\n' "$PACKAGE_NAME"
+            printf 'package_version=%s\n' "$PACKAGE_VERSION"
+            printf 'tag=%s\n' "$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
 
   tag:
     needs: validate
@@ -55,6 +117,10 @@ jobs:
     permissions:
       contents: write
     outputs:
+      commit: ${{ needs.validate.outputs.commit }}
+      npm_dist_tag: ${{ needs.validate.outputs.npm_dist_tag }}
+      package_name: ${{ needs.validate.outputs.package_name }}
+      package_version: ${{ needs.validate.outputs.package_version }}
       tag: ${{ needs.validate.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +130,7 @@ jobs:
       - name: Create and push tag on PR head commit
         id: tag
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ needs.validate.outputs.commit }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           # `--` and a fully qualified refspec keep validated data out of Git's
@@ -89,33 +155,19 @@ jobs:
 
       - run: npm ci
 
-      - name: Determine npm tag
-        id: npm-tag
-        env:
-          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
-        run: |
-          VERSION="${RELEASE_TAG#v}"
-          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
-          if [[ "$VERSION" == *-* ]]; then
-            echo 'tag=next' >> "$GITHUB_OUTPUT"
-          else
-            echo 'tag=latest' >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Publish package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_DIST_TAG: ${{ steps.npm-tag.outputs.tag }}
+          NPM_DIST_TAG: ${{ needs.tag.outputs.npm_dist_tag }}
         run: npm publish --tag "$NPM_DIST_TAG"
 
       - name: Sync next tag on stable release
-        if: steps.npm-tag.outputs.tag == 'latest'
+        if: needs.tag.outputs.npm_dist_tag == 'latest'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          RELEASE_VERSION: ${{ steps.npm-tag.outputs.version }}
+          PACKAGE_NAME: ${{ needs.tag.outputs.package_name }}
+          RELEASE_VERSION: ${{ needs.tag.outputs.package_version }}
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-
           for attempt in 1 2 3; do
             if npm dist-tag add "${PACKAGE_NAME}@${RELEASE_VERSION}" next; then
               exit 0
@@ -129,10 +181,9 @@ jobs:
 
       - name: Verify dist-tags
         env:
-          EXPECTED_DIST_TAG: ${{ steps.npm-tag.outputs.tag }}
+          EXPECTED_DIST_TAG: ${{ needs.tag.outputs.npm_dist_tag }}
+          PACKAGE_NAME: ${{ needs.tag.outputs.package_name }}
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-
           for attempt in 1 2 3 4 5; do
             LATEST=$(npm view "${PACKAGE_NAME}" dist-tags.latest)
             NEXT=$(npm view "${PACKAGE_NAME}" dist-tags.next || true)
