@@ -1,19 +1,9 @@
-import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { types } from 'node:util';
 import {
   materializeTaktpackContents,
 } from './archive-inspector.js';
-import {
-  deriveProjectTemplateApplyPlanFromCurrentTarget,
-} from './apply-plan-derivation.js';
-import {
-  createProjectTemplateRemoteApplyPreview,
-  type ProjectTemplateRemoteApplyPreview,
-} from './apply-preview.js';
-import {
-  readProjectTemplateCompanionLockState,
-} from './companion-lock-state-reader.js';
+import type { ProjectTemplateRemoteApplyPreview } from './apply-preview.js';
 import {
   assertClaimedVerifiedGithubTemplateDownloadReceiptForPreview,
   claimVerifiedGithubTemplateDownloadReceiptForApply,
@@ -27,35 +17,17 @@ import {
 import type {
   GithubTemplateDownloadReceiptVerifier,
 } from './github-download-receipt-storage.js';
-import {
-  claimProjectTemplateRepertoireDependencyInspectionForPlanning,
-  inspectProjectTemplateRepertoireDependencies,
-  type ProjectTemplateRepertoireDependencyInspectionPort,
+import type {
+  ProjectTemplateRepertoireDependencyInspectionPort,
 } from './repertoire-dependency-inspection-port.js';
-import {
-  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
-} from './repertoire-dependency-canonical.js';
-import {
-  createProjectTemplateRepertoireDependencyPlan,
-} from './repertoire-dependency-plan.js';
-import {
-  calculateProjectTemplateRepertoireDependencyLockSha256,
-  serializeProjectTemplateRepertoireDependencyLock,
-} from './repertoire-dependency-lock.js';
-import { serializeTemplateLock } from './lock.js';
-import {
-  createProjectTemplateSourceProvenancePlan,
-} from './source-provenance-plan.js';
 import {
   createRemotePreviewOperationContext,
   requireActiveRemotePreview,
   type ProjectTemplateRemotePreviewOperationContext,
 } from './remote-preview-operation.js';
-import { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
 import {
-  openProjectTemplateApplyStorageReadOnly,
-} from './apply-storage.js';
-import { readProjectTemplateMergeBaseline } from './merge-baseline-store.js';
+  deriveGithubProjectTemplateRemoteTransaction,
+} from './remote-transaction-derivation.js';
 
 export {
   GithubProjectTemplateRemotePreviewError,
@@ -77,10 +49,6 @@ export interface CreateGithubProjectTemplateRemotePreviewOptions {
   readonly dependencyInspectionTimeoutMs?: number;
   readonly receiptIo?: GithubTemplateDownloadReceiptOfflineReadIo;
   readonly signal?: AbortSignal;
-}
-
-function sha256(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function exactOptions(
@@ -238,172 +206,14 @@ export async function createGithubProjectTemplateRemotePreview(
     consumeVerifiedGithubTemplateDownloadReceiptApplyClaim(receiptClaim);
   }
 
-  const receipt = verified.receipt;
-  const descriptor = receipt.payload.source.sourceDescriptor;
-  const dependencies = descriptor.repertoireDependencies;
-  const dependencyEvidence = receipt.payload.source.dependencyVerification
-    ?? Object.freeze({
-      method: 'github-ref-to-commit-v1' as const,
-      declarationSha256:
-        calculateProjectTemplateRepertoireDependencyDeclarationSha256([]),
-      count: 0,
-    });
-  if (
-    dependencyEvidence.count !== dependencies.length
-    || dependencyEvidence.declarationSha256
-      !== calculateProjectTemplateRepertoireDependencyDeclarationSha256(
-        dependencies,
-      )
-  ) throw new Error('remote dependency evidence mismatch');
-
-  const companion = readProjectTemplateCompanionLockState(
-    options.projectRoot,
-    operationContext,
-  );
-  requireActiveRemotePreview(operationContext);
-  const baseContents: Array<{ path: string; content: Uint8Array }> = [];
-  if (companion.state === 'update') {
-    try {
-      const storage = await openProjectTemplateApplyStorageReadOnly({
-        repoPath: options.projectRoot,
-      });
-      requireActiveRemotePreview(operationContext);
-      for (const entry of companion.contentLock.entries) {
-        if (
-          entry.policy !== 'merge'
-          || (entry.path !== 'config.yaml' && entry.path !== 'devloopd.yaml')
-        ) continue;
-        try {
-          const content = await readProjectTemplateMergeBaseline({
-            storage,
-            expectedSha256: entry.sha256,
-          });
-          requireActiveRemotePreview(operationContext);
-          // Detach preview planning bytes from the storage reader's Buffer.
-          baseContents.push({ path: entry.path, content: new Uint8Array(content) });
-        } catch {
-          // Missing or invalid historical bytes are represented by the
-          // planner's fixed BASE_UNAVAILABLE conflict; preview never repairs.
-          requireActiveRemotePreview(operationContext);
-        }
-      }
-    } catch {
-      // An unavailable/unsafe store grants no baseline authority. Planning
-      // remains read-only and reports the same per-entry fixed conflict.
-      requireActiveRemotePreview(operationContext);
-    }
-  }
-  const preparedContentPlan = await deriveProjectTemplateApplyPlanFromCurrentTarget({
-    projectRoot: options.projectRoot,
-    ...(companion.state === 'update'
-      ? { baseLock: companion.contentLock }
-      : {}),
-    baseContents,
-    incomingManifest: materialized.inspection.manifest,
-    incomingContents: materialized.contents,
-    incomingInspection: {
-      archiveSha256: materialized.inspection.archiveSha256,
-      manifestSha256: materialized.inspection.manifestSha256,
-      currentTaktVersion: options.currentTaktVersion,
-      compatibilityStatus: materialized.inspection.compatibility.status,
-    },
-    baselineStrategy: options.baselineStrategy,
-    operationContext,
-  });
-  requireActiveRemotePreview(operationContext);
-  const contentPlan = preparedContentPlan.plan;
-
-  const incomingDependencyLock = Object.freeze({
-    schemaVersion: '1.0' as const,
-    sourceDescriptorSha256: receipt.payload.source.descriptorSha256,
-    manifestSha256: materialized.inspection.manifestSha256,
-    dependencies,
-  });
-  let inspection: ReturnType<
-    typeof inspectProjectTemplateRepertoireDependencies
-  >;
-  try {
-    inspection = inspectProjectTemplateRepertoireDependencies({
-      request: {
-        sourceDescriptorSha256: incomingDependencyLock.sourceDescriptorSha256,
-        manifestSha256: incomingDependencyLock.manifestSha256,
-        dependencies,
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        deadlineMs,
-      },
-      port: options.repertoireInspectionPort,
-    });
-  } catch (error) {
-    // The port can only supply fixed inspection failures; cancellation and
-    // expiry are normalized to this facade's equally fixed public contract.
-    requireActiveRemotePreview(operationContext);
-    throw error;
-  }
-  requireActiveRemotePreview(operationContext);
-  const dependencyPlan = createProjectTemplateRepertoireDependencyPlan({
-    inspectionClaim:
-      claimProjectTemplateRepertoireDependencyInspectionForPlanning(inspection),
-    incomingLock: incomingDependencyLock,
-    previousLock: companion.state === 'first-install'
-      ? { state: 'absent' }
-      : {
-        state: 'present',
-        content: serializeProjectTemplateRepertoireDependencyLock(
-          companion.repertoireLock,
-        ),
-      },
-  });
-
-  const sourceProvenance = Object.freeze({
-    schemaVersion: '1.0' as const,
-    source: Object.freeze({
-      owner: receipt.payload.source.owner,
-      repo: receipt.payload.source.repo,
-      repositoryUrl: receipt.payload.source.repositoryUrl,
-      canonicalSource: receipt.payload.source.canonicalSource,
-      requestedRef: receipt.payload.source.requestedRef,
-      releaseTag: receipt.payload.source.releaseTag,
-      ...(parseProjectTemplateGithubSourceSpec(
-        receipt.payload.source.canonicalSource,
-      ).kind === 'github-release-asset'
-        ? { assetName: receipt.payload.release.assetName }
-        : {}),
-      commit: receipt.payload.source.commit,
-      descriptorSha256: receipt.payload.source.descriptorSha256,
-    }),
-    archive: Object.freeze({
-      sha256: receipt.payload.archive.sha256,
-      version: receipt.payload.archive.version,
-      manifestSha256: receipt.payload.archive.manifestSha256,
-    }),
-    dependencyVerification: Object.freeze({ ...dependencyEvidence }),
-  });
-  const sourcePlan = createProjectTemplateSourceProvenancePlan({
-    incoming: sourceProvenance,
-    previous: companion.state === 'first-install'
-      ? { state: 'absent' }
-      : { state: 'present', provenance: companion.sourceProvenance },
-  });
-  const nextContentLock = {
-    schemaVersion: materialized.inspection.lockSeed.schemaVersion,
-    manifestSha256: materialized.inspection.manifestSha256,
-    packVersion: materialized.inspection.lockSeed.packVersion,
-    source: materialized.inspection.lockSeed.source,
-    capabilities: materialized.inspection.lockSeed.capabilities,
-    entries: materialized.inspection.lockSeed.entries,
-  };
-  requireActiveRemotePreview(operationContext);
-  return createProjectTemplateRemoteApplyPreview({
-    contentPlan,
-    repertoireDependencyPlan: dependencyPlan,
-    sourceProvenancePlan: sourcePlan,
+  return deriveGithubProjectTemplateRemoteTransaction({
+    verified,
+    materialized,
     receiptKey: options.receiptKey,
-    previousLocksSha256: companion.previousLocksSha256,
-    nextContentLockSha256: sha256(serializeTemplateLock(nextContentLock)),
-    nextRepertoireLockSha256:
-      calculateProjectTemplateRepertoireDependencyLockSha256(
-        incomingDependencyLock,
-      ),
+    projectRoot: options.projectRoot,
+    currentTaktVersion: options.currentTaktVersion,
+    repertoireInspectionPort: options.repertoireInspectionPort,
     baselineStrategy: options.baselineStrategy,
+    operationContext,
   });
 }

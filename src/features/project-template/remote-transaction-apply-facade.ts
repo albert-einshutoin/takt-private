@@ -27,12 +27,20 @@ import {
   deriveGithubTemplateDownloadArtifactPaths,
 } from './github-download-receipt-paths.js';
 import { materializeTaktpackContents } from './archive-inspector.js';
+import {
+  createRemotePreviewOperationContext,
+} from './remote-preview-operation.js';
+import {
+  deriveGithubProjectTemplateRemoteTransaction,
+} from './remote-transaction-derivation.js';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const REMOTE_APPLY_DERIVATION_TIMEOUT_MS = 5_000;
 
 export type GithubProjectTemplateRemoteApplyErrorCode =
   | 'INVALID_OPTIONS'
   | 'INVALID_AUTHORITY'
+  | 'TRANSACTION_PLAN_MISMATCH'
   | 'TRUSTED_INFRASTRUCTURE_UNAVAILABLE';
 
 export class GithubProjectTemplateRemoteApplyError extends Error {
@@ -41,7 +49,9 @@ export class GithubProjectTemplateRemoteApplyError extends Error {
       ? 'GitHub project template remote apply options are invalid'
       : code === 'INVALID_AUTHORITY'
         ? 'GitHub project template remote apply authority is invalid'
-        : 'GitHub project template remote apply infrastructure is unavailable');
+        : code === 'TRANSACTION_PLAN_MISMATCH'
+          ? 'GitHub project template remote transaction plan changed'
+          : 'GitHub project template remote apply infrastructure is unavailable');
     this.name = 'GithubProjectTemplateRemoteApplyError';
     Object.freeze(this);
   }
@@ -332,6 +342,10 @@ export function createProjectTemplateRemoteApplyComposition(
       input: ApplyGithubProjectTemplateRemoteTransactionOptions,
     ): Promise<ProjectTemplateApplyResult> {
       const options = snapshotOptions(input);
+      const operationContext = createRemotePreviewOperationContext(
+        options.signal,
+        performance.now() + REMOTE_APPLY_DERIVATION_TIMEOUT_MS,
+      );
       const initialGuard = inspectProjectTemplateApplyGuard({
         repoPath: options.projectRoot,
       });
@@ -368,6 +382,9 @@ export function createProjectTemplateRemoteApplyComposition(
         const claim = claimVerifiedGithubTemplateDownloadReceiptForApply(
           verified,
         );
+        let materialized: Awaited<ReturnType<
+          typeof materializeTaktpackContents
+        >>;
         try {
           const claimed =
             assertClaimedVerifiedGithubTemplateDownloadReceiptForPreview(
@@ -382,20 +399,62 @@ export function createProjectTemplateRemoteApplyComposition(
             cacheRoot: options.cacheRoot,
             archiveSha256: claimed.artifactSha256,
           });
-          await materializeTaktpackContents(artifactPaths.artifactPath, {
-            currentTaktVersion: options.currentTaktVersion,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          });
+          materialized = await materializeTaktpackContents(
+            artifactPaths.artifactPath,
+            {
+              currentTaktVersion: options.currentTaktVersion,
+              ...(options.signal === undefined
+                ? {}
+                : { signal: options.signal }),
+              deadlineMs: operationContext.deadlineMs,
+            },
+          );
           assertProjectTemplateMutationLeaseOwned(
             options.projectRoot,
             lease as ProjectTemplateMutationLease,
           );
+          if (
+            materialized.inspection.archiveSha256 !== claimed.artifactSha256
+            || materialized.inspection.archiveSha256
+              !== claimed.receipt.payload.archive.sha256
+            || materialized.inspection.manifestSha256
+              !== claimed.receipt.payload.archive.manifestSha256
+            || materialized.inspection.manifestSha256
+              !== claimed.inspection.manifestSha256
+          ) {
+            throw new GithubProjectTemplateRemoteApplyError(
+              'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
+            );
+          }
         } finally {
           consumeVerifiedGithubTemplateDownloadReceiptApplyClaim(claim);
         }
-        // The subsequent fresh cohort/approval/executor stages are added by
-        // the remaining H11 TDD slices. No verified value escapes this call.
-        void trusted.repertoireInspectionPort;
+        const preview = await deriveGithubProjectTemplateRemoteTransaction({
+          verified,
+          materialized,
+          receiptKey: options.receiptKey,
+          projectRoot: options.projectRoot,
+          currentTaktVersion: options.currentTaktVersion,
+          repertoireInspectionPort: trusted.repertoireInspectionPort,
+          baselineStrategy: options.baselineStrategy,
+          operationContext,
+          assertAuthority() {
+            assertProjectTemplateMutationLeaseOwned(
+              options.projectRoot,
+              lease as ProjectTemplateMutationLease,
+            );
+          },
+        });
+        assertProjectTemplateMutationLeaseOwned(
+          options.projectRoot,
+          lease as ProjectTemplateMutationLease,
+        );
+        if (preview.transactionPlanId !== options.expectedTransactionPlanId) {
+          throw new GithubProjectTemplateRemoteApplyError(
+            'TRANSACTION_PLAN_MISMATCH',
+          );
+        }
+        // Approval and execution are added by the subsequent H11 slices.
         throw new GithubProjectTemplateRemoteApplyError(
           'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
         );
