@@ -77,11 +77,13 @@ describe('project template CLI lifecycle', () => {
     const admitted = deferred();
     const settle = deferred();
     const dispose = vi.fn(() => undefined);
+    const onAbort = vi.fn();
     const execution = startProjectTemplateCliLifecycle({
       command: 'project-template apply',
       mode: 'apply',
       dispose,
-      handle: async ({ admitMutation }) => {
+      handle: async ({ admitMutation, signal }) => {
+        signal.addEventListener('abort', onAbort);
         admitMutation();
         admitted.resolve();
         await settle.promise;
@@ -104,7 +106,10 @@ describe('project template CLI lifecycle', () => {
 
     expect(outcome.exitCode).toBe(0);
     expect(outcome.envelope.status).toBe('success');
+    expect(onAbort).not.toHaveBeenCalled();
     expect(dispose).toHaveBeenCalledTimes(1);
+    execution.interrupt();
+    expect(onAbort).not.toHaveBeenCalled();
   });
 
   it('redacts unexpected failures into the internal category and disposes once', async () => {
@@ -125,5 +130,46 @@ describe('project template CLI lifecycle', () => {
     });
     expect(JSON.stringify(outcome.envelope)).not.toContain('/Users/alice');
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps synchronous handler throws and disposal rejection to internal', async () => {
+    const execution = startProjectTemplateCliLifecycle({
+      command: 'project-template preview',
+      mode: 'dry-run',
+      dispose: () => Promise.reject(new Error('dispose failed')),
+      handle: (() => {
+        throw new Error('sync failure');
+      }) as never,
+    });
+
+    await expect(execution.result).resolves.toMatchObject({
+      exitCode: 70,
+      envelope: { status: 'error', error: { code: 'INTERNAL' } },
+    });
+  });
+
+  it('treats duplicate mutation admission as an internal protocol failure', async () => {
+    const execution = startProjectTemplateCliLifecycle({
+      command: 'project-template apply',
+      mode: 'apply',
+      dispose: () => undefined,
+      handle: async ({ admitMutation }) => {
+        admitMutation();
+        admitMutation();
+        return {
+          envelope: createProjectTemplateCliSuccess({
+            command: 'project-template apply',
+            mode: 'apply',
+            result: { applied: true },
+          }),
+          exitCode: 0,
+        };
+      },
+    });
+
+    await expect(execution.result).resolves.toMatchObject({
+      exitCode: 70,
+      envelope: { status: 'error', error: { code: 'INTERNAL' } },
+    });
   });
 });
