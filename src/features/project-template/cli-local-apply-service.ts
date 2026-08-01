@@ -1,6 +1,9 @@
 import { resolve } from 'node:path';
 import { types } from 'node:util';
 import {
+  createProductionProjectTemplateCliLocalApplyPort,
+} from './local-transaction-apply-facade.js';
+import {
   createProjectTemplateCliFailure,
   createProjectTemplateCliSuccess,
   projectTemplateCliExitCodeForErrorCode,
@@ -49,6 +52,7 @@ export type ProjectTemplateCliLocalExecutionResult =
     readonly status: 'not_started';
     readonly code:
       | 'TARGET_DRIFT'
+      | 'PLAN_DRIFT'
       | 'BASE_LOCK_DRIFT'
       | 'LEASE_UNAVAILABLE'
       | 'APPLY_GUARD_BLOCKED'
@@ -56,6 +60,8 @@ export type ProjectTemplateCliLocalExecutionResult =
       | 'APPROVAL_REQUIRED'
       | 'APPROVAL_INVALID'
       | 'APPLY_FAILED_ROLLED_BACK'
+      | 'SOURCE_INTEGRITY_FAILED'
+      | 'INTERRUPTED'
       | 'SECURITY_GUARD';
   }
   | { readonly status: 'indeterminate' };
@@ -295,12 +301,15 @@ function previewOutcome(
 }
 
 function executionFailure(code: string): ProjectTemplateCliErrorCode {
+  if (code === 'PLAN_DRIFT') return 'PLAN_DRIFT';
   if (code === 'TARGET_DRIFT') return 'TARGET_DRIFT';
   if (code === 'BASE_LOCK_DRIFT') return 'BASE_LOCK_DRIFT';
   if (code === 'LEASE_UNAVAILABLE') return 'LEASE_UNAVAILABLE';
   if (code === 'BACKUP_UNAVAILABLE') return 'BACKUP_UNAVAILABLE';
   if (code === 'APPROVAL_REQUIRED' || code === 'APPROVAL_INVALID') return 'APPROVAL_REQUIRED';
   if (code === 'APPLY_FAILED_ROLLED_BACK') return 'APPLY_FAILED_ROLLED_BACK';
+  if (code === 'SOURCE_INTEGRITY_FAILED') return 'SOURCE_INTEGRITY_FAILED';
+  if (code === 'INTERRUPTED') return 'INTERRUPTED';
   return code === 'APPLY_GUARD_BLOCKED' ? 'APPLY_GUARD_BLOCKED' : 'SECURITY_GUARD';
 }
 
@@ -434,4 +443,12 @@ export function createProjectTemplateCliLocalApplyService(
       });
     },
   });
+}
+
+/** Creates the production local CLI service over the trusted transaction port. */
+export function createProductionProjectTemplateCliLocalApplyService():
+ProjectTemplateCliLocalApplyService {
+  return createProjectTemplateCliLocalApplyService(
+    createProductionProjectTemplateCliLocalApplyPort(),
+  );
 }
