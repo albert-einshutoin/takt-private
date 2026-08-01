@@ -343,6 +343,67 @@ describe('Windows project template receipt key store', () => {
     expect(plaintext?.every((byte) => byte === 0)).toBe(true);
     expect(ciphertext?.every((byte) => byte === 0)).toBe(true);
   });
+
+  it('recovers only an old lock owned by a dead process', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+    });
+    await healthy.write(registry());
+    const lockPath = join(directory, '.keyring.lock');
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 424242,
+      createdAtMs: 1,
+      token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    }), { mode: 0o600 });
+    const recovered = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      leasePolicy: {
+        attempts: 3,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive: () => false,
+      },
+    });
+    await expect(recovered.read()).resolves.toEqual(registry());
+    expect(existsSync(lockPath)).toBe(false);
+
+    writeFileSync(lockPath, '{malformed', { mode: 0o600 });
+    await expect(recovered.read()).rejects.toThrow(/lease is unavailable/i);
+    expect(readFileSync(lockPath, 'utf8')).toBe('{malformed');
+  });
+
+  it('rejects same-size in-place DPAPI ciphertext changes', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+    });
+    await healthy.write(registry());
+    let changed = false;
+    const raced = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      io: {
+        afterInitialFileStat(path) {
+          if (changed || !path.endsWith('keyring.dpapi')) return;
+          changed = true;
+          const ciphertext = readFileSync(path);
+          const plaintext = Uint8Array.from(ciphertext, (byte) => byte ^ 0xa5);
+          const text = Buffer.from(plaintext).toString('utf8')
+            .replace('"generation":0', '"generation":1');
+          expect(Buffer.byteLength(text)).toBe(ciphertext.byteLength);
+          writeFileSync(path, Uint8Array.from(Buffer.from(text), (byte) => byte ^ 0xa5));
+          plaintext.fill(0);
+          ciphertext.fill(0);
+        },
+      },
+    });
+    await expect(raced.read()).rejects.toThrow(/changed/i);
+  });
 });
 
 function dpapiRequest() {

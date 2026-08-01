@@ -23,8 +23,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createPosixProjectTemplateReceiptKeyStore,
 } from '../../infra/security/project-template-receipt-key-store-posix.js';
-import type {
-  ProjectTemplateReceiptKeyRegistry,
+import {
+  parseProjectTemplateReceiptKeyRegistry,
+  type ProjectTemplateReceiptKeyEntry,
+  type ProjectTemplateReceiptKeyRegistry,
 } from '../../infra/security/project-template-receipt-key-store.js';
 
 const roots: string[] = [];
@@ -255,5 +257,99 @@ describe('POSIX project template receipt key store', () => {
     expect(await partial.read()).toEqual(registry());
     expect(maximumRequested).toBeLessThanOrEqual(64 * 1024);
     expect(readBuffer?.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it('never unlinks another owner lock after timeout or path replacement', async () => {
+    const directory = join(root(), 'keys');
+    const owner = createPosixProjectTemplateReceiptKeyStore({ directory });
+    const waiter = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      leasePolicy: { attempts: 2, waitMs: 1 },
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held = owner.withExclusiveLease(async () => gate);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(waiter.withExclusiveLease(() => undefined)).rejects.toThrow(
+      /lease is unavailable/i,
+    );
+    const third = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      leasePolicy: { attempts: 2, waitMs: 1 },
+    });
+    await expect(third.withExclusiveLease(() => undefined)).rejects.toThrow(
+      /lease is unavailable/i,
+    );
+
+    const lockPath = join(directory, '.keyring.lock');
+    unlinkSync(lockPath);
+    writeFileSync(lockPath, 'replacement-owner\n', { mode: 0o600 });
+    release();
+    await held;
+    expect(readFileSync(lockPath, 'utf8')).toBe('replacement-owner\n');
+  });
+
+  it('rejects same-size in-place registry changes after initial fstat', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
+    await healthy.write(registry());
+    let changed = false;
+    const raced = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        afterInitialFileStat(path) {
+          if (changed || !path.endsWith('keyring.json')) return;
+          changed = true;
+          const bytes = readFileSync(path);
+          const text = bytes.toString('utf8').replace('"generation":0', '"generation":1');
+          expect(Buffer.byteLength(text)).toBe(bytes.byteLength);
+          writeFileSync(path, text);
+          bytes.fill(0);
+        },
+      },
+    });
+    await expect(raced.read()).rejects.toThrow(/changed/i);
+  });
+
+  it('zeroizes every parse-owned decoded secret on success and partial failure', () => {
+    const owned: Uint8Array[] = [];
+    const secret = Buffer.alloc(32, 7).toString('base64url');
+    const valid = Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      keys: [{
+        keyId: 'receipt-key-77777777777777777777777777777777',
+        state: 'active',
+        secret,
+      }],
+    }));
+    const parsed = parseProjectTemplateReceiptKeyRegistry(valid, {
+      onOwnedSecretBuffer(buffer) { owned.push(buffer); },
+    });
+    expect(parsed.keys[0]?.secret?.[0]).toBe(7);
+    expect(owned.length).toBeGreaterThanOrEqual(2);
+    expect(owned.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
+
+    owned.length = 0;
+    const invalid = Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      keys: [
+        {
+          keyId: 'receipt-key-77777777777777777777777777777777',
+          state: 'active',
+          secret,
+        },
+        {
+          keyId: 'receipt-key-88888888888888888888888888888888',
+          state: 'verify-only',
+          secret: 'invalid',
+        },
+      ] satisfies Array<Partial<ProjectTemplateReceiptKeyEntry>>,
+    }));
+    expect(() => parseProjectTemplateReceiptKeyRegistry(invalid, {
+      onOwnedSecretBuffer(buffer) { owned.push(buffer); },
+    })).toThrow(/encoded key secret/i);
+    expect(owned.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
+    valid.fill(0);
+    invalid.fill(0);
   });
 });
