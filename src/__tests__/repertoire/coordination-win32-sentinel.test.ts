@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CoordinationWindowsSentinelError,
+  CoordinationWindowsSentinelBusyError,
+  CoordinationWindowsSentinelTimeoutError,
   openWindowsCoordinationSentinel,
+  openWindowsCoordinationSentinelBounded,
   type WindowsSentinelFileStat,
 } from '../../features/repertoire/coordination-win32-sentinel.js';
 
@@ -30,6 +33,7 @@ function fixture(existing = false) {
   const fdStats = new Map<number, WindowsSentinelFileStat>([[41, stat('directory', 4n)]]);
   if (existing) fdStats.set(52, paths.get(SENTINEL)!);
   let bytes = existing ? canonical : Buffer.alloc(0);
+  let publishingPath: string | undefined;
   const close = vi.fn();
   const rootAuthority = {
     canonicalRoot: ROOT,
@@ -39,11 +43,15 @@ function fixture(existing = false) {
   };
   const dependencies = {
     lstat: (path: string) => paths.get(path),
+    list: () => [...paths.keys()]
+      .filter((path) => path.startsWith(`${SUBTREE}\\`))
+      .map((path) => path.slice(SUBTREE.length + 1)),
     openDirectory: vi.fn(() => 41),
-    openSentinelExclusive: vi.fn(() => {
-      if (paths.has(SENTINEL)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+    openSentinelExclusive: vi.fn((path: string) => {
+      if (paths.has(path)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
       const created = { ...stat('file', 5n), size: 0n };
-      paths.set(SENTINEL, created);
+      publishingPath = path;
+      paths.set(path, created);
       fdStats.set(52, created);
       return 52;
     }),
@@ -52,12 +60,27 @@ function fixture(existing = false) {
     writeSentinel: vi.fn((_fd: number, value: Buffer) => {
       bytes = Buffer.from(value);
       const written = { ...stat('file', 5n), size: BigInt(bytes.length) };
-      paths.set(SENTINEL, written);
+      paths.set(publishingPath ?? SENTINEL, written);
       fdStats.set(52, written);
     }),
     fsync: vi.fn(),
     readSentinel: vi.fn(() => Buffer.from(bytes)),
     close,
+    link: vi.fn((source: string, destination: string) => {
+      if (paths.has(destination)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      const linked = { ...paths.get(source)!, nlink: 2n };
+      paths.set(source, linked);
+      paths.set(destination, linked);
+      fdStats.set(52, linked);
+    }),
+    unlink: vi.fn((path: string) => {
+      paths.delete(path);
+      if (path === publishingPath && paths.has(SENTINEL)) {
+        const published = { ...paths.get(SENTINEL)!, nlink: 1n };
+        paths.set(SENTINEL, published);
+        fdStats.set(52, published);
+      }
+    }),
     randomUUID: () => TOKEN,
   };
   return { bytes: () => bytes, close, dependencies, fdStats, paths, rootAuthority };
@@ -71,7 +94,9 @@ describe('Windows coordination root sentinel', () => {
       dependencies: value.dependencies,
     });
 
-    expect(value.dependencies.openSentinelExclusive).toHaveBeenCalledWith(SENTINEL);
+    expect(value.dependencies.openSentinelExclusive).toHaveBeenCalledWith(
+      `${SENTINEL}.${TOKEN}.publishing`,
+    );
     expect(value.bytes().toString('utf8')).toBe(`{"version":1,"token":"${TOKEN}"}\n`);
     expect(value.bytes().toString('utf8')).not.toMatch(/dev|ino|mtime|ctime/i);
     expect(authority.token).toBe(TOKEN);
@@ -90,6 +115,76 @@ describe('Windows coordination root sentinel', () => {
     expect(value.dependencies.openSentinelRead).toHaveBeenCalledWith(SENTINEL);
     expect(value.dependencies.writeSentinel).not.toHaveBeenCalled();
     expect(value.bytes()).toEqual(before);
+  });
+
+  it('blocks a concurrent first-start observer until complete publication', () => {
+    const value = fixture();
+    let observed: unknown;
+    const publish = value.dependencies.link.getMockImplementation()!;
+    value.dependencies.link.mockImplementation((source, destination) => {
+      try {
+        openWindowsCoordinationSentinel({
+          rootAuthority: value.rootAuthority,
+          dependencies: value.dependencies,
+        });
+      } catch (error) {
+        observed = error;
+      }
+      publish(source, destination);
+    });
+
+    const authority = openWindowsCoordinationSentinel({
+      rootAuthority: value.rootAuthority,
+      dependencies: value.dependencies,
+    });
+    expect(observed).toBeInstanceOf(CoordinationWindowsSentinelBusyError);
+    expect(authority.token).toBe(TOKEN);
+  });
+
+  it('times out behind a stale valid publishing file and never cleans it', async () => {
+    const value = fixture(true);
+    const staging = `${SENTINEL}.${TOKEN}.publishing`;
+    value.paths.set(staging, value.paths.get(SENTINEL)!);
+    value.paths.delete(SENTINEL);
+
+    await expect(openWindowsCoordinationSentinelBounded({
+      rootAuthority: value.rootAuthority,
+      dependencies: value.dependencies,
+      timeoutMs: 20,
+    })).rejects.toBeInstanceOf(CoordinationWindowsSentinelTimeoutError);
+    expect(value.paths.has(staging)).toBe(true);
+    expect(value.dependencies.unlink).not.toHaveBeenCalled();
+  });
+
+  it('treats a crash-retained linked publication pair as bounded busy evidence', async () => {
+    const value = fixture(true);
+    const staging = `${SENTINEL}.${TOKEN}.publishing`;
+    const linked = { ...value.paths.get(SENTINEL)!, nlink: 2n };
+    value.paths.set(SENTINEL, linked);
+    value.paths.set(staging, linked);
+    value.fdStats.set(52, linked);
+
+    await expect(openWindowsCoordinationSentinelBounded({
+      rootAuthority: value.rootAuthority,
+      dependencies: value.dependencies,
+      timeoutMs: 20,
+    })).rejects.toBeInstanceOf(CoordinationWindowsSentinelTimeoutError);
+    expect(value.paths.has(staging)).toBe(true);
+  });
+
+  it('rejects stable malformed publishing bytes after bounded observation', async () => {
+    const value = fixture(true);
+    const staging = `${SENTINEL}.${TOKEN}.publishing`;
+    value.paths.set(staging, { ...value.paths.get(SENTINEL)!, size: 1n });
+    value.paths.delete(SENTINEL);
+    value.dependencies.readSentinel.mockReturnValue(Buffer.from('{'));
+
+    await expect(openWindowsCoordinationSentinelBounded({
+      rootAuthority: value.rootAuthority,
+      dependencies: value.dependencies,
+      timeoutMs: 20,
+    })).rejects.toBeInstanceOf(CoordinationWindowsSentinelError);
+    expect(value.paths.has(staging)).toBe(true);
   });
 
   it.each(['malformed', 'oversize', 'symlink', 'hardlink'] as const)(

@@ -4,8 +4,11 @@ import {
   fstatSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   openSync,
   readSync,
+  readdirSync,
+  unlinkSync,
   writeFileSync,
   type BigIntStats,
 } from 'node:fs';
@@ -15,6 +18,8 @@ import { win32 } from 'node:path';
 const SENTINEL_FILENAME = '.root.identity';
 const SENTINEL_VERSION = 1;
 const MAX_SENTINEL_BYTES = 4_096;
+const PUBLISHING_SUFFIX = '.publishing';
+const PUBLISHING_PATTERN = /^\.root\.identity\.([0-9a-f-]{36})\.publishing$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export type WindowsSentinelFileStat = {
@@ -37,6 +42,7 @@ export type WindowsSentinelRootAuthority = {
 
 export type WindowsSentinelDependencies = {
   lstat(path: string): WindowsSentinelFileStat | undefined;
+  list(path: string): string[];
   openSentinelExclusive(path: string): number;
   openSentinelRead(path: string): number;
   fstat(fd: number): WindowsSentinelFileStat;
@@ -44,6 +50,8 @@ export type WindowsSentinelDependencies = {
   fsync(fd: number): void;
   readSentinel(fd: number, maximumBytes: number): Buffer;
   close(fd: number): void;
+  link(source: string, destination: string): void;
+  unlink(path: string): void;
   randomUUID(): string;
 };
 
@@ -60,6 +68,51 @@ export class CoordinationWindowsSentinelError extends Error {
   }
 }
 
+export class CoordinationWindowsSentinelBusyError extends Error {
+  readonly malformed: boolean;
+  constructor(malformed = false) {
+    super('Windows coordination sentinel publication is pending');
+    this.name = 'CoordinationWindowsSentinelBusyError';
+    this.malformed = malformed;
+  }
+}
+
+export class CoordinationWindowsSentinelTimeoutError extends Error {
+  constructor() {
+    super('Windows coordination sentinel publication timed out');
+    this.name = 'CoordinationWindowsSentinelTimeoutError';
+  }
+}
+
+export async function openWindowsCoordinationSentinelBounded(options: {
+  readonly rootAuthority: WindowsSentinelRootAuthority;
+  readonly dependencies?: WindowsSentinelDependencies;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+}): Promise<WindowsCoordinationSentinelAuthority> {
+  const deadline = Date.now() + options.timeoutMs;
+  let observedMalformed = false;
+  try {
+    while (true) {
+      if (options.signal?.aborted) throw failed();
+      try {
+        return openWindowsCoordinationSentinel(options);
+      } catch (error) {
+        if (!(error instanceof CoordinationWindowsSentinelBusyError)) throw error;
+        observedMalformed ||= error.malformed;
+        if (Date.now() >= deadline) {
+          if (observedMalformed) throw failed();
+          throw new CoordinationWindowsSentinelTimeoutError();
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+  } catch (error) {
+    try { options.rootAuthority.close(); } catch { /* redacted below */ }
+    throw error;
+  }
+}
+
 export function openWindowsCoordinationSentinel(options: {
   readonly rootAuthority: WindowsSentinelRootAuthority;
   readonly dependencies?: WindowsSentinelDependencies;
@@ -71,6 +124,7 @@ export function openWindowsCoordinationSentinel(options: {
   );
   const sentinelPath = win32.join(coordinationRoot, SENTINEL_FILENAME);
   let sentinelFd: number | undefined;
+  let ownPublishingPath: string | undefined;
   try {
     options.rootAuthority.assertUnchanged();
     const directoryBefore = requireDirectory(dependencies.lstat(coordinationRoot));
@@ -80,24 +134,33 @@ export function openWindowsCoordinationSentinel(options: {
       throw failed();
     }
 
-    let created = false;
-    try {
-      sentinelFd = dependencies.openSentinelExclusive(sentinelPath);
-      created = true;
-    } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
-      sentinelFd = openExistingSentinel(dependencies, sentinelPath);
-    }
-
+    assertKnownPublishingEntries(dependencies, coordinationRoot);
     let canonicalBytes: Buffer;
-    if (created) {
+    if (dependencies.lstat(sentinelPath) === undefined) {
       const token = dependencies.randomUUID();
       if (!UUID.test(token)) throw failed();
       canonicalBytes = Buffer.from(JSON.stringify({ version: SENTINEL_VERSION, token }) + '\n');
       if (canonicalBytes.length > MAX_SENTINEL_BYTES) throw failed();
+      ownPublishingPath = `${sentinelPath}.${token}${PUBLISHING_SUFFIX}`;
+      sentinelFd = dependencies.openSentinelExclusive(ownPublishingPath);
       dependencies.writeSentinel(sentinelFd, canonicalBytes);
       dependencies.fsync(sentinelFd);
+      const stagedFd = requireSentinel(dependencies.fstat(sentinelFd));
+      const stagedPath = requireSentinel(dependencies.lstat(ownPublishingPath));
+      assertSameStableFile(stagedFd, stagedPath);
+      const stagedBytes = dependencies.readSentinel(sentinelFd, MAX_SENTINEL_BYTES + 1);
+      if (!stagedBytes.equals(canonicalBytes)) throw failed();
+      try {
+        dependencies.link(ownPublishingPath, sentinelPath);
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+      }
+      dependencies.unlink(ownPublishingPath);
+      ownPublishingPath = undefined;
+      dependencies.close(sentinelFd);
+      sentinelFd = openExistingSentinel(dependencies, sentinelPath);
     } else {
+      sentinelFd = openExistingSentinel(dependencies, sentinelPath);
       canonicalBytes = dependencies.readSentinel(sentinelFd, MAX_SENTINEL_BYTES + 1);
     }
 
@@ -106,10 +169,6 @@ export function openWindowsCoordinationSentinel(options: {
     assertSameStableFile(sentinelOpened, sentinelAfter);
     if (sentinelOpened.size !== BigInt(canonicalBytes.length)) throw failed();
     const record = parseCanonicalSentinel(canonicalBytes);
-    if (created) {
-      const retainedBytes = dependencies.readSentinel(sentinelFd, MAX_SENTINEL_BYTES + 1);
-      if (!retainedBytes.equals(canonicalBytes)) throw failed();
-    }
     options.rootAuthority.assertUnchanged();
 
     const retainedSentinelFd = sentinelFd;
@@ -160,7 +219,8 @@ export function openWindowsCoordinationSentinel(options: {
         if (closeFailed) throw failed();
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof CoordinationWindowsSentinelBusyError) throw error;
     for (const fd of [sentinelFd]) {
       if (fd === undefined) continue;
       try {
@@ -176,6 +236,65 @@ export function openWindowsCoordinationSentinel(options: {
     }
     throw failed();
   }
+}
+
+function assertKnownPublishingEntries(
+  dependencies: WindowsSentinelDependencies,
+  coordinationRoot: string,
+): void {
+  let publishing = false;
+  let malformed = false;
+  for (const name of dependencies.list(coordinationRoot)) {
+    if (!name.endsWith(PUBLISHING_SUFFIX)) continue;
+    const match = PUBLISHING_PATTERN.exec(name);
+    if (match === null || !UUID.test(match[1]!)) throw failed();
+    const stat = dependencies.lstat(win32.join(coordinationRoot, name));
+    const publishingStat = requirePublishing(stat);
+    if (publishingStat.nlink === 2n) {
+      const published = requirePublishing(
+        dependencies.lstat(win32.join(coordinationRoot, SENTINEL_FILENAME)),
+      );
+      if (
+        published.nlink !== 2n
+        || published.dev !== publishingStat.dev
+        || published.ino !== publishingStat.ino
+      ) throw failed();
+    }
+    publishing = true;
+    if (publishingStat.size > 0n) {
+      let fd: number | undefined;
+      try {
+        fd = dependencies.openSentinelRead(win32.join(coordinationRoot, name));
+        const opened = requirePublishing(dependencies.fstat(fd));
+        const after = requirePublishing(dependencies.lstat(win32.join(coordinationRoot, name)));
+        assertSameStableFile(opened, after);
+        try {
+          parseCanonicalSentinel(dependencies.readSentinel(fd, MAX_SENTINEL_BYTES + 1));
+        } catch {
+          malformed = true;
+        }
+      } finally {
+        if (fd !== undefined) dependencies.close(fd);
+      }
+    } else {
+      malformed = true;
+    }
+  }
+  if (publishing) throw new CoordinationWindowsSentinelBusyError(malformed);
+}
+
+function requirePublishing(
+  stat: WindowsSentinelFileStat | undefined,
+): WindowsSentinelFileStat {
+  if (
+    stat === undefined
+    || stat.kind !== 'file'
+    || stat.symbolicLink
+    || (stat.nlink !== 1n && stat.nlink !== 2n)
+    || stat.size < 0n
+    || stat.size > BigInt(MAX_SENTINEL_BYTES)
+  ) throw failed();
+  return stat;
 }
 
 function openExistingSentinel(dependencies: WindowsSentinelDependencies, path: string): number {
@@ -257,6 +376,7 @@ const builtinDependencies: WindowsSentinelDependencies = {
       throw error;
     }
   },
+  list: readdirSync,
   openSentinelExclusive: (path) => openSync(
     path,
     constants.O_RDWR | constants.O_CREAT | constants.O_EXCL,
@@ -267,6 +387,8 @@ const builtinDependencies: WindowsSentinelDependencies = {
   fsync: fsyncSync,
   readSentinel: readBounded,
   close: closeSync,
+  link: linkSync,
+  unlink: unlinkSync,
   randomUUID,
 };
 
