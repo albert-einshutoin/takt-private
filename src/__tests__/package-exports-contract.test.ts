@@ -21,6 +21,8 @@ import type {
   ProjectTemplateRepertoireDependencyV1,
   ProjectTemplateGithubSourceComposition,
   ProjectTemplateGithubSourceCompositionDependencies,
+  ProjectTemplateRemoteProductionComposition,
+  ProjectTemplateRemoteProductionCompositionErrorCode,
   ProjectTemplateSourceDescriptorPackV1,
   ProjectTemplateSourceDescriptorV1,
   ProjectTemplateApplyPreview,
@@ -100,6 +102,10 @@ describe('package exports contract', () => {
           typeof api.GithubTemplateDownloadOrchestratorError,
         createGithubSourceComposition:
           typeof api.createProjectTemplateGithubSourceComposition,
+        createRemoteProductionComposition:
+          typeof api.createProjectTemplateRemoteProductionComposition,
+        remoteProductionError:
+          typeof api.ProjectTemplateRemoteProductionCompositionError,
       }));
     `);
 
@@ -122,6 +128,8 @@ describe('package exports contract', () => {
       downloadGithubTemplateSource: 'function',
       downloadOrchestratorError: 'function',
       createGithubSourceComposition: 'function',
+      createRemoteProductionComposition: 'function',
+      remoteProductionError: 'function',
     });
     expectTypeOf<PreparedProjectTemplateApplyPlan['resolvedContents']>()
       .toMatchTypeOf<readonly unknown[]>();
@@ -199,6 +207,10 @@ describe('package exports contract', () => {
       }>();
     expectTypeOf<ProjectTemplateGithubSourceCompositionDependencies>()
       .toHaveProperty('requestMetadata');
+    expectTypeOf<ProjectTemplateRemoteProductionComposition>()
+      .toHaveProperty('apply');
+    expectTypeOf<ProjectTemplateRemoteProductionCompositionErrorCode>()
+      .toMatchTypeOf<string>();
     expect(declarationEntry).toContain('ProjectTemplateBaseContent');
     expect(declarationEntry).toContain('ProjectTemplateApplyMergeDiagnostics');
     expect(declarationEntry).toContain('ProjectTemplateGithubRefSourceSpec');
@@ -223,6 +235,8 @@ describe('package exports contract', () => {
       .toContain('ProjectTemplateGithubSourceComposition');
     expect(declarationEntry)
       .toContain('ProjectTemplateGithubSourceCompositionDependencies');
+    expect(declarationEntry)
+      .toContain('ProjectTemplateRemoteProductionComposition');
     expect(compositionDeclaration).toContain('does not enforce approval');
     expect(compositionDeclaration)
       .toContain('downloadGithubTemplateSource(...).asset');

@@ -142,6 +142,10 @@ export {
 export {
   createProjectTemplateGithubSourceComposition,
 } from './infra/github/project-template-github-source-composition.js';
+export {
+  createProjectTemplateRemoteProductionComposition,
+  ProjectTemplateRemoteProductionCompositionError,
+} from './infra/github/project-template-remote-production-composition.js';
 export type {
   ProjectTemplateGithubArchiveAssetPortDependencies,
 } from './infra/github/project-template-github-archive-asset-port.js';
@@ -154,6 +158,10 @@ export type {
   ProjectTemplateGithubSourceCompositionContext,
   ProjectTemplateGithubSourceCompositionDependencies,
 } from './infra/github/project-template-github-source-composition.js';
+export type {
+  ProjectTemplateRemoteProductionComposition,
+  ProjectTemplateRemoteProductionCompositionErrorCode,
+} from './infra/github/project-template-remote-production-composition.js';
 export type {
   ProjectTemplateManifestV1,
   ProjectTemplateGithubRefSourceSpec,

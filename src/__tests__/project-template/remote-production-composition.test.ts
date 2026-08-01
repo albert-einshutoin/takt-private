@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,11 +25,12 @@ import {
   type GithubTemplateSourceMetadataPort,
 } from '../../features/project-template/github-update-check.js';
 import type { GithubTemplateSourceResolverPort } from '../../features/project-template/github-source-resolver-port.js';
+import { deriveGithubTemplateDownloadArtifactPaths } from '../../features/project-template/github-download-receipt-paths.js';
 import { serializeProjectTemplateSourceDescriptor } from '../../features/project-template/source-descriptor.js';
 import type { ProjectTemplateReceiptKeyRegistry, ProjectTemplateReceiptKeyStore } from '../../infra/security/project-template-receipt-key-store.js';
 import {
   createProjectTemplateRemoteProductionComposition,
-} from '../../infra/github/project-template-remote-production-composition.js';
+} from '../../index.js';
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const roots: string[] = [];
@@ -68,11 +71,11 @@ function memoryStore(): ProjectTemplateReceiptKeyStore & { disposed: boolean } {
   };
 }
 
-async function fixture() {
+async function fixture(options: { readonly invalidDoctor?: boolean } = {}) {
   const sourceRoot = temp('takt-production-source-');
   const sourcePath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
   mkdirSync(dirname(sourcePath), { recursive: true });
-  writeFileSync(sourcePath, `name: review
+  writeFileSync(sourcePath, options.invalidDoctor ? 'name: broken\nsteps: nope\n' : `name: review
 initial_step: review
 max_steps: 1
 steps:
@@ -100,6 +103,7 @@ steps:
     },
     repertoireDependencies: [],
   });
+  const checksum = `${sha256}  template.taktpack\n`;
   const metadata: GithubTemplateSourceMetadataPort = {
     async resolveRefToCommit() { return { commit: COMMIT }; },
     async readFileAtCommit() { return new TextEncoder().encode(descriptor); },
@@ -107,12 +111,12 @@ steps:
       return {
         id: 1, tagName: 'v1.2.3', assets: [
           { id: 2, name: 'template.taktpack', size: archive.byteLength },
-          { id: 3, name: 'template.taktpack.sha256', size: 90 },
+          { id: 3, name: 'template.taktpack.sha256', size: checksum.length },
         ],
       };
     },
     async readReleaseAsset() {
-      return new TextEncoder().encode(`${sha256}  template.taktpack\n`);
+      return new TextEncoder().encode(checksum);
     },
   };
   const source = 'github:acme/template@main';
@@ -141,7 +145,7 @@ steps:
   const cacheRoot = temp('takt-production-cache-');
   chmodSync(cacheRoot, 0o700);
   return {
-    advisory, asset, cacheRoot, projectRoot, resolver, source,
+    advisory, asset, cacheRoot, projectRoot, resolver, sha256, source,
     goOffline() { online = false; archive = Buffer.alloc(0); },
   };
 }
@@ -180,6 +184,12 @@ describe('project template remote production composition', () => {
       baselineStrategy: 'conflict',
     });
     expect(Reflect.ownKeys(previewed)).toEqual(['previewId', 'transactionPlanId']);
+    await expect(composition.approve({
+      projectRoot: value.projectRoot,
+      previewId: previewed.previewId,
+      transactionPlanId: previewed.previewId,
+      baselineStrategy: 'conflict',
+    })).rejects.toMatchObject({ code: 'UNKNOWN_PREVIEW' });
     const approved = await composition.approve({
       projectRoot: value.projectRoot,
       previewId: previewed.previewId,
@@ -226,21 +236,192 @@ describe('project template remote production composition', () => {
 
   it('rejects guessed, cloned-to-another-composition, and expired handles', async () => {
     const value = await fixture();
+    let now = 0;
     const first = await createProjectTemplateRemoteProductionComposition({
       keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
       repertoireInspectionPort: { inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; } },
-      now: () => 0,
+      now: () => now,
       handleTtlMs: 10,
     });
     const second = await createProjectTemplateRemoteProductionComposition({
       keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
       repertoireInspectionPort: { inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; } },
     });
+    const downloaded = await first.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
     await expect(second.preview({
-      cacheRoot: value.cacheRoot, receiptKey: 'a'.repeat(64),
+      cacheRoot: value.cacheRoot, receiptKey: downloaded.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
+    })).rejects.toMatchObject({ code: 'UNKNOWN_RECEIPT' });
+    now = 11;
+    await expect(first.preview({
+      cacheRoot: value.cacheRoot, receiptKey: downloaded.receiptKey,
       projectRoot: value.projectRoot, currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
     })).rejects.toMatchObject({ code: 'UNKNOWN_RECEIPT' });
     await first.dispose();
     await second.dispose();
+  });
+
+  it('disposes the receipt runtime when later factory composition fails', async () => {
+    const value = await fixture();
+    const store = memoryStore();
+    await expect(createProjectTemplateRemoteProductionComposition({
+      keyStore: store,
+      resolver: value.resolver,
+      asset: value.asset,
+      repertoireInspectionPort: {} as never,
+    })).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      operatorDetail: 'invalid-argument',
+    });
+    expect(store.disposed).toBe(true);
+  });
+
+  it('keeps factory primary code and public detail fixed when cleanup also fails', async () => {
+    const value = await fixture();
+    const store = memoryStore();
+    store.dispose = async () => {
+      throw new Error(`secret cleanup failure at ${value.projectRoot}`);
+    };
+    let observed: unknown;
+    try {
+      await createProjectTemplateRemoteProductionComposition({
+        keyStore: store,
+        resolver: value.resolver,
+        asset: value.asset,
+        repertoireInspectionPort: {} as never,
+      });
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      operatorDetail: 'invalid-argument',
+    });
+    expect(JSON.stringify(observed)).not.toContain(value.projectRoot);
+    expect(Reflect.ownKeys(observed as object)).not.toContain('cause');
+  });
+
+  it('blocks new work, aborts and drains in-flight work before runtime disposal', async () => {
+    const value = await fixture();
+    const store = memoryStore();
+    let release!: () => void;
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slowAsset = {
+      openReleaseAsset(input: Parameters<typeof value.asset.openReleaseAsset>[0]) {
+        const source = value.asset.openReleaseAsset(input);
+        return (async function* () {
+          entered();
+          await gate;
+          for await (const chunk of source) yield chunk;
+        })();
+      },
+    };
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: store, resolver: value.resolver, asset: slowAsset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+    });
+    const downloading = composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    const downloadFailure = expect(downloading).rejects.toMatchObject({
+      code: 'OPERATION_FAILED',
+    });
+    await enteredPromise;
+    const disposing = composition.dispose();
+    await expect(composition.recover({ projectRoot: value.projectRoot }))
+      .rejects.toMatchObject({ code: 'DISPOSED' });
+    release();
+    await downloadFailure;
+    await disposing;
+    expect(store.disposed).toBe(true);
+  });
+
+  it.each(['tampered', 'missing'] as const)(
+    'fails closed when the sealed artifact is %s',
+    async (failureMode) => {
+      const value = await fixture();
+      const composition = await createProjectTemplateRemoteProductionComposition({
+        keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+        repertoireInspectionPort: {
+          inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+        },
+      });
+      const downloaded = await composition.download({
+        projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+        source: value.source, advisory: value.advisory,
+      });
+      const artifactPath = deriveGithubTemplateDownloadArtifactPaths({
+        cacheRoot: value.cacheRoot,
+        archiveSha256: value.sha256,
+      }).artifactPath;
+      if (failureMode === 'missing') unlinkSync(artifactPath);
+      else writeFileSync(artifactPath, 'tampered');
+      await expect(composition.preview({
+        cacheRoot: value.cacheRoot, receiptKey: downloaded.receiptKey,
+        projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+        baselineStrategy: 'conflict',
+      })).rejects.toMatchObject({
+        code: 'OPERATION_FAILED',
+        operatorDetail: 'operation-failed',
+      });
+      await composition.dispose();
+    },
+  );
+
+  it('burns approval, rolls back doctor failure, and allows offline restart recovery', async () => {
+    const value = await fixture({ invalidDoctor: true });
+    const dependencies = {
+      resolver: value.resolver,
+      asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+    };
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), ...dependencies,
+    });
+    const downloaded = await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    const previewed = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: downloaded.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    });
+    const approved = await composition.approve({
+      projectRoot: value.projectRoot, previewId: previewed.previewId,
+      transactionPlanId: previewed.transactionPlanId, baselineStrategy: 'conflict',
+    });
+    const applyInput = {
+      cacheRoot: value.cacheRoot, receiptKey: downloaded.receiptKey,
+      previewId: previewed.previewId, transactionPlanId: previewed.transactionPlanId,
+      approvalId: approved.approvalId, projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0', baselineStrategy: 'conflict' as const,
+    };
+    await expect(composition.apply(applyInput)).rejects.toMatchObject({
+      code: 'OPERATION_FAILED', operatorDetail: 'operation-failed',
+    });
+    expect(existsSync(join(value.projectRoot, '.takt', 'workflows', 'review.yaml')))
+      .toBe(false);
+    await expect(composition.apply(applyInput)).rejects.toMatchObject({
+      code: 'UNKNOWN_APPROVAL',
+    });
+    await composition.dispose();
+
+    const restarted = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), ...dependencies,
+    });
+    await expect(restarted.recover({ projectRoot: value.projectRoot }))
+      .resolves.toEqual({ status: 'none' });
+    await restarted.dispose();
   });
 });

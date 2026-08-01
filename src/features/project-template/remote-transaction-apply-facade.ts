@@ -105,6 +105,8 @@ interface ProjectTemplateRemoteApplyCompositionDependencies {
   readonly verifier: GithubTemplateDownloadReceiptVerifier;
   readonly repertoireInspectionPort:
     ProjectTemplateRepertoireDependencyInspectionPort;
+  /** @internal Test-only observation of the wrapper-owned lease boundary. */
+  readonly onLeasePhase?: (phase: 'acquired' | 'released') => void;
 }
 
 export interface ProjectTemplateRemoteApplyComposition {
@@ -348,10 +350,14 @@ export function createProjectTemplateRemoteApplyComposition(
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const keys = Reflect.ownKeys(descriptors);
   if (
-    keys.length !== 2
+    (keys.length !== 2 && keys.length !== 3)
     || !keys.includes('verifier')
     || !keys.includes('repertoireInspectionPort')
+    || (keys.length === 3 && !keys.includes('onLeasePhase'))
     || Object.values(descriptors).some((descriptor) => !('value' in descriptor))
+    || (descriptors['onLeasePhase'] !== undefined
+      && (typeof descriptors['onLeasePhase'].value !== 'function'
+        || types.isProxy(descriptors['onLeasePhase'].value)))
   ) invalidOptions();
   const verifier = snapshotMethodPort<
     GithubTemplateDownloadReceiptVerifier['verify']
@@ -370,7 +376,16 @@ export function createProjectTemplateRemoteApplyComposition(
         ProjectTemplateRepertoireDependencyInspectionPort['inspect']
       >[0]) => Reflect.apply(inspection.method, inspection.receiver, [request])),
     }),
+    onLeasePhase: descriptors['onLeasePhase']?.value as
+      ((phase: 'acquired' | 'released') => void) | undefined,
   });
+  const observeLease = (phase: 'acquired' | 'released'): void => {
+    try {
+      trusted.onLeasePhase?.(phase);
+    } catch {
+      // Test diagnostics cannot participate in mutation authority or cleanup.
+    }
+  };
   return Object.freeze({
     async apply(
       input: ApplyGithubProjectTemplateRemoteTransactionOptions,
@@ -389,6 +404,7 @@ export function createProjectTemplateRemoteApplyComposition(
         );
       }
       const lease = acquireProjectTemplateApplyLease(options.projectRoot);
+      observeLease('acquired');
       try {
         assertProjectTemplateMutationLeaseOwned(
           options.projectRoot,
@@ -542,6 +558,7 @@ export function createProjectTemplateRemoteApplyComposition(
         });
       } finally {
         lease.release();
+        observeLease('released');
       }
     },
   });

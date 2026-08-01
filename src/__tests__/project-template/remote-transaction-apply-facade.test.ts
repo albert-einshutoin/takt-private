@@ -674,9 +674,11 @@ describe('GitHub project template remote transaction apply facade', () => {
       preview,
       baselineStrategy: 'conflict',
     });
+    const leasePhases: string[] = [];
     const composition = createProjectTemplateRemoteApplyComposition({
       verifier: verifier(),
       repertoireInspectionPort: inspectionPort(),
+      onLeasePhase(phase) { leasePhases.push(phase); },
     });
     const options = {
       ...publicOptions(value.cacheRoot, value.projectRoot),
@@ -688,6 +690,7 @@ describe('GitHub project template remote transaction apply facade', () => {
       ...options,
       approvalEvidence: { ...approval },
     } as never)).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+    leasePhases.length = 0;
     const result = await composition.apply({
       ...options,
       approvalEvidence: approval,
@@ -704,6 +707,7 @@ describe('GitHub project template remote transaction apply facade', () => {
     expect(existsSync(storage.journalPath)).toBe(false);
     expect(readdirSync(storage.stagingRoot)).toEqual([]);
     expect(readdirSync(storage.backupsRoot)).toEqual([result.backupId]);
+    expect(leasePhases).toEqual(['acquired', 'released']);
     await expect(hasProjectTemplateApprovalClaim({
       storage,
       approvalId: approval.approvalId,
