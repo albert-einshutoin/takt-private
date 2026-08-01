@@ -117,6 +117,13 @@ export interface ProjectTemplateRemoteProductionComposition {
   dispose(): Promise<void>;
 }
 
+interface ProjectTemplateRemoteProductionCompositionTestControl {
+  readonly disposeDrainTimeoutMs?: number;
+  readonly operationGate?: (
+    operation: 'download' | 'preview' | 'approve' | 'recover',
+  ) => Promise<void>;
+}
+
 interface ReceiptHandle {
   readonly expiresAt: number;
 }
@@ -181,12 +188,31 @@ function strategy(record: Record<string, unknown>): 'conflict' | 'adopt-identica
 export async function createProjectTemplateRemoteProductionComposition(
   value: ProjectTemplateRemoteProductionCompositionOptions,
 ): Promise<ProjectTemplateRemoteProductionComposition> {
+  return await createProjectTemplateRemoteProductionCompositionInternal(value, {});
+}
+
+/** @internal Test-only deterministic orchestration; never re-exported publicly. */
+export async function createProjectTemplateRemoteProductionCompositionForTest(
+  value: ProjectTemplateRemoteProductionCompositionOptions,
+  control: ProjectTemplateRemoteProductionCompositionTestControl,
+): Promise<ProjectTemplateRemoteProductionComposition> {
+  return await createProjectTemplateRemoteProductionCompositionInternal(value, control);
+}
+
+async function createProjectTemplateRemoteProductionCompositionInternal(
+  value: ProjectTemplateRemoteProductionCompositionOptions,
+  control: ProjectTemplateRemoteProductionCompositionTestControl,
+): Promise<ProjectTemplateRemoteProductionComposition> {
   const source = exactRecord(value, [
     'keyStore', 'resolver', 'asset', 'repertoireInspectionPort',
   ], ['now', 'handleTtlMs', 'handleLimit']);
   const now = source['now'] === undefined ? Date.now : source['now'];
   const handleTtlMs = source['handleTtlMs'] ?? DEFAULT_HANDLE_TTL_MS;
   const handleLimit = source['handleLimit'] ?? MAX_HANDLES;
+  const testControl = exactRecord(control, [], ['disposeDrainTimeoutMs', 'operationGate']);
+  const disposeDrainTimeoutMs = testControl['disposeDrainTimeoutMs']
+    ?? DISPOSE_DRAIN_TIMEOUT_MS;
+  const operationGate = testControl['operationGate'];
   if (
     typeof now !== 'function'
     || types.isProxy(now)
@@ -198,6 +224,12 @@ export async function createProjectTemplateRemoteProductionComposition(
     || !Number.isSafeInteger(handleLimit)
     || handleLimit <= 0
     || handleLimit > MAX_HANDLES
+    || typeof disposeDrainTimeoutMs !== 'number'
+    || !Number.isSafeInteger(disposeDrainTimeoutMs)
+    || disposeDrainTimeoutMs <= 0
+    || disposeDrainTimeoutMs > DISPOSE_DRAIN_TIMEOUT_MS
+    || (operationGate !== undefined
+      && (typeof operationGate !== 'function' || types.isProxy(operationGate)))
   ) failure('INVALID_ARGUMENT');
 
   const keyStore = source['keyStore'] as ProjectTemplateReceiptKeyStore;
@@ -252,6 +284,8 @@ export async function createProjectTemplateRemoteProductionComposition(
   const previews = new Map<string, PreviewHandle>();
   const approvals = new Map<string, ApprovalHandle>();
   let disposed = false;
+  let operationEpoch = 0;
+  let disposePromise: Promise<void> | undefined;
   let lastNow = Number.NEGATIVE_INFINITY;
   let activeOperations = 0;
   let drainWaiter: (() => void) | undefined;
@@ -264,13 +298,17 @@ export async function createProjectTemplateRemoteProductionComposition(
     return value;
   };
   const available = (): void => { if (disposed) failure('DISPOSED'); };
+  const current = (epoch: number): void => {
+    if (disposed || epoch !== operationEpoch) failure('DISPOSED');
+  };
   const active = <T extends { readonly expiresAt: number }>(
     map: Map<string, T>,
     id: string,
     code: 'UNKNOWN_RECEIPT' | 'UNKNOWN_PREVIEW' | 'UNKNOWN_APPROVAL',
+    nowMs: number,
   ): T => {
     const handle = map.get(id);
-    if (handle === undefined || handle.expiresAt <= time()) {
+    if (handle === undefined || handle.expiresAt <= nowMs) {
       map.delete(id);
       failure(code);
     }
@@ -330,43 +368,36 @@ export async function createProjectTemplateRemoteProductionComposition(
       }
     }
   };
-  const reserve = (kind: HandleKind): {
-    readonly nowMs: number;
-    readonly revoked: readonly ApprovalHandle[];
-    release(): void;
-  } => {
-    const nowMs = time();
-    const revoked = sweepExpired(nowMs);
-    available();
-    if (handleMaps[kind].size + reservations[kind] >= handleLimit) {
-      failure('HANDLE_LIMIT_EXCEEDED');
-    }
-    reservations[kind] += 1;
-    let active = true;
-    return {
-      nowMs,
-      revoked,
-      release() {
-        if (!active) return;
-        active = false;
-        reservations[kind] -= 1;
-      },
-    };
-  };
-  const operation = async <T>(run: () => Promise<T>): Promise<T> => {
+  interface OperationContext { readonly epoch: number; readonly nowMs: number }
+  const operation = async <T>(
+    kind: HandleKind | undefined,
+    run: (context: OperationContext) => Promise<T>,
+  ): Promise<T> => {
     available();
     activeOperations += 1;
+    let reserved = false;
     try {
+      const epoch = operationEpoch;
       const nowMs = time();
       const revoked = sweepExpired(nowMs);
-      available();
+      current(epoch);
+      if (kind !== undefined) {
+        if (handleMaps[kind].size + reservations[kind] >= handleLimit) {
+          failure('HANDLE_LIMIT_EXCEEDED');
+        }
+        reservations[kind] += 1;
+        reserved = true;
+      }
       await revokeExpired(revoked, nowMs);
-      available();
-      return await run();
+      current(epoch);
+      const result = await run({ epoch, nowMs });
+      current(epoch);
+      return result;
     } catch (error) {
       if (error instanceof ProjectTemplateRemoteProductionCompositionError) throw error;
       failure('OPERATION_FAILED');
     } finally {
+      if (kind !== undefined && reserved) reservations[kind] -= 1;
       activeOperations -= 1;
       if (activeOperations === 0) {
         drainWaiter?.();
@@ -380,76 +411,65 @@ export async function createProjectTemplateRemoteProductionComposition(
 
   return Object.freeze({
     async download(input: unknown) {
-      return await operation(async () => {
+      return await operation('receipts', async ({ epoch, nowMs }) => {
         const options = exactRecord(input, [
           'projectRoot', 'cacheRoot', 'source', 'advisory',
         ], ['signal']);
-        const reservation = reserve('receipts');
-        try {
-          await revokeExpired(reservation.revoked, reservation.nowMs);
-          const result = await downloadGithubTemplateSource({
-            projectRoot: text(options, 'projectRoot'),
-            cacheRoot: text(options, 'cacheRoot'),
-            source: text(options, 'source'),
-            advisory: options['advisory'] as GithubTemplateSourceAdvisory,
-            resolver: source['resolver'] as GithubTemplateSourceResolverPort,
-            asset: source['asset'] as GithubTemplateArchiveAssetPort,
-            authenticator: runtime.authenticator,
-            verifier: runtime.verifier,
-            signal: operationSignal(options['signal']),
-          });
-          receipts.set(result.receiptKey, {
-            expiresAt: time() + (handleTtlMs as number),
-          });
-          return Object.freeze({ receiptKey: result.receiptKey });
-        } finally {
-          reservation.release();
-        }
+        const result = await downloadGithubTemplateSource({
+          projectRoot: text(options, 'projectRoot'),
+          cacheRoot: text(options, 'cacheRoot'),
+          source: text(options, 'source'),
+          advisory: options['advisory'] as GithubTemplateSourceAdvisory,
+          resolver: source['resolver'] as GithubTemplateSourceResolverPort,
+          asset: source['asset'] as GithubTemplateArchiveAssetPort,
+          authenticator: runtime.authenticator,
+          verifier: runtime.verifier,
+          signal: operationSignal(options['signal']),
+        });
+        if (operationGate !== undefined) await Reflect.apply(
+          operationGate as (operation: 'download') => Promise<void>, undefined, ['download'],
+        );
+        current(epoch);
+        receipts.set(result.receiptKey, { expiresAt: nowMs + (handleTtlMs as number) });
+        return Object.freeze({ receiptKey: result.receiptKey });
       });
     },
     async preview(input: unknown) {
-      return await operation(async () => {
+      return await operation('previews', async ({ epoch, nowMs }) => {
         const options = exactRecord(input, [
           'cacheRoot', 'receiptKey', 'projectRoot', 'currentTaktVersion', 'baselineStrategy',
         ], ['signal']);
         const receiptKey = text(options, 'receiptKey');
         if (!SHA256.test(receiptKey)) failure('INVALID_ARGUMENT');
-        const receipt = active(receipts, receiptKey, 'UNKNOWN_RECEIPT');
-        const reservation = reserve('previews');
-        try {
-          await revokeExpired(reservation.revoked, reservation.nowMs);
-          const baselineStrategy = strategy(options);
-          const projectRoot = text(options, 'projectRoot');
-          const preview = await createGithubProjectTemplateRemotePreview({
-            cacheRoot: text(options, 'cacheRoot'), receiptKey,
-            verifier: runtime.verifier, projectRoot,
-            currentTaktVersion: text(options, 'currentTaktVersion'),
-            repertoireInspectionPort: source['repertoireInspectionPort'] as
-              ProjectTemplateRepertoireDependencyInspectionPort,
-            baselineStrategy,
-            signal: operationSignal(options['signal']),
-          });
-          if (preview.transactionPlanId === undefined) {
-            failure('OPERATION_FAILED');
-          }
-          previews.set(preview.previewId, {
-            receiptKey, preview, projectRoot, baselineStrategy,
-            expiresAt: Math.min(
-              receipt.expiresAt,
-              time() + (handleTtlMs as number),
-            ),
-          });
-          return Object.freeze({
-            previewId: preview.previewId,
-            transactionPlanId: preview.transactionPlanId,
-          });
-        } finally {
-          reservation.release();
-        }
+        const receipt = active(receipts, receiptKey, 'UNKNOWN_RECEIPT', nowMs);
+        const baselineStrategy = strategy(options);
+        const projectRoot = text(options, 'projectRoot');
+        const preview = await createGithubProjectTemplateRemotePreview({
+          cacheRoot: text(options, 'cacheRoot'), receiptKey,
+          verifier: runtime.verifier, projectRoot,
+          currentTaktVersion: text(options, 'currentTaktVersion'),
+          repertoireInspectionPort: source['repertoireInspectionPort'] as
+            ProjectTemplateRepertoireDependencyInspectionPort,
+          baselineStrategy,
+          signal: operationSignal(options['signal']),
+        });
+        if (preview.transactionPlanId === undefined) failure('OPERATION_FAILED');
+        if (operationGate !== undefined) await Reflect.apply(
+          operationGate as (operation: 'preview') => Promise<void>, undefined, ['preview'],
+        );
+        current(epoch);
+        previews.set(preview.previewId, {
+          receiptKey, preview, projectRoot, baselineStrategy,
+          expiresAt: Math.min(receipt.expiresAt, nowMs + (handleTtlMs as number)),
+        });
+        return Object.freeze({
+          previewId: preview.previewId,
+          transactionPlanId: preview.transactionPlanId,
+        });
       });
     },
     async approve(input: unknown) {
-      return await operation(async () => {
+      return await operation('approvals', async ({ epoch, nowMs }) => {
         const options = exactRecord(input, [
           'projectRoot', 'previewId', 'transactionPlanId', 'baselineStrategy',
         ]);
@@ -458,37 +478,47 @@ export async function createProjectTemplateRemoteProductionComposition(
         if (!SHA256.test(previewId) || !SHA256.test(transactionPlanId)) {
           failure('INVALID_ARGUMENT');
         }
-        const handle = active(previews, previewId, 'UNKNOWN_PREVIEW');
+        const handle = active(previews, previewId, 'UNKNOWN_PREVIEW', nowMs);
         if (
           handle.preview.transactionPlanId !== transactionPlanId
           || handle.projectRoot !== text(options, 'projectRoot')
           || handle.baselineStrategy !== strategy(options)
         ) failure('UNKNOWN_PREVIEW');
-        const reservation = reserve('approvals');
         previews.delete(previewId);
-        try {
-          await revokeExpired(reservation.revoked, reservation.nowMs);
-          const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
-            projectRoot: handle.projectRoot,
-            preview: handle.preview,
-            baselineStrategy: handle.baselineStrategy,
-          });
-          approvals.set(evidence.approvalId, { ...handle, evidence });
-          return Object.freeze({ approvalId: evidence.approvalId });
-        } finally {
-          reservation.release();
+        const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+          projectRoot: handle.projectRoot,
+          preview: handle.preview,
+          baselineStrategy: handle.baselineStrategy,
+        });
+        if (operationGate !== undefined) await Reflect.apply(
+          operationGate as (operation: 'approve') => Promise<void>, undefined, ['approve'],
+        );
+        if (disposed || epoch !== operationEpoch) {
+          try {
+            const storage = await initializeProjectTemplateApplyStorage({
+              repoPath: handle.projectRoot,
+            });
+            await revokeProjectTemplateApplyPreviewApproval({
+              storage, evidence, now: new Date(nowMs),
+            });
+          } catch {
+            // The public approval is never published; durable validation remains fail-closed.
+          }
+          failure('DISPOSED');
         }
+        approvals.set(evidence.approvalId, { ...handle, evidence });
+        return Object.freeze({ approvalId: evidence.approvalId });
       });
     },
     async apply(input: unknown) {
-      return await operation(async () => {
+      return await operation(undefined, async ({ nowMs }) => {
         const options = exactRecord(input, [
           'cacheRoot', 'receiptKey', 'previewId', 'transactionPlanId', 'approvalId',
           'projectRoot', 'currentTaktVersion', 'baselineStrategy',
         ], ['signal']);
         const approvalId = text(options, 'approvalId');
         if (!APPROVAL_ID.test(approvalId)) failure('INVALID_ARGUMENT');
-        const handle = active(approvals, approvalId, 'UNKNOWN_APPROVAL');
+        const handle = active(approvals, approvalId, 'UNKNOWN_APPROVAL', nowMs);
         approvals.delete(approvalId);
         const receiptKey = text(options, 'receiptKey');
         if (
@@ -515,44 +545,50 @@ export async function createProjectTemplateRemoteProductionComposition(
       });
     },
     async recover(input: unknown) {
-      return await operation(async () => {
+      return await operation(undefined, async ({ epoch }) => {
         const options = exactRecord(input, ['projectRoot']);
+        if (operationGate !== undefined) await Reflect.apply(
+          operationGate as (operation: 'recover') => Promise<void>, undefined, ['recover'],
+        );
+        current(epoch);
         return Object.freeze(await recoverProjectTemplateCompanionLockTransaction({
           projectRoot: text(options, 'projectRoot'),
         }));
       });
     },
-    async dispose() {
-      if (disposed) return;
+    dispose() {
+      if (disposePromise !== undefined) return disposePromise;
       disposed = true;
+      operationEpoch += 1;
       shutdown.abort();
-      if (activeOperations > 0) {
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            drainWaiter = undefined;
-            resolve();
-          }, DISPOSE_DRAIN_TIMEOUT_MS);
-          drainWaiter = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-        });
-      }
-      // New work was rejected synchronously before the bounded drain. Clear
-      // handles only after in-flight operations release their private claims.
-      const revoked = [...approvals.values()];
-      receipts.clear();
-      previews.clear();
-      approvals.clear();
-      await revokeExpired(revoked, Date.now());
-      try {
-        await runtime.dispose();
-      } catch (error) {
-        throw new ProjectTemplateRemoteProductionCompositionError(
-          'OPERATION_FAILED',
-          new AggregateError([error], 'receipt runtime disposal failed'),
-        );
-      }
+      disposePromise = (async () => {
+        if (activeOperations > 0) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              drainWaiter = undefined;
+              resolve();
+            }, disposeDrainTimeoutMs as number);
+            drainWaiter = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+          });
+        }
+        const revoked = [...approvals.values()];
+        receipts.clear();
+        previews.clear();
+        approvals.clear();
+        await revokeExpired(revoked, Date.now());
+        try {
+          await runtime.dispose();
+        } catch (error) {
+          throw new ProjectTemplateRemoteProductionCompositionError(
+            'OPERATION_FAILED',
+            new AggregateError([error], 'receipt runtime disposal failed'),
+          );
+        }
+      })();
+      return disposePromise;
     },
   });
 }

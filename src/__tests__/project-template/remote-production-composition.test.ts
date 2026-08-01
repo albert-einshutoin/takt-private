@@ -31,6 +31,9 @@ import type { ProjectTemplateReceiptKeyRegistry, ProjectTemplateReceiptKeyStore 
 import {
   createProjectTemplateRemoteProductionComposition,
 } from '../../index.js';
+import {
+  createProjectTemplateRemoteProductionCompositionForTest,
+} from '../../infra/github/project-template-remote-production-composition.js';
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const roots: string[] = [];
@@ -684,11 +687,12 @@ describe('project template remote production composition', () => {
       const value = await fixture();
       const entered = deferred();
       const release = deferred();
-      const composition = await createProjectTemplateRemoteProductionComposition({
+      const composition = await createProjectTemplateRemoteProductionCompositionForTest({
         keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
         repertoireInspectionPort: {
           inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
         },
+      }, {
         disposeDrainTimeoutMs: 1,
         operationGate: async (operation) => {
           if (operation !== blockedOperation) return;
@@ -770,5 +774,28 @@ describe('project template remote production composition', () => {
     })).resolves.toHaveProperty('approvalId');
     expect(calls).toBe(1);
     await composition.dispose();
+  });
+
+  it('returns one stable rejected dispose promise without exposing cleanup details', async () => {
+    const value = await fixture();
+    const store = memoryStore();
+    store.dispose = async () => {
+      throw new Error(`secret cleanup failure at ${value.projectRoot}`);
+    };
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: store, resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+    });
+    const first = composition.dispose();
+    expect(composition.dispose()).toBe(first);
+    const firstError = await first.catch((error: unknown) => error);
+    const secondError = await composition.dispose().catch((error: unknown) => error);
+    expect(secondError).toBe(firstError);
+    expect(firstError).toMatchObject({
+      code: 'OPERATION_FAILED', operatorDetail: 'operation-failed',
+    });
+    expect(JSON.stringify(firstError)).not.toContain(value.projectRoot);
   });
 });

@@ -191,7 +191,28 @@ async function publish(
       }
     }
   }
-  await storage.io.chmod(staged.absolutePath, 0o600);
+  // The staging inode is private while unpublished, then receives the sealed
+  // target mode before rename so the durable after-witness matches reality.
+  await storage.io.chmod(staged.absolutePath, Number.parseInt(staged.targetMode, 8));
+  const beforeWitness = await storage.io.lstat(staged.absolutePath);
+  const content = await storage.io.readFile(staged.absolutePath, staged.bytes);
+  const afterWitness = await storage.io.lstat(staged.absolutePath);
+  if (
+    beforeWitness.isSymbolicLink()
+    || !beforeWitness.isFile()
+    || beforeWitness.nlink !== 1
+    || beforeWitness.dev !== storage.device
+    || beforeWitness.size !== staged.bytes
+    || hash(content) !== staged.sha256
+    || beforeWitness.dev !== afterWitness.dev
+    || beforeWitness.ino !== afterWitness.ino
+    || beforeWitness.mode !== afterWitness.mode
+    || beforeWitness.size !== afterWitness.size
+    || beforeWitness.mtimeMs !== afterWitness.mtimeMs
+    || beforeWitness.ctimeMs !== afterWitness.ctimeMs
+    || beforeWitness.nlink !== afterWitness.nlink
+    || (storage.platform !== 'win32' && mode(afterWitness.mode) !== staged.targetMode)
+  ) throw new Error('companion lock staging witness changed before publish');
   if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-before-fsync`);
   await storage.io.fsyncFile(staged.absolutePath);
   if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-after-fsync`);
