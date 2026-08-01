@@ -8,8 +8,39 @@ export const PROJECT_TEMPLATE_CLI_JSON_LIMITS = Object.freeze({
   maxContainerEntries: 10_000,
 });
 
-const localeCompare = String.prototype.localeCompare;
-const arraySort = Array.prototype.sort;
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const CAPTURED_REFLECT_RECEIVER = Reflect;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
+const CAPTURED_OBJECT_VALUES = Object.values;
+const CAPTURED_OBJECT_FREEZE = Object.freeze;
+const CAPTURED_OBJECT_IS = Object.is;
+const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_OBJECT_PROTOTYPE = Object.prototype;
+const CAPTURED_ARRAY_IS_ARRAY = Array.isArray;
+const CAPTURED_ARRAY_RECEIVER = Array;
+const CAPTURED_ARRAY_PROTOTYPE = Array.prototype;
+const CAPTURED_ARRAY_POP = Array.prototype.pop;
+const CAPTURED_ARRAY_PUSH = Array.prototype.push;
+const CAPTURED_ARRAY_SORT = Array.prototype.sort;
+const CAPTURED_ARRAY_JOIN = Array.prototype.join;
+const CAPTURED_JSON_PARSE = JSON.parse;
+const CAPTURED_JSON_STRINGIFY = JSON.stringify;
+const CAPTURED_JSON_RECEIVER = JSON;
+const CAPTURED_BUFFER_BYTE_LENGTH = Buffer.byteLength;
+const CAPTURED_BUFFER_RECEIVER = Buffer;
+const CAPTURED_NUMBER_IS_FINITE = Number.isFinite;
+const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
+const CAPTURED_NUMBER_RECEIVER = Number;
+const CAPTURED_TYPES_IS_PROXY = types.isProxy;
+const CAPTURED_STRING_LOCALE_COMPARE = String.prototype.localeCompare;
+const CAPTURED_WEAK_SET_ADD = WeakSet.prototype.add;
+const CAPTURED_WEAK_SET_HAS = WeakSet.prototype.has;
+
+function apply<T>(fn: (...args: never[]) => T, receiver: unknown, args: unknown[]): T {
+  return CAPTURED_REFLECT_APPLY(fn, receiver, args) as T;
+}
 
 function invalidGraph(): never {
   throw new ProjectTemplateCliContractError(
@@ -19,13 +50,16 @@ function invalidGraph(): never {
 }
 
 function utf8Bytes(value: string): number {
-  return Buffer.byteLength(value, 'utf8');
+  return apply(CAPTURED_BUFFER_BYTE_LENGTH, CAPTURED_BUFFER_RECEIVER, [value, 'utf8']);
 }
 
 function validatePrimitive(value: unknown): boolean {
   if (value === null || typeof value === 'boolean') return true;
   if (typeof value === 'number') {
-    if (!Number.isFinite(value) || Object.is(value, -0)) invalidGraph();
+    if (
+      !apply(CAPTURED_NUMBER_IS_FINITE, CAPTURED_NUMBER_RECEIVER, [value])
+      || apply(CAPTURED_OBJECT_IS, CAPTURED_OBJECT_RECEIVER, [value, -0])
+    ) invalidGraph();
     return true;
   }
   return typeof value === 'string';
@@ -40,7 +74,7 @@ function validateBoundedGraph(root: unknown): void {
   let stringBytes = 0;
 
   while (pending.length > 0) {
-    const current = pending.pop()!;
+    const current = apply(CAPTURED_ARRAY_POP, pending, [])!;
     nodes += 1;
     if (
       nodes > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxNodes
@@ -58,41 +92,60 @@ function validateBoundedGraph(root: unknown): void {
     if (
       value === null
       || typeof value !== 'object'
-      || types.isProxy(value)
-      || seen.has(value)
+      || apply(CAPTURED_TYPES_IS_PROXY, types, [value])
+      || apply(CAPTURED_WEAK_SET_HAS, seen, [value])
     ) {
       invalidGraph();
     }
-    seen.add(value);
+    apply(CAPTURED_WEAK_SET_ADD, seen, [value]);
 
-    const prototype = Object.getPrototypeOf(value);
-    if (Array.isArray(value)) {
-      if (prototype !== Array.prototype) invalidGraph();
-      const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    const prototype = apply(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [value],
+    );
+    if (apply(CAPTURED_ARRAY_IS_ARRAY, CAPTURED_ARRAY_RECEIVER, [value])) {
+      if (prototype !== CAPTURED_ARRAY_PROTOTYPE) invalidGraph();
+      const lengthDescriptor = apply(
+        CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+        CAPTURED_OBJECT_RECEIVER,
+        [value, 'length'],
+      );
       if (
         lengthDescriptor === undefined
         || !('value' in lengthDescriptor)
-        || !Number.isSafeInteger(lengthDescriptor.value)
+        || !apply(
+          CAPTURED_NUMBER_IS_SAFE_INTEGER,
+          CAPTURED_NUMBER_RECEIVER,
+          [lengthDescriptor.value],
+        )
         || lengthDescriptor.value < 0
         || lengthDescriptor.value > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxContainerEntries
         || lengthDescriptor.value > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxNodes - nodes
       ) invalidGraph();
-      const keys = Reflect.ownKeys(value);
+      const keys = apply(CAPTURED_REFLECT_OWN_KEYS, CAPTURED_REFLECT_RECEIVER, [value]);
       if (keys.length !== lengthDescriptor.value + 1) invalidGraph();
       for (let index = 0; index < lengthDescriptor.value; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, `${index}`);
+        const descriptor = apply(
+          CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+          CAPTURED_OBJECT_RECEIVER,
+          [value, `${index}`],
+        );
         if (
           descriptor === undefined
           || !descriptor.enumerable
           || !('value' in descriptor)
         ) invalidGraph();
-        pending.push({ value: descriptor.value, depth: current.depth + 1 });
+        apply(CAPTURED_ARRAY_PUSH, pending, [{
+          value: descriptor.value,
+          depth: current.depth + 1,
+        }]);
       }
       continue;
     }
 
-    if (prototype !== Object.prototype && prototype !== null) invalidGraph();
-    const keys = Reflect.ownKeys(value);
+    if (prototype !== CAPTURED_OBJECT_PROTOTYPE && prototype !== null) invalidGraph();
+    const keys = apply(CAPTURED_REFLECT_OWN_KEYS, CAPTURED_REFLECT_RECEIVER, [value]);
     if (
       keys.length > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxContainerEntries
       || keys.length > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxNodes - nodes
@@ -101,19 +154,26 @@ function validateBoundedGraph(root: unknown): void {
       if (typeof key !== 'string') invalidGraph();
       stringBytes += utf8Bytes(key);
       if (stringBytes > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxBytes) invalidGraph();
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      const descriptor = apply(
+        CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+        CAPTURED_OBJECT_RECEIVER,
+        [value, key],
+      );
       if (
         descriptor === undefined
         || !descriptor.enumerable
         || !('value' in descriptor)
       ) invalidGraph();
-      pending.push({ value: descriptor.value, depth: current.depth + 1 });
+      apply(CAPTURED_ARRAY_PUSH, pending, [{
+        value: descriptor.value,
+        depth: current.depth + 1,
+      }]);
     }
   }
 }
 
 function compareKeys(left: string, right: string): number {
-  return Reflect.apply(localeCompare, left, [right, 'en-US']) as number;
+  return apply(CAPTURED_STRING_LOCALE_COMPARE, left, [right, 'en-US']);
 }
 
 export function serializeProjectTemplateCliJson(value: unknown): string {
@@ -123,52 +183,74 @@ export function serializeProjectTemplateCliJson(value: unknown): string {
   const append = (chunk: string): void => {
     outputBytes += utf8Bytes(chunk);
     if (outputBytes > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxBytes) invalidGraph();
-    chunks.push(chunk);
+    apply(CAPTURED_ARRAY_PUSH, chunks, [chunk]);
   };
 
   const serialize = (current: unknown): void => {
     if (validatePrimitive(current)) {
-      append(JSON.stringify(current) as string);
+      append(apply(CAPTURED_JSON_STRINGIFY, CAPTURED_JSON_RECEIVER, [current]));
       return;
     }
-    if (Array.isArray(current)) {
+    if (apply(CAPTURED_ARRAY_IS_ARRAY, CAPTURED_ARRAY_RECEIVER, [current])) {
+      const array = current as readonly unknown[];
       append('[');
-      for (let index = 0; index < current.length; index += 1) {
+      for (let index = 0; index < array.length; index += 1) {
         if (index > 0) append(',');
-        const descriptor = Object.getOwnPropertyDescriptor(current, `${index}`)!;
+        const descriptor = apply(
+          CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+          CAPTURED_OBJECT_RECEIVER,
+          [array, `${index}`],
+        )!;
         serialize(descriptor.value);
       }
       append(']');
       return;
     }
     const record = current as object;
-    const keys = Reflect.ownKeys(record) as string[];
-    Reflect.apply(arraySort, keys, [compareKeys]);
+    const keys = apply(
+      CAPTURED_REFLECT_OWN_KEYS,
+      CAPTURED_REFLECT_RECEIVER,
+      [record],
+    ) as string[];
+    apply(CAPTURED_ARRAY_SORT, keys, [compareKeys]);
     append('{');
     for (let index = 0; index < keys.length; index += 1) {
       if (index > 0) append(',');
       const key = keys[index]!;
-      append(JSON.stringify(key));
+      append(apply(CAPTURED_JSON_STRINGIFY, CAPTURED_JSON_RECEIVER, [key]));
       append(':');
-      serialize(Object.getOwnPropertyDescriptor(record, key)!.value);
+      serialize(apply(
+        CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+        CAPTURED_OBJECT_RECEIVER,
+        [record, key],
+      )!.value);
     }
     append('}');
   };
 
   serialize(value);
-  return `${chunks.join('')}\n`;
+  return `${apply(CAPTURED_ARRAY_JOIN, chunks, [''])}\n`;
 }
 
 export function snapshotProjectTemplateCliJson(value: unknown): unknown {
-  const snapshot = JSON.parse(serializeProjectTemplateCliJson(value)) as unknown;
+  const snapshot = apply(
+    CAPTURED_JSON_PARSE,
+    CAPTURED_JSON_RECEIVER,
+    [serializeProjectTemplateCliJson(value)],
+  ) as unknown;
   const pending: object[] = [];
-  if (snapshot !== null && typeof snapshot === 'object') pending.push(snapshot);
+  if (snapshot !== null && typeof snapshot === 'object') {
+    apply(CAPTURED_ARRAY_PUSH, pending, [snapshot]);
+  }
   while (pending.length > 0) {
-    const current = pending.pop()!;
-    for (const child of Object.values(current)) {
-      if (child !== null && typeof child === 'object') pending.push(child);
+    const current = apply(CAPTURED_ARRAY_POP, pending, [])!;
+    const children = apply(CAPTURED_OBJECT_VALUES, CAPTURED_OBJECT_RECEIVER, [current]);
+    for (const child of children) {
+      if (child !== null && typeof child === 'object') {
+        apply(CAPTURED_ARRAY_PUSH, pending, [child]);
+      }
     }
-    Object.freeze(current);
+    apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [current]);
   }
   return snapshot;
 }
