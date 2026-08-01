@@ -25,6 +25,7 @@ import {
   createProductionProjectTemplateCliLocalApplyPort,
   settleProjectTemplateCliLocalExecutionAfterLease,
 } from '../../features/project-template/local-transaction-apply-facade.js';
+import type { TemplateSource } from '../../features/project-template/types.js';
 
 const roots: string[] = [];
 
@@ -66,6 +67,7 @@ async function fixture(options: {
   readonly commit?: string;
   readonly workflowName?: string;
   readonly invalidWorkflow?: boolean;
+  readonly source?: TemplateSource;
 } = {}): Promise<{ archivePath: string; targetRoot: string }> {
   const sourceRoot = root('takt-local-service-source-');
   mkdirSync(join(sourceRoot, '.takt'), { mode: 0o700 });
@@ -87,7 +89,7 @@ steps:
   const exportPlan = await createProjectTemplateExportPlan(sourceRoot, {
     packVersion: '1.0.0',
     takt: { minVersion: '0.48.0' },
-    source: {
+    source: options.source ?? {
       kind: 'local',
       uri: '.',
       ref: 'workspace',
@@ -100,6 +102,58 @@ steps:
 }
 
 describe('production local project-template CLI composition', () => {
+  it('diffs and applies a downloaded remote-origin pack without remote authority', async () => {
+    const source = {
+      kind: 'github' as const,
+      uri: 'https://github.com/example/template' as const,
+      ref: 'v1.0.0',
+      commit: 'a'.repeat(40),
+    };
+    const { archivePath, targetRoot } = await fixture({ source });
+    const service = createProductionProjectTemplateCliLocalApplyService();
+    const common = {
+      cwd: targetRoot,
+      sourcePath: archivePath,
+      currentTaktVersion: '0.48.0',
+      force: true,
+    };
+
+    const preview = await service.diff(common);
+    expect(preview).toMatchObject({
+      envelope: {
+        status: 'success',
+        command: 'project-template diff',
+      },
+      exitCode: 0,
+    });
+    if (preview.envelope.status !== 'success') throw new Error('preview failed');
+    const applied = await service.apply({
+      ...common,
+      mode: 'apply',
+      expectedPlanId: preview.envelope.result.planId,
+    });
+
+    expect(applied).toMatchObject({
+      envelope: {
+        status: 'success',
+        command: 'project-template apply',
+      },
+      exitCode: 0,
+    });
+    expect(JSON.parse(readFileSync(
+      join(targetRoot, '.takt-template-source-lock.json'),
+      'utf8',
+    ))).toMatchObject({
+      source: {
+        kind: 'local-import',
+        uri: '.',
+        ref: 'workspace',
+        commit: source.commit,
+        descriptorSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+  });
+
   it('reports an indeterminate result when lease release cannot be proven', () => {
     const committed = {
       status: 'committed' as const,

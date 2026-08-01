@@ -79,8 +79,9 @@ export interface DerivedLocalProjectTemplateTransaction {
 /**
  * Re-derives a local archive transaction from fresh archive, target, baseline,
  * and exact 000/111 companion-lock evidence. Local schema 1.0 deliberately
- * admits no repertoire dependencies and never upgrades archive metadata into
- * remote repository authority.
+ * admits no repertoire dependencies. Any embedded git/GitHub identity is
+ * retained only as pack-bound provenance and is never upgraded into remote
+ * fetch, update, or repository authority.
  */
 export async function deriveLocalProjectTemplateTransaction(
   options: DeriveLocalProjectTemplateTransactionOptions,
@@ -92,13 +93,14 @@ export async function deriveLocalProjectTemplateTransaction(
   });
   requireActive(options.signal);
   const manifest = materialized.inspection.manifest;
-  if (manifest.source.kind !== 'local') {
-    throw new TaktpackError(
-      'INVALID_PACK',
-      'local archive apply requires local workspace source identity',
-      'manifest.source',
-    );
-  }
+  const localImportSource = manifest.source.kind === 'local'
+    ? manifest.source
+    : Object.freeze({
+      kind: 'local' as const,
+      uri: '.',
+      ref: 'workspace' as const,
+      commit: manifest.source.commit,
+    });
 
   const companion = readProjectTemplateCompanionLockState(options.projectRoot);
   requireActive(options.signal);
@@ -177,9 +179,12 @@ export async function deriveLocalProjectTemplateTransaction(
     schemaVersion: '1.0' as const,
     source: Object.freeze({
       kind: 'local-import' as const,
-      uri: manifest.source.uri,
-      ref: manifest.source.ref,
-      commit: manifest.source.commit,
+      // Why: a git/GitHub identity embedded in copied archive bytes remains
+      // descriptor evidence only. Mapping the effective source to a local
+      // workspace prevents a later update from treating it as fetch authority.
+      uri: localImportSource.uri,
+      ref: localImportSource.ref,
+      commit: localImportSource.commit,
       descriptorSha256: sourceDescriptorSha256,
     }),
     archive: Object.freeze({
@@ -204,7 +209,7 @@ export async function deriveLocalProjectTemplateTransaction(
     schemaVersion: materialized.inspection.lockSeed.schemaVersion,
     manifestSha256: materialized.inspection.manifestSha256,
     packVersion: materialized.inspection.lockSeed.packVersion,
-    source: materialized.inspection.lockSeed.source,
+    source: localImportSource,
     capabilities: materialized.inspection.lockSeed.capabilities,
     entries: materialized.inspection.lockSeed.entries,
   };

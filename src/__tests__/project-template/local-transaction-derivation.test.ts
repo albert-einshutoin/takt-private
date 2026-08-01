@@ -14,6 +14,7 @@ import {
 import {
   parseProjectTemplateSourceProvenanceJson,
 } from '../../features/project-template/source-provenance.js';
+import type { TemplateSource } from '../../features/project-template/types.js';
 
 const roots: string[] = [];
 const COMMIT = 'a'.repeat(40);
@@ -28,7 +29,11 @@ afterEach(() => {
   for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true });
 });
 
-async function fixture(): Promise<{ archivePath: string; targetRoot: string }> {
+async function fixture(
+  source: TemplateSource = {
+    kind: 'local', uri: '.', ref: 'workspace', commit: COMMIT,
+  },
+): Promise<{ archivePath: string; targetRoot: string }> {
   const sourceRoot = root('takt-local-derive-source-');
   const sourcePath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
   mkdirSync(dirname(sourcePath), { recursive: true });
@@ -37,7 +42,7 @@ async function fixture(): Promise<{ archivePath: string; targetRoot: string }> {
   const plan = await createProjectTemplateExportPlan(sourceRoot, {
     packVersion: '1.0.0',
     takt: { minVersion: '0.48.0' },
-    source: { kind: 'local', uri: '.', ref: 'workspace', commit: COMMIT },
+    source,
     policies: { 'config.yaml': 'merge' },
   });
   const archivePath = join(sourceRoot, 'template.taktpack');
@@ -46,6 +51,51 @@ async function fixture(): Promise<{ archivePath: string; targetRoot: string }> {
 }
 
 describe('local project template transaction derivation', () => {
+  it.each([
+    {
+      kind: 'github' as const,
+      uri: 'https://github.com/example/template' as const,
+      ref: 'v1.0.0',
+      commit: COMMIT,
+    },
+    {
+      kind: 'git' as const,
+      uri: 'https://git.example.com/team/template.git' as const,
+      ref: 'refs/tags/v1.0.0',
+      commit: COMMIT,
+    },
+  ])('imports a $kind-origin pack as local data without granting remote authority', async (remoteSource) => {
+    const { archivePath, targetRoot } = await fixture(remoteSource);
+
+    const derived = await deriveLocalProjectTemplateTransaction({
+      archivePath,
+      projectRoot: targetRoot,
+      currentTaktVersion: '0.48.0',
+      baselineStrategy: 'adopt-identical',
+    });
+
+    expect(parseTemplateLock(JSON.parse(
+      new TextDecoder().decode(derived.companionOutputs.contentLock),
+    )).source).toEqual({
+      kind: 'local',
+      uri: '.',
+      ref: 'workspace',
+      commit: remoteSource.commit,
+    });
+    expect(parseProjectTemplateSourceProvenanceJson(
+      derived.companionOutputs.sourceProvenance,
+    ).source).toMatchObject({
+      kind: 'local-import',
+      uri: '.',
+      ref: 'workspace',
+      commit: remoteSource.commit,
+      descriptorSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(derived.contentEntries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'workflows/review.yaml', action: 'write' }),
+    ]));
+  });
+
   it('derives a sealed first-install transaction from an exact 000 cohort', async () => {
     const { archivePath, targetRoot } = await fixture();
     const derived = await deriveLocalProjectTemplateTransaction({
