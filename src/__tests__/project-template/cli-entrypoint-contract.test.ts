@@ -11,6 +11,28 @@ import {
 const runner = resolve('node_modules/.bin/vite-node');
 const entrypoint = resolve('src/app/cli/index.ts');
 const roots: string[] = [];
+const duplicateRuntimeAssertionCases = [
+  [
+    'inspect', './missing.taktpack',
+    ['--current-takt-version', '99.0.0', '--current-takt-version', '0.48.0'],
+    'dry-run',
+  ],
+  [
+    'diff', './missing.taktpack',
+    ['--current-takt-version', '0.48.0', '--current-takt-version', '99.0.0'],
+    'dry-run',
+  ],
+  [
+    'apply', './missing.taktpack',
+    ['--current-takt-version', '0.48.0', '--current-takt-version', '0.48.0'],
+    'apply',
+  ],
+  [
+    'update', 'github:owner/template@v1.0.0',
+    ['--current-takt-version=0.48.0', '--current-takt-version', '99.0.0'],
+    'apply',
+  ],
+] as const;
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -139,33 +161,11 @@ describe('project-template CLI entrypoint contract', () => {
     }
   });
 
-  it('rejects duplicate runtime assertions in every source command before filesystem work', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'takt-cli-duplicate-version-'));
-    roots.push(root);
-    const cases = [
-      [
-        'inspect', './missing.taktpack',
-        ['--current-takt-version', '99.0.0', '--current-takt-version', '0.48.0'],
-        'dry-run',
-      ],
-      [
-        'diff', './missing.taktpack',
-        ['--current-takt-version', '0.48.0', '--current-takt-version', '99.0.0'],
-        'dry-run',
-      ],
-      [
-        'apply', './missing.taktpack',
-        ['--current-takt-version', '0.48.0', '--current-takt-version', '0.48.0'],
-        'apply',
-      ],
-      [
-        'update', 'github:owner/template@v1.0.0',
-        ['--current-takt-version=0.48.0', '--current-takt-version', '99.0.0'],
-        'apply',
-      ],
-    ] as const;
-
-    for (const [command, source, assertions, mode] of cases) {
+  it.each(duplicateRuntimeAssertionCases)(
+    'rejects duplicate runtime assertions for %s before filesystem work',
+    async (command, source, assertions, mode) => {
+      const root = await mkdtemp(join(tmpdir(), 'takt-cli-duplicate-version-'));
+      roots.push(root);
       const cwd = join(root, command);
       await mkdir(cwd);
       const mutation = mode === 'apply'
@@ -185,8 +185,8 @@ describe('project-template CLI entrypoint contract', () => {
         error: { code: 'INVALID_ARGUMENT' },
       });
       expect(await readdir(cwd)).toEqual([]);
-    }
-  }, 15_000);
+    },
+  );
 
   it('returns one INTERRUPTED envelope and exit 130 for in-flight SIGINT', async () => {
     const cache = resolve('node_modules/.cache');
