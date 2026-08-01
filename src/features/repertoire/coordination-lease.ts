@@ -23,8 +23,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   createCoordinationPlatformPolicy,
   type CoordinationRootAuthority,
-  type CoordinationRootEvidence,
 } from './coordination-platform-policy.js';
+import type { PosixDirectoryEvidence } from './coordination-filesystem-types.js';
 
 const COORDINATION_DIRECTORY_NAME = '.takt-repertoire-coordination';
 const READERS_DIRECTORY_NAME = 'readers';
@@ -211,7 +211,7 @@ type CoordinationPaths = {
 };
 
 type TrustedConfigRoot = CoordinationRootAuthority;
-type TrustedRootEvidence = CoordinationRootEvidence;
+type TrustedRootEvidence = PosixDirectoryEvidence;
 
 type CoordinationSnapshot = {
   digest: string;
@@ -493,6 +493,7 @@ function openPosixRootAuthority(path: string): TrustedConfigRoot {
   }
   let closed = false;
   const evidence = safeObjectFreeze({
+    kind: 'posix' as const,
     dev: before.dev,
     ino: before.ino,
     mode: before.mode,

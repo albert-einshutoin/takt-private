@@ -9,7 +9,7 @@ function authority(overrides: Partial<CoordinationRootAuthority> = {}): Coordina
   return {
     lexicalRoot: '/config',
     canonicalRoot: '/config',
-    evidence: { dev: 1, ino: 2, mode: 0o40700, uid: 501 },
+    evidence: { kind: 'posix', dev: 1, ino: 2, mode: 0o40700, uid: 501 },
     assertUnchanged: vi.fn(),
     close: vi.fn(),
     ...overrides,
@@ -72,7 +72,7 @@ describe('coordination platform policy', () => {
 
   it.each([
     authority({ canonicalRoot: '' }),
-    authority({ evidence: { dev: 1, ino: Number.NaN, mode: 0, uid: 0 } }),
+    authority({ evidence: { kind: 'posix', dev: 1, ino: Number.NaN, mode: 0, uid: 0 } }),
     { ...authority(), assertUnchanged: undefined },
   ])('rejects malformed Windows bridge authority without returning it', (untrusted) => {
     const policy = createCoordinationPlatformPolicy({

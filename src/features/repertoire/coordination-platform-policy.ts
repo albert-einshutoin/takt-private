@@ -1,17 +1,11 @@
-export type CoordinationRootEvidence = {
-  readonly dev: number;
-  readonly ino: number;
-  readonly mode: number;
-  readonly uid: number;
-};
+import type {
+  CoordinationDirectoryAuthority,
+  CoordinationDirectoryEvidence,
+} from './coordination-filesystem-types.js';
 
-export type CoordinationRootAuthority = {
-  readonly canonicalRoot: string;
-  readonly evidence: CoordinationRootEvidence;
-  readonly lexicalRoot: string;
-  assertUnchanged(): void;
-  close(): void;
-};
+export type CoordinationRootEvidence = CoordinationDirectoryEvidence;
+
+export type CoordinationRootAuthority = CoordinationDirectoryAuthority;
 
 export type CoordinationWindowsRootAuthorityBridge = {
   openRootAuthority(path: string): CoordinationRootAuthority;
@@ -84,10 +78,16 @@ function assertAuthorityShape(authority: CoordinationRootAuthority): void {
     || typeof authority.close !== 'function'
     || typeof evidence !== 'object'
     || evidence === null
-    || !Number.isSafeInteger(evidence.dev)
-    || !Number.isSafeInteger(evidence.ino)
-    || !Number.isSafeInteger(evidence.mode)
-    || !Number.isSafeInteger(evidence.uid)
+    || (evidence.kind !== 'posix' && evidence.kind !== 'win32')
+    || (evidence.kind === 'posix' && (
+      !Number.isSafeInteger(evidence.dev)
+      || !Number.isSafeInteger(evidence.ino)
+      || !Number.isSafeInteger(evidence.mode)
+      || !Number.isSafeInteger(evidence.uid)
+    ))
+    || (evidence.kind === 'win32' && (
+      evidence.dev.length === 0 || evidence.ino.length === 0
+    ))
   ) throw failed();
 }
 
