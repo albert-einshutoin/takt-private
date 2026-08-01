@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -16,7 +17,9 @@ import {
   writeTaktpack,
 } from '../../features/project-template/index.js';
 import {
+  captureTaktpackOutputPrecondition,
   syncTaktpackOutputDirectory,
+  writeTaktpackWithOutputPrecondition,
   writeTaktpackWithIoSeam,
   type TaktpackWriterIoPhase,
 } from '../../features/project-template/archive-writer.js';
@@ -53,6 +56,123 @@ afterEach(() => {
 });
 
 describe('taktpack deterministic writer', () => {
+  it('exposes only a path-redacted deterministic projection from an output authority', async () => {
+    const root = makeRoot();
+    const output = join(root, 'projection.taktpack');
+
+    const first = await captureTaktpackOutputPrecondition(output);
+    const second = await captureTaktpackOutputPrecondition(output);
+
+    expect(first.projection).toEqual(second.projection);
+    expect(first.projection).toMatchObject({
+      schemaVersion: '1.0',
+      pathSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      target: { state: 'absent' },
+    });
+    expect(JSON.stringify(first.projection)).not.toContain(root);
+    expect(Object.keys(first.authority)).toEqual([]);
+  });
+
+  it('rejects cloned, reused, and foreign-path output authorities before creating temp files', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'authorized.taktpack');
+    const foreign = join(root, 'foreign.taktpack');
+    const clonedCapture = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      { ...clonedCapture.authority } as typeof clonedCapture.authority,
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+
+    const foreignCapture = await captureTaktpackOutputPrecondition(output);
+    await expect(writeTaktpackWithOutputPrecondition(
+      foreign,
+      plan,
+      foreignCapture.authority,
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+
+    const singleUse = await captureTaktpackOutputPrecondition(output);
+    await writeTaktpackWithOutputPrecondition(output, plan, singleUse.authority);
+    rmSync(output);
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      singleUse.authority,
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(existsSync(output)).toBe(false);
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('does not let force authorize an absent target that appeared after capture', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'appeared.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    writeFileSync(output, 'foreign');
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readFileSync(output, 'utf8')).toBe('foreign');
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('rejects a parent identity swap captured by the output authority', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    const movedDirectory = join(root, 'moved-exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'pack.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    renameSync(outputDirectory, movedDirectory);
+    mkdirSync(outputDirectory);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(existsSync(output)).toBe(false);
+    expect(readdirSync(movedDirectory)).toEqual([]);
+    expect(readdirSync(outputDirectory)).toEqual([]);
+  });
+
+  it('revalidates exact target identity at the publication boundary even with force', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'replaced-at-publish.taktpack');
+    writeFileSync(output, 'approved');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'publish') {
+            rmSync(output);
+            writeFileSync(output, 'replacement');
+          }
+        },
+      },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readFileSync(output, 'utf8')).toBe('replacement');
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
   it('treats directory fsync as unsupported on Windows without reporting failure', () => {
     let calls = 0;
 
