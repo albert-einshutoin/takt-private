@@ -14,6 +14,7 @@ import {
 import {
   createProductionProjectTemplateCliRollbackService,
 } from '../../features/project-template/cli-rollback-service.js';
+import { COMMIT_PATTERN_SOURCE } from '../../features/project-template/validation.js';
 import { initializeProjectTemplateApplyStorage } from '../../features/project-template/apply-storage.js';
 import { createProjectTemplateGithubSourceComposition } from '../../infra/github/project-template-github-source-composition.js';
 import { createProjectTemplateCliRemoteProductionRuntime } from '../../infra/github/project-template-cli-remote-production.js';
@@ -35,7 +36,8 @@ import { resolveConfigValue } from '../../infra/config/resolveConfigValue.js';
 import { DEFAULT_LANGUAGE } from '../../shared/constants.js';
 import type { Language } from '../../core/models/config-types.js';
 
-const COMMIT = /^[a-f0-9]{40}$/u;
+// Why: repository export must accept exactly the commit formats that its manifest can validate.
+const COMMIT_PATTERN = new RegExp(COMMIT_PATTERN_SOURCE, 'u');
 const REMOTE_DEADLINE_MS = 30_000;
 
 function privateDirectory(path: string): string {
@@ -207,7 +209,7 @@ async function dispatchProjectTemplateCommand(
       || metadata?.packVersion === undefined
       || metadata.minTaktVersion === undefined
       || metadata.sourceCommit === undefined
-      || !COMMIT.test(metadata.sourceCommit)
+      || !COMMIT_PATTERN.test(metadata.sourceCommit)
     ) return failure(request, 'INVALID_ARGUMENT');
     return await executeProjectTemplateCliExport({
       projectRoot: request.cwd,

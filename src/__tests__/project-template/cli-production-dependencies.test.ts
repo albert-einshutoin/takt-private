@@ -65,6 +65,30 @@ function remoteApplyRequest(cwd: string) {
   };
 }
 
+function exportRequest(cwd: string, sourceCommit: string) {
+  return {
+    command: 'project-template export' as const,
+    cwd,
+    json: true,
+    currentTaktVersion: '0.48.0',
+    outputPath: join(cwd, 'template.taktpack'),
+    mutation: { mode: 'dry-run' as const, force: false },
+    exportMetadata: {
+      packVersion: '1.0.0',
+      minTaktVersion: '0.48.0',
+      sourceCommit,
+    },
+  };
+}
+
+async function createExportFixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'takt-cli-export-commit-'));
+  roots.push(root);
+  await mkdir(join(root, '.takt', 'workflows'), { recursive: true });
+  await writeFile(join(root, '.takt', 'workflows', 'review.yaml'), 'name: review\n');
+  return root;
+}
+
 function context() {
   return { signal: new AbortController().signal, admitMutation: vi.fn() };
 }
@@ -177,6 +201,44 @@ describe('project-template production command dependencies', () => {
     expect(apply).toHaveBeenCalledOnce();
     expect(admission).toHaveBeenCalledOnce();
     await dependencies.dispose();
+  });
+
+  it.each([
+    ['SHA-1', 'a'.repeat(40)],
+    ['SHA-256', 'b'.repeat(64)],
+  ] as const)('accepts a valid %s source commit for repository export', async (_kind, commit) => {
+    const root = await createExportFixture();
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+
+    const outcome = await dependencies.dispatch(exportRequest(root, commit), context());
+    await dependencies.dispose();
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: { command: 'project-template export', mode: 'dry-run', status: 'success' },
+    });
+    expect(await readdir(root)).toEqual(['.takt']);
+  });
+
+  it.each([
+    ['39 characters', 'a'.repeat(39)],
+    ['41 characters', 'a'.repeat(41)],
+    ['63 characters', 'a'.repeat(63)],
+    ['65 characters', 'a'.repeat(65)],
+    ['non-hexadecimal characters', 'g'.repeat(40)],
+    ['uppercase hexadecimal characters', 'A'.repeat(40)],
+  ] as const)('rejects a source commit with %s', async (_kind, commit) => {
+    const root = await createExportFixture();
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+
+    const outcome = await dependencies.dispatch(exportRequest(root, commit), context());
+    await dependencies.dispose();
+
+    expect(outcome).toMatchObject({
+      exitCode: 20,
+      envelope: { command: 'project-template export', error: { code: 'INVALID_ARGUMENT' } },
+    });
+    expect(await readdir(root)).toEqual(['.takt']);
   });
 
   it('keeps a runtime construction failure primary while disposal stays bounded', async () => {
