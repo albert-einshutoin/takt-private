@@ -32,6 +32,20 @@ function port(
 }
 
 describe('local project-template CLI diff/apply service', () => {
+  it('admits exact-once and drains execution without forwarding the signal', async () => {
+    const controller = new AbortController();
+    const admitMutation = vi.fn(() => controller.abort());
+    const execute = vi.fn(port().execute);
+    const service = createProjectTemplateCliLocalApplyService(port({ execute }));
+    await service.apply({
+      cwd: '/safe/repo', sourcePath: 'pack.taktpack', currentTaktVersion: '0.48.0',
+      force: false, mode: 'apply', expectedPlanId: PLAN_ID,
+      signal: controller.signal, admitMutation,
+    });
+    expect(admitMutation).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]![0]).not.toHaveProperty('signal');
+  });
   it('returns the same closed dry-run plan for diff and apply', async () => {
     const service = createProjectTemplateCliLocalApplyService(port());
     const options = {

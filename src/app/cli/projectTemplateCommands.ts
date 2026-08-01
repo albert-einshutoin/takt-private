@@ -165,13 +165,15 @@ export function registerProjectTemplateCommands(
     handle: (context: ProjectTemplateCliLifecycleContext) =>
       Promise<ProjectTemplateCliOutcome>,
   ): Promise<void> => {
-    let lifecycle: ReturnType<typeof startProjectTemplateCliLifecycle> | undefined;
+    const lifecycleState: {
+      current?: ReturnType<typeof startProjectTemplateCliLifecycle>;
+    } = {};
     let interruptedBeforeStart = false;
     const removeInterrupt = dependencies.installInterrupt(() => {
-      if (lifecycle === undefined) interruptedBeforeStart = true;
-      else lifecycle.interrupt();
+      if (lifecycleState.current === undefined) interruptedBeforeStart = true;
+      else lifecycleState.current.interrupt();
     });
-    lifecycle = startProjectTemplateCliLifecycle({
+    const lifecycle = startProjectTemplateCliLifecycle({
       command,
       mode,
       dispose: dependencies.dispose,
@@ -182,6 +184,7 @@ export function registerProjectTemplateCommands(
         return await handle(context);
       },
     });
+    lifecycleState.current = lifecycle;
     if (interruptedBeforeStart) lifecycle.interrupt();
     try {
       const result = await lifecycle.result;

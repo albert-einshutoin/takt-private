@@ -40,6 +40,14 @@ const base = {
 };
 
 describe('project template remote CLI service', () => {
+  it.each(['apply', 'update'] as const)('admits %s exact-once before terminal execution', async (command) => {
+    const admitMutation = vi.fn();
+    const execute = vi.fn(port().execute);
+    const service = createProjectTemplateCliRemoteApplyService(port({ execute }));
+    await service[command]({ ...base, mode: 'apply', expectedPlanId: PLAN_ID, admitMutation });
+    expect(admitMutation).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+  });
   it('returns only the closed safe diff DTO from a fresh derivation', async () => {
     const service = createProjectTemplateCliRemoteApplyService(port());
     const outcome = await service.diff(base);

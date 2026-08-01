@@ -23,6 +23,19 @@ function port(overrides: Partial<ProjectTemplateCliRollbackPort> = {}): ProjectT
 }
 
 describe('project template CLI rollback service', () => {
+  it('admits exact-once and drains rollback without forwarding the signal', async () => {
+    const controller = new AbortController();
+    const admitMutation = vi.fn(() => controller.abort());
+    const execute = vi.fn(async () => ({ status: 'rolled_back' as const, backupId: 'backup-1' }));
+    const service = createProjectTemplateCliRollbackService(port({ execute }));
+    await service.rollback({
+      cwd: '/safe/repo', backupId: 'backup-1', force: false, mode: 'apply',
+      expectedPlanId: planId, signal: controller.signal, admitMutation,
+    });
+    expect(admitMutation).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0]![0]).not.toHaveProperty('signal');
+  });
   it('classifies lease release failure as indeterminate', () => {
     expect(settleProjectTemplateRollbackAfterLease(
       { status: 'rolled_back', backupId: 'backup-1' },

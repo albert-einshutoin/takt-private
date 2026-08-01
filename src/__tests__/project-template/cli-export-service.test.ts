@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { executeProjectTemplateCliExport } from '../../features/project-template/cli-export-service.js';
 import type { ProjectTemplateExportOptions } from '../../features/project-template/archive-types.js';
 
@@ -54,6 +54,19 @@ afterEach(() => {
 });
 
 describe('project template CLI export service', () => {
+  it('admits exact-once only after the exact export plan is revalidated', async () => {
+    const fixture = makeFixture();
+    const preview = await dryRun(fixture.root, fixture.outputPath);
+    const planId = preview.envelope.status === 'success' && 'planId' in preview.envelope.result
+      ? preview.envelope.result.planId : '';
+    const admitMutation = vi.fn();
+    await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
+      mutation: { mode: 'apply', force: false, expectedPlanId: planId },
+      admitMutation,
+    });
+    expect(admitMutation).toHaveBeenCalledOnce();
+  });
   it('returns a deterministic closed dry-run DTO without writing an archive', async () => {
     const fixture = makeFixture();
 
