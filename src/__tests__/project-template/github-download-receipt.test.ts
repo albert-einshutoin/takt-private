@@ -18,6 +18,7 @@ import {
 import {
   claimPreparedGithubTemplateDownloadReceiptForStorage,
   consumePreparedGithubTemplateDownloadReceiptStorageClaim,
+  createGithubTemplateDownloadReceiptAuthenticationInput,
   GithubTemplateDownloadReceiptError,
   MAX_GITHUB_TEMPLATE_DOWNLOAD_RECEIPT_BYTES,
   parseGithubTemplateDownloadReceipt,
@@ -35,6 +36,7 @@ import {
   type GithubTemplateSourceMetadataPort,
 } from '../../features/project-template/github-update-check.js';
 import {
+  calculateProjectTemplateSourceDescriptorSha256,
   serializeProjectTemplateSourceDescriptor,
   type ProjectTemplateSourceDescriptorV1,
 } from '../../features/project-template/source-descriptor.js';
@@ -80,8 +82,11 @@ interface MutableReceipt {
       canonicalSource: string;
       requestedRef: string;
       releaseTag: string;
+      dependencyVerification?: unknown;
       sourceDescriptor: {
+        schemaVersion: string;
         pack: { sha256: string };
+        repertoireDependencies: unknown[];
       };
     };
     release: {
@@ -692,6 +697,33 @@ describe('GitHub template authenticated download receipt D1', () => {
       expect(() => parseGithubTemplateDownloadReceipt(invalid))
         .toThrow(expect.objectContaining({ code: 'INVALID_RECEIPT' }));
     }
+  });
+
+  it('accepts legacy v1 evidence omission only for zero dependencies', async () => {
+    const fixture = await createFixture();
+    const prepared = await prepareGithubTemplateDownloadReceipt({
+      ...fixture,
+      authenticator: authenticator(),
+    });
+    const nonzero = JSON.parse(prepared.serialized) as MutableReceipt;
+    delete nonzero.payload.source.dependencyVerification;
+    expect(() => parseGithubTemplateDownloadReceipt(
+      JSON.stringify(nonzero, null, 2),
+    )).toThrow(expect.objectContaining({ code: 'INVALID_RECEIPT' }));
+
+    nonzero.payload.source.sourceDescriptor.repertoireDependencies = [];
+    nonzero.payload.source.descriptorSha256 =
+      calculateProjectTemplateSourceDescriptorSha256(
+        nonzero.payload.source.sourceDescriptor as unknown as
+          ProjectTemplateSourceDescriptorV1,
+      );
+    const legacyZero = JSON.stringify(nonzero, null, 2);
+    const parsed = parseGithubTemplateDownloadReceipt(legacyZero);
+    expect(parsed.payload.source).not.toHaveProperty(
+      'dependencyVerification',
+    );
+    expect(createGithubTemplateDownloadReceiptAuthenticationInput(parsed))
+      .toEqual(expect.any(Uint8Array));
   });
 
   it('rejects accessor, symbol, unknown, and Proxy serializer inputs', async () => {

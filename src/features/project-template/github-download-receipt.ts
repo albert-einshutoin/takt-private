@@ -92,7 +92,7 @@ export interface GithubTemplateDownloadReceiptV1 {
       readonly releaseTag: string;
       readonly commit: string;
       readonly descriptorSha256: string;
-      readonly dependencyVerification: VerifiedGithubDependencySourceEvidence;
+      readonly dependencyVerification?: VerifiedGithubDependencySourceEvidence;
       /**
        * Dependency entries are declarations from the authenticated descriptor.
        * They are not resolved dependency authorities.
@@ -504,10 +504,12 @@ function parseReceiptStructure(
       'dependencyVerification',
       'sourceDescriptor',
     ]);
-    const dependencyVerification = ownDataRecord(
-      source['dependencyVerification'],
-      ['method', 'declarationSha256', 'count'],
-    );
+    const dependencyVerification = source['dependencyVerification'] === undefined
+      ? undefined
+      : ownDataRecord(
+        source['dependencyVerification'],
+        ['method', 'declarationSha256', 'count'],
+      );
     const release = ownDataRecord(payload['release'], [
       'releaseId',
       'assetId',
@@ -542,7 +544,9 @@ function parseReceiptStructure(
     );
     if (
       Object.keys(payload).length !== 3
-      || Object.keys(source).length !== 10
+      || Object.keys(source).length !== (
+        dependencyVerification === undefined ? 9 : 10
+      )
       || Object.keys(release).length !== 7
       || Object.keys(archive).length !== 6
       || authentication['algorithm'] !== 'hmac-sha256'
@@ -579,19 +583,23 @@ function parseReceiptStructure(
             source['descriptorSha256'],
             SHA256_PATTERN,
           ),
-          dependencyVerification: {
-            method: requireString(
-              dependencyVerification['method'],
-              /^github-ref-to-commit-v1$/,
-            ) as 'github-ref-to-commit-v1',
-            declarationSha256: requireString(
-              dependencyVerification['declarationSha256'],
-              SHA256_PATTERN,
-            ),
-            count: requireNonNegativeInteger(
-              dependencyVerification['count'],
-            ),
-          },
+          ...(dependencyVerification === undefined
+            ? {}
+            : {
+              dependencyVerification: {
+                method: requireString(
+                  dependencyVerification['method'],
+                  /^github-ref-to-commit-v1$/,
+                ) as 'github-ref-to-commit-v1',
+                declarationSha256: requireString(
+                  dependencyVerification['declarationSha256'],
+                  SHA256_PATTERN,
+                ),
+                count: requireNonNegativeInteger(
+                  dependencyVerification['count'],
+                ),
+              },
+            }),
           sourceDescriptor: descriptor,
         },
         release: {
@@ -707,12 +715,18 @@ function parseReceiptStructure(
       || calculateProjectTemplateSourceDescriptorSha256(
         sourceReceipt.sourceDescriptor,
       ) !== sourceReceipt.descriptorSha256
-      || sourceReceipt.dependencyVerification.count
-        !== sourceReceipt.sourceDescriptor.repertoireDependencies.length
-      || sourceReceipt.dependencyVerification.declarationSha256
-        !== calculateProjectTemplateRepertoireDependencyDeclarationSha256(
-          sourceReceipt.sourceDescriptor.repertoireDependencies,
-        )
+      || (
+        sourceReceipt.dependencyVerification === undefined
+          ? sourceReceipt.sourceDescriptor.repertoireDependencies.length !== 0
+          : (
+            sourceReceipt.dependencyVerification.count
+              !== sourceReceipt.sourceDescriptor.repertoireDependencies.length
+            || sourceReceipt.dependencyVerification.declarationSha256
+              !== calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+                sourceReceipt.sourceDescriptor.repertoireDependencies,
+              )
+          )
+      )
       || descriptorPack.releaseTag !== sourceReceipt.releaseTag
       || descriptorPack.version !== archiveReceipt.version
       || descriptorPack.sha256 !== archiveReceipt.sha256
