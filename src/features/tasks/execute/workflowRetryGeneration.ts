@@ -136,7 +136,13 @@ function rebindResumePointToCurrentWorkflow(
       undefined,
       readContext,
     );
-    if (!childWorkflow || resumePoint.stack[index + 1]!.workflow !== childWorkflow.name) {
+    if (!childWorkflow) {
+      // Preserve the established nearest-call fallback only when the witnessed
+      // topology itself records an unavailable child. The current call entry
+      // has already been fully validated and rebound atomically.
+      return { ...resumePoint, stack: reboundStack };
+    }
+    if (resumePoint.stack[index + 1]!.workflow !== childWorkflow.name) {
       throw new WorkflowDiscoveryReadError();
     }
     currentWorkflow = childWorkflow;
