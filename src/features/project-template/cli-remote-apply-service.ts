@@ -418,11 +418,11 @@ export function createProjectTemplateCliRemoteApplyService(
     if (command === 'project-template update' && !derived.updateAvailable) {
       return failure(command, 'apply', 'PLAN_DRIFT');
     }
-    if (derived.reviewRequired && !options.force) {
-      return failure(command, 'apply', 'APPROVAL_REQUIRED');
-    }
     if (derived.reviewRequired && !derived.forceApplicable) {
       return failure(command, 'apply', 'REVIEW_REQUIRED');
+    }
+    if (derived.reviewRequired && !options.force) {
+      return failure(command, 'apply', 'APPROVAL_REQUIRED');
     }
     try {
       consumeProjectTemplateCliMutationAdmission(options.admitMutation);

@@ -193,34 +193,50 @@ describe('project template remote CLI service', () => {
     expect(admitMutation).not.toHaveBeenCalled();
   });
 
-  it('distinguishes missing force approval from a non-force-applicable review', async () => {
+  it('requires approval when force is applicable but missing', async () => {
     const execute = vi.fn(port().execute);
-    const reviewPlan = async (forceApplicable: boolean) => ({
-      ...(await port().derive({
-        cwd: '/repo', source: 'github:owner/repo@v1', currentTaktVersion: '0.48.0',
-        baselineStrategy: 'conflict',
-      })),
-      reviewRequired: true,
-      defaultApplyPossible: false,
-      forceApplicable,
-    });
     const forceApplicable = createProjectTemplateCliRemoteApplyService(port({
       execute,
-      derive: async () => reviewPlan(true),
-    }));
-    const reviewOnly = createProjectTemplateCliRemoteApplyService(port({
-      execute,
-      derive: async () => reviewPlan(false),
+      derive: async () => ({
+        ...(await port().derive({
+          cwd: '/repo', source: 'github:owner/repo@v1', currentTaktVersion: '0.48.0',
+          baselineStrategy: 'conflict',
+        })),
+        reviewRequired: true,
+        defaultApplyPossible: false,
+        forceApplicable: true,
+      }),
     }));
 
     await expect(forceApplicable.apply({
       ...base, mode: 'apply', expectedPlanId: PLAN_ID,
     })).resolves.toMatchObject({ envelope: { error: { code: 'APPROVAL_REQUIRED' } } });
-    await expect(reviewOnly.apply({
-      ...base, force: true, mode: 'apply', expectedPlanId: PLAN_ID,
-    })).resolves.toMatchObject({ envelope: { error: { code: 'REVIEW_REQUIRED' } } });
     expect(execute).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    'keeps a non-force-applicable review required when force=%s',
+    async (force) => {
+      const execute = vi.fn(port().execute);
+      const reviewOnly = createProjectTemplateCliRemoteApplyService(port({
+        execute,
+        derive: async () => ({
+          ...(await port().derive({
+            cwd: '/repo', source: 'github:owner/repo@v1', currentTaktVersion: '0.48.0',
+            baselineStrategy: 'conflict',
+          })),
+          reviewRequired: true,
+          defaultApplyPossible: false,
+          forceApplicable: false,
+        }),
+      }));
+
+      await expect(reviewOnly.apply({
+        ...base, force, mode: 'apply', expectedPlanId: PLAN_ID,
+      })).resolves.toMatchObject({ envelope: { error: { code: 'REVIEW_REQUIRED' } } });
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
 
   it('preserves unknown recovery state as recovery-required', async () => {
     const execute = vi.fn(port().execute);
