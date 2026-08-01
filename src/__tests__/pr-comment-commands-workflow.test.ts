@@ -22,6 +22,8 @@ const ACTION_PINS = {
   githubScript: 'actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b',
   setupNode: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
   uploadArtifact: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+  takt: 'nrslib/takt-action@e5b9b2d7b98c6eb0909670621ac6dfe1b8f20322',
+  slack: 'slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d',
 } as const;
 const requireForHarness = createRequire(import.meta.url);
 const temporaryDirectories: string[] = [];
@@ -130,7 +132,11 @@ async function runPublisher(
   fixture: PublisherFixture = {},
   source = findStep(readWorkflow().jobs['publish-review']!, 'Validate and publish review report')
     .with!.script as string,
-): Promise<{ readonly comments: string[]; readonly failures: string[] }> {
+): Promise<{
+  readonly comments: string[];
+  readonly failures: string[];
+  readonly reviewCommits: string[];
+}> {
   const root = mkdtempSync(resolve(tmpdir(), 'takt-review-publisher-'));
   temporaryDirectories.push(root);
   const report = fixture.report ?? Buffer.from('verified review', 'utf8');
@@ -165,22 +171,25 @@ async function runPublisher(
   }
 
   const comments: string[] = [];
+  const reviewCommits: string[] = [];
   const failures: string[] = [];
   let currentHeadChecked = false;
   const github = {
     rest: {
-      issues: {
-        createComment: async ({ body }: { body: string }) => {
-          if (!currentHeadChecked) {
-            throw new Error('publisher posted before current-head validation');
-          }
-          comments.push(body);
-        },
-      },
       pulls: {
         get: async () => {
           currentHeadChecked = true;
           return { data: { head: { sha: fixture.currentHead ?? REVIEWED_HEAD_SHA } } };
+        },
+        createReview: async ({
+          body,
+          commit_id: commitId,
+        }: { body: string; commit_id: string }) => {
+          if (!currentHeadChecked) {
+            throw new Error('publisher posted before current-head validation');
+          }
+          comments.push(body);
+          reviewCommits.push(commitId);
         },
       },
     },
@@ -202,7 +211,7 @@ async function runPublisher(
   } catch (error) {
     failures.push(error instanceof Error ? error.message : String(error));
   }
-  return { comments, failures };
+  return { comments, failures, reviewCommits };
 }
 
 function runTaskBuilder(
@@ -456,18 +465,21 @@ describe('PR Comment Commands workflow contract', () => {
     expect(post.with?.script).toContain("createHash('sha256')");
     expect(post.with?.script).toContain('timingSafeEqual');
     expect(post.with?.script).toContain('new TextDecoder');
-    expect(post.with?.script).toContain('github.rest.issues.createComment');
+    expect(post.with?.script).toContain('github.rest.pulls.createReview');
+    expect(post.with?.script).toContain('commit_id: expectedHead');
     expect(post.with?.script).toContain('github.rest.pulls.get');
     expect(post.env?.EXPECTED_HEAD_SHA).toBe('${{ needs.review.outputs.reviewed_head_sha }}');
   });
 
-  it('pins every first-party action to a reviewed full commit SHA', () => {
+  it('pins every external action to a reviewed full commit SHA', () => {
     const actionUses = Object.values(readWorkflow().jobs)
       .flatMap(job => job.steps)
       .map(step => step.uses)
-      .filter((uses): uses is string => uses?.startsWith('actions/') === true);
+      .filter((uses): uses is string => typeof uses === 'string');
     expect(actionUses.length).toBeGreaterThan(0);
-    expect(actionUses.every(uses => /^actions\/[a-z-]+@[0-9a-f]{40}$/u.test(uses))).toBe(true);
+    expect(actionUses.every(
+      uses => /^[a-z0-9-]+\/[a-z0-9-]+@[0-9a-f]{40}$/u.test(uses),
+    )).toBe(true);
     expect(new Set(actionUses)).toEqual(new Set(Object.values(ACTION_PINS)));
   });
 
@@ -475,6 +487,7 @@ describe('PR Comment Commands workflow contract', () => {
     const result = await runPublisher();
     expect(result.failures).toEqual([]);
     expect(result.comments).toEqual(['verified review']);
+    expect(result.reviewCommits).toEqual([REVIEWED_HEAD_SHA]);
   });
 
   it.each([
@@ -514,6 +527,48 @@ describe('PR Comment Commands workflow contract', () => {
       manifest: manifestWithReportDigest('0'.repeat(64)),
     }, mutated);
     expect(result.comments).toEqual(['verified review']);
+  });
+
+  it('builds Slack JSON from an untrusted issue title without markup interpolation', () => {
+    const takt = readWorkflow().jobs.takt!;
+    const prepare = findStep(takt, 'Prepare Slack payload');
+    const notify = findStep(takt, 'Notify Slack');
+    const script = prepare.run!.match(/node <<'NODE'\n([\s\S]*?)\nNODE/u)?.[1];
+    expect(script, 'missing trusted Slack payload builder').toBeDefined();
+    expect(prepare.run).not.toContain('${{ github.event.issue.title }}');
+    expect(notify.uses).toBe(ACTION_PINS.slack);
+    expect(notify.with).toMatchObject({
+      'payload-file-path': '${{ runner.temp }}/takt-slack-payload.json',
+    });
+    expect(notify.with).not.toHaveProperty('payload');
+
+    const root = mkdtempSync(resolve(tmpdir(), 'takt-slack-payload-'));
+    temporaryDirectories.push(root);
+    const payloadPath = resolve(root, 'payload.json');
+    const maliciousTitle = '"}\n<!channel> <@U123> & <script>';
+    execFileSync('node', ['-'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ACTOR_LOGIN: 'reviewer',
+        ISSUE_NUMBER: '164',
+        ISSUE_TITLE: maliciousTitle,
+        JOB_STATUS: 'failure',
+        REPOSITORY: 'owner/repo',
+        RUN_ID: '1234',
+        SERVER_URL: 'https://github.com',
+        SLACK_PAYLOAD_PATH: payloadPath,
+      },
+      input: script,
+    });
+    const payload = JSON.parse(readFileSync(payloadPath, 'utf8')) as {
+      blocks: Array<{ text?: { type?: string; text?: string } }>;
+    };
+    const titleBlock = payload.blocks.find(block => block.text?.type === 'plain_text');
+    expect(titleBlock?.text?.text).toBe(maliciousTitle);
+    expect(payload.blocks
+      .filter(block => block.text?.type === 'mrkdwn')
+      .every(block => !block.text?.text?.includes(maliciousTitle))).toBe(true);
   });
 
   it('never interpolates untrusted comment or PR data into a shell script', () => {
