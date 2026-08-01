@@ -117,6 +117,25 @@ describe('project-template inspect CLI service', () => {
     });
   });
 
+  it('rejects a source reached through a symlinked parent before inspection', async () => {
+    const inspect = vi.fn();
+    const outcome = await inspectProjectTemplateForCliWithDependencies({
+      cwd: '/safe/repo',
+      sourcePath: 'linked/template.taktpack',
+    }, inspectDependencies({
+      realpath: vi.fn(async (path: string) => path.endsWith('.taktpack')
+        ? '/outside/template.taktpack'
+        : path),
+      inspectTaktpack: inspect,
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 24,
+      envelope: { status: 'error', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
+    expect(inspect).not.toHaveBeenCalled();
+  });
+
   it('coarsens archive errors and aborts without leaking core details', async () => {
     const marker = 'LEAK_CANARY_PATH';
     const outcome = await inspectProjectTemplateForCliWithDependencies({

@@ -249,12 +249,14 @@ export async function inspectProjectTemplateForCliWithDependencies(
   const cwd = resolve(options.cwd);
   const sourcePath = resolve(cwd, options.sourcePath);
   try {
-    const [cwdBefore, cwdRealpath, sourceBefore] = await Promise.all([
+    const [cwdBefore, cwdRealpath, sourceBefore, sourceRealpath] = await Promise.all([
       dependencies.lstat(cwd),
       dependencies.realpath(cwd),
       dependencies.lstat(sourcePath),
+      dependencies.realpath(sourcePath),
     ]);
     if (cwdRealpath !== cwd || !cwdBefore.isDirectory() || cwdBefore.isSymbolicLink()
+      || sourceRealpath !== sourcePath
       || !sourceBefore.isFile() || sourceBefore.isSymbolicLink() || sourceBefore.nlink !== 1
       || sourceBefore.size > DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes) {
       return outcomeFailure('project-template inspect', 'SOURCE_INTEGRITY_FAILED');
@@ -264,12 +266,14 @@ export async function inspectProjectTemplateForCliWithDependencies(
       currentTaktVersion: options.currentTaktVersion,
       limits: DEFAULT_TAKTPACK_LIMITS,
     });
-    const [cwdAfter, cwdRealpathAfter, sourceAfter] = await Promise.all([
+    const [cwdAfter, cwdRealpathAfter, sourceAfter, sourceRealpathAfter] = await Promise.all([
       dependencies.lstat(cwd),
       dependencies.realpath(cwd),
       dependencies.lstat(sourcePath),
+      dependencies.realpath(sourcePath),
     ]);
     if (cwdRealpathAfter !== cwd || !isStableDirectory(cwdBefore, cwdAfter)
+      || sourceRealpathAfter !== sourcePath
       || !isStableFile(sourceBefore, sourceAfter)) {
       return outcomeFailure('project-template inspect', 'SOURCE_INTEGRITY_FAILED');
     }
