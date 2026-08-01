@@ -11,6 +11,7 @@ const completionFiles = [
 const commands = ['export', 'inspect', 'diff', 'apply', 'update', 'rollback', 'list'];
 const common = ['--cwd', '--json'];
 const mutation = ['--dry-run', '--apply', '--expected-plan-id', '--force'];
+const exportApprovals = ['--approve-policy', '--approve-capability'];
 
 describe('project-template shell completions', () => {
   for (const file of completionFiles) {
@@ -19,6 +20,7 @@ describe('project-template shell completions', () => {
       for (const command of commands) expect(text).toContain(command);
       for (const option of common) expect(text).toContain(option);
       for (const option of mutation) expect(text).toContain(option);
+      for (const option of exportApprovals) expect(text).toContain(option);
       expect(text).not.toMatch(/(?:token|password|secret|https?:\/\/)/iu);
     });
   }
@@ -58,6 +60,7 @@ describe('project-template shell completions', () => {
         expect(guide).toContain(`\`${command}\``);
       }
       for (const option of [...common, ...mutation]) expect(guide).toContain(option);
+      for (const option of exportApprovals) expect(guide).toContain(option);
       for (const code of ['`0`', '`20`', '`21`', '`22`', '`23`', '`24`', '`25`', '`70`', '`130`']) {
         expect(guide).toContain(code);
       }

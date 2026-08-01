@@ -392,7 +392,7 @@ helpを表示してexit `0`を返します。
 
 | コマンド | 引数 | 追加オプション | 変更 |
 |---|---|---|---|
-| `export` | 出力 `.taktpack` | `--pack-version`, `--min-takt-version`, `--source-commit` | dry-run/apply |
+| `export` | 出力 `.taktpack` | `--pack-version`, `--min-takt-version`, `--source-commit`、繰り返し可能な`--approve-policy <path=policy>`、`--approve-capability <capability>` | dry-run/apply |
 | `inspect` | local `.taktpack` | `--current-takt-version` | なし |
 | `diff` | local packまたはcanonical GitHub source | `--current-takt-version` | なし |
 | `apply` | local packまたはcanonical GitHub source | `--current-takt-version` | dry-run/apply |
@@ -403,6 +403,10 @@ helpを表示してexit `0`を返します。
 `--force` は `--apply` と同時にだけ指定でき、previewがreviewableと明示した変更を
 承認します。hard conflict、recovery state、active run、lease、integrity check、
 target drift、plan driftは迂回しません。
+project-owned pathやcapabilityの承認も兼ねません。これらをexportする場合は、繰り返し可能な
+`--approve-policy`と`--approve-capability`で明示的に承認し、fresh previewとapplyで同じ
+承認setを指定してください。指定順はcanonical化されますが、承認内容を変えるとplanも変わります。
+capability承認はpreviewがそのcapabilityを検出した場合だけ指定し、未使用の承認は不正入力になります。
 
 `--current-takt-version` はTaktDesk互換のために残す任意のruntime一致確認であり、
 simulationやoverrideではありません。指定時は実行中Takt binaryのversionと完全一致が
@@ -413,8 +417,8 @@ previewとapplyの間でこの値を変えてもhard conflictを迂回できま�
 local移行例:
 
 ```sh
-takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --dry-run --json
-takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --apply --expected-plan-id <sha256> --json
+takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --approve-policy config.yaml=managed --dry-run --json
+takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --approve-policy config.yaml=managed --apply --expected-plan-id <sha256> --json
 takt project-template inspect ./team.taktpack --cwd ./destination --json
 takt project-template apply ./team.taktpack --cwd ./destination --dry-run --json
 takt project-template apply ./team.taktpack --cwd ./destination --apply --expected-plan-id <sha256> --force --json

@@ -21,7 +21,7 @@ _takt_project_template() {
 inspect) candidates="--cwd --json --current-takt-version" ;;
 list) candidates="--cwd --json" ;;
 diff) candidates="--cwd --json --current-takt-version" ;;
-export) candidates="--cwd --json --dry-run --apply --expected-plan-id --force --pack-version --min-takt-version --source-commit" ;;
+export) candidates="--cwd --json --dry-run --apply --expected-plan-id --force --pack-version --min-takt-version --source-commit --approve-policy --approve-capability" ;;
 apply) candidates="--cwd --json --dry-run --apply --expected-plan-id --force --current-takt-version" ;;
 update) candidates="--cwd --json --dry-run --apply --expected-plan-id --force --current-takt-version" ;;
 rollback) candidates="--cwd --json --dry-run --apply --expected-plan-id --force" ;;

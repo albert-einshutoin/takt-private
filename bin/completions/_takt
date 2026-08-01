@@ -29,7 +29,7 @@ _takt() {
   case $command in
     inspect|diff) _values 'option' $common --current-takt-version ;;
     list) _values 'option' $common ;;
-    export) _values 'option' $common $mutation --pack-version --min-takt-version --source-commit ;;
+    export) _values 'option' $common $mutation --pack-version --min-takt-version --source-commit --approve-policy --approve-capability ;;
     apply|update) _values 'option' $common $mutation --current-takt-version ;;
     rollback) _values 'option' $common $mutation ;;
   esac

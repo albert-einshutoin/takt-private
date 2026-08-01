@@ -1,5 +1,5 @@
 # fish completion for takt project-template
-# Public options: --cwd --json --dry-run --apply --expected-plan-id --force
+# Public options: --cwd --json --dry-run --apply --expected-plan-id --force --approve-policy --approve-capability
 set -l pt_commands export inspect diff apply update rollback list
 complete -c takt -n '__fish_use_subcommand' -a project-template
 complete -c takt -n '__fish_seen_subcommand_from project-template' -a "$pt_commands"
@@ -28,3 +28,5 @@ end
 complete -c takt -n '__fish_seen_subcommand_from project-template; and __fish_seen_subcommand_from export' -l pack-version -r
 complete -c takt -n '__fish_seen_subcommand_from project-template; and __fish_seen_subcommand_from export' -l min-takt-version -r
 complete -c takt -n '__fish_seen_subcommand_from project-template; and __fish_seen_subcommand_from export' -l source-commit -r
+complete -c takt -n '__fish_seen_subcommand_from project-template; and __fish_seen_subcommand_from export' -l approve-policy -r
+complete -c takt -n '__fish_seen_subcommand_from project-template; and __fish_seen_subcommand_from export' -l approve-capability -r

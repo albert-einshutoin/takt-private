@@ -464,7 +464,7 @@ without `--json` or `--cwd`) returns one schema `1.0` error envelope with
 
 | Command | Operand | Additional options | Mutation |
 |---|---|---|---|
-| `export` | output `.taktpack` | `--pack-version`, `--min-takt-version`, `--source-commit` | dry-run/apply |
+| `export` | output `.taktpack` | `--pack-version`, `--min-takt-version`, `--source-commit`, repeatable `--approve-policy <path=policy>`, repeatable `--approve-capability <capability>` | dry-run/apply |
 | `inspect` | local `.taktpack` | `--current-takt-version` | never |
 | `diff` | local pack or canonical GitHub source | `--current-takt-version` | never |
 | `apply` | local pack or canonical GitHub source | `--current-takt-version` | dry-run/apply |
@@ -475,6 +475,12 @@ without `--json` or `--cwd`) returns one schema `1.0` error envelope with
 `--force` is valid only with `--apply`. It approves changes that the preview
 explicitly classified as reviewable. It never bypasses a hard conflict,
 recovery state, active run, lease, integrity check, target drift, or plan drift.
+It does not approve project-owned paths or capabilities. Export those only with
+explicit, repeatable `--approve-policy` and `--approve-capability` flags. Use a
+capability approval only when the preview detects that capability; unused
+approvals are invalid. Repeat
+the exact approval set on the fresh preview and apply commands; approval order is
+canonicalized, while a changed approval produces a different plan.
 
 `--current-takt-version` is an optional caller assertion retained for TaktDesk
 compatibility; it is not a simulation or override. When present, it must
@@ -487,8 +493,8 @@ bypass a hard conflict.
 Local transfer example:
 
 ```sh
-takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --dry-run --json
-takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --apply --expected-plan-id <sha256> --json
+takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --approve-policy config.yaml=managed --dry-run --json
+takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --approve-policy config.yaml=managed --apply --expected-plan-id <sha256> --json
 takt project-template inspect ./team.taktpack --cwd ./destination --json
 takt project-template apply ./team.taktpack --cwd ./destination --dry-run --json
 takt project-template apply ./team.taktpack --cwd ./destination --apply --expected-plan-id <sha256> --force --json
