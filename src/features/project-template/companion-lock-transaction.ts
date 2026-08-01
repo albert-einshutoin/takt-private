@@ -692,9 +692,13 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
     if (targetDrift) {
       // No approval was consumed and no target mutation began. These are
       // private preparation artifacts only; foreign target bytes stay intact.
-      await removeProjectTemplateStagingTransaction({ storage, transactionId });
-      await removeProjectTemplateBackupGeneration({ storage, backupId });
-      await removeJournal(storage);
+      try {
+        await removeProjectTemplateStagingTransaction({ storage, transactionId });
+        await removeProjectTemplateBackupGeneration({ storage, backupId });
+        await removeJournal(storage);
+      } catch {
+        throw new ProjectTemplateCompanionLockRecoveryError();
+      }
       throw new ProjectTemplateCompanionLockTargetDriftError();
     }
     if (error instanceof ProjectTemplateRemoteTransactionLinearizationError) {
