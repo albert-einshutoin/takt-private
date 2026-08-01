@@ -5,8 +5,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GithubTemplateSourceResolverPort } from '../../features/project-template/github-source-resolver-port.js';
 import type { GithubTemplateSourceAdvisory } from '../../features/project-template/github-update-check.js';
 import {
-  createProjectTemplateCliRemoteProductionRuntimeForTest,
+  createProjectTemplateCliRemoteProductionRuntimeForTest as createCoreRemoteRuntime,
 } from '../../infra/github/project-template-cli-remote-production.js';
+import type {
+  ProjectTemplateCliRemoteMutationOptions,
+} from '../../features/project-template/cli-remote-apply-service.js';
+import { startProjectTemplateCliLifecycle } from '../../features/project-template/cli-lifecycle.js';
 import type {
   ProjectTemplateRemoteProductionComposition,
 } from '../../infra/github/project-template-remote-production-composition.js';
@@ -16,6 +20,40 @@ import {
 
 const roots: string[] = [];
 const PLAN_ID = 'a'.repeat(64);
+
+type RemoteMutationTestOptions =
+  | Extract<ProjectTemplateCliRemoteMutationOptions, { mode: 'dry-run' }>
+  | Omit<Extract<ProjectTemplateCliRemoteMutationOptions, { mode: 'apply' }>, 'admitMutation'>;
+
+function createProjectTemplateCliRemoteProductionRuntimeForTest(
+  value: Parameters<typeof createCoreRemoteRuntime>[0],
+) {
+  const runtime = createCoreRemoteRuntime(value);
+  const mutate = (
+    command: 'apply' | 'update',
+    options: RemoteMutationTestOptions,
+  ) => {
+    if (options.mode === 'dry-run') return runtime.service[command](options);
+    return startProjectTemplateCliLifecycle({
+      command: `project-template ${command}`,
+      mode: 'apply',
+      dispose: () => undefined,
+      handle: ({ admitMutation, signal }) => runtime.service[command]({
+        ...options,
+        signal: options.signal ?? signal,
+        admitMutation,
+      }),
+    }).result;
+  };
+  return {
+    ...runtime,
+    service: {
+      ...runtime.service,
+      apply: (options: RemoteMutationTestOptions) => mutate('apply', options),
+      update: (options: RemoteMutationTestOptions) => mutate('update', options),
+    },
+  };
+}
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
