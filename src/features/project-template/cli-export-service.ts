@@ -32,6 +32,11 @@ import {
   createProjectTemplateExportPlan,
   getProjectTemplateExportSourceState,
 } from './export-plan.js';
+import {
+  isProjectTemplateCliExportApprovalError,
+  snapshotProjectTemplateExportApprovals,
+  type ProjectTemplateExportApprovalProjection,
+} from './cli-export-approvals.js';
 
 const EXPORT_PLAN_DOMAIN = 'takt.project-template.cli-export-plan.v1';
 
@@ -88,6 +93,7 @@ function calculatePlanId(
   projectRoot: string,
   plan: ProjectTemplateExportPlan,
   output: TaktpackOutputPreconditionProjection,
+  approvals: ProjectTemplateExportApprovalProjection,
 ): string {
   const state = getProjectTemplateExportSourceState(plan);
   if (state === undefined) throw new CliExportBoundaryError('INTERNAL');
@@ -116,6 +122,10 @@ function calculatePlanId(
       lock: plan.lock,
       report: plan.report,
     },
+    approvals: {
+      policies: approvals.policies,
+      approvedCapabilities: approvals.approvedCapabilities,
+    },
     output,
   })).digest('hex');
 }
@@ -123,6 +133,7 @@ function calculatePlanId(
 async function createPlannedExport(
   input: ProjectTemplateCliExportInput,
   projectRoot: string,
+  approvals: ProjectTemplateExportApprovalProjection,
   testSeam: ProjectTemplateCliExportTestSeam,
 ): Promise<PlannedExport> {
   const plan = await createProjectTemplateExportPlan(projectRoot, input.exportOptions);
@@ -133,11 +144,13 @@ async function createPlannedExport(
   });
   testSeam.onPhase?.('after-output-capture');
   input.signal?.throwIfAborted();
-  const planId = calculatePlanId(projectRoot, plan, output.projection);
+  const planId = calculatePlanId(
+    projectRoot, plan, output.projection, approvals,
+  );
   const absentTargetPlanId = calculatePlanId(projectRoot, plan, {
     ...output.projection,
     target: { state: 'absent' },
-  });
+  }, approvals);
   return { plan, planId, absentTargetPlanId, output };
 }
 
@@ -166,6 +179,7 @@ function guardSummary(projectRoot: string): {
 
 function mapError(error: unknown): ProjectTemplateCliErrorCode {
   if (error instanceof CliExportBoundaryError) return error.code;
+  if (isProjectTemplateCliExportApprovalError(error)) return 'SECURITY_GUARD';
   if (error instanceof Error && error.name === 'AbortError') return 'INTERRUPTED';
   if (!(error instanceof TaktpackError)) return 'INTERNAL';
   switch (error.code) {
@@ -186,6 +200,8 @@ function mapError(error: unknown): ProjectTemplateCliErrorCode {
     case 'CLEANUP_FAILED':
       return error.artifactState === 'published' ? 'RESULT_INDETERMINATE' : 'INTERNAL';
     case 'INVALID_EXPORT_PLAN':
+      return error.field === 'policies' || error.field === 'approvedCapabilities'
+        ? 'INVALID_ARGUMENT' : 'SECURITY_GUARD';
     case 'ARCHIVE_LIMIT_EXCEEDED':
     case 'UNSAFE_ARCHIVE_ENTRY':
     case 'INVALID_ARCHIVE_ORDER':
@@ -221,7 +237,17 @@ export async function executeProjectTemplateCliExport(
       throw new ProjectTemplateCliInvalidAdmission();
     }
     mode = mutation['mode'] as ProjectTemplateCliMutationOptions['mode'];
-    input = { ...snapshot, mutation } as unknown as ProjectTemplateCliExportInput;
+    const rawExportOptions = snapshotProjectTemplateCliOwnData(snapshot['exportOptions'],
+      ['packVersion', 'takt', 'source'], ['policies', 'approvedCapabilities']);
+    const approvalSnapshot = snapshotProjectTemplateExportApprovals(rawExportOptions);
+    const exportOptions: ProjectTemplateExportOptions = {
+      packVersion: rawExportOptions['packVersion'] as string,
+      takt: rawExportOptions['takt'] as ProjectTemplateExportOptions['takt'],
+      source: rawExportOptions['source'] as ProjectTemplateExportOptions['source'],
+      policies: approvalSnapshot.options.policies,
+      approvedCapabilities: approvalSnapshot.options.approvedCapabilities,
+    };
+    input = { ...snapshot, mutation, exportOptions } as unknown as ProjectTemplateCliExportInput;
     input.signal?.throwIfAborted();
     if (!isAbsolute(input.projectRoot)) throw new CliExportBoundaryError('INVALID_ARGUMENT');
     const projectRoot = await realpath(resolve(input.projectRoot));
@@ -231,7 +257,8 @@ export async function executeProjectTemplateCliExport(
     if (mode === 'apply' && initialGuard.applyError !== undefined) {
       return failure(mode, initialGuard.applyError);
     }
-    const planned = await createPlannedExport(input, projectRoot, testSeam);
+    const approvals = approvalSnapshot.projection;
+    const planned = await createPlannedExport(input, projectRoot, approvals, testSeam);
     const reviewSummary = initialGuard.readiness === 'ready'
       && planned.output.projection.target.state === 'regular-file'
       ? {
@@ -286,6 +313,7 @@ export async function executeProjectTemplateCliExport(
       projectRoot,
       planned.plan,
       finalOutput.projection,
+      approvals,
     );
     if (finalPlanId !== planned.planId) return failure(mode, 'TARGET_DRIFT');
     try {

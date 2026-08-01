@@ -314,6 +314,66 @@ describe('project-template production command dependencies', () => {
     expect(await readdir(root)).toEqual(['.takt']);
   });
 
+  it('passes explicit policy approval into export planning and returns an actionable plan', async () => {
+    const root = await createExportFixture();
+    await writeFile(join(root, '.takt', 'config.yaml'), 'language: ja\n');
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+    const request = exportRequest(root, 'a'.repeat(40));
+    const outcome = await dependencies.dispatch({
+      ...request,
+      exportMetadata: {
+        ...request.exportMetadata,
+        policyApprovals: ['config.yaml=managed'],
+      },
+    }, context());
+    await dependencies.dispose();
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: { status: 'success', result: { planId: expect.any(String) } },
+    });
+    expect(await readdir(root)).toEqual(['.takt']);
+  });
+
+  it('passes explicit capability approval into export planning', async () => {
+    const root = await createExportFixture();
+    await writeFile(
+      join(root, '.takt', 'workflows', 'review.yaml'),
+      'steps:\n  - run: npm test\n',
+    );
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+    const request = exportRequest(root, 'a'.repeat(40));
+    const outcome = await dependencies.dispatch({
+      ...request,
+      exportMetadata: {
+        ...request.exportMetadata,
+        capabilityApprovals: ['external-command'],
+      },
+    }, context());
+    await dependencies.dispose();
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: { status: 'success', result: { planId: expect.any(String) } },
+    });
+  });
+
+  it('maps an approval for a non-exportable path to INVALID_ARGUMENT', async () => {
+    const root = await createExportFixture();
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+    const request = exportRequest(root, 'a'.repeat(40));
+    const outcome = await dependencies.dispatch({
+      ...request,
+      exportMetadata: {
+        ...request.exportMetadata,
+        policyApprovals: ['missing.yaml=managed'],
+      },
+    }, context());
+    await dependencies.dispose();
+    expect(outcome).toMatchObject({
+      exitCode: 20, envelope: { error: { code: 'INVALID_ARGUMENT' } },
+    });
+    expect(await readdir(root)).toEqual(['.takt']);
+  });
+
   it('rejects an invalid export commit with captured regexp intrinsics before planning', async () => {
     const root = await createExportFixture();
     const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');

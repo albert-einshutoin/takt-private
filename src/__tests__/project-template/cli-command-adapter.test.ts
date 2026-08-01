@@ -430,6 +430,76 @@ describe('project-template CLI command adapter', () => {
     });
   });
 
+  it('dispatches repeatable explicit export approvals without using force as approval', async () => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', 'export', 'template.taktpack',
+      '--pack-version', '1.0.0', '--min-takt-version', '0.48.0',
+      '--source-commit', 'a'.repeat(40),
+      '--approve-policy', 'config.yaml=managed',
+      '--approve-policy', 'devloopd.yaml=merge',
+      '--approve-capability', 'external-command',
+    ]);
+    expect(value.requests[0]).toMatchObject({
+      exportMetadata: {
+        policyApprovals: ['config.yaml=managed', 'devloopd.yaml=merge'],
+        capabilityApprovals: ['external-command'],
+      },
+      mutation: { mode: 'dry-run', force: false },
+    });
+  });
+
+  it('collects repeated approvals without using a poisoned Array iterator', async () => {
+    const value = harness();
+    const args = [
+      'node', 'takt', 'project-template', 'export', 'template.taktpack',
+      '--pack-version', '1.0.0', '--min-takt-version', '0.48.0',
+      '--source-commit', 'a'.repeat(40),
+      '--approve-policy', 'config.yaml=managed',
+      '--approve-policy', 'devloopd.yaml=merge',
+    ];
+    const iterator = Array.prototype[Symbol.iterator];
+    let pending: Promise<Command>;
+    try {
+      Array.prototype[Symbol.iterator] = () => { throw new Error('iterator invoked'); };
+      pending = value.program.parseAsync(args);
+    } finally {
+      Array.prototype[Symbol.iterator] = iterator;
+    }
+    await pending!;
+    expect(value.requests[0]?.exportMetadata?.policyApprovals).toEqual([
+      'config.yaml=managed', 'devloopd.yaml=merge',
+    ]);
+  });
+
+  it.each([
+    ['duplicate policy', ['--approve-policy', 'config.yaml=managed', '--approve-policy', 'config.yaml=managed']],
+    ['conflicting policy', ['--approve-policy', 'config.yaml=managed', '--approve-policy', 'config.yaml=merge']],
+    ['traversal policy', ['--approve-policy', '../config.yaml=managed']],
+    ['multiple separators', ['--approve-policy', 'config.yaml=managed=merge']],
+    ['unknown policy', ['--approve-policy', 'config.yaml=unknown']],
+    ['duplicate capability', ['--approve-capability', 'external-command', '--approve-capability', 'external-command']],
+    ['unknown capability', ['--approve-capability', 'credential']],
+    ['too many capabilities', [
+      '--approve-capability', 'external-command',
+      '--approve-capability', 'github-write',
+      '--approve-capability', 'executable',
+      '--approve-capability', 'external-command',
+    ]],
+  ] as const)('rejects %s approval syntax before dispatch', async (_label, args) => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', 'export', 'template.taktpack',
+      '--pack-version', '1.0.0', '--min-takt-version', '0.48.0',
+      '--source-commit', 'a'.repeat(40), ...args,
+    ]);
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.exitCodes).toEqual([20]);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
   it('installs SIGINT before synchronous mutation admission can begin', async () => {
     let listenerInstalled = false;
     const value = harness({

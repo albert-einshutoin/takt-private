@@ -97,6 +97,22 @@ describe('project template export plan', () => {
     expect(approved.manifest.entries[0]?.capabilities).toEqual(['external-command']);
   });
 
+  it.each([
+    ['duplicate', ['external-command', 'external-command']],
+    ['unknown', ['credential']],
+    ['unused', ['external-command', 'github-write']],
+  ] as const)('rejects %s capability approvals', async (_label, approvedCapabilities) => {
+    const root = makeProject({
+      'workflows/release.yaml': 'steps:\n  - run: npm test\n',
+    });
+    await expect(createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+      approvedCapabilities: approvedCapabilities as never,
+    })).rejects.toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'approvedCapabilities',
+    });
+  });
+
   it('requires an explicit policy for project-owned configuration', async () => {
     const root = makeProject({ 'config.yaml': 'language: ja\n' });
     const options = {

@@ -93,6 +93,97 @@ afterEach(() => {
 });
 
 describe('project template CLI export service', () => {
+  it('binds canonical policy approvals across preview and fresh apply', async () => {
+    const fixture = makeFixture();
+    writeFileSync(join(fixture.root, '.takt', 'config.yaml'), 'language: ja\n');
+    writeFileSync(join(fixture.root, '.takt', 'devloopd.yaml'), 'enabled: true\n');
+    const previewOptions = {
+      ...exportOptions,
+      policies: { 'devloopd.yaml': 'merge' as const, 'config.yaml': 'managed' as const },
+    };
+    const applyOptions = {
+      ...exportOptions,
+      policies: { 'config.yaml': 'managed' as const, 'devloopd.yaml': 'merge' as const },
+    };
+    const preview = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath,
+      exportOptions: previewOptions,
+      mutation: { mode: 'dry-run', force: false },
+    });
+    expect(preview.envelope.status).toBe('success');
+    if (preview.envelope.status !== 'success') return;
+    const applied = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath,
+      exportOptions: applyOptions,
+      mutation: {
+        mode: 'apply', force: false,
+        expectedPlanId: preview.envelope.result.planId,
+      },
+    });
+    expect(applied).toMatchObject({
+      exitCode: 0,
+      envelope: { status: 'success', result: { planId: preview.envelope.result.planId } },
+    });
+  });
+
+  it('rejects apply when an explicit policy approval changes after preview', async () => {
+    const fixture = makeFixture();
+    writeFileSync(join(fixture.root, '.takt', 'config.yaml'), 'language: ja\n');
+    const preview = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath,
+      exportOptions: { ...exportOptions, policies: { 'config.yaml': 'managed' } },
+      mutation: { mode: 'dry-run', force: false },
+    });
+    expect(preview.envelope.status).toBe('success');
+    if (preview.envelope.status !== 'success') return;
+    const applied = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath,
+      exportOptions: { ...exportOptions, policies: { 'config.yaml': 'merge' } },
+      mutation: {
+        mode: 'apply', force: false,
+        expectedPlanId: preview.envelope.result.planId,
+      },
+    });
+    expect(applied).toMatchObject({
+      envelope: { status: 'error', error: { code: 'PLAN_DRIFT' } },
+    });
+    expect(existsSync(fixture.outputPath)).toBe(false);
+  });
+
+  it('rejects nested approval accessors and proxies without invoking caller code', async () => {
+    const fixture = makeFixture();
+    const getter = vi.fn(() => ({ 'config.yaml': 'managed' }));
+    const accessorOptions = Object.defineProperty({ ...exportOptions }, 'policies', {
+      enumerable: true, get: getter,
+    });
+    await expect(executeCoreExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath,
+      exportOptions: accessorOptions as never,
+      mutation: { mode: 'dry-run', force: false },
+    })).resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    await expect(executeCoreExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath,
+      exportOptions: {
+        ...exportOptions,
+        policies: new Proxy({ 'config.yaml': 'managed' }, {}) as never,
+      },
+      mutation: { mode: 'dry-run', force: false },
+    })).resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it('does not treat force as implicit capability approval', async () => {
+    const fixture = makeFixture();
+    writeFileSync(fixture.sourcePath, 'steps:\n  - run: npm test\n');
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
+      mutation: { mode: 'dry-run', force: true },
+    });
+    expect(outcome).toMatchObject({
+      envelope: { status: 'error', error: { code: 'REVIEW_REQUIRED' } },
+    });
+  });
+
   it('rejects a missing mutation admission capability before publication', async () => {
     const fixture = makeFixture();
     const preview = await dryRun(fixture.root, fixture.outputPath);

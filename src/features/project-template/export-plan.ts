@@ -23,6 +23,7 @@ import type {
   TemplateLockV1,
 } from './types.js';
 import { requireRecord } from './validation.js';
+import { TEMPLATE_CAPABILITIES } from './validation.js';
 
 const DESCRIPTOR: TaktpackDescriptorV1 = {
   format: 'taktpack',
@@ -141,7 +142,19 @@ export async function createProjectTemplateExportPlan(
     );
   }
 
-  const approvedCapabilities = new Set(options.approvedCapabilities ?? []);
+  const approvedCapabilityValues = options.approvedCapabilities ?? [];
+  const approvedCapabilities = new Set<TemplateCapability>();
+  for (const capability of approvedCapabilityValues) {
+    if (!TEMPLATE_CAPABILITIES.includes(capability)
+      || approvedCapabilities.has(capability)) {
+      throw new TaktpackError(
+        'INVALID_EXPORT_PLAN',
+        'approved capability is invalid or duplicated',
+        'approvedCapabilities',
+      );
+    }
+    approvedCapabilities.add(capability);
+  }
   const includedPaths = new Set<string>();
   const entries: TemplateEntry[] = [];
   const files: ProjectTemplateExportFile[] = [];
@@ -227,6 +240,13 @@ export async function createProjectTemplateExportPlan(
   const unknownPolicies = [...policies.keys()].filter((path) => !includedPaths.has(path));
   if (unknownPolicies.length > 0) {
     throw new TaktpackError('INVALID_EXPORT_PLAN', 'policy references a non-exportable path', 'policies');
+  }
+  if ([...approvedCapabilities].some((capability) => !topCapabilities.has(capability))) {
+    throw new TaktpackError(
+      'INVALID_EXPORT_PLAN',
+      'approved capability was not detected in exportable content',
+      'approvedCapabilities',
+    );
   }
 
   entries.sort((left, right) => left.path.localeCompare(right.path, 'en-US'));

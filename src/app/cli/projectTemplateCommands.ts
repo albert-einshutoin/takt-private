@@ -17,9 +17,15 @@ import {
   type ProjectTemplateCliLifecycleContext,
 } from '../../features/project-template/cli-lifecycle.js';
 import {
+  MAX_TEMPLATE_ENTRIES,
   MAX_SEMVER_LENGTH,
   SEMVER_PATTERN_SOURCE,
+  TEMPLATE_CAPABILITIES,
 } from '../../features/project-template/validation.js';
+import {
+  isProjectTemplateCliExportApprovalError,
+  parseProjectTemplateCliExportApprovals,
+} from '../../features/project-template/cli-export-approvals.js';
 
 export type ProjectTemplateCliCommandSource =
   | { readonly kind: 'local'; readonly value: string }
@@ -38,6 +44,8 @@ export interface ProjectTemplateCliCommandRequest {
     readonly packVersion?: string;
     readonly minTaktVersion?: string;
     readonly sourceCommit?: string;
+    readonly policyApprovals?: readonly string[];
+    readonly capabilityApprovals?: readonly string[];
   };
 }
 
@@ -60,6 +68,11 @@ Command,
 >();
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
 const CAPTURED_REGEXP_EXEC = RegExp.prototype.exec;
+const CAPTURED_ARRAY_IS_ARRAY = Array.isArray;
+const CAPTURED_ARRAY_PROTOTYPE = Array.prototype;
+const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
+const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
 const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE, 'u');
 
 function isValidExportSemVer(value: unknown): value is string {
@@ -96,6 +109,8 @@ interface CommonFlags extends MutationFlags {
   readonly packVersion?: string;
   readonly minTaktVersion?: string;
   readonly sourceCommit?: string;
+  readonly approvePolicy?: readonly string[];
+  readonly approveCapability?: readonly string[];
 }
 
 function addCurrentVersionAssertion(command: Command): Command {
@@ -206,6 +221,33 @@ function addMutationOptions(command: Command): Command {
     .option('--expected-plan-id <sha256>', 'Required with --apply')
     .option('--force', 'Approve reviewable changes; valid only with --apply');
 }
+
+function collectBounded(maxItems: number) {
+  return (value: string, previous: readonly string[]): readonly string[] => {
+    if (!CAPTURED_ARRAY_IS_ARRAY(previous)
+      || CAPTURED_OBJECT_GET_PROTOTYPE_OF(previous) !== CAPTURED_ARRAY_PROTOTYPE) {
+      throw new Error('invalid repeated project-template option state');
+    }
+    // Why: Commander calls the processor once per occurrence. Appending to its
+    // private array avoids quadratic copies, while retaining one overflow item
+    // lets the hardened parser return the canonical INVALID_ARGUMENT envelope.
+    if (previous.length >= maxItems + 1) return previous;
+    CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_DEFINE_PROPERTY,
+      CAPTURED_OBJECT_RECEIVER,
+      [previous, `${previous.length}`, {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      }],
+    );
+    return previous;
+  };
+}
+
+const collectPolicyApproval = collectBounded(MAX_TEMPLATE_ENTRIES);
+const collectCapabilityApproval = collectBounded(TEMPLATE_CAPABILITIES.length);
 
 export function registerProjectTemplateCommands(
   root: Command,
@@ -357,6 +399,8 @@ export function registerProjectTemplateCommands(
     .option('--pack-version <version>', 'Template pack version')
     .option('--min-takt-version <version>', 'Minimum compatible Takt version')
     .option('--source-commit <sha>', 'Source commit recorded in the pack'))
+    .option('--approve-policy <path=policy>', 'Approve an export policy', collectPolicyApproval, [])
+    .option('--approve-capability <capability>', 'Approve a detected capability', collectCapabilityApproval, [])
     .action(async (output: string | undefined, flags: CommonFlags, command: Command) => {
       if (hasUnknownOption(command)) {
         await invalid('project-template export', flags.apply === true ? 'apply' : 'dry-run', 'UNKNOWN_OPTION');
@@ -369,8 +413,18 @@ export function registerProjectTemplateCommands(
       // where genuine internal failures must remain INTERNAL.
       const validMetadata = isValidExportSemVer(flags.packVersion)
         && isValidExportSemVer(flags.minTaktVersion);
+      let approvals;
+      try {
+        approvals = parseProjectTemplateCliExportApprovals({
+          policies: flags.approvePolicy,
+          capabilities: flags.approveCapability,
+        });
+      } catch (error) {
+        if (!isProjectTemplateCliExportApprovalError(error)) throw error;
+        approvals = undefined;
+      }
       if ('envelope' in parsedMutation || output === undefined
-        || !output.endsWith('.taktpack') || !validMetadata) {
+        || !output.endsWith('.taktpack') || !validMetadata || approvals === undefined) {
         const result = invalidMutationInput('project-template export', parsedMutation);
         await settle(
           'project-template export', result.envelope.mode,
@@ -385,6 +439,8 @@ export function registerProjectTemplateCommands(
           packVersion: flags.packVersion,
           minTaktVersion: flags.minTaktVersion,
           sourceCommit: flags.sourceCommit,
+          policyApprovals: flags.approvePolicy,
+          capabilityApprovals: flags.approveCapability,
         },
       });
     });

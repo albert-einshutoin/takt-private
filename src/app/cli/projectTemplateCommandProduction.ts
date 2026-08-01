@@ -39,6 +39,10 @@ import type { ProjectTemplateCliLifecycleContext } from '../../features/project-
 import { resolveConfigValue } from '../../infra/config/resolveConfigValue.js';
 import { DEFAULT_LANGUAGE } from '../../shared/constants.js';
 import type { Language } from '../../core/models/config-types.js';
+import {
+  isProjectTemplateCliExportApprovalError,
+  parseProjectTemplateCliExportApprovals,
+} from '../../features/project-template/cli-export-approvals.js';
 
 // Why: call the captured exec intrinsic directly. Captured `test` still performs
 // a dynamic `regexp.exec` lookup and can be poisoned after module initialization.
@@ -236,6 +240,18 @@ async function dispatchProjectTemplateCommand(
       || !isValidExportSemVer(metadata.minTaktVersion)
       || !isValidCommit(metadata.sourceCommit)
     ) return failure(request, 'INVALID_ARGUMENT');
+    let approvals;
+    try {
+      approvals = parseProjectTemplateCliExportApprovals({
+        policies: metadata.policyApprovals,
+        capabilities: metadata.capabilityApprovals,
+      });
+    } catch (error) {
+      if (isProjectTemplateCliExportApprovalError(error)) {
+        return failure(request, 'INVALID_ARGUMENT');
+      }
+      throw error;
+    }
     return await executeProjectTemplateCliExport({
       projectRoot: request.cwd,
       outputPath: request.outputPath,
@@ -246,6 +262,7 @@ async function dispatchProjectTemplateCommand(
           kind: 'local', uri: '.', ref: 'workspace',
           commit: metadata.sourceCommit,
         },
+        ...approvals,
       },
       mutation: request.mutation,
       signal: context.signal,
