@@ -55,6 +55,9 @@ import {
   initializeProjectTemplateApplyStorage,
 } from '../../features/project-template/apply-storage.js';
 import {
+  readGithubProjectTemplateRemoteTransactionSummary,
+} from '../../features/project-template/remote-transaction-derivation.js';
+import {
   writeProjectTemplateMergeBaseline,
 } from '../../features/project-template/merge-baseline-store.js';
 
@@ -296,6 +299,18 @@ describe('GitHub project template remote preview production facade', () => {
     expect(preview.transactionPlanId).toMatch(/^[a-f0-9]{64}$/);
     expect(preview.reviewRequired).toBe(true);
     expect(preview.hardConflict).toBe(false);
+    const summary = readGithubProjectTemplateRemoteTransactionSummary(preview);
+    expect(summary).toEqual({
+      changeCount: 1,
+      conflictCount: 0,
+      dependencyCount: 0,
+      reviewRequired: true,
+      hardConflict: false,
+      defaultApplyPossible: false,
+    });
+    expect(Reflect.ownKeys(summary!)).not.toContain('candidatePaths');
+    expect(readGithubProjectTemplateRemoteTransactionSummary({ ...preview }))
+      .toBeUndefined();
     expect(closed).toContain('artifact');
     expect(closed).toContain('receipt');
     expect(closed.filter((kind) => kind === 'directory').length).toBeGreaterThan(0);
