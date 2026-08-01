@@ -1314,3 +1314,38 @@ export function consumeVerifiedGithubTemplateDownloadReceiptApplyClaim(
   VERIFIED_RECEIPT_APPLY_CLAIMS.delete(value);
   claim.authority.state = 'consumed';
 }
+
+/**
+ * Internal preview handoff. It validates the exact claim and cache identity
+ * without exposing path authority on the returned verification evidence.
+ *
+ * @internal
+ */
+export function assertClaimedVerifiedGithubTemplateDownloadReceiptForPreview(
+  value: ClaimedVerifiedGithubTemplateDownloadReceiptForApply,
+  expected: Readonly<{
+    cacheRoot: string;
+    receiptKey: string;
+    artifactSha256: string;
+  }>,
+): VerifiedGithubTemplateDownloadReceipt {
+  const claim = (
+    typeof value === 'object' && value !== null
+      ? VERIFIED_RECEIPT_APPLY_CLAIMS.get(value)
+      : undefined
+  );
+  if (
+    claim === undefined
+    || claim.authority.state !== 'consuming'
+    || value.verified !== claim.verified
+    || claim.authority.cacheRoot !== expected.cacheRoot
+    || claim.authority.receiptKey !== expected.receiptKey
+    || claim.authority.artifactSha256 !== expected.artifactSha256
+  ) {
+    throw offlineError(
+      'INVALID_AUTHORITY',
+      'verified GitHub template receipt preview claim is invalid',
+    );
+  }
+  return claim.verified;
+}
