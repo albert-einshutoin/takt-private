@@ -206,7 +206,9 @@ describe('taktpack deterministic writer', () => {
     const root = makeRoot();
     writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
     const plan = await makePlan(root);
-    const output = join(root, 'post-publish-race.taktpack');
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'post-publish-race.taktpack');
     writeFileSync(output, 'approved-old');
     const captured = await captureTaktpackOutputPrecondition(output);
 
@@ -220,19 +222,20 @@ describe('taktpack deterministic writer', () => {
           if (phase === 'post-publish') {
             rmSync(output);
             writeFileSync(output, 'foreign-replacement');
+            throw new Error('post-publish witness changed');
           }
         },
       },
     ).catch((caught: unknown) => caught);
+    expect(readFileSync(output, 'utf8')).toBe('foreign-replacement');
+    expect(readdirSync(root).filter((name) => (
+      name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toHaveLength(2);
     expect(error).toMatchObject({
       code: 'UNSAFE_OUTPUT_TARGET',
       artifactState: 'published',
     });
     expect(String(error)).not.toContain(root);
-    expect(readFileSync(output, 'utf8')).toBe('foreign-replacement');
-    expect(readdirSync(root).filter((name) => (
-      name.endsWith('.tmp') || name.endsWith('.rollback')
-    ))).toHaveLength(2);
   });
 
   it('uses force evacuation as a CAS and restores a foreign object moved by the race', async () => {
@@ -258,6 +261,38 @@ describe('taktpack deterministic writer', () => {
       },
     )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
     expect(readFileSync(output, 'utf8')).toBe('foreign-racer');
+    expect(readdirSync(root).some((name) => (
+      name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toBe(false);
+  });
+
+  it('restores the approved target with no-replace when publication fails after evacuation', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'link-failure.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'authority-link') throw new Error('link unavailable');
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'ARCHIVE_WRITE_FAILED',
+      artifactState: 'not-published',
+    });
+    expect(readFileSync(output, 'utf8')).toBe('approved-old');
     expect(readdirSync(root).some((name) => (
       name.endsWith('.tmp') || name.endsWith('.rollback')
     ))).toBe(false);

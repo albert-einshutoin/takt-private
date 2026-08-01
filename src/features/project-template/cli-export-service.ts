@@ -7,6 +7,7 @@ import {
   writeTaktpackWithOutputPrecondition,
   type CapturedTaktpackOutputPrecondition,
   type TaktpackOutputPreconditionProjection,
+  type TaktpackWriterIoSeam,
 } from './archive-writer.js';
 import { inspectProjectTemplateApplyGuard } from './apply-guard.js';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
@@ -52,6 +53,7 @@ export type ProjectTemplateCliExportPhase =
 
 export interface ProjectTemplateCliExportTestSeam {
   readonly onPhase?: (phase: ProjectTemplateCliExportPhase) => void;
+  readonly writerIoSeam?: TaktpackWriterIoSeam;
 }
 
 class CliExportBoundaryError extends Error {
@@ -163,7 +165,11 @@ function mapError(error: unknown): ProjectTemplateCliErrorCode {
     case 'OUTPUT_EXISTS':
       return 'TARGET_DRIFT';
     case 'UNSAFE_OUTPUT_TARGET':
-      return error.field === 'outputCapture' ? 'SECURITY_GUARD' : 'TARGET_DRIFT';
+      return error.field === 'outputCapture'
+        ? 'SECURITY_GUARD'
+        : error.artifactState === 'published'
+          ? 'RESULT_INDETERMINATE'
+          : 'TARGET_DRIFT';
     case 'OPERATION_ABORTED': return 'INTERRUPTED';
     case 'OPERATION_TIMEOUT': return 'SOURCE_UNAVAILABLE';
     case 'HASH_MISMATCH': return 'SOURCE_INTEGRITY_FAILED';
@@ -253,6 +259,7 @@ export async function executeProjectTemplateCliExport(
       planned.plan,
       finalOutput.authority,
       { force: input.mutation.force, signal: input.signal },
+      testSeam.writerIoSeam,
     );
     return {
       envelope: createProjectTemplateCliSuccess({

@@ -110,11 +110,15 @@ function outputTargetSnapshot(stat: import('node:fs').Stats): TaktpackOutputTarg
   };
 }
 
-function unsafeOutputTarget(field = 'outputPath'): TaktpackError {
+function unsafeOutputTarget(
+  field = 'outputPath',
+  artifactState?: 'not-published' | 'published',
+): TaktpackError {
   return new TaktpackError(
     'UNSAFE_OUTPUT_TARGET',
     'output precondition authority does not match the commit target',
     field,
+    artifactState,
   );
 }
 
@@ -383,6 +387,24 @@ function sameTargetIdentity(
     && actual.ctimeMs === expected.ctimeMs;
 }
 
+function sameEvacuatedTargetIdentity(
+  expected: TaktpackOutputTargetSnapshot,
+  actual: import('node:fs').Stats,
+): boolean {
+  // rename can advance ctime while preserving the file object. The remaining
+  // identity and content metadata still prove which inode was evacuated.
+  return actual.isFile()
+    && !actual.isSymbolicLink()
+    && actual.dev === expected.dev
+    && actual.ino === expected.ino
+    && actual.nlink === expected.nlink
+    && actual.size === expected.size
+    && actual.mode === expected.mode
+    && actual.uid === expected.uid
+    && actual.gid === expected.gid
+    && actual.mtimeMs === expected.mtimeMs;
+}
+
 function resolveAuthorizedOutputPath(outputPath: string): string {
   if (!isAbsolute(outputPath)) throw unsafeOutputTarget();
   let directory: string;
@@ -451,8 +473,8 @@ function assertAuthorizedTarget(state: TaktpackOutputAuthorityState): void {
 function assertPublishedTarget(
   state: TaktpackOutputAuthorityState,
   publishedSnapshot: import('node:fs').Stats,
+  expectedLinks: number,
 ): void {
-  assertAuthorizedParent(state);
   let actual: import('node:fs').Stats;
   try {
     actual = lstatSync(state.canonicalPath);
@@ -462,7 +484,7 @@ function assertPublishedTarget(
   if (
     !actual.isFile()
     || actual.isSymbolicLink()
-    || actual.nlink !== 1
+    || actual.nlink !== expectedLinks
     || actual.dev !== publishedSnapshot.dev
     || actual.ino !== publishedSnapshot.ino
     || actual.size !== publishedSnapshot.size
@@ -482,10 +504,21 @@ export function syncTaktpackOutputDirectory(
   return 'synced';
 }
 
+function syncHeldTaktpackOutputDirectory(
+  directoryFd: number,
+  platform: NodeJS.Platform = process.platform,
+): 'synced' | 'unsupported' {
+  if (platform === 'win32') return 'unsupported';
+  fsyncSync(directoryFd);
+  return 'synced';
+}
+
 export type TaktpackWriterIoPhase =
   | 'pipeline'
   | 'archive-read'
   | 'file-fsync'
+  | 'force-cas'
+  | 'authority-link'
   | 'publish'
   | 'post-publish'
   | 'post-link-unlink'
@@ -672,7 +705,9 @@ export async function writeTaktpackWithIoSeam(
     : dirname(outputDirectory);
   const tempPath = join(
     stagingDirectory,
-    `.${basename(outputDirectory)}.${basename(outputPath)}.${process.pid}.${randomUUID()}.tmp`,
+    authorityState === undefined
+      ? `.${basename(outputDirectory)}.${basename(outputPath)}.${process.pid}.${randomUUID()}.tmp`
+      : `.taktpack-recovery.${randomUUID()}.tmp`,
   );
   let archiveHash = createHash('sha256');
   let bytes = 0;
@@ -682,6 +717,22 @@ export async function writeTaktpackWithIoSeam(
   let result: WriteTaktpackResult | undefined;
   let directoryFd: number | undefined;
   let rollbackPath: string | undefined;
+  let authorityPublishedSnapshot: import('node:fs').Stats | undefined;
+  let retainRecoveryArtifacts = false;
+
+  const failAuthorityPublication = (error: unknown): never => {
+    if (
+      authorityState === undefined
+      || directoryFd === undefined
+      || authorityPublishedSnapshot === undefined
+    ) throw error;
+    // Even when the visible path still appears exact, another actor may race
+    // the rollback syscall. Retaining both opaque artifacts is safer than a
+    // path-only unlink/rename that could destroy a foreign replacement.
+    void error;
+    retainRecoveryArtifacts = true;
+    throw unsafeOutputTarget('outputPath', 'published');
+  };
   try {
     if (authorityState !== undefined) {
       try {
@@ -803,66 +854,82 @@ export async function writeTaktpackWithIoSeam(
       // begins, complete directory durability and report the published result
       // instead of turning a visible artifact into an ambiguous abort.
       options.signal?.throwIfAborted();
-      let publicationExpectedTarget = expectedTarget;
       if (authorityState !== undefined) {
         assertAuthorizedParent(authorityState, directoryFd);
         assertAuthorizedTarget(authorityState);
         if (force && authorityState.projection.target.state === 'regular-file') {
           rollbackPath = join(
             stagingDirectory,
-            `.${basename(outputDirectory)}.${basename(outputPath)}.${process.pid}.${randomUUID()}.rollback`,
+            `.taktpack-recovery.${randomUUID()}.rollback`,
           );
-          linkSync(outputPath, rollbackPath);
-          publicationExpectedTarget = lstatSync(outputPath);
+          ioSeam.onPhase?.('force-cas');
+          renameSync(outputPath, rollbackPath);
+          const evacuated = lstatSync(rollbackPath);
+          if (!sameEvacuatedTargetIdentity(
+            authorityState.projection.target.snapshot,
+            evacuated,
+          )) {
+            try {
+              linkSync(rollbackPath, outputPath);
+              unlinkSync(rollbackPath);
+              rollbackPath = undefined;
+            } catch {
+              retainRecoveryArtifacts = true;
+              throw unsafeOutputTarget('outputPath', 'published');
+            }
+            throw unsafeOutputTarget();
+          }
         }
-      }
-      const publishedSnapshot = lstatSync(tempPath);
-      publishTempFile(
-        tempPath,
-        outputPath,
-        force,
-        publicationExpectedTarget,
-        () => {
-          // link/rename is the externally visible commit point. Record it
-          // before any later temp cleanup or directory durability operation.
+        authorityPublishedSnapshot = lstatSync(tempPath);
+        try {
+          // Same-device hard-link creation is atomic no-replace on POSIX and
+          // Windows: a foreign insertion wins with EEXIST and is preserved.
+          ioSeam.onPhase?.('authority-link');
+          linkSync(tempPath, outputPath);
           published = true;
-        },
-        () => ioSeam.onPhase?.('post-link-unlink'),
-      );
-      if (authorityState !== undefined) {
+        } catch (error) {
+          if (error instanceof Error && 'code' in error && error.code === 'EEXIST') {
+            if (rollbackPath !== undefined) retainRecoveryArtifacts = true;
+            throw unsafeOutputTarget(
+              'outputPath',
+              rollbackPath === undefined ? 'not-published' : 'published',
+            );
+          }
+          if (rollbackPath !== undefined) {
+            try {
+              linkSync(rollbackPath, outputPath);
+              unlinkSync(rollbackPath);
+              rollbackPath = undefined;
+            } catch {
+              retainRecoveryArtifacts = true;
+              throw unsafeOutputTarget('outputPath', 'published');
+            }
+          }
+          throw error;
+        }
         try {
           ioSeam.onPhase?.('post-publish');
           assertAuthorizedParent(authorityState, directoryFd);
-          assertPublishedTarget(authorityState, publishedSnapshot);
-          if (rollbackPath !== undefined) {
-            unlinkSync(rollbackPath);
-            rollbackPath = undefined;
-          }
-          assertAuthorizedParent(authorityState, directoryFd);
-          assertPublishedTarget(authorityState, publishedSnapshot);
+          assertPublishedTarget(authorityState, authorityPublishedSnapshot, 2);
         } catch (error) {
-          let rolledBack = false;
-          try {
-            if (rollbackPath !== undefined && existsSync(rollbackPath)) {
-              renameSync(rollbackPath, outputPath);
-              rollbackPath = undefined;
-              rolledBack = true;
-            } else {
-              const current = lstatSync(outputPath);
-              if (current.dev === publishedSnapshot.dev && current.ino === publishedSnapshot.ino) {
-                unlinkSync(outputPath);
-                rolledBack = true;
-              }
-            }
-          } catch {
-            // The original validation error remains primary. published=true
-            // truthfully reports that rollback could not be proven complete.
-          }
-          if (rolledBack) published = false;
-          throw error;
+          failAuthorityPublication(error);
         }
+      } else {
+        publishTempFile(
+          tempPath,
+          outputPath,
+          force,
+          expectedTarget,
+          () => {
+            published = true;
+          },
+          () => ioSeam.onPhase?.('post-link-unlink'),
+        );
       }
     } catch (error) {
+      if (retainRecoveryArtifacts) {
+        throw unsafeOutputTarget('outputPath', 'published');
+      }
       throw normalizeWriterIoError(
         error,
         published ? 'CLEANUP_FAILED' : 'ARCHIVE_WRITE_FAILED',
@@ -872,8 +939,35 @@ export async function writeTaktpackWithIoSeam(
     }
     try {
       ioSeam.onPhase?.('directory-fsync');
-      syncTaktpackOutputDirectory(outputDirectory);
+      if (authorityState === undefined || directoryFd === undefined) {
+        syncTaktpackOutputDirectory(outputDirectory);
+      } else {
+        syncHeldTaktpackOutputDirectory(directoryFd);
+        try {
+          assertAuthorizedParent(authorityState, directoryFd);
+          assertPublishedTarget(authorityState, authorityPublishedSnapshot!, 2);
+        } catch (error) {
+          failAuthorityPublication(error);
+        }
+        unlinkSync(tempPath);
+        if (rollbackPath !== undefined) {
+          unlinkSync(rollbackPath);
+          rollbackPath = undefined;
+        }
+        syncHeldTaktpackOutputDirectory(directoryFd);
+        try {
+          assertAuthorizedParent(authorityState, directoryFd);
+          assertPublishedTarget(authorityState, authorityPublishedSnapshot!, 1);
+        } catch {
+          retainRecoveryArtifacts = true;
+          throw unsafeOutputTarget('outputPath', 'published');
+        }
+      }
     } catch (error) {
+      if (authorityState !== undefined && published) {
+        retainRecoveryArtifacts = true;
+        throw unsafeOutputTarget('outputPath', 'published');
+      }
       throw normalizeWriterIoError(error, 'DURABILITY_FAILED', 'outputDirectory', 'published');
     }
     result = {
@@ -882,12 +976,14 @@ export async function writeTaktpackWithIoSeam(
       bytes,
     };
   } catch (error) {
-    primaryError = normalizeWriterIoError(
-      error,
-      'ARCHIVE_WRITE_FAILED',
-      'archive',
-      published ? 'published' : 'not-published',
-    );
+    primaryError = retainRecoveryArtifacts
+      ? unsafeOutputTarget('outputPath', 'published')
+      : normalizeWriterIoError(
+        error,
+        'ARCHIVE_WRITE_FAILED',
+        'archive',
+        published ? 'published' : 'not-published',
+      );
   } finally {
     if (directoryFd !== undefined) {
       try {
@@ -898,8 +994,12 @@ export async function writeTaktpackWithIoSeam(
     }
     try {
       ioSeam.onPhase?.('cleanup');
-      if (existsSync(tempPath)) unlinkSync(tempPath);
-      if (rollbackPath !== undefined && existsSync(rollbackPath)) unlinkSync(rollbackPath);
+      if (!retainRecoveryArtifacts && existsSync(tempPath)) unlinkSync(tempPath);
+      if (
+        !retainRecoveryArtifacts
+        && rollbackPath !== undefined
+        && existsSync(rollbackPath)
+      ) unlinkSync(rollbackPath);
     } catch (caughtCleanupError) {
       // Cleanup must never replace the primary failure: callers need the
       // operation that caused the archive to fail, without a raw temp path.
