@@ -101,6 +101,28 @@ function createPort(overrides: Partial<GithubTemplateSourceMetadataPort> = {}): 
 }
 
 describe('resolveGithubTemplateSource', () => {
+  it('rejects a forged structural verification callback before metadata or authority issuance', async () => {
+    const fixture = createPort();
+    const forged = vi.fn(async () => ({
+      method: 'github-ref-to-commit-v1' as const,
+      declarationSha256:
+        calculateProjectTemplateRepertoireDependencyDeclarationSha256(
+          descriptor().repertoireDependencies as never,
+        ),
+      count: 1,
+    }));
+
+    await expect(resolveGithubTemplateSource({
+      source: parseProjectTemplateGithubSourceSpec(
+        'github:acme/template@main',
+      ),
+      metadata: fixture.port,
+      verifyDependencies: forged,
+    } as never)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(forged).not.toHaveBeenCalled();
+    expect(fixture.calls).toEqual([]);
+  });
+
   it('demotes active authority into deeply frozen advisory evidence', async () => {
     const resolved = await resolveDownloadAuthorityFixture();
 
