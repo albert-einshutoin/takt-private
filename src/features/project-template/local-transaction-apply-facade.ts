@@ -281,7 +281,7 @@ async function execute(options: {
 export function createProductionProjectTemplateCliLocalApplyPort():
 ProjectTemplateCliLocalApplyPort {
   return Object.freeze({
-    inspectGuard(cwd) {
+    inspectGuard(cwd: string) {
       return inspectProjectTemplateApplyGuard({ repoPath: cwd });
     },
     derive,
