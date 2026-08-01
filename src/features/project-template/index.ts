@@ -107,6 +107,32 @@ export type {
   DeepReadonly,
 } from './archive-types.js';
 export { canonicalizeTaktpackJson } from './canonical-json.js';
+export {
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
+  ProjectTemplateCliContractError,
+  createProjectTemplateCliFailure,
+  createProjectTemplateCliSuccess,
+  parseProjectTemplateCliMutationOptions,
+  presentProjectTemplateCliEnvelope,
+  projectTemplateCliExitCodeForErrorCode,
+  writeProjectTemplateCliOutcome,
+} from './cli-machine-contract.js';
+export type {
+  ProjectTemplateCliEnvelope,
+  ProjectTemplateCliExitCode,
+  ProjectTemplateCliFailureEnvelope,
+  ProjectTemplateCliJson,
+  ProjectTemplateCliMode,
+  ProjectTemplateCliMutationOptions,
+  ProjectTemplateCliOutcome,
+  ProjectTemplateCliSuccessEnvelope,
+  ProjectTemplateCliWarning,
+} from './cli-machine-contract.js';
+export { startProjectTemplateCliLifecycle } from './cli-lifecycle.js';
+export type {
+  ProjectTemplateCliLifecycleContext,
+  ProjectTemplateCliLifecycleExecution,
+} from './cli-lifecycle.js';
 export { createProjectTemplateExportPlan } from './export-plan.js';
 export { writeTaktpack } from './archive-writer.js';
 export { inspectTaktpack } from './archive-inspector.js';
