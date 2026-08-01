@@ -111,6 +111,58 @@ describe('personal onboarding template facade', () => {
     expect(report.humanOutput).toContain('backup-safe');
   });
 
+  it('closes a root gitignore exception and skips labels while retaining backupId', async () => {
+    const ensureGithubLabels = vi.fn();
+    const facade = createPersonalOnboardingTemplateFacade({
+      applyFiles: vi.fn(async () => fileSuccess()),
+      ensureRootGitignore: vi.fn(() => {
+        throw new Error('root failure /repo/.gitignore token=secret');
+      }),
+      ensureGithubLabels,
+    });
+
+    const report = await facade.run(options);
+
+    expect(ensureGithubLabels).not.toHaveBeenCalled();
+    expect(report.passed).toBe(false);
+    expect(JSON.parse(report.machineOutput)).toMatchObject({
+      status: 'partial', mode: 'apply', backupId: 'backup-safe',
+      components: {
+        files: { status: 'success', changed: true },
+        rootGitignore: { status: 'error', changed: false },
+        labels: { status: 'skipped' },
+      },
+    });
+    expect(report.machineOutput).not.toMatch(/\/repo|token|secret|path|detail/iu);
+    expect(report.humanOutput).not.toMatch(/\/repo|token|secret/iu);
+  });
+
+  it('closes a labels exception after root success and retains backupId', async () => {
+    const facade = createPersonalOnboardingTemplateFacade({
+      applyFiles: vi.fn(async () => fileSuccess()),
+      ensureRootGitignore: vi.fn(() => ({
+        status: 'exists' as const, name: 'root gitignore', message: 'already present',
+      })),
+      ensureGithubLabels: vi.fn(async () => {
+        throw new Error('gh failure /repo credential=secret');
+      }),
+    });
+
+    const report = await facade.run(options);
+
+    expect(report.passed).toBe(false);
+    expect(JSON.parse(report.machineOutput)).toMatchObject({
+      status: 'partial', mode: 'apply', backupId: 'backup-safe',
+      components: {
+        files: { status: 'success', changed: true },
+        rootGitignore: { status: 'success', changed: false },
+        labels: { status: 'error', changed: false },
+      },
+    });
+    expect(report.machineOutput).not.toMatch(/\/repo|credential|secret|path|detail/iu);
+    expect(report.humanOutput).not.toMatch(/\/repo|credential|secret/iu);
+  });
+
   it('keeps dry-run post components non-mutating', async () => {
     const applyFiles = vi.fn(async () => ({
       envelope: createProjectTemplateCliSuccess({

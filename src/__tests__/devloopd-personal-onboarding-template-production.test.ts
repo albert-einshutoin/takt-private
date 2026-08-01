@@ -149,4 +149,37 @@ describe('production personal onboarding template facade', () => {
     expect(value.dispose).toHaveBeenCalledOnce();
     expect(report.machineOutput).not.toMatch(/credential|authority|\/repo/iu);
   });
+
+  it('closes a rejected GitHub runner behind the component facade', async () => {
+    const dispatch = vi.fn(async (_request, context) => {
+      consumeProjectTemplateCliMutationAdmission(context.admitMutation);
+      return outcome('apply');
+    });
+    const value = harness(dispatch);
+    const facade = createProductionPersonalOnboardingTemplateFacade({
+      currentTaktVersion: '0.48.0',
+      loadCommandDependenciesFactory: value.load,
+      installInterrupt: () => () => {},
+      ensureRootGitignore: () => ({
+        status: 'exists', name: 'root gitignore', message: 'already present',
+      }),
+      ensureGithubLabels: async () => {
+        throw new Error('child rejected /repo Authorization: bearer secret');
+      },
+    });
+
+    const report = await facade.run(applyOptions);
+
+    expect(report.passed).toBe(false);
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(JSON.parse(report.machineOutput)).toMatchObject({
+      status: 'partial', backupId: 'backup-safe',
+      components: {
+        files: { status: 'success' },
+        rootGitignore: { status: 'success' },
+        labels: { status: 'error', changed: false },
+      },
+    });
+    expect(report.machineOutput).not.toMatch(/\/repo|authorization|bearer|secret|path|detail/iu);
+  });
 });
