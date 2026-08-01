@@ -42,6 +42,18 @@ function validProvenance(): Record<string, unknown> {
   };
 }
 
+function validReleaseAssetProvenance(): Record<string, unknown> {
+  const provenance = validProvenance();
+  provenance['source'] = {
+    ...source(provenance),
+    canonicalSource:
+      'https://github.com/acme/takt-template/releases/download/v2.1.0/template.taktpack',
+    requestedRef: 'v2.1.0',
+    assetName: 'template.taktpack',
+  };
+  return provenance;
+}
+
 function expectProvenanceError(
   value: unknown,
   code?: ProjectTemplateValidationError['code'],
@@ -93,6 +105,31 @@ describe('project template source provenance', () => {
     expect(() => parseProjectTemplateSourceProvenanceJson(
       canonical.replace('  "source"', '\t"source"'),
     )).toThrow(/canonical/i);
+  });
+
+  it('binds a direct HTTPS release source to its tag and asset identity', () => {
+    expect(parseProjectTemplateSourceProvenance(validReleaseAssetProvenance()))
+      .toEqual(validReleaseAssetProvenance());
+
+    for (const mutate of [
+      (value: Record<string, unknown>) => {
+        source(value)['assetName'] = 'other.taktpack';
+      },
+      (value: Record<string, unknown>) => {
+        delete source(value)['assetName'];
+      },
+      (value: Record<string, unknown>) => {
+        source(value)['requestedRef'] = 'v2.2.0';
+      },
+    ]) {
+      const provenance = validReleaseAssetProvenance();
+      mutate(provenance);
+      expectProvenanceError(provenance, 'INVALID_SOURCE');
+    }
+
+    const refSource = validProvenance();
+    source(refSource)['assetName'] = 'template.taktpack';
+    expectProvenanceError(refSource, 'INVALID_SOURCE');
   });
 
   it('rejects oversized and malformed UTF-8 input before semantic parsing', () => {

@@ -65,7 +65,9 @@ function verifier(): GithubTemplateDownloadReceiptVerifier {
   };
 }
 
-async function fixture() {
+async function fixture(
+  sourceInput = 'github:acme/template@main',
+) {
   const sourceRoot = temp('takt-remote-source-');
   const sourcePath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
   mkdirSync(dirname(sourcePath), { recursive: true });
@@ -118,7 +120,7 @@ async function fixture() {
     },
   };
   const resolved = await resolveGithubTemplateSource({
-    source: parseProjectTemplateGithubSourceSpec('github:acme/template@main'),
+    source: parseProjectTemplateGithubSourceSpec(sourceInput),
     metadata,
   });
   mkdirSync(join(sourceRoot, '.takt-template-state'), { mode: 0o700 });
@@ -197,6 +199,14 @@ describe('GitHub project template remote preview production facade', () => {
     expect(closed.filter((kind) => kind === 'directory').length).toBeGreaterThan(0);
     expect(renderProjectTemplateApplyPreviewJson(preview))
       .not.toContain(value.prepared.receiptKey);
+  });
+
+  it('creates provenance for a canonical direct HTTPS release asset', async () => {
+    const value = await fixture(
+      'https://github.com/acme/template/releases/download/v1.2.3/template.taktpack',
+    );
+    await expect(createGithubProjectTemplateRemotePreview(facadeOptions(value)))
+      .resolves.toMatchObject({ schemaVersion: '1.0', hardConflict: false });
   });
 
   it('retires receipt authority before a downstream repertoire failure', async () => {
