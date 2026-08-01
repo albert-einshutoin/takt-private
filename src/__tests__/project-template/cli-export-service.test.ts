@@ -332,4 +332,41 @@ describe('project template CLI export service', () => {
     });
     expect(readdirSync(join(fixture.root, 'exports'))).toEqual([]);
   });
+
+  it('reports retained publication recovery as indeterminate without replacing foreign output', async () => {
+    const fixture = makeFixture();
+    writeFileSync(fixture.outputPath, 'approved-old');
+    const dry = await dryRun(fixture.root, fixture.outputPath, true);
+    expect(dry.envelope.status).toBe('success');
+    if (dry.envelope.status !== 'success') return;
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply',
+        force: true,
+        expectedPlanId: dry.envelope.result.planId,
+      },
+    }, {
+      writerIoSeam: {
+        onPhase(phase) {
+          if (phase === 'post-publish') {
+            rmSync(fixture.outputPath);
+            writeFileSync(fixture.outputPath, 'foreign-replacement');
+          }
+        },
+      },
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RESULT_INDETERMINATE' } },
+    });
+    expect(readFileSync(fixture.outputPath, 'utf8')).toBe('foreign-replacement');
+    expect(readdirSync(fixture.root).filter((name) => (
+      name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toHaveLength(2);
+  });
 });
