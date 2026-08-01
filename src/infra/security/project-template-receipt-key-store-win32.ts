@@ -83,6 +83,7 @@ export interface Win32ProjectTemplateReceiptKeyStoreIo {
   readonly close?: typeof closeSync;
   readonly fsyncDirectory?: (directory: string) => void;
   readonly onHashBuffer?: (buffer: Uint8Array) => void;
+  readonly beforeStaleLockQuarantine?: (path: string) => void;
 }
 
 export interface Win32ProjectTemplateReceiptKeyStoreOptions {

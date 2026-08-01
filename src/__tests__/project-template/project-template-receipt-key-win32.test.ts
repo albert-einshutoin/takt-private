@@ -407,6 +407,94 @@ describe('Windows project template receipt key store', () => {
     expect(readFileSync(lockPath, 'utf8')).toBe('{malformed');
   });
 
+  it('preserves a same-inode Windows lock that becomes live and young', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+    });
+    await healthy.write(registry());
+    const lockPath = join(directory, '.keyring.lock');
+    const staleRecord = JSON.stringify({
+      pid: 424242,
+      createdAtMs: 1,
+      token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    const liveRecord = JSON.stringify({
+      pid: 515151,
+      createdAtMs: 999,
+      token: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    writeFileSync(lockPath, staleRecord, { mode: 0o600 });
+    let mutated = false;
+    const store = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      leasePolicy: {
+        attempts: 2,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive(pid) {
+          if (!mutated && pid === 424242) {
+            mutated = true;
+            writeFileSync(lockPath, liveRecord);
+          }
+          return pid === 515151;
+        },
+      },
+    });
+
+    await expect(store.read()).rejects.toThrow(/lease is unavailable/i);
+    expect(readFileSync(lockPath, 'utf8')).toBe(liveRecord);
+  });
+
+  it('restores a new Windows owner raced in by another stale-lock recoverer', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+    });
+    await healthy.write(registry());
+    const lockPath = join(directory, '.keyring.lock');
+    const otherQuarantine = join(directory, '.other-recoverer-lock');
+    const staleRecord = JSON.stringify({
+      pid: 424242,
+      createdAtMs: 1,
+      token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    const liveRecord = JSON.stringify({
+      pid: 515151,
+      createdAtMs: 999,
+      token: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+    writeFileSync(lockPath, staleRecord, { mode: 0o600 });
+    let raced = false;
+    const store = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      io: {
+        beforeStaleLockQuarantine(path) {
+          if (raced) return;
+          raced = true;
+          renameSync(path, otherQuarantine);
+          writeFileSync(path, liveRecord, { mode: 0o600 });
+        },
+      },
+      leasePolicy: {
+        attempts: 2,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive: (pid) => pid === 515151,
+      },
+    });
+
+    await expect(store.read()).rejects.toThrow(/lease is unavailable/i);
+    expect(readFileSync(lockPath, 'utf8')).toBe(liveRecord);
+    expect(readFileSync(otherQuarantine, 'utf8')).toBe(staleRecord);
+  });
+
   it('rejects same-size in-place DPAPI ciphertext changes', async () => {
     const directory = join(root(), 'keys');
     const healthy = createWin32ProjectTemplateReceiptKeyStore({
