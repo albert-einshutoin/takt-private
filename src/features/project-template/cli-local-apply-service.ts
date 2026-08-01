@@ -15,6 +15,8 @@ const CAPTURED_ARRAY_IS_ARRAY = Array.isArray;
 const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
 const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS =
   Object.getOwnPropertyDescriptors;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor;
 const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
 const CAPTURED_OBJECT_PROTOTYPE = Object.prototype;
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
@@ -197,7 +199,11 @@ async function awaitActive<T>(promise: Promise<T>, signal: AbortSignal | undefin
 
 function ownData(value: unknown, key: string): unknown {
   if (typeof value !== 'object' || value === null) throw new Error('invalid core result');
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  const descriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    Object,
+    [value, key],
+  ) as PropertyDescriptor | undefined;
   if (descriptor === undefined || !('value' in descriptor)) throw new Error('invalid core result');
   return descriptor.value;
 }
@@ -218,6 +224,8 @@ function snapshotPlan(value: unknown): ProjectTemplateCliLocalDerivedPlan {
     || !CAPTURED_REFLECT_APPLY(CAPTURED_NUMBER_IS_SAFE_INTEGER, Number, [dependencyCount])
     || (changeCount as number) < 0 || (conflictCount as number) < 0
     || (dependencyCount as number) < 0
+    || (changeCount as number) > 8_192 || (conflictCount as number) > 8_192
+    || (dependencyCount as number) > 128
     || typeof reviewRequired !== 'boolean' || typeof hardConflict !== 'boolean'
     || typeof defaultApplyPossible !== 'boolean' || typeof forceApplicable !== 'boolean') {
     throw new Error('invalid core plan');
