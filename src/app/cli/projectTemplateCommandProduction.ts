@@ -30,6 +30,9 @@ import type {
   ProjectTemplateCliCommandRequest,
 } from './projectTemplateCommands.js';
 import type { ProjectTemplateCliRemoteProductionRuntime } from '../../infra/github/project-template-cli-remote-production.js';
+import { resolveConfigValue } from '../../infra/config/resolveConfigValue.js';
+import { DEFAULT_LANGUAGE } from '../../shared/constants.js';
+import type { Language } from '../../core/models/config-types.js';
 
 const COMMIT = /^[a-f0-9]{40}$/u;
 const REMOTE_DEADLINE_MS = 30_000;
@@ -78,10 +81,18 @@ type RemoteRuntimeFactory = (
   projectRoot: string,
 ) => Promise<ProjectTemplateCliRemoteProductionRuntime>;
 
+/** Resolve repertoire selection without initializing or rewriting configuration. */
+export function resolveProjectTemplateCliProductionLanguage(
+  canonicalProjectRoot: string,
+): Language {
+  return resolveConfigValue(canonicalProjectRoot, 'language') ?? DEFAULT_LANGUAGE;
+}
+
 async function createRemoteRuntime(projectRoot: string) {
   // Reuse the transaction storage guard so a hostile `.takt` symlink is
   // rejected before any runtime directory or key material can be created.
   const canonicalProjectRoot = projectRootIdentity(projectRoot);
+  const language = resolveProjectTemplateCliProductionLanguage(canonicalProjectRoot);
   const storage = await initializeProjectTemplateApplyStorage({
     repoPath: canonicalProjectRoot,
   });
@@ -107,7 +118,7 @@ async function createRemoteRuntime(projectRoot: string) {
       asset: github.archive,
       repertoireInspectionPort:
         createProjectTemplateInstalledRepertoireDependencyInspectionPort({
-          projectRoot: canonicalProjectRoot, language: 'ja',
+          projectRoot: canonicalProjectRoot, language,
         }),
     });
   } catch (error) {

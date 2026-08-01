@@ -42,20 +42,79 @@ if (projectTemplateInvocation) {
   program.configureOutput({ writeErr() {} });
 }
 
-function requestedProjectTemplateCommand(): ProjectTemplateCliCommand {
-  const args = process.argv.slice(2);
-  const index = args.indexOf('project-template');
-  const name = index < 0 ? undefined : args[index + 1];
-  return name === 'inspect' || name === 'list' || name === 'export'
-    || name === 'diff' || name === 'apply' || name === 'update'
-    || name === 'rollback'
-    ? `project-template ${name}`
-    : 'project-template list';
+const PROJECT_TEMPLATE_COMMAND_NAMES = [
+  'inspect', 'list', 'export', 'diff', 'apply', 'update', 'rollback',
+] as const;
+type ProjectTemplateCommandName = typeof PROJECT_TEMPLATE_COMMAND_NAMES[number];
+const PROJECT_TEMPLATE_COMMANDS: ReadonlySet<string> = new Set(
+  PROJECT_TEMPLATE_COMMAND_NAMES,
+);
+const PROJECT_TEMPLATE_APPLY_COMMANDS: ReadonlySet<ProjectTemplateCommandName> = new Set([
+  'export', 'apply', 'update', 'rollback',
+] as const);
+const ROOT_OPTIONS_WITH_VALUE = new Set([
+  '-i', '--issue', '--pr', '-w', '--workflow', '-b', '--branch', '--repo',
+  '--provider', '--model', '-t', '--task', '--isolation', '--cwd',
+]);
+
+interface ProjectTemplateParserFailureIdentity {
+  readonly command: ProjectTemplateCliCommand;
+  readonly mode: 'dry-run' | 'apply';
+}
+
+function isProjectTemplateCommandName(
+  value: string | undefined,
+): value is ProjectTemplateCommandName {
+  return value !== undefined && PROJECT_TEMPLATE_COMMANDS.has(value);
+}
+
+/**
+ * Recover only identity fields that are safe to place in a parser-failure envelope.
+ * Unknown group syntax is deliberately mapped to list/dry-run because guessing an
+ * unknown option's arity could turn its value into a fabricated mutation command.
+ */
+function projectTemplateParserFailureIdentity(
+  args: readonly string[],
+): ProjectTemplateParserFailureIdentity {
+  const consumedValues = new Set<number>();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    const equals = argument.indexOf('=');
+    const option = equals < 0 ? argument : argument.slice(0, equals);
+    if (!ROOT_OPTIONS_WITH_VALUE.has(option)) continue;
+    if (equals < 0 && args[index + 1] !== undefined) {
+      consumedValues.add(index + 1);
+      index += 1;
+    }
+  }
+
+  const groupIndex = args.findIndex((argument, index) => (
+    argument === 'project-template' && !consumedValues.has(index)
+  ));
+  if (groupIndex < 0) {
+    return { command: 'project-template list', mode: 'dry-run' };
+  }
+
+  let commandIndex = groupIndex + 1;
+  while (args[commandIndex] === '--cwd' || args[commandIndex]?.startsWith('--cwd=')) {
+    if (args[commandIndex] === '--cwd') commandIndex += 2;
+    else commandIndex += 1;
+  }
+  const name = args[commandIndex];
+  if (!isProjectTemplateCommandName(name)) {
+    return { command: 'project-template list', mode: 'dry-run' };
+  }
+
+  const apply = PROJECT_TEMPLATE_APPLY_COMMANDS.has(name)
+    && args.slice(commandIndex + 1).some((argument) => argument === '--apply');
+  return {
+    command: `project-template ${name}`,
+    mode: apply ? 'apply' : 'dry-run',
+  };
 }
 
 async function writeProjectTemplateEntrypointFailure(): Promise<void> {
-  const command = requestedProjectTemplateCommand();
-  const mode = process.argv.includes('--apply') ? 'apply' : 'dry-run';
+  const { command, mode } = projectTemplateParserFailureIdentity(process.argv.slice(2));
   if (!await settleProjectTemplateParserFailure(program, command, mode)) {
     throw new Error('project template parser lifecycle is unavailable');
   }
