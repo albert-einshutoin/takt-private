@@ -10,8 +10,10 @@ import {
 
 function memoryStore(): ProjectTemplateReceiptKeyStore & {
   registry?: ProjectTemplateReceiptKeyRegistry;
+  generation?: number;
   disposed: boolean;
 } {
+  let tail = Promise.resolve();
   return {
     disposed: false,
     async read() {
@@ -21,6 +23,26 @@ function memoryStore(): ProjectTemplateReceiptKeyStore & {
     },
     async write(registry) {
       this.registry = structuredClone(registry);
+      this.generation = (this.generation ?? -1) + 1;
+    },
+    async withExclusiveLease(operation) {
+      const run = tail.then(async () => operation({
+        snapshot: this.registry === undefined ? undefined : {
+          generation: this.generation!,
+          registry: structuredClone(this.registry),
+        },
+        compareAndSwap: async (expectedGeneration, registry) => {
+          if (expectedGeneration !== this.generation) return undefined;
+          this.generation = (this.generation ?? -1) + 1;
+          this.registry = structuredClone(registry);
+          return {
+            generation: this.generation,
+            registry: structuredClone(this.registry),
+          };
+        },
+      }));
+      tail = run.then(() => undefined, () => undefined);
+      return await run;
     },
     async dispose() {
       this.disposed = true;
@@ -166,5 +188,61 @@ describe('project template receipt authentication runtime', () => {
       input: new Uint8Array([1]),
       tag: 'not-a-sha256-tag',
     })).resolves.toBe('invalid');
+    await expect(runtime.verifier.verify({
+      keyId: 'malformed',
+      input: new Uint8Array([1]),
+      tag: '0'.repeat(64),
+    })).resolves.toBe('invalid');
+    await expect(runtime.verifier.verify({
+      keyId: 'receipt-key-ffffffffffffffffffffffffffffffff',
+      input: new Uint8Array([1]),
+      tag: '0'.repeat(64),
+    })).resolves.toBe('unavailable');
+    await expect(runtime.verifier.verify({
+      keyId: lease.keyId,
+      input: new Uint8Array(256 * 1024 + 1),
+      tag: '0'.repeat(64),
+    })).resolves.toBe('invalid');
+    await expect(runtime.revoke('malformed')).rejects.toThrow(/argument/i);
+  });
+
+  it('serializes concurrent runtime init, signing, rotation, and revocation', async () => {
+    const store = memoryStore();
+    let seed = 20;
+    const randomBytes = () => new Uint8Array(32).fill(seed++);
+    const [first, second] = await Promise.all([
+      createProjectTemplateReceiptAuthenticationRuntime({ keyStore: store, randomBytes }),
+      createProjectTemplateReceiptAuthenticationRuntime({ keyStore: store, randomBytes }),
+    ]);
+    const input = new Uint8Array([8, 8]);
+    const firstLease = await first.authenticator.acquireSigningKey() as {
+      readonly keyId: string;
+      sign(input: Uint8Array): Promise<unknown>;
+    };
+    const firstTag = await firstLease.sign(input) as string;
+    const [rotatedKey] = await Promise.all([first.rotate(), second.rotate()]);
+    const revokedLease = await first.authenticator.acquireSigningKey() as {
+      readonly keyId: string;
+      sign(input: Uint8Array): Promise<unknown>;
+    };
+    const revokedTag = await revokedLease.sign(input) as string;
+    await Promise.all([first.rotate(), second.revoke(revokedLease.keyId)]);
+
+    const restarted = await createProjectTemplateReceiptAuthenticationRuntime({
+      keyStore: store,
+      randomBytes,
+    });
+    expect(await restarted.verifier.verify({
+      keyId: firstLease.keyId,
+      input,
+      tag: firstTag,
+    })).toBe('valid');
+    expect(await restarted.verifier.verify({
+      keyId: revokedLease.keyId,
+      input,
+      tag: revokedTag,
+    })).toBe('invalid');
+    expect(store.registry?.keys.filter((key) => key.state === 'active')).toHaveLength(1);
+    expect(store.registry?.keys.some((key) => key.keyId === rotatedKey)).toBe(true);
   });
 });

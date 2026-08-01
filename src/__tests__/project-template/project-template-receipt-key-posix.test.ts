@@ -1,11 +1,18 @@
 import {
+  appendFileSync,
   chmodSync,
+  closeSync,
+  copyFileSync,
+  ftruncateSync,
   linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -127,5 +134,101 @@ describe('POSIX project template receipt key store', () => {
       }],
     })).rejects.toThrow('simulated crash');
     expect(await healthy.read()).toEqual(first);
+  });
+
+  it('holds an exclusive scoped lease across store instances', async () => {
+    const directory = join(root(), 'keys');
+    const first = createPosixProjectTemplateReceiptKeyStore({ directory });
+    const second = createPosixProjectTemplateReceiptKeyStore({ directory });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const order: string[] = [];
+    const held = first.withExclusiveLease(async () => {
+      order.push('first-enter');
+      await gate;
+      order.push('first-exit');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const waiting = second.withExclusiveLease(() => {
+      order.push('second-enter');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(order).toEqual(['first-enter']);
+    release();
+    await Promise.all([held, waiting]);
+    expect(order).toEqual(['first-enter', 'first-exit', 'second-enter']);
+  });
+
+  it('rejects grow, truncate, chmod, replacement, and close races', async () => {
+    async function attacked(
+      attack: (path: string) => void,
+      phase: 'afterInitialFileStat' | 'beforeFinalFileStat' =
+        'afterInitialFileStat',
+    ): Promise<void> {
+      const directory = join(root(), 'keys');
+      const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
+      await healthy.write(registry());
+      let once = false;
+      const store = createPosixProjectTemplateReceiptKeyStore({
+        directory,
+        io: {
+          [phase](path) {
+            if (once || !path.endsWith('keyring.json')) return;
+            once = true;
+            attack(path);
+          },
+        },
+      });
+      await expect(store.read()).rejects.toThrow(/changed|identity|mode|bounded/i);
+    }
+
+    await attacked((path) => appendFileSync(path, Buffer.alloc(64 * 1024)));
+    await attacked((path) => {
+      const fd = openSync(path, 'r+');
+      try {
+        ftruncateSync(fd, 1);
+      } finally {
+        closeSync(fd);
+      }
+    });
+    await attacked((path) => chmodSync(path, 0o644));
+    await attacked((path) => {
+      const replacement = `${path}.replacement`;
+      copyFileSync(path, replacement);
+      chmodSync(replacement, 0o600);
+      renameSync(replacement, path);
+    }, 'beforeFinalFileStat');
+
+    const directory = join(root(), 'keys');
+    const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
+    await healthy.write(registry());
+    const closeFailure = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        close(fd) {
+          closeSync(fd);
+          throw new Error('close failure');
+        },
+      },
+    });
+    await expect(closeFailure.read()).rejects.toThrow(/close failure/i);
+  });
+
+  it('loops partial reads without allocating beyond size plus one', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createPosixProjectTemplateReceiptKeyStore({ directory });
+    await healthy.write(registry());
+    let maximumRequested = 0;
+    const partial = createPosixProjectTemplateReceiptKeyStore({
+      directory,
+      io: {
+        read(fd, buffer, offset, length, position) {
+          maximumRequested = Math.max(maximumRequested, buffer.byteLength);
+          return readSync(fd, buffer, offset, Math.min(length, 3), position);
+        },
+      },
+    });
+    expect(await partial.read()).toEqual(registry());
+    expect(maximumRequested).toBeLessThanOrEqual(64 * 1024 + 1);
   });
 });
