@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { types } from 'node:util';
 import {
   createProjectTemplateCliFailure,
   createProjectTemplateCliSuccess,
@@ -10,6 +11,7 @@ import {
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const MAX_COUNT = 10_000;
 
 export type ProjectTemplateCliRemotePortErrorCode =
   | 'AUTH_FAILED'
@@ -141,6 +143,9 @@ function review(plan: ProjectTemplateCliRemoteDerivedPlan): {
   reviewCodes: readonly ProjectTemplateCliReviewCode[];
 } {
   if (plan.hardConflict) return { readiness: 'blocked', reviewCodes: ['HARD_CONFLICT'] };
+  if (!plan.defaultApplyPossible && !plan.reviewRequired) {
+    return { readiness: 'blocked', reviewCodes: ['REVIEW_REQUIRED'] };
+  }
   if (plan.reviewRequired) {
     return { readiness: 'review-required', reviewCodes: ['REVIEW_REQUIRED'] };
   }
@@ -148,21 +153,44 @@ function review(plan: ProjectTemplateCliRemoteDerivedPlan): {
 }
 
 function count(value: unknown): value is number {
-  return Number.isSafeInteger(value) && typeof value === 'number' && value >= 0;
+  return Number.isSafeInteger(value) && typeof value === 'number'
+    && value >= 0 && value <= MAX_COUNT;
 }
 
 function snapshotPlan(value: ProjectTemplateCliRemoteDerivedPlan): ProjectTemplateCliRemoteDerivedPlan {
-  const plan = { ...value };
-  if (!SHA256.test(plan.transactionPlanId)
+  if (typeof value !== 'object' || value === null || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new ProjectTemplateCliRemotePortError('INTERNAL');
+  }
+  const keys = [
+    'transactionPlanId', 'changeCount', 'conflictCount', 'dependencyCount',
+    'updateAvailable', 'reviewRequired', 'hardConflict', 'defaultApplyPossible',
+    'forceApplicable', 'authority',
+  ] as const;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(descriptors).length !== keys.length) {
+    throw new ProjectTemplateCliRemotePortError('INTERNAL');
+  }
+  const plan = Object.create(null) as Record<string, unknown>;
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      throw new ProjectTemplateCliRemotePortError('INTERNAL');
+    }
+    plan[key] = descriptor.value;
+  }
+  if (typeof plan.transactionPlanId !== 'string'
+    || !SHA256.test(plan.transactionPlanId)
     || !count(plan.changeCount) || !count(plan.conflictCount) || !count(plan.dependencyCount)
     || typeof plan.updateAvailable !== 'boolean'
     || typeof plan.reviewRequired !== 'boolean'
     || typeof plan.hardConflict !== 'boolean'
     || typeof plan.defaultApplyPossible !== 'boolean'
     || typeof plan.forceApplicable !== 'boolean'
-    || plan.authority === undefined
+    || (typeof plan.authority !== 'object' && typeof plan.authority !== 'function')
+    || plan.authority === null || types.isProxy(plan.authority)
   ) throw new ProjectTemplateCliRemotePortError('INTERNAL');
-  return Object.freeze(plan);
+  return Object.freeze({ ...plan }) as unknown as ProjectTemplateCliRemoteDerivedPlan;
 }
 
 function guardCode(blocks: readonly { readonly code: string }[]): ProjectTemplateCliErrorCode {
@@ -174,21 +202,110 @@ function guardCode(blocks: readonly { readonly code: string }[]): ProjectTemplat
 }
 
 function portFailure(error: unknown): ProjectTemplateCliErrorCode {
-  return error instanceof ProjectTemplateCliRemotePortError ? error.code : 'INTERNAL';
+  if (!(error instanceof ProjectTemplateCliRemotePortError)) return 'INTERNAL';
+  switch (error.code) {
+    case 'AUTH_FAILED': case 'NETWORK_FAILED': case 'SOURCE_INTEGRITY_FAILED':
+    case 'SOURCE_UNAVAILABLE': case 'SECURITY_GUARD': case 'APPLY_GUARD_BLOCKED':
+    case 'APPLY_LEASE_UNAVAILABLE': case 'RECOVERY_REQUIRED':
+    case 'RESULT_INDETERMINATE': return error.code;
+    default: return 'INTERNAL';
+  }
 }
 
 function aborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
 
+function snapshotPort(value: unknown): ProjectTemplateCliRemoteApplyPort {
+  if (typeof value !== 'object' || value === null || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new TypeError('remote apply port is invalid');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = ['inspectGuard', 'derive', 'execute'] as const;
+  if (Reflect.ownKeys(descriptors).length !== keys.length) {
+    throw new TypeError('remote apply port is invalid');
+  }
+  const methods = Object.create(null) as Record<string, (...args: never[]) => unknown>;
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !('value' in descriptor)
+      || typeof descriptor.value !== 'function' || types.isProxy(descriptor.value)) {
+      throw new TypeError('remote apply port is invalid');
+    }
+    methods[key] = descriptor.value as (...args: never[]) => unknown;
+  }
+  return Object.freeze({
+    inspectGuard: methods['inspectGuard']!.bind(value),
+    derive: methods['derive']!.bind(value),
+    execute: methods['execute']!.bind(value),
+  }) as unknown as ProjectTemplateCliRemoteApplyPort;
+}
+
+function validBase(options: ProjectTemplateCliRemoteBaseOptions): boolean {
+  return typeof options.cwd === 'string' && options.cwd.length > 0
+    && typeof options.source === 'string' && options.source.length > 0
+    && options.source.length <= 2_048
+    && typeof options.currentTaktVersion === 'string'
+    && options.currentTaktVersion.length > 0
+    && (options.baselineStrategy === 'conflict'
+      || options.baselineStrategy === 'adopt-identical')
+    && typeof options.force === 'boolean'
+    && (options.signal === undefined || options.signal instanceof AbortSignal);
+}
+
+function snapshotOptions(
+  value: unknown,
+  mutation: boolean,
+): ProjectTemplateCliRemoteBaseOptions | ProjectTemplateCliRemoteMutationOptions | undefined {
+  if (typeof value !== 'object' || value === null || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const modeDescriptor = descriptors['mode'];
+  const mode = modeDescriptor !== undefined && 'value' in modeDescriptor
+    ? modeDescriptor.value : undefined;
+  const required = [
+    'cwd', 'source', 'currentTaktVersion', 'baselineStrategy', 'force',
+    ...(mutation ? ['mode'] : []),
+    ...(mutation && mode === 'apply' ? ['expectedPlanId'] : []),
+  ];
+  const allowed = new Set([...required, 'signal']);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== 'string' || !allowed.has(key))
+    || required.some((key) => !keys.includes(key))) return undefined;
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of keys) {
+    const name = key as string;
+    const descriptor = descriptors[name];
+    if (descriptor === undefined || !('value' in descriptor)) return undefined;
+    snapshot[name] = descriptor.value;
+  }
+  const base = {
+    cwd: snapshot['cwd'], source: snapshot['source'],
+    currentTaktVersion: snapshot['currentTaktVersion'],
+    baselineStrategy: snapshot['baselineStrategy'], force: snapshot['force'],
+    ...(snapshot['signal'] === undefined ? {} : { signal: snapshot['signal'] }),
+  } as ProjectTemplateCliRemoteBaseOptions;
+  if (!validBase(base)) return undefined;
+  if (!mutation) return Object.freeze(base);
+  if (mode === 'dry-run') return Object.freeze({ ...base, mode: 'dry-run' as const });
+  if (mode === 'apply' && typeof snapshot['expectedPlanId'] === 'string') {
+    return Object.freeze({ ...base, mode: 'apply' as const, expectedPlanId: snapshot['expectedPlanId'] });
+  }
+  return undefined;
+}
+
+function requestedMode(value: unknown): 'dry-run' | 'apply' {
+  if (typeof value !== 'object' || value === null || types.isProxy(value)) return 'dry-run';
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'mode');
+  return descriptor !== undefined && 'value' in descriptor && descriptor.value === 'apply'
+    ? 'apply' : 'dry-run';
+}
+
 export function createProjectTemplateCliRemoteApplyService(
   port: ProjectTemplateCliRemoteApplyPort,
 ): ProjectTemplateCliRemoteApplyService {
-  const trusted = Object.freeze({
-    inspectGuard: port.inspectGuard.bind(port),
-    derive: port.derive.bind(port),
-    execute: port.execute.bind(port),
-  });
+  const trusted = snapshotPort(port);
 
   const derive = async (
     options: ProjectTemplateCliRemoteBaseOptions,
@@ -219,6 +336,7 @@ export function createProjectTemplateCliRemoteApplyService(
     command: 'project-template diff' | 'project-template apply' | 'project-template update',
     options: ProjectTemplateCliRemoteBaseOptions,
   ): Promise<ProjectTemplateCliOutcome> => {
+    if (!validBase(options)) return failure(command, 'dry-run', 'INVALID_ARGUMENT');
     const derived = await derive(options, command, 'dry-run');
     if ('envelope' in derived) return derived;
     const summary = review(derived);
@@ -241,11 +359,20 @@ export function createProjectTemplateCliRemoteApplyService(
     command: 'project-template apply' | 'project-template update',
     options: Extract<ProjectTemplateCliRemoteMutationOptions, { mode: 'apply' }>,
   ): Promise<ProjectTemplateCliOutcome> => {
+    if (!validBase(options)) return failure(command, 'apply', 'INVALID_ARGUMENT');
     if (!SHA256.test(options.expectedPlanId)) return failure(command, 'apply', 'INVALID_EXPECTED_PLAN_ID');
     const derived = await derive(options, command, 'apply');
     if ('envelope' in derived) return derived;
     if (derived.transactionPlanId !== options.expectedPlanId) return failure(command, 'apply', 'PLAN_DRIFT');
-    if (derived.hardConflict) return failure(command, 'apply', 'HARD_CONFLICT');
+    if (derived.hardConflict || derived.conflictCount > 0) {
+      return failure(command, 'apply', 'HARD_CONFLICT');
+    }
+    if (!derived.defaultApplyPossible && !derived.reviewRequired) {
+      return failure(command, 'apply', 'SECURITY_GUARD');
+    }
+    if (command === 'project-template update' && !derived.updateAvailable) {
+      return failure(command, 'apply', 'PLAN_DRIFT');
+    }
     if (derived.reviewRequired && !(options.force && derived.forceApplicable)) {
       return failure(command, 'apply', 'REVIEW_REQUIRED');
     }
@@ -279,12 +406,29 @@ export function createProjectTemplateCliRemoteApplyService(
   };
 
   return Object.freeze({
-    diff: (options: ProjectTemplateCliRemoteBaseOptions) => dry('project-template diff', options),
-    apply: (options: ProjectTemplateCliRemoteMutationOptions) => options.mode === 'dry-run'
-      ? dry('project-template apply', options)
-      : mutate('project-template apply', options),
-    update: (options: ProjectTemplateCliRemoteMutationOptions) => options.mode === 'dry-run'
-      ? dry('project-template update', options)
-      : mutate('project-template update', options),
+    async diff(value: ProjectTemplateCliRemoteBaseOptions) {
+      const options = snapshotOptions(value, false) as ProjectTemplateCliRemoteBaseOptions | undefined;
+      return options === undefined
+        ? failure('project-template diff', 'dry-run', 'INVALID_ARGUMENT')
+        : await dry('project-template diff', options);
+    },
+    async apply(value: ProjectTemplateCliRemoteMutationOptions) {
+      const options = snapshotOptions(value, true) as ProjectTemplateCliRemoteMutationOptions | undefined;
+      if (options === undefined) {
+        return failure('project-template apply', requestedMode(value), 'INVALID_ARGUMENT');
+      }
+      return options.mode === 'dry-run'
+        ? await dry('project-template apply', options)
+        : await mutate('project-template apply', options);
+    },
+    async update(value: ProjectTemplateCliRemoteMutationOptions) {
+      const options = snapshotOptions(value, true) as ProjectTemplateCliRemoteMutationOptions | undefined;
+      if (options === undefined) {
+        return failure('project-template update', requestedMode(value), 'INVALID_ARGUMENT');
+      }
+      return options.mode === 'dry-run'
+        ? await dry('project-template update', options)
+        : await mutate('project-template update', options);
+    },
   });
 }
