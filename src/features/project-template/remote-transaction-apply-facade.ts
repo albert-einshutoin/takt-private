@@ -6,7 +6,11 @@ import {
 } from './apply-guard.js';
 import {
   acquireProjectTemplateApplyLease,
+  assertProjectTemplateMutationLeaseOwned,
+  type ProjectTemplateApplyLease,
+  type ProjectTemplateMutationLease,
 } from './apply-lease.js';
+import { resolve } from 'node:path';
 import {
   assertClaimedVerifiedGithubTemplateDownloadReceiptForPreview,
   claimVerifiedGithubTemplateDownloadReceiptForApply,
@@ -28,13 +32,16 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 export type GithubProjectTemplateRemoteApplyErrorCode =
   | 'INVALID_OPTIONS'
+  | 'INVALID_AUTHORITY'
   | 'TRUSTED_INFRASTRUCTURE_UNAVAILABLE';
 
 export class GithubProjectTemplateRemoteApplyError extends Error {
   constructor(public readonly code: GithubProjectTemplateRemoteApplyErrorCode) {
     super(code === 'INVALID_OPTIONS'
       ? 'GitHub project template remote apply options are invalid'
-      : 'GitHub project template remote apply infrastructure is unavailable');
+      : code === 'INVALID_AUTHORITY'
+        ? 'GitHub project template remote apply authority is invalid'
+        : 'GitHub project template remote apply infrastructure is unavailable');
     this.name = 'GithubProjectTemplateRemoteApplyError';
     Object.freeze(this);
   }
@@ -63,8 +70,114 @@ export interface ProjectTemplateRemoteApplyComposition {
   ): Promise<ProjectTemplateApplyResult>;
 }
 
+declare const remoteApplyLeaseExecutionClaimBrand: unique symbol;
+
+export interface ProjectTemplateRemoteApplyLeaseExecutionClaim {
+  readonly kind: 'project-template-remote-apply-lease-execution-claim';
+  readonly [remoteApplyLeaseExecutionClaimBrand]: true;
+}
+
+interface ActiveRemoteApplyLeaseExecutionClaim {
+  readonly projectRoot: string;
+  readonly lease: ProjectTemplateMutationLease;
+  state: 'active' | 'consumed';
+}
+
+const REMOTE_APPLY_LEASE_EXECUTION_CLAIMS = new WeakMap<
+  ProjectTemplateRemoteApplyLeaseExecutionClaim,
+  ActiveRemoteApplyLeaseExecutionClaim
+>();
+
 function invalidOptions(): never {
   throw new GithubProjectTemplateRemoteApplyError('INVALID_OPTIONS');
+}
+
+function invalidAuthority(): never {
+  throw new GithubProjectTemplateRemoteApplyError('INVALID_AUTHORITY');
+}
+
+export function claimProjectTemplateRemoteApplyLeaseForExecution(value: {
+  readonly projectRoot: string;
+  readonly lease: ProjectTemplateApplyLease;
+}): ProjectTemplateRemoteApplyLeaseExecutionClaim {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || Array.isArray(value)
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) invalidAuthority();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (
+    keys.length !== 2
+    || !keys.includes('projectRoot')
+    || !keys.includes('lease')
+    || Object.values(descriptors).some((descriptor) => !('value' in descriptor))
+  ) invalidAuthority();
+  const projectRoot = descriptors['projectRoot']!.value;
+  const lease = descriptors['lease']!.value as ProjectTemplateMutationLease;
+  if (
+    typeof projectRoot !== 'string'
+    || projectRoot.length === 0
+    || typeof lease !== 'object'
+    || lease === null
+  ) invalidAuthority();
+  try {
+    assertProjectTemplateMutationLeaseOwned(projectRoot, lease);
+    if (lease.operation !== 'apply') invalidAuthority();
+  } catch {
+    invalidAuthority();
+  }
+  const claim = Object.freeze({
+    kind: 'project-template-remote-apply-lease-execution-claim' as const,
+  }) as ProjectTemplateRemoteApplyLeaseExecutionClaim;
+  REMOTE_APPLY_LEASE_EXECUTION_CLAIMS.set(claim, {
+    projectRoot: resolve(projectRoot),
+    lease,
+    state: 'active',
+  });
+  return claim;
+}
+
+export function consumeProjectTemplateRemoteApplyLeaseExecutionClaim(value: {
+  readonly projectRoot: string;
+  readonly claim: ProjectTemplateRemoteApplyLeaseExecutionClaim;
+}): ProjectTemplateMutationLease {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || Array.isArray(value)
+    || types.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+  ) invalidAuthority();
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (
+    keys.length !== 2
+    || !keys.includes('projectRoot')
+    || !keys.includes('claim')
+    || Object.values(descriptors).some((descriptor) => !('value' in descriptor))
+  ) invalidAuthority();
+  const projectRoot = descriptors['projectRoot']!.value;
+  const claim = descriptors['claim']!.value as
+    ProjectTemplateRemoteApplyLeaseExecutionClaim;
+  const active = (
+    typeof claim === 'object' && claim !== null
+  ) ? REMOTE_APPLY_LEASE_EXECUTION_CLAIMS.get(claim) : undefined;
+  if (
+    typeof projectRoot !== 'string'
+    || active === undefined
+    || active.state !== 'active'
+    || active.projectRoot !== resolve(projectRoot)
+  ) invalidAuthority();
+  try {
+    assertProjectTemplateMutationLeaseOwned(projectRoot, active.lease);
+  } catch {
+    invalidAuthority();
+  }
+  active.state = 'consumed';
+  return active.lease;
 }
 
 function snapshotMethodPort<Method extends (...args: never[]) => unknown>(
@@ -229,6 +342,10 @@ export function createProjectTemplateRemoteApplyComposition(
       }
       const lease = acquireProjectTemplateApplyLease(options.projectRoot);
       try {
+        assertProjectTemplateMutationLeaseOwned(
+          options.projectRoot,
+          lease as ProjectTemplateMutationLease,
+        );
         const ownedGuard = inspectProjectTemplateApplyGuard({
           repoPath: options.projectRoot,
           ownedLease: lease,
@@ -243,6 +360,10 @@ export function createProjectTemplateRemoteApplyComposition(
           receiptKey: options.receiptKey,
           verifier: trusted.verifier,
         });
+        assertProjectTemplateMutationLeaseOwned(
+          options.projectRoot,
+          lease as ProjectTemplateMutationLease,
+        );
         // Reservation follows the fresh authenticated read synchronously.
         const claim = claimVerifiedGithubTemplateDownloadReceiptForApply(
           verified,
@@ -265,6 +386,10 @@ export function createProjectTemplateRemoteApplyComposition(
             currentTaktVersion: options.currentTaktVersion,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
+          assertProjectTemplateMutationLeaseOwned(
+            options.projectRoot,
+            lease as ProjectTemplateMutationLease,
+          );
         } finally {
           consumeVerifiedGithubTemplateDownloadReceiptApplyClaim(claim);
         }
