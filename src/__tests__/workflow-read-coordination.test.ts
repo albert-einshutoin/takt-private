@@ -479,6 +479,32 @@ ${stepFields}`);
     expect(getterCalled).toBe(false);
   });
 
+  it('rejects resume stack accessors without invoking them', async () => {
+    let getterCalled = false;
+    const stack = [{ workflow: 'default', step: 'step1', kind: 'agent' }];
+    Object.defineProperty(stack, '0', {
+      enumerable: true,
+      get: () => {
+        getterCalled = true;
+        return { workflow: 'default', step: 'step1', kind: 'agent' };
+      },
+    });
+
+    await expect(executeTaskWorkflow({
+      task: 'stack accessor retry source',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'default',
+      retrySource: {
+        generationWitness: 'a'.repeat(64),
+        resumePoint: { version: 1, stack: stack as never, iteration: 1, elapsed_ms: 1 },
+      },
+    }, async () => ({ success: true }))).rejects.toMatchObject({
+      name: 'WorkflowDiscoveryReadError',
+    });
+    expect(getterCalled).toBe(false);
+  });
+
   it('rejects custom thenables without adopting them', async () => {
     createProjectRuntimeWorkflow();
     let adopted = false;

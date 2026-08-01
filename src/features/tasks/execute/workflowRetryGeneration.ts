@@ -220,6 +220,14 @@ function snapshotResumePoint(value: unknown): WorkflowResumePoint {
   if (safeIsProxy(point.stack) || point.stack.length < 1 || point.stack.length > MAX_RESUME_STACK_DEPTH) {
     throw new WorkflowDiscoveryReadError();
   }
+  const stackDescriptors = safeGetOwnPropertyDescriptors(point.stack);
+  const stackKeys = Reflect.ownKeys(stackDescriptors);
+  if (stackKeys.some((key) => {
+    if (key === 'length') return false;
+    if (typeof key !== 'string' || !/^(0|[1-9][0-9]*)$/.test(key)) return true;
+    const descriptor = stackDescriptors[key];
+    return descriptor === undefined || !('value' in descriptor);
+  })) throw new WorkflowDiscoveryReadError();
   const stack = point.stack.map((entry) => {
     const item = snapshotPlainRecord(entry, new Set(['workflow', 'workflow_ref', 'step', 'kind']));
     const workflow = requiredNonEmptyString(item.workflow);
