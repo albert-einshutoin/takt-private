@@ -1,6 +1,7 @@
 # fish completion for takt project-template
 # Public options: --cwd --json --dry-run --apply --expected-plan-id --force
 set -l pt_commands export inspect diff apply update rollback list
+complete -c takt -n '__fish_use_subcommand' -a project-template
 complete -c takt -n '__fish_seen_subcommand_from project-template' -a "$pt_commands"
 
 for command in inspect diff

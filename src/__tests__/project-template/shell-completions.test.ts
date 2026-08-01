@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -29,6 +30,22 @@ describe('project-template shell completions', () => {
       expect(line).toBeDefined();
       for (const option of mutation) expect(line).not.toContain(option);
     }
+  });
+
+  it.each([
+    ['root', '(takt "")', '1', 'project-template'],
+    ['group', '(takt project-template "")', '2', 'rollback'],
+    ['group cwd', '(takt --cwd /work project-template "")', '4', 'rollback'],
+    ['command cwd', '(takt project-template --cwd /work rollback "")', '5', '--expected-plan-id'],
+  ])('executes bash completion for %s', (_name, words, current, expected) => {
+    const output = execFileSync('bash', ['-c', [
+      'source bin/completions/takt.bash',
+      `COMP_WORDS=${words}`,
+      `COMP_CWORD=${current}`,
+      '_takt_project_template',
+      'printf "%s\\n" "${COMPREPLY[@]}"',
+    ].join('; ')], { encoding: 'utf8' });
+    expect(output).toContain(expected);
   });
 
   it('keeps the English and Japanese operator contracts synchronized', () => {

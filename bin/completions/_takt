@@ -1,15 +1,32 @@
 #compdef takt
 
-_takt_project_template() {
+_takt() {
   local -a commands common mutation
+  local command='' index pt_index=0 skip_value=0
   commands=(export inspect diff apply update rollback list)
   common=(--cwd --json)
   mutation=(--dry-run --apply --expected-plan-id --force)
-  if (( CURRENT == 3 )); then
-    _describe 'project template command' commands
+  for (( index = 2; index < CURRENT; index++ )); do
+    if [[ ${words[index]} == project-template ]]; then
+      pt_index=$index
+      continue
+    fi
+    if (( pt_index > 0 )); then
+      if (( skip_value )); then skip_value=0; continue; fi
+      if [[ ${words[index]} == --cwd ]]; then skip_value=1; continue; fi
+      if [[ ${words[index]} != -* ]]; then command=${words[index]}; break; fi
+    fi
+  done
+  if (( pt_index == 0 )); then
+    _values 'command' project-template
     return
   fi
-  case ${words[3]} in
+  if [[ -z $command ]]; then
+    _describe 'project template command' commands
+    _values 'option' --cwd
+    return
+  fi
+  case $command in
     inspect|diff) _values 'option' $common --current-takt-version ;;
     list) _values 'option' $common ;;
     export) _values 'option' $common $mutation --pack-version --min-takt-version --source-commit ;;
@@ -18,6 +35,4 @@ _takt_project_template() {
   esac
 }
 
-if [[ ${words[2]} == project-template ]]; then
-  _takt_project_template
-fi
+_takt "$@"
