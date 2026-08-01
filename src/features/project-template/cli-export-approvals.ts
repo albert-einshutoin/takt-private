@@ -37,7 +37,7 @@ const TYPES_IS_PROXY = types.isProxy;
 const VALIDATION_ERROR_PROTOTYPE = ProjectTemplateValidationError.prototype;
 
 export class ProjectTemplateCliExportApprovalError extends Error {
-  constructor() {
+  constructor(readonly field: 'policies' | 'approvedCapabilities' = 'policies') {
     super('project template export approval is invalid');
     this.name = 'ProjectTemplateCliExportApprovalError';
   }
@@ -52,8 +52,8 @@ export function isProjectTemplateCliExportApprovalError(
     && OBJECT_GET_PROTOTYPE_OF(error) === APPROVAL_ERROR_PROTOTYPE;
 }
 
-function invalid(): never {
-  throw new ProjectTemplateCliExportApprovalError();
+function invalid(field: 'policies' | 'approvedCapabilities' = 'policies'): never {
+  throw new ProjectTemplateCliExportApprovalError(field);
 }
 
 function append<T>(values: T[], value: T): void {
@@ -94,10 +94,14 @@ function assertKeys(
   }
 }
 
-function strings(value: unknown, maxItems: number): string[] {
+function strings(
+  value: unknown,
+  maxItems: number,
+  field: 'policies' | 'approvedCapabilities' = 'policies',
+): string[] {
   if (value === undefined) return [];
   if (!ARRAY_IS_ARRAY(value) || TYPES_IS_PROXY(value)
-    || OBJECT_GET_PROTOTYPE_OF(value) !== ARRAY_PROTOTYPE) invalid();
+    || OBJECT_GET_PROTOTYPE_OF(value) !== ARRAY_PROTOTYPE) invalid(field);
   const descriptors = OBJECT_GET_OWN_PROPERTY_DESCRIPTORS(value) as unknown as Record<
   PropertyKey, PropertyDescriptor | undefined
   >;
@@ -105,15 +109,15 @@ function strings(value: unknown, maxItems: number): string[] {
   if (lengthDescriptor === undefined || !('value' in lengthDescriptor)
     || typeof lengthDescriptor.value !== 'number'
     || !NUMBER_IS_SAFE_INTEGER(lengthDescriptor.value) || lengthDescriptor.value < 0
-    || lengthDescriptor.value > maxItems) invalid();
+    || lengthDescriptor.value > maxItems) invalid(field);
   const length = lengthDescriptor.value as number;
   const keys = REFLECT_OWN_KEYS(descriptors);
-  if (keys.length !== length + 1) invalid();
+  if (keys.length !== length + 1) invalid(field);
   const result: string[] = [];
   for (let index = 0; index < length; index += 1) {
     const descriptor = descriptors[`${index}`];
     if (descriptor === undefined || !('value' in descriptor)
-      || typeof descriptor.value !== 'string') invalid();
+      || typeof descriptor.value !== 'string') invalid(field);
     append(result, descriptor.value);
   }
   return result;
@@ -182,12 +186,16 @@ function validateEntry(
 }
 
 function canonicalizeCapabilities(value: unknown): string[] {
-  const capabilities = strings(value, TEMPLATE_CAPABILITIES.length);
+  const capabilities = strings(
+    value, TEMPLATE_CAPABILITIES.length, 'approvedCapabilities',
+  );
   const seen = OBJECT_CREATE(null) as Record<string, true>;
   for (let index = 0; index < capabilities.length; index += 1) {
     const capability = capabilities[index]!;
     if (!isCapability(capability)
-      || (REFLECT_APPLY(OBJECT_HAS_OWN, seen, [capability]) as boolean)) invalid();
+      || (REFLECT_APPLY(OBJECT_HAS_OWN, seen, [capability]) as boolean)) {
+      invalid('approvedCapabilities');
+    }
     define(seen, capability, true);
   }
   return capabilities;

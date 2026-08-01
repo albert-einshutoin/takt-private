@@ -172,6 +172,52 @@ describe('project template CLI export service', () => {
     expect(getter).not.toHaveBeenCalled();
   });
 
+  it('does not forge a missing policy after project-root Object poisoning', async () => {
+    const fixture = makeFixture();
+    writeFileSync(join(fixture.root, '.takt', 'config.yaml'), 'language: ja\n');
+    const originalDescriptors = Object.getOwnPropertyDescriptors;
+    const originalSymbols = Object.getOwnPropertySymbols;
+    const originalEntries = Object.entries;
+    const originalGetPrototypeOf = Object.getPrototypeOf;
+    const forgedDescriptors = {
+      'config.yaml': {
+        configurable: true, enumerable: true, value: 'managed', writable: true,
+      },
+    };
+    let outcome;
+    try {
+      outcome = await executeProjectTemplateCliExport({
+        projectRoot: fixture.root, outputPath: fixture.outputPath,
+        exportOptions: { ...exportOptions, policies: {} },
+        mutation: { mode: 'dry-run', force: false },
+      }, {
+        onPhase(phase) {
+          if (phase !== 'after-project-root') return;
+          Object.getOwnPropertyDescriptors = ((value: object) => {
+            const actual = originalDescriptors(value);
+            return originalGetPrototypeOf(value) === null && Reflect.ownKeys(actual).length === 0
+              ? forgedDescriptors : actual;
+          }) as typeof Object.getOwnPropertyDescriptors;
+          Object.getOwnPropertySymbols = ((value: object) => (
+            originalGetPrototypeOf(value) === null ? [] : originalSymbols(value)
+          )) as typeof Object.getOwnPropertySymbols;
+          Object.entries = ((value: object) => value === forgedDescriptors
+            ? [['config.yaml', forgedDescriptors['config.yaml']]]
+            : originalEntries(value)) as typeof Object.entries;
+        },
+      });
+    } finally {
+      Object.getOwnPropertyDescriptors = originalDescriptors;
+      Object.getOwnPropertySymbols = originalSymbols;
+      Object.entries = originalEntries;
+    }
+    expect(outcome).toMatchObject({
+      exitCode: 21,
+      envelope: { status: 'error', error: { code: 'REVIEW_REQUIRED' } },
+    });
+    expect(existsSync(fixture.outputPath)).toBe(false);
+  });
+
   it('does not treat force as implicit capability approval', async () => {
     const fixture = makeFixture();
     writeFileSync(fixture.sourcePath, 'steps:\n  - run: npm test\n');
