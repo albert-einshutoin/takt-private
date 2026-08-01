@@ -71,7 +71,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Read package metadata from PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
@@ -128,7 +128,7 @@ jobs:
       package_version: ${{ needs.validate.outputs.package_version }}
       tag: ${{ needs.validate.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -156,12 +156,30 @@ jobs:
     outputs:
       filename: ${{ steps.pack.outputs.filename }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
-          ref: ${{ needs.tag.outputs.tag }}
+          ref: ${{ needs.tag.outputs.commit }}
 
-      - uses: actions/setup-node@v4
+      - name: Verify checkout and tag commit binding
+        env:
+          EXPECTED_COMMIT: ${{ needs.tag.outputs.commit }}
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Expected release commit is not a full lowercase SHA.' >&2
+            exit 1
+          fi
+          CHECKED_OUT_COMMIT=$(git rev-parse --verify 'HEAD^{commit}')
+          TAGGED_COMMIT=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          if [ "$CHECKED_OUT_COMMIT" != "$EXPECTED_COMMIT" ] ||
+             [ "$TAGGED_COMMIT" != "$EXPECTED_COMMIT" ]; then
+            echo 'Release checkout or tag no longer matches the validated commit.' >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -195,7 +213,7 @@ jobs:
           printf 'filename=%s\n' "$PACKAGE_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: takt-npm-package
           path: ${{ runner.temp }}/takt-package
@@ -209,12 +227,12 @@ jobs:
       contents: read
     steps:
       - name: Download exact release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: takt-npm-package
           path: ${{ runner.temp }}/takt-package
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'

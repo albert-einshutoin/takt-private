@@ -47,6 +47,12 @@ type ScriptResult = {
 
 const EXEC_TIMEOUT_MS = 3_000;
 const HEAD_SHA = '0123456789abcdef0123456789abcdef01234567';
+const ACTION_PINS = {
+  checkout: 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
+  downloadArtifact: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
+  setupNode: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+  uploadArtifact: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+} as const;
 const workflowPath = resolve('.github/workflows/auto-tag.yml');
 const workflowSource = readFileSync(workflowPath, 'utf8');
 const workflow = parse(workflowSource) as Workflow;
@@ -356,7 +362,7 @@ describe('auto-tag workflow release boundary', () => {
 
   it('checks out only package.json from the exact head without credentials', () => {
     const checkout = findStep('validate', 'Read package metadata from PR head');
-    expect(checkout.uses).toBe('actions/checkout@v4');
+    expect(checkout.uses).toBe(ACTION_PINS.checkout);
     expect(checkout.with).toMatchObject({
       'persist-credentials': false,
       ref: '${{ github.event.pull_request.head.sha }}',
@@ -365,9 +371,19 @@ describe('auto-tag workflow release boundary', () => {
     });
     const allCheckouts = Object.values(workflow.jobs)
       .flatMap(job => job.steps)
-      .filter(step => step.uses === 'actions/checkout@v4');
+      .filter(step => step.uses === ACTION_PINS.checkout);
     expect(allCheckouts.length).toBeGreaterThan(0);
     expect(allCheckouts.every(step => step.with?.['persist-credentials'] === false)).toBe(true);
+  });
+
+  it('pins every external action to the reviewed full commit SHA set', () => {
+    const actionUses = Object.values(workflow.jobs)
+      .flatMap(job => job.steps)
+      .map(step => step.uses)
+      .filter((uses): uses is string => uses !== undefined);
+    expect(actionUses.length).toBeGreaterThan(0);
+    expect(actionUses.every(uses => /^[^@]+@[0-9a-f]{40}$/u.test(uses))).toBe(true);
+    expect(new Set(actionUses)).toEqual(new Set(Object.values(ACTION_PINS)));
   });
 
   it('passes untrusted event data through env and keeps mutation jobs gated', () => {
@@ -419,8 +435,8 @@ describe('auto-tag workflow release boundary', () => {
   it('builds and packs without secrets before a checkout-free publish job', () => {
     const packageJob = workflow.jobs.package!;
     const publishJob = workflow.jobs.publish!;
-    const packageCheckout = packageJob.steps.find(step => step.uses === 'actions/checkout@v4');
-    const publishCheckout = publishJob.steps.find(step => step.uses === 'actions/checkout@v4');
+    const packageCheckout = packageJob.steps.find(step => step.uses === ACTION_PINS.checkout);
+    const publishCheckout = publishJob.steps.find(step => step.uses === ACTION_PINS.checkout);
     const publish = findStep('publish', 'Publish verified package');
     const packageScripts = packageJob.steps.map(step => step.run ?? '').join('\n');
     const secretSteps = publishJob.steps.filter(step => (
@@ -430,8 +446,13 @@ describe('auto-tag workflow release boundary', () => {
     expect(packageJob.needs).toBe('tag');
     expect(packageJob.outputs).toEqual({ filename: '${{ steps.pack.outputs.filename }}' });
     expect(packageCheckout?.with).toMatchObject({
-      ref: '${{ needs.tag.outputs.tag }}',
+      ref: '${{ needs.tag.outputs.commit }}',
+      'fetch-depth': 0,
       'persist-credentials': false,
+    });
+    expect(findStep('package', 'Verify checkout and tag commit binding').env).toEqual({
+      EXPECTED_COMMIT: '${{ needs.tag.outputs.commit }}',
+      RELEASE_TAG: '${{ needs.tag.outputs.tag }}',
     });
     expect(packageScripts).toContain('npm ci');
     expect(packageScripts).toContain('npm run build');
@@ -447,13 +468,11 @@ describe('auto-tag workflow release boundary', () => {
     expect(publish.run).not.toMatch(/npm (?:ci|run|test)/u);
   });
 
-  it('does not expose the publish token to package lifecycle scripts', () => {
+  it('proves directory lifecycle control while documenting tarball publish limits', () => {
     const directory = createTemporaryDirectory('takt-auto-tag-publish-');
     const source = join(directory, 'source');
-    const artifact = join(directory, 'takt-package');
     const sentinel = join(directory, 'lifecycle-token');
     mkdirSync(source);
-    mkdirSync(artifact);
     writeFileSync(join(source, 'package.json'), JSON.stringify({
       name: 'takt-token-boundary-fixture',
       version: '1.2.3',
@@ -461,33 +480,104 @@ describe('auto-tag workflow release boundary', () => {
         prepublishOnly: 'node -e "require(\'node:fs\').writeFileSync(process.env.SENTINEL_PATH, process.env.NODE_AUTH_TOKEN || \'missing\')"',
       },
     }));
-    const packed = execFileSync('npm', [
-      'pack', '--ignore-scripts', '--pack-destination', artifact,
-    ], { cwd: source, encoding: 'utf8', timeout: EXEC_TIMEOUT_MS }).trim();
-    execFileSync('/bin/mv', [join(artifact, packed), join(artifact, 'takt-1.2.3.tgz')], {
-      timeout: EXEC_TIMEOUT_MS,
-    });
+    const environment = {
+      ...process.env,
+      NODE_AUTH_TOKEN: 'must-not-reach-lifecycle',
+      NPM_CONFIG_DRY_RUN: 'true',
+      SENTINEL_PATH: sentinel,
+    };
 
-    const publish = findStep('publish', 'Publish verified package');
-    expect(() => execFileSync(
-      '/bin/bash',
-      ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', publish.run as string],
-      {
+    // npm does not provide the same lifecycle proof for a tarball operand as
+    // for a directory operand. This control demonstrates that the sentinel is
+    // observable, while the production tarball boundary is enforced by the
+    // exact argv mutation test below.
+    execFileSync('npm', ['publish', '.', '--dry-run'], {
+      cwd: source, env: environment, stdio: 'pipe', timeout: EXEC_TIMEOUT_MS,
+    });
+    expect(readFileSync(sentinel, 'utf8')).toBe('must-not-reach-lifecycle');
+    rmSync(sentinel);
+    execFileSync('npm', ['publish', '.', '--dry-run', '--ignore-scripts'], {
+      cwd: source, env: environment, stdio: 'pipe', timeout: EXEC_TIMEOUT_MS,
+    });
+    expect(existsSync(sentinel)).toBe(false);
+  });
+
+  it('detects removal of --ignore-scripts from the exact production publish argv', () => {
+    const source = findStep('publish', 'Publish verified package').run as string;
+    const execute = (script: string): string => {
+      const directory = createTemporaryDirectory('takt-auto-tag-publish-argv-');
+      const bin = join(directory, 'bin');
+      const log = join(directory, 'npm.log');
+      mkdirSync(bin);
+      writeFileSync(join(bin, 'npm'), '#!/bin/sh\nprintf \'%s\\n\' "$*" > "$NPM_LOG"\n');
+      chmodSync(join(bin, 'npm'), 0o755);
+      execFileSync('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script], {
         cwd: directory,
         env: {
           ...process.env,
-          NODE_AUTH_TOKEN: 'must-not-reach-lifecycle',
-          NPM_CONFIG_DRY_RUN: 'true',
           NPM_DIST_TAG: 'latest',
+          NPM_LOG: log,
           PACKAGE_FILENAME: 'takt-1.2.3.tgz',
+          PATH: `${bin}:${process.env.PATH ?? ''}`,
           RUNNER_TEMP: directory,
-          SENTINEL_PATH: sentinel,
         },
         stdio: 'pipe',
         timeout: EXEC_TIMEOUT_MS,
-      },
-    )).not.toThrow();
-    expect(existsSync(sentinel)).toBe(false);
+      });
+      return readFileSync(log, 'utf8').trim();
+    };
+    const assertSafePublishArgv = (argv: string): void => {
+      expect(argv.split(' ')).toContain('--ignore-scripts');
+    };
+
+    assertSafePublishArgv(execute(source));
+    const mutated = source.replace(' --ignore-scripts', '');
+    expect(mutated).not.toBe(source);
+    expect(() => assertSafePublishArgv(execute(mutated))).toThrow();
+  });
+
+  it.each([
+    ['matching checkout and tag', HEAD_SHA, HEAD_SHA, true],
+    ['wrong checkout', 'e'.repeat(40), HEAD_SHA, false],
+    ['retargeted tag', HEAD_SHA, 'f'.repeat(40), false],
+  ])('executes package commit binding and rejects %s', (
+    _description,
+    checkedOutCommit,
+    taggedCommit,
+    success,
+  ) => {
+    const directory = createTemporaryDirectory('takt-auto-tag-tag-binding-');
+    const git = join(directory, 'git');
+    writeFileSync(git, `#!/bin/sh
+case "$*" in
+  'rev-parse --verify HEAD^{commit}') printf '%s\\n' "$CHECKED_OUT_COMMIT" ;;
+  'rev-parse --verify refs/tags/v1.2.3^{commit}') printf '%s\\n' "$TAGGED_COMMIT" ;;
+  *) exit 99 ;;
+esac
+`);
+    chmodSync(git, 0o755);
+    let actualSuccess = true;
+    try {
+      execFileSync('/bin/bash', [
+        '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+        findStep('package', 'Verify checkout and tag commit binding').run as string,
+      ], {
+        cwd: directory,
+        env: {
+          ...process.env,
+          CHECKED_OUT_COMMIT: checkedOutCommit,
+          EXPECTED_COMMIT: HEAD_SHA,
+          PATH: `${directory}:${process.env.PATH ?? ''}`,
+          RELEASE_TAG: 'v1.2.3',
+          TAGGED_COMMIT: taggedCommit,
+        },
+        stdio: 'pipe',
+        timeout: EXEC_TIMEOUT_MS,
+      });
+    } catch {
+      actualSuccess = false;
+    }
+    expect(actualSuccess).toBe(success);
   });
 
   it('binds registry verification to the exact package version and expected dist-tag', () => {
