@@ -58,6 +58,8 @@ export type CoordinationStableDirectory = {
 export interface CoordinationFilesystemPolicy extends CoordinationIdentityPolicy {
   preflightRoot(path: string): CoordinationDirectoryAuthority;
   ensurePrivateDirectory(path: string): void;
+  createPrivateDirectoryExclusive(path: string): CoordinationIdentity;
+  sealPrivateDirectory(path: string): void;
   assertDirectory(path: string): void;
   listStable(path: string): CoordinationStableDirectory;
   createStagedExclusiveFile(path: string, bytes: Buffer): CoordinationStableFile;
@@ -71,11 +73,13 @@ export interface CoordinationFilesystemPolicy extends CoordinationIdentityPolicy
   sameStableFile(left: CoordinationFileObservation, right: CoordinationFileObservation): boolean;
 }
 
+const freeze = Object.freeze.bind(Object);
+
 /** Identity operations stay platform-owned so bigint evidence is never coerced. */
 export function createCoordinationIdentityPolicy(
   kind: CoordinationIdentity['kind'],
 ): CoordinationIdentityPolicy {
-  return Object.freeze({
+  return freeze({
     kind,
     sameIdentity(left: CoordinationIdentity, right: CoordinationIdentity): boolean {
       return left.kind === kind

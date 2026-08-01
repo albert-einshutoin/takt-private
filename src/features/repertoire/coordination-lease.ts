@@ -1,11 +1,3 @@
-import {
-  closeSync,
-  constants,
-  fchmodSync,
-  mkdirSync,
-  openSync,
-  renameSync,
-} from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -39,8 +31,6 @@ const TOMBSTONE_SOFT_LIMIT = 2_048;
 const TOMBSTONE_HARD_LIMIT = 4_096;
 const RETRY_DELAY_MS = 10;
 const MAX_SNAPSHOT_ATTEMPTS = 8;
-const PRIVATE_DIRECTORY_MODE = 0o700;
-const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_REGEX = new RegExp(`^${UUID_PATTERN}$`);
 const HEX_256_REGEX = /^[0-9a-f]{64}$/;
@@ -892,8 +882,11 @@ function releaseOwnedLease(
   const containerName = `${nonce}.${expected.pid}.${expected.token}.${expected.mode}.released`;
   const container = join(paths.released, containerName);
   const publishingContainer = `${container}${RELEASE_PUBLISHING_SUFFIX}`;
+  let containerIdentity: CoordinationIdentity;
   try {
-    mkdirSync(publishingContainer, { mode: PRIVATE_DIRECTORY_MODE });
+    containerIdentity = posixCoordinationFilesystemPolicy.createPrivateDirectoryExclusive(
+      publishingContainer,
+    );
   } catch (error) {
     // A nonce collision is never retried: preserving the existing container is
     // more important than making release appear successful under a compromised
@@ -921,12 +914,16 @@ function releaseOwnedLease(
   // published; the post-rename identity check and full scan fail closed but
   // cannot provide a stronger OS isolation boundary than the shared UID.
   paths.trustedRoot.assertUnchanged();
-  renameSync(path, publishingPath);
+  posixCoordinationFilesystemPolicy.renameOwned(path, publishingPath, identity);
   paths.trustedRoot.assertUnchanged();
   syncDirectory(parentDirectory);
   syncDirectory(publishingContainer);
   paths.trustedRoot.assertUnchanged();
-  renameSync(publishingContainer, container);
+  posixCoordinationFilesystemPolicy.renameOwned(
+    publishingContainer,
+    container,
+    containerIdentity,
+  );
   paths.trustedRoot.assertUnchanged();
   syncDirectory(paths.released);
   const releasedPath = join(container, RELEASED_ARTIFACT_FILENAME);
@@ -1007,13 +1004,7 @@ function syncDirectory(path: string): void {
 }
 
 function enforcePrivateDirectoryMode(path: string): void {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, DIRECTORY_OPEN_FLAGS);
-    fchmodSync(fd, PRIVATE_DIRECTORY_MODE);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
+  posixCoordinationFilesystemPolicy.sealPrivateDirectory(path);
 }
 
 function validateOptions(options: AcquireRepertoireCoordinationLeaseOptions): void {

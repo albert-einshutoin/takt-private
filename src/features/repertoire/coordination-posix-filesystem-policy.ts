@@ -35,11 +35,15 @@ const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 const CREATE_FLAGS = constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
 const identityPolicy = createCoordinationIdentityPolicy('posix');
 const getUid = typeof process.getuid === 'function' ? process.getuid.bind(process) : undefined;
+// Coordination runs while authority-bearing callbacks execute. Capture mutable
+// intrinsics at module initialization so callback code cannot replace them and
+// influence filesystem validation or publication.
+const freeze = Object.freeze.bind(Object);
 
 export class CoordinationFilesystemChangedError extends Error {}
 export class CoordinationFilesystemUnsafeError extends Error {}
 
-export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = Object.freeze({
+export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = freeze({
   ...identityPolicy,
   preflightRoot(path: string): CoordinationDirectoryAuthority {
     const before = lstatSync(path);
@@ -58,14 +62,14 @@ export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = O
     }
     const retainedFd = fd;
     let closed = false;
-    const evidence = Object.freeze({
+    const evidence = freeze({
       kind: 'posix' as const,
       dev: before.dev,
       ino: before.ino,
       mode: before.mode,
       uid: before.uid,
     });
-    return Object.freeze({
+    return freeze({
       lexicalRoot: path,
       canonicalRoot,
       evidence,
@@ -92,6 +96,17 @@ export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = O
     }
     assertPrivateDirectory(lstatSync(path));
   },
+  createPrivateDirectoryExclusive(path: string): CoordinationIdentity {
+    mkdirSync(path, { mode: DIRECTORY_MODE });
+    chmodDirectory(path);
+    const stat = lstatSync(path);
+    assertPrivateDirectory(stat);
+    return freeze({ kind: 'posix', dev: stat.dev, ino: stat.ino });
+  },
+  sealPrivateDirectory(path: string): void {
+    chmodDirectory(path);
+    assertPrivateDirectory(lstatSync(path));
+  },
   assertDirectory(path: string): void {
     assertPrivateDirectory(lstatSync(path));
   },
@@ -100,8 +115,8 @@ export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = O
     const entries = readdirSync(path).sort();
     const after = directoryDigest(path);
     if (before !== after) throw new CoordinationFilesystemChangedError();
-    return Object.freeze({
-      entries: Object.freeze(entries),
+    return freeze({
+      entries: freeze(entries),
       digest: before,
       assertUnchanged(): void {
         if (directoryDigest(path) !== before) throw new CoordinationFilesystemChangedError();
@@ -183,11 +198,11 @@ function readStableOpenedFile(fd: number, path: string, expectedLength: number):
 function stableFile(stat: Stats, bytes: Buffer): CoordinationStableFile {
   const identity = { kind: 'posix' as const, dev: stat.dev, ino: stat.ino };
   const contentDigest = createHash('sha256').update(bytes).digest('hex');
-  return Object.freeze({ bytes, identity, digest: `${statDigest(stat)}:${contentDigest}` });
+  return freeze({ bytes, identity, digest: `${statDigest(stat)}:${contentDigest}` });
 }
 
 function observation(stat: Stats): CoordinationFileObservation {
-  return Object.freeze({
+  return freeze({
     identity: { kind: 'posix' as const, dev: stat.dev, ino: stat.ino },
     digest: statDigest(stat),
     kind: isType(stat, constants.S_IFREG) ? 'file' : isType(stat, constants.S_IFDIR) ? 'directory' : 'other',
