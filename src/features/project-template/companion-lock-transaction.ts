@@ -87,6 +87,17 @@ export class ProjectTemplateCompanionLockRollbackError extends Error {
   }
 }
 
+export class ProjectTemplateCompanionLockRecoveryError extends Error {
+  readonly code = 'RECOVERY_BLOCKED' as const;
+  readonly operatorDetail = 'recovery-evidence-inconsistent' as const;
+
+  constructor() {
+    super('project template companion lock recovery is blocked');
+    this.name = 'ProjectTemplateCompanionLockRecoveryError';
+    Object.freeze(this);
+  }
+}
+
 function hash(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -567,13 +578,109 @@ async function readJournal(
   }
 }
 
+function stateMatches(
+  actual: ProjectTemplateBackupEntryState,
+  expected: ProjectTemplateBackupEntryState,
+  platform: NodeJS.Platform,
+): boolean {
+  return actual.kind === 'absent'
+    ? expected.kind === 'absent'
+    : expected.kind === 'file'
+      && actual.sha256 === expected.sha256
+      && actual.bytes === expected.bytes
+      && (platform === 'win32' || actual.mode === expected.mode);
+}
+
+function sameStringArray(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+function recoveryBlocked(): never {
+  throw new ProjectTemplateCompanionLockRecoveryError();
+}
+
+async function validateRecoveryEvidence(
+  storage: ProjectTemplateApplyStorage,
+  journal: ProjectTemplateApplyJournal,
+  manifest: ProjectTemplateBackupManifest,
+): Promise<Set<string>> {
+  if (
+    manifest.schemaVersion !== journal.schemaVersion
+    || manifest.planId !== journal.planId
+    || manifest.backupId !== journal.backupId
+    || !sameStringArray(
+      manifest.createdTargetDirectories,
+      journal.createdTargetDirectories,
+    )
+  ) recoveryBlocked();
+
+  const keys = manifest.entries.map((entry) => (
+    resolveProjectTemplateApplyTarget(storage, entry.target).key
+  ));
+  if (new Set(keys).size !== keys.length) recoveryBlocked();
+  for (const entry of manifest.entries) {
+    const validAction = entry.action === 'add'
+      ? entry.before.kind === 'absent' && entry.after.kind === 'file'
+      : entry.action === 'update'
+        ? entry.before.kind === 'file' && entry.after.kind === 'file'
+        : entry.action === 'delete'
+          && entry.before.kind === 'file' && entry.after.kind === 'absent';
+    if (!validAction) recoveryBlocked();
+  }
+  const completed = journal.completedOperations;
+  if (
+    new Set(completed).size !== completed.length
+    || completed.some((key, index) => key !== keys[index])
+  ) recoveryBlocked();
+
+  const fullCompletionRequired = journal.state === 'verifying'
+    || journal.state === 'committed';
+  if (
+    (journal.state === 'prepared' && completed.length !== 0)
+    || (fullCompletionRequired && completed.length !== keys.length)
+    || !['prepared', 'committing', 'verifying', 'committed'].includes(journal.state)
+  ) recoveryBlocked();
+
+  const restore = new Set<string>();
+  const states: Array<'before' | 'after'> = [];
+  for (let index = 0; index < manifest.entries.length; index += 1) {
+    const entry = manifest.entries[index]!;
+    const actual = await currentState(storage, entry.target);
+    const matchesBefore = stateMatches(actual, entry.before, storage.platform);
+    const matchesAfter = stateMatches(actual, entry.after, storage.platform);
+    if (!matchesBefore && !matchesAfter) recoveryBlocked();
+    const state = matchesAfter && !matchesBefore ? 'after' : 'before';
+    states.push(state);
+    if (state === 'after') restore.add(keys[index]!);
+  }
+
+  if (journal.state === 'prepared' && states.some((state) => state !== 'before')) {
+    recoveryBlocked();
+  }
+  if (journal.state === 'committed' || journal.state === 'verifying') {
+    if (states.some((state) => state !== 'after')) recoveryBlocked();
+  } else if (journal.state === 'committing') {
+    for (let index = 0; index < states.length; index += 1) {
+      if (index < completed.length && states[index] !== 'after') recoveryBlocked();
+      if (index > completed.length && states[index] !== 'before') recoveryBlocked();
+    }
+  }
+  return restore;
+}
+
 async function restoreBefore(
   storage: ProjectTemplateApplyStorage,
   manifest: ProjectTemplateBackupManifest,
+  restoreKeys: ReadonlySet<string>,
 ): Promise<void> {
   const recoveryId = `recovery-${randomUUID()}`;
   for (const entry of [...manifest.entries].reverse()) {
     const target = resolveProjectTemplateApplyTarget(storage, entry.target);
+    if (!restoreKeys.has(target.key)) continue;
     if (entry.before.kind === 'absent') {
       try {
         await storage.io.unlink(target.absolutePath);
@@ -635,9 +742,23 @@ async function recoverOwnedStorage(
         storage,
         backupId: journal.backupId,
       });
-    } catch (error) {
-      if (journal.state !== 'prepared' || journal.completedOperations.length !== 0) {
-        throw error;
+    } catch {
+      let manifestMissing = false;
+      try {
+        await storage.io.lstat(join(
+          storage.backupsRoot,
+          journal.backupId,
+          'manifest.json',
+        ));
+      } catch (statError) {
+        manifestMissing = (statError as NodeJS.ErrnoException).code === 'ENOENT';
+      }
+      if (
+        !manifestMissing
+        || journal.state !== 'prepared'
+        || journal.completedOperations.length !== 0
+      ) {
+        throw new ProjectTemplateCompanionLockRecoveryError();
       }
       await removeProjectTemplateStagingTransaction({
         storage,
@@ -651,8 +772,11 @@ async function recoverOwnedStorage(
       return { status: 'rolled-back' };
     }
     assertOwned(storage, lease);
-    if (manifest.planId !== journal.planId) {
-      throw new Error('companion transaction journal plan mismatch');
+    let restoreKeys: Set<string>;
+    try {
+      restoreKeys = await validateRecoveryEvidence(storage, journal, manifest);
+    } catch {
+      throw new ProjectTemplateCompanionLockRecoveryError();
     }
     if (journal.state === 'committed') {
       await removeProjectTemplateStagingTransaction({
@@ -662,7 +786,7 @@ async function recoverOwnedStorage(
       await removeJournal(storage);
       return { status: 'committed' };
     }
-    await restoreBefore(storage, manifest);
+    await restoreBefore(storage, manifest, restoreKeys);
     assertOwned(storage, lease);
     await removeProjectTemplateStagingTransaction({
       storage,
