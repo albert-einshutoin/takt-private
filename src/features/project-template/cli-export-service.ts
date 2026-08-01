@@ -88,7 +88,6 @@ function calculatePlanId(
   projectRoot: string,
   plan: ProjectTemplateExportPlan,
   output: TaktpackOutputPreconditionProjection,
-  force: boolean,
 ): string {
   const state = getProjectTemplateExportSourceState(plan);
   if (state === undefined) throw new CliExportBoundaryError('INTERNAL');
@@ -106,9 +105,10 @@ function calculatePlanId(
   };
   // Why: this identifier is a CLI authorization token, not an archive hash.
   // Domain separation prevents a content digest from being replayed as consent.
+  // Force remains apply-time authorization rather than plan identity so the documented
+  // dry-run can approve the exact existing output before --apply --force replaces it.
   return createHash('sha256').update(canonicalizeTaktpackJson({
     domain: EXPORT_PLAN_DOMAIN,
-    force,
     source,
     plan: {
       descriptor: plan.descriptor,
@@ -133,11 +133,11 @@ async function createPlannedExport(
   });
   testSeam.onPhase?.('after-output-capture');
   input.signal?.throwIfAborted();
-  const planId = calculatePlanId(projectRoot, plan, output.projection, input.mutation.force);
+  const planId = calculatePlanId(projectRoot, plan, output.projection);
   const absentTargetPlanId = calculatePlanId(projectRoot, plan, {
     ...output.projection,
     target: { state: 'absent' },
-  }, input.mutation.force);
+  });
   return { plan, planId, absentTargetPlanId, output };
 }
 
@@ -275,7 +275,6 @@ export async function executeProjectTemplateCliExport(
       projectRoot,
       planned.plan,
       finalOutput.projection,
-      input.mutation.force,
     );
     if (finalPlanId !== planned.planId) return failure(mode, 'TARGET_DRIFT');
     try {

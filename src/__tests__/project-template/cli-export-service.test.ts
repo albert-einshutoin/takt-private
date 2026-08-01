@@ -185,6 +185,35 @@ describe('project template CLI export service', () => {
     }
   });
 
+  it('reuses an existing-target preview when force independently authorizes overwrite', async () => {
+    const fixture = makeFixture();
+    writeFileSync(fixture.outputPath, 'existing archive');
+    const preview = await dryRun(fixture.root, fixture.outputPath);
+    expect(preview.envelope.status).toBe('success');
+    if (preview.envelope.status !== 'success') return;
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply',
+        force: true,
+        expectedPlanId: preview.envelope.result.planId,
+      },
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        status: 'success',
+        mode: 'apply',
+        result: { planId: preview.envelope.result.planId },
+      },
+    });
+    expect(readFileSync(fixture.outputPath, 'utf8')).not.toBe('existing archive');
+  });
+
   it('requires the exact fresh plan id before invoking the archive writer', async () => {
     const fixture = makeFixture();
     const admitMutation = vi.fn();
