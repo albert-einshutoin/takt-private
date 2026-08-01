@@ -54,6 +54,29 @@ function validReleaseAssetProvenance(): Record<string, unknown> {
   return provenance;
 }
 
+function validLocalProvenance(): Record<string, unknown> {
+  return {
+    schemaVersion: '1.0',
+    source: {
+      kind: 'local-import',
+      uri: '.',
+      ref: 'workspace',
+      commit: COMMIT,
+      descriptorSha256: SHA256_A,
+    },
+    archive: {
+      sha256: SHA256_B,
+      version: '2.1.0',
+      manifestSha256: SHA256_C,
+    },
+    dependencyVerification: {
+      method: 'local-empty-v1',
+      declarationSha256: SHA256_D,
+      count: 0,
+    },
+  };
+}
+
 function expectProvenanceError(
   value: unknown,
   code?: ProjectTemplateValidationError['code'],
@@ -105,6 +128,36 @@ describe('project template source provenance', () => {
     expect(() => parseProjectTemplateSourceProvenanceJson(
       canonical.replace('  "source"', '\t"source"'),
     )).toThrow(/canonical/i);
+  });
+
+  it('accepts a schema 1.0 local import without claiming GitHub authority', () => {
+    const parsed = parseProjectTemplateSourceProvenance(validLocalProvenance());
+
+    expect(parsed).toEqual(validLocalProvenance());
+    expect(serializeProjectTemplateSourceProvenance(parsed))
+      .toBe(JSON.stringify(validLocalProvenance(), null, 2));
+    expect(JSON.stringify(parsed)).not.toContain('repositoryUrl');
+    expect(JSON.stringify(parsed)).not.toContain('github-ref-to-commit-v1');
+  });
+
+  it('requires local imports to retain empty dependency evidence', () => {
+    for (const mutate of [
+      (value: Record<string, unknown>) => {
+        (value['dependencyVerification'] as Record<string, unknown>)['count'] = 1;
+      },
+      (value: Record<string, unknown>) => {
+        (value['dependencyVerification'] as Record<string, unknown>)['method'] =
+          'github-ref-to-commit-v1';
+      },
+      (value: Record<string, unknown>) => {
+        (value['source'] as Record<string, unknown>)['repositoryUrl'] =
+          'https://github.com/acme/private';
+      },
+    ]) {
+      const provenance = validLocalProvenance();
+      mutate(provenance);
+      expectProvenanceError(provenance);
+    }
   });
 
   it('binds a direct HTTPS release source to its tag and asset identity', () => {
