@@ -31,6 +31,10 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+function sha256Bytes(value: Uint8Array): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 function requireActive(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) {
     throw new TaktpackError(
@@ -51,6 +55,10 @@ export interface DeriveLocalProjectTemplateTransactionOptions {
 
 export interface DerivedLocalProjectTemplateTransaction {
   readonly preview: ProjectTemplateLocalApplyPreview;
+  readonly mergeBaselines: readonly {
+    readonly sha256: string;
+    readonly content: Uint8Array;
+  }[];
   readonly contentEntries: readonly (
     | {
       readonly path: string;
@@ -219,6 +227,29 @@ export async function deriveLocalProjectTemplateTransaction(
   for (const item of preparedContentPlan.resolvedContents) {
     effectiveContents.set(item.path, item.content);
   }
+  const incomingContents = new Map(
+    materialized.contents.map((item) => [item.path, item.content]),
+  );
+  const mergeBaselines: Array<
+    DerivedLocalProjectTemplateTransaction['mergeBaselines'][number]
+  > = [];
+  for (const entry of materialized.inspection.lockSeed.entries) {
+    if (
+      entry.policy !== 'merge'
+      || (entry.path !== 'config.yaml' && entry.path !== 'devloopd.yaml')
+    ) continue;
+    const content = incomingContents.get(entry.path);
+    if (content === undefined || sha256Bytes(content) !== entry.sha256) {
+      // Archive inspection already binds blobs to the lock seed. This final
+      // local copy check prevents a retained materialization from being paired
+      // with a different next-generation merge baseline.
+      throw new Error('local merge baseline evidence is incomplete');
+    }
+    mergeBaselines.push(Object.freeze({
+      sha256: entry.sha256,
+      content: new Uint8Array(content!),
+    }));
+  }
   const contentEntries: Array<
     DerivedLocalProjectTemplateTransaction['contentEntries'][number]
   > = [];
@@ -241,6 +272,7 @@ export async function deriveLocalProjectTemplateTransaction(
   }
   return Object.freeze({
     preview,
+    mergeBaselines: Object.freeze(mergeBaselines),
     contentEntries: Object.freeze(contentEntries),
     companionOutputs: Object.freeze({
       contentLock: new TextEncoder().encode(serializeTemplateLock(nextContentLock)),

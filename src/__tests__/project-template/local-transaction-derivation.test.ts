@@ -38,6 +38,7 @@ async function fixture(): Promise<{ archivePath: string; targetRoot: string }> {
     packVersion: '1.0.0',
     takt: { minVersion: '0.48.0' },
     source: { kind: 'local', uri: '.', ref: 'workspace', commit: COMMIT },
+    policies: { 'config.yaml': 'merge' },
   });
   const archivePath = join(sourceRoot, 'template.taktpack');
   await writeTaktpack(archivePath, plan);
