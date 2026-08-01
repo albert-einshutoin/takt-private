@@ -200,6 +200,12 @@ describe('resolveTaskExecution', () => {
       stack: task.data?.resume_point?.stack.slice(0, 1),
     });
     expect(result.initialIterationOverride).toBe(7);
+    expect(result.retrySource).toEqual(expect.objectContaining({
+      configuredStartStep: 'review',
+      resumePoint: task.data?.resume_point,
+      initialIteration: 7,
+      generationWitness: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }));
   });
 
   it('should preserve resume_point when child workflow step no longer resolves', async () => {
@@ -491,6 +497,11 @@ describe('resolveTaskExecution', () => {
 
     expect(result.initialIterationOverride).toBe(50);
     expect(result.maxStepsOverride).toBe(51);
+    expect(result.retrySource).toEqual({
+      storedMaxSteps: 50,
+      initialIteration: 50,
+      generationWitness: 'missing-workflow-generation',
+    });
   });
 
   it('should fail fast when an unknown workflow key is present', async () => {

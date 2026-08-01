@@ -15,6 +15,10 @@ import {
   type ProjectTemplateRunStartPermit,
 } from '../../project-template/apply-lease.js';
 import { prepareWorkflowRuntimeRead } from './workflowRuntimeReadBoundary.js';
+import {
+  buildWorkflowGenerationWitness,
+  resolveWorkflowRetryOverrides,
+} from './workflowRetryGeneration.js';
 
 const log = createLogger('task');
 
@@ -40,6 +44,7 @@ export async function executeTaskWorkflow(
     startStep,
     retryNote,
     resumePoint,
+    retrySource,
     directResume,
     reportDirName,
     abortSignal,
@@ -84,6 +89,14 @@ export async function executeTaskWorkflow(
         reason: `Workflow "${safeWorkflowIdentifier}" not found.`,
       });
     }
+    const retryOverrides = retrySource === undefined
+      ? { startStep, resumePoint, maxStepsOverride, initialIterationOverride }
+      : resolveWitnessedRetryOverrides(
+        workflowConfig,
+        projectCwd,
+        cwd,
+        retrySource,
+      );
     log.debug('Running workflow', {
       name: workflowConfig.name,
       steps: workflowConfig.steps.map((s: { name: string }) => s.name),
@@ -104,17 +117,17 @@ export async function executeTaskWorkflow(
       providerProfiles: config.providerProfiles,
       interactiveUserInput,
       interactiveMetadata,
-      startStep,
+      startStep: retryOverrides.startStep,
       retryNote,
-      resumePoint,
+      resumePoint: retryOverrides.resumePoint,
       directResume,
       reportDirName,
       abortSignal,
       taskPrefix,
       taskColorIndex,
       taskDisplayLabel,
-      maxStepsOverride,
-      initialIterationOverride,
+      maxStepsOverride: retryOverrides.maxStepsOverride,
+      initialIterationOverride: retryOverrides.initialIterationOverride,
       currentTaskIssueNumber,
       traceTaskMetadata,
       onRunningEvidencePublished,
@@ -136,6 +149,28 @@ export async function executeTaskWorkflow(
     ...(abortSignal ? { abortSignal } : {}),
     prepare: prepareWorkflow,
   });
+}
+
+function resolveWitnessedRetryOverrides(
+  workflowConfig: WorkflowConfig,
+  projectCwd: string,
+  lookupCwd: string,
+  retrySource: NonNullable<ExecuteTaskOptions['retrySource']>,
+) {
+  const currentWitness = buildWorkflowGenerationWitness(
+    workflowConfig,
+    projectCwd,
+    lookupCwd,
+  );
+  if (currentWitness !== retrySource.generationWitness) {
+    throw new Error('Workflow generation changed during retry preparation.');
+  }
+  return resolveWorkflowRetryOverrides(
+    workflowConfig,
+    projectCwd,
+    lookupCwd,
+    retrySource,
+  );
 }
 
 function resolveTraceTaskMetadata(options: ExecuteTaskOptions): WorkflowTraceTaskMetadata | undefined {

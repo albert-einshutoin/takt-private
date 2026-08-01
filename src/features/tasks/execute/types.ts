@@ -18,6 +18,7 @@ import type { DirectResumeMetadata } from './runMeta.js';
 import type { TaskAttachment } from '../attachments.js';
 import type { TraceTaskContext } from './traceTaskMetadata.js';
 import type { ProjectTemplateRunStartPermit } from '../../project-template/apply-lease.js';
+import type { WorkflowRetrySource } from './workflowRetryGeneration.js';
 
 /** Info captured when iteration limit is hit in non-interactive mode */
 export interface ExceededInfo {
@@ -153,6 +154,8 @@ export interface ExecuteTaskOptions {
   retryNote?: string;
   /** Resume point for workflow_call-aware retries */
   resumePoint?: WorkflowResumePoint;
+  /** Raw retry metadata plus the generation that produced it. */
+  retrySource?: WorkflowRetrySource;
   /** Source direct run metadata for resumed direct executions */
   directResume?: DirectResumeMetadata;
   /** Override report directory name (e.g. "20260201-015714-foptng") */

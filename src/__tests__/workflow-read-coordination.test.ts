@@ -41,6 +41,8 @@ import { resolveWorkflowProviderOptionsWithHost } from '../infra/config/loaders/
 import { executeTaskWorkflow } from '../features/tasks/execute/taskWorkflowExecution.js';
 import { resolveProjectTemplateRunStartMutexPath } from '../features/project-template/apply-guard.js';
 import { resolveWorkflowCallTarget } from '../infra/config/loaders/workflowCallResolver.js';
+import { buildWorkflowGenerationWitness } from '../features/tasks/execute/workflowRetryGeneration.js';
+import type { WorkflowResumePoint } from '../core/models/index.js';
 
 const SAMPLE_WORKFLOW = `name: coordinated-workflow
 description: coordinated workflow
@@ -86,6 +88,33 @@ describe('workflow repertoire read coordination', () => {
     const workflowsDir = join(projectDir, '.takt', 'workflows');
     mkdirSync(workflowsDir, { recursive: true });
     writeFileSync(join(workflowsDir, `${name}.yaml`), SAMPLE_WORKFLOW);
+  }
+
+  function createNestedRetryWorkflow(childInstruction: string, childStep = 'work', maxSteps = 3): void {
+    const workflowsDir = join(projectDir, '.takt', 'workflows');
+    mkdirSync(workflowsDir, { recursive: true });
+    writeFileSync(join(workflowsDir, 'retry-child.yaml'), `name: retry-child
+subworkflow:
+  callable: true
+initial_step: ${childStep}
+max_steps: ${maxSteps}
+steps:
+  - name: ${childStep}
+    instruction: "${childInstruction}"
+`);
+    writeFileSync(join(workflowsDir, 'retry-parent.yaml'), `name: retry-parent
+initial_step: delegate
+max_steps: 5
+steps:
+  - name: delegate
+    kind: workflow_call
+    call: retry-child
+    rules:
+      - condition: COMPLETE
+        next: COMPLETE
+      - condition: ABORT
+        next: ABORT
+`);
   }
 
   function createProjectWorkflowWithScopedResources(): void {
@@ -267,6 +296,114 @@ ${stepFields}`);
     });
     writer.release();
   });
+
+  it('fails closed before execution when a same-name retry child changes generation', async () => {
+    createNestedRetryWorkflow('generation A');
+    const generationA = loadWorkflowByIdentifier('retry-parent', projectDir)!;
+    const generationWitness = buildWorkflowGenerationWitness(generationA, projectDir, projectDir);
+    const resumePoint: WorkflowResumePoint = {
+      version: 1,
+      stack: [
+        { workflow: 'retry-parent', step: 'delegate', kind: 'workflow_call' },
+        { workflow: 'retry-child', step: 'work', kind: 'agent' },
+      ],
+      iteration: 3,
+      elapsed_ms: 10,
+    };
+    createNestedRetryWorkflow('generation B');
+    let executorCalled = false;
+
+    await expect(executeTaskWorkflow({
+      task: 'generation-safe retry',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'retry-parent',
+      retrySource: { resumePoint, initialIteration: 3, generationWitness },
+    }, async () => {
+      executorCalled = true;
+      return { success: true };
+    })).rejects.toThrow('Workflow generation changed during retry preparation.');
+
+    expect(executorCalled).toBe(false);
+    expect(existsSync(resolveProjectTemplateRunStartMutexPath(projectDir))).toBe(false);
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+      timeoutMs: 250,
+    });
+    writer.release();
+  });
+
+  it('recomputes retry step and max-steps from the witnessed runtime generation', async () => {
+    createNestedRetryWorkflow('same generation');
+    const generation = loadWorkflowByIdentifier('retry-parent', projectDir)!;
+    const generationWitness = buildWorkflowGenerationWitness(generation, projectDir, projectDir);
+    const resumePoint: WorkflowResumePoint = {
+      version: 1,
+      stack: [{ workflow: 'retry-parent', step: 'delegate', kind: 'workflow_call' }],
+      iteration: 5,
+      elapsed_ms: 10,
+    };
+
+    await expect(executeTaskWorkflow({
+      task: 'recompute retry',
+      cwd: projectDir,
+      projectCwd: projectDir,
+      workflowIdentifier: 'retry-parent',
+      startStep: 'stale-step',
+      maxStepsOverride: 999,
+      retrySource: {
+        configuredStartStep: 'stale-step',
+        resumePoint,
+        initialIteration: 5,
+        generationWitness,
+      },
+    }, async (_workflow, _task, _cwd, executionOptions) => {
+      expect(executionOptions.startStep).toBe('delegate');
+      expect(executionOptions.resumePoint).toEqual(resumePoint);
+      expect(executionOptions.maxStepsOverride).toBe(10);
+      expect(executionOptions.initialIterationOverride).toBe(5);
+      return { success: true };
+    })).resolves.toEqual({ success: true });
+  });
+
+  it.each(['step', 'max_steps'] as const)(
+    'rejects retry metadata when generation B changes the child %s contract',
+    async (change) => {
+      createNestedRetryWorkflow('generation A');
+      const generationA = loadWorkflowByIdentifier('retry-parent', projectDir)!;
+      const generationWitness = buildWorkflowGenerationWitness(generationA, projectDir, projectDir);
+      createNestedRetryWorkflow(
+        'generation A',
+        change === 'step' ? 'work-v2' : 'work',
+        change === 'max_steps' ? 4 : 3,
+      );
+      let executorCalled = false;
+
+      await expect(executeTaskWorkflow({
+        task: 'generation contract retry',
+        cwd: projectDir,
+        projectCwd: projectDir,
+        workflowIdentifier: 'retry-parent',
+        retrySource: {
+          resumePoint: {
+            version: 1,
+            stack: [
+              { workflow: 'retry-parent', step: 'delegate', kind: 'workflow_call' },
+              { workflow: 'retry-child', step: 'work', kind: 'agent' },
+            ],
+            iteration: 3,
+            elapsed_ms: 10,
+          },
+          generationWitness,
+        },
+      }, async () => {
+        executorCalled = true;
+        return { success: true };
+      })).rejects.toThrow('Workflow generation changed during retry preparation.');
+      expect(executorCalled).toBe(false);
+    },
+  );
 
   it('rejects custom thenables without adopting them', async () => {
     createProjectRuntimeWorkflow();

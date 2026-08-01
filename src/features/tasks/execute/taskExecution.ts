@@ -129,6 +129,7 @@ export async function executeTaskAndCompleteWithResult(
       orderContent,
       maxStepsOverride,
       initialIterationOverride,
+      retrySource,
     } = await resolveTaskExecution(task, cwd, taskAbortSignal);
 
     const executionTask = taskRunner.updateRunningTaskExecution(task.name, {
@@ -156,6 +157,7 @@ export async function executeTaskAndCompleteWithResult(
       taskDisplayLabel: parallelOptions?.taskDisplayLabel,
       maxStepsOverride,
       initialIterationOverride,
+      retrySource,
       currentTaskIssueNumber: issueNumber,
       traceTaskMetadata: buildTraceTaskMetadata({
         task,

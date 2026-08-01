@@ -26,6 +26,10 @@ import { getTaskSlugFromTaskDir } from '../../../shared/utils/taskPaths.js';
 import { resolveConfigValue } from '../../../infra/config/resolveConfigValue.js';
 import { stageTaskSpecForExecution } from './taskSpecContext.js';
 import { resolveReusedWorktreeExecution } from './reusedWorktree.js';
+import {
+  buildWorkflowGenerationWitness,
+  type WorkflowRetrySource,
+} from './workflowRetryGeneration.js';
 
 const log = createLogger('task');
 
@@ -59,6 +63,7 @@ export interface ResolvedTaskExecution {
   issueNumber?: number;
   maxStepsOverride?: number;
   initialIterationOverride?: number;
+  retrySource?: WorkflowRetrySource;
 }
 
 function resolveRetryResume(
@@ -325,6 +330,21 @@ export async function resolveTaskExecution(
     initialIterationOverride,
     resolveWorkflowMaxSteps(workflowConfig),
   );
+  const retrySource: WorkflowRetrySource | undefined = needsWorkflowRetryContext
+    ? {
+      ...(configuredStartStep ? { configuredStartStep } : {}),
+      ...(resumePoint ? { resumePoint } : {}),
+      ...(data.exceeded_max_steps !== undefined
+        ? { storedMaxSteps: data.exceeded_max_steps }
+        : {}),
+      ...(initialIterationOverride !== undefined
+        ? { initialIteration: initialIterationOverride }
+        : {}),
+      generationWitness: workflowConfig
+        ? buildWorkflowGenerationWitness(workflowConfig, defaultCwd, execCwd)
+        : 'missing-workflow-generation',
+    }
+    : undefined;
 
   const autoPr = data.auto_pr ?? resolveWorkflowConfigValue(defaultCwd, 'autoPr') ?? false;
   const draftPr = data.draft_pr ?? resolveWorkflowConfigValue(defaultCwd, 'draftPr') ?? false;
@@ -353,5 +373,6 @@ export async function resolveTaskExecution(
     ...(data.issue !== undefined ? { issueNumber: data.issue } : {}),
     ...(maxStepsOverride !== undefined ? { maxStepsOverride } : {}),
     ...(initialIterationOverride !== undefined ? { initialIterationOverride } : {}),
+    ...(retrySource ? { retrySource } : {}),
   };
 }
