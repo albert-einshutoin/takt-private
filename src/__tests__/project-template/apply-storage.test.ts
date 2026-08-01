@@ -22,6 +22,7 @@ import {
   consumeProjectTemplateApprovalRecord,
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
+  openProjectTemplateApplyStorageReadOnly,
   pruneProjectTemplateBackupGenerations,
   readProjectTemplateApprovalRecord,
   readProjectTemplateBackupManifest,
@@ -83,6 +84,43 @@ afterEach(() => {
 });
 
 describe('project template apply storage', () => {
+  it('opens existing baseline authority read-only and closes all directory FDs', async () => {
+    const root = makeRepo();
+    const initialized = await initializeProjectTemplateApplyStorage({ repoPath: root });
+    const before = {
+      control: lstatSync(initialized.controlRoot).mtimeMs,
+      baselines: lstatSync(initialized.baselinesRoot).mtimeMs,
+    };
+    const phases: string[] = [];
+    const opened = await openProjectTemplateApplyStorageReadOnly({
+      repoPath: root,
+      ioSeam: { onPhase(phase) { phases.push(phase); } },
+    });
+    expect(opened.baselinesInode).toBe(initialized.baselinesInode);
+    expect(phases).toEqual([
+      'repository-opened',
+      'control-opened',
+      'baselines-opened',
+      'all-closed',
+    ]);
+    expect({
+      control: lstatSync(initialized.controlRoot).mtimeMs,
+      baselines: lstatSync(initialized.baselinesRoot).mtimeMs,
+    }).toEqual(before);
+
+    const failedPhases: string[] = [];
+    await expect(openProjectTemplateApplyStorageReadOnly({
+      repoPath: root,
+      ioSeam: {
+        onPhase(phase) {
+          failedPhases.push(phase);
+          if (phase === 'control-opened') throw new Error('private path');
+        },
+      },
+    })).rejects.not.toThrow('private path');
+    expect(failedPhases.at(-1)).toBe('all-closed');
+  });
+
   it('rejects non-UTF-8 approval bytes instead of replacement-decoding them', async () => {
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
     const approvalId = 'approval-invalid-utf8';
