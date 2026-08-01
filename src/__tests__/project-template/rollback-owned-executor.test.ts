@@ -115,7 +115,7 @@ describe('owned project template rollback executor', () => {
     const finalTarget = join(value.projectRoot, '.takt-template-source-lock.json');
     const io = createProjectTemplateApplyStorageIo({
       after(operation, path) {
-        if (operation === 'lstat' && path === finalTarget) controller.abort();
+        if (operation === 'read' && path.endsWith(finalTarget)) controller.abort();
       },
     });
     const storage = await initializeProjectTemplateApplyStorage({
@@ -144,6 +144,7 @@ describe('owned project template rollback executor', () => {
         lease,
         plan,
       })).resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
+      expect(existsSync(storage.journalPath)).toBe(false);
     } finally {
       lease.release();
     }
@@ -166,7 +167,7 @@ describe('owned project template rollback executor', () => {
         storage,
         lease,
         plan,
-      })).resolves.toEqual({ status: 'not_started', code: 'ROLLBACK_DRIFT' });
+      })).resolves.toMatchObject({ status: 'not_started', code: 'ROLLBACK_DRIFT' });
     } finally {
       lease.release();
     }
@@ -190,7 +191,28 @@ describe('owned project template rollback executor', () => {
         lease,
         plan,
         signal: controller.signal,
-      })).resolves.toEqual({ status: 'not_started', code: 'INTERRUPTED' });
+      })).resolves.toMatchObject({ status: 'not_started', code: 'INTERRUPTED' });
+    } finally {
+      lease.release();
+    }
+    expect(readFileSync(value.contentPath)).toEqual(before);
+  });
+
+  it('rejects a structural clone of the sealed rollback authority', async () => {
+    const value = await installed();
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: value.projectRoot });
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const before = readFileSync(value.contentPath);
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({
+        storage,
+        lease,
+        plan: { ...plan },
+      })).resolves.toMatchObject({ status: 'not_started', code: 'SECURITY_GUARD' });
     } finally {
       lease.release();
     }
