@@ -23,7 +23,7 @@ function shortOptionShape(argument: string): ShortOptionShape {
     }
     return 'unknown';
   }
-  return 'unknown';
+  return 'self-contained';
 }
 
 function isProjectTemplateCommandCandidate(
@@ -31,7 +31,20 @@ function isProjectTemplateCommandCandidate(
   index: number,
 ): boolean {
   if (args[index] !== 'project-template') return false;
-  const next = args[index + 1];
+  let cursor = index + 1;
+  while (cursor < args.length) {
+    const option = args[cursor]!;
+    if (option === '--cwd') {
+      cursor += args[cursor + 1] === undefined ? 1 : 2;
+      continue;
+    }
+    if (option.startsWith('--cwd=')) {
+      cursor += 1;
+      continue;
+    }
+    break;
+  }
+  const next = args[cursor];
   return next === undefined
     || next === '--help'
     || next === '-h'
