@@ -120,6 +120,17 @@ function mutation(
   }
 }
 
+function invalidMutationInput(
+  command: ProjectTemplateCliCommand,
+  parsed: ProjectTemplateCliMutationOptions | ProjectTemplateCliOutcome,
+): ProjectTemplateCliOutcome {
+  if ('envelope' in parsed) return parsed;
+  // Why: machine clients correlate errors with the invocation they attempted.
+  // Preserve an already-validated apply mode even when a later operand check
+  // fails, instead of misreporting the request as a dry-run.
+  return failure(command, parsed.mode, 'INVALID_ARGUMENT');
+}
+
 function canonicalSource(cwd: string, value: string | undefined): ProjectTemplateCliCommandSource | undefined {
   if (value === undefined || value.length === 0 || value.includes('\0')) return undefined;
   if (value.startsWith('github:') || value.startsWith('https://github.com/')) {
@@ -235,9 +246,17 @@ export function registerProjectTemplateCommands(
     invalid(command, mode, 'UNKNOWN_OPTION')
   ));
 
-  const hasUnknownOption = (command: Command): boolean => (
-    command.args.length !== command.processedArgs.length
-  );
+  const hasUnknownOption = (command: Command): boolean => {
+    // Why: Commander keeps an omitted optional operand as `undefined` in
+    // processedArgs. Counting that placeholder as an excess token turns a
+    // valid apply-shaped invocation into UNKNOWN_OPTION before operand
+    // validation can preserve its mode.
+    const processedArgumentCount = command.processedArgs.reduce(
+      (count, argument) => count + (argument === undefined ? 0 : 1),
+      0,
+    );
+    return command.args.length !== processedArgumentCount;
+  };
 
   const run = async (
     command: Command,
@@ -301,9 +320,7 @@ export function registerProjectTemplateCommands(
       const parsedMutation = mutation('project-template export', flags);
       const cwd = requestedCwd(root, command, flags, dependencies);
       if ('envelope' in parsedMutation || output === undefined || !output.endsWith('.taktpack')) {
-        const result = 'envelope' in parsedMutation
-          ? parsedMutation
-          : failure('project-template export', 'dry-run', 'INVALID_ARGUMENT');
+        const result = invalidMutationInput('project-template export', parsedMutation);
         await settle(
           'project-template export', result.envelope.mode,
           async () => result,
@@ -343,9 +360,7 @@ export function registerProjectTemplateCommands(
         const parsedSource = canonicalSource(cwd, source);
         if ('envelope' in parsedMutation || parsedSource === undefined
           || (name === 'update' && parsedSource.kind !== 'github')) {
-          const result = 'envelope' in parsedMutation
-            ? parsedMutation
-            : failure(machineCommand, 'dry-run', 'INVALID_ARGUMENT');
+          const result = invalidMutationInput(machineCommand, parsedMutation);
           await settle(machineCommand, result.envelope.mode, async () => result);
           return;
         }
@@ -368,9 +383,7 @@ export function registerProjectTemplateCommands(
       }
       const parsedMutation = mutation('project-template rollback', flags);
       if ('envelope' in parsedMutation || backupId === undefined) {
-        const result = 'envelope' in parsedMutation
-          ? parsedMutation
-          : failure('project-template rollback', 'dry-run', 'INVALID_ARGUMENT');
+        const result = invalidMutationInput('project-template rollback', parsedMutation);
         await settle('project-template rollback', result.envelope.mode, async () => result);
         return;
       }

@@ -168,6 +168,24 @@ describe('project-template CLI command adapter', () => {
     });
   });
 
+  it.each([
+    ['export output', ['project-template', 'export', 'invalid.txt']],
+    ['apply source', ['project-template', 'apply']],
+    ['update source', ['project-template', 'update', './local.taktpack']],
+    ['rollback backup', ['project-template', 'rollback']],
+  ] as const)('preserves apply mode for an invalid %s', async (_label, prefix) => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', ...prefix,
+      '--apply', '--expected-plan-id', PLAN_ID,
+    ]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      mode: 'apply', error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
   it('installs SIGINT before synchronous mutation admission can begin', async () => {
     let listenerInstalled = false;
     const value = harness({

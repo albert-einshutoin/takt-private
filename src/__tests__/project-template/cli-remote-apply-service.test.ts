@@ -193,6 +193,23 @@ describe('project template remote CLI service', () => {
     expect(admitMutation).not.toHaveBeenCalled();
   });
 
+  it('preserves unknown recovery state as recovery-required', async () => {
+    const execute = vi.fn(port().execute);
+    const service = createProjectTemplateCliRemoteApplyService(port({
+      inspectGuard: () => ({
+        passed: false,
+        blocks: [{ code: 'RECOVERY_REQUIRED_UNKNOWN' }],
+      }),
+      execute,
+    }));
+
+    await expect(service.diff(base)).resolves.toMatchObject({
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RECOVERY_REQUIRED' } },
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('blocks non-zero conflicts and inconsistent non-applicable plans even with force', async () => {
     const execute = vi.fn(port().execute);
     const conflict = createProjectTemplateCliRemoteApplyService(port({

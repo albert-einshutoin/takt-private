@@ -228,7 +228,12 @@ function guardCode(blocks: readonly { readonly code: string }[]): ProjectTemplat
   let securityGuard = false;
   for (let index = 0; index < blocks.length; index += 1) {
     const code = blocks[index]?.code;
-    if (code === 'RECOVERY_REQUIRED') recoveryRequired = true;
+    // Why: an unreadable recovery marker is at least as severe as a confirmed
+    // marker. Preserve the recovery-required exit category instead of hiding
+    // operator action behind the generic coordination guard.
+    if (code === 'RECOVERY_REQUIRED' || code === 'RECOVERY_REQUIRED_UNKNOWN') {
+      recoveryRequired = true;
+    }
     if (code === 'ACTIVE_RUN') activeRun = true;
     if (code === 'SECURITY_GUARD') securityGuard = true;
   }
