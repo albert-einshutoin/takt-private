@@ -3,13 +3,11 @@ import {
   constants,
   fchmodSync,
   fsyncSync,
-  lstatSync,
   linkSync,
   mkdirSync,
   openSync,
   renameSync,
   unlinkSync,
-  type Stats,
 } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
@@ -24,6 +22,7 @@ import {
 } from './coordination-posix-filesystem-policy.js';
 import type {
   CoordinationIdentity,
+  CoordinationFileObservation,
   CoordinationStableDirectory,
   CoordinationStableFile,
 } from './coordination-filesystem-types.js';
@@ -44,11 +43,7 @@ const TOMBSTONE_HARD_LIMIT = 4_096;
 const RETRY_DELAY_MS = 10;
 const MAX_SNAPSHOT_ATTEMPTS = 8;
 const PRIVATE_DIRECTORY_MODE = 0o700;
-const PRIVATE_FILE_MODE = 0o600;
 const DIRECTORY_OPEN_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
-const FILE_TYPE_MASK = constants.S_IFMT;
-const FILE_TYPE_REGULAR = constants.S_IFREG;
-const FILE_TYPE_SYMLINK = constants.S_IFLNK;
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_REGEX = new RegExp(`^${UUID_PATTERN}$`);
 const HEX_256_REGEX = /^[0-9a-f]{64}$/;
@@ -731,32 +726,22 @@ function classifyPublishingPair(
   activePath: string,
   publishingPath: string,
 ): 'linked' | 'contender' {
-  const active = lstatPublishingPath(activePath);
-  const publishing = lstatPublishingPath(publishingPath);
-  assertSafeClaimArtifactMetadata(active);
-  assertSafeClaimArtifactMetadata(publishing);
-  if (active.dev === publishing.dev && active.ino === publishing.ino) {
-    if (active.nlink !== 2 || publishing.nlink !== 2) throw SNAPSHOT_CHANGED;
+  const active = statPublishingPath(activePath);
+  const publishing = statPublishingPath(publishingPath);
+  if (posixCoordinationFilesystemPolicy.sameObject(active, publishing)) {
+    if (active.linkCount !== 2 || publishing.linkCount !== 2) throw SNAPSHOT_CHANGED;
     return 'linked';
   }
-  if (active.nlink !== 1 || publishing.nlink !== 1) throw SNAPSHOT_CHANGED;
+  if (active.linkCount !== 1 || publishing.linkCount !== 1) throw SNAPSHOT_CHANGED;
   return 'contender';
 }
 
 function assertPublishingOnly(path: string): void {
-  const stat = lstatPublishingPath(path);
-  assertSafeClaimArtifactMetadata(stat);
-  if (stat.nlink === 1) return;
-  if (stat.nlink === 2) {
+  const stat = statPublishingPath(path);
+  if (stat.linkCount === 1) return;
+  if (stat.linkCount === 2) {
     const activePath = path.slice(0, -CLAIM_PUBLISHING_SUFFIX.length);
-    let active: Stats;
-    try {
-      active = lstatSync(activePath);
-    } catch (error) {
-      if (isMissingError(error)) throw SNAPSHOT_CHANGED;
-      throw error;
-    }
-    assertSafeClaimArtifactMetadata(active);
+    statPublishingPath(activePath);
     // The directory listing can race across the publisher's nlink=2 window.
     // The active name may therefore be the same inode at nlink 2, already be
     // the remaining nlink=1 publication, or have been released. Restarting is
@@ -767,25 +752,10 @@ function assertPublishingOnly(path: string): void {
   throw SNAPSHOT_CHANGED;
 }
 
-function assertSafeClaimArtifactMetadata(stat: Stats): void {
-  const expectedUid = currentUid();
-  if (
-    !isFileMode(stat.mode)
-    || isSymlinkMode(stat.mode)
-    || stat.size < 0
-    || stat.size > MAX_LEASE_BYTES
-    || (stat.mode & 0o777) !== PRIVATE_FILE_MODE
-    || (expectedUid !== null && stat.uid !== expectedUid)
-  ) throw new RepertoireCoordinationError('UNSAFE_STATE');
-}
-
-function lstatPublishingPath(path: string): Stats {
-  try {
-    return lstatSync(path);
-  } catch (error) {
-    if (isMissingError(error)) throw SNAPSHOT_CHANGED;
-    throw error;
-  }
+function statPublishingPath(path: string): CoordinationFileObservation {
+  const stat = posixCoordinationFilesystemPolicy.statPath(path, MAX_LEASE_BYTES);
+  if (stat === undefined) throw SNAPSHOT_CHANGED;
+  return stat;
 }
 
 function scanReleased(
@@ -882,14 +852,6 @@ function readListedLease(path: string, mode?: RepertoireCoordinationMode): Lease
   }
 }
 
-
-function isFileMode(mode: number): boolean {
-  return (mode & FILE_TYPE_MASK) === FILE_TYPE_REGULAR;
-}
-
-function isSymlinkMode(mode: number): boolean {
-  return (mode & FILE_TYPE_MASK) === FILE_TYPE_SYMLINK;
-}
 
 function assertPublishedLease(
   leases: LeaseEvidence[],
