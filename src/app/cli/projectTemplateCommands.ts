@@ -75,10 +75,25 @@ interface MutationFlags {
 interface CommonFlags extends MutationFlags {
   readonly cwd?: string;
   readonly json?: boolean;
-  readonly currentTaktVersion?: string;
+  readonly currentTaktVersion?: readonly string[];
   readonly packVersion?: string;
   readonly minTaktVersion?: string;
   readonly sourceCommit?: string;
+}
+
+function addCurrentVersionAssertion(command: Command): Command {
+  // Why: this assertion protects compatibility and mutation admission. Keep
+  // every occurrence that Commander has already tokenized so attached values
+  // and values which resemble option names cannot be miscounted by raw argv
+  // scanning or silently collapsed with Commander's usual last-value-wins.
+  return command.option(
+    '--current-takt-version <version>',
+    'Assert the executing Takt version',
+    (value: string, previous: readonly string[] | undefined): readonly string[] => [
+      ...(previous ?? []), value,
+    ],
+    [],
+  );
 }
 
 function failure(
@@ -264,8 +279,10 @@ export function registerProjectTemplateCommands(
     flags: CommonFlags,
     request: Omit<ProjectTemplateCliCommandRequest, 'cwd' | 'json' | 'currentTaktVersion'>,
   ): Promise<void> => {
-    if (flags.currentTaktVersion !== undefined
-      && flags.currentTaktVersion !== dependencies.currentTaktVersion) {
+    const currentVersionAssertions = flags.currentTaktVersion ?? [];
+    if (currentVersionAssertions.length > 1
+      || (currentVersionAssertions[0] !== undefined
+        && currentVersionAssertions[0] !== dependencies.currentTaktVersion)) {
       // Why: compatibility is a mutation security boundary. Treat the option
       // as a caller/runtime assertion so neither preview nor apply can replace
       // the version of the binary that is actually executing the operation.
@@ -290,10 +307,9 @@ export function registerProjectTemplateCommands(
     );
   };
 
-  addCommonOptions(group.command('inspect')
+  addCommonOptions(addCurrentVersionAssertion(group.command('inspect')
     .description('Inspect a local .taktpack without mutation')
-    .argument('[source]', 'Local .taktpack path')
-    .option('--current-takt-version <version>', 'Assert the executing Takt version'))
+    .argument('[source]', 'Local .taktpack path')))
     .action(async (source: string | undefined, flags: CommonFlags, command: Command) => {
       if (hasUnknownOption(command)) {
         await invalid('project-template inspect', 'dry-run', 'UNKNOWN_OPTION');
@@ -354,10 +370,9 @@ export function registerProjectTemplateCommands(
     name: 'diff' | 'apply' | 'update',
     mutating: boolean,
   ): void => {
-    const command = group.command(name)
+    const command = addCurrentVersionAssertion(group.command(name)
       .description(`${name} a local or canonical GitHub project template`)
-      .argument('[source]', 'Local .taktpack path or canonical GitHub source')
-      .option('--current-takt-version <version>', 'Assert the executing Takt version');
+      .argument('[source]', 'Local .taktpack path or canonical GitHub source'));
     (mutating ? addMutationOptions(command) : addCommonOptions(command))
       .action(async (source: string | undefined, flags: CommonFlags, action: Command) => {
         const machineCommand = `project-template ${name}` as ProjectTemplateCliCommand;

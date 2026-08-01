@@ -237,6 +237,67 @@ describe('project-template CLI command adapter', () => {
     });
   });
 
+  it.each([
+    [
+      'inspect higher then exact', 'inspect', './template.taktpack',
+      ['--current-takt-version', '99.0.0', '--current-takt-version', '0.48.0'],
+      'dry-run',
+    ],
+    [
+      'diff exact then higher', 'diff', './template.taktpack',
+      ['--current-takt-version', '0.48.0', '--current-takt-version', '99.0.0'],
+      'dry-run',
+    ],
+    [
+      'apply exact then exact', 'apply', './template.taktpack',
+      ['--current-takt-version', '0.48.0', '--current-takt-version', '0.48.0'],
+      'apply',
+    ],
+    [
+      'update attached then separated', 'update', 'github:owner/template@v1.0.0',
+      ['--current-takt-version=0.48.0', '--current-takt-version', '99.0.0'],
+      'apply',
+    ],
+  ] as const)('rejects duplicate runtime assertions before %s dispatch', async (
+    _label,
+    command,
+    source,
+    assertions,
+    expectedMode,
+  ) => {
+    const value = harness();
+    const mutation = expectedMode === 'apply'
+      ? ['--apply', '--expected-plan-id', PLAN_ID, '--force']
+      : [];
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', command, source,
+      ...assertions, ...mutation,
+    ]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.admissions).toEqual([]);
+    expect(value.exitCodes).toEqual([20]);
+    expect(value.writes).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      status: 'error', command: `project-template ${command}`,
+      mode: expectedMode, error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
+  it('does not count an attached option value that equals the option name', async () => {
+    const value = harness({ currentTaktVersion: '--current-takt-version' });
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', 'diff', './template.taktpack',
+      '--current-takt-version=--current-takt-version',
+    ]);
+
+    expect(value.dispatch).toHaveBeenCalledOnce();
+    expect(value.requests[0]).toMatchObject({
+      command: 'project-template diff',
+      currentTaktVersion: '--current-takt-version',
+    });
+  });
+
   it('rejects force-only and expected-plan drift options before dispatch', async () => {
     const force = harness();
     await force.program.parseAsync([

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -138,6 +138,55 @@ describe('project-template CLI entrypoint contract', () => {
       });
     }
   });
+
+  it('rejects duplicate runtime assertions in every source command before filesystem work', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'takt-cli-duplicate-version-'));
+    roots.push(root);
+    const cases = [
+      [
+        'inspect', './missing.taktpack',
+        ['--current-takt-version', '99.0.0', '--current-takt-version', '0.48.0'],
+        'dry-run',
+      ],
+      [
+        'diff', './missing.taktpack',
+        ['--current-takt-version', '0.48.0', '--current-takt-version', '99.0.0'],
+        'dry-run',
+      ],
+      [
+        'apply', './missing.taktpack',
+        ['--current-takt-version', '0.48.0', '--current-takt-version', '0.48.0'],
+        'apply',
+      ],
+      [
+        'update', 'github:owner/template@v1.0.0',
+        ['--current-takt-version=0.48.0', '--current-takt-version', '99.0.0'],
+        'apply',
+      ],
+    ] as const;
+
+    for (const [command, source, assertions, mode] of cases) {
+      const cwd = join(root, command);
+      await mkdir(cwd);
+      const mutation = mode === 'apply'
+        ? ['--apply', '--expected-plan-id', 'a'.repeat(64), '--force']
+        : [];
+      const result = run([
+        '--cwd', cwd, 'project-template', command, source,
+        ...assertions, ...mutation,
+      ]);
+
+      expect(result.status).toBe(20);
+      expect(result.stderr).toBe('');
+      expect(result.stdout.trim().split('\n')).toHaveLength(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        schemaVersion: '1.0', status: 'error',
+        command: `project-template ${command}`, mode,
+        error: { code: 'INVALID_ARGUMENT' },
+      });
+      expect(await readdir(cwd)).toEqual([]);
+    }
+  }, 15_000);
 
   it('returns one INTERRUPTED envelope and exit 130 for in-flight SIGINT', async () => {
     const cache = resolve('node_modules/.cache');
