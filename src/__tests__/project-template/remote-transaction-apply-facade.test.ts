@@ -7,10 +7,11 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyGithubProjectTemplateRemoteTransaction,
@@ -26,6 +27,9 @@ import {
 import {
   acquireProjectTemplateApplyLease,
 } from '../../features/project-template/apply-lease.js';
+import {
+  resolveProjectTemplateApplyLeasePath,
+} from '../../features/project-template/apply-guard.js';
 import {
   storeGithubTemplateDownloadReceipt,
   type GithubTemplateDownloadReceiptVerifier,
@@ -45,6 +49,18 @@ import {
   serializeProjectTemplateSourceDescriptor,
   type ProjectTemplateSourceDescriptorV1,
 } from '../../features/project-template/source-descriptor.js';
+import { serializeTemplateLock } from '../../features/project-template/lock.js';
+import {
+  PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+  serializeProjectTemplateRepertoireDependencyLock,
+} from '../../features/project-template/repertoire-dependency-lock.js';
+import {
+  PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+  serializeProjectTemplateSourceProvenance,
+} from '../../features/project-template/source-provenance.js';
+import {
+  calculateProjectTemplateRepertoireDependencyDeclarationSha256,
+} from '../../features/project-template/repertoire-dependency-canonical.js';
 
 const roots: string[] = [];
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
@@ -194,12 +210,79 @@ async function storedFixture() {
     artifactPath: materialized.cachePath,
     receiptPath,
     prepared,
+    exportPlan,
     projectRoot: root('takt-remote-apply-target-'),
   };
 }
 
 function flipFirstHexBit(value: string): string {
   return `${value[0] === '0' ? '1' : '0'}${value.slice(1)}`;
+}
+
+function installedCohortContents(): Readonly<Record<string, string>> {
+  const manifestSha256 = 'c'.repeat(64);
+  const descriptorSha256 = 'd'.repeat(64);
+  return Object.freeze({
+    '.takt-template-lock.json': serializeTemplateLock({
+      schemaVersion: '1.0',
+      manifestSha256,
+      packVersion: '1.1.0',
+      source: {
+        kind: 'github',
+        uri: 'https://github.com/acme/template',
+        ref: 'v1.1.0',
+        commit: COMMIT,
+      },
+      capabilities: [],
+      entries: [],
+    }),
+    [PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH]:
+      serializeProjectTemplateRepertoireDependencyLock({
+        schemaVersion: '1.0',
+        sourceDescriptorSha256: descriptorSha256,
+        manifestSha256,
+        dependencies: [],
+      }),
+    [PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH]:
+      serializeProjectTemplateSourceProvenance({
+        schemaVersion: '1.0',
+        source: {
+          owner: 'acme',
+          repo: 'template',
+          repositoryUrl: 'https://github.com/acme/template',
+          canonicalSource: 'github:acme/template@main',
+          requestedRef: 'main',
+          releaseTag: 'v1.1.0',
+          commit: COMMIT,
+          descriptorSha256,
+        },
+        archive: {
+          sha256: 'e'.repeat(64),
+          version: '1.1.0',
+          manifestSha256,
+        },
+        dependencyVerification: {
+          method: 'github-ref-to-commit-v1',
+          declarationSha256:
+            calculateProjectTemplateRepertoireDependencyDeclarationSha256([]),
+          count: 0,
+        },
+      }),
+  });
+}
+
+function writeInstalledCohort(projectRoot: string): void {
+  for (const [path, content] of Object.entries(installedCohortContents())) {
+    writeFileSync(join(projectRoot, path), content, { mode: 0o600 });
+  }
+}
+
+function inspectionPort(witness = 'e'.repeat(64)) {
+  return {
+    inspect() {
+      return { witnessSha256: witness, observations: [] };
+    },
+  };
 }
 
 describe('GitHub project template remote transaction apply facade', () => {
@@ -359,5 +442,198 @@ describe('GitHub project template remote transaction apply facade', () => {
       code: 'TRANSACTION_PLAN_MISMATCH',
     });
     expect(applyInspections).toBe(1);
+  });
+
+  it('rejects a content target drift observed after preview', async () => {
+    const value = await storedFixture();
+    expect(value.exportPlan.manifest.entries[0]!.path)
+      .toBe('workflows/review.yaml');
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    const targetPath = join(
+      value.projectRoot,
+      '.takt',
+      value.exportPlan.manifest.entries[0]!.path,
+    );
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(
+      targetPath,
+      'name: locally changed\n',
+    );
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: inspectionPort(),
+    });
+
+    await expect(composition.apply({
+      ...publicOptions(value.cacheRoot, value.projectRoot),
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: preview.transactionPlanId,
+    })).rejects.toMatchObject({ code: 'TRANSACTION_PLAN_MISMATCH' });
+  });
+
+  it.each([
+    [
+      'content',
+      '.takt-template-lock.json',
+      'TRANSACTION_PLAN_MISMATCH',
+      (content: string) => {
+        const value = JSON.parse(content) as Record<string, unknown>;
+        value['entries'] = [{
+          path: 'workflows/previous.yaml',
+          policy: 'managed',
+          mode: '0644',
+          sha256: 'f'.repeat(64),
+          capabilities: [],
+        }];
+        return serializeTemplateLock(value);
+      },
+    ],
+    [
+      'dependency',
+      PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+      'INVALID_LOCK',
+      (content: string) => {
+        const value = JSON.parse(content) as Record<string, unknown>;
+        value['sourceDescriptorSha256'] = 'f'.repeat(64);
+        return serializeProjectTemplateRepertoireDependencyLock(value);
+      },
+    ],
+    [
+      'source',
+      PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+      'TRANSACTION_PLAN_MISMATCH',
+      (content: string) => {
+        const value = JSON.parse(content) as {
+          archive: Record<string, unknown>;
+        };
+        value.archive['sha256'] = 'f'.repeat(64);
+        return serializeProjectTemplateSourceProvenance(value);
+      },
+    ],
+  ] as const)(
+    'rejects an independently changed %s lock generation',
+    async (_label, changedPath, expectedCode, mutate) => {
+      const value = await storedFixture();
+      writeInstalledCohort(value.projectRoot);
+      const preview = await createGithubProjectTemplateRemotePreview({
+        cacheRoot: value.cacheRoot,
+        receiptKey: value.prepared.receiptKey,
+        verifier: verifier(),
+        projectRoot: value.projectRoot,
+        currentTaktVersion: '0.48.0',
+        repertoireInspectionPort: inspectionPort(),
+        baselineStrategy: 'conflict',
+      });
+      const path = join(value.projectRoot, changedPath);
+      writeFileSync(path, mutate(readFileSync(path, 'utf8')));
+      const composition = createProjectTemplateRemoteApplyComposition({
+        verifier: verifier(),
+        repertoireInspectionPort: inspectionPort(),
+      });
+
+      await expect(composition.apply({
+        ...publicOptions(value.cacheRoot, value.projectRoot),
+        receiptKey: value.prepared.receiptKey,
+        expectedTransactionPlanId: preview.transactionPlanId,
+      })).rejects.toMatchObject({ code: expectedCode });
+    },
+  );
+
+  it('rejects a mixed-generation companion lock cohort', async () => {
+    const value = await storedFixture();
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    writeFileSync(
+      join(value.projectRoot, '.takt-template-lock.json'),
+      installedCohortContents()['.takt-template-lock.json']!,
+    );
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: inspectionPort(),
+    });
+
+    await expect(composition.apply({
+      ...publicOptions(value.cacheRoot, value.projectRoot),
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: preview.transactionPlanId,
+    })).rejects.toMatchObject({ code: 'MIXED_STATE' });
+  });
+
+  it('rejects an exact transaction plan that contains a hard conflict', async () => {
+    const value = await storedFixture();
+    const targetPath = join(
+      value.projectRoot,
+      '.takt',
+      value.exportPlan.manifest.entries[0]!.path,
+    );
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(
+      targetPath,
+      'name: local\n',
+    );
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    expect(preview.hardConflict).toBe(true);
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: inspectionPort(),
+    });
+
+    await expect(composition.apply({
+      ...publicOptions(value.cacheRoot, value.projectRoot),
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: preview.transactionPlanId,
+    })).rejects.toMatchObject({ code: 'HARD_CONFLICT' });
+  });
+
+  it('reasserts lease ownership immediately after receipt verification awaits', async () => {
+    const value = await storedFixture();
+    let inspections = 0;
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: {
+        async verify({ input, tag }) {
+          unlinkSync(resolveProjectTemplateApplyLeasePath(value.projectRoot));
+          return createHmac('sha256', SECRET).update(input).digest('hex') === tag
+            ? 'valid'
+            : 'invalid';
+        },
+      },
+      repertoireInspectionPort: {
+        inspect() {
+          inspections += 1;
+          return { witnessSha256: 'e'.repeat(64), observations: [] };
+        },
+      },
+    });
+
+    await expect(composition.apply({
+      ...publicOptions(value.cacheRoot, value.projectRoot),
+      receiptKey: value.prepared.receiptKey,
+    } as never)).rejects.toMatchObject({
+      code: 'PROJECT_TEMPLATE_COORDINATION_UNAVAILABLE',
+    });
+    expect(inspections).toBe(0);
   });
 });
