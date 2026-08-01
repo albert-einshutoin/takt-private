@@ -4,8 +4,8 @@ import {
   snapshotProjectTemplateCliJson,
 } from './cli-bounded-json.js';
 import { ProjectTemplateCliContractError } from './cli-contract-error.js';
+import { DEFAULT_TAKTPACK_LIMITS } from './archive-types.js';
 import { MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES } from './source-descriptor.js';
-import { PROJECT_TEMPLATE_TRANSACTION_LIMITS } from './transaction-limits.js';
 import { MAX_TEMPLATE_ENTRIES } from './validation.js';
 
 export { ProjectTemplateCliContractError } from './cli-contract-error.js';
@@ -245,6 +245,25 @@ export type ProjectTemplateCliMutationOptions =
   | ProjectTemplateCliDryRunOptions
   | ProjectTemplateCliApplyOptions;
 
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_ARRAY_IS_ARRAY = Array.isArray;
+const CAPTURED_ARRAY_RECEIVER = Array;
+const CAPTURED_ARRAY_PUSH = Array.prototype.push;
+const CAPTURED_OBJECT_KEYS = Object.keys;
+const CAPTURED_OBJECT_HAS_OWN = Object.hasOwn;
+const CAPTURED_OBJECT_FREEZE = Object.freeze;
+const CAPTURED_OBJECT_RECEIVER = Object;
+const CAPTURED_NUMBER_IS_SAFE_INTEGER = Number.isSafeInteger;
+const CAPTURED_NUMBER_RECEIVER = Number;
+const CAPTURED_SET_HAS = Set.prototype.has;
+const CAPTURED_SET_ADD = Set.prototype.add;
+const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
+const CAPTURED_STRING_STARTS_WITH = String.prototype.startsWith;
+
+function apply<T>(fn: (...args: never[]) => T, receiver: unknown, args: unknown[]): T {
+  return CAPTURED_REFLECT_APPLY(fn, receiver, args) as T;
+}
+
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
 const TOKEN_PATTERN = /(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/u;
@@ -263,14 +282,14 @@ const COMMANDS = new Set<ProjectTemplateCliCommand>([
   'project-template rollback',
   'project-template list',
 ]);
-const WARNING_CODES = Object.freeze({
+const WARNING_CODES = apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{
   DEPRECATED_SOURCE: true,
   PARTIAL_RESULT: true,
   RECOVERY_AVAILABLE: true,
   REVIEW_REQUIRED: true,
   UPDATE_AVAILABLE: true,
-} as const satisfies Readonly<Record<ProjectTemplateCliWarningCode, true>>);
-const REVIEW_CODES = Object.freeze({
+} as const satisfies Readonly<Record<ProjectTemplateCliWarningCode, true>>]);
+const REVIEW_CODES = apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{
   ACTIVE_RUN: true,
   DEPENDENCY_CONFLICT: true,
   HARD_CONFLICT: true,
@@ -278,9 +297,12 @@ const REVIEW_CODES = Object.freeze({
   REVIEW_REQUIRED: true,
   SOURCE_DRIFT: true,
   TARGET_DRIFT: true,
-} as const satisfies Readonly<Record<ProjectTemplateCliReviewCode, true>>);
+} as const satisfies Readonly<Record<ProjectTemplateCliReviewCode, true>>]);
 
-export const PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES = Object.freeze({
+export const PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES = apply(
+  CAPTURED_OBJECT_FREEZE,
+  CAPTURED_OBJECT_RECEIVER,
+  [{
   EXPECTED_PLAN_ID_REQUIRES_APPLY: 20,
   INVALID_APPLY_INPUT: 20,
   INVALID_ARGUMENT: 20,
@@ -317,10 +339,11 @@ export const PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES = Object.freeze({
   INTERNAL: 70,
   PROTOCOL_ERROR: 70,
   INTERRUPTED: 130,
-} as const satisfies Readonly<Record<
+  } as const satisfies Readonly<Record<
   ProjectTemplateCliErrorCode,
   ProjectTemplateCliExitCode
->>);
+  >>],
+) as Readonly<Record<ProjectTemplateCliErrorCode, ProjectTemplateCliExitCode>>;
 
 function invalidSchema(): never {
   throw new ProjectTemplateCliContractError(
@@ -332,7 +355,7 @@ function invalidSchema(): never {
 function isArray(
   value: ProjectTemplateCliJson | undefined,
 ): value is readonly ProjectTemplateCliJson[] {
-  return Array.isArray(value);
+  return apply(CAPTURED_ARRAY_IS_ARRAY, CAPTURED_ARRAY_RECEIVER, [value]);
 }
 
 function isRecord(
@@ -345,8 +368,15 @@ function hasExactKeys(
   value: Readonly<Record<string, ProjectTemplateCliJson>>,
   keys: readonly string[],
 ): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+  const actual = apply(CAPTURED_OBJECT_KEYS, CAPTURED_OBJECT_RECEIVER, [value]);
+  if (actual.length !== keys.length) return false;
+  for (let index = 0; index < keys.length; index += 1) {
+    if (!apply(CAPTURED_OBJECT_HAS_OWN, CAPTURED_OBJECT_RECEIVER, [
+      value,
+      keys[index]!,
+    ])) return false;
+  }
+  return true;
 }
 
 function isCount(
@@ -354,19 +384,19 @@ function isCount(
   maximum: number,
 ): value is number {
   return typeof value === 'number'
-    && Number.isSafeInteger(value)
+    && apply(CAPTURED_NUMBER_IS_SAFE_INTEGER, CAPTURED_NUMBER_RECEIVER, [value])
     && value >= 0
     && value <= maximum;
 }
 
 function isHash(value: ProjectTemplateCliJson | undefined): value is string {
-  return typeof value === 'string' && HASH_PATTERN.test(value);
+  return typeof value === 'string' && apply(CAPTURED_REGEXP_TEST, HASH_PATTERN, [value]);
 }
 
 function isSafeId(value: ProjectTemplateCliJson | undefined): value is string {
   return typeof value === 'string'
-    && ID_PATTERN.test(value)
-    && !TOKEN_PATTERN.test(value);
+    && apply(CAPTURED_REGEXP_TEST, ID_PATTERN, [value])
+    && !apply(CAPTURED_REGEXP_TEST, TOKEN_PATTERN, [value]);
 }
 
 function assertExactResult(
@@ -395,16 +425,17 @@ function validateReviewSummary(
     invalidSchema();
   }
   const unique = new Set<ProjectTemplateCliReviewCode>();
-  for (const value of result.reviewCodes) {
+  for (let index = 0; index < result.reviewCodes.length; index += 1) {
+    const value = result.reviewCodes[index]!;
     const code = value as ProjectTemplateCliReviewCode;
     if (
       typeof value !== 'string'
-      || !Object.hasOwn(REVIEW_CODES, code)
-      || unique.has(code)
+      || !apply(CAPTURED_OBJECT_HAS_OWN, CAPTURED_OBJECT_RECEIVER, [REVIEW_CODES, code])
+      || apply(CAPTURED_SET_HAS, unique, [code])
     ) {
       invalidSchema();
     }
-    unique.add(code);
+    apply(CAPTURED_SET_ADD, unique, [code]);
   }
   if ((result.readiness === 'ready') !== (result.reviewCodes.length === 0)) {
     invalidSchema();
@@ -435,7 +466,7 @@ function validateResult(
     if (!isHash(result.planId)
       || (mode === 'apply' && !isHash(result.packId))
       || !isCount(result.entryCount, MAX_TEMPLATE_ENTRIES)
-      || !isCount(result.archiveBytes, PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes)
+      || !isCount(result.archiveBytes, DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes)
       || !isCount(
         result.dependencyCount,
         MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES,
@@ -449,7 +480,7 @@ function validateResult(
     validateReviewSummary(result);
     if (!isHash(result.packId)
       || !isCount(result.entryCount, MAX_TEMPLATE_ENTRIES)
-      || !isCount(result.archiveBytes, PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxBytes)
+      || !isCount(result.archiveBytes, DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes)
       || !isCount(
         result.dependencyCount,
         MAX_PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCIES,
@@ -541,9 +572,12 @@ function validateResult(
       || !isRecoveryState(result.recoveryState)
       || (result.installed && !isSafeId(result.targetId))) invalidSchema();
     const unique = new Set<string>();
-    for (const backupId of result.backupIds) {
-      if (!isSafeId(backupId) || unique.has(backupId)) invalidSchema();
-      unique.add(backupId);
+    for (let index = 0; index < result.backupIds.length; index += 1) {
+      const backupId = result.backupIds[index]!;
+      if (!isSafeId(backupId) || apply(CAPTURED_SET_HAS, unique, [backupId])) {
+        invalidSchema();
+      }
+      apply(CAPTURED_SET_ADD, unique, [backupId]);
     }
   }
   return result as ProjectTemplateCliResult;
@@ -553,22 +587,29 @@ function validateWarnings(value: ProjectTemplateCliJson | undefined): readonly P
   if (value === undefined || !isArray(value) || value.length > MAX_WARNINGS) invalidSchema();
   const warnings: ProjectTemplateCliWarning[] = [];
   const unique = new Set<ProjectTemplateCliWarningCode>();
-  for (const warning of value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const warning = value[index]!;
     if (!isRecord(warning) || !hasExactKeys(warning, ['code']) || typeof warning.code !== 'string') {
       invalidSchema();
     }
     const code = warning.code as ProjectTemplateCliWarningCode;
     if (
-      !SYMBOLIC_CODE_PATTERN.test(code)
-      || !Object.hasOwn(WARNING_CODES, code)
-      || unique.has(code)
+      !apply(CAPTURED_REGEXP_TEST, SYMBOLIC_CODE_PATTERN, [code])
+      || !apply(CAPTURED_OBJECT_HAS_OWN, CAPTURED_OBJECT_RECEIVER, [WARNING_CODES, code])
+      || apply(CAPTURED_SET_HAS, unique, [code])
     ) {
       invalidSchema();
     }
-    unique.add(code);
-    warnings.push({ code });
+    apply(CAPTURED_SET_ADD, unique, [code]);
+    apply(CAPTURED_ARRAY_PUSH, warnings, [
+      apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{ code }]),
+    ]);
   }
-  return Object.freeze(warnings.map((warning) => Object.freeze(warning)));
+  return apply(
+    CAPTURED_OBJECT_FREEZE,
+    CAPTURED_OBJECT_RECEIVER,
+    [warnings],
+  ) as readonly ProjectTemplateCliWarning[];
 }
 
 function snapshotJson(value: unknown): ProjectTemplateCliJson {
@@ -585,7 +626,9 @@ export function snapshotProjectTemplateCliEnvelope(value: unknown): ProjectTempl
   if (!isRecord(snapshot)
     || snapshot.schemaVersion !== PROJECT_TEMPLATE_CLI_SCHEMA_VERSION
     || typeof snapshot.command !== 'string'
-    || !COMMANDS.has(snapshot.command as ProjectTemplateCliCommand)
+    || !apply(CAPTURED_SET_HAS, COMMANDS, [
+      snapshot.command as ProjectTemplateCliCommand,
+    ])
     || (snapshot.mode !== 'dry-run' && snapshot.mode !== 'apply')
     || (snapshot.status !== 'success' && snapshot.status !== 'error')) invalidSchema();
   const command = snapshot.command as ProjectTemplateCliCommand;
@@ -602,14 +645,14 @@ export function snapshotProjectTemplateCliEnvelope(value: unknown): ProjectTempl
     if (!hasExactKeys(snapshot, [
       'schemaVersion', 'command', 'status', 'mode', 'result', 'warnings',
     ])) invalidSchema();
-    return Object.freeze({
+    return apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{
       schemaVersion: PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
       command,
       status: 'success',
       mode: snapshot.mode,
       result: validateResult(command, snapshot.mode, snapshot.result),
       warnings,
-    }) as ProjectTemplateCliSuccessEnvelope;
+    }]) as ProjectTemplateCliSuccessEnvelope;
   }
   if (!hasExactKeys(snapshot, [
     'schemaVersion', 'command', 'status', 'mode', 'error', 'warnings',
@@ -617,17 +660,20 @@ export function snapshotProjectTemplateCliEnvelope(value: unknown): ProjectTempl
     || typeof snapshot.error.code !== 'string') invalidSchema();
   const code = snapshot.error.code as ProjectTemplateCliErrorCode;
   if (
-    !SYMBOLIC_CODE_PATTERN.test(code)
-    || !Object.hasOwn(PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES, code)
+    !apply(CAPTURED_REGEXP_TEST, SYMBOLIC_CODE_PATTERN, [code])
+    || !apply(CAPTURED_OBJECT_HAS_OWN, CAPTURED_OBJECT_RECEIVER, [
+      PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES,
+      code,
+    ])
   ) invalidSchema();
-  return Object.freeze({
+  return apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{
     schemaVersion: PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
     command,
     status: 'error',
     mode: snapshot.mode,
-    error: Object.freeze({ code }),
+    error: apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{ code }]),
     warnings,
-  }) as ProjectTemplateCliFailureEnvelope;
+  }]) as ProjectTemplateCliFailureEnvelope;
 }
 
 export function snapshotProjectTemplateCliOutcome(value: unknown): ProjectTemplateCliOutcome {
@@ -639,7 +685,10 @@ export function snapshotProjectTemplateCliOutcome(value: unknown): ProjectTempla
     ? 0
     : projectTemplateCliExitCodeForErrorCode(envelope.error.code);
   if (snapshot.exitCode !== expectedExitCode) invalidSchema();
-  return Object.freeze({ envelope, exitCode: expectedExitCode });
+  return apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{
+    envelope,
+    exitCode: expectedExitCode,
+  }]) as ProjectTemplateCliOutcome;
 }
 
 export type ProjectTemplateCliSuccessInput =
@@ -703,7 +752,10 @@ export async function writeProjectTemplateCliOutcome(
 }
 
 export function projectTemplateCliExitCodeForErrorCode(code: string): ProjectTemplateCliExitCode {
-  return Object.hasOwn(PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES, code)
+  return apply(CAPTURED_OBJECT_HAS_OWN, CAPTURED_OBJECT_RECEIVER, [
+    PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES,
+    code,
+  ])
     ? PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES[code as ProjectTemplateCliErrorCode]
     : 70;
 }
@@ -715,15 +767,15 @@ function usageError(code: ProjectTemplateCliErrorCode, message: string): never {
 export function parseProjectTemplateCliMutationOptions(
   argv: readonly string[],
 ): ProjectTemplateCliMutationOptions {
-  let apply = false;
+  let applyMode = false;
   let dryRun = false;
   let force = false;
   let expectedPlanId: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--apply') {
-      if (apply) usageError('INVALID_ARGUMENT', '--apply may only be provided once');
-      apply = true;
+      if (applyMode) usageError('INVALID_ARGUMENT', '--apply may only be provided once');
+      applyMode = true;
     } else if (argument === '--dry-run') {
       if (dryRun) usageError('INVALID_ARGUMENT', '--dry-run may only be provided once');
       dryRun = true;
@@ -735,7 +787,10 @@ export function parseProjectTemplateCliMutationOptions(
         usageError('INVALID_ARGUMENT', '--expected-plan-id may only be provided once');
       }
       const candidate = argv[index + 1];
-      if (candidate === undefined || candidate.startsWith('--')) {
+      if (
+        candidate === undefined
+        || apply(CAPTURED_STRING_STARTS_WITH, candidate, ['--'])
+      ) {
         usageError('MISSING_EXPECTED_PLAN_ID', '--expected-plan-id requires a value');
       }
       expectedPlanId = candidate;
@@ -744,19 +799,26 @@ export function parseProjectTemplateCliMutationOptions(
       usageError('UNKNOWN_OPTION', 'unknown project-template mutation option');
     }
   }
-  if (apply && dryRun) {
+  if (applyMode && dryRun) {
     usageError('MUTUALLY_EXCLUSIVE_OPTIONS', '--apply and --dry-run are exclusive');
   }
-  if (!apply && expectedPlanId !== undefined) {
+  if (!applyMode && expectedPlanId !== undefined) {
     usageError('EXPECTED_PLAN_ID_REQUIRES_APPLY', '--expected-plan-id is only valid with --apply');
   }
-  if (apply && expectedPlanId === undefined) {
+  if (applyMode && expectedPlanId === undefined) {
     usageError('MISSING_EXPECTED_PLAN_ID', '--apply requires --expected-plan-id');
   }
-  if (expectedPlanId !== undefined && !HASH_PATTERN.test(expectedPlanId)) {
+  if (
+    expectedPlanId !== undefined
+    && !apply(CAPTURED_REGEXP_TEST, HASH_PATTERN, [expectedPlanId])
+  ) {
     usageError('INVALID_EXPECTED_PLAN_ID', 'expected plan id must be lowercase sha256');
   }
-  return apply
-    ? Object.freeze({ mode: 'apply', expectedPlanId: expectedPlanId!, force })
-    : Object.freeze({ mode: 'dry-run', force });
+  return (applyMode
+    ? apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{
+      mode: 'apply', expectedPlanId: expectedPlanId!, force,
+    }])
+    : apply(CAPTURED_OBJECT_FREEZE, CAPTURED_OBJECT_RECEIVER, [{
+      mode: 'dry-run', force,
+    }])) as ProjectTemplateCliMutationOptions;
 }

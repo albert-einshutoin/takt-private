@@ -150,7 +150,8 @@ function validateBoundedGraph(root: unknown): void {
       keys.length > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxContainerEntries
       || keys.length > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxNodes - nodes
     ) invalidGraph();
-    for (const key of keys) {
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index]!;
       if (typeof key !== 'string') invalidGraph();
       stringBytes += utf8Bytes(key);
       if (stringBytes > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxBytes) invalidGraph();
@@ -245,7 +246,8 @@ export function snapshotProjectTemplateCliJson(value: unknown): unknown {
   while (pending.length > 0) {
     const current = apply(CAPTURED_ARRAY_POP, pending, [])!;
     const children = apply(CAPTURED_OBJECT_VALUES, CAPTURED_OBJECT_RECEIVER, [current]);
-    for (const child of children) {
+    for (let index = 0; index < children.length; index += 1) {
+      const child = children[index];
       if (child !== null && typeof child === 'object') {
         apply(CAPTURED_ARRAY_PUSH, pending, [child]);
       }

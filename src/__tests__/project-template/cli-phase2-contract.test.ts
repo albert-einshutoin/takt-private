@@ -51,6 +51,17 @@ function rejectAllWithPoison(receiver: object, key: PropertyKey): boolean {
       dependencyCount: 0, readiness: 'ready' as const, reviewCodes: [],
     },
   };
+  const valid = JSON.stringify({
+    schemaVersion: '1.0',
+    command: 'project-template inspect',
+    status: 'success',
+    mode: 'dry-run',
+    result: {
+      packId: HASH, entryCount: 1, archiveBytes: 1, dependencyCount: 0,
+      readiness: 'review-required', reviewCodes: ['REVIEW_REQUIRED'],
+    },
+    warnings: [{ code: 'PARTIAL_RESULT' }],
+  });
   return runWithPoison(receiver, key, () => {
     const operations = [
       () => parseProjectTemplateCliEnvelopeJson(unknownCommand),
@@ -65,7 +76,7 @@ function rejectAllWithPoison(receiver: object, key: PropertyKey): boolean {
         if (!(error instanceof ProjectTemplateCliContractError)) return false;
       }
     }
-    return true;
+    return parseProjectTemplateCliEnvelopeJson(valid).status === 'success';
   }) as boolean;
 }
 
@@ -95,7 +106,10 @@ describe('project template CLI phase 2 contract', () => {
     ['Array.isArray', Array, 'isArray'],
     ['Object.keys', Object, 'keys'],
     ['Object.hasOwn', Object, 'hasOwn'],
+    ['Object.freeze', Object, 'freeze'],
     ['Number.isSafeInteger', Number, 'isSafeInteger'],
+    ['Array.push', Array.prototype, 'push'],
+    ['Array.iterator', Array.prototype, Symbol.iterator],
     ['Set.has', Set.prototype, 'has'],
     ['Set.add', Set.prototype, 'add'],
     ['RegExp.test', RegExp.prototype, 'test'],
