@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync, type Stats } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, type Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -214,6 +214,37 @@ describe('project-template list CLI service', () => {
       },
     });
     expect(readdirSync(root)).toEqual(before);
+  });
+
+  it('reads installed state from the canonical project-template control root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-cli-list-installed-'));
+    roots.push(root);
+    mkdirSync(join(root, '.takt-template-state', 'merge-baselines'), {
+      recursive: true,
+      mode: 0o700,
+    });
+    mkdirSync(join(root, '.takt-template-state', 'backups'), { mode: 0o700 });
+
+    const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: root }, {
+      readCompanionLockState: vi.fn(() => ({
+        state: 'update',
+        previousLocksSha256: SHA,
+        contentLock: { manifestSha256: SHA },
+      })),
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        result: {
+          installed: true,
+          targetId: SHA,
+          backupIds: [],
+          recoveryState: 'clean',
+        },
+      },
+    });
   });
 
   it('reports first-install with only bounded backup-generation identifiers', async () => {
