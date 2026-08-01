@@ -85,6 +85,8 @@ export class CoordinationWindowsSentinelTimeoutError extends Error {
   }
 }
 
+class CoordinationWindowsSentinelSnapshotChangedError extends Error {}
+
 export async function openWindowsCoordinationSentinelBounded(options: {
   readonly rootAuthority: WindowsSentinelRootAuthority;
   readonly dependencies?: WindowsSentinelDependencies;
@@ -158,7 +160,12 @@ export function openWindowsCoordinationSentinel(options: {
       }
       dependencies.unlink(ownPublishingPath);
       ownPublishingPath = undefined;
-      dependencies.close(sentinelFd);
+      const stagedFdToClose = sentinelFd;
+      // A failed close may still release the OS handle and allow its numeric
+      // value to be recycled. Terminalize ownership before calling close so
+      // outer cleanup can never target a different handle with the same value.
+      sentinelFd = undefined;
+      dependencies.close(stagedFdToClose);
       sentinelFd = openExistingSentinel(dependencies, sentinelPath);
     } else {
       sentinelFd = openExistingSentinel(dependencies, sentinelPath);
@@ -245,47 +252,77 @@ function assertKnownPublishingEntries(
 ): void {
   let publishing = false;
   let malformed = false;
-  for (const name of dependencies.list(coordinationRoot)) {
-    // Lease claims also use a .publishing suffix in this directory. Sentinel
-    // recovery owns only its reserved prefix and must not reinterpret valid
-    // lease transitions as malformed sentinel state.
-    if (!name.startsWith(`${SENTINEL_FILENAME}.`)) continue;
-    if (!name.endsWith(PUBLISHING_SUFFIX)) throw failed();
-    const match = PUBLISHING_PATTERN.exec(name);
-    if (match === null || !UUID.test(match[1]!)) throw failed();
-    const stat = dependencies.lstat(win32.join(coordinationRoot, name));
-    const publishingStat = requirePublishing(stat);
-    if (publishingStat.nlink === 2n) {
-      const published = requirePublishing(
-        dependencies.lstat(win32.join(coordinationRoot, SENTINEL_FILENAME)),
-      );
-      if (
-        published.nlink !== 2n
-        || published.dev !== publishingStat.dev
-        || published.ino !== publishingStat.ino
-      ) throw failed();
-    }
-    publishing = true;
-    if (publishingStat.size > 0n) {
-      let fd: number | undefined;
-      try {
-        fd = dependencies.openSentinelRead(win32.join(coordinationRoot, name));
-        const opened = requirePublishing(dependencies.fstat(fd));
-        const after = requirePublishing(dependencies.lstat(win32.join(coordinationRoot, name)));
-        assertSameStableFile(opened, after);
-        try {
-          parseCanonicalSentinel(dependencies.readSentinel(fd, MAX_SENTINEL_BYTES + 1));
-        } catch {
-          malformed = true;
-        }
-      } finally {
-        if (fd !== undefined) dependencies.close(fd);
+  try {
+    for (const name of dependencies.list(coordinationRoot)) {
+      // Lease claims also use a .publishing suffix in this directory. Sentinel
+      // recovery owns only its reserved prefix and must not reinterpret valid
+      // lease transitions as malformed sentinel state.
+      if (!name.startsWith(`${SENTINEL_FILENAME}.`)) continue;
+      if (!name.endsWith(PUBLISHING_SUFFIX)) throw failed();
+      const match = PUBLISHING_PATTERN.exec(name);
+      if (match === null || !UUID.test(match[1]!)) throw failed();
+      const publishingPath = win32.join(coordinationRoot, name);
+      const publishingStat = requirePublishingSnapshot(dependencies.lstat(publishingPath));
+      if (publishingStat.nlink === 2n) {
+        const published = requirePublishingSnapshot(
+          dependencies.lstat(win32.join(coordinationRoot, SENTINEL_FILENAME)),
+        );
+        if (
+          published.nlink !== 2n
+          || published.dev !== publishingStat.dev
+          || published.ino !== publishingStat.ino
+        ) throw changed();
       }
-    } else {
-      malformed = true;
+      publishing = true;
+      if (publishingStat.size > 0n) {
+        let fd: number | undefined;
+        try {
+          try {
+            fd = dependencies.openSentinelRead(publishingPath);
+          } catch (error) {
+            if (isMissing(error)) throw changed();
+            throw error;
+          }
+          const opened = requirePublishing(dependencies.fstat(fd));
+          const after = requirePublishingSnapshot(dependencies.lstat(publishingPath));
+          if (!sameStableFile(opened, after)) throw changed();
+          let stagedBytes: Buffer;
+          try {
+            stagedBytes = dependencies.readSentinel(fd, MAX_SENTINEL_BYTES + 1);
+          } catch (error) {
+            if (isMissing(error)) throw changed();
+            throw error;
+          }
+          try {
+            parseCanonicalSentinel(stagedBytes);
+          } catch {
+            malformed = true;
+          }
+        } finally {
+          if (fd !== undefined) {
+            const fdToClose = fd;
+            fd = undefined;
+            dependencies.close(fdToClose);
+          }
+        }
+      } else {
+        malformed = true;
+      }
     }
+  } catch (error) {
+    if (error instanceof CoordinationWindowsSentinelSnapshotChangedError) {
+      throw new CoordinationWindowsSentinelBusyError(malformed);
+    }
+    throw error;
   }
   if (publishing) throw new CoordinationWindowsSentinelBusyError(malformed);
+}
+
+function requirePublishingSnapshot(
+  stat: WindowsSentinelFileStat | undefined,
+): WindowsSentinelFileStat {
+  if (stat === undefined) throw changed();
+  return requirePublishing(stat);
 }
 
 function requirePublishing(
@@ -372,6 +409,15 @@ function assertSameStableFile(left: WindowsSentinelFileStat, right: WindowsSenti
   if (left.size !== right.size || left.nlink !== right.nlink) throw failed();
 }
 
+function sameStableFile(left: WindowsSentinelFileStat, right: WindowsSentinelFileStat): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+    && left.size === right.size
+    && left.nlink === right.nlink;
+}
+
 const builtinDependencies: WindowsSentinelDependencies = {
   lstat(path): WindowsSentinelFileStat | undefined {
     try {
@@ -437,4 +483,8 @@ function errorCode(error: unknown): unknown {
 
 function failed(): CoordinationWindowsSentinelError {
   return new CoordinationWindowsSentinelError();
+}
+
+function changed(): CoordinationWindowsSentinelSnapshotChangedError {
+  return new CoordinationWindowsSentinelSnapshotChangedError();
 }

@@ -153,6 +153,67 @@ describe('Windows coordination root sentinel', () => {
     expect(authority.token).toBe(TOKEN);
   });
 
+  it.each(['unlinked-after-list', 'finalized-link-pair', 'open-enoent', 'read-enoent'] as const)(
+    'retries the normal publisher %s race instead of reporting unsafe state',
+    (race) => {
+      const value = fixture(true);
+      const staging = `${SENTINEL}.${TOKEN}.publishing`;
+      value.paths.set(staging, value.paths.get(SENTINEL)!);
+      if (race === 'unlinked-after-list') {
+        const lstat = value.dependencies.lstat;
+        value.dependencies.lstat = vi.fn((path: string) => {
+          if (path === staging) {
+            value.paths.delete(staging);
+            return undefined;
+          }
+          return lstat(path);
+        });
+      }
+      if (race === 'finalized-link-pair') {
+        const linked = { ...value.paths.get(SENTINEL)!, nlink: 2n };
+        value.paths.set(SENTINEL, linked);
+        value.paths.set(staging, linked);
+        const lstat = value.dependencies.lstat;
+        value.dependencies.lstat = vi.fn((path: string) => {
+          if (path === staging) {
+            value.paths.delete(staging);
+            value.paths.set(SENTINEL, { ...linked, nlink: 1n });
+            return linked;
+          }
+          return lstat(path);
+        });
+      }
+      if (race === 'open-enoent') {
+        value.dependencies.openSentinelRead.mockImplementationOnce(() => {
+          value.paths.delete(staging);
+          throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        });
+      }
+      if (race === 'read-enoent') {
+        value.dependencies.readSentinel.mockImplementationOnce(() => {
+          value.paths.delete(staging);
+          throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        });
+      }
+
+      expect(() => openWindowsCoordinationSentinel({
+        rootAuthority: value.rootAuthority,
+        dependencies: value.dependencies,
+      })).toThrow(CoordinationWindowsSentinelBusyError);
+    },
+  );
+
+  it('keeps stable publishing metadata violations unsafe', () => {
+    const value = fixture(true);
+    const staging = `${SENTINEL}.${TOKEN}.publishing`;
+    value.paths.set(staging, { ...value.paths.get(SENTINEL)!, symbolicLink: true });
+
+    expect(() => openWindowsCoordinationSentinel({
+      rootAuthority: value.rootAuthority,
+      dependencies: value.dependencies,
+    })).toThrow(CoordinationWindowsSentinelError);
+  });
+
   it('times out behind a stale valid publishing file and never cleans it', async () => {
     const value = fixture(true);
     const staging = `${SENTINEL}.${TOKEN}.publishing`;
@@ -187,7 +248,9 @@ describe('Windows coordination root sentinel', () => {
   it('rejects stable malformed publishing bytes after bounded observation', async () => {
     const value = fixture(true);
     const staging = `${SENTINEL}.${TOKEN}.publishing`;
-    value.paths.set(staging, { ...value.paths.get(SENTINEL)!, size: 1n });
+    const malformed = { ...value.paths.get(SENTINEL)!, size: 1n };
+    value.paths.set(staging, malformed);
+    value.fdStats.set(52, malformed);
     value.paths.delete(SENTINEL);
     value.dependencies.readSentinel.mockReturnValue(Buffer.from('{'));
 
@@ -236,6 +299,18 @@ describe('Windows coordination root sentinel', () => {
     authority.close();
     authority.close();
 
+    expect(value.close.mock.calls).toEqual([[52]]);
+    expect(value.rootAuthority.close).toHaveBeenCalledOnce();
+  });
+
+  it('terminalizes a staged descriptor before a failing close and never retries its number', () => {
+    const value = fixture();
+    value.dependencies.close.mockImplementation(() => { throw new Error('close failed'); });
+
+    expect(() => openWindowsCoordinationSentinel({
+      rootAuthority: value.rootAuthority,
+      dependencies: value.dependencies,
+    })).toThrow(CoordinationWindowsSentinelError);
     expect(value.close.mock.calls).toEqual([[52]]);
     expect(value.rootAuthority.close).toHaveBeenCalledOnce();
   });
