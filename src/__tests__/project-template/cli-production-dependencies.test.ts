@@ -241,6 +241,47 @@ describe('project-template production command dependencies', () => {
     expect(await readdir(root)).toEqual(['.takt']);
   });
 
+  it.each([
+    ['preview', 'packVersion'],
+    ['preview', 'minTaktVersion'],
+    ['apply', 'packVersion'],
+    ['apply', 'minTaktVersion'],
+  ] as const)('rejects malformed export SemVer in %s for %s before filesystem mutation', async (
+    mode,
+    field,
+  ) => {
+    const root = await createExportFixture();
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+    const request = exportRequest(root, 'a'.repeat(40));
+    const admitMutation = vi.fn();
+    const outcome = await dependencies.dispatch({
+      ...request,
+      mutation: mode === 'apply'
+        ? {
+          mode: 'apply' as const,
+          force: false,
+          expectedPlanId: 'a'.repeat(64),
+        }
+        : request.mutation,
+      exportMetadata: {
+        ...request.exportMetadata,
+        [field]: 'not-semver',
+      },
+    }, { signal: new AbortController().signal, admitMutation });
+    await dependencies.dispose();
+
+    expect(outcome).toMatchObject({
+      exitCode: 20,
+      envelope: {
+        command: 'project-template export',
+        mode: mode === 'apply' ? 'apply' : 'dry-run',
+        error: { code: 'INVALID_ARGUMENT' },
+      },
+    });
+    expect(admitMutation).not.toHaveBeenCalled();
+    expect(await readdir(root)).toEqual(['.takt']);
+  });
+
   it('rejects an invalid export commit with captured regexp intrinsics before planning', async () => {
     const root = await createExportFixture();
     const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');

@@ -365,6 +365,38 @@ describe('project-template CLI command adapter', () => {
     });
   });
 
+  it.each([
+    ['preview', '--pack-version'],
+    ['preview', '--min-takt-version'],
+    ['apply', '--pack-version'],
+    ['apply', '--min-takt-version'],
+  ] as const)('rejects malformed export SemVer in %s for %s before dispatch', async (
+    mode,
+    option,
+  ) => {
+    const value = harness();
+    const mutationArgs = mode === 'apply'
+      ? ['--apply', '--expected-plan-id', PLAN_ID]
+      : [];
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', 'export', 'template.taktpack',
+      '--pack-version', option === '--pack-version' ? 'not-semver' : '1.0.0',
+      '--min-takt-version', option === '--min-takt-version' ? 'not-semver' : '0.48.0',
+      '--source-commit', 'a'.repeat(40),
+      ...mutationArgs,
+    ]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.admissions).toEqual([]);
+    expect(value.exitCodes).toEqual([20]);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      command: 'project-template export',
+      mode: mode === 'apply' ? 'apply' : 'dry-run',
+      status: 'error',
+      error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
   it('installs SIGINT before synchronous mutation admission can begin', async () => {
     let listenerInstalled = false;
     const value = harness({

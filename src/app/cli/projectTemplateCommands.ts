@@ -16,6 +16,10 @@ import {
   startProjectTemplateCliLifecycle,
   type ProjectTemplateCliLifecycleContext,
 } from '../../features/project-template/cli-lifecycle.js';
+import {
+  MAX_SEMVER_LENGTH,
+  SEMVER_PATTERN_SOURCE,
+} from '../../features/project-template/validation.js';
 
 export type ProjectTemplateCliCommandSource =
   | { readonly kind: 'local'; readonly value: string }
@@ -54,6 +58,19 @@ const parserFailureHandlers = new WeakMap<
 Command,
 (command: ProjectTemplateCliCommand, mode: 'dry-run' | 'apply') => Promise<void>
 >();
+const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
+const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE, 'u');
+
+function isValidExportSemVer(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length <= MAX_SEMVER_LENGTH
+    && CAPTURED_REFLECT_APPLY(
+      CAPTURED_REGEXP_TEST,
+      SEMVER_PATTERN,
+      [value],
+    ) as boolean;
+}
 
 export function settleProjectTemplateParserFailure(
   root: Command,
@@ -347,7 +364,13 @@ export function registerProjectTemplateCommands(
       }
       const parsedMutation = mutation('project-template export', flags);
       const cwd = requestedCwd(root, command, flags, dependencies);
-      if ('envelope' in parsedMutation || output === undefined || !output.endsWith('.taktpack')) {
+      // Why: version metadata is operator input, so reject it before planning
+      // or mutation admission. Do not broaden the dispatch catch boundary,
+      // where genuine internal failures must remain INTERNAL.
+      const validMetadata = isValidExportSemVer(flags.packVersion)
+        && isValidExportSemVer(flags.minTaktVersion);
+      if ('envelope' in parsedMutation || output === undefined
+        || !output.endsWith('.taktpack') || !validMetadata) {
         const result = invalidMutationInput('project-template export', parsedMutation);
         await settle(
           'project-template export', result.envelope.mode,

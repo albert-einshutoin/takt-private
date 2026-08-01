@@ -14,7 +14,11 @@ import {
 import {
   createProductionProjectTemplateCliRollbackService,
 } from '../../features/project-template/cli-rollback-service.js';
-import { COMMIT_PATTERN_SOURCE } from '../../features/project-template/validation.js';
+import {
+  COMMIT_PATTERN_SOURCE,
+  MAX_SEMVER_LENGTH,
+  SEMVER_PATTERN_SOURCE,
+} from '../../features/project-template/validation.js';
 import { initializeProjectTemplateApplyStorage } from '../../features/project-template/apply-storage.js';
 import { createProjectTemplateGithubSourceComposition } from '../../infra/github/project-template-github-source-composition.js';
 import { createProjectTemplateCliRemoteProductionRuntime } from '../../infra/github/project-template-cli-remote-production.js';
@@ -42,11 +46,22 @@ const CAPTURED_REFLECT_APPLY = Reflect.apply;
 const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
 // Why: repository export must accept exactly the commit formats that its manifest can validate.
 const COMMIT_PATTERN = new RegExp(COMMIT_PATTERN_SOURCE, 'u');
+const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE, 'u');
 const REMOTE_DEADLINE_MS = 30_000;
 
 function isValidCommit(value: unknown): value is string {
   return typeof value === 'string'
     && CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, COMMIT_PATTERN, [value]) as boolean;
+}
+
+function isValidExportSemVer(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length <= MAX_SEMVER_LENGTH
+    && CAPTURED_REFLECT_APPLY(
+      CAPTURED_REGEXP_TEST,
+      SEMVER_PATTERN,
+      [value],
+    ) as boolean;
 }
 
 function privateDirectory(path: string): string {
@@ -217,6 +232,8 @@ async function dispatchProjectTemplateCommand(
       || request.mutation === undefined
       || metadata?.packVersion === undefined
       || metadata.minTaktVersion === undefined
+      || !isValidExportSemVer(metadata.packVersion)
+      || !isValidExportSemVer(metadata.minTaktVersion)
       || !isValidCommit(metadata.sourceCommit)
     ) return failure(request, 'INVALID_ARGUMENT');
     return await executeProjectTemplateCliExport({
