@@ -32,6 +32,7 @@ import {
   validateProjectTemplateExportPlanSeal,
 } from './export-plan.js';
 import {
+  DEFAULT_TAKTPACK_LIMITS,
   TAKTPACK_BLOB_PREFIX,
   type ProjectTemplateExportFile,
   type ProjectTemplateExportPlan,
@@ -66,6 +67,7 @@ interface TaktpackOutputTargetSnapshot {
   readonly gid: number;
   readonly mtimeMs: number;
   readonly ctimeMs: number;
+  readonly sha256: string;
 }
 
 export interface TaktpackOutputPreconditionProjection {
@@ -96,7 +98,10 @@ export interface CapturedTaktpackOutputPrecondition {
   readonly projection: TaktpackOutputPreconditionProjection;
 }
 
-function outputTargetSnapshot(stat: import('node:fs').Stats): TaktpackOutputTargetSnapshot {
+function outputTargetSnapshot(
+  stat: import('node:fs').Stats,
+  sha256: string,
+): TaktpackOutputTargetSnapshot {
   return {
     dev: stat.dev,
     ino: stat.ino,
@@ -107,7 +112,50 @@ function outputTargetSnapshot(stat: import('node:fs').Stats): TaktpackOutputTarg
     gid: stat.gid,
     mtimeMs: stat.mtimeMs,
     ctimeMs: stat.ctimeMs,
+    sha256,
   };
+}
+
+async function digestCapturedOutputTarget(
+  path: string,
+  initial: import('node:fs').Stats,
+): Promise<string> {
+  if (initial.size > DEFAULT_TAKTPACK_LIMITS.maxArchiveBytes) {
+    throw unsafeOutputCapture();
+  }
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    throw unsafeOutputCapture();
+  }
+  try {
+    const before = await handle.stat();
+    if (!sameTargetIdentity(outputTargetSnapshot(initial, ''), before)) {
+      throw unsafeOutputCapture();
+    }
+    const digest = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    while (position < before.size) {
+      const read = await handle.read(
+        buffer,
+        0,
+        Math.min(buffer.byteLength, before.size - position),
+        position,
+      );
+      if (read.bytesRead <= 0) throw unsafeOutputCapture();
+      digest.update(buffer.subarray(0, read.bytesRead));
+      position += read.bytesRead;
+    }
+    const after = await handle.stat();
+    if (!areProjectTemplateFileStatsEqual(before, after)) {
+      throw unsafeOutputCapture();
+    }
+    return digest.digest('hex');
+  } finally {
+    await handle.close();
+  }
 }
 
 function unsafeOutputTarget(
@@ -163,7 +211,10 @@ export async function captureTaktpackOutputPrecondition(
     }
     target = Object.freeze({
       state: 'regular-file' as const,
-      snapshot: Object.freeze(outputTargetSnapshot(targetStat)),
+      snapshot: Object.freeze(outputTargetSnapshot(
+        targetStat,
+        await digestCapturedOutputTarget(canonicalPath, targetStat),
+      )),
     });
   } catch (error) {
     if (error instanceof TaktpackError) throw error;
@@ -403,6 +454,44 @@ function sameEvacuatedTargetIdentity(
     && actual.uid === expected.uid
     && actual.gid === expected.gid
     && actual.mtimeMs === expected.mtimeMs;
+}
+
+function verifyEvacuatedTargetWitness(
+  expected: TaktpackOutputTargetSnapshot,
+  path: string,
+): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return false;
+  }
+  try {
+    const before = fstatSync(fd);
+    if (!sameEvacuatedTargetIdentity(expected, before)) return false;
+    const digest = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    while (position < before.size) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        0,
+        Math.min(buffer.byteLength, before.size - position),
+        position,
+      );
+      if (bytesRead <= 0) return false;
+      digest.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    const after = fstatSync(fd);
+    return areProjectTemplateFileStatsEqual(before, after)
+      && digest.digest('hex') === expected.sha256;
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function resolveAuthorizedOutputPath(outputPath: string): string {
@@ -864,20 +953,19 @@ export async function writeTaktpackWithIoSeam(
           );
           ioSeam.onPhase?.('force-cas');
           renameSync(outputPath, rollbackPath);
-          const evacuated = lstatSync(rollbackPath);
-          if (!sameEvacuatedTargetIdentity(
+          if (!verifyEvacuatedTargetWitness(
             authorityState.projection.target.snapshot,
-            evacuated,
+            rollbackPath,
           )) {
+            retainRecoveryArtifacts = true;
             try {
+              // Restore visibility without replacing a newer foreign winner.
+              // The evacuated object remains retained as evidence either way.
               linkSync(rollbackPath, outputPath);
-              unlinkSync(rollbackPath);
-              rollbackPath = undefined;
             } catch {
-              retainRecoveryArtifacts = true;
-              throw unsafeOutputTarget('outputPath', 'published');
+              // EEXIST means a foreign winner is already visible; preserve it.
             }
-            throw unsafeOutputTarget();
+            throw unsafeOutputTarget('outputPath', 'published');
           }
         }
         authorityPublishedSnapshot = lstatSync(tempPath);
