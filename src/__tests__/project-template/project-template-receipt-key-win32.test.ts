@@ -311,14 +311,17 @@ describe('Windows project template receipt key store', () => {
 
   it('zeroizes DPAPI adapter and store-owned buffers', async () => {
     let adapterInput: Uint8Array | undefined;
+    let adapterOutput: Uint8Array | undefined;
     const adapter = createWindowsDpapiCurrentUserAdapter({
       async run(request) {
         adapterInput = request.input;
-        return new Uint8Array([1]);
+        adapterOutput = new Uint8Array([1]);
+        return adapterOutput;
       },
     });
     await adapter.protect(new Uint8Array([4]));
     expect(adapterInput?.every((byte) => byte === 0)).toBe(true);
+    expect(adapterOutput?.every((byte) => byte === 0)).toBe(true);
 
     let plaintext: Uint8Array | undefined;
     let ciphertext: Uint8Array | undefined;

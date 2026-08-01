@@ -220,6 +220,12 @@ describe('project template receipt authentication runtime', () => {
       sign(input: Uint8Array): Promise<unknown>;
     };
     const firstTag = await firstLease.sign(input) as string;
+    const secondInput = new Uint8Array([8, 9]);
+    const secondLease = await second.authenticator.acquireSigningKey() as {
+      readonly keyId: string;
+      sign(input: Uint8Array): Promise<unknown>;
+    };
+    const secondTag = await secondLease.sign(secondInput) as string;
     const [rotatedKey] = await Promise.all([first.rotate(), second.rotate()]);
     const revokedLease = await first.authenticator.acquireSigningKey() as {
       readonly keyId: string;
@@ -236,6 +242,11 @@ describe('project template receipt authentication runtime', () => {
       keyId: firstLease.keyId,
       input,
       tag: firstTag,
+    })).toBe('valid');
+    expect(await restarted.verifier.verify({
+      keyId: secondLease.keyId,
+      input: secondInput,
+      tag: secondTag,
     })).toBe('valid');
     expect(await restarted.verifier.verify({
       keyId: revokedLease.keyId,

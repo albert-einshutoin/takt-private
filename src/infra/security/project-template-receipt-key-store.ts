@@ -58,6 +58,15 @@ interface SerializedEntry {
   readonly secret?: string;
 }
 
+function encodeSecret(secret: Uint8Array): string {
+  const bytes = Buffer.from(secret);
+  try {
+    return bytes.toString('base64url');
+  } finally {
+    bytes.fill(0);
+  }
+}
+
 function exactRecord(
   value: unknown,
   keys: readonly string[],
@@ -173,7 +182,7 @@ export function serializeProjectTemplateReceiptKeyRegistry(
       state: entry.state,
       ...(entry.secret === undefined
         ? {}
-        : { secret: Buffer.from(entry.secret).toString('base64url') }),
+        : { secret: encodeSecret(entry.secret) }),
     }));
     const bytes = Buffer.from(JSON.stringify({ schemaVersion: 1, keys }), 'utf8');
     if (bytes.byteLength > PROJECT_TEMPLATE_RECEIPT_KEY_REGISTRY_MAX_BYTES) {
@@ -202,7 +211,7 @@ export function serializeProjectTemplateReceiptKeySnapshot(
       state: entry.state,
       ...(entry.secret === undefined
         ? {}
-        : { secret: Buffer.from(entry.secret).toString('base64url') }),
+        : { secret: encodeSecret(entry.secret) }),
     }));
     const bytes = Buffer.from(JSON.stringify({
       schemaVersion: 1,
@@ -231,7 +240,7 @@ export function parseProjectTemplateReceiptKeyRegistry(
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch {
     throw new ProjectTemplateReceiptKeyStoreError('Invalid key registry JSON');
   }
@@ -253,7 +262,12 @@ export function parseProjectTemplateReceiptKeyRegistry(
       if (typeof encoded !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(encoded)) {
         throw new ProjectTemplateReceiptKeyStoreError('Invalid encoded key secret');
       }
-      secret = Uint8Array.from(Buffer.from(encoded, 'base64url'));
+      const decoded = Buffer.from(encoded, 'base64url');
+      try {
+        secret = Uint8Array.from(decoded);
+      } finally {
+        decoded.fill(0);
+      }
     }
     return {
       keyId: entry['keyId'] as string,
@@ -274,7 +288,7 @@ export function parseProjectTemplateReceiptKeySnapshot(
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch {
     throw new ProjectTemplateReceiptKeyStoreError('Invalid key registry JSON');
   }

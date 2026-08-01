@@ -242,21 +242,26 @@ export function createWindowsDpapiCurrentUserAdapter(
       throw failure('DPAPI input exceeds bounded maximum');
     }
     const requestInput = Uint8Array.from(input);
+    let transferredOutput: Uint8Array | undefined;
     try {
-      const output = await Reflect.apply(options.run, options, [{
+      transferredOutput = await Reflect.apply(options.run, options, [{
         operation,
         scope: 'CurrentUser',
         input: requestInput,
         maxOutputBytes: DPAPI_MAX_BYTES,
       }]);
-      if (!(output instanceof Uint8Array) || output.byteLength > DPAPI_MAX_BYTES) {
+      if (
+        !(transferredOutput instanceof Uint8Array)
+        || transferredOutput.byteLength > DPAPI_MAX_BYTES
+      ) {
         throw new Error();
       }
-      return Uint8Array.from(output);
+      return Uint8Array.from(transferredOutput);
     } catch {
       throw failure('DPAPI CurrentUser operation failed');
     } finally {
       requestInput.fill(0);
+      transferredOutput?.fill(0);
     }
   }
   return Object.freeze({
