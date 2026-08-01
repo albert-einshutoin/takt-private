@@ -4,6 +4,8 @@ import type {
 } from './apply-preview-approval.js';
 import {
   consumeProjectTemplateApplyPreviewApproval,
+  issueOwnedProjectTemplateApplyPreviewApproval,
+  revokeProjectTemplateApplyPreviewApproval,
   validateProjectTemplateApplyPreviewApproval,
 } from './apply-preview-approval.js';
 import type { ProjectTemplateApplyResult } from './apply-executor.js';
@@ -55,6 +57,7 @@ export type GithubProjectTemplateRemoteApplyErrorCode =
   | 'TRANSACTION_PLAN_MISMATCH'
   | 'HARD_CONFLICT'
   | 'APPROVAL_INVALID'
+  | 'RESULT_INDETERMINATE'
   | 'TRUSTED_INFRASTRUCTURE_UNAVAILABLE';
 
 export class GithubProjectTemplateRemoteApplyError extends Error {
@@ -71,6 +74,8 @@ export class GithubProjectTemplateRemoteApplyError extends Error {
             ? 'GitHub project template remote transaction has a hard conflict'
             : code === 'APPROVAL_INVALID'
               ? 'GitHub project template remote approval is invalid'
+              : code === 'RESULT_INDETERMINATE'
+                ? 'GitHub project template remote apply result is indeterminate'
               : 'GitHub project template remote apply infrastructure is unavailable');
     this.name = 'GithubProjectTemplateRemoteApplyError';
     // Fixed operator details remain useful for diagnostics without retaining
@@ -85,6 +90,8 @@ export class GithubProjectTemplateRemoteApplyError extends Error {
             ? 'fresh-transaction-plan-is-not-executable'
             : code === 'APPROVAL_INVALID'
               ? 'fresh-preview-approval-not-authorized'
+              : code === 'RESULT_INDETERMINATE'
+                ? 'lease-release-outcome-uncertain'
               : 'trusted-infrastructure-not-composed';
     Object.freeze(this);
   }
@@ -101,17 +108,27 @@ export interface ApplyGithubProjectTemplateRemoteTransactionOptions {
   readonly signal?: AbortSignal;
 }
 
+export type ApplyGithubProjectTemplateRemoteTransactionWithInternalApprovalOptions =
+  Omit<ApplyGithubProjectTemplateRemoteTransactionOptions, 'approvalEvidence'>;
+
 interface ProjectTemplateRemoteApplyCompositionDependencies {
   readonly verifier: GithubTemplateDownloadReceiptVerifier;
   readonly repertoireInspectionPort:
     ProjectTemplateRepertoireDependencyInspectionPort;
   /** @internal Test-only observation of the wrapper-owned lease boundary. */
   readonly onLeasePhase?: (phase: 'acquired' | 'released') => void;
+  /** @internal Test-only observation after durable approval state transitions. */
+  readonly onApprovalPhase?: (phase: 'issued' | 'consumed') => void;
+  /** @internal Test-only cleanup fault seam. */
+  readonly revokeApproval?: typeof revokeProjectTemplateApplyPreviewApproval;
 }
 
 export interface ProjectTemplateRemoteApplyComposition {
   apply(
     value: ApplyGithubProjectTemplateRemoteTransactionOptions,
+  ): Promise<ProjectTemplateApplyResult>;
+  applyWithInternalApproval(
+    value: ApplyGithubProjectTemplateRemoteTransactionWithInternalApprovalOptions,
   ): Promise<ProjectTemplateApplyResult>;
 }
 
@@ -250,9 +267,16 @@ function snapshotMethodPort<Method extends (...args: never[]) => unknown>(
   return Object.freeze({ receiver: value, method: descriptor.value as Method });
 }
 
+type RemoteApplyOptionsSnapshot = Readonly<
+  ApplyGithubProjectTemplateRemoteTransactionWithInternalApprovalOptions
+  & { readonly approvalEvidence?: ProjectTemplateApplyPreviewApprovalEvidence }
+>;
+
 function snapshotOptions(
-  value: ApplyGithubProjectTemplateRemoteTransactionOptions,
-): Readonly<ApplyGithubProjectTemplateRemoteTransactionOptions> {
+  value: ApplyGithubProjectTemplateRemoteTransactionOptions
+    | ApplyGithubProjectTemplateRemoteTransactionWithInternalApprovalOptions,
+  approvalMode: 'caller' | 'internal' = 'caller',
+): RemoteApplyOptionsSnapshot {
   // Why: caller-supplied verifier or inspection functions must be rejected by
   // shape before any value can execute a getter or acquire apply authority.
   if (
@@ -276,7 +300,6 @@ function snapshotOptions(
     'cacheRoot',
     'receiptKey',
     'expectedTransactionPlanId',
-    'approvalEvidence',
     'projectRoot',
     'currentTaktVersion',
     'baselineStrategy',
@@ -287,12 +310,13 @@ function snapshotOptions(
     keys.some((key) => typeof key !== 'string' || !allowed.has(key))
     || Object.values(descriptors).some((descriptor) => !('value' in descriptor))
     || required.some((key) => descriptors[key] === undefined)
+    || (approvalMode === 'caller') !== (descriptors['approvalEvidence'] !== undefined)
   ) invalidOptions();
   const cacheRoot = descriptors['cacheRoot']!.value;
   const receiptKey = descriptors['receiptKey']!.value;
   const expectedTransactionPlanId =
     descriptors['expectedTransactionPlanId']!.value;
-  const approvalEvidence = descriptors['approvalEvidence']!.value;
+  const approvalEvidence = descriptors['approvalEvidence']?.value;
   const projectRoot = descriptors['projectRoot']!.value;
   const currentTaktVersion = descriptors['currentTaktVersion']!.value;
   const baselineStrategy = descriptors['baselineStrategy']!.value;
@@ -314,8 +338,10 @@ function snapshotOptions(
     cacheRoot,
     receiptKey,
     expectedTransactionPlanId,
-    approvalEvidence:
-      approvalEvidence as ProjectTemplateApplyPreviewApprovalEvidence,
+    ...(approvalEvidence === undefined ? {} : {
+      approvalEvidence:
+        approvalEvidence as ProjectTemplateApplyPreviewApprovalEvidence,
+    }),
     projectRoot,
     currentTaktVersion,
     baselineStrategy,
@@ -350,14 +376,25 @@ export function createProjectTemplateRemoteApplyComposition(
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const keys = Reflect.ownKeys(descriptors);
   if (
-    (keys.length !== 2 && keys.length !== 3)
+    keys.length < 2
+    || keys.length > 5
     || !keys.includes('verifier')
     || !keys.includes('repertoireInspectionPort')
-    || (keys.length === 3 && !keys.includes('onLeasePhase'))
+    || keys.some((key) => key !== 'verifier'
+      && key !== 'repertoireInspectionPort'
+      && key !== 'onLeasePhase'
+      && key !== 'onApprovalPhase'
+      && key !== 'revokeApproval')
     || Object.values(descriptors).some((descriptor) => !('value' in descriptor))
     || (descriptors['onLeasePhase'] !== undefined
       && (typeof descriptors['onLeasePhase'].value !== 'function'
         || types.isProxy(descriptors['onLeasePhase'].value)))
+    || (descriptors['onApprovalPhase'] !== undefined
+      && (typeof descriptors['onApprovalPhase'].value !== 'function'
+        || types.isProxy(descriptors['onApprovalPhase'].value)))
+    || (descriptors['revokeApproval'] !== undefined
+      && (typeof descriptors['revokeApproval'].value !== 'function'
+        || types.isProxy(descriptors['revokeApproval'].value)))
   ) invalidOptions();
   const verifier = snapshotMethodPort<
     GithubTemplateDownloadReceiptVerifier['verify']
@@ -378,6 +415,11 @@ export function createProjectTemplateRemoteApplyComposition(
     }),
     onLeasePhase: descriptors['onLeasePhase']?.value as
       ((phase: 'acquired' | 'released') => void) | undefined,
+    onApprovalPhase: descriptors['onApprovalPhase']?.value as
+      ((phase: 'issued' | 'consumed') => void) | undefined,
+    revokeApproval: (descriptors['revokeApproval']?.value
+      ?? revokeProjectTemplateApplyPreviewApproval) as
+      typeof revokeProjectTemplateApplyPreviewApproval,
   });
   const observeLease = (phase: 'acquired' | 'released'): void => {
     try {
@@ -386,11 +428,19 @@ export function createProjectTemplateRemoteApplyComposition(
       // Test diagnostics cannot participate in mutation authority or cleanup.
     }
   };
-  return Object.freeze({
-    async apply(
-      input: ApplyGithubProjectTemplateRemoteTransactionOptions,
-    ): Promise<ProjectTemplateApplyResult> {
-      const options = snapshotOptions(input);
+  const observeApproval = (phase: 'issued' | 'consumed'): void => {
+    try {
+      trusted.onApprovalPhase?.(phase);
+    } catch {
+      // Test diagnostics cannot participate in mutation authority or cleanup.
+    }
+  };
+  const run = async (
+    input: ApplyGithubProjectTemplateRemoteTransactionOptions
+      | ApplyGithubProjectTemplateRemoteTransactionWithInternalApprovalOptions,
+    approvalMode: 'caller' | 'internal',
+  ): Promise<ProjectTemplateApplyResult> => {
+      const options = snapshotOptions(input, approvalMode);
       const operationContext = createRemotePreviewOperationContext(
         options.signal,
         performance.now() + REMOTE_APPLY_DERIVATION_TIMEOUT_MS,
@@ -405,8 +455,12 @@ export function createProjectTemplateRemoteApplyComposition(
       }
       const lease = acquireProjectTemplateApplyLease(options.projectRoot);
       observeLease('acquired');
+      let result: ProjectTemplateApplyResult | undefined;
+      let primaryFailure: unknown;
+      let failed = false;
       try {
-        assertProjectTemplateMutationLeaseOwned(
+        result = await (async () => {
+          assertProjectTemplateMutationLeaseOwned(
           options.projectRoot,
           lease as ProjectTemplateMutationLease,
         );
@@ -508,6 +562,9 @@ export function createProjectTemplateRemoteApplyComposition(
         if (preview.hardConflict) {
           throw new GithubProjectTemplateRemoteApplyError('HARD_CONFLICT');
         }
+        if (!preview.defaultApplyPossible && !preview.reviewRequired) {
+          throw new GithubProjectTemplateRemoteApplyError('HARD_CONFLICT');
+        }
         const storage = await initializeProjectTemplateApplyStorage({
           repoPath: options.projectRoot,
         });
@@ -515,51 +572,116 @@ export function createProjectTemplateRemoteApplyComposition(
           options.projectRoot,
           lease as ProjectTemplateMutationLease,
         );
-        if (!await validateProjectTemplateApplyPreviewApproval({
-          storage,
-          preview,
-          baselineStrategy: options.baselineStrategy,
-          evidence: options.approvalEvidence,
-        })) {
-          throw new GithubProjectTemplateRemoteApplyError('APPROVAL_INVALID');
+        let approvalEvidence = options.approvalEvidence;
+        if (approvalMode === 'internal' && preview.reviewRequired) {
+          approvalEvidence = await issueOwnedProjectTemplateApplyPreviewApproval({
+            projectRoot: options.projectRoot,
+            storage,
+            lease,
+            preview,
+            baselineStrategy: options.baselineStrategy,
+          });
+          observeApproval('issued');
+        } else if (approvalMode === 'caller'
+          && !await validateProjectTemplateApplyPreviewApproval({
+            storage,
+            preview,
+            baselineStrategy: options.baselineStrategy,
+            evidence: approvalEvidence,
+          })) {
+            throw new GithubProjectTemplateRemoteApplyError('APPROVAL_INVALID');
         }
         assertProjectTemplateMutationLeaseOwned(
           options.projectRoot,
           lease as ProjectTemplateMutationLease,
         );
-        return await executeOwnedProjectTemplateCompanionLockTransaction({
-          storage,
-          lease,
-          transactionPlanId: preview.transactionPlanId,
-          preconditionToken: preview.bindings.contentPreconditionToken,
-          outputs: {
-            contentEntries: derived.contentEntries,
-            ...derived.companionOutputs,
-          },
-          async consumeApproval() {
-            return await consumeProjectTemplateApplyPreviewApproval({
-              storage,
-              preview,
-              baselineStrategy: options.baselineStrategy,
-              evidence: options.approvalEvidence,
-            });
-          },
-          runDoctor() {
-            if (!runProjectTemplateDoctor(options.projectRoot).passed) {
-              throw new Error('project template doctor rejected transaction');
+        let approvalConsumed = false;
+        try {
+          return await executeOwnedProjectTemplateCompanionLockTransaction({
+            storage,
+            lease,
+            candidatePaths: derived.candidatePaths,
+            transactionPlanId: preview.transactionPlanId,
+            preconditionToken: preview.bindings.contentPreconditionToken,
+            expectedPreviousLocksSha256:
+              preview.bindings.previousLocksSha256,
+            outputs: {
+              contentEntries: derived.contentEntries,
+              ...derived.companionOutputs,
+            },
+            async consumeApproval() {
+              if (approvalMode === 'internal' && !preview.reviewRequired) {
+                return true;
+              }
+              const consumed = await consumeProjectTemplateApplyPreviewApproval({
+                storage,
+                preview,
+                baselineStrategy: options.baselineStrategy,
+                evidence: approvalEvidence,
+              });
+              approvalConsumed = consumed;
+              if (consumed) observeApproval('consumed');
+              return consumed;
+            },
+            runDoctor() {
+              if (!runProjectTemplateDoctor(options.projectRoot).passed) {
+                throw new Error('project template doctor rejected transaction');
+              }
+              // The cohort reader proves all three companion files are from one
+              // semantically consistent generation before commit is durable.
+              if (
+                readProjectTemplateCompanionLockState(options.projectRoot).state
+                  !== 'update'
+              ) throw new Error('project template companion cohort is incomplete');
+            },
+          });
+        } catch (error) {
+          if (
+            approvalMode === 'internal'
+            && !approvalConsumed
+            && approvalEvidence !== undefined
+          ) {
+            let revoked = false;
+            try {
+              revoked = await trusted.revokeApproval({
+                storage,
+                evidence: approvalEvidence,
+              });
+            } catch {
+              // Cleanup uncertainty can leave durable authority ambiguous.
             }
-            // The cohort reader proves all three companion files are from one
-            // semantically consistent generation before commit is durable.
-            if (
-              readProjectTemplateCompanionLockState(options.projectRoot).state
-                !== 'update'
-            ) throw new Error('project template companion cohort is incomplete');
-          },
-        });
-      } finally {
-        lease.release();
-        observeLease('released');
+            if (!revoked) {
+              throw new GithubProjectTemplateRemoteApplyError(
+                'RESULT_INDETERMINATE',
+              );
+            }
+          }
+            throw error;
+          }
+        })();
+      } catch (error) {
+        failed = true;
+        primaryFailure = error;
       }
+      try {
+        lease.release();
+      } catch {
+        throw new GithubProjectTemplateRemoteApplyError(
+          'RESULT_INDETERMINATE',
+        );
+      }
+      observeLease('released');
+      if (failed) throw primaryFailure;
+      return result!;
+  };
+  return Object.freeze({
+    apply(input: ApplyGithubProjectTemplateRemoteTransactionOptions) {
+      return run(input, 'caller');
+    },
+    applyWithInternalApproval(
+      input: ApplyGithubProjectTemplateRemoteTransactionWithInternalApprovalOptions,
+    ) {
+      return run(input, 'internal');
     },
   });
 }
