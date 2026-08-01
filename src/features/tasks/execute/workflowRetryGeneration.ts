@@ -1,12 +1,20 @@
 import { createHash } from 'node:crypto';
 import { types as utilTypes } from 'node:util';
-import type { WorkflowConfig, WorkflowResumePoint } from '../../../core/models/index.js';
+import type {
+  WorkflowConfig,
+  WorkflowResumePoint,
+  WorkflowResumePointEntry,
+} from '../../../core/models/index.js';
 import { trimResumePointStackForWorkflow } from '../../../core/workflow/run/resume-point.js';
-import { getWorkflowReference } from '../../../core/workflow/workflow-reference.js';
-import { isWorkflowCallStep } from '../../../core/workflow/step-kind.js';
+import {
+  buildWorkflowResumePointEntry,
+  getWorkflowReference,
+} from '../../../core/workflow/workflow-reference.js';
+import { getWorkflowStepKind, isWorkflowCallStep } from '../../../core/workflow/step-kind.js';
 import { resolveWorkflowCallTarget } from '../../../infra/config/loaders/workflowCallResolver.js';
 import type { InternalWorkflowReadContext } from '../../../infra/config/loaders/workflowDiscovery.js';
 import { WorkflowDiscoveryReadError } from '../../../infra/config/loaders/workflowDiscoveryError.js';
+import { getWorkflowTrustInfo } from '../../../infra/config/loaders/workflowTrustSource.js';
 
 const MAX_WORKFLOW_GENERATION_DEPTH = 5;
 const MAX_WORKFLOW_GENERATION_NODES = 256;
@@ -59,9 +67,16 @@ export function resolveWorkflowRetryOverrides(
   source: WorkflowRetrySource,
   readContext: InternalWorkflowReadContext,
 ): WorkflowRetryOverrides {
+  const reboundResumePoint = rebindResumePointToCurrentWorkflow(
+    workflow,
+    source.resumePoint,
+    projectCwd,
+    lookupCwd,
+    readContext,
+  );
   const resumePoint = trimResumePointStackForWorkflow({
     workflow,
-    resumePoint: source.resumePoint,
+    resumePoint: reboundResumePoint,
     resolveWorkflowCall: (parentWorkflow, step) => resolveWorkflowCallTarget(
       parentWorkflow,
       step.call,
@@ -86,6 +101,47 @@ export function resolveWorkflowRetryOverrides(
     ...(maxStepsOverride !== undefined ? { maxStepsOverride } : {}),
     ...(initialIterationOverride !== undefined ? { initialIterationOverride } : {}),
   };
+}
+
+function rebindResumePointToCurrentWorkflow(
+  workflow: WorkflowConfig,
+  resumePoint: WorkflowResumePoint | undefined,
+  projectCwd: string,
+  lookupCwd: string,
+  readContext: InternalWorkflowReadContext,
+): WorkflowResumePoint | undefined {
+  if (!resumePoint) return undefined;
+  const reboundStack: WorkflowResumePointEntry[] = [];
+  let currentWorkflow = workflow;
+  for (let index = 0; index < resumePoint.stack.length; index += 1) {
+    const savedEntry = resumePoint.stack[index]!;
+    if (savedEntry.workflow !== currentWorkflow.name) throw new WorkflowDiscoveryReadError();
+    const currentStep = currentWorkflow.steps.find((step) => step.name === savedEntry.step);
+    if (!currentStep) throw new WorkflowDiscoveryReadError();
+    const currentKind = getWorkflowStepKind(currentStep);
+    if (currentKind !== savedEntry.kind) throw new WorkflowDiscoveryReadError();
+    reboundStack.push(buildWorkflowResumePointEntry(
+      currentWorkflow,
+      currentStep.name,
+      currentKind,
+    ));
+    if (index === resumePoint.stack.length - 1) continue;
+    if (!isWorkflowCallStep(currentStep)) throw new WorkflowDiscoveryReadError();
+    const childWorkflow = resolveWorkflowCallTarget(
+      currentWorkflow,
+      currentStep.call,
+      currentStep.name,
+      projectCwd,
+      lookupCwd,
+      undefined,
+      readContext,
+    );
+    if (!childWorkflow || resumePoint.stack[index + 1]!.workflow !== childWorkflow.name) {
+      throw new WorkflowDiscoveryReadError();
+    }
+    currentWorkflow = childWorkflow;
+  }
+  return { ...resumePoint, stack: reboundStack };
 }
 
 export function snapshotWorkflowRetrySource(value: unknown): WorkflowRetrySource {
@@ -191,7 +247,17 @@ function captureWorkflowTree(
   // Opaque references contain absolute source-path hashes and are intentionally
   // excluded from the persisted tree. Deterministic traversal IDs retain DAG
   // and cycle topology while allowing an identical .takt tree to move hosts.
-  return { id, workflow, children };
+  const trustInfo = getWorkflowTrustInfo(workflow, projectCwd);
+  return {
+    id,
+    workflow,
+    trust: {
+      source: trustInfo.source,
+      isProjectTrustRoot: trustInfo.isProjectTrustRoot,
+      isProjectWorkflowRoot: trustInfo.isProjectWorkflowRoot,
+    },
+    children,
+  };
 }
 
 function hashCanonical(value: unknown): string {

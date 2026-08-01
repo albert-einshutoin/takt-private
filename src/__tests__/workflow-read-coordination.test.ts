@@ -372,7 +372,13 @@ ${stepFields}`);
       },
     }, async (_workflow, _task, _cwd, executionOptions) => {
       expect(executionOptions.startStep).toBe('delegate');
-      expect(executionOptions.resumePoint).toEqual(resumePoint);
+      expect(executionOptions.resumePoint).toEqual({
+        ...resumePoint,
+        stack: [{
+          ...resumePoint.stack[0]!,
+          workflow_ref: expect.stringMatching(/^project:sha256:[0-9a-f]{64}$/),
+        }],
+      });
       expect(executionOptions.maxStepsOverride).toBe(10);
       expect(executionOptions.initialIterationOverride).toBe(5);
       return { success: true };

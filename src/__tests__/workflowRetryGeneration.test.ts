@@ -15,7 +15,10 @@ import {
   buildWorkflowGenerationWitness,
   snapshotWorkflowRetrySource,
 } from '../features/tasks/execute/workflowRetryGeneration.js';
-import { attachWorkflowOpaqueRef } from '../infra/config/loaders/workflowSourceMetadata.js';
+import {
+  attachWorkflowOpaqueRef,
+  attachWorkflowTrustInfo,
+} from '../infra/config/loaders/workflowSourceMetadata.js';
 
 const readContext = Object.freeze({ marker: 'one-snapshot' }) as unknown as InternalWorkflowReadContext;
 
@@ -131,6 +134,22 @@ describe('workflow retry generation witness', () => {
 
     expect(buildWorkflowGenerationWitness(checkoutA, '/a', '/a', readContext))
       .toBe(buildWorkflowGenerationWitness(checkoutB, '/b', '/b', readContext));
+  });
+
+  it('keeps portable trust-source identity in the persisted witness', () => {
+    const projectWorkflow = attachWorkflowTrustInfo(agentWorkflow('trusted'), {
+      source: 'project',
+      isProjectTrustRoot: true,
+      isProjectWorkflowRoot: true,
+    });
+    const externalWorkflow = attachWorkflowTrustInfo(agentWorkflow('trusted'), {
+      source: 'external',
+      isProjectTrustRoot: false,
+      isProjectWorkflowRoot: false,
+    });
+
+    expect(buildWorkflowGenerationWitness(projectWorkflow, '/project', '/project', readContext))
+      .not.toBe(buildWorkflowGenerationWitness(externalWorkflow, '/project', '/project', readContext));
   });
 
   it('does not depend on localeCompare for canonical key ordering', () => {
