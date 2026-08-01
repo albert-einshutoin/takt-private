@@ -9,6 +9,7 @@ export interface ResolvedTaskRetryMetadata {
   currentIteration?: number;
   maxSteps?: number;
   workflowGenerationWitness?: string;
+  runMetaMissing?: boolean;
   preserveExisting?: boolean;
 }
 
@@ -56,6 +57,10 @@ export function buildTerminalTaskRecord(
       ? { workflow_generation_witness: nextRetryMetadata.workflowGenerationWitness }
       : {}),
     ...exceededMetadata,
+    // A pre-execution rejection can occur after reserving a new slug but
+    // before canonical run metadata exists. Keep generation A continuation
+    // fields and remove the dangling slug instead of silently losing both.
+    ...(retryMetadata?.runMetaMissing ? { run_slug: undefined } : {}),
   };
 }
 

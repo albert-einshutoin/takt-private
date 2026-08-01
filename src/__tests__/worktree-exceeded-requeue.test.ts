@@ -471,4 +471,44 @@ describe('シナリオ3・4: requeue → re-execution passes exceeded metadata t
       elapsed_ms: 183245,
     });
   });
+
+  it('preserves generation A retry metadata when B is rejected before run meta publication', async () => {
+    const generationA = buildTestWorkflowConfig();
+    const generationB: WorkflowConfig = {
+      ...generationA,
+      steps: generationA.steps.map((step) => ({
+        ...step,
+        instruction: 'Generation B instruction',
+      })),
+    };
+    const resumePoint = {
+      version: 1 as const,
+      stack: [{ workflow: 'test-workflow', step: 'plan', kind: 'agent' as const }],
+      iteration: 30,
+      elapsed_ms: 183245,
+    };
+    const witnessA = buildTestWorkflowGenerationWitness(generationA, testDir, cloneDir);
+    writeExceededRecord(testDir, {
+      worktree: true,
+      worktree_path: cloneDir,
+      resume_point: resumePoint,
+      workflow_generation_witness: witnessA,
+    });
+    vi.mocked(loadWorkflowByIdentifier).mockReturnValue(generationB);
+
+    runner.requeueExceededTask('task-a');
+    const [task] = runner.claimNextTasks(1);
+    if (!task) throw new Error('No task claimed');
+
+    await expect(executeAndCompleteTask(task, runner, testDir)).resolves.toBe(false);
+
+    expect(vi.mocked(executeWorkflow)).not.toHaveBeenCalled();
+    const [record] = loadTasksFile(testDir).tasks;
+    expect(record?.status).toBe('failed');
+    expect(record?.resume_point).toEqual(resumePoint);
+    expect(record?.workflow_generation_witness).toBe(witnessA);
+    expect(record?.exceeded_current_iteration).toBe(30);
+    expect(record?.exceeded_max_steps).toBe(60);
+    expect(record?.run_slug).toBeUndefined();
+  });
 });

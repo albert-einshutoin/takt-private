@@ -33,6 +33,7 @@ interface PersistTaskResultOptions {
 interface PersistTaskErrorOptions {
   emitStatusLog?: boolean;
   responsePrefix?: string;
+  preserveRetryMetadataOnMissingRunMeta?: boolean;
 }
 
 export function buildTaskResult(params: BuildTaskResultParams): TaskResult {
@@ -155,6 +156,9 @@ export function persistTaskError(
     ...(task.data?.branch ? { branch: task.data.branch } : {}),
     ...(task.worktreePath ? { worktreePath: task.worktreePath } : {}),
     ...(task.copyWorkspacePath ? { copyWorkspacePath: task.copyWorkspacePath } : {}),
+    ...(options?.preserveRetryMetadataOnMissingRunMeta
+      ? { preserveRetryMetadataOnMissingRunMeta: true }
+      : {}),
   });
 
   if (emitStatusLog) {
