@@ -121,6 +121,17 @@ describe('production Windows coordination filesystem policy', () => {
     expect('fchmod' in value.dependencies).toBe(false);
   });
 
+  it('unlinks an owned staging name during its two-link publication window', () => {
+    const value = fixture();
+    value.paths.set(FILE, { ...stat('file', 5n), nlink: 2n } as BigIntStats);
+
+    expect(() => value.policy.unlinkOwned(
+      FILE,
+      { kind: 'win32', dev: '1', ino: '5' },
+    )).not.toThrow();
+    expect(value.dependencies.unlink).toHaveBeenCalledWith(FILE);
+  });
+
   it('rejects a hardlinked or replaced created file through the production policy', () => {
     const value = fixture();
     value.dependencies.write = vi.fn((_fd, written) => {

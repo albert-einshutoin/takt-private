@@ -218,7 +218,7 @@ export function createWin32CoordinationFilesystemPolicy(
   },
   linkNoReplace: dependencies.link,
   unlinkOwned(path: string, identity: CoordinationIdentity): void {
-    const current = requireFile(lstat(path, dependencies), expectedDevice);
+    const current = requireOwnedFile(lstat(path, dependencies), expectedDevice);
     if (!identityPolicy.sameIdentity(toIdentity(current), identity)) throw unsafe();
     dependencies.unlink(path);
   },
@@ -319,6 +319,20 @@ function requireFile(value: WinStat | undefined, expectedDevice: string | undefi
   if (value === undefined || value.kind !== 'file' || value.symbolicLink || value.nlink !== 1n) {
     throw unsafe();
   }
+  assertExpectedDevice(value, expectedDevice);
+  return value;
+}
+
+function requireOwnedFile(
+  value: WinStat | undefined,
+  expectedDevice: string | undefined,
+): WinStat {
+  if (
+    value === undefined
+    || value.kind !== 'file'
+    || value.symbolicLink
+    || (value.nlink !== 1n && value.nlink !== 2n)
+  ) throw unsafe();
   assertExpectedDevice(value, expectedDevice);
   return value;
 }
