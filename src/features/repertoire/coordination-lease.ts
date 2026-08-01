@@ -9,21 +9,23 @@ import {
   mkdirSync,
   openSync,
   readSync,
-  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
-  type BigIntStats,
   type Stats,
 } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   createCoordinationPlatformPolicy,
   type CoordinationRootAuthority,
 } from './coordination-platform-policy.js';
-import { posixCoordinationFilesystemPolicy } from './coordination-posix-filesystem-policy.js';
+import {
+  CoordinationFilesystemChangedError,
+  posixCoordinationFilesystemPolicy,
+} from './coordination-posix-filesystem-policy.js';
+import type { CoordinationStableDirectory } from './coordination-filesystem-types.js';
 
 const COORDINATION_DIRECTORY_NAME = '.takt-repertoire-coordination';
 const READERS_DIRECTORY_NAME = 'readers';
@@ -49,7 +51,6 @@ const FILE_WRITE_EXCLUSIVE_FLAGS = constants.O_WRONLY
   | constants.O_EXCL
   | constants.O_NOFOLLOW;
 const FILE_TYPE_MASK = constants.S_IFMT;
-const FILE_TYPE_DIRECTORY = constants.S_IFDIR;
 const FILE_TYPE_REGULAR = constants.S_IFREG;
 const FILE_TYPE_SYMLINK = constants.S_IFLNK;
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -74,10 +75,10 @@ const safeArraySortMethod = Array.prototype.sort;
 const safeArrayFind = <T>(value: T[], predicate: (item: T) => boolean): T | undefined => (
   safeReflectApply(safeArrayFindMethod, value, [predicate]) as T | undefined
 );
-const safeArrayIncludes = <T>(value: T[], item: T): boolean => (
+const safeArrayIncludes = <T>(value: readonly T[], item: T): boolean => (
   safeReflectApply(safeArrayIncludesMethod, value, [item]) as boolean
 );
-const safeArrayJoin = (value: unknown[], separator: string): string => (
+const safeArrayJoin = (value: readonly unknown[], separator: string): string => (
   safeReflectApply(safeArrayJoinMethod, value, [separator]) as string
 );
 const safeArrayPush = <T>(value: T[], item: T): number => (
@@ -107,12 +108,8 @@ const safeDateToISOString = (value: Date): string => (
 const safeJsonParse = JSON.parse.bind(JSON);
 const safeJsonStringify = JSON.stringify.bind(JSON);
 const safeMathMin = Math.min.bind(Math);
-const safeBigInt = BigInt;
 const safeNumber = Number;
 const safeNumberIsSafeInteger = Number.isSafeInteger.bind(Number);
-const BIGINT_FILE_TYPE_MASK = safeBigInt(FILE_TYPE_MASK);
-const BIGINT_FILE_TYPE_DIRECTORY = safeBigInt(FILE_TYPE_DIRECTORY);
-const BIGINT_FILE_TYPE_SYMLINK = safeBigInt(FILE_TYPE_SYMLINK);
 const safeObjectDefineProperty = Object.defineProperty.bind(Object);
 const safeObjectFreeze = Object.freeze.bind(Object);
 const safeObjectKeys = Object.keys.bind(Object);
@@ -473,27 +470,11 @@ function assertCoordinationDirectories(paths: CoordinationPaths): void {
 }
 
 function ensurePrivateDirectory(path: string): void {
-  try {
-    mkdirSync(path, { mode: PRIVATE_DIRECTORY_MODE });
-    enforcePrivateDirectoryMode(path);
-    syncDirectory(dirname(path));
-  } catch (error) {
-    if (!isAlreadyExistsError(error)) throw error;
-  }
-  assertPrivateDirectory(path);
+  posixCoordinationFilesystemPolicy.ensurePrivateDirectory(path);
 }
 
 function assertPrivateDirectory(path: string): void {
-  const stat = lstatSync(path);
-  const expectedUid = currentUid();
-  if (
-    !isDirectoryMode(stat.mode)
-    || isSymlinkMode(stat.mode)
-    || (stat.mode & 0o777) !== PRIVATE_DIRECTORY_MODE
-    || (expectedUid !== null && stat.uid !== expectedUid)
-  ) {
-    throw new RepertoireCoordinationError('UNSAFE_STATE');
-  }
+  posixCoordinationFilesystemPolicy.assertDirectory(path);
 }
 
 function createLeaseRecord(mode: RepertoireCoordinationMode): LeaseRecord {
@@ -667,8 +648,9 @@ function scanStateOnce(
   paths: CoordinationPaths,
   enforceHardLimit: boolean,
 ): CoordinationSnapshot {
-  const rootBefore = readDirectoryIdentity(paths.root);
-  const rootEntries = sortedDirectoryEntries(paths.root);
+  const rootSnapshot = listStableDirectory(paths.root);
+  const rootBefore = rootSnapshot.digest;
+  const rootEntries = rootSnapshot.entries;
   for (const entry of rootEntries) {
     if (
       entry !== READERS_DIRECTORY_NAME
@@ -706,8 +688,7 @@ function scanStateOnce(
       !writerPublishing ? readListedLease(paths.writerIntent, 'write') : undefined
     )
     : undefined;
-  const rootAfter = readDirectoryIdentity(paths.root);
-  if (rootBefore !== rootAfter) throw SNAPSHOT_CHANGED;
+  assertDirectorySnapshotUnchanged(rootSnapshot);
 
   const digest = safeArrayJoin([
     rootBefore,
@@ -732,8 +713,9 @@ function scanReaders(directory: string): {
   evidence: LeaseEvidence[];
   publishing: boolean;
 } {
-  const before = readDirectoryIdentity(directory);
-  const entries = sortedDirectoryEntries(directory);
+  const snapshot = listStableDirectory(directory);
+  const before = snapshot.digest;
+  const entries = snapshot.entries;
   if (entries.length > MAX_READER_CLAIMS) {
     throw new RepertoireCoordinationError('UNSAFE_STATE');
   }
@@ -785,8 +767,7 @@ function scanReaders(directory: string): {
     safeArrayPush(evidence, lease);
     safeArrayPush(digests, `${filename}:${lease.digest}`);
   }
-  const after = readDirectoryIdentity(directory);
-  if (before !== after) throw SNAPSHOT_CHANGED;
+  assertDirectorySnapshotUnchanged(snapshot);
   return { digest: `${before}:${safeArrayJoin(digests, ',')}`, evidence, publishing };
 }
 
@@ -855,8 +836,9 @@ function scanReleased(
   directory: string,
   enforceHardLimit: boolean,
 ): { digest: string; count: number; evidence: LeaseEvidence[] } {
-  const before = readDirectoryIdentity(directory);
-  const entries = sortedDirectoryEntries(directory);
+  const snapshot = listStableDirectory(directory);
+  const before = snapshot.digest;
+  const entries = snapshot.entries;
   if (enforceHardLimit && entries.length > TOMBSTONE_HARD_LIMIT) {
     throw new RepertoireCoordinationError('RECOVERY_REQUIRED');
   }
@@ -873,9 +855,9 @@ function scanReleased(
         throw new RepertoireCoordinationError('UNSAFE_STATE');
       }
       const publishingContainer = join(directory, containerName);
-      const publishingBefore = readListedDirectoryIdentity(publishingContainer);
-      const publishingAfter = readListedDirectoryIdentity(publishingContainer);
-      if (publishingBefore !== publishingAfter) throw SNAPSHOT_CHANGED;
+      const publishingSnapshot = listStableDirectory(publishingContainer);
+      const publishingBefore = publishingSnapshot.digest;
+      assertDirectorySnapshotUnchanged(publishingSnapshot);
       releasePublishing = true;
       safeArrayPush(digests, `${containerName}:${publishingBefore}`);
       continue;
@@ -883,8 +865,9 @@ function scanReleased(
     const match = safeRegExpExec(RELEASED_CONTAINER_PATTERN, containerName);
     if (!match) throw new RepertoireCoordinationError('UNSAFE_STATE');
     const container = join(directory, containerName);
-    const containerBefore = readDirectoryIdentity(container);
-    const artifacts = sortedDirectoryEntries(container);
+    const containerSnapshot = listStableDirectory(container);
+    const containerBefore = containerSnapshot.digest;
+    const artifacts = containerSnapshot.entries;
     if (
       artifacts.length !== 1
       || artifacts[0] !== RELEASED_ARTIFACT_FILENAME
@@ -899,13 +882,11 @@ function scanReleased(
     ) {
       throw new RepertoireCoordinationError('UNSAFE_STATE');
     }
-    const containerAfter = readDirectoryIdentity(container);
-    if (containerBefore !== containerAfter) throw SNAPSHOT_CHANGED;
+    assertDirectorySnapshotUnchanged(containerSnapshot);
     safeArrayPush(evidence, lease);
     safeArrayPush(digests, `${containerName}:${containerBefore}:${lease.digest}`);
   }
-  const after = readDirectoryIdentity(directory);
-  if (before !== after) throw SNAPSHOT_CHANGED;
+  assertDirectorySnapshotUnchanged(snapshot);
   if (releasePublishing) throw new RepertoireCoordinationError('WRITER_PENDING');
   return {
     digest: `${before}:${safeArrayJoin(digests, ',')}`,
@@ -914,11 +895,24 @@ function scanReleased(
   };
 }
 
-function readListedDirectoryIdentity(path: string): string {
+function listStableDirectory(path: string): CoordinationStableDirectory {
   try {
-    return readDirectoryIdentity(path);
+    return posixCoordinationFilesystemPolicy.listStable(path);
   } catch (error) {
-    if (isMissingError(error)) throw SNAPSHOT_CHANGED;
+    if (error instanceof CoordinationFilesystemChangedError || isMissingError(error)) {
+      throw SNAPSHOT_CHANGED;
+    }
+    throw error;
+  }
+}
+
+function assertDirectorySnapshotUnchanged(snapshot: CoordinationStableDirectory): void {
+  try {
+    snapshot.assertUnchanged();
+  } catch (error) {
+    if (error instanceof CoordinationFilesystemChangedError || isMissingError(error)) {
+      throw SNAPSHOT_CHANGED;
+    }
     throw error;
   }
 }
@@ -932,38 +926,6 @@ function readListedLease(path: string, mode?: RepertoireCoordinationMode): Lease
   }
 }
 
-function sortedDirectoryEntries(path: string): string[] {
-  return safeArraySort(readdirSync(path));
-}
-
-function readDirectoryIdentity(path: string): string {
-  const stat = lstatSync(path, { bigint: true });
-  assertPrivateBigIntDirectory(stat);
-  return safeArrayJoin([
-    stat.dev,
-    stat.ino,
-    stat.mode,
-    stat.uid,
-    stat.mtimeNs,
-    stat.ctimeNs,
-  ], ':');
-}
-
-function assertPrivateBigIntDirectory(stat: BigIntStats): void {
-  const expectedUid = currentUid();
-  if (
-    !isBigIntDirectoryMode(stat.mode)
-    || isBigIntSymlinkMode(stat.mode)
-    || (stat.mode & 0o777n) !== safeBigInt(PRIVATE_DIRECTORY_MODE)
-    || (expectedUid !== null && stat.uid !== safeBigInt(expectedUid))
-  ) {
-    throw new RepertoireCoordinationError('UNSAFE_STATE');
-  }
-}
-
-function isDirectoryMode(mode: number): boolean {
-  return (mode & FILE_TYPE_MASK) === FILE_TYPE_DIRECTORY;
-}
 
 function isFileMode(mode: number): boolean {
   return (mode & FILE_TYPE_MASK) === FILE_TYPE_REGULAR;
@@ -971,14 +933,6 @@ function isFileMode(mode: number): boolean {
 
 function isSymlinkMode(mode: number): boolean {
   return (mode & FILE_TYPE_MASK) === FILE_TYPE_SYMLINK;
-}
-
-function isBigIntDirectoryMode(mode: bigint): boolean {
-  return (mode & BIGINT_FILE_TYPE_MASK) === BIGINT_FILE_TYPE_DIRECTORY;
-}
-
-function isBigIntSymlinkMode(mode: bigint): boolean {
-  return (mode & BIGINT_FILE_TYPE_MASK) === BIGINT_FILE_TYPE_SYMLINK;
 }
 
 function assertPublishedLease(

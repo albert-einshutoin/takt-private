@@ -99,7 +99,13 @@ export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = O
     const entries = readdirSync(path).sort();
     const after = directoryDigest(path);
     if (before !== after) throw new CoordinationFilesystemChangedError();
-    return Object.freeze({ entries: Object.freeze(entries), digest: before });
+    return Object.freeze({
+      entries: Object.freeze(entries),
+      digest: before,
+      assertUnchanged(): void {
+        if (directoryDigest(path) !== before) throw new CoordinationFilesystemChangedError();
+      },
+    });
   },
   createStagedExclusiveFile(path: string, bytes: Buffer): CoordinationStableFile {
     let fd: number | undefined;
@@ -229,6 +235,13 @@ function syncDirectory(path: string): void {
 
 function directoryDigest(path: string): string {
   const stat = lstatSync(path, { bigint: true });
+  const uid = currentUid();
+  if (
+    (stat.mode & BigInt(TYPE_MASK)) !== BigInt(constants.S_IFDIR)
+    || (stat.mode & BigInt(TYPE_MASK)) === BigInt(constants.S_IFLNK)
+    || (stat.mode & 0o777n) !== BigInt(DIRECTORY_MODE)
+    || (uid !== null && stat.uid !== BigInt(uid))
+  ) throw unsafe();
   return `${stat.dev}:${stat.ino}:${stat.mode}:${stat.uid}:${stat.mtimeNs}:${stat.ctimeNs}`;
 }
 

@@ -52,6 +52,7 @@ export type CoordinationStableFile = {
 export type CoordinationStableDirectory = {
   readonly entries: readonly string[];
   readonly digest: string;
+  assertUnchanged(): void;
 };
 
 export interface CoordinationFilesystemPolicy extends CoordinationIdentityPolicy {
