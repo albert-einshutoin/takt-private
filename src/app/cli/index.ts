@@ -12,37 +12,88 @@ import { error as errorLog } from '../../shared/ui/index.js';
 import { resolveRemovedRootCommand, resolveSlashFallbackTask } from './helpers.js';
 import { installImmediateSigintExit } from './immediateSigintExit.js';
 import { installOpencodeExitCleanup } from './opencodeExitCleanup.js';
+import { isProjectTemplateCliInvocation } from './projectTemplateInvocation.js';
+import {
+  createProjectTemplateCliFailure,
+  projectTemplateCliExitCodeForErrorCode,
+  startProjectTemplateCliLifecycle,
+  writeProjectTemplateCliOutcome,
+  type ProjectTemplateCliCommand,
+} from '../../features/project-template/index.js';
 
-checkForUpdates();
+const projectTemplateInvocation = isProjectTemplateCliInvocation(
+  process.argv.slice(2),
+);
+if (!projectTemplateInvocation) checkForUpdates();
 
 // Import in dependency order
 import { program, runPreActionHook } from './program.js';
 import './commands.js';
 import { executeInteractiveDefaultActionLoop } from './routing.js';
 
+if (projectTemplateInvocation) {
+  program.exitOverride();
+  program.configureOutput({ writeErr() {} });
+}
+
+function requestedProjectTemplateCommand(): ProjectTemplateCliCommand {
+  const args = process.argv.slice(2);
+  const index = args.indexOf('project-template');
+  const name = index < 0 ? undefined : args[index + 1];
+  return name === 'inspect' || name === 'list' || name === 'export'
+    || name === 'diff' || name === 'apply' || name === 'update'
+    || name === 'rollback'
+    ? `project-template ${name}`
+    : 'project-template list';
+}
+
+async function writeProjectTemplateEntrypointFailure(): Promise<void> {
+  const command = requestedProjectTemplateCommand();
+  const mode = process.argv.includes('--apply') ? 'apply' : 'dry-run';
+  const code = 'UNKNOWN_OPTION' as const;
+  const execution = startProjectTemplateCliLifecycle({
+    command, mode, async dispose() {},
+    async handle() {
+      return {
+        envelope: createProjectTemplateCliFailure({ command, mode, code }),
+        exitCode: projectTemplateCliExitCodeForErrorCode(code),
+      };
+    },
+  });
+  const outcome = await execution.result;
+  await writeProjectTemplateCliOutcome(outcome, (chunk) => {
+    process.stdout.write(chunk);
+  });
+  process.exitCode = outcome.exitCode;
+}
+
 (async () => {
   const args = process.argv.slice(2);
   installOpencodeExitCleanup();
-  const cleanupImmediateSigintExit = installImmediateSigintExit(args[0]);
-  const { operands } = program.parseOptions(args);
-  const removedRootCommand = resolveRemovedRootCommand(operands);
-  if (removedRootCommand !== null) {
-    cleanupImmediateSigintExit();
-    errorLog(`error: unknown command '${removedRootCommand}'`);
-    process.exit(1);
-  }
-
-  const knownCommands = program.commands.map((cmd) => cmd.name());
-  const slashFallbackTask = resolveSlashFallbackTask(args, knownCommands);
-
-  if (slashFallbackTask !== null) {
-    try {
-      await runPreActionHook();
-      await executeInteractiveDefaultActionLoop(slashFallbackTask);
-    } finally {
+  const cleanupImmediateSigintExit = projectTemplateInvocation
+    ? () => {}
+    : installImmediateSigintExit(args[0]);
+  if (!projectTemplateInvocation) {
+    const { operands } = program.parseOptions(args);
+    const removedRootCommand = resolveRemovedRootCommand(operands);
+    if (removedRootCommand !== null) {
       cleanupImmediateSigintExit();
+      errorLog(`error: unknown command '${removedRootCommand}'`);
+      process.exit(1);
     }
-    process.exit(0);
+
+    const knownCommands = program.commands.map((cmd) => cmd.name());
+    const slashFallbackTask = resolveSlashFallbackTask(args, knownCommands);
+
+    if (slashFallbackTask !== null) {
+      try {
+        await runPreActionHook();
+        await executeInteractiveDefaultActionLoop(slashFallbackTask);
+      } finally {
+        cleanupImmediateSigintExit();
+      }
+      process.exit(0);
+    }
   }
 
   // Normal parsing for all other cases (including '#' prefixed inputs)
@@ -53,10 +104,24 @@ import { executeInteractiveDefaultActionLoop } from './routing.js';
   }
 
   const rootArg = process.argv.slice(2)[0];
-  if (rootArg !== 'watch') {
+  if (rootArg !== 'watch' && !projectTemplateInvocation) {
     process.exit(0);
   }
-})().catch((err) => {
+})().catch(async (err) => {
+  if (projectTemplateInvocation) {
+    if ((err as { code?: string }).code === 'commander.helpDisplayed') {
+      process.exitCode = 0;
+      return;
+    }
+    if ((err as { name?: string }).name === 'CommanderError') {
+      await writeProjectTemplateEntrypointFailure();
+      return;
+    }
+    // Do not claim a second stdout write if an action or its writer failed.
+    process.stderr.write('project-template command failed\n');
+    process.exitCode = 70;
+    return;
+  }
   errorLog(getErrorMessage(err));
   process.exit(1);
 });
