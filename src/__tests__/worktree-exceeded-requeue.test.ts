@@ -7,14 +7,28 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 // --- Mock setup ---
 
+const { loadWorkflowByIdentifierMock } = vi.hoisted(() => ({
+  loadWorkflowByIdentifierMock: vi.fn(),
+}));
+
 vi.mock('../infra/config/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../infra/config/index.js')>();
   return {
     ...actual,
-    loadWorkflowByIdentifier: vi.fn(),
+    loadWorkflowByIdentifier: loadWorkflowByIdentifierMock,
     isWorkflowPath: vi.fn().mockReturnValue(false),
     resolveWorkflowConfigValues: vi.fn().mockReturnValue({}),
     resolveWorkflowConfigValue: vi.fn().mockReturnValue(undefined),
+  };
+});
+
+vi.mock('../infra/config/loaders/workflowResolver.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../infra/config/loaders/workflowResolver.js')>();
+  return {
+    ...actual,
+    // Runtime execution deliberately uses the internal context-aware loader;
+    // keep this behavioral fixture bound to the same workflow mock authority.
+    loadWorkflowByIdentifierWithReadContext: loadWorkflowByIdentifierMock,
   };
 });
 
