@@ -22,6 +22,7 @@ import {
   consumeProjectTemplateApprovalRecord,
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
+  listProjectTemplateBackupIdsBounded,
   openProjectTemplateApplyStorageReadOnly,
   parseProjectTemplateApplyJournal,
   pruneProjectTemplateBackupGenerations,
@@ -1151,6 +1152,33 @@ describe('project template apply storage', () => {
     expect(result.retainedBackupIds).toEqual(['backup-3', 'backup-2']);
     expect(lstatSync(join(storage.backupsRoot, 'backup-2')).isDirectory()).toBe(true);
     expect(lstatSync(join(storage.backupsRoot, 'backup-3')).isDirectory()).toBe(true);
+  });
+
+  it('lists at most 32 validated backup generations newest first', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    for (const [index, backupId] of ['backup-1', 'backup-2', 'backup-3'].entries()) {
+      await writeProjectTemplateBackupManifest({
+        storage,
+        manifest: manifest(backupId, `2026-07-30T00:00:0${index}.000Z`),
+      });
+    }
+
+    await expect(listProjectTemplateBackupIdsBounded({ storage }))
+      .resolves.toEqual(['backup-3', 'backup-2', 'backup-1']);
+  });
+
+  it('fails closed before listing a 33rd backup generation', async () => {
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: makeRepo() });
+    for (let index = 0; index < 33; index += 1) {
+      const backupId = `backup-${String(index).padStart(2, '0')}`;
+      await writeProjectTemplateBackupManifest({
+        storage,
+        manifest: manifest(backupId, `2026-07-30T00:00:${String(index).padStart(2, '0')}.000Z`),
+      });
+    }
+
+    await expect(listProjectTemplateBackupIdsBounded({ storage }))
+      .rejects.toMatchObject({ code: 'LIMIT_EXCEEDED' });
   });
 
   it('never prunes a protected in-flight backup generation', async () => {
