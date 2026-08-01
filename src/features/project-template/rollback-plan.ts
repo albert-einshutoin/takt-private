@@ -7,6 +7,7 @@ import {
   type ProjectTemplateApplyStorage,
   type ProjectTemplateApplyTarget,
   type ProjectTemplateBackupEntryState,
+  type ProjectTemplateBackupManifest,
 } from './apply-storage.js';
 import { readProjectTemplateCompanionLockState } from './companion-lock-state-reader.js';
 import { projectTemplateTransactionTargetByteLimit } from './transaction-limits.js';
@@ -38,6 +39,16 @@ export interface CreateProjectTemplateRollbackPlanOptions {
   readonly currentTargetSha256: string;
   readonly currentCompanionLocksSha256: string;
 }
+
+interface ActiveRollbackPlanAuthority {
+  readonly storage: ProjectTemplateApplyStorage;
+  readonly repoRoot: string;
+  readonly manifest: ProjectTemplateBackupManifest;
+  state: 'active' | 'consumed';
+}
+
+const ROLLBACK_PLAN_AUTHORITIES =
+  new WeakMap<object, ActiveRollbackPlanAuthority>();
 
 function requirePattern(value: unknown, pattern: RegExp): string {
   if (
@@ -266,5 +277,27 @@ export async function deriveProjectTemplateRollbackPlan(options: {
     currentCompanionLocksSha256: companion.previousLocksSha256,
   });
   requireActive(signal);
+  ROLLBACK_PLAN_AUTHORITIES.set(plan, {
+    storage,
+    repoRoot: storage.repoRoot,
+    manifest,
+    state: 'active',
+  });
   return plan;
+}
+
+/** @internal Consumes one process-local rollback derivation authority. */
+export function consumeProjectTemplateRollbackPlanAuthority(options: {
+  readonly plan: ProjectTemplateRollbackPlan;
+  readonly storage: ProjectTemplateApplyStorage;
+}): ProjectTemplateBackupManifest | undefined {
+  const authority = ROLLBACK_PLAN_AUTHORITIES.get(options.plan);
+  if (
+    authority === undefined
+    || authority.state !== 'active'
+    || authority.storage !== options.storage
+    || authority.repoRoot !== options.storage.repoRoot
+  ) return undefined;
+  authority.state = 'consumed';
+  return authority.manifest;
 }

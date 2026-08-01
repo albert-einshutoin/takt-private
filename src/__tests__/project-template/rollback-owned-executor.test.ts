@@ -14,6 +14,7 @@ import { createProjectTemplateExportPlan } from '../../features/project-template
 import {
   rollbackOwnedProjectTemplateApply,
 } from '../../features/project-template/apply-executor.js';
+import { inspectProjectTemplateApplyGuard } from '../../features/project-template/apply-guard.js';
 import {
   acquireProjectTemplateApplyLease,
 } from '../../features/project-template/apply-lease.js';
@@ -151,6 +152,8 @@ describe('owned project template rollback executor', () => {
     expect(existsSync(value.contentPath)).toBe(false);
     expect(readProjectTemplateCompanionLockState(value.projectRoot).state)
       .toBe('first-install');
+    expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
+      .toBe(true);
   });
 
   it('preserves a foreign target when the sealed rollback plan drifts', async () => {

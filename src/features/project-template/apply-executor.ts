@@ -10,9 +10,12 @@ import {
 } from './apply-guard.js';
 import {
   acquireProjectTemplateApplyLease,
+  assertProjectTemplateMutationLeaseOwned,
   clearProjectTemplateRecoveryRequiredMarker,
   reclaimStaleProjectTemplateApplyLeaseForRecovery,
   writeProjectTemplateRecoveryRequiredMarker,
+  type ProjectTemplateApplyLease,
+  type ProjectTemplateMutationLease,
 } from './apply-lease.js';
 import type {
   ProjectTemplateApplyPlan,
@@ -64,6 +67,12 @@ import {
   isProjectTemplateApplyApprovalEvidence,
   type ProjectTemplateApplyApprovalEvidence,
 } from './apply-approval.js';
+import {
+  consumeProjectTemplateRollbackPlanAuthority,
+  deriveProjectTemplateRollbackPlan,
+  type ProjectTemplateRollbackPlan,
+} from './rollback-plan.js';
+import { readProjectTemplateCompanionLockState } from './companion-lock-state-reader.js';
 
 export const PROJECT_TEMPLATE_LOCK_PATH = '.takt-template-lock.json';
 
@@ -79,7 +88,9 @@ export type ProjectTemplateRollbackNotStartedCode =
   | 'APPLY_GUARD_BLOCKED'
   | 'APPLY_LEASE_UNAVAILABLE'
   | 'BACKUP_UNAVAILABLE'
-  | 'ROLLBACK_DRIFT';
+  | 'ROLLBACK_DRIFT'
+  | 'INTERRUPTED'
+  | 'SECURITY_GUARD';
 
 export type ProjectTemplateApplyResult =
   | { status: 'not_started'; code: ProjectTemplateApplyNotStartedCode; message: string }
@@ -432,11 +443,23 @@ async function deleteTarget(
 async function writeJournal(
   storage: ProjectTemplateApplyStorage,
   value: Omit<ProjectTemplateApplyJournal, 'schemaVersion'>,
+  schemaVersion: ProjectTemplateApplyJournal['schemaVersion'] = '1.0',
 ): Promise<void> {
   await writeProjectTemplateApplyJournal({
     storage,
-    journal: { schemaVersion: '1.0', ...value },
+    journal: { schemaVersion, ...value },
   });
+}
+
+async function removeRollbackJournal(
+  storage: ProjectTemplateApplyStorage,
+): Promise<void> {
+  try {
+    await storage.io.unlink(storage.journalPath);
+    await storage.io.fsyncDirectory(dirname(storage.journalPath));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
 }
 
 async function verifyPlanTarget(
@@ -1276,6 +1299,219 @@ export async function applyProjectTemplatePlan(options: {
   }
 }
 
+async function performOwnedRollback(options: {
+  readonly storage: ProjectTemplateApplyStorage;
+  readonly lease: ProjectTemplateApplyLease;
+  readonly manifest: ProjectTemplateBackupManifest;
+  readonly strictCompanionVerification: boolean;
+  readonly drainTerminalJournal: boolean;
+}): Promise<ProjectTemplateRollbackResult> {
+  const { storage } = options;
+  const { manifest } = options;
+  const assertOwned = (): void => assertProjectTemplateMutationLeaseOwned(
+    dirname(dirname(options.lease.lockPath)),
+    options.lease as ProjectTemplateMutationLease,
+  );
+  let rollbackMutationStarted = false;
+  try {
+    assertOwned();
+    for (const entry of manifest.entries) {
+      if (!stateMatches(
+        await currentState(storage, entry.target),
+        entry.after,
+        storage.platform,
+      )) {
+        return rollbackNotStarted('ROLLBACK_DRIFT', 'an applied target changed after apply');
+      }
+      assertOwned();
+    }
+    const transactionId = `rollback-${randomUUID()}`;
+    const restoredOperations: string[] = [];
+    rollbackMutationStarted = true;
+    try {
+      for (const entry of [...manifest.entries].reverse()) {
+        const key = operationKey(storage, entry.target);
+        await writeJournal(storage, {
+          transactionId,
+          planId: manifest.planId,
+          backupId: manifest.backupId,
+          state: 'rolling-back',
+          completedOperations: restoredOperations,
+          createdTargetDirectories: manifest.createdTargetDirectories,
+          updatedAt: new Date().toISOString(),
+        }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
+        assertOwned();
+        await restoreOperations(
+          storage,
+          manifest,
+          transactionId,
+          new Set([key]),
+        );
+        assertOwned();
+        restoredOperations.push(key);
+        await writeJournal(storage, {
+          transactionId,
+          planId: manifest.planId,
+          backupId: manifest.backupId,
+          state: 'rolling-back',
+          completedOperations: restoredOperations,
+          createdTargetDirectories: manifest.createdTargetDirectories,
+          updatedAt: new Date().toISOString(),
+        }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
+        assertOwned();
+      }
+      await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
+      assertOwned();
+      if (!await verifyManifestState(storage, manifest, 'before')) {
+        throw new Error('rollback verification failed');
+      }
+      assertOwned();
+      if (
+        options.strictCompanionVerification
+        && !runProjectTemplateDoctor(storage.repoRoot).passed
+      ) {
+        throw new Error('rollback doctor verification failed');
+      }
+      const companionBefore = manifest.entries.filter((entry) => (
+        entry.target.kind === 'content-lock'
+        || entry.target.kind === 'repertoire-lock'
+        || entry.target.kind === 'source-provenance'
+      ));
+      const expectedCompanionState = companionBefore.every(
+        (entry) => entry.before.kind === 'absent',
+      ) ? 'first-install'
+        : companionBefore.every((entry) => entry.before.kind === 'file')
+          ? 'update'
+          : 'mixed';
+      if (options.strictCompanionVerification) {
+        if (
+          companionBefore.length !== 3
+          || expectedCompanionState === 'mixed'
+          || readProjectTemplateCompanionLockState(storage.repoRoot).state
+            !== expectedCompanionState
+        ) throw new Error('rollback companion cohort verification failed');
+      }
+      assertOwned();
+      invalidateResolvedConfigCache(storage.repoRoot);
+      await writeJournal(storage, {
+        transactionId,
+        planId: manifest.planId,
+        backupId: manifest.backupId,
+        state: 'rolled-back',
+        completedOperations: restoredOperations,
+        createdTargetDirectories: manifest.createdTargetDirectories,
+        updatedAt: new Date().toISOString(),
+      }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
+      assertOwned();
+      await removeProjectTemplateStagingTransaction({ storage, transactionId });
+      assertOwned();
+      if (options.drainTerminalJournal) {
+        await removeRollbackJournal(storage);
+        assertOwned();
+      }
+      return { status: 'rolled_back', backupId: manifest.backupId };
+    } catch {
+      try {
+        writeRecoveryMarker({ storage, transactionId });
+        await writeJournal(storage, {
+          transactionId,
+          planId: manifest.planId,
+          backupId: manifest.backupId,
+          state: 'restore-failed',
+          completedOperations: restoredOperations,
+          createdTargetDirectories: manifest.createdTargetDirectories,
+          updatedAt: new Date().toISOString(),
+        }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
+      } catch {
+        // The recovery-required result remains closed if storage also fails.
+      }
+      return {
+        status: 'recovery_required',
+        code: 'RECOVERY_REQUIRED',
+        backupId: manifest.backupId,
+        message: 'project template recovery is required',
+      };
+    }
+  } catch {
+    if (!rollbackMutationStarted) {
+      return rollbackNotStarted(
+        'BACKUP_UNAVAILABLE',
+        'backup generation or rollback preconditions are unavailable',
+      );
+    }
+    return {
+      status: 'recovery_required',
+      code: 'RECOVERY_REQUIRED',
+      backupId: manifest.backupId,
+      message: 'project template recovery is required',
+    };
+  }
+}
+
+/** @internal Executes one freshly sealed rollback under the caller-owned lease. */
+export async function rollbackOwnedProjectTemplateApply(options: {
+  readonly storage: ProjectTemplateApplyStorage;
+  readonly lease: ProjectTemplateApplyLease;
+  readonly plan: ProjectTemplateRollbackPlan;
+  readonly signal?: AbortSignal;
+}): Promise<ProjectTemplateRollbackResult> {
+  assertProjectTemplateMutationLeaseOwned(
+    dirname(dirname(options.lease.lockPath)),
+    options.lease as ProjectTemplateMutationLease,
+  );
+  if (consumeProjectTemplateRollbackPlanAuthority({
+    plan: options.plan,
+    storage: options.storage,
+  }) === undefined) {
+    return rollbackNotStarted('SECURITY_GUARD', 'rollback authority is invalid');
+  }
+  const interrupted = (): boolean => options.signal?.aborted === true;
+  if (interrupted()) {
+    return rollbackNotStarted('INTERRUPTED', 'rollback was interrupted');
+  }
+  let fresh: ProjectTemplateRollbackPlan;
+  try {
+    fresh = await deriveProjectTemplateRollbackPlan({
+      storage: options.storage,
+      backupId: options.plan.backupId,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+  } catch (error) {
+    if (
+      interrupted()
+      || (error instanceof Error && error.name === 'AbortError')
+    ) return rollbackNotStarted('INTERRUPTED', 'rollback was interrupted');
+    return rollbackNotStarted('ROLLBACK_DRIFT', 'rollback evidence changed');
+  }
+  assertProjectTemplateMutationLeaseOwned(
+    dirname(dirname(options.lease.lockPath)),
+    options.lease as ProjectTemplateMutationLease,
+  );
+  if (fresh.backupManifestSha256 !== options.plan.backupManifestSha256) {
+    return rollbackNotStarted('BACKUP_UNAVAILABLE', 'backup generation changed');
+  }
+  if (
+    fresh.currentTargetSha256 !== options.plan.currentTargetSha256
+    || fresh.currentCompanionLocksSha256
+      !== options.plan.currentCompanionLocksSha256
+    || fresh.planId !== options.plan.planId
+  ) return rollbackNotStarted('ROLLBACK_DRIFT', 'rollback evidence changed');
+  const manifest = consumeProjectTemplateRollbackPlanAuthority({
+    plan: fresh,
+    storage: options.storage,
+  });
+  if (manifest === undefined) {
+    return rollbackNotStarted('SECURITY_GUARD', 'rollback authority is invalid');
+  }
+  return await performOwnedRollback({
+    storage: options.storage,
+    lease: options.lease,
+    manifest,
+    strictCompanionVerification: true,
+    drainTerminalJournal: true,
+  });
+}
+
 export async function rollbackProjectTemplateApply(options: {
   projectRoot: string;
   backupId: string;
@@ -1293,7 +1529,6 @@ export async function rollbackProjectTemplateApply(options: {
   } catch {
     return rollbackNotStarted('APPLY_LEASE_UNAVAILABLE', 'exclusive apply lease is unavailable');
   }
-  let rollbackMutationStarted = false;
   try {
     const ownedGuard = inspectProjectTemplateApplyGuard({
       repoPath: options.projectRoot,
@@ -1314,104 +1549,18 @@ export async function rollbackProjectTemplateApply(options: {
       storage,
       backupId: options.backupId,
     });
-    for (const entry of manifest.entries) {
-      if (!stateMatches(
-        await currentState(storage, entry.target),
-        entry.after,
-        storage.platform,
-      )) {
-        return rollbackNotStarted('ROLLBACK_DRIFT', 'an applied target changed after apply');
-      }
-    }
-    const transactionId = `rollback-${randomUUID()}`;
-    const restoredOperations: string[] = [];
-    // Everything above is read-only validation. Once this phase begins, even
-    // a failed first journal write has uncertain durability and must retain
-    // the recovery-required classification.
-    rollbackMutationStarted = true;
-    try {
-      for (const entry of [...manifest.entries].reverse()) {
-        const key = operationKey(storage, entry.target);
-        await writeJournal(storage, {
-          transactionId,
-          planId: manifest.planId,
-          backupId: manifest.backupId,
-          state: 'rolling-back',
-          completedOperations: restoredOperations,
-          createdTargetDirectories: manifest.createdTargetDirectories,
-          updatedAt: new Date().toISOString(),
-        });
-        await restoreOperations(
-          storage,
-          manifest,
-          transactionId,
-          new Set([key]),
-        );
-        restoredOperations.push(key);
-        await writeJournal(storage, {
-          transactionId,
-          planId: manifest.planId,
-          backupId: manifest.backupId,
-          state: 'rolling-back',
-          completedOperations: restoredOperations,
-          createdTargetDirectories: manifest.createdTargetDirectories,
-          updatedAt: new Date().toISOString(),
-        });
-      }
-      await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
-      if (!await verifyManifestState(storage, manifest, 'before')) {
-        throw new Error('rollback verification failed');
-      }
-      invalidateResolvedConfigCache(options.projectRoot);
-      await writeJournal(storage, {
-        transactionId,
-        planId: manifest.planId,
-        backupId: manifest.backupId,
-        state: 'rolled-back',
-        completedOperations: restoredOperations,
-        createdTargetDirectories: manifest.createdTargetDirectories,
-        updatedAt: new Date().toISOString(),
-      });
-      await removeProjectTemplateStagingTransaction({ storage, transactionId });
-      return { status: 'rolled_back', backupId: manifest.backupId };
-    } catch {
-      try {
-        writeRecoveryMarker({
-          storage,
-          transactionId,
-        });
-        await writeJournal(storage, {
-          transactionId,
-          planId: manifest.planId,
-          backupId: manifest.backupId,
-          state: 'restore-failed',
-          completedOperations: restoredOperations,
-          createdTargetDirectories: manifest.createdTargetDirectories,
-          updatedAt: new Date().toISOString(),
-        });
-      } catch {
-        // Preserve the recovery-required outcome when durable storage is itself failing.
-      }
-      return {
-        status: 'recovery_required',
-        code: 'RECOVERY_REQUIRED',
-        backupId: manifest.backupId,
-        message: 'project template recovery is required',
-      };
-    }
+    return await performOwnedRollback({
+      storage,
+      lease,
+      manifest,
+      strictCompanionVerification: false,
+      drainTerminalJournal: false,
+    });
   } catch {
-    if (!rollbackMutationStarted) {
-      return rollbackNotStarted(
-        'BACKUP_UNAVAILABLE',
-        'backup generation or rollback preconditions are unavailable',
-      );
-    }
-    return {
-      status: 'recovery_required',
-      code: 'RECOVERY_REQUIRED',
-      backupId: options.backupId,
-      message: 'project template recovery is required',
-    };
+    return rollbackNotStarted(
+      'BACKUP_UNAVAILABLE',
+      'backup generation or rollback preconditions are unavailable',
+    );
   } finally {
     lease.release();
   }
