@@ -9,7 +9,24 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { resolveRef } from '../../features/repertoire/github-ref-resolver.js';
+import {
+  resolveRef,
+  verifyImmutableGithubDependencySources,
+} from '../../features/repertoire/github-ref-resolver.js';
+
+const DEPENDENCIES = [{
+  scope: '@acme/alpha',
+  version: '1.2.3',
+  source: 'github:acme/alpha@v1.2.3',
+  commit: '0123456789abcdef0123456789abcdef01234567',
+  capabilities: ['edit'] as const,
+}, {
+  scope: '@acme/beta',
+  version: '2.0.0',
+  source: 'github:acme/beta@refs/tags/v2.0.0',
+  commit: 'abcdef0123456789abcdef0123456789abcdef01',
+  capabilities: [] as const,
+}] as const;
 
 describe('resolveRef', () => {
   it('should return specRef directly when provided', () => {
@@ -79,5 +96,59 @@ describe('resolveRef', () => {
     expect(() => resolveRef(undefined, 'myorg', 'myrepo', execGh)).toThrow(
       'デフォルトブランチを取得できませんでした: myorg/myrepo',
     );
+  });
+});
+
+describe('verifyImmutableGithubDependencySources', () => {
+  it('resolves every canonical tag sequentially and returns sealed evidence', async () => {
+    const calls: string[] = [];
+    let active = 0;
+    const result = await verifyImmutableGithubDependencySources({
+      dependencies: DEPENDENCIES,
+      resolver: {
+        async resolveRefToCommit(input) {
+          active += 1;
+          expect(active).toBe(1);
+          calls.push(`${input.owner}/${input.repo}@${input.ref}`);
+          await Promise.resolve();
+          active -= 1;
+          return { commit: DEPENDENCIES[calls.length - 1]!.commit };
+        },
+      },
+    });
+
+    expect(calls).toEqual([
+      'acme/alpha@v1.2.3',
+      'acme/beta@refs/tags/v2.0.0',
+    ]);
+    expect(result).toEqual({
+      method: 'github-ref-to-commit-v1',
+      declarationSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      count: 2,
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+  });
+
+  it('fails closed when a tag was republished to another commit', async () => {
+    await expect(verifyImmutableGithubDependencySources({
+      dependencies: DEPENDENCIES.slice(0, 1),
+      resolver: {
+        async resolveRefToCommit() {
+          return { commit: 'ffffffffffffffffffffffffffffffffffffffff' };
+        },
+      },
+    })).rejects.toMatchObject({ code: 'COMMIT_MISMATCH' });
+  });
+
+  it('returns zero-count evidence without invoking the metadata port', async () => {
+    const resolveRefToCommit = vi.fn();
+    await expect(verifyImmutableGithubDependencySources({
+      dependencies: [],
+      resolver: { resolveRefToCommit },
+    })).resolves.toMatchObject({
+      method: 'github-ref-to-commit-v1',
+      count: 0,
+    });
+    expect(resolveRefToCommit).not.toHaveBeenCalled();
   });
 });
