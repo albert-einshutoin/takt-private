@@ -108,15 +108,45 @@ export function createPersonalOnboardingTemplateFacade(
 
       const apply = mode === 'apply';
       const files = { status: 'success' as const, changed: apply };
-      const rootAction = dependencies.ensureRootGitignore(options.repoPath, apply);
-      const rootGitignore = actionComponent(rootAction);
-      const labelActions = await dependencies.ensureGithubLabels({
-        repoPath: options.repoPath,
-        repo: options.repo,
-        apply,
-      });
-      const labels = actionsComponent(labelActions);
       const retainedBackupId = backupId(outcome);
+      let rootGitignore: ComponentSummary;
+      try {
+        const rootAction = dependencies.ensureRootGitignore(options.repoPath, apply);
+        rootGitignore = actionComponent(rootAction);
+      } catch {
+        // Post-file helpers may surface paths or provider credentials in thrown
+        // values. Keep those values outside both public renderers and stop the
+        // remaining post-file mutations after the first component exception.
+        rootGitignore = { status: 'error', changed: false };
+        const labels = { status: 'skipped' as const };
+        const machine = {
+          schemaVersion: '1.0', status: 'partial' as const, command: 'onboard-repo', mode,
+          ...(retainedBackupId === undefined ? {} : { backupId: retainedBackupId }),
+          components: { files, rootGitignore, labels },
+        };
+        return {
+          passed: false,
+          machineOutput: JSON.stringify(machine),
+          humanOutput: humanOutput({
+            status: 'partial', mode, files, rootGitignore, labels,
+            ...(retainedBackupId === undefined ? {} : { backupId: retainedBackupId }),
+          }),
+        };
+      }
+
+      let labels: ComponentSummary;
+      try {
+        const labelActions = await dependencies.ensureGithubLabels({
+          repoPath: options.repoPath,
+          repo: options.repo,
+          apply,
+        });
+        labels = actionsComponent(labelActions);
+      } catch {
+        // The component status is sufficient for automation and never exposes
+        // runner rejection text, which can include command lines and secrets.
+        labels = { status: 'error', changed: false };
+      }
       const passed = rootGitignore.status === 'success' && labels.status === 'success';
       const status = passed ? 'success' as const : 'partial' as const;
       const machine = {
