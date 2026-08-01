@@ -5,36 +5,78 @@ on:
     types: [closed]
     branches: [main]
 
+permissions: {}
+
 jobs:
-  tag:
+  validate:
     if: >
       github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.title, 'Release v') &&
-      startsWith(github.event.pull_request.head.ref, 'release/')
+      startsWith(github.event.pull_request.head.ref, 'release/') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Validate release title and branch
+        id: release
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          export LC_ALL=C
+          # Keep this grammar aligned with the product's SemVer contract. The
+          # length bound prevents attacker-controlled event data from growing
+          # without limit before it reaches a write-capable job.
+          SEMVER_IDENTIFIER='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          SEMVER_PATTERN="(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-${SEMVER_IDENTIFIER}(\\.${SEMVER_IDENTIFIER})*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?"
+
+          case "$PR_TITLE" in
+            'Release v'*) VERSION=${PR_TITLE#'Release v'} ;;
+            *) echo 'Release title must be exactly: Release v<semver>' >&2; exit 1 ;;
+          esac
+
+          if [ "${#VERSION}" -gt 128 ] || [[ ! "$VERSION" =~ ^${SEMVER_PATTERN}$ ]]; then
+            echo 'Release title contains an invalid SemVer version.' >&2
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+          if [ "$PR_HEAD_REF" != "release/${TAG}" ]; then
+            echo 'Release branch must exactly match the validated tag.' >&2
+            exit 1
+          fi
+
+          printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+
+  tag:
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
+      tag: ${{ needs.validate.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Extract version from PR title
-        id: version
-        run: |
-          VERSION=$(echo "${{ github.event.pull_request.title }}" | sed 's/^Release //')
-          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Create and push tag on PR head commit
+        id: tag
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          git tag "${{ steps.version.outputs.tag }}" "${{ github.event.pull_request.head.sha }}"
-          git push origin "${{ steps.version.outputs.tag }}"
+          # `--` and a fully qualified refspec keep validated data out of Git's
+          # option namespace even if the validation boundary changes later.
+          git tag -- "$RELEASE_TAG" "$HEAD_SHA"
+          git push -- origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
 
   publish:
     needs: tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,29 +91,33 @@ jobs:
 
       - name: Determine npm tag
         id: npm-tag
+        env:
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
         run: |
-          VERSION="${{ needs.tag.outputs.tag }}"
-          VERSION="${VERSION#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if echo "$VERSION" | grep -qE '(alpha|beta|rc|next)'; then
-            echo "tag=next" >> "$GITHUB_OUTPUT"
+          VERSION="${RELEASE_TAG#v}"
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo 'tag=next' >> "$GITHUB_OUTPUT"
           else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo 'tag=latest' >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish package
-        run: npm publish --tag ${{ steps.npm-tag.outputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_DIST_TAG: ${{ steps.npm-tag.outputs.tag }}
+        run: npm publish --tag "$NPM_DIST_TAG"
 
       - name: Sync next tag on stable release
         if: steps.npm-tag.outputs.tag == 'latest'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_VERSION: ${{ steps.npm-tag.outputs.version }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
-          VERSION="${{ steps.npm-tag.outputs.version }}"
 
           for attempt in 1 2 3; do
-            if npm dist-tag add "${PACKAGE_NAME}@${VERSION}" next; then
+            if npm dist-tag add "${PACKAGE_NAME}@${RELEASE_VERSION}" next; then
               exit 0
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -80,10 +126,10 @@ jobs:
             fi
             sleep $((attempt * 5))
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Verify dist-tags
+        env:
+          EXPECTED_DIST_TAG: ${{ steps.npm-tag.outputs.tag }}
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
 
@@ -93,7 +139,7 @@ jobs:
 
             echo "Attempt ${attempt}: latest=${LATEST}, next=${NEXT}"
 
-            if [ "${{ steps.npm-tag.outputs.tag }}" != "latest" ] || [ "${LATEST}" = "${NEXT}" ]; then
+            if [ "$EXPECTED_DIST_TAG" != 'latest' ] || [ "$LATEST" = "$NEXT" ]; then
               echo "Dist-tags verified."
               exit 0
             fi
