@@ -130,6 +130,7 @@ export {
   parseProjectTemplateCliEnvelopeJson,
   parseProjectTemplateCliMutationOptions,
   presentProjectTemplateCliEnvelope,
+  createProductionProjectTemplateCliLocalApplyService,
   TAKTPACK_ENTRY_NAMES,
   TAKTPACK_BLOB_PREFIX,
   DEFAULT_TAKTPACK_LIMITS,

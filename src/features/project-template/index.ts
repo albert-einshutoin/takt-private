@@ -141,6 +141,9 @@ export type {
   ProjectTemplateCliSuccessInput,
 } from './cli-machine-contract.js';
 export { startProjectTemplateCliLifecycle } from './cli-lifecycle.js';
+export {
+  createProductionProjectTemplateCliLocalApplyService,
+} from './cli-local-apply-service.js';
 export type {
   ProjectTemplateCliLifecycleContext,
   ProjectTemplateCliLifecycleExecution,
