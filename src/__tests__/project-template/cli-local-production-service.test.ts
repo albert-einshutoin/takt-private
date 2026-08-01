@@ -19,6 +19,7 @@ import {
   acquireProjectTemplateApplyLease,
 } from '../../features/project-template/apply-lease.js';
 import {
+  createProductionProjectTemplateCliLocalApplyPort,
   settleProjectTemplateCliLocalExecutionAfterLease,
 } from '../../features/project-template/local-transaction-apply-facade.js';
 
@@ -213,6 +214,66 @@ describe('production local project-template CLI composition', () => {
       envelope: { status: 'error', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
     });
     expect(readFileSync(sourceLock, 'utf8')).toBe('foreign\n');
+  });
+
+  it('does not mutate when the local archive changes after diff', async () => {
+    const { archivePath, targetRoot } = await fixture();
+    const service = createProductionProjectTemplateCliLocalApplyService();
+    const common = {
+      cwd: targetRoot,
+      sourcePath: archivePath,
+      currentTaktVersion: '0.48.0',
+      force: true,
+    };
+    const preview = await service.diff(common);
+    if (preview.envelope.status !== 'success') throw new Error('preview failed');
+    writeFileSync(archivePath, Buffer.concat([
+      readFileSync(archivePath),
+      Buffer.from('foreign'),
+    ]));
+
+    const result = await service.apply({
+      ...common,
+      mode: 'apply',
+      expectedPlanId: preview.envelope.result.planId,
+    });
+
+    expect(result).toMatchObject({
+      envelope: { status: 'error', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
+    expect(existsSync(join(targetRoot, '.takt-template-lock.json'))).toBe(false);
+    expect(existsSync(join(targetRoot, '.takt-template-state', 'apply.lock')))
+      .toBe(false);
+  });
+
+  it('maps an abort during the lease-held re-derive and releases the lease', async () => {
+    const { archivePath, targetRoot } = await fixture();
+    const port = createProductionProjectTemplateCliLocalApplyPort();
+    const controller = new AbortController();
+    const derived = await port.derive({
+      cwd: targetRoot,
+      sourcePath: archivePath,
+      currentTaktVersion: '0.48.0',
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    const result = await port.execute({
+      cwd: targetRoot,
+      sourcePath: archivePath,
+      currentTaktVersion: '0.48.0',
+      expectedTransactionPlanId: derived.transactionPlanId,
+      force: true,
+      derived,
+      signal: controller.signal,
+    });
+
+    expect(result).toEqual({ status: 'not_started', code: 'INTERRUPTED' });
+    expect(existsSync(join(targetRoot, '.takt-template-lock.json'))).toBe(false);
+    expect(existsSync(join(targetRoot, '.takt-template-state', 'approvals')))
+      .toBe(false);
+    expect(existsSync(join(targetRoot, '.takt-template-state', 'apply.lock')))
+      .toBe(false);
   });
 
   it('maps pre-admission abort to 130 without creating lease state', async () => {
