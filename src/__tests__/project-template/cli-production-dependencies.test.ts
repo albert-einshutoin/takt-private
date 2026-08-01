@@ -2,9 +2,12 @@ import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
+import * as productionModule from '../../app/cli/projectTemplateCommandProduction.js';
+const {
   createProjectTemplateCliCommandProductionDependencies,
-} from '../../app/cli/projectTemplateCommandProduction.js';
+} = productionModule;
+import { GlobalConfigManager } from '../../infra/config/global/globalConfigCore.js';
+import { invalidateAllResolvedConfigCache } from '../../infra/config/resolveConfigValue.js';
 import {
   createProjectTemplateCliSuccess,
   type ProjectTemplateCliOutcome,
@@ -14,8 +17,13 @@ import type {
 } from '../../infra/github/project-template-cli-remote-production.js';
 
 const roots: string[] = [];
+const originalConfigDirectory = process.env.TAKT_CONFIG_DIR;
 
 afterEach(async () => {
+  if (originalConfigDirectory === undefined) delete process.env.TAKT_CONFIG_DIR;
+  else process.env.TAKT_CONFIG_DIR = originalConfigDirectory;
+  GlobalConfigManager.resetInstance();
+  invalidateAllResolvedConfigCache();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -61,6 +69,49 @@ function context() {
 }
 
 describe('project-template production command dependencies', () => {
+  it.each([
+    ['missing configs', undefined, undefined, 'en'],
+    ['global config', 'ja', undefined, 'ja'],
+    ['project config', undefined, 'ja', 'ja'],
+    ['project override', 'ja', 'en', 'en'],
+  ] as const)(
+    'resolves repertoire language from %s without creating missing config',
+    async (_name, globalLanguage, projectLanguage, expectedLanguage) => {
+      const root = await mkdtemp(join(tmpdir(), 'takt-cli-language-'));
+      roots.push(root);
+      const project = join(root, 'project');
+      const globalConfigDirectory = join(root, 'global-config');
+      await mkdir(join(project, '.git'), { recursive: true });
+      await mkdir(globalConfigDirectory);
+      if (globalLanguage !== undefined) {
+        await writeFile(
+          join(globalConfigDirectory, 'config.yaml'),
+          `language: ${globalLanguage}\n`,
+        );
+      }
+      if (projectLanguage !== undefined) {
+        await mkdir(join(project, '.takt'), { recursive: true });
+        await writeFile(
+          join(project, '.takt', 'config.yaml'),
+          `language: ${projectLanguage}\n`,
+        );
+      }
+      process.env.TAKT_CONFIG_DIR = globalConfigDirectory;
+      GlobalConfigManager.resetInstance();
+      invalidateAllResolvedConfigCache();
+      const before = await readdir(globalConfigDirectory);
+      const resolveLanguage = (
+        productionModule as unknown as {
+          resolveProjectTemplateCliProductionLanguage?: (projectRoot: string) => 'en' | 'ja';
+        }
+      ).resolveProjectTemplateCliProductionLanguage;
+
+      expect(resolveLanguage).toBeTypeOf('function');
+      expect(resolveLanguage?.(project)).toBe(expectedLanguage);
+      expect(await readdir(globalConfigDirectory)).toEqual(before);
+    },
+  );
+
   it('owns and disposes a runtime that completes creation after disposal starts', async () => {
     let release!: (runtime: ProjectTemplateCliRemoteProductionRuntime) => void;
     const disposeRuntime = vi.fn(async () => undefined);

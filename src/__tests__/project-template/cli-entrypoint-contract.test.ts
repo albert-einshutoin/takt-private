@@ -150,8 +150,21 @@ await program.parseAsync(process.argv);
   it.each([
     ['per-command', ['project-template', 'list', '--wat', 'value']],
     ['root', ['--wat', 'value', 'project-template', 'list']],
-    ['group', ['project-template', '--wat', 'value', 'list']],
-    ['subcommand', ['project-template', 'wat']],
+    [
+      'group apply-shaped',
+      [
+        'project-template', '--wat', 'secret-group-value', 'apply',
+        '/private/entrypoint/group-source.taktpack', '--apply',
+        '--expected-plan-id', 'a'.repeat(64),
+      ],
+    ],
+    [
+      'subcommand apply-shaped',
+      [
+        'project-template', 'secret-subcommand', '--apply',
+        '/private/entrypoint/subcommand-source.taktpack',
+      ],
+    ],
   ] as const)('maps %s parser failure to one redacted envelope', (_name, args) => {
     const result = run(args);
     expect(result.status).toBe(20);
@@ -160,6 +173,24 @@ await program.parseAsync(process.argv);
     expect(JSON.parse(result.stdout)).toMatchObject({
       schemaVersion: '1.0', status: 'error', error: { code: 'UNKNOWN_OPTION' },
     });
-    expect(result.stdout).not.toContain('value');
+    expect(result.stdout).not.toMatch(/secret-|\/private\/entrypoint/iu);
+  });
+
+  it('does not mistake a known root option value for the real apply command', () => {
+    const result = run([
+      '--task', 'project-template', '--wat', 'secret-root-value',
+      'project-template', 'apply', '/private/entrypoint/source.taktpack',
+      '--apply', '--expected-plan-id', 'a'.repeat(64),
+    ]);
+
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template apply', mode: 'apply',
+      error: { code: 'UNKNOWN_OPTION' },
+    });
+    expect(result.stdout).not.toMatch(/secret-root-value|\/private\/entrypoint/iu);
   });
 });
