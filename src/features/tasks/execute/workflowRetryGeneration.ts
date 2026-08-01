@@ -122,12 +122,17 @@ interface TraversalState {
   memo: Map<string, number>;
 }
 
+interface WorkflowAncestor {
+  readonly reference: string;
+  readonly id: number;
+}
+
 function captureWorkflowTree(
   workflow: WorkflowConfig,
   projectCwd: string,
   lookupCwd: string,
   readContext: InternalWorkflowReadContext,
-  ancestors: readonly string[],
+  ancestors: readonly WorkflowAncestor[],
   depth: number,
   state: TraversalState,
 ): unknown {
@@ -135,8 +140,9 @@ function captureWorkflowTree(
     throw new WorkflowDiscoveryReadError();
   }
   const reference = getWorkflowReference(workflow);
-  if (ancestors.includes(reference)) {
-    return { reference, cycle: true };
+  const cycleTarget = ancestors.find((ancestor) => ancestor.reference === reference);
+  if (cycleTarget) {
+    return { cycle: cycleTarget.id };
   }
   const canonicalWorkflow = JSON.stringify(canonicalize(workflow));
   state.bytes += Buffer.byteLength(canonicalWorkflow, 'utf8');
@@ -152,7 +158,7 @@ function captureWorkflowTree(
   }
   const id = state.nodes;
   state.memo.set(memoKey, id);
-  const nextAncestors = [...ancestors, reference];
+  const nextAncestors = [...ancestors, { reference, id }];
   const children: unknown[] = [];
   for (const step of workflow.steps) {
     if (!isWorkflowCallStep(step)) continue;
@@ -182,7 +188,10 @@ function captureWorkflowTree(
       ),
     });
   }
-  return { id, reference, workflow, children };
+  // Opaque references contain absolute source-path hashes and are intentionally
+  // excluded from the persisted tree. Deterministic traversal IDs retain DAG
+  // and cycle topology while allowing an identical .takt tree to move hosts.
+  return { id, workflow, children };
 }
 
 function hashCanonical(value: unknown): string {
@@ -194,7 +203,7 @@ function canonicalize(value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value;
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([key, child]) => [key, canonicalize(child)]),
   );
 }
@@ -217,7 +226,12 @@ function snapshotPlainRecord(value: unknown, allowedKeys: ReadonlySet<string>): 
 function snapshotResumePoint(value: unknown): WorkflowResumePoint {
   const point = snapshotPlainRecord(value, new Set(['version', 'stack', 'iteration', 'elapsed_ms']));
   if (point.version !== 1 || !Array.isArray(point.stack)) throw new WorkflowDiscoveryReadError();
-  if (safeIsProxy(point.stack) || point.stack.length < 1 || point.stack.length > MAX_RESUME_STACK_DEPTH) {
+  if (
+    safeIsProxy(point.stack)
+    || safeGetPrototypeOf(point.stack) !== Array.prototype
+    || point.stack.length < 1
+    || point.stack.length > MAX_RESUME_STACK_DEPTH
+  ) {
     throw new WorkflowDiscoveryReadError();
   }
   const stackDescriptors = safeGetOwnPropertyDescriptors(point.stack);
@@ -228,6 +242,12 @@ function snapshotResumePoint(value: unknown): WorkflowResumePoint {
     const descriptor = stackDescriptors[key];
     return descriptor === undefined || !('value' in descriptor);
   })) throw new WorkflowDiscoveryReadError();
+  for (let index = 0; index < point.stack.length; index += 1) {
+    const descriptor = stackDescriptors[String(index)];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      throw new WorkflowDiscoveryReadError();
+    }
+  }
   const stack = point.stack.map((entry) => {
     const item = snapshotPlainRecord(entry, new Set(['workflow', 'workflow_ref', 'step', 'kind']));
     const workflow = requiredNonEmptyString(item.workflow);

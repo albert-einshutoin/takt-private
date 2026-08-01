@@ -11,7 +11,11 @@ vi.mock('../infra/config/loaders/workflowCallResolver.js', () => ({
   resolveWorkflowCallTarget: (...args: unknown[]) => mockResolveWorkflowCallTarget(...args),
 }));
 
-import { buildWorkflowGenerationWitness } from '../features/tasks/execute/workflowRetryGeneration.js';
+import {
+  buildWorkflowGenerationWitness,
+  snapshotWorkflowRetrySource,
+} from '../features/tasks/execute/workflowRetryGeneration.js';
+import { attachWorkflowOpaqueRef } from '../infra/config/loaders/workflowSourceMetadata.js';
 
 const readContext = Object.freeze({ marker: 'one-snapshot' }) as unknown as InternalWorkflowReadContext;
 
@@ -119,5 +123,53 @@ describe('workflow retry generation witness', () => {
 
     expect(() => buildWorkflowGenerationWitness(oversized, '/project', '/project', readContext))
       .toThrowError(WorkflowDiscoveryReadError);
+  });
+
+  it('produces the same persisted witness after an identical workflow moves checkout paths', () => {
+    const checkoutA = attachWorkflowOpaqueRef(agentWorkflow('portable'), 'project:sha256:path-a');
+    const checkoutB = attachWorkflowOpaqueRef(agentWorkflow('portable'), 'project:sha256:path-b');
+
+    expect(buildWorkflowGenerationWitness(checkoutA, '/a', '/a', readContext))
+      .toBe(buildWorkflowGenerationWitness(checkoutB, '/b', '/b', readContext));
+  });
+
+  it('does not depend on localeCompare for canonical key ordering', () => {
+    const localeCompare = vi.spyOn(String.prototype, 'localeCompare').mockImplementation(() => {
+      throw new Error('locale-dependent comparator used');
+    });
+    try {
+      expect(buildWorkflowGenerationWitness(agentWorkflow('portable'), '/project', '/project', readContext))
+        .toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      localeCompare.mockRestore();
+    }
+  });
+
+  it('rejects sparse resume stacks', () => {
+    const stack = new Array(1);
+
+    expect(() => snapshotWorkflowRetrySource({
+      generationWitness: 'a'.repeat(64),
+      resumePoint: { version: 1, stack, iteration: 1, elapsed_ms: 1 },
+    })).toThrowError(WorkflowDiscoveryReadError);
+  });
+
+  it('rejects custom Array prototypes without invoking inherited getters', () => {
+    let getterCalled = false;
+    const customPrototype = Object.create(Array.prototype) as unknown[];
+    Object.defineProperty(customPrototype, '0', {
+      get: () => {
+        getterCalled = true;
+        return { workflow: 'default', step: 'step', kind: 'agent' };
+      },
+    });
+    const stack = new Array(1);
+    Object.setPrototypeOf(stack, customPrototype);
+
+    expect(() => snapshotWorkflowRetrySource({
+      generationWitness: 'a'.repeat(64),
+      resumePoint: { version: 1, stack, iteration: 1, elapsed_ms: 1 },
+    })).toThrowError(WorkflowDiscoveryReadError);
+    expect(getterCalled).toBe(false);
   });
 });
