@@ -5,7 +5,9 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
+  lstatSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -218,7 +220,15 @@ describe('repertoire coordination hardening', () => {
       const foreignToken = randomUUID();
       const savedOwnedPath = join(root, `saved-owned-${mode}`);
       fsFault.beforeReleaseMutation = (path) => {
-        expect(path).toBe(activePath);
+        const actualIdentity = lstatSync(path);
+        const expectedIdentity = lstatSync(activePath);
+        // Production now anchors coordination children to the canonical root.
+        // The hook must compare filesystem identity instead of alias spelling.
+        expect(realpathSync(path)).toBe(realpathSync(activePath));
+        expect({ dev: actualIdentity.dev, ino: actualIdentity.ino }).toEqual({
+          dev: expectedIdentity.dev,
+          ino: expectedIdentity.ino,
+        });
         fsFault.actualRenameSync!(path, savedOwnedPath);
         fsFault.actualWriteFileSync!(path, `${JSON.stringify({
           ...original,
