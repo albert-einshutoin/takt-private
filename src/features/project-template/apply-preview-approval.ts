@@ -698,6 +698,49 @@ async function consumeReserved(options: {
   }
 }
 
+/**
+ * @internal Revalidates the exact durable approval without reserving or
+ * consuming it. Remote apply uses this before preparation; the single-use
+ * consume remains the later linearization point after every output is staged.
+ */
+export async function validateProjectTemplateApplyPreviewApproval(
+  value: unknown,
+): Promise<boolean> {
+  const options = snapshotOperationOptions(value, 'consume');
+  if (options === undefined) return false;
+  const authority = authorityFor(options.evidence);
+  if (authority === undefined || authority.state !== 'active') return false;
+  let preview: ProjectTemplateApplyPreview;
+  try {
+    preview = assertProjectTemplateApplyPreview(options.preview);
+  } catch {
+    return false;
+  }
+  try {
+    if (
+      authority.record.projectIdentity !== projectIdentity(options.storage)
+      || await hasProjectTemplateApprovalClaim({
+        storage: options.storage,
+        approvalId: authority.record.approvalId,
+      })
+    ) return false;
+    const record = parseApprovalRecord(await readProjectTemplateApprovalRecord({
+      storage: options.storage,
+      approvalId: authority.record.approvalId,
+    }));
+    return record !== undefined && recordMatches({
+      record,
+      authority,
+      storage: options.storage,
+      preview,
+      baselineStrategy: options.baselineStrategy!,
+      nowMs: options.nowMs,
+    });
+  } catch {
+    return false;
+  }
+}
+
 /** @internal Atomically consumes a single-use preview approval. */
 export async function consumeProjectTemplateApplyPreviewApproval(
   value: unknown,

@@ -1,6 +1,12 @@
 import { types } from 'node:util';
-import type { ProjectTemplateApplyApprovalEvidence } from './apply-approval.js';
+import type {
+  ProjectTemplateApplyPreviewApprovalEvidence,
+} from './apply-preview-approval.js';
+import {
+  validateProjectTemplateApplyPreviewApproval,
+} from './apply-preview-approval.js';
 import type { ProjectTemplateApplyResult } from './apply-executor.js';
+import { initializeProjectTemplateApplyStorage } from './apply-storage.js';
 import {
   inspectProjectTemplateApplyGuard,
 } from './apply-guard.js';
@@ -42,6 +48,7 @@ export type GithubProjectTemplateRemoteApplyErrorCode =
   | 'INVALID_AUTHORITY'
   | 'TRANSACTION_PLAN_MISMATCH'
   | 'HARD_CONFLICT'
+  | 'APPROVAL_INVALID'
   | 'TRUSTED_INFRASTRUCTURE_UNAVAILABLE';
 
 export class GithubProjectTemplateRemoteApplyError extends Error {
@@ -56,7 +63,9 @@ export class GithubProjectTemplateRemoteApplyError extends Error {
           ? 'GitHub project template remote transaction plan changed'
           : code === 'HARD_CONFLICT'
             ? 'GitHub project template remote transaction has a hard conflict'
-            : 'GitHub project template remote apply infrastructure is unavailable');
+            : code === 'APPROVAL_INVALID'
+              ? 'GitHub project template remote approval is invalid'
+              : 'GitHub project template remote apply infrastructure is unavailable');
     this.name = 'GithubProjectTemplateRemoteApplyError';
     // Fixed operator details remain useful for diagnostics without retaining
     // caller input, filesystem paths, receipt material, or inspection output.
@@ -68,7 +77,9 @@ export class GithubProjectTemplateRemoteApplyError extends Error {
           ? 'fresh-transaction-id-differs'
           : code === 'HARD_CONFLICT'
             ? 'fresh-transaction-plan-is-not-executable'
-            : 'trusted-infrastructure-not-composed';
+            : code === 'APPROVAL_INVALID'
+              ? 'fresh-preview-approval-not-authorized'
+              : 'trusted-infrastructure-not-composed';
     Object.freeze(this);
   }
 }
@@ -77,7 +88,7 @@ export interface ApplyGithubProjectTemplateRemoteTransactionOptions {
   readonly cacheRoot: string;
   readonly receiptKey: string;
   readonly expectedTransactionPlanId: string;
-  readonly approvalEvidence: ProjectTemplateApplyApprovalEvidence;
+  readonly approvalEvidence: ProjectTemplateApplyPreviewApprovalEvidence;
   readonly projectRoot: string;
   readonly currentTaktVersion: string;
   readonly baselineStrategy: 'conflict' | 'adopt-identical';
@@ -295,7 +306,8 @@ function snapshotOptions(
     cacheRoot,
     receiptKey,
     expectedTransactionPlanId,
-    approvalEvidence: approvalEvidence as ProjectTemplateApplyApprovalEvidence,
+    approvalEvidence:
+      approvalEvidence as ProjectTemplateApplyPreviewApprovalEvidence,
     projectRoot,
     currentTaktVersion,
     baselineStrategy,
@@ -473,6 +485,25 @@ export function createProjectTemplateRemoteApplyComposition(
         if (preview.hardConflict) {
           throw new GithubProjectTemplateRemoteApplyError('HARD_CONFLICT');
         }
+        const storage = await initializeProjectTemplateApplyStorage({
+          repoPath: options.projectRoot,
+        });
+        assertProjectTemplateMutationLeaseOwned(
+          options.projectRoot,
+          lease as ProjectTemplateMutationLease,
+        );
+        if (!await validateProjectTemplateApplyPreviewApproval({
+          storage,
+          preview,
+          baselineStrategy: options.baselineStrategy,
+          evidence: options.approvalEvidence,
+        })) {
+          throw new GithubProjectTemplateRemoteApplyError('APPROVAL_INVALID');
+        }
+        assertProjectTemplateMutationLeaseOwned(
+          options.projectRoot,
+          lease as ProjectTemplateMutationLease,
+        );
         // Approval and execution are added by the subsequent H11 slices.
         throw new GithubProjectTemplateRemoteApplyError(
           'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
