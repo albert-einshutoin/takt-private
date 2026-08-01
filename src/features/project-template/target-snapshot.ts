@@ -476,12 +476,16 @@ export async function captureProjectTemplateTargetSnapshot(
   };
   checkpoint();
   const candidatePaths = parseCandidatePaths(candidateValue);
-  const taktRoot = resolve(projectRoot, '.takt');
   let projectRealPath: string;
+  let taktRoot: string;
   let rootRealPath: string | undefined;
   let rootBefore: Stats | undefined;
   try {
     projectRealPath = await realpath(projectRoot);
+    // Why: macOS commonly exposes /var through /private/var. Every descendant
+    // identity comparison must share the canonical root or a safe target is
+    // falsely classified as an escaping directory.
+    taktRoot = resolve(projectRealPath, '.takt');
   } catch {
     throw unsafeTarget();
   }

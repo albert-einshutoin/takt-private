@@ -41,9 +41,12 @@ export type GithubProjectTemplateRemoteApplyErrorCode =
   | 'INVALID_OPTIONS'
   | 'INVALID_AUTHORITY'
   | 'TRANSACTION_PLAN_MISMATCH'
+  | 'HARD_CONFLICT'
   | 'TRUSTED_INFRASTRUCTURE_UNAVAILABLE';
 
 export class GithubProjectTemplateRemoteApplyError extends Error {
+  readonly operatorDetail: string;
+
   constructor(public readonly code: GithubProjectTemplateRemoteApplyErrorCode) {
     super(code === 'INVALID_OPTIONS'
       ? 'GitHub project template remote apply options are invalid'
@@ -51,8 +54,21 @@ export class GithubProjectTemplateRemoteApplyError extends Error {
         ? 'GitHub project template remote apply authority is invalid'
         : code === 'TRANSACTION_PLAN_MISMATCH'
           ? 'GitHub project template remote transaction plan changed'
-          : 'GitHub project template remote apply infrastructure is unavailable');
+          : code === 'HARD_CONFLICT'
+            ? 'GitHub project template remote transaction has a hard conflict'
+            : 'GitHub project template remote apply infrastructure is unavailable');
     this.name = 'GithubProjectTemplateRemoteApplyError';
+    // Fixed operator details remain useful for diagnostics without retaining
+    // caller input, filesystem paths, receipt material, or inspection output.
+    this.operatorDetail = code === 'INVALID_OPTIONS'
+      ? 'public-options-rejected'
+      : code === 'INVALID_AUTHORITY'
+        ? 'process-local-authority-rejected'
+        : code === 'TRANSACTION_PLAN_MISMATCH'
+          ? 'fresh-transaction-id-differs'
+          : code === 'HARD_CONFLICT'
+            ? 'fresh-transaction-plan-is-not-executable'
+            : 'trusted-infrastructure-not-composed';
     Object.freeze(this);
   }
 }
@@ -453,6 +469,9 @@ export function createProjectTemplateRemoteApplyComposition(
           throw new GithubProjectTemplateRemoteApplyError(
             'TRANSACTION_PLAN_MISMATCH',
           );
+        }
+        if (preview.hardConflict) {
+          throw new GithubProjectTemplateRemoteApplyError('HARD_CONFLICT');
         }
         // Approval and execution are added by the subsequent H11 slices.
         throw new GithubProjectTemplateRemoteApplyError(
