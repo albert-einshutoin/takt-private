@@ -59,6 +59,19 @@ describe('project template CLI machine contract', () => {
     )).toThrow(ProjectTemplateCliContractError);
   });
 
+  it('rejects invalid command and mode values at construction time', () => {
+    expect(() => createProjectTemplateCliSuccess({
+      command: '/Users/alice/project-template',
+      mode: 'dry-run',
+      result: null,
+    })).toThrow(ProjectTemplateCliContractError);
+    expect(() => createProjectTemplateCliFailure({
+      command: 'project-template apply',
+      mode: 'unsafe' as never,
+      code: 'INTERNAL',
+    })).toThrow(ProjectTemplateCliContractError);
+  });
+
   it.each([
     [{ absolutePath: '/Users/example/.takt/cache' }],
     [{ credential: 'github-token' }],

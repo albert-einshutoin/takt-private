@@ -21,14 +21,30 @@ class ProjectTemplateCliPreAdmissionInterrupt extends Error {
   }
 }
 
+class ProjectTemplateCliDuplicateAdmission extends Error {
+  constructor() {
+    super('mutation admission may only occur once');
+    this.name = 'ProjectTemplateCliDuplicateAdmission';
+  }
+}
+
 function failureOutcome(
   command: string,
   mode: ProjectTemplateCliMode,
-  code: 'INTERRUPTED' | 'INTERNAL',
+  code:
+    | 'INTERRUPTED'
+    | 'INTERNAL'
+    | 'RECOVERY_REQUIRED'
+    | 'RESULT_INDETERMINATE',
 ): ProjectTemplateCliOutcome {
+  const exitCode = code === 'INTERRUPTED'
+    ? 130
+    : code === 'RECOVERY_REQUIRED' || code === 'RESULT_INDETERMINATE'
+      ? 25
+      : 70;
   return {
     envelope: createProjectTemplateCliFailure({ command, mode, code }),
-    exitCode: code === 'INTERRUPTED' ? 130 : 70,
+    exitCode,
   };
 }
 
@@ -62,7 +78,7 @@ export function startProjectTemplateCliLifecycle(input: {
       throw new ProjectTemplateCliPreAdmissionInterrupt();
     }
     if (admitted) {
-      throw new Error('mutation admission may only occur once');
+      throw new ProjectTemplateCliDuplicateAdmission();
     }
     admitted = true;
   };
@@ -83,6 +99,10 @@ export function startProjectTemplateCliLifecycle(input: {
         && (interrupted || error instanceof ProjectTemplateCliPreAdmissionInterrupt)
       ) {
         outcome = failureOutcome(input.command, input.mode, 'INTERRUPTED');
+      } else if (error instanceof ProjectTemplateCliDuplicateAdmission) {
+        outcome = failureOutcome(input.command, input.mode, 'INTERNAL');
+      } else if (admitted) {
+        outcome = failureOutcome(input.command, input.mode, 'RESULT_INDETERMINATE');
       } else {
         // Exception messages are intentionally not reflected into the envelope:
         // upstream errors can contain paths, credentials, or provider details.
@@ -94,7 +114,11 @@ export function startProjectTemplateCliLifecycle(input: {
     try {
       await input.dispose();
     } catch {
-      outcome = failureOutcome(input.command, input.mode, 'INTERNAL');
+      outcome = failureOutcome(
+        input.command,
+        input.mode,
+        admitted ? 'RECOVERY_REQUIRED' : 'INTERNAL',
+      );
     }
     return outcome;
   })();

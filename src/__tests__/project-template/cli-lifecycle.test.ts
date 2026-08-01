@@ -172,4 +172,47 @@ describe('project template CLI lifecycle', () => {
       envelope: { status: 'error', error: { code: 'INTERNAL' } },
     });
   });
+
+  it('reports an exception after admission as indeterminate', async () => {
+    const execution = startProjectTemplateCliLifecycle({
+      command: 'project-template apply',
+      mode: 'apply',
+      dispose: () => undefined,
+      handle: async ({ admitMutation }) => {
+        admitMutation();
+        throw new Error('commit status unknown');
+      },
+    });
+
+    await expect(execution.result).resolves.toMatchObject({
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RESULT_INDETERMINATE' } },
+    });
+  });
+
+  it('reports disposal failure after admission as recovery-required', async () => {
+    const execution = startProjectTemplateCliLifecycle({
+      command: 'project-template apply',
+      mode: 'apply',
+      dispose: () => {
+        throw new Error('lease cleanup failed');
+      },
+      handle: async ({ admitMutation }) => {
+        admitMutation();
+        return {
+          envelope: createProjectTemplateCliSuccess({
+            command: 'project-template apply',
+            mode: 'apply',
+            result: { applied: true },
+          }),
+          exitCode: 0,
+        };
+      },
+    });
+
+    await expect(execution.result).resolves.toMatchObject({
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RECOVERY_REQUIRED' } },
+    });
+  });
 });

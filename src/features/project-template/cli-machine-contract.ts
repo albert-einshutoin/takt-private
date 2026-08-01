@@ -117,6 +117,18 @@ function assertSymbolicCode(code: string): void {
   }
 }
 
+function assertEnvelopeIdentity(command: string, mode: ProjectTemplateCliMode): void {
+  if (
+    !COMMAND_PATTERN.test(command)
+    || (mode !== 'dry-run' && mode !== 'apply')
+  ) {
+    throw new ProjectTemplateCliContractError(
+      'PROTOCOL_ERROR',
+      'machine command or mode is invalid',
+    );
+  }
+}
+
 function assertSafeMachineJson(value: ProjectTemplateCliJson): void {
   if (typeof value === 'string') {
     if (value.startsWith('/') || WINDOWS_ABSOLUTE_PATH_PATTERN.test(value)) {
@@ -352,6 +364,7 @@ export function createProjectTemplateCliSuccess(input: {
   readonly result: unknown;
   readonly warnings?: readonly ProjectTemplateCliWarning[];
 }): ProjectTemplateCliSuccessEnvelope {
+  assertEnvelopeIdentity(input.command, input.mode);
   return Object.freeze({
     schemaVersion: PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
     command: input.command,
@@ -368,6 +381,7 @@ export function createProjectTemplateCliFailure(input: {
   readonly code: string;
   readonly warnings?: readonly ProjectTemplateCliWarning[];
 }): ProjectTemplateCliFailureEnvelope {
+  assertEnvelopeIdentity(input.command, input.mode);
   assertSymbolicCode(input.code);
   return Object.freeze({
     schemaVersion: PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
