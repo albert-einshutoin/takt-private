@@ -36,6 +36,7 @@ const fsFault = vi.hoisted(() => ({
   hook0: undefined as (() => void) | undefined,
   beforeReleaseMutation: undefined as ((path: string) => void) | undefined,
   afterReaddir: undefined as ((path: string) => boolean | void) | undefined,
+  afterPublishingLstat: undefined as ((path: string) => boolean | void) | undefined,
   afterLeaseWrite: undefined as (() => void) | undefined,
   afterClaimLink: undefined as (() => void) | undefined,
   afterClaimUnlink: undefined as (() => void) | undefined,
@@ -95,7 +96,11 @@ vi.mock('node:fs', async (importOriginal) => {
     lstatSync(...args: Parameters<typeof actual.lstatSync>) {
       runHook0();
       fail('lstatSync');
-      return actual.lstatSync(...args);
+      const result = actual.lstatSync(...args);
+      const path = String(args[0]);
+      const hook = fsFault.afterPublishingLstat;
+      if (hook?.(path) !== false) fsFault.afterPublishingLstat = undefined;
+      return result;
     },
     linkSync(...args: Parameters<typeof actual.linkSync>) {
       fail('linkSync');
@@ -182,6 +187,7 @@ afterEach(() => {
   fsFault.hook0 = undefined;
   fsFault.beforeReleaseMutation = undefined;
   fsFault.afterReaddir = undefined;
+  fsFault.afterPublishingLstat = undefined;
   fsFault.afterLeaseWrite = undefined;
   fsFault.afterClaimLink = undefined;
   fsFault.afterClaimUnlink = undefined;
@@ -211,6 +217,41 @@ describe('repertoire coordination hardening', () => {
       .toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
     expect(lstatSync(activePath).nlink).toBe(2);
     expect(lstatSync(publishingPath).nlink).toBe(2);
+  });
+
+  it.each([
+    { transition: 'publisher unlinks staging', releasesActive: false },
+    { transition: 'publisher immediately releases active', releasesActive: true },
+  ])('retries when $transition after publishing lstat', async ({ releasesActive }) => {
+    const root = makeRoot();
+    const seed = await acquire(root, 'write');
+    seed.release();
+    const [released] = releasedFiles(root);
+    const coordinationRoot = realpathSync(join(root, '.takt-repertoire-coordination'));
+    const activePath = join(coordinationRoot, 'writer.intent');
+    const publishingPath = `${activePath}.publishing`;
+    writeFileSync(publishingPath, readFileSync(released!), { mode: 0o600 });
+    fsFault.afterReaddir = (path) => {
+      if (path !== coordinationRoot) return false;
+      fsFault.actualLinkSync!(publishingPath, activePath);
+      return true;
+    };
+    fsFault.afterPublishingLstat = (path) => {
+      if (path !== publishingPath) return false;
+      fsFault.actualUnlinkSync!(publishingPath);
+      if (releasesActive) fsFault.actualUnlinkSync!(activePath);
+      return true;
+    };
+
+    if (releasesActive) {
+      const lease = acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root });
+      lease.release();
+    } else {
+      expect(() => acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root }))
+        .toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
+      expect(lstatSync(activePath).nlink).toBe(1);
+    }
+    expect(existsSync(publishingPath)).toBe(false);
   });
 
   it('removes only its valid losing staging claim after publication gets EEXIST', async () => {

@@ -900,41 +900,40 @@ function classifyPublishingPair(
 function assertPublishingOnly(path: string): void {
   const stat = lstatPublishingPath(path);
   const expectedUid = currentUid();
-  if (stat.nlink === 2) {
-    const activePath = path.slice(0, -CLAIM_PUBLISHING_SUFFIX.length);
-    let active: Stats;
-    try {
-      active = lstatSync(activePath);
-    } catch {
-      throw new RepertoireCoordinationError('UNSAFE_STATE');
-    }
-    // The directory listing can race with the publisher's no-replace link:
-    // a publishing-only entry may become the legitimate nlink=2 pair before
-    // it is inspected. Restart from a fresh listing only when the current
-    // active name proves that exact transition; an unrelated hard link stays
-    // unsafe rather than being mistaken for progress.
-    if (
-      isFileMode(active.mode)
-      && !isSymlinkMode(active.mode)
-      && active.dev === stat.dev
-      && active.ino === stat.ino
-      && active.nlink === 2
-      && stat.size >= 0
-      && stat.size <= MAX_LEASE_BYTES
-      && (active.mode & 0o777) === PRIVATE_FILE_MODE
-      && (expectedUid === null || active.uid === expectedUid)
-    ) throw SNAPSHOT_CHANGED;
-    throw new RepertoireCoordinationError('UNSAFE_STATE');
-  }
   if (
     !isFileMode(stat.mode)
     || isSymlinkMode(stat.mode)
-    || stat.nlink !== 1
     || stat.size < 0
     || stat.size > MAX_LEASE_BYTES
     || (stat.mode & 0o777) !== PRIVATE_FILE_MODE
     || (expectedUid !== null && stat.uid !== expectedUid)
   ) throw new RepertoireCoordinationError('UNSAFE_STATE');
+  if (stat.nlink === 2) {
+    const activePath = path.slice(0, -CLAIM_PUBLISHING_SUFFIX.length);
+    let active: Stats;
+    try {
+      active = lstatSync(activePath);
+    } catch (error) {
+      if (isMissingError(error)) throw SNAPSHOT_CHANGED;
+      throw error;
+    }
+    // The directory listing can race across the publisher's nlink=2 window.
+    // The active name may therefore be the same inode at nlink 2, already be
+    // the remaining nlink=1 publication, or have been released. Restarting is
+    // bounded, so a stable external hard link with no derived active name still
+    // terminates as unsafe rather than authorizing progress.
+    if (
+      isFileMode(active.mode)
+      && !isSymlinkMode(active.mode)
+      && active.dev === stat.dev
+      && active.ino === stat.ino
+      && (active.nlink === 1 || active.nlink === 2)
+      && (active.mode & 0o777) === PRIVATE_FILE_MODE
+      && (expectedUid === null || active.uid === expectedUid)
+    ) throw SNAPSHOT_CHANGED;
+    throw new RepertoireCoordinationError('UNSAFE_STATE');
+  }
+  if (stat.nlink !== 1) throw new RepertoireCoordinationError('UNSAFE_STATE');
 }
 
 function lstatPublishingPath(path: string): Stats {
