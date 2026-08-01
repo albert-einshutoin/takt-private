@@ -40,6 +40,7 @@ export interface PosixProjectTemplateReceiptKeyStoreIo {
   readonly read?: typeof readSync;
   readonly close?: typeof closeSync;
   readonly onHashBuffer?: (buffer: Uint8Array) => void;
+  readonly beforeStaleLockUnlink?: (path: string) => void;
 }
 
 export interface PosixProjectTemplateReceiptKeyStoreOptions {
@@ -48,6 +49,9 @@ export interface PosixProjectTemplateReceiptKeyStoreOptions {
   readonly leasePolicy?: {
     readonly attempts: number;
     readonly waitMs: number;
+    readonly staleAfterMs?: number;
+    readonly now?: () => number;
+    readonly isProcessAlive?: (pid: number) => boolean;
   };
 }
 
@@ -181,12 +185,12 @@ function readBoundedRegistryFile(
         throw failure('Key registry changed during bounded read');
       }
       const firstHash = createHash('sha256').update(buffer.subarray(0, offset)).digest();
-      io?.onHashBuffer?.(firstHash);
-      buffer.fill(0);
       let rereadOffset = 0;
       let contentStable = false;
       let secondHash: Buffer | undefined;
       try {
+        io?.onHashBuffer?.(firstHash);
+        buffer.fill(0);
         while (rereadOffset < buffer.byteLength) {
           const count = Reflect.apply(read, io, [
             fd,
@@ -320,42 +324,205 @@ interface OwnedLock {
   readonly fd: number;
   readonly dev: number;
   readonly ino: number;
+  readonly token: string;
+}
+
+interface PosixLockPolicy {
+  readonly attempts: number;
+  readonly waitMs: number;
+  readonly staleAfterMs: number;
+  readonly now: () => number;
+  readonly isProcessAlive: (pid: number) => boolean;
+}
+
+function defaultProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function recoverStaleLock(
+  lockPath: string,
+  policy: PosixLockPolicy,
+  io: PosixProjectTemplateReceiptKeyStoreIo | undefined,
+): boolean {
+  let fd: number | undefined;
+  let bytes: Buffer | undefined;
+  try {
+    const pathStat = lstatSync(lockPath);
+    if (
+      pathStat.isSymbolicLink()
+      || !pathStat.isFile()
+      || pathStat.nlink !== 1
+      || pathStat.uid !== expectedUid()
+      || (pathStat.mode & 0o777) !== 0o600
+    ) return false;
+    fd = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const descriptorStat = fstatSync(fd);
+    if (
+      !descriptorStat.isFile()
+      || descriptorStat.nlink !== 1
+      || descriptorStat.uid !== expectedUid()
+      || (descriptorStat.mode & 0o777) !== 0o600
+      || descriptorStat.dev !== pathStat.dev
+      || descriptorStat.ino !== pathStat.ino
+      || descriptorStat.size < 1
+      || descriptorStat.size > 512
+    ) return false;
+    bytes = Buffer.alloc(descriptorStat.size + 1);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const count = readSync(fd, bytes, offset, bytes.byteLength - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    const finalDescriptor = fstatSync(fd);
+    const finalPath = lstatSync(lockPath);
+    if (
+      offset !== descriptorStat.size
+      || finalDescriptor.dev !== descriptorStat.dev
+      || finalDescriptor.ino !== descriptorStat.ino
+      || finalDescriptor.size !== descriptorStat.size
+      || finalDescriptor.nlink !== 1
+      || finalPath.dev !== descriptorStat.dev
+      || finalPath.ino !== descriptorStat.ino
+      || finalPath.nlink !== 1
+    ) return false;
+    const parsed = JSON.parse(bytes.subarray(0, offset).toString('utf8')) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(parsed);
+    if (
+      Reflect.ownKeys(parsed).length !== 3
+      || !('value' in (descriptors['pid'] ?? {}))
+      || !('value' in (descriptors['createdAtMs'] ?? {}))
+      || !('value' in (descriptors['token'] ?? {}))
+    ) return false;
+    const pid = descriptors['pid']!.value as unknown;
+    const createdAtMs = descriptors['createdAtMs']!.value as unknown;
+    const token = descriptors['token']!.value as unknown;
+    const now = policy.now();
+    if (
+      !Number.isSafeInteger(pid)
+      || (pid as number) < 1
+      || typeof createdAtMs !== 'number'
+      || !Number.isFinite(createdAtMs)
+      || !Number.isFinite(now)
+      || createdAtMs < 0
+      || now < 0
+      || createdAtMs > now
+      || now - createdAtMs < policy.staleAfterMs
+      || typeof token !== 'string'
+      || !/^[a-f0-9]{32}$/.test(token)
+    ) return false;
+    let alive: boolean;
+    try {
+      alive = policy.isProcessAlive(pid as number);
+    } catch {
+      return false;
+    }
+    if (typeof alive !== 'boolean' || alive) return false;
+    io?.beforeStaleLockUnlink?.(lockPath);
+    const beforeUnlink = lstatSync(lockPath);
+    if (
+      beforeUnlink.dev !== descriptorStat.dev
+      || beforeUnlink.ino !== descriptorStat.ino
+      || beforeUnlink.nlink !== 1
+    ) return false;
+    closeSync(fd);
+    fd = undefined;
+    // Node has no unlinkat-with-inode predicate. Rechecking immediately before
+    // unlink narrows the unavoidable pathname race without deleting on doubt.
+    unlinkSync(lockPath);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    bytes?.fill(0);
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 async function acquireLock(
   lockPath: string,
-  attempts: number,
-  waitMs: number,
+  policy: PosixLockPolicy,
+  io: PosixProjectTemplateReceiptKeyStoreIo | undefined,
 ): Promise<OwnedLock> {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
     let fd: number | undefined;
     let openedOwnership: OwnedLock | undefined;
     try {
       fd = openSync(
         lockPath,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
         0o600,
       );
+      const token = randomUUID().replaceAll('-', '');
       const opened = fstatSync(fd);
-      openedOwnership = { fd, dev: opened.dev, ino: opened.ino };
+      openedOwnership = { fd, dev: opened.dev, ino: opened.ino, token };
       fchmodSync(fd, 0o600);
-      writeFileSync(fd, `${process.pid}\n`, 'utf8');
+      writeFileSync(fd, JSON.stringify({
+        pid: process.pid,
+        createdAtMs: policy.now(),
+        token,
+      }), 'utf8');
       fsyncSync(fd);
       assertRegularOwnedFile(lockPath, fd);
       const stat = fstatSync(fd);
-      return { fd, dev: stat.dev, ino: stat.ino };
+      return { fd, dev: stat.dev, ino: stat.ino, token };
     } catch (error) {
-      if (openedOwnership !== undefined) releaseOwnedLock(lockPath, openedOwnership);
+      if (openedOwnership !== undefined) {
+        releaseOwnedLock(lockPath, openedOwnership, false);
+      }
       else if (fd !== undefined) closeSync(fd);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, waitMs));
+      if (!recoverStaleLock(lockPath, policy, io)) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, policy.waitMs));
+      }
     }
   }
   throw failure('Key store exclusive lease is unavailable');
 }
 
-function releaseOwnedLock(lockPath: string, ownership: OwnedLock): void {
+function releaseOwnedLock(
+  lockPath: string,
+  ownership: OwnedLock,
+  requireToken = true,
+): void {
   const descriptorStat = fstatSync(ownership.fd);
+  let tokenMatches = !requireToken;
+  if (requireToken && descriptorStat.size > 0 && descriptorStat.size <= 512) {
+    const bytes = Buffer.alloc(descriptorStat.size);
+    try {
+      let offset = 0;
+      while (offset < bytes.byteLength) {
+        const count = readSync(
+          ownership.fd,
+          bytes,
+          offset,
+          bytes.byteLength - offset,
+          offset,
+        );
+        if (count === 0) break;
+        offset += count;
+      }
+      if (offset === descriptorStat.size) {
+        const parsed = JSON.parse(bytes.toString('utf8')) as unknown;
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+          const descriptors = Object.getOwnPropertyDescriptors(parsed);
+          tokenMatches = Reflect.ownKeys(parsed).length === 3
+            && 'value' in (descriptors['token'] ?? {})
+            && descriptors['token']!.value === ownership.token;
+        }
+      }
+    } catch {
+      tokenMatches = false;
+    } finally {
+      bytes.fill(0);
+    }
+  }
   let pathStat: ReturnType<typeof lstatSync> | undefined;
   try {
     pathStat = lstatSync(lockPath);
@@ -369,6 +536,7 @@ function releaseOwnedLock(lockPath: string, ownership: OwnedLock): void {
     && pathStat?.dev === ownership.dev
     && pathStat.ino === ownership.ino
     && pathStat.nlink === 1
+    && tokenMatches
   ) unlinkSync(lockPath);
 }
 
@@ -381,13 +549,22 @@ export function createPosixProjectTemplateReceiptKeyStore(
   }
   const registryPath = join(directory, REGISTRY_NAME);
   const lockPath = join(directory, LOCK_NAME);
-  const leaseAttempts = options.leasePolicy?.attempts ?? LOCK_ATTEMPTS;
-  const leaseWaitMs = options.leasePolicy?.waitMs ?? LOCK_WAIT_MS;
+  const leasePolicy: PosixLockPolicy = {
+    attempts: options.leasePolicy?.attempts ?? LOCK_ATTEMPTS,
+    waitMs: options.leasePolicy?.waitMs ?? LOCK_WAIT_MS,
+    staleAfterMs: options.leasePolicy?.staleAfterMs ?? 30_000,
+    now: options.leasePolicy?.now ?? Date.now,
+    isProcessAlive: options.leasePolicy?.isProcessAlive ?? defaultProcessAlive,
+  };
   if (
-    !Number.isSafeInteger(leaseAttempts)
-    || leaseAttempts < 1
-    || !Number.isSafeInteger(leaseWaitMs)
-    || leaseWaitMs < 0
+    !Number.isSafeInteger(leasePolicy.attempts)
+    || leasePolicy.attempts < 1
+    || !Number.isSafeInteger(leasePolicy.waitMs)
+    || leasePolicy.waitMs < 0
+    || !Number.isFinite(leasePolicy.staleAfterMs)
+    || leasePolicy.staleAfterMs < 1
+    || typeof leasePolicy.now !== 'function'
+    || typeof leasePolicy.isProcessAlive !== 'function'
   ) throw failure('Key store lease policy is invalid');
   let disposed = false;
 
@@ -405,7 +582,7 @@ export function createPosixProjectTemplateReceiptKeyStore(
     let ownedLock: OwnedLock | undefined;
     let snapshot: ProjectTemplateReceiptKeySnapshot | undefined;
     try {
-      ownedLock = await acquireLock(lockPath, leaseAttempts, leaseWaitMs);
+      ownedLock = await acquireLock(lockPath, leasePolicy, options.io);
       snapshot = readSnapshot(registryPath, options.io);
       let committed = false;
       const result = await operation(Object.freeze({

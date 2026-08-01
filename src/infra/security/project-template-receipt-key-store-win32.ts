@@ -333,12 +333,12 @@ function readBoundedCiphertext(
         throw failure('DPAPI key registry changed during bounded read');
       }
       const firstHash = createHash('sha256').update(buffer.subarray(0, offset)).digest();
-      io?.onHashBuffer?.(firstHash);
-      buffer.fill(0);
       let rereadOffset = 0;
       let contentStable = false;
       let secondHash: Buffer | undefined;
       try {
+        io?.onHashBuffer?.(firstHash);
+        buffer.fill(0);
         while (rereadOffset < buffer.byteLength) {
           const count = Reflect.apply(read, io, [
             fd,
