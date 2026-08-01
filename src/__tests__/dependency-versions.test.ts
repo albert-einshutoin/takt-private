@@ -184,12 +184,66 @@ describe('dependency versions', () => {
     const packageLock = readPackageLock();
 
     expect(getLockedPackage(packageLock, 'node_modules/ajv').version).toBe('6.15.0');
+    expect(getLockedPackage(packageLock, 'node_modules/@modelcontextprotocol/sdk').version)
+      .toBe('1.30.0');
+    expect(getLockedPackage(packageLock, 'node_modules/@hono/node-server').version)
+      .toBe('2.0.12');
+    expect(getLockedPackage(packageLock, 'node_modules/body-parser').version).toBe('2.3.0');
     expect(getLockedPackage(packageLock, 'node_modules/express-rate-limit').version).toBe('8.5.2');
-    expect(getLockedPackage(packageLock, 'node_modules/fast-uri').version).toBe('3.1.2');
-    expect(getLockedPackage(packageLock, 'node_modules/hono').version).toBe('4.12.25');
+    expect(getLockedPackage(packageLock, 'node_modules/fast-uri').version).toBe('3.1.5');
+    expect(getLockedPackage(packageLock, 'node_modules/hono').version).toBe('4.12.33');
     expect(getLockedPackage(packageLock, 'node_modules/ip-address').version).toBe('10.2.0');
-    expect(getLockedPackage(packageLock, 'node_modules/protobufjs').version).toBe('7.6.4');
+    expect(getLockedPackage(packageLock, 'node_modules/protobufjs').version).toBe('7.6.5');
     expect(getLockedPackage(packageLock, 'node_modules/qs').version).toBe('6.15.2');
+  });
+
+  it('aligns the OpenTelemetry package family on the patched compatible generation', () => {
+    const packageJson = readPackageJson();
+    const packageLock = readPackageLock();
+    const expected = {
+      '@opentelemetry/exporter-metrics-otlp-http': ['^0.220.0', '0.220.0'],
+      '@opentelemetry/exporter-trace-otlp-http': ['^0.220.0', '0.220.0'],
+      '@opentelemetry/sdk-metrics': ['^2.9.0', '2.9.0'],
+      '@opentelemetry/sdk-node': ['^0.220.0', '0.220.0'],
+      '@opentelemetry/sdk-trace-base': ['^2.9.0', '2.9.0'],
+    } as const;
+
+    for (const [name, [declared, locked]] of Object.entries(expected)) {
+      expect(packageJson.dependencies?.[name]).toBe(declared);
+      expect(getLockedPackage(packageLock, `node_modules/${name}`).version).toBe(locked);
+    }
+    expect(getLockedPackage(
+      packageLock,
+      'node_modules/@opentelemetry/propagator-jaeger',
+    ).version).toBe('2.9.0');
+  });
+
+  it('imports the real Anthropic and MCP SDK entrypoints', () => {
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        "const [anthropic, mcp] = await Promise.all([import('@anthropic-ai/claude-agent-sdk'), import('@modelcontextprotocol/sdk')]); process.stdout.write(JSON.stringify({ anthropic: Object.keys(anthropic).length > 0, mcp: Object.keys(mcp).length > 0 }));",
+      ],
+      { cwd: process.cwd(), encoding: 'utf-8' },
+    );
+
+    expect(JSON.parse(stdout)).toEqual({ anthropic: true, mcp: true });
+  });
+
+  it('contains malformed Jaeger propagation headers without throwing', () => {
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        "import { ROOT_CONTEXT } from '@opentelemetry/api'; import { JaegerPropagator } from '@opentelemetry/propagator-jaeger'; const carrier = { 'uber-trace-id': '%E0%A4%A' }; const getter = { keys: value => Object.keys(value), get: (value, key) => value[key] }; const result = new JaegerPropagator().extract(ROOT_CONTEXT, carrier, getter); process.stdout.write(result === ROOT_CONTEXT ? 'contained' : 'context');",
+      ],
+      { cwd: process.cwd(), encoding: 'utf-8' },
+    );
+
+    expect(stdout).toBe('contained');
   });
 
   it('locks test runner transitive dependencies to patched security releases', () => {
@@ -202,6 +256,9 @@ describe('dependency versions', () => {
     expect(getLockedPackage(packageLock, 'node_modules/vitest').version).toBe('3.2.6');
     expect(getLockedPackage(packageLock, 'node_modules/vite').version).toBe('6.4.3');
     expect(getLockedPackage(packageLock, 'node_modules/esbuild').version).toBe('0.28.1');
+    expect(getLockedPackage(packageLock, 'node_modules/postcss').version).toBe('8.5.25');
+    expect(getLockedPackage(packageLock, 'node_modules/js-yaml').version).toBe('4.3.1');
+    expect(getLockedPackage(packageLock, 'node_modules/brace-expansion').version).toBe('2.1.4');
   });
 
   it('resolves traced-config through its public entrypoint', () => {
