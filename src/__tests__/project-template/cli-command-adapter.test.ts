@@ -37,7 +37,7 @@ function outcome(
   };
 }
 
-function harness() {
+function harness(overrides: Partial<ProjectTemplateCliCommandAdapterDependencies> = {}) {
   const writes: string[] = [];
   const requests: ProjectTemplateCliCommandRequest[] = [];
   const admissions: string[] = [];
@@ -52,19 +52,21 @@ function harness() {
     }
     return outcome(request.command, request.mutation?.mode ?? 'dry-run');
   });
+  const dispose = vi.fn(async () => undefined);
   const dependencies: ProjectTemplateCliCommandAdapterDependencies = {
     dispatch,
-    async dispose() {},
+    dispose,
     writeStdout(chunk) { writes.push(chunk); },
     setExitCode() {},
     installInterrupt() { return () => {}; },
     cwd() { return '/workspace'; },
     currentTaktVersion: '0.48.0',
+    ...overrides,
   };
   const program = new Command().name('takt').exitOverride();
   program.option('--cwd <path>');
   registerProjectTemplateCommands(program, dependencies);
-  return { admissions, dispatch, program, requests, writes };
+  return { admissions, dispatch, dispose, program, requests, writes };
 }
 
 describe('project-template CLI command adapter', () => {
@@ -116,18 +118,76 @@ describe('project-template CLI command adapter', () => {
   });
 
   it('rejects force-only and expected-plan drift options before dispatch', async () => {
-    const { dispatch, program, writes } = harness();
-    await program.parseAsync([
+    const force = harness();
+    await force.program.parseAsync([
       'node', 'takt', 'project-template', 'apply', './template.taktpack', '--force',
     ]);
-    await program.parseAsync([
+    const expected = harness();
+    await expected.program.parseAsync([
       'node', 'takt', 'project-template', 'update',
       'github:owner/template@v1.0.0', '--expected-plan-id', PLAN_ID,
     ]);
+    const writes = [...force.writes, ...expected.writes];
 
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(force.dispatch).not.toHaveBeenCalled();
+    expect(expected.dispatch).not.toHaveBeenCalled();
     expect(writes.map((chunk) => JSON.parse(chunk).error.code)).toEqual([
       'INVALID_ARGUMENT', 'EXPECTED_PLAN_ID_REQUIRES_APPLY',
     ]);
+    expect(force.dispose).toHaveBeenCalledOnce();
+    expect(expected.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('maps unknown options to one stable envelope and still disposes', async () => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', 'list', '--credential-path', '/secret',
+    ]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(value.writes).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      status: 'error', error: { code: 'UNKNOWN_OPTION' },
+    });
+    expect(value.writes[0]).not.toContain('/secret');
+  });
+
+  it('maps excess operands to UNKNOWN_OPTION without Commander stderr', async () => {
+    const value = harness();
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', 'list', 'unexpected-value',
+    ]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      error: { code: 'UNKNOWN_OPTION' },
+    });
+  });
+
+  it('installs SIGINT before synchronous mutation admission can begin', async () => {
+    let listenerInstalled = false;
+    const value = harness({
+      installInterrupt(interrupt) {
+        listenerInstalled = true;
+        interrupt();
+        return () => {};
+      },
+      async dispatch(_request, context) {
+        expect(listenerInstalled).toBe(true);
+        context.admitMutation();
+        return outcome('project-template apply', 'apply');
+      },
+    });
+    await value.program.parseAsync([
+      'node', 'takt', 'project-template', 'apply', './template.taktpack',
+      '--apply', '--expected-plan-id', PLAN_ID,
+    ]);
+
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      status: 'error', error: { code: 'INTERRUPTED' },
+    });
+    expect(value.dispose).toHaveBeenCalledOnce();
   });
 });

@@ -135,8 +135,10 @@ function requestedCwd(
 
 function addCommonOptions(command: Command): Command {
   return command
+    .allowUnknownOption(true)
+    .allowExcessArguments(true)
     .option('--cwd <path>', 'Project root (overrides root/project-template --cwd)')
-    .option('--json', 'Write one schema 1.0 JSON envelope to stdout');
+    .option('--json', 'Explicitly request the always-machine JSON output contract');
 }
 
 function addMutationOptions(command: Command): Command {
@@ -153,7 +155,52 @@ export function registerProjectTemplateCommands(
 ): Command {
   const group = root.command('project-template')
     .description('Portable .takt project template operations')
+    .exitOverride()
+    .allowUnknownOption(true)
     .option('--cwd <path>', 'Project root');
+
+  const settle = async (
+    command: ProjectTemplateCliCommand,
+    mode: 'dry-run' | 'apply',
+    handle: (context: ProjectTemplateCliLifecycleContext) =>
+      Promise<ProjectTemplateCliOutcome>,
+  ): Promise<void> => {
+    let lifecycle: ReturnType<typeof startProjectTemplateCliLifecycle> | undefined;
+    let interruptedBeforeStart = false;
+    const removeInterrupt = dependencies.installInterrupt(() => {
+      if (lifecycle === undefined) interruptedBeforeStart = true;
+      else lifecycle.interrupt();
+    });
+    lifecycle = startProjectTemplateCliLifecycle({
+      command,
+      mode,
+      dispose: dependencies.dispose,
+      async handle(context) {
+        // Yield once so the returned lifecycle can receive a SIGINT that fired
+        // during listener installation before dispatch can admit mutation.
+        await Promise.resolve();
+        return await handle(context);
+      },
+    });
+    if (interruptedBeforeStart) lifecycle.interrupt();
+    try {
+      const result = await lifecycle.result;
+      await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
+      dependencies.setExitCode(result.exitCode);
+    } finally {
+      removeInterrupt();
+    }
+  };
+
+  const invalid = (
+    command: ProjectTemplateCliCommand,
+    mode: 'dry-run' | 'apply',
+    code: ProjectTemplateCliErrorCode,
+  ): Promise<void> => settle(command, mode, async () => failure(command, mode, code));
+
+  const hasUnknownOption = (command: Command): boolean => (
+    command.args.length !== command.processedArgs.length
+  );
 
   const run = async (
     command: Command,
@@ -168,20 +215,11 @@ export function registerProjectTemplateCommands(
       currentTaktVersion:
         flags.currentTaktVersion ?? dependencies.currentTaktVersion,
     };
-    const lifecycle = startProjectTemplateCliLifecycle({
-      command: fullRequest.command,
-      mode: fullRequest.mutation?.mode ?? 'dry-run',
-      dispose: dependencies.dispose,
-      handle: (context) => dependencies.dispatch(fullRequest, context),
-    });
-    const removeInterrupt = dependencies.installInterrupt(lifecycle.interrupt);
-    try {
-      const result = await lifecycle.result;
-      await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
-      dependencies.setExitCode(result.exitCode);
-    } finally {
-      removeInterrupt();
-    }
+    await settle(
+      fullRequest.command,
+      fullRequest.mutation?.mode ?? 'dry-run',
+      (context) => dependencies.dispatch(fullRequest, context),
+    );
   };
 
   addCommonOptions(group.command('inspect')
@@ -189,12 +227,14 @@ export function registerProjectTemplateCommands(
     .argument('[source]', 'Local .taktpack path')
     .option('--current-takt-version <version>', 'Compatibility version'))
     .action(async (source: string | undefined, flags: CommonFlags, command: Command) => {
+      if (hasUnknownOption(command)) {
+        await invalid('project-template inspect', 'dry-run', 'UNKNOWN_OPTION');
+        return;
+      }
       const cwd = requestedCwd(root, command, flags, dependencies);
       const parsed = canonicalSource(cwd, source);
       if (parsed?.kind !== 'local') {
-        const result = failure('project-template inspect', 'dry-run', 'INVALID_ARGUMENT');
-        await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
-        dependencies.setExitCode(result.exitCode);
+        await invalid('project-template inspect', 'dry-run', 'INVALID_ARGUMENT');
         return;
       }
       await run(command, flags, { command: 'project-template inspect', source: parsed });
@@ -202,9 +242,13 @@ export function registerProjectTemplateCommands(
 
   addCommonOptions(group.command('list')
     .description('List installed template state and rollback backups'))
-    .action((flags: CommonFlags, command: Command) => (
-      run(command, flags, { command: 'project-template list' })
-    ));
+    .action(async (flags: CommonFlags, command: Command) => {
+      if (hasUnknownOption(command)) {
+        await invalid('project-template list', 'dry-run', 'UNKNOWN_OPTION');
+        return;
+      }
+      await run(command, flags, { command: 'project-template list' });
+    });
 
   addMutationOptions(group.command('export')
     .description('Export the current .takt project as a .taktpack')
@@ -213,14 +257,20 @@ export function registerProjectTemplateCommands(
     .option('--min-takt-version <version>', 'Minimum compatible Takt version')
     .option('--source-commit <sha>', 'Source commit recorded in the pack'))
     .action(async (output: string | undefined, flags: CommonFlags, command: Command) => {
+      if (hasUnknownOption(command)) {
+        await invalid('project-template export', flags.apply === true ? 'apply' : 'dry-run', 'UNKNOWN_OPTION');
+        return;
+      }
       const parsedMutation = mutation('project-template export', flags);
       const cwd = requestedCwd(root, command, flags, dependencies);
       if ('envelope' in parsedMutation || output === undefined || !output.endsWith('.taktpack')) {
         const result = 'envelope' in parsedMutation
           ? parsedMutation
           : failure('project-template export', 'dry-run', 'INVALID_ARGUMENT');
-        await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
-        dependencies.setExitCode(result.exitCode);
+        await settle(
+          'project-template export', result.envelope.mode,
+          async () => result,
+        );
         return;
       }
       await run(command, flags, {
@@ -245,6 +295,10 @@ export function registerProjectTemplateCommands(
     (mutating ? addMutationOptions(command) : addCommonOptions(command))
       .action(async (source: string | undefined, flags: CommonFlags, action: Command) => {
         const machineCommand = `project-template ${name}` as ProjectTemplateCliCommand;
+        if (hasUnknownOption(action)) {
+          await invalid(machineCommand, flags.apply === true ? 'apply' : 'dry-run', 'UNKNOWN_OPTION');
+          return;
+        }
         const parsedMutation = mutating
           ? mutation(machineCommand, flags)
           : ({ mode: 'dry-run', force: false } as const);
@@ -255,8 +309,7 @@ export function registerProjectTemplateCommands(
           const result = 'envelope' in parsedMutation
             ? parsedMutation
             : failure(machineCommand, 'dry-run', 'INVALID_ARGUMENT');
-          await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
-          dependencies.setExitCode(result.exitCode);
+          await settle(machineCommand, result.envelope.mode, async () => result);
           return;
         }
         await run(action, flags, {
@@ -272,13 +325,16 @@ export function registerProjectTemplateCommands(
     .description('Rollback to a durable project-template backup')
     .argument('[backup-id]', 'Backup identifier'))
     .action(async (backupId: string | undefined, flags: CommonFlags, command: Command) => {
+      if (hasUnknownOption(command)) {
+        await invalid('project-template rollback', flags.apply === true ? 'apply' : 'dry-run', 'UNKNOWN_OPTION');
+        return;
+      }
       const parsedMutation = mutation('project-template rollback', flags);
       if ('envelope' in parsedMutation || backupId === undefined) {
         const result = 'envelope' in parsedMutation
           ? parsedMutation
           : failure('project-template rollback', 'dry-run', 'INVALID_ARGUMENT');
-        await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
-        dependencies.setExitCode(result.exitCode);
+        await settle('project-template rollback', result.envelope.mode, async () => result);
         return;
       }
       await run(command, flags, {
