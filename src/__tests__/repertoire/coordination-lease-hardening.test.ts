@@ -279,14 +279,20 @@ describe('repertoire coordination hardening', () => {
       : join(coordinationRoot, 'readers', `${String(record['pid'])}.${String(record['token'])}.lease`);
     const publishingPath = `${activePath}.publishing`;
     const validBytes = readFileSync(released!);
+    const replacementBytes = Buffer.from(`${JSON.stringify({
+      ...record,
+      createdAt: record['createdAt'] === '2000-01-01T00:00:00.000Z'
+        ? '2000-01-01T00:00:00.001Z'
+        : '2000-01-01T00:00:00.000Z',
+    })}\n`);
+    expect(replacementBytes).not.toEqual(validBytes);
     writeFileSync(publishingPath, validBytes, { mode: 0o600 });
     linkSync(publishingPath, activePath);
-    const oldPublishing = lstatSync(publishingPath);
     fsFault.afterClaimLstat = (path) => {
       if (path !== activePath) return false;
       fsFault.actualUnlinkSync!(publishingPath);
       if (releaseWinner) fsFault.actualUnlinkSync!(activePath);
-      fsFault.actualWriteFileSync!(publishingPath, validBytes, { mode: 0o600, flag: 'wx' });
+      fsFault.actualWriteFileSync!(publishingPath, replacementBytes, { mode: 0o600, flag: 'wx' });
       if (linkReplacement) fsFault.actualLinkSync!(publishingPath, activePath);
       return true;
     };
@@ -294,10 +300,9 @@ describe('repertoire coordination hardening', () => {
     expect(() => acquireRepertoireCoordinationReadLeaseImmediate({ globalConfigDir: root }))
       .toThrow(expect.objectContaining({ code: 'WRITER_PENDING' }));
     const replacement = lstatSync(publishingPath);
-    expect({ dev: replacement.dev, ino: replacement.ino }).not.toEqual({
-      dev: oldPublishing.dev,
-      ino: oldPublishing.ino,
-    });
+    expect(readFileSync(publishingPath)).toEqual(replacementBytes);
+    expect(replacement.nlink).toBe(linkReplacement ? 2 : 1);
+    expect(existsSync(activePath)).toBe(!releaseWinner || linkReplacement);
   });
 
   it('removes only its valid losing staging claim after publication gets EEXIST', async () => {
