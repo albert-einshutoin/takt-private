@@ -102,6 +102,8 @@ function hash(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+const MAX_RECOVERY_BACKUP_BYTES = 4 * 1024 * 1024;
+
 function mode(value: number): string {
   return `0${(value & 0o777).toString(8).padStart(3, '0')}`;
 }
@@ -653,9 +655,13 @@ async function validateRecoveryEvidence(
     if (!validAction) recoveryBlocked();
   }
   const completed = journal.completedOperations;
+  const rollbackOrder = [...keys].reverse();
+  const rollingBack = journal.state === 'rolling-back';
   if (
     new Set(completed).size !== completed.length
-    || completed.some((key, index) => key !== keys[index])
+    || completed.some((key, index) => key !== (
+      rollingBack ? rollbackOrder[index] : keys[index]
+    ))
   ) recoveryBlocked();
 
   const fullCompletionRequired = journal.state === 'verifying'
@@ -663,7 +669,8 @@ async function validateRecoveryEvidence(
   if (
     (journal.state === 'prepared' && completed.length !== 0)
     || (fullCompletionRequired && completed.length !== keys.length)
-    || !['prepared', 'committing', 'verifying', 'committed'].includes(journal.state)
+    || !['prepared', 'committing', 'verifying', 'committed', 'rolling-back']
+      .includes(journal.state)
   ) recoveryBlocked();
 
   const restore = new Set<string>();
@@ -684,6 +691,11 @@ async function validateRecoveryEvidence(
   }
   if (journal.state === 'committed' || journal.state === 'verifying') {
     if (states.some((state) => state !== 'after')) recoveryBlocked();
+  } else if (rollingBack) {
+    const restored = new Set(completed);
+    for (let index = 0; index < states.length; index += 1) {
+      if (restored.has(keys[index]!) && states[index] !== 'before') recoveryBlocked();
+    }
   } else if (journal.state === 'committing') {
     for (let index = 0; index < states.length; index += 1) {
       if (index < completed.length && states[index] !== 'after') recoveryBlocked();
@@ -695,44 +707,95 @@ async function validateRecoveryEvidence(
 
 async function restoreBefore(
   storage: ProjectTemplateApplyStorage,
+  journal: ProjectTemplateApplyJournal,
   manifest: ProjectTemplateBackupManifest,
-  restoreKeys: ReadonlySet<string>,
+  backupBytes: ReadonlyMap<string, Buffer>,
 ): Promise<void> {
   const recoveryId = `recovery-${randomUUID()}`;
+  const restored = journal.state === 'rolling-back'
+    ? [...journal.completedOperations]
+    : [];
+  if (journal.state !== 'rolling-back') {
+    await writeProjectTemplateApplyJournal({
+      storage,
+      journal: {
+        ...journal,
+        state: 'rolling-back',
+        completedOperations: restored,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
   for (const entry of [...manifest.entries].reverse()) {
     const target = resolveProjectTemplateApplyTarget(storage, entry.target);
-    if (!restoreKeys.has(target.key)) continue;
-    if (entry.before.kind === 'absent') {
-      try {
-        await storage.io.unlink(target.absolutePath);
-        await storage.io.fsyncDirectory(dirname(target.absolutePath));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (restored.includes(target.key)) continue;
+    const actual = await currentState(storage, entry.target);
+    if (!stateMatches(actual, entry.before, storage.platform)) {
+      if (!stateMatches(actual, entry.after, storage.platform)) recoveryBlocked();
+      if (entry.before.kind === 'absent') {
+        try {
+          await storage.io.unlink(target.absolutePath);
+          await storage.io.fsyncDirectory(dirname(target.absolutePath));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      } else {
+        const content = backupBytes.get(target.key);
+        if (content === undefined) recoveryBlocked();
+        const staged = await writeProjectTemplateStagingFile({
+          storage,
+          transactionId: recoveryId,
+          target: entry.target,
+          content,
+          expectedSha256: entry.before.sha256,
+          targetMode: entry.before.mode,
+        });
+        await publish(storage, staged);
       }
-      continue;
     }
-    const content = await storage.io.readFile(
-      join(storage.backupsRoot, manifest.backupId, entry.before.blobRelativePath),
-      entry.before.bytes,
-    );
-    if (hash(content) !== entry.before.sha256) {
-      throw new Error('companion lock backup failed integrity validation');
-    }
-    const staged = await writeProjectTemplateStagingFile({
+    restored.push(target.key);
+    await writeProjectTemplateApplyJournal({
       storage,
-      transactionId: recoveryId,
-      target: entry.target,
-      content,
-      expectedSha256: entry.before.sha256,
-      targetMode: entry.before.mode,
+      journal: {
+        ...journal,
+        state: 'rolling-back',
+        completedOperations: restored,
+        updatedAt: new Date().toISOString(),
+      },
     });
-    await publish(storage, staged);
   }
   await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
   await removeProjectTemplateStagingTransaction({
     storage,
     transactionId: recoveryId,
   });
+}
+
+async function preflightRecoveryBackupBytes(
+  storage: ProjectTemplateApplyStorage,
+  manifest: ProjectTemplateBackupManifest,
+  restoreKeys: ReadonlySet<string>,
+): Promise<ReadonlyMap<string, Buffer>> {
+  const result = new Map<string, Buffer>();
+  let totalBytes = 0;
+  for (const entry of manifest.entries) {
+    const target = resolveProjectTemplateApplyTarget(storage, entry.target);
+    if (!restoreKeys.has(target.key) || entry.before.kind === 'absent') continue;
+    totalBytes += entry.before.bytes;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_RECOVERY_BACKUP_BYTES) {
+      recoveryBlocked();
+    }
+    const content = await storage.io.readPrivateFile(
+      join(storage.backupsRoot, manifest.backupId, entry.before.blobRelativePath),
+      entry.before.bytes,
+      storage.device,
+    );
+    if (content.byteLength !== entry.before.bytes || hash(content) !== entry.before.sha256) {
+      recoveryBlocked();
+    }
+    result.set(target.key, content);
+  }
+  return result;
 }
 
 async function recoverOwned(
@@ -807,7 +870,13 @@ async function recoverOwnedStorage(
       await removeJournal(storage);
       return { status: 'committed' };
     }
-    await restoreBefore(storage, manifest, restoreKeys);
+    let backupBytes: ReadonlyMap<string, Buffer>;
+    try {
+      backupBytes = await preflightRecoveryBackupBytes(storage, manifest, restoreKeys);
+    } catch {
+      throw new ProjectTemplateCompanionLockRecoveryError();
+    }
+    await restoreBefore(storage, journal, manifest, backupBytes);
     assertOwned(storage, lease);
     await removeProjectTemplateStagingTransaction({
       storage,

@@ -243,7 +243,9 @@ describe('companion lock rollback current-state guard', () => {
       await expect(recoverProjectTemplateCompanionLockTransaction({
         projectRoot: value.projectRoot,
       })).resolves.toEqual({ status: 'rolled-back' });
-      expect(value.snapshot().targets).toEqual(entries.map((entry) => Buffer.from(entry.before!)));
+      expect(entries.map((entry) => readFileSync(
+        resolveProjectTemplateApplyTarget(value.storage, entry.target).absolutePath,
+      ))).toEqual(entries.map((entry) => Buffer.from(entry.before!)));
     },
   );
 
