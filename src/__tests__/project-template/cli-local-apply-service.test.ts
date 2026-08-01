@@ -19,6 +19,7 @@ function port(
       reviewRequired: false,
       hardConflict: false,
       defaultApplyPossible: true,
+      forceApplicable: false,
       authority: Object.freeze({ kind: 'test-authority' }),
     })),
     execute: vi.fn(async () => ({
@@ -99,6 +100,7 @@ describe('local project-template CLI diff/apply service', () => {
         reviewRequired: true,
         hardConflict: true,
         defaultApplyPossible: false,
+        forceApplicable: false,
         authority: Object.freeze({}),
       })),
       execute,
@@ -163,6 +165,7 @@ describe('local project-template CLI diff/apply service', () => {
           reviewRequired: false,
           hardConflict: false,
           defaultApplyPossible: true,
+          forceApplicable: false,
           authority: Object.freeze({}),
         };
       }),
