@@ -58,4 +58,30 @@ describe('project template rollback plan', () => {
       ...changed,
     })).toThrow();
   });
+
+  it('rejects unknown keys, proxies, and accessors without invoking them', () => {
+    const valid = {
+      backupId: 'backup-1',
+      backupManifestSha256: HASH.manifest,
+      currentTargetSha256: HASH.target,
+      currentCompanionLocksSha256: HASH.cohort,
+    };
+    expect(() => createProjectTemplateRollbackPlan({
+      ...valid,
+      extra: true,
+    } as never)).toThrow();
+    expect(() => createProjectTemplateRollbackPlan(new Proxy(valid, {}) as never))
+      .toThrow();
+    let getterCalls = 0;
+    const accessor = { ...valid } as Record<string, unknown>;
+    Object.defineProperty(accessor, 'backupId', {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return 'backup-1';
+      },
+    });
+    expect(() => createProjectTemplateRollbackPlan(accessor as never)).toThrow();
+    expect(getterCalls).toBe(0);
+  });
 });
