@@ -20,6 +20,7 @@ const roots: string[] = [];
 const originalConfigDirectory = process.env.TAKT_CONFIG_DIR;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (originalConfigDirectory === undefined) delete process.env.TAKT_CONFIG_DIR;
   else process.env.TAKT_CONFIG_DIR = originalConfigDirectory;
   GlobalConfigManager.resetInstance();
@@ -69,6 +70,26 @@ function context() {
 }
 
 describe('project-template production command dependencies', () => {
+  it('keeps the SIGINT listener installed until explicit lifecycle disposal', () => {
+    const interrupt = vi.fn();
+    let installed: NodeJS.SignalsListener | undefined;
+    const on = vi.spyOn(process, 'on').mockImplementation((event, listener) => {
+      if (event === 'SIGINT') installed = listener as NodeJS.SignalsListener;
+      return process;
+    });
+    const removeListener = vi.spyOn(process, 'removeListener').mockReturnValue(process);
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+
+    const dispose = dependencies.installInterrupt(interrupt);
+    installed?.('SIGINT');
+    installed?.('SIGINT');
+
+    expect(on).toHaveBeenCalledWith('SIGINT', interrupt);
+    expect(interrupt).toHaveBeenCalledTimes(2);
+    dispose();
+    expect(removeListener).toHaveBeenCalledWith('SIGINT', interrupt);
+  });
+
   it.each([
     ['missing configs', undefined, undefined, 'en'],
     ['global config', 'ja', undefined, 'ja'],

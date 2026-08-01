@@ -38,7 +38,10 @@ async function defaultFactoryLoader(): Promise<CommandDependenciesFactory> {
 }
 
 function defaultInterruptInstaller(interrupt: () => void): () => void {
-  process.once('SIGINT', interrupt);
+  // Why: onboarding reuses the transaction lifecycle. A persistent listener
+  // prevents a second SIGINT from invoking Node's default exit while admitted
+  // work is still draining to commit, rollback, or recovery.
+  process.on('SIGINT', interrupt);
   return () => { process.removeListener('SIGINT', interrupt); };
 }
 

@@ -316,7 +316,10 @@ export function createProjectTemplateCliCommandProductionDependencies(
     writeStdout(chunk) { process.stdout.write(chunk); },
     setExitCode(code) { process.exitCode = code; },
     installInterrupt(interrupt) {
-      process.once('SIGINT', interrupt);
+      // Why: after mutation admission, the first SIGINT intentionally starts a
+      // transaction drain. Keep consuming later SIGINTs until disposal so Node's
+      // default handler cannot terminate commit, rollback, or recovery midway.
+      process.on('SIGINT', interrupt);
       return () => { process.removeListener('SIGINT', interrupt); };
     },
     cwd: process.cwd,

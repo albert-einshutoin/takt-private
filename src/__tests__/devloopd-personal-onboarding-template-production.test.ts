@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   consumeProjectTemplateCliMutationAdmission,
 } from '../features/project-template/cli-lifecycle.js';
@@ -14,6 +14,8 @@ import type {
 } from '../app/cli/projectTemplateCommands.js';
 
 const PLAN_ID = 'a'.repeat(64);
+
+afterEach(() => { vi.restoreAllMocks(); });
 
 function outcome(mode: 'dry-run' | 'apply'): ProjectTemplateCliOutcome {
   return mode === 'apply'
@@ -74,6 +76,41 @@ const applyOptions = {
 };
 
 describe('production personal onboarding template facade', () => {
+  it('keeps the default SIGINT listener active through admitted transaction drain', async () => {
+    let installed: NodeJS.SignalsListener | undefined;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const on = vi.spyOn(process, 'on').mockImplementation((event, listener) => {
+      if (event === 'SIGINT') installed = listener as NodeJS.SignalsListener;
+      return process;
+    });
+    const removeListener = vi.spyOn(process, 'removeListener').mockReturnValue(process);
+    const dispatch = vi.fn(async (_request, context) => {
+      consumeProjectTemplateCliMutationAdmission(context.admitMutation);
+      installed?.('SIGINT');
+      installed?.('SIGINT');
+      await gate;
+      return outcome('apply');
+    });
+    const value = harness(dispatch);
+    const facade = createProductionPersonalOnboardingTemplateFacade({
+      currentTaktVersion: '0.48.0',
+      loadCommandDependenciesFactory: value.load,
+      ensureRootGitignore: () => ({
+        status: 'exists', name: 'root gitignore', message: 'already present',
+      }),
+      ensureGithubLabels: async () => [],
+    });
+
+    const pending = facade.run(applyOptions);
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(on).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+    expect(removeListener).not.toHaveBeenCalled();
+    release();
+    await expect(pending).resolves.toMatchObject({ passed: true });
+    expect(removeListener).toHaveBeenCalledWith('SIGINT', installed);
+  });
+
   it('loads production dependencies lazily and disposes exactly once', async () => {
     const dispatch = vi.fn(async (request, context) => {
       expect(request.mutation).toMatchObject({ mode: 'apply' });
