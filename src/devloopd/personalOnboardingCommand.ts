@@ -19,13 +19,15 @@ export type PersonalOnboardingTemplateMutation =
     readonly expectedPlanId: string;
   };
 
+export interface PersonalOnboardingTemplateRunOptions {
+  readonly repoPath: string;
+  readonly repo?: string;
+  readonly source: PersonalOnboardingTemplateSource;
+  readonly mutation: PersonalOnboardingTemplateMutation;
+}
+
 export interface PersonalOnboardingTemplateCommandFacade {
-  run(options: {
-    readonly repoPath: string;
-    readonly repo?: string;
-    readonly source: PersonalOnboardingTemplateSource;
-    readonly mutation: PersonalOnboardingTemplateMutation;
-  }): Promise<{
+  run(options: PersonalOnboardingTemplateRunOptions): Promise<{
     readonly passed: boolean;
     readonly machineOutput: string;
     readonly humanOutput: string;

@@ -6,6 +6,7 @@ import type { PersonalOnboardingAction } from './personalOnboarding.js';
 import type {
   PersonalOnboardingTemplateCommandFacade,
   PersonalOnboardingTemplateMutation,
+  PersonalOnboardingTemplateRunOptions,
   PersonalOnboardingTemplateSource,
 } from './personalOnboardingCommand.js';
 
@@ -80,7 +81,7 @@ export function createPersonalOnboardingTemplateFacade(
   dependencies: PersonalOnboardingTemplateFacadeDependencies,
 ): PersonalOnboardingTemplateCommandFacade {
   return Object.freeze({
-    async run(options) {
+    async run(options: PersonalOnboardingTemplateRunOptions) {
       const outcome = snapshotProjectTemplateCliOutcome(
         await dependencies.applyFiles(options),
       );
