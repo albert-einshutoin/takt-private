@@ -3,7 +3,10 @@ import {
   createProjectTemplateCliSuccess,
 } from '../../features/project-template/cli-machine-contract.js';
 import {
+  consumeProjectTemplateCliMutationAdmission,
+  ProjectTemplateCliInvalidAdmission,
   startProjectTemplateCliLifecycle,
+  type ProjectTemplateCliMutationAdmission,
 } from '../../features/project-template/cli-lifecycle.js';
 
 const PLAN_ID = 'a'.repeat(64);
@@ -20,6 +23,37 @@ function deferred(): {
 }
 
 describe('project template CLI lifecycle', () => {
+  it('rejects arbitrary and proxied mutation admission functions', () => {
+    expect(() => consumeProjectTemplateCliMutationAdmission(() => undefined))
+      .toThrow(ProjectTemplateCliInvalidAdmission);
+    expect(() => consumeProjectTemplateCliMutationAdmission(new Proxy(
+      () => undefined,
+      {},
+    ))).toThrow(ProjectTemplateCliInvalidAdmission);
+  });
+
+  it('consumes lifecycle admission exactly once and invalidates it after settle', async () => {
+    let retained: ProjectTemplateCliMutationAdmission | undefined;
+    const execution = startProjectTemplateCliLifecycle({
+      command: 'project-template apply', mode: 'apply', dispose: () => undefined,
+      handle: async ({ admitMutation }) => {
+        retained = admitMutation;
+        consumeProjectTemplateCliMutationAdmission(admitMutation);
+        expect(() => consumeProjectTemplateCliMutationAdmission(admitMutation))
+          .toThrow(ProjectTemplateCliInvalidAdmission);
+        return {
+          envelope: createProjectTemplateCliSuccess({
+            command: 'project-template apply', mode: 'apply',
+            result: { planId: PLAN_ID, applied: true, backupId: 'backup-1', recoveryState: 'clean' },
+          }),
+          exitCode: 0,
+        };
+      },
+    });
+    await expect(execution.result).resolves.toMatchObject({ exitCode: 0 });
+    expect(() => consumeProjectTemplateCliMutationAdmission(retained))
+      .toThrow(ProjectTemplateCliInvalidAdmission);
+  });
   it('aborts before mutation admission with exit 130 and disposes once', async () => {
     const entered = deferred();
     const dispose = vi.fn(() => undefined);
