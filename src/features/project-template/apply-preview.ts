@@ -16,12 +16,17 @@ import {
   renderProjectTemplateRepertoireDependencyPlanHuman,
   renderProjectTemplateRepertoireDependencyPlanJson,
 } from './repertoire-dependency-preview.js';
+import {
+  assertProjectTemplateSourceProvenancePlan,
+} from './source-provenance-plan.js';
 import type {
   ProjectTemplateApplyPreview,
   ProjectTemplateApplyPreviewBindings,
   ProjectTemplateApplyPreviewCompositionConflictCode,
   ProjectTemplateApplyPreviewContentHardConflict,
   ProjectTemplateApplyPreviewOptions,
+  ProjectTemplateRemoteApplyPreview,
+  ProjectTemplateRemoteApplyPreviewOptions,
 } from './apply-preview-types.js';
 
 export type {
@@ -30,6 +35,8 @@ export type {
   ProjectTemplateApplyPreviewCompositionConflictCode,
   ProjectTemplateApplyPreviewContentHardConflict,
   ProjectTemplateApplyPreviewOptions,
+  ProjectTemplateRemoteApplyPreview,
+  ProjectTemplateRemoteApplyPreviewOptions,
 } from './apply-preview-types.js';
 
 type ReviewScalar = string | number | boolean | null;
@@ -68,6 +75,8 @@ interface ContentReviewDto {
 const PREVIEW_ID_DOMAIN = 'takt.project-template.apply-preview.v1\u0000';
 const PREVIEW_REVIEW_DOMAIN =
   'takt.project-template.apply-preview-review.v1\u0000';
+const REMOTE_TRANSACTION_PLAN_DOMAIN =
+  'takt.project-template.remote-transaction-plan.v1\u0000';
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_ARRAY_RECEIVER = Array;
 const CAPTURED_JSON_RECEIVER = JSON;
@@ -320,6 +329,32 @@ function publicBindings(
         previousRepertoireLockSha256:
           bindings.previousRepertoireLockSha256,
       }),
+    ...(bindings.sourceProvenancePlanId === undefined
+      ? {}
+      : { sourceProvenancePlanId: bindings.sourceProvenancePlanId }),
+    ...(bindings.previousSourceProvenanceSha256 === undefined
+      ? {}
+      : {
+        previousSourceProvenanceSha256:
+          bindings.previousSourceProvenanceSha256,
+      }),
+    ...(bindings.nextSourceProvenanceSha256 === undefined
+      ? {}
+      : { nextSourceProvenanceSha256: bindings.nextSourceProvenanceSha256 }),
+    ...(bindings.previousLocksSha256 === undefined
+      ? {}
+      : { previousLocksSha256: bindings.previousLocksSha256 }),
+    ...(bindings.nextContentLockSha256 === undefined
+      ? {}
+      : { nextContentLockSha256: bindings.nextContentLockSha256 }),
+    ...(bindings.nextRepertoireLockSha256 === undefined
+      ? {}
+      : {
+        nextRepertoireLockSha256: bindings.nextRepertoireLockSha256,
+      }),
+    ...(bindings.transactionPlanId === undefined
+      ? {}
+      : { transactionPlanId: bindings.transactionPlanId }),
   });
 }
 
@@ -547,6 +582,245 @@ export function createProjectTemplateApplyPreview(
     contentDto,
     renderProjectTemplateRepertoireDependencyPlanHuman(dependencyPlan),
   );
+  CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_SET, PREVIEW_SEALS, [
+    preview,
+    freeze({
+      previewId,
+      canonicalBody,
+      reviewSurfaceSha256: hashDomainBody(PREVIEW_REVIEW_DOMAIN, json),
+      human,
+      json,
+    }),
+  ]);
+  return preview;
+}
+
+function snapshotRemoteOptions(
+  value: unknown,
+): ProjectTemplateRemoteApplyPreviewOptions {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || CAPTURED_REFLECT_APPLY(CAPTURED_TYPES_IS_PROXY, types, [value])
+    || CAPTURED_REFLECT_APPLY(
+      CAPTURED_OBJECT_GET_PROTOTYPE_OF,
+      CAPTURED_OBJECT_RECEIVER,
+      [value],
+    ) !== CAPTURED_OBJECT_PROTOTYPE
+  ) invalidPreview('remoteApplyPreview');
+  const descriptors = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS,
+    CAPTURED_OBJECT_RECEIVER,
+    [value],
+  ) as Record<PropertyKey, PropertyDescriptor>;
+  const expected = [
+    'contentPlan',
+    'repertoireDependencyPlan',
+    'sourceProvenancePlan',
+    'receiptKey',
+    'previousLocksSha256',
+    'nextContentLockSha256',
+    'nextRepertoireLockSha256',
+    'baselineStrategy',
+  ] as const;
+  const keys = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REFLECT_OWN_KEYS,
+    CAPTURED_REFLECT_RECEIVER,
+    [descriptors],
+  ) as PropertyKey[];
+  if (keys.length !== expected.length) invalidPreview('remoteApplyPreview');
+  for (let index = 0; index < expected.length; index += 1) {
+    const descriptor = descriptors[expected[index]!];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      invalidPreview('remoteApplyPreview');
+    }
+  }
+  for (let index = 0; index < keys.length; index += 1) {
+    let allowed = false;
+    for (let expectedIndex = 0; expectedIndex < expected.length; expectedIndex += 1) {
+      if (keys[index] === expected[expectedIndex]) allowed = true;
+    }
+    if (!allowed) invalidPreview('remoteApplyPreview');
+  }
+  const sha256Pattern = /^[a-f0-9]{64}$/;
+  for (const key of [
+    'receiptKey',
+    'previousLocksSha256',
+    'nextContentLockSha256',
+    'nextRepertoireLockSha256',
+  ] as const) {
+    if (
+      typeof descriptors[key]!.value !== 'string'
+      || !sha256Pattern.test(descriptors[key]!.value as string)
+    ) invalidPreview(`remoteApplyPreview.${key}`);
+  }
+  const baselineStrategy = descriptors['baselineStrategy']!.value;
+  if (baselineStrategy !== 'conflict' && baselineStrategy !== 'adopt-identical') {
+    invalidPreview('remoteApplyPreview.baselineStrategy');
+  }
+  return freeze({
+    contentPlan: descriptors['contentPlan']!.value as ProjectTemplateApplyPlan,
+    repertoireDependencyPlan:
+      descriptors['repertoireDependencyPlan']!.value as ProjectTemplateRepertoireDependencyPlan,
+    sourceProvenancePlan:
+      descriptors['sourceProvenancePlan']!.value as ProjectTemplateRemoteApplyPreviewOptions['sourceProvenancePlan'],
+    receiptKey: descriptors['receiptKey']!.value as string,
+    previousLocksSha256: descriptors['previousLocksSha256']!.value as string,
+    nextContentLockSha256:
+      descriptors['nextContentLockSha256']!.value as string,
+    nextRepertoireLockSha256:
+      descriptors['nextRepertoireLockSha256']!.value as string,
+    baselineStrategy,
+  });
+}
+
+/**
+ * Composes the three reviewed plans into one non-authorizing remote preview.
+ * Receipt identity remains only in the transaction hash input and is never
+ * rendered or persisted as source provenance.
+ */
+export function createProjectTemplateRemoteApplyPreview(
+  value: ProjectTemplateRemoteApplyPreviewOptions,
+): ProjectTemplateRemoteApplyPreview {
+  const options = snapshotRemoteOptions(value);
+  const contentPlan = assertSealedProjectTemplateApplyPlan(options.contentPlan);
+  const dependencyPlan = requireSealedDependencyPlan(
+    options.repertoireDependencyPlan,
+  );
+  const sourcePlan = assertProjectTemplateSourceProvenancePlan(
+    options.sourceProvenancePlan,
+  );
+  const source = sourcePlan.nextProvenance;
+  const basePreview = createProjectTemplateApplyPreview({
+    contentPlan,
+    repertoireDependencyPlan: dependencyPlan,
+  });
+  const compositionConflicts = [
+    ...basePreview.compositionConflicts,
+  ] as ProjectTemplateApplyPreviewCompositionConflictCode[];
+  if (source.archive.manifestSha256 !== contentPlan.incomingManifestSha256) {
+    append(compositionConflicts, 'SOURCE_MANIFEST_BINDING_MISMATCH');
+  }
+  if (source.archive.sha256 !== contentPlan.incomingArchiveSha256) {
+    append(compositionConflicts, 'SOURCE_ARCHIVE_BINDING_MISMATCH');
+  }
+  if (source.source.descriptorSha256 !== dependencyPlan.sourceDescriptorSha256) {
+    append(compositionConflicts, 'SOURCE_DESCRIPTOR_BINDING_MISMATCH');
+  }
+  if (
+    source.dependencyVerification.declarationSha256
+      !== dependencyPlan.declarationSha256
+    || source.dependencyVerification.count !== dependencyPlan.dependencies.length
+  ) append(compositionConflicts, 'SOURCE_DEPENDENCY_BINDING_MISMATCH');
+  if (source.archive.version !== contentPlan.incomingPackVersion) {
+    append(compositionConflicts, 'SOURCE_VERSION_BINDING_MISMATCH');
+  }
+  freeze(compositionConflicts);
+
+  const transactionBody = freeze({
+    receiptKey: options.receiptKey,
+    contentPlanId: contentPlan.planId,
+    contentPreconditionToken: contentPlan.preconditionToken,
+    repertoireDependencyPlanId: dependencyPlan.planId,
+    repertoireDependencyPreconditionToken: dependencyPlan.preconditionToken,
+    sourceProvenancePlanId: sourcePlan.planId,
+    archiveSha256: source.archive.sha256,
+    manifestSha256: source.archive.manifestSha256,
+    sourceDescriptorSha256: source.source.descriptorSha256,
+    repertoireDeclarationSha256:
+      source.dependencyVerification.declarationSha256,
+    previousLocksSha256: options.previousLocksSha256,
+    previousContentLockSha256: contentPlan.baseLockSha256 ?? null,
+    previousRepertoireLockSha256: dependencyPlan.previousLockSha256 ?? null,
+    previousSourceProvenanceSha256:
+      sourcePlan.previousProvenanceSha256 ?? null,
+    nextContentLockSha256: options.nextContentLockSha256,
+    nextRepertoireLockSha256: options.nextRepertoireLockSha256,
+    nextSourceProvenanceSha256: sourcePlan.nextProvenanceSha256,
+    targetPreconditionToken: contentPlan.preconditionToken,
+    baselineStrategy: options.baselineStrategy,
+  }) as unknown as ReviewValue;
+  const transactionPlanId = hashDomainBody(
+    REMOTE_TRANSACTION_PLAN_DOMAIN,
+    canonicalJson(transactionBody),
+  );
+  const bindings = freeze({
+    ...basePreview.bindings,
+    sourceProvenancePlanId: sourcePlan.planId,
+    ...(sourcePlan.previousProvenanceSha256 === undefined
+      ? {}
+      : {
+        previousSourceProvenanceSha256:
+          sourcePlan.previousProvenanceSha256,
+      }),
+    nextSourceProvenanceSha256: sourcePlan.nextProvenanceSha256,
+    previousLocksSha256: options.previousLocksSha256,
+    nextContentLockSha256: options.nextContentLockSha256,
+    nextRepertoireLockSha256: options.nextRepertoireLockSha256,
+    transactionPlanId,
+  });
+  const sourceHardConflict = sourcePlan.hardConflict;
+  const hardConflict = basePreview.hardConflict
+    || sourceHardConflict
+    || compositionConflicts.length !== 0;
+  const reviewRequired = hardConflict
+    || basePreview.reviewRequired
+    || sourcePlan.reviewRequired;
+  const defaultApplyPossible = !reviewRequired && !hardConflict;
+  const sourceReview = freeze({
+    planId: sourcePlan.planId,
+    action: sourcePlan.action,
+    changes: sourcePlan.changes,
+    conflicts: sourcePlan.conflicts,
+    previousProvenanceSha256:
+      sourcePlan.previousProvenanceSha256 ?? null,
+    nextProvenanceSha256: sourcePlan.nextProvenanceSha256,
+  }) as unknown as ReviewValue;
+  const internalBody = freeze({
+    schemaVersion: '1.0',
+    transactionPlanId,
+    bindings,
+    compositionConflicts,
+    sourceHardConflict,
+    reviewRequired,
+    hardConflict,
+    defaultApplyPossible,
+    sourceReview,
+    basePreviewId: basePreview.previewId,
+  }) as unknown as ReviewValue;
+  const canonicalBody = canonicalJson(internalBody);
+  const previewId = hashPreviewBody(canonicalBody);
+  const preview = freeze({
+    schemaVersion: '1.0' as const,
+    previewId,
+    transactionPlanId,
+    bindings,
+    compositionConflicts,
+    contentHardConflicts: basePreview.contentHardConflicts,
+    dependencyHardConflict: basePreview.dependencyHardConflict,
+    sourceHardConflict,
+    reviewRequired,
+    hardConflict,
+    defaultApplyPossible,
+  }) as ProjectTemplateRemoteApplyPreview;
+  const baseJson = renderProjectTemplateApplyPreviewJson(basePreview);
+  const json = '{"schemaVersion":"1.0","previewId":'
+    + canonicalString(previewId)
+    + ',"transactionPlanId":' + canonicalString(transactionPlanId)
+    + ',"bindings":' + canonicalJson(publicBindings(bindings))
+    + ',"compositionConflicts":' + canonicalJson(compositionConflicts)
+    + ',"source":' + canonicalJson(sourceReview)
+    + ',"base":' + baseJson
+    + ',"flags":{"reviewRequired":' + CAPTURED_STRING(reviewRequired)
+    + ',"hardConflict":' + CAPTURED_STRING(hardConflict)
+    + ',"defaultApplyPossible":' + CAPTURED_STRING(defaultApplyPossible)
+    + '}}';
+  const human = 'project-template-remote-apply-preview schema=1.0\n'
+    + `previewId=${canonicalString(previewId)}\n`
+    + `transactionPlanId=${canonicalString(transactionPlanId)}\n`
+    + `sourceChanges=${canonicalJson(sourcePlan.changes)}\n`
+    + `sourceConflicts=${canonicalJson(sourcePlan.conflicts)}\n`
+    + renderProjectTemplateApplyPreviewHuman(basePreview);
   CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_MAP_SET, PREVIEW_SEALS, [
     preview,
     freeze({

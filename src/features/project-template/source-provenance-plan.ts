@@ -8,6 +8,7 @@ import {
 import { compareSemVer } from './validation.js';
 
 const PLAN_ID_DOMAIN = 'takt.project-template.source-provenance-plan.v1\u0000';
+const SOURCE_PROVENANCE_PLAN_SEALS = new WeakMap<object, string>();
 
 export type ProjectTemplateSourceProvenanceChange =
   | 'SOURCE_ADDED'
@@ -228,7 +229,7 @@ export function createProjectTemplateSourceProvenancePlan(
       : { previousProvenanceSha256 }),
     nextProvenanceSha256,
   };
-  return Object.freeze({
+  const plan = Object.freeze({
     schemaVersion: '1.0' as const,
     planId: calculatePlanId(idBody),
     action,
@@ -243,4 +244,23 @@ export function createProjectTemplateSourceProvenancePlan(
     hardConflict,
     defaultApplyPossible: !hardConflict,
   });
+  SOURCE_PROVENANCE_PLAN_SEALS.set(plan, plan.planId);
+  return plan;
+}
+
+/** @internal Rejects cloned or deserialized source planning lookalikes. */
+export function assertProjectTemplateSourceProvenancePlan(
+  value: unknown,
+): ProjectTemplateSourceProvenancePlan {
+  const sealedId = typeof value === 'object' && value !== null
+    ? SOURCE_PROVENANCE_PLAN_SEALS.get(value)
+    : undefined;
+  if (sealedId === undefined) {
+    throw new TypeError('source provenance plan is not process-local');
+  }
+  const plan = value as ProjectTemplateSourceProvenancePlan;
+  if (plan.planId !== sealedId) {
+    throw new TypeError('source provenance plan identity changed');
+  }
+  return plan;
 }

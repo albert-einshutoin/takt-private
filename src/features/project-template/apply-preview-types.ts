@@ -3,6 +3,9 @@ import type { ProjectTemplateApplyPlan } from './apply-plan-types.js';
 import type {
   ProjectTemplateRepertoireDependencyPlan,
 } from './repertoire-dependency-plan.js';
+import type {
+  ProjectTemplateSourceProvenancePlan,
+} from './source-provenance-plan.js';
 
 /** @internal Inputs accepted only by the private preview-composition boundary. */
 export interface ProjectTemplateApplyPreviewOptions {
@@ -11,9 +14,25 @@ export interface ProjectTemplateApplyPreviewOptions {
     ProjectTemplateRepertoireDependencyPlan;
 }
 
+/** @internal Inputs accepted only by the authenticated remote preview facade. */
+export interface ProjectTemplateRemoteApplyPreviewOptions
+  extends ProjectTemplateApplyPreviewOptions {
+  readonly sourceProvenancePlan: ProjectTemplateSourceProvenancePlan;
+  readonly receiptKey: string;
+  readonly previousLocksSha256: string;
+  readonly nextContentLockSha256: string;
+  readonly nextRepertoireLockSha256: string;
+  readonly baselineStrategy: 'conflict' | 'adopt-identical';
+}
+
 /** A cross-plan composition failure safe to show on a review surface. */
 export type ProjectTemplateApplyPreviewCompositionConflictCode =
-  'MANIFEST_BINDING_MISMATCH';
+  | 'MANIFEST_BINDING_MISMATCH'
+  | 'SOURCE_MANIFEST_BINDING_MISMATCH'
+  | 'SOURCE_ARCHIVE_BINDING_MISMATCH'
+  | 'SOURCE_DESCRIPTOR_BINDING_MISMATCH'
+  | 'SOURCE_DEPENDENCY_BINDING_MISMATCH'
+  | 'SOURCE_VERSION_BINDING_MISMATCH';
 
 /** A content blocker safe to show without exposing file contents or tokens. */
 export type ProjectTemplateApplyPreviewContentHardConflict =
@@ -42,6 +61,13 @@ export interface ProjectTemplateApplyPreviewBindings {
   readonly sourceDescriptorSha256: string;
   readonly repertoireDeclarationSha256: string;
   readonly previousRepertoireLockSha256?: string;
+  readonly sourceProvenancePlanId?: string;
+  readonly previousSourceProvenanceSha256?: string;
+  readonly nextSourceProvenanceSha256?: string;
+  readonly previousLocksSha256?: string;
+  readonly nextContentLockSha256?: string;
+  readonly nextRepertoireLockSha256?: string;
+  readonly transactionPlanId?: string;
 }
 
 /**
@@ -57,7 +83,23 @@ export interface ProjectTemplateApplyPreview {
   readonly contentHardConflicts:
     readonly ProjectTemplateApplyPreviewContentHardConflict[];
   readonly dependencyHardConflict: boolean;
+  readonly transactionPlanId?: string;
+  readonly sourceHardConflict?: boolean;
   readonly reviewRequired: boolean;
   readonly hardConflict: boolean;
   readonly defaultApplyPossible: boolean;
+}
+
+export interface ProjectTemplateRemoteApplyPreview
+  extends ProjectTemplateApplyPreview {
+  readonly transactionPlanId: string;
+  readonly sourceHardConflict: boolean;
+  readonly bindings: ProjectTemplateApplyPreviewBindings & {
+    readonly transactionPlanId: string;
+    readonly sourceProvenancePlanId: string;
+    readonly nextSourceProvenanceSha256: string;
+    readonly previousLocksSha256: string;
+    readonly nextContentLockSha256: string;
+    readonly nextRepertoireLockSha256: string;
+  };
 }
