@@ -43,6 +43,22 @@ describe('project template CLI machine contract', () => {
     expect('result' in failure).toBe(false);
   });
 
+  it('rejects forged envelopes instead of trusting TypeScript at runtime', () => {
+    const forged = {
+      schemaVersion: '1.0',
+      command: 'project-template preview',
+      status: 'success',
+      mode: 'dry-run',
+      result: { changed: false },
+      error: { code: 'INTERNAL', detail: '/Users/alice/.takt/cache' },
+      warnings: [],
+    };
+
+    expect(() => presentProjectTemplateCliEnvelope(
+      forged as never,
+    )).toThrow(ProjectTemplateCliContractError);
+  });
+
   it.each([
     [{ absolutePath: '/Users/example/.takt/cache' }],
     [{ credential: 'github-token' }],
@@ -54,6 +70,42 @@ describe('project template CLI machine contract', () => {
       mode: 'dry-run',
       result,
     })).toThrow(ProjectTemplateCliContractError);
+  });
+
+  it.each([
+    ['non-finite number', { value: Number.NaN }],
+    ['negative zero', { value: -0 }],
+    ['undefined', { value: undefined }],
+    ['sparse array', Array(2)],
+    ['symbol key', { [Symbol('hidden')]: 'value' }],
+  ])('rejects unsafe JSON graph shape: %s', (_label, result) => {
+    expect(() => createProjectTemplateCliSuccess({
+      command: 'project-template preview',
+      mode: 'dry-run',
+      result,
+    })).toThrow(ProjectTemplateCliContractError);
+  });
+
+  it('rejects getters, proxies, cycles, and bounded-resource overflow', () => {
+    const getter = Object.defineProperty({}, 'value', {
+      enumerable: true,
+      get: () => 'must-not-run',
+    });
+    const proxy = new Proxy({ value: 1 }, {});
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    let deep: Record<string, unknown> = {};
+    for (let index = 0; index < 70; index += 1) deep = { deep };
+    const tooManyNodes = Array.from({ length: 10_001 }, () => ({}));
+    const tooManyBytes = { value: 'x'.repeat(1_048_577) };
+
+    for (const result of [getter, proxy, cycle, deep, tooManyNodes, tooManyBytes]) {
+      expect(() => createProjectTemplateCliSuccess({
+        command: 'project-template preview',
+        mode: 'dry-run',
+        result,
+      })).toThrow(ProjectTemplateCliContractError);
+    }
   });
 
   it.each([
@@ -110,5 +162,22 @@ describe('project template CLI machine contract', () => {
 
     expect(write).toHaveBeenCalledTimes(1);
     expect(write).toHaveBeenCalledWith(expect.stringMatching(/^\{.*\}\n$/));
+  });
+
+  it('does not write an outcome whose exit category contradicts its envelope', async () => {
+    const write = vi.fn(() => undefined);
+    const outcome = {
+      envelope: createProjectTemplateCliFailure({
+        command: 'project-template apply',
+        mode: 'apply',
+        code: 'PLAN_DRIFT',
+      }),
+      exitCode: 0 as const,
+    };
+
+    await expect(writeProjectTemplateCliOutcome(outcome, write)).rejects.toThrow(
+      ProjectTemplateCliContractError,
+    );
+    expect(write).not.toHaveBeenCalled();
   });
 });
