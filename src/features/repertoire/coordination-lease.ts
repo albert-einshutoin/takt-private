@@ -191,15 +191,27 @@ type LeaseEvidence = {
   digest: string;
 };
 
+type PublishedClaimState = 'published' | 'retired' | 'uncertain';
+
 type CoordinationPaths = {
   root: string;
   readers: string;
   released: string;
   writerIntent: string;
+  trustedRoot: TrustedConfigRoot;
+};
+
+type TrustedRootEvidence = {
+  readonly dev: number;
+  readonly ino: number;
+  readonly mode: number;
+  readonly uid: number;
 };
 
 type TrustedConfigRoot = {
   readonly canonicalRoot: string;
+  readonly evidence: TrustedRootEvidence;
+  readonly lexicalRoot: string;
   close(): void;
   assertUnchanged(): void;
 };
@@ -225,10 +237,11 @@ const SNAPSHOT_CHANGED = Symbol('repertoire-coordination-snapshot-changed');
 export async function acquireRepertoireCoordinationLease(
   options: AcquireRepertoireCoordinationLeaseOptions,
 ): Promise<RepertoireCoordinationLease> {
+  let paths: CoordinationPaths | undefined;
   try {
     validateOptions(options);
     throwIfAborted(options.signal);
-    const paths = prepareCoordinationPaths(options.globalConfigDir);
+    paths = prepareCoordinationPaths(options.globalConfigDir);
     const deadline = safeDateNow() + (options.timeoutMs ?? 5_000);
     const initial = scanStableState(paths);
     enforceTombstoneLimits(initial.releasedCount, options.mode);
@@ -237,7 +250,7 @@ export async function acquireRepertoireCoordinationLease(
       ? acquireReadLease(paths, options.signal)
       : await acquireWriteLease(paths, deadline, options.signal);
   } catch (error) {
-    throw normalizeCoordinationError(error);
+    return throwAfterClosingTrustedRoot(paths, error);
   }
 }
 
@@ -245,16 +258,17 @@ export async function acquireRepertoireCoordinationLease(
 export function acquireRepertoireCoordinationReadLeaseImmediate(
   options: AcquireImmediateRepertoireReadLeaseOptions,
 ): RepertoireCoordinationLease {
+  let paths: CoordinationPaths | undefined;
   try {
     const validated = { ...options, mode: 'read' as const };
     validateOptions(validated);
     throwIfAborted(validated.signal);
-    const paths = prepareCoordinationPaths(validated.globalConfigDir);
+    paths = prepareCoordinationPaths(validated.globalConfigDir);
     const initial = scanStableState(paths);
     enforceTombstoneLimits(initial.releasedCount, 'read');
     return acquireReadLease(paths, validated.signal);
   } catch (error) {
-    throw normalizeCoordinationError(error);
+    return throwAfterClosingTrustedRoot(paths, error);
   }
 }
 
@@ -271,7 +285,8 @@ function acquireReadLease(
   throwIfAborted(signal);
   const record = createLeaseRecord('read');
   const claimPath = join(paths.readers, `${record.pid}.${record.token}.lease`);
-  const identity = createLeaseFile(claimPath, record, paths.readers);
+  const identity = createLeaseFile(paths, claimPath, record, paths.readers);
+  let claimState: PublishedClaimState = 'published';
 
   try {
     throwIfAborted(signal);
@@ -279,11 +294,15 @@ function acquireReadLease(
     enforceTombstoneLimits(after.releasedCount, 'read');
     assertPublishedLease(after.readers, record, identity);
     if (after.writer !== undefined) {
-      releaseOwnedLease(paths, claimPath, record, identity, paths.readers);
+      claimState = retireAfterFailedAcquire(paths, claimPath, record, identity, paths.readers);
+      if (claimState !== 'retired') throw new RepertoireCoordinationError('UNSAFE_STATE');
       throw new RepertoireCoordinationError('WRITER_PENDING');
     }
   } catch (error) {
-    retireAfterFailedAcquire(paths, claimPath, record, identity, paths.readers);
+    if (claimState === 'published') {
+      claimState = retireAfterFailedAcquire(paths, claimPath, record, identity, paths.readers);
+    }
+    if (claimState === 'uncertain') throw new RepertoireCoordinationError('UNSAFE_STATE');
     throw error;
   }
 
@@ -297,6 +316,7 @@ async function acquireWriteLease(
 ): Promise<RepertoireCoordinationLease> {
   const record = createLeaseRecord('write');
   let identity: FileIdentity;
+  let claimState: PublishedClaimState = 'uncertain';
 
   while (true) {
     throwIfAborted(signal);
@@ -305,18 +325,19 @@ async function acquireWriteLease(
       state = scanStableState(paths);
     } catch (error) {
       if (isWriterPending(error)) {
-        await waitForRetry(deadline, signal);
+        await waitForRetry(paths, deadline, signal);
         continue;
       }
       throw error;
     }
     enforceTombstoneLimits(state.releasedCount, 'write');
     try {
-      identity = createLeaseFile(paths.writerIntent, record, paths.root);
+      identity = createLeaseFile(paths, paths.writerIntent, record, paths.root);
+      claimState = 'published';
       break;
     } catch (error) {
       if (!isAlreadyExistsError(error)) throw error;
-      await waitForRetry(deadline, signal);
+      await waitForRetry(paths, deadline, signal);
     }
   }
 
@@ -327,7 +348,7 @@ async function acquireWriteLease(
         state = scanStableState(paths);
       } catch (error) {
         if (isWriterPending(error)) {
-          await waitForRetry(deadline, signal);
+          await waitForRetry(paths, deadline, signal);
           continue;
         }
         throw error;
@@ -339,10 +360,13 @@ async function acquireWriteLease(
         identity,
       );
       if (state.readers.length === 0) break;
-      await waitForRetry(deadline, signal);
+      await waitForRetry(paths, deadline, signal);
     }
   } catch (error) {
-    retireAfterFailedAcquire(paths, paths.writerIntent, record, identity, paths.root);
+    if (claimState === 'published') {
+      claimState = retireAfterFailedAcquire(paths, paths.writerIntent, record, identity, paths.root);
+    }
+    if (claimState === 'uncertain') throw new RepertoireCoordinationError('UNSAFE_STATE');
     throw error;
   }
 
@@ -362,14 +386,37 @@ function leaseHandle(
     mode,
     release(): void {
       if (released) return;
+      released = true;
+      let primaryFailure: unknown;
       try {
+        paths.trustedRoot.assertUnchanged();
         releaseOwnedLease(paths, path, record, identity, parentDirectory);
-        released = true;
+        paths.trustedRoot.assertUnchanged();
       } catch (error) {
+        primaryFailure = error;
+      }
+      try {
+        paths.trustedRoot.close();
+      } catch (error) {
+        if (primaryFailure !== undefined) {
+          throw new RepertoireCoordinationError('UNSAFE_STATE');
+        }
         throw normalizeCoordinationError(error);
       }
+      if (primaryFailure !== undefined) throw normalizeCoordinationError(primaryFailure);
     },
   });
+}
+
+function throwAfterClosingTrustedRoot(paths: CoordinationPaths | undefined, error: unknown): never {
+  if (paths !== undefined) {
+    try {
+      paths.trustedRoot.close();
+    } catch {
+      throw new RepertoireCoordinationError('UNSAFE_STATE');
+    }
+  }
+  throw normalizeCoordinationError(error);
 }
 
 function prepareCoordinationPaths(globalConfigDir: string): CoordinationPaths {
@@ -388,14 +435,16 @@ function prepareCoordinationPaths(globalConfigDir: string): CoordinationPaths {
       readers,
       released,
       writerIntent: join(root, WRITER_INTENT_FILENAME),
+      trustedRoot,
     };
     assertCoordinationDirectories(paths);
     // Creating the private subtree is observable filesystem work. Re-prove
     // the opened root afterwards so replacement cannot redirect later leases.
     trustedRoot.assertUnchanged();
     return paths;
-  } finally {
+  } catch (error) {
     trustedRoot.close();
+    throw error;
   }
 }
 
@@ -415,26 +464,41 @@ function assertTrustedConfigRoot(path: string): TrustedConfigRoot {
     assertSameTrustedConfigRoot(before, lexicalAfterOpen);
     assertSameTrustedConfigRoot(before, canonicalAfterOpen);
   } catch (error) {
-    if (fd !== undefined) closeSync(fd);
+    if (fd !== undefined) {
+      const openedFd = fd;
+      fd = undefined;
+      closeSync(openedFd);
+    }
     throw error;
   }
   let closed = false;
+  const evidence = safeObjectFreeze({
+    dev: before.dev,
+    ino: before.ino,
+    mode: before.mode,
+    uid: before.uid,
+  });
   return {
     canonicalRoot,
+    evidence,
+    lexicalRoot: path,
     assertUnchanged(): void {
       if (closed || fd === undefined) throw new RepertoireCoordinationError('UNSAFE_STATE');
       const opened = fstatSync(fd);
       const lexicalCurrent = lstatSync(path);
       const canonicalCurrent = lstatSync(canonicalRoot);
-      assertSameTrustedConfigRoot(before, opened);
-      assertSameTrustedConfigRoot(before, lexicalCurrent);
-      assertSameTrustedConfigRoot(before, canonicalCurrent);
+      assertSameTrustedConfigRoot(evidence, opened);
+      assertSameTrustedConfigRoot(evidence, lexicalCurrent);
+      assertSameTrustedConfigRoot(evidence, canonicalCurrent);
     },
     close(): void {
       if (closed || fd === undefined) return;
-      closeSync(fd);
+      // Terminalize before closeSync: a close error cannot authorize a retry
+      // against an fd number that the OS may already have recycled.
+      const openedFd = fd;
       closed = true;
       fd = undefined;
+      closeSync(openedFd);
     },
   };
 }
@@ -449,7 +513,7 @@ function assertTrustedConfigRootStat(stat: Stats): void {
   ) throw new RepertoireCoordinationError('UNSAFE_STATE');
 }
 
-function assertSameTrustedConfigRoot(expected: Stats, actual: Stats): void {
+function assertSameTrustedConfigRoot(expected: TrustedRootEvidence | Stats, actual: Stats): void {
   assertTrustedConfigRootStat(actual);
   if (
     actual.dev !== expected.dev
@@ -501,10 +565,12 @@ function createLeaseRecord(mode: RepertoireCoordinationMode): LeaseRecord {
 }
 
 function createLeaseFile(
+  paths: CoordinationPaths,
   path: string,
   record: LeaseRecord,
   parentDirectory: string,
 ): FileIdentity {
+  paths.trustedRoot.assertUnchanged();
   assertPrivateDirectory(parentDirectory);
   let fd: number | undefined;
   try {
@@ -520,8 +586,10 @@ function createLeaseFile(
     if (fd !== undefined) closeSync(fd);
   }
   syncDirectory(parentDirectory);
+  paths.trustedRoot.assertUnchanged();
   const published = readExactPrivateLease(path, record.mode);
   assertSameOwner(published.record, record);
+  paths.trustedRoot.assertUnchanged();
   return published.identity;
 }
 
@@ -607,11 +675,15 @@ function scanStableState(
   paths: CoordinationPaths,
   enforceHardLimit = true,
 ): CoordinationSnapshot {
+  paths.trustedRoot.assertUnchanged();
   let previous: CoordinationSnapshot | undefined;
   for (let attempt = 0; attempt < MAX_SNAPSHOT_ATTEMPTS; attempt += 1) {
     try {
       const current = scanStateOnce(paths, enforceHardLimit);
-      if (previous?.digest === current.digest) return current;
+      if (previous?.digest === current.digest) {
+        paths.trustedRoot.assertUnchanged();
+        return current;
+      }
       previous = current;
     } catch (error) {
       if (error !== SNAPSHOT_CHANGED) throw error;
@@ -814,12 +886,15 @@ function retireAfterFailedAcquire(
   record: LeaseRecord,
   identity: FileIdentity,
   parentDirectory: string,
-): void {
+): PublishedClaimState {
   try {
+    // Never attempt pathname cleanup after losing the descriptor-backed root
+    // proof; it could retire a foreign claim through a replacement path.
+    paths.trustedRoot.assertUnchanged();
     releaseOwnedLease(paths, path, record, identity, parentDirectory);
+    return 'retired';
   } catch {
-    // The original acquisition failure is already fail-closed. A failed
-    // retirement must not replace it with lower-fidelity filesystem details.
+    return 'uncertain';
   }
 }
 
@@ -830,6 +905,7 @@ function releaseOwnedLease(
   identity: FileIdentity,
   parentDirectory: string,
 ): void {
+  paths.trustedRoot.assertUnchanged();
   const nonce = safeBufferToString(safeRandomBytes(32), 'hex');
   if (!safeRegExpTest(HEX_256_REGEX, nonce)) {
     throw new RepertoireCoordinationError('UNSAFE_STATE');
@@ -848,6 +924,7 @@ function releaseOwnedLease(
     }
     throw error;
   }
+  paths.trustedRoot.assertUnchanged();
   enforcePrivateDirectoryMode(publishingContainer);
   assertPrivateDirectory(publishingContainer);
   syncDirectory(paths.released);
@@ -864,10 +941,14 @@ function releaseOwnedLease(
   // A malicious same-UID process can still mutate a 0700 directory after it is
   // published; the post-rename identity check and full scan fail closed but
   // cannot provide a stronger OS isolation boundary than the shared UID.
+  paths.trustedRoot.assertUnchanged();
   renameSync(path, publishingPath);
+  paths.trustedRoot.assertUnchanged();
   syncDirectory(parentDirectory);
   syncDirectory(publishingContainer);
+  paths.trustedRoot.assertUnchanged();
   renameSync(publishingContainer, container);
+  paths.trustedRoot.assertUnchanged();
   syncDirectory(paths.released);
   const releasedPath = join(container, RELEASED_ARTIFACT_FILENAME);
 
@@ -877,8 +958,10 @@ function releaseOwnedLease(
     // delete it here; all future acquisitions will fail closed while scanning.
     throw new RepertoireCoordinationError('UNSAFE_STATE');
   }
+  paths.trustedRoot.assertUnchanged();
   const published = scanStableState(paths, false);
   assertPublishedLease(published.released, expected, identity);
+  paths.trustedRoot.assertUnchanged();
 }
 
 function sameOwnerAndIdentity(
@@ -951,7 +1034,12 @@ function fileIdentityDigest(stat: Stats): string {
   );
 }
 
-async function waitForRetry(deadline: number, signal: AbortSignal | undefined): Promise<void> {
+async function waitForRetry(
+  paths: CoordinationPaths,
+  deadline: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  paths.trustedRoot.assertUnchanged();
   throwIfAborted(signal);
   const remaining = deadline - safeDateNow();
   if (remaining <= 0) throw new RepertoireCoordinationError('TIMEOUT');
@@ -961,6 +1049,9 @@ async function waitForRetry(deadline: number, signal: AbortSignal | undefined): 
     if (signal?.aborted) throw new RepertoireCoordinationError('ABORTED');
     throw new RepertoireCoordinationError('UNSAFE_STATE');
   }
+  // A same-UID process may replace a root below a writable parent while this
+  // process is suspended, so no pathname is reused until the fd proof matches.
+  paths.trustedRoot.assertUnchanged();
   throwIfAborted(signal);
   if (safeDateNow() >= deadline) throw new RepertoireCoordinationError('TIMEOUT');
 }

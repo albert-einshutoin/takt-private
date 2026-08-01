@@ -275,6 +275,32 @@ describeContract(
       expect(existsSync(displacedRoot)).toBe(true);
     });
 
+    it.each(['read', 'write'] as const)(
+      'fails closed when a %s lease root is renamed and linked back through the original path',
+      async (mode) => {
+        const parent = makeGlobalConfigDir();
+        const globalConfigDir = join(parent, 'config');
+        const displacedRoot = join(parent, 'displaced');
+        mkdirSync(globalConfigDir, { mode: 0o700 });
+        const lease = await acquire(globalConfigDir, mode);
+        renameSync(globalConfigDir, displacedRoot);
+        symlinkSync(displacedRoot, globalConfigDir);
+
+        expect(() => lease.release()).toThrow(expect.objectContaining({ code: 'UNSAFE_STATE' }));
+        // A failed release is terminal because its retained fd may already be
+        // recycled after close; retrying by pathname would target replacement state.
+        expect(() => lease.release()).not.toThrow();
+        expect(existsSync(displacedRoot)).toBe(true);
+      },
+    );
+
+    it('makes a successful release idempotent', async () => {
+      const globalConfigDir = makeGlobalConfigDir();
+      const lease = await acquire(globalConfigDir, 'read');
+      lease.release();
+      expect(() => lease.release()).not.toThrow();
+    });
+
     it.runIf(typeof process.getuid === 'function' && process.getuid() === 0)(
       'rejects a global config root owned by another uid',
       async () => {
