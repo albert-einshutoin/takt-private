@@ -32,6 +32,7 @@ interface TaskRecord {
   name: string;
   status: 'pending' | 'running' | 'failed' | 'completed';
   owner_pid?: number | null;
+  run_slug?: string;
   workflow?: string;
   failure?: {
     error?: string;
@@ -189,15 +190,18 @@ describe('E2E: Run interrupted task cleanup and high-priority run flows', () => 
     });
 
     try {
-      const runningObserved = await waitFor(() => {
-        if (!existsSync(tasksFile)) {
-          return false;
-        }
-        const tasks = readTasks(tasksFile);
-        return tasks.some((task) => task.status === 'running');
-      }, 30_000, 20);
+      const terminationReadiness = await waitForForcedTerminationReadiness({
+        repoPath: repo.path,
+        tasksFile,
+        ownerPid: child.pid,
+        timeoutMs: 30_000,
+        intervalMs: 20,
+      });
 
-      expect(runningObserved, `stdout:\n${firstStdout}\n\nstderr:\n${firstStderr}`).toBe(true);
+      expect(
+        terminationReadiness.ready,
+        `${terminationReadiness.diagnostic}\n\nstdout:\n${firstStdout}\n\nstderr:\n${firstStderr}`,
+      ).toBe(true);
 
       child.kill('SIGKILL');
       await childClosedPromise;
