@@ -1,9 +1,11 @@
 import { types } from 'node:util';
 import {
   issueTrustedProjectTemplateApplyPreviewApproval,
+  revokeProjectTemplateApplyPreviewApproval,
   type ProjectTemplateApplyPreviewApprovalEvidence,
 } from '../../features/project-template/apply-preview-approval.js';
 import type { ProjectTemplateRemoteApplyPreview } from '../../features/project-template/apply-preview-types.js';
+import { initializeProjectTemplateApplyStorage } from '../../features/project-template/apply-storage.js';
 import {
   recoverProjectTemplateCompanionLockTransaction,
 } from '../../features/project-template/companion-lock-transaction.js';
@@ -66,6 +68,8 @@ export interface ProjectTemplateRemoteProductionCompositionOptions {
   readonly now?: () => number;
   /** @internal deterministic bounded-handle TTL for tests. */
   readonly handleTtlMs?: number;
+  /** @internal deterministic bounded-handle capacity for tests. */
+  readonly handleLimit?: number;
 }
 
 export interface ProjectTemplateRemoteProductionComposition {
@@ -129,6 +133,8 @@ interface ApprovalHandle extends PreviewHandle {
   readonly evidence: ProjectTemplateApplyPreviewApprovalEvidence;
 }
 
+type HandleKind = 'receipts' | 'previews' | 'approvals';
+
 function failure(code: ProjectTemplateRemoteProductionCompositionErrorCode): never {
   throw new ProjectTemplateRemoteProductionCompositionError(code);
 }
@@ -177,9 +183,10 @@ export async function createProjectTemplateRemoteProductionComposition(
 ): Promise<ProjectTemplateRemoteProductionComposition> {
   const source = exactRecord(value, [
     'keyStore', 'resolver', 'asset', 'repertoireInspectionPort',
-  ], ['now', 'handleTtlMs']);
+  ], ['now', 'handleTtlMs', 'handleLimit']);
   const now = source['now'] === undefined ? Date.now : source['now'];
   const handleTtlMs = source['handleTtlMs'] ?? DEFAULT_HANDLE_TTL_MS;
+  const handleLimit = source['handleLimit'] ?? MAX_HANDLES;
   if (
     typeof now !== 'function'
     || types.isProxy(now)
@@ -187,6 +194,10 @@ export async function createProjectTemplateRemoteProductionComposition(
     || !Number.isSafeInteger(handleTtlMs)
     || handleTtlMs <= 0
     || handleTtlMs > MAX_HANDLE_TTL_MS
+    || typeof handleLimit !== 'number'
+    || !Number.isSafeInteger(handleLimit)
+    || handleLimit <= 0
+    || handleLimit > MAX_HANDLES
   ) failure('INVALID_ARGUMENT');
 
   const keyStore = source['keyStore'] as ProjectTemplateReceiptKeyStore;
@@ -241,13 +252,15 @@ export async function createProjectTemplateRemoteProductionComposition(
   const previews = new Map<string, PreviewHandle>();
   const approvals = new Map<string, ApprovalHandle>();
   let disposed = false;
+  let lastNow = Number.NEGATIVE_INFINITY;
   let activeOperations = 0;
   let drainWaiter: (() => void) | undefined;
   const shutdown = new AbortController();
 
   const time = (): number => {
     const value = Reflect.apply(now as () => number, undefined, []) as number;
-    if (!Number.isFinite(value)) failure('OPERATION_FAILED');
+    if (!Number.isFinite(value) || value < lastNow) failure('OPERATION_FAILED');
+    lastNow = value;
     return value;
   };
   const available = (): void => { if (disposed) failure('DISPOSED'); };
@@ -263,13 +276,92 @@ export async function createProjectTemplateRemoteProductionComposition(
     }
     return handle;
   };
-  const reserve = (map: Map<string, unknown>): void => {
-    if (map.size >= MAX_HANDLES) failure('HANDLE_LIMIT_EXCEEDED');
+  const reservations: Record<HandleKind, number> = {
+    receipts: 0,
+    previews: 0,
+    approvals: 0,
+  };
+  const handleMaps = { receipts, previews, approvals } as const;
+  const sweepExpired = (nowMs: number): ApprovalHandle[] => {
+    const expiredReceipts = new Set<string>();
+    for (const [receiptKey, handle] of receipts) {
+      if (handle.expiresAt <= nowMs) {
+        receipts.delete(receiptKey);
+        expiredReceipts.add(receiptKey);
+      }
+    }
+    const expiredPreviews = new Set<string>();
+    for (const [previewId, handle] of previews) {
+      if (handle.expiresAt <= nowMs || expiredReceipts.has(handle.receiptKey)) {
+        previews.delete(previewId);
+        expiredPreviews.add(previewId);
+      }
+    }
+    const revoked: ApprovalHandle[] = [];
+    for (const [approvalId, handle] of approvals) {
+      if (
+        handle.expiresAt <= nowMs
+        || expiredReceipts.has(handle.receiptKey)
+        || expiredPreviews.has(handle.preview.previewId)
+      ) {
+        approvals.delete(approvalId);
+        revoked.push(handle);
+      }
+    }
+    return revoked;
+  };
+  const revokeExpired = async (
+    handles: readonly ApprovalHandle[],
+    nowMs: number,
+  ): Promise<void> => {
+    for (const handle of handles) {
+      try {
+        const storage = await initializeProjectTemplateApplyStorage({
+          repoPath: handle.projectRoot,
+        });
+        await revokeProjectTemplateApplyPreviewApproval({
+          storage,
+          evidence: handle.evidence,
+          now: new Date(nowMs),
+        });
+      } catch {
+        // The public handle is already unreachable and the approval record is
+        // expired. A later operation still validates the durable TTL.
+      }
+    }
+  };
+  const reserve = (kind: HandleKind): {
+    readonly nowMs: number;
+    readonly revoked: readonly ApprovalHandle[];
+    release(): void;
+  } => {
+    const nowMs = time();
+    const revoked = sweepExpired(nowMs);
+    available();
+    if (handleMaps[kind].size + reservations[kind] >= handleLimit) {
+      failure('HANDLE_LIMIT_EXCEEDED');
+    }
+    reservations[kind] += 1;
+    let active = true;
+    return {
+      nowMs,
+      revoked,
+      release() {
+        if (!active) return;
+        active = false;
+        reservations[kind] -= 1;
+      },
+    };
   };
   const operation = async <T>(run: () => Promise<T>): Promise<T> => {
     available();
     activeOperations += 1;
     try {
+      const nowMs = time();
+      const revoked = sweepExpired(nowMs);
+      available();
+      await revokeExpired(revoked, nowMs);
+      available();
       return await run();
     } catch (error) {
       if (error instanceof ProjectTemplateRemoteProductionCompositionError) throw error;
@@ -292,20 +384,27 @@ export async function createProjectTemplateRemoteProductionComposition(
         const options = exactRecord(input, [
           'projectRoot', 'cacheRoot', 'source', 'advisory',
         ], ['signal']);
-        reserve(receipts);
-        const result = await downloadGithubTemplateSource({
-          projectRoot: text(options, 'projectRoot'),
-          cacheRoot: text(options, 'cacheRoot'),
-          source: text(options, 'source'),
-          advisory: options['advisory'] as GithubTemplateSourceAdvisory,
-          resolver: source['resolver'] as GithubTemplateSourceResolverPort,
-          asset: source['asset'] as GithubTemplateArchiveAssetPort,
-          authenticator: runtime.authenticator,
-          verifier: runtime.verifier,
-          signal: operationSignal(options['signal']),
-        });
-        receipts.set(result.receiptKey, { expiresAt: time() + (handleTtlMs as number) });
-        return Object.freeze({ receiptKey: result.receiptKey });
+        const reservation = reserve('receipts');
+        try {
+          await revokeExpired(reservation.revoked, reservation.nowMs);
+          const result = await downloadGithubTemplateSource({
+            projectRoot: text(options, 'projectRoot'),
+            cacheRoot: text(options, 'cacheRoot'),
+            source: text(options, 'source'),
+            advisory: options['advisory'] as GithubTemplateSourceAdvisory,
+            resolver: source['resolver'] as GithubTemplateSourceResolverPort,
+            asset: source['asset'] as GithubTemplateArchiveAssetPort,
+            authenticator: runtime.authenticator,
+            verifier: runtime.verifier,
+            signal: operationSignal(options['signal']),
+          });
+          receipts.set(result.receiptKey, {
+            expiresAt: time() + (handleTtlMs as number),
+          });
+          return Object.freeze({ receiptKey: result.receiptKey });
+        } finally {
+          reservation.release();
+        }
       });
     },
     async preview(input: unknown) {
@@ -316,27 +415,37 @@ export async function createProjectTemplateRemoteProductionComposition(
         const receiptKey = text(options, 'receiptKey');
         if (!SHA256.test(receiptKey)) failure('INVALID_ARGUMENT');
         const receipt = active(receipts, receiptKey, 'UNKNOWN_RECEIPT');
-        reserve(previews);
-        const baselineStrategy = strategy(options);
-        const projectRoot = text(options, 'projectRoot');
-        const preview = await createGithubProjectTemplateRemotePreview({
-          cacheRoot: text(options, 'cacheRoot'), receiptKey,
-          verifier: runtime.verifier, projectRoot,
-          currentTaktVersion: text(options, 'currentTaktVersion'),
-          repertoireInspectionPort: source['repertoireInspectionPort'] as
-            ProjectTemplateRepertoireDependencyInspectionPort,
-          baselineStrategy,
-          signal: operationSignal(options['signal']),
-        });
-        if (preview.transactionPlanId === undefined) failure('OPERATION_FAILED');
-        previews.set(preview.previewId, {
-          receiptKey, preview, projectRoot, baselineStrategy,
-          expiresAt: Math.min(receipt.expiresAt, time() + (handleTtlMs as number)),
-        });
-        return Object.freeze({
-          previewId: preview.previewId,
-          transactionPlanId: preview.transactionPlanId,
-        });
+        const reservation = reserve('previews');
+        try {
+          await revokeExpired(reservation.revoked, reservation.nowMs);
+          const baselineStrategy = strategy(options);
+          const projectRoot = text(options, 'projectRoot');
+          const preview = await createGithubProjectTemplateRemotePreview({
+            cacheRoot: text(options, 'cacheRoot'), receiptKey,
+            verifier: runtime.verifier, projectRoot,
+            currentTaktVersion: text(options, 'currentTaktVersion'),
+            repertoireInspectionPort: source['repertoireInspectionPort'] as
+              ProjectTemplateRepertoireDependencyInspectionPort,
+            baselineStrategy,
+            signal: operationSignal(options['signal']),
+          });
+          if (preview.transactionPlanId === undefined) {
+            failure('OPERATION_FAILED');
+          }
+          previews.set(preview.previewId, {
+            receiptKey, preview, projectRoot, baselineStrategy,
+            expiresAt: Math.min(
+              receipt.expiresAt,
+              time() + (handleTtlMs as number),
+            ),
+          });
+          return Object.freeze({
+            previewId: preview.previewId,
+            transactionPlanId: preview.transactionPlanId,
+          });
+        } finally {
+          reservation.release();
+        }
       });
     },
     async approve(input: unknown) {
@@ -355,15 +464,20 @@ export async function createProjectTemplateRemoteProductionComposition(
           || handle.projectRoot !== text(options, 'projectRoot')
           || handle.baselineStrategy !== strategy(options)
         ) failure('UNKNOWN_PREVIEW');
+        const reservation = reserve('approvals');
         previews.delete(previewId);
-        reserve(approvals);
-        const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
-          projectRoot: handle.projectRoot,
-          preview: handle.preview,
-          baselineStrategy: handle.baselineStrategy,
-        });
-        approvals.set(evidence.approvalId, { ...handle, evidence });
-        return Object.freeze({ approvalId: evidence.approvalId });
+        try {
+          await revokeExpired(reservation.revoked, reservation.nowMs);
+          const evidence = await issueTrustedProjectTemplateApplyPreviewApproval({
+            projectRoot: handle.projectRoot,
+            preview: handle.preview,
+            baselineStrategy: handle.baselineStrategy,
+          });
+          approvals.set(evidence.approvalId, { ...handle, evidence });
+          return Object.freeze({ approvalId: evidence.approvalId });
+        } finally {
+          reservation.release();
+        }
       });
     },
     async apply(input: unknown) {
@@ -426,9 +540,11 @@ export async function createProjectTemplateRemoteProductionComposition(
       }
       // New work was rejected synchronously before the bounded drain. Clear
       // handles only after in-flight operations release their private claims.
+      const revoked = [...approvals.values()];
       receipts.clear();
       previews.clear();
       approvals.clear();
+      await revokeExpired(revoked, Date.now());
       try {
         await runtime.dispose();
       } catch (error) {

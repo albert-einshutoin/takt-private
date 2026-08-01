@@ -455,11 +455,14 @@ describe('project template remote production composition', () => {
       projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
       source: value.source, advisory: value.advisory,
     });
+    mkdirSync(join(value.projectRoot, '.takt'), { recursive: true });
+    writeFileSync(join(value.projectRoot, '.takt', 'config.yaml'), 'language: ja\n');
     const secondPreview = await composition.preview({
       cacheRoot: value.cacheRoot, receiptKey: secondReceipt.receiptKey,
       projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
       baselineStrategy: 'conflict',
     });
+    expect(secondPreview.previewId).not.toBe(firstPreview.previewId);
     await expect(composition.apply({
       cacheRoot: value.cacheRoot, receiptKey: firstReceipt.receiptKey,
       previewId: firstPreview.previewId,
@@ -504,25 +507,32 @@ describe('project template remote production composition', () => {
       projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
       source: value.source, advisory: value.advisory,
     });
-    writeFileSync(join(value.projectRoot, 'local.txt'), 'one');
+    mkdirSync(join(value.projectRoot, '.takt'), { recursive: true });
+    writeFileSync(join(value.projectRoot, '.takt', 'config.yaml'), 'language: ja\n');
     const live = await composition.preview({
       cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
-      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'adopt-identical',
     });
     now = 11;
-    writeFileSync(join(value.projectRoot, 'local.txt'), 'two');
+    writeFileSync(join(value.projectRoot, '.takt', 'config.yaml'), 'language: en\n');
     const replacement = await composition.preview({
       cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
       projectRoot: value.projectRoot, currentTaktVersion: '0.48.0', baselineStrategy: 'conflict',
     });
+    expect(new Set([expired.previewId, live.previewId, replacement.previewId]).size)
+      .toBe(3);
     await expect(composition.approve({
       projectRoot: value.projectRoot, previewId: expired.previewId,
       transactionPlanId: expired.transactionPlanId, baselineStrategy: 'conflict',
     })).rejects.toMatchObject({ code: 'UNKNOWN_PREVIEW' });
-    for (const handle of [live, replacement]) {
+    for (const [handle, baselineStrategy] of [
+      [live, 'adopt-identical'],
+      [replacement, 'conflict'],
+    ] as const) {
       await expect(composition.approve({
         projectRoot: value.projectRoot, previewId: handle.previewId,
-        transactionPlanId: handle.transactionPlanId, baselineStrategy: 'conflict',
+        transactionPlanId: handle.transactionPlanId, baselineStrategy,
       })).resolves.toHaveProperty('approvalId');
     }
     await composition.dispose();
@@ -582,6 +592,83 @@ describe('project template remote production composition', () => {
     expect(concurrent.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     expect(concurrent.filter((result) => result.status === 'rejected')[0])
       .toMatchObject({ reason: { code: 'HANDLE_LIMIT_EXCEEDED' } });
+    await composition.dispose();
+  });
+
+  it('does not publish a reservation when dispose reenters the sweep clock', async () => {
+    const value = await fixture();
+    let now = 0;
+    let triggerDispose = false;
+    let disposePromise: Promise<void> | undefined;
+    let composition!: Awaited<ReturnType<
+      typeof createProjectTemplateRemoteProductionComposition
+    >>;
+    composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+      now: () => {
+        if (triggerDispose && disposePromise === undefined) {
+          disposePromise = composition.dispose();
+        }
+        return now;
+      },
+      handleTtlMs: 10,
+      handleLimit: 1,
+    });
+    await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    now = 11;
+    triggerDispose = true;
+    await expect(composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    })).rejects.toMatchObject({ code: 'DISPOSED' });
+    await disposePromise;
+  });
+
+  it('does not consume a live preview when approval capacity is reserved', async () => {
+    const value = await fixture();
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryStore(), resolver: value.resolver, asset: value.asset,
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+      handleLimit: 1,
+    });
+    const receipt = await composition.download({
+      projectRoot: value.projectRoot, cacheRoot: value.cacheRoot,
+      source: value.source, advisory: value.advisory,
+    });
+    const first = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    });
+    await composition.approve({
+      projectRoot: value.projectRoot, previewId: first.previewId,
+      transactionPlanId: first.transactionPlanId, baselineStrategy: 'conflict',
+    });
+    mkdirSync(join(value.projectRoot, '.takt'), { recursive: true });
+    writeFileSync(join(value.projectRoot, '.takt', 'config.yaml'), 'language: ja\n');
+    const second = await composition.preview({
+      cacheRoot: value.cacheRoot, receiptKey: receipt.receiptKey,
+      projectRoot: value.projectRoot, currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+    });
+    const approveSecond = () => composition.approve({
+      projectRoot: value.projectRoot, previewId: second.previewId,
+      transactionPlanId: second.transactionPlanId, baselineStrategy: 'conflict',
+    });
+    await expect(approveSecond()).rejects.toMatchObject({
+      code: 'HANDLE_LIMIT_EXCEEDED',
+    });
+    await expect(approveSecond()).rejects.toMatchObject({
+      code: 'HANDLE_LIMIT_EXCEEDED',
+    });
     await composition.dispose();
   });
 });
