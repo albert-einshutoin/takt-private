@@ -187,4 +187,144 @@ describe('project template remote CLI production runtime', () => {
     expect(JSON.stringify(outcome)).not.toContain(sensitive);
     expect(JSON.stringify(outcome)).not.toMatch(/cause|apply-journal/iu);
   });
+
+  it('rejects post-dispose admission before network and shares one dispose promise', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'takt-cli-remote-disposed-'));
+    roots.push(cwd);
+    const resolveAdvisory = vi.fn(async () => ({
+      updateState: 'up-to-date', hardBlocked: false,
+    } as GithubTemplateSourceAdvisory));
+    const resolver = {
+      resolveAdvisory,
+      async resolveForDownload() { throw new Error('not called'); },
+    } satisfies GithubTemplateSourceResolverPort;
+    const dispose = vi.fn(async () => undefined);
+    const unavailable = async (): Promise<never> => { throw new Error('not called'); };
+    const composition = {
+      download: unavailable, preview: unavailable, approve: unavailable,
+      apply: unavailable, applyWithInternalApproval: unavailable,
+      async recover() { return { status: 'none' as const }; }, dispose,
+    } as unknown as ProjectTemplateRemoteProductionComposition;
+    const runtime = createProjectTemplateCliRemoteProductionRuntimeForTest({
+      cacheRoot: join(cwd, 'cache'), resolver, composition,
+    });
+
+    const first = runtime.dispose();
+    const second = runtime.dispose();
+    expect(second).toBe(first);
+    await first;
+    const outcome = await runtime.service.diff({
+      cwd, source: 'github:owner/template@v1.0.0',
+      currentTaktVersion: '0.48.0', baselineStrategy: 'conflict', force: false,
+    });
+
+    expect(outcome).toMatchObject({
+      envelope: { status: 'error', error: { code: 'SOURCE_UNAVAILABLE' } },
+    });
+    expect(resolveAdvisory).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it('aborts in-flight advisory and closes its completion-to-download race', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'takt-cli-remote-advisory-race-'));
+    roots.push(cwd);
+    let releaseAdvisory!: () => void;
+    const advisoryGate = new Promise<void>((resolve) => { releaseAdvisory = resolve; });
+    let observedSignal: AbortSignal | undefined;
+    const resolver = {
+      async resolveAdvisory(input: { signal?: AbortSignal }) {
+        observedSignal = input.signal;
+        await advisoryGate;
+        return { updateState: 'update-available', hardBlocked: false } as
+          GithubTemplateSourceAdvisory;
+      },
+      async resolveForDownload() { throw new Error('not called'); },
+    } as GithubTemplateSourceResolverPort;
+    const download = vi.fn(async () => ({ receiptKey: 'b'.repeat(64) }));
+    const dispose = vi.fn(async () => undefined);
+    const composition = {
+      download,
+      async preview() { throw new Error('not called'); },
+      async approve() { throw new Error('not called'); },
+      async apply() { throw new Error('not called'); },
+      async applyWithInternalApproval() { throw new Error('not called'); },
+      async recover() { return { status: 'none' as const }; }, dispose,
+    } satisfies ProjectTemplateRemoteProductionComposition;
+    const runtime = createProjectTemplateCliRemoteProductionRuntimeForTest({
+      cacheRoot: join(cwd, 'cache'), resolver, composition,
+    });
+    const outcomePromise = runtime.service.diff({
+      cwd, source: 'github:owner/template@v1.0.0',
+      currentTaktVersion: '0.48.0', baselineStrategy: 'conflict', force: false,
+    });
+    await vi.waitFor(() => expect(observedSignal).toBeDefined());
+
+    const disposing = runtime.dispose();
+    expect(observedSignal!.aborted).toBe(true);
+    expect(dispose).not.toHaveBeenCalled();
+    releaseAdvisory();
+    await expect(outcomePromise).resolves.toMatchObject({
+      envelope: { status: 'error', error: { code: 'SOURCE_UNAVAILABLE' } },
+    });
+    await disposing;
+    expect(download).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it('drains admitted execution before one concurrent composition disposal', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'takt-cli-remote-mutation-drain-'));
+    roots.push(cwd);
+    const resolver = {
+      async resolveAdvisory() {
+        return { updateState: 'update-available', hardBlocked: false } as
+          GithubTemplateSourceAdvisory;
+      },
+      async resolveForDownload() { throw new Error('not called'); },
+    } satisfies GithubTemplateSourceResolverPort;
+    let releaseMutation!: () => void;
+    const mutationGate = new Promise<void>((resolve) => { releaseMutation = resolve; });
+    const applyWithInternalApproval = vi.fn(async () => {
+      await mutationGate;
+      return {
+        status: 'committed' as const, transactionPlanId: PLAN_ID,
+        backupId: 'backup-safe',
+      };
+    });
+    const dispose = vi.fn(async () => undefined);
+    const composition = {
+      async download() { return { receiptKey: 'b'.repeat(64) }; },
+      async preview() {
+        return {
+          previewId: 'preview-safe', transactionPlanId: PLAN_ID,
+          summary: {
+            changeCount: 1, conflictCount: 0, dependencyCount: 0,
+            reviewRequired: false, hardConflict: false,
+            defaultApplyPossible: true,
+          },
+        };
+      },
+      async approve() { throw new Error('not called'); },
+      async apply() { throw new Error('not called'); },
+      applyWithInternalApproval,
+      async recover() { return { status: 'none' as const }; }, dispose,
+    } satisfies ProjectTemplateRemoteProductionComposition;
+    const runtime = createProjectTemplateCliRemoteProductionRuntimeForTest({
+      cacheRoot: join(cwd, 'cache'), resolver, composition,
+    });
+    const outcome = runtime.service.apply({
+      cwd, source: 'github:owner/template@v1.0.0',
+      currentTaktVersion: '0.48.0', baselineStrategy: 'conflict', force: false,
+      mode: 'apply', expectedPlanId: PLAN_ID,
+    });
+    await vi.waitFor(() => expect(applyWithInternalApproval).toHaveBeenCalledOnce());
+
+    const first = runtime.dispose();
+    const second = runtime.dispose();
+    expect(second).toBe(first);
+    expect(dispose).not.toHaveBeenCalled();
+    releaseMutation();
+    await expect(outcome).resolves.toMatchObject({ envelope: { status: 'success' } });
+    await first;
+    expect(dispose).toHaveBeenCalledOnce();
+  });
 });

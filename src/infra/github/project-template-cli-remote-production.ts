@@ -91,6 +91,32 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
   readonly composition: ProjectTemplateRemoteProductionComposition;
 }): ProjectTemplateCliRemoteProductionRuntime {
   const { cacheRoot, resolver, composition } = value;
+  const shutdown = new AbortController();
+  let state: 'active' | 'disposing' | 'disposed' = 'active';
+  let activeOperations = 0;
+  let resolveDrain: (() => void) | undefined;
+  let disposePromise: Promise<void> | undefined;
+  const enter = (): (() => void) => {
+    if (state !== 'active') {
+      throw new ProjectTemplateCliRemotePortError('SOURCE_UNAVAILABLE');
+    }
+    activeOperations += 1;
+    let left = false;
+    return () => {
+      if (left) return;
+      left = true;
+      activeOperations -= 1;
+      if (activeOperations === 0) {
+        resolveDrain?.();
+        resolveDrain = undefined;
+      }
+    };
+  };
+  const operationSignal = (signal: AbortSignal | undefined): AbortSignal => (
+    signal === undefined
+      ? shutdown.signal
+      : AbortSignal.any([signal, shutdown.signal])
+  );
   const port: ProjectTemplateCliRemoteApplyPort = {
     inspectGuard(cwd) {
       try {
@@ -103,27 +129,32 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
       }
     },
     async derive(options) {
+      const leave = enter();
       try {
+        const signal = operationSignal(options.signal);
         const advisory = await resolver.resolveAdvisory({
           source: options.source,
           current: currentEvidence(options.cwd),
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
+          signal,
         });
+        signal.throwIfAborted();
         const downloaded = await composition.download({
           projectRoot: options.cwd,
           cacheRoot,
           source: options.source,
           advisory,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
+          signal,
         });
+        signal.throwIfAborted();
         const previewed = await composition.preview({
           cacheRoot,
           receiptKey: downloaded.receiptKey,
           projectRoot: options.cwd,
           currentTaktVersion: options.currentTaktVersion,
           baselineStrategy: options.baselineStrategy,
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
+          signal,
         });
+        signal.throwIfAborted();
         const authority = Object.freeze({
           kind: 'project-template-cli-remote-authority',
         });
@@ -151,23 +182,26 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
         }) satisfies ProjectTemplateCliRemoteDerivedPlan;
       } catch (error) {
         deriveFailure(error);
+      } finally {
+        leave();
       }
     },
     async execute(options) {
-      const key = options.derived.authority;
-      const authority = typeof key === 'object' && key !== null
-        ? AUTHORITIES.get(key) : undefined;
-      if (
-        authority === undefined
-        || authority.state !== 'active'
-        || authority.cwd !== options.cwd
-        || authority.source !== options.source
-        || authority.currentTaktVersion !== options.currentTaktVersion
-        || authority.baselineStrategy !== options.baselineStrategy
-        || authority.transactionPlanId !== options.expectedTransactionPlanId
-      ) throw new ProjectTemplateCliRemotePortError('SECURITY_GUARD');
-      authority.state = 'consumed';
+      const leave = enter();
       try {
+        const key = options.derived.authority;
+        const authority = typeof key === 'object' && key !== null
+          ? AUTHORITIES.get(key) : undefined;
+        if (
+          authority === undefined
+          || authority.state !== 'active'
+          || authority.cwd !== options.cwd
+          || authority.source !== options.source
+          || authority.currentTaktVersion !== options.currentTaktVersion
+          || authority.baselineStrategy !== options.baselineStrategy
+          || authority.transactionPlanId !== options.expectedTransactionPlanId
+        ) throw new ProjectTemplateCliRemotePortError('SECURITY_GUARD');
+        authority.state = 'consumed';
         const result = await composition.applyWithInternalApproval({
           cacheRoot,
           receiptKey: authority.receiptKey,
@@ -184,12 +218,30 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
         });
       } catch (error) {
         executeFailure(error);
+      } finally {
+        leave();
       }
     },
   };
+  const dispose = (): Promise<void> => {
+    if (disposePromise !== undefined) return disposePromise;
+    state = 'disposing';
+    shutdown.abort();
+    disposePromise = (async () => {
+      if (activeOperations !== 0) {
+        await new Promise<void>((resolve) => { resolveDrain = resolve; });
+      }
+      try {
+        await composition.dispose();
+      } finally {
+        state = 'disposed';
+      }
+    })();
+    return disposePromise;
+  };
   return Object.freeze({
     service: createProjectTemplateCliRemoteApplyService(port),
-    dispose() { return composition.dispose(); },
+    dispose,
   });
 }
 
