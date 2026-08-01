@@ -212,6 +212,62 @@ describe('companion lock cross-file recovery validation', () => {
 });
 
 describe('companion lock rollback current-state guard', () => {
+  function largeCohortEntries(fullMegabytes: number, trailingBytes = 0): EntrySpec[] {
+    return [
+      ...Array.from({ length: fullMegabytes }, (_, index): EntrySpec => ({
+        target: { kind: 'template-entry', path: `large/${index}.yaml` },
+        action: 'update',
+        before: String(index % 10).repeat(1024 * 1024),
+        after: `new-${index}`,
+        current: 'after',
+      })),
+      ...(trailingBytes === 0 ? [] : [{
+        target: { kind: 'template-entry' as const, path: 'large/trailing.yaml' },
+        action: 'update' as const,
+        before: 'x'.repeat(trailingBytes),
+        after: 'new-trailing',
+        current: 'after' as const,
+      }]),
+    ];
+  }
+
+  it('rolls back a normal five-megabyte cohort', async () => {
+    const entries = largeCohortEntries(5);
+    const value = await recoveryFixture({
+      completedOperations: entries.map((entry) => (
+        `entry:${(entry.target as { path: string }).path}`
+      )),
+      entries,
+    });
+    await expect(recoverProjectTemplateCompanionLockTransaction({
+      projectRoot: value.projectRoot,
+    })).resolves.toEqual({ status: 'rolled-back' });
+  });
+
+  it('accepts the exact 32 MiB cohort boundary', async () => {
+    const entries = largeCohortEntries(32);
+    const value = await recoveryFixture({
+      completedOperations: entries.map((entry) => (
+        `entry:${(entry.target as { path: string }).path}`
+      )),
+      entries,
+    });
+    await expect(recoverProjectTemplateCompanionLockTransaction({
+      projectRoot: value.projectRoot,
+    })).resolves.toEqual({ status: 'rolled-back' });
+  });
+
+  it('blocks 32 MiB plus one byte without mutation and retains evidence', async () => {
+    const entries = largeCohortEntries(32, 1);
+    const value = await recoveryFixture({
+      completedOperations: entries.map((entry) => (
+        `entry:${(entry.target as { path: string }).path}`
+      )),
+      entries,
+    });
+    await expectBlocked(value);
+  });
+
   it.each([0, 4])(
     'validates every backup blob before restoring when blob %i is corrupt',
     async (corruptIndex) => {
