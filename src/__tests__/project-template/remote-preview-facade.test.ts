@@ -268,6 +268,7 @@ describe('GitHub project template remote preview production facade', () => {
     const value = await fixture();
     const controller = new AbortController();
     let observedDeadline: number | undefined;
+    const monotonicStart = performance.now();
     await expect(createGithubProjectTemplateRemotePreview({
       ...facadeOptions(value),
       signal: controller.signal,
@@ -285,6 +286,8 @@ describe('GitHub project template remote preview production facade', () => {
       message: 'GitHub project template remote preview was aborted',
     });
     expect(observedDeadline).toBeTypeOf('number');
+    expect(observedDeadline!).toBeGreaterThanOrEqual(monotonicStart + 4_500);
+    expect(observedDeadline!).toBeLessThanOrEqual(performance.now() + 5_000);
 
     await expect(createGithubProjectTemplateRemotePreview(facadeOptions(value)))
       .resolves.toMatchObject({ schemaVersion: '1.0' });
