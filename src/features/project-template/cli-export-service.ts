@@ -148,9 +148,8 @@ function guardSummary(projectRoot: string): {
 } {
   const blocks = inspectProjectTemplateApplyGuard({ repoPath: projectRoot }).blocks;
   if (blocks.length === 0) return { readiness: 'ready', reviewCodes: [] };
-  if (blocks.some((block) => block.code === 'ACTIVE_RUN' || block.code === 'STALE_RUN')) {
-    return { readiness: 'blocked', reviewCodes: ['ACTIVE_RUN'], applyError: 'ACTIVE_RUN' };
-  }
+  // Why: recovery means a prior mutation has indeterminate durable state, so it must
+  // retain the recovery/exit-25 contract even when an active run is also present.
   if (blocks.some((block) => block.code === 'RECOVERY_REQUIRED'
     || block.code === 'RECOVERY_REQUIRED_UNKNOWN')) {
     return {
@@ -158,6 +157,9 @@ function guardSummary(projectRoot: string): {
       reviewCodes: ['RECOVERY_REQUIRED'],
       applyError: 'RECOVERY_REQUIRED',
     };
+  }
+  if (blocks.some((block) => block.code === 'ACTIVE_RUN' || block.code === 'STALE_RUN')) {
+    return { readiness: 'blocked', reviewCodes: ['ACTIVE_RUN'], applyError: 'ACTIVE_RUN' };
   }
   return { readiness: 'blocked', reviewCodes: ['HARD_CONFLICT'], applyError: 'SECURITY_GUARD' };
 }

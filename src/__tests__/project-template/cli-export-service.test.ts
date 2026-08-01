@@ -56,6 +56,28 @@ function makeFixture(): { root: string; sourcePath: string; outputPath: string }
   return { root, sourcePath, outputPath: join(outputDir, 'template.taktpack') };
 }
 
+function installActiveRun(root: string): void {
+  const runDir = join(root, '.takt', 'runs', 'active-run');
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, 'meta.json'), JSON.stringify({
+    task: 'active task',
+    workflow: 'subscription-devloop',
+    status: 'running',
+    startTime: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }));
+}
+
+function installRecoveryMarker(root: string, valid: boolean): void {
+  const markerPath = join(root, '.takt-template-state', 'recovery-required.json');
+  mkdirSync(join(markerPath, '..'), { recursive: true });
+  writeFileSync(markerPath, JSON.stringify(valid ? {
+    version: 1,
+    token: 'recovery-owner',
+    transactionId: 'recovery-transaction',
+  } : {}));
+}
+
 function dryRun(root: string, outputPath: string, force = false) {
   return executeProjectTemplateCliExport({
     projectRoot: root,
@@ -334,15 +356,7 @@ describe('project template CLI export service', () => {
   it('does not let force bypass an active run', async () => {
     const fixture = makeFixture();
     const admitMutation = vi.fn();
-    const runDir = join(fixture.root, '.takt', 'runs', 'active-run');
-    mkdirSync(runDir, { recursive: true });
-    writeFileSync(join(runDir, 'meta.json'), JSON.stringify({
-      task: 'active task',
-      workflow: 'subscription-devloop',
-      status: 'running',
-      startTime: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }));
+    installActiveRun(fixture.root);
 
     const plan = await dryRun(fixture.root, fixture.outputPath, true);
     expect(plan).toMatchObject({
@@ -367,6 +381,49 @@ describe('project template CLI export service', () => {
     expect(outcome).toMatchObject({
       exitCode: 23,
       envelope: { status: 'error', error: { code: 'ACTIVE_RUN' } },
+    });
+    expect(existsSync(fixture.outputPath)).toBe(false);
+    expect(admitMutation).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['durable', true],
+    ['unknown', false],
+  ] as const)('prioritizes %s recovery over an active run', async (_kind, validMarker) => {
+    const fixture = makeFixture();
+    const admitMutation = vi.fn();
+    installActiveRun(fixture.root);
+    installRecoveryMarker(fixture.root, validMarker);
+
+    const plan = await dryRun(fixture.root, fixture.outputPath, true);
+    expect(plan).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        status: 'success',
+        result: {
+          readiness: 'recovery-required',
+          reviewCodes: ['RECOVERY_REQUIRED'],
+        },
+      },
+    });
+    expect(plan.envelope.status).toBe('success');
+    if (plan.envelope.status !== 'success') return;
+
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root,
+      outputPath: fixture.outputPath,
+      exportOptions,
+      mutation: {
+        mode: 'apply',
+        force: true,
+        expectedPlanId: plan.envelope.result.planId,
+      },
+      admitMutation,
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 25,
+      envelope: { status: 'error', error: { code: 'RECOVERY_REQUIRED' } },
     });
     expect(existsSync(fixture.outputPath)).toBe(false);
     expect(admitMutation).not.toHaveBeenCalled();
