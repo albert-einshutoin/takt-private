@@ -30,6 +30,12 @@ import {
   areProjectTemplateDirectorySnapshotsStable,
 } from './filesystem-scan.js';
 import { parsePortablePath } from './validation.js';
+import {
+  PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+} from './repertoire-dependency-lock.js';
+import {
+  PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+} from './source-provenance.js';
 
 export { PROJECT_TEMPLATE_CONTROL_DIRECTORY } from './control-root-contract.js';
 export const DEFAULT_PROJECT_TEMPLATE_BACKUP_GENERATIONS = 5;
@@ -318,7 +324,10 @@ export async function consumeProjectTemplateApprovalRecord(options: {
 
 export type ProjectTemplateApplyTarget =
   | { kind: 'template-entry'; path: string }
-  | { kind: 'lock' };
+  | { kind: 'lock' }
+  | { kind: 'content-lock' }
+  | { kind: 'repertoire-lock' }
+  | { kind: 'source-provenance' };
 
 export interface ResolvedProjectTemplateApplyTarget {
   target: ProjectTemplateApplyTarget;
@@ -368,7 +377,7 @@ export interface ProjectTemplateBackupManifestEntry {
 }
 
 export interface ProjectTemplateBackupManifest {
-  schemaVersion: '1.0';
+  schemaVersion: '1.0' | '1.1';
   backupId: string;
   planId: string;
   preconditionToken: string;
@@ -388,7 +397,7 @@ export type ProjectTemplateApplyJournalState =
   | 'restore-failed';
 
 export interface ProjectTemplateApplyJournal {
-  schemaVersion: '1.0';
+  schemaVersion: '1.0' | '1.1';
   transactionId: string;
   planId: string;
   backupId: string;
@@ -830,6 +839,12 @@ export function resolveProjectTemplateApplyTarget(
     );
   }
   if (value.kind === 'lock') {
+    if (!hasExactDataKeys(value, ['kind'])) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_PATH',
+        'project template apply target is invalid',
+      );
+    }
     return {
       target: { kind: 'lock' },
       key: 'lock',
@@ -838,10 +853,52 @@ export function resolveProjectTemplateApplyTarget(
       displayPath: '.takt-template-lock.json',
     };
   }
+  const companion = value.kind === 'content-lock'
+    ? {
+        key: 'content-lock',
+        path: '.takt-template-lock.json',
+      }
+    : value.kind === 'repertoire-lock'
+      ? {
+          key: 'repertoire-lock',
+          path: PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
+        }
+      : value.kind === 'source-provenance'
+        ? {
+            key: 'source-provenance',
+            path: PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+          }
+        : undefined;
+  if (companion !== undefined) {
+    if (!hasExactDataKeys(value, ['kind'])) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_PATH',
+        'project template apply target is invalid',
+      );
+    }
+    const target = value.kind === 'content-lock'
+      ? { kind: 'content-lock' as const }
+      : value.kind === 'repertoire-lock'
+        ? { kind: 'repertoire-lock' as const }
+        : { kind: 'source-provenance' as const };
+    return {
+      target,
+      key: companion.key,
+      absolutePath: join(storage.repoRoot, companion.path),
+      stagingRelativePath: `locks/${companion.path}`,
+      displayPath: companion.path,
+    };
+  }
   if (value.kind !== 'template-entry') {
     throw new ProjectTemplateApplyStorageError(
       'UNSAFE_PATH',
       'project template apply target kind is invalid',
+    );
+  }
+  if (!hasExactDataKeys(value, ['kind', 'path'])) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_PATH',
+      'project template apply target is invalid',
     );
   }
   const path = safeRelativePath(value.path);
@@ -852,6 +909,56 @@ export function resolveProjectTemplateApplyTarget(
     stagingRelativePath: `entries/${path}`,
     displayPath: `.takt/${path}`,
   };
+}
+
+function hasExactDataKeys(
+  value: object,
+  expected: readonly string[],
+): boolean {
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  return keys.length === expected.length
+    && keys.every((key) => typeof key === 'string' && expected.includes(key))
+    && Object.values(descriptors).every((descriptor) => 'value' in descriptor);
+}
+
+function validateManifestTarget(
+  value: unknown,
+  schemaVersion: '1.0' | '1.1',
+): ProjectTemplateApplyTarget {
+  if (value === null || typeof value !== 'object') {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST',
+      'backup manifest target is invalid',
+    );
+  }
+  const target = value as Partial<ProjectTemplateApplyTarget>;
+  if (target.kind === 'template-entry') {
+    if (!hasExactDataKeys(value, ['kind', 'path'])) {
+      throw new ProjectTemplateApplyStorageError(
+        'INVALID_MANIFEST',
+        'backup manifest target is invalid',
+      );
+    }
+    return {
+      kind: 'template-entry',
+      path: safeRelativePath((target as { path: string }).path),
+    };
+  }
+  const expectedKinds = schemaVersion === '1.0'
+    ? ['lock'] as const
+    : ['content-lock', 'repertoire-lock', 'source-provenance'] as const;
+  if (
+    typeof target.kind !== 'string'
+    || !expectedKinds.includes(target.kind as never)
+    || !hasExactDataKeys(value, ['kind'])
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST',
+      'backup manifest target is invalid',
+    );
+  }
+  return { kind: target.kind } as ProjectTemplateApplyTarget;
 }
 
 function safeMode(value: string): string {
@@ -1480,7 +1587,16 @@ function validateBackupManifest(
   manifest: ProjectTemplateBackupManifest,
 ): ProjectTemplateBackupManifest {
   if (
-    manifest.schemaVersion !== '1.0'
+    (manifest.schemaVersion !== '1.0' && manifest.schemaVersion !== '1.1')
+    || !hasExactDataKeys(manifest, [
+      'schemaVersion',
+      'backupId',
+      'planId',
+      'preconditionToken',
+      'createdAt',
+      'createdTargetDirectories',
+      'entries',
+    ])
     || !Array.isArray(manifest.entries)
     || manifest.entries.length > MAX_CONTROL_DIRECTORY_ENTRIES
   ) {
@@ -1502,21 +1618,21 @@ function validateBackupManifest(
         'backup manifest entry is invalid',
       );
     }
-    const target = entry.target.kind === 'lock'
-      ? { kind: 'lock' as const }
-      : entry.target.kind === 'template-entry'
-        ? {
-            kind: 'template-entry' as const,
-            path: safeRelativePath(entry.target.path),
-          }
-        : undefined;
-    if (target === undefined) {
+    if (!hasExactDataKeys(entry, [
+      'target', 'action', 'before', 'after',
+    ])) {
       throw new ProjectTemplateApplyStorageError(
         'INVALID_MANIFEST',
-        'backup manifest target is invalid',
+        'backup manifest entry is invalid',
       );
     }
-    const targetKey = target.kind === 'lock' ? 'lock' : `entry:${target.path}`;
+    const target = validateManifestTarget(
+      entry.target,
+      manifest.schemaVersion,
+    );
+    const targetKey = target.kind === 'template-entry'
+      ? `entry:${target.path}`
+      : target.kind;
     if (paths.has(targetKey)) {
       throw new ProjectTemplateApplyStorageError(
         'INVALID_MANIFEST',
@@ -1543,7 +1659,7 @@ function validateBackupManifest(
   );
   const allowedCreatedDirectories = new Set<string>();
   for (const entry of entries) {
-    if (entry.target.kind === 'lock') continue;
+    if (entry.target.kind !== 'template-entry') continue;
     allowedCreatedDirectories.add('');
     const parent = dirname(entry.target.path).split('/').filter(
       (segment) => segment !== '.',
@@ -1561,7 +1677,7 @@ function validateBackupManifest(
     );
   }
   return {
-    schemaVersion: '1.0',
+    schemaVersion: manifest.schemaVersion,
     backupId: assertSafeIdentifier(manifest.backupId, 'backupId'),
     planId: assertHash(manifest.planId, 'planId'),
     preconditionToken: assertHash(manifest.preconditionToken, 'preconditionToken'),
@@ -1647,7 +1763,17 @@ export function parseProjectTemplateApplyJournal(
     'restore-failed',
   ]);
   if (
-    journal.schemaVersion !== '1.0'
+    (journal.schemaVersion !== '1.0' && journal.schemaVersion !== '1.1')
+    || !hasExactDataKeys(value, [
+      'schemaVersion',
+      'transactionId',
+      'planId',
+      'backupId',
+      'state',
+      'completedOperations',
+      'createdTargetDirectories',
+      'updatedAt',
+    ])
     || typeof journal.transactionId !== 'string'
     || typeof journal.planId !== 'string'
     || typeof journal.backupId !== 'string'
@@ -1656,7 +1782,11 @@ export function parseProjectTemplateApplyJournal(
     || !Array.isArray(journal.completedOperations)
     || journal.completedOperations.length > MAX_CONTROL_DIRECTORY_ENTRIES
     || journal.completedOperations.some(
-      (operation) => typeof operation !== 'string' || operation.length > 512,
+      (operation) => (
+        typeof operation !== 'string'
+        || operation.length > 512
+        || !isOperationKeyForSchema(operation, journal.schemaVersion!)
+      ),
     )
     || typeof journal.updatedAt !== 'string'
   ) {
@@ -1670,7 +1800,7 @@ export function parseProjectTemplateApplyJournal(
     'INVALID_JOURNAL',
   );
   return {
-    schemaVersion: '1.0',
+    schemaVersion: journal.schemaVersion,
     transactionId: assertSafeIdentifier(journal.transactionId, 'transactionId'),
     planId: assertHash(journal.planId, 'planId'),
     backupId: assertSafeIdentifier(journal.backupId, 'backupId'),
@@ -1679,6 +1809,24 @@ export function parseProjectTemplateApplyJournal(
     createdTargetDirectories,
     updatedAt: assertTimestamp(journal.updatedAt, 'updatedAt'),
   };
+}
+
+function isOperationKeyForSchema(
+  value: string,
+  schemaVersion: '1.0' | '1.1',
+): boolean {
+  if (value.startsWith('entry:')) {
+    try {
+      return value === `entry:${safeRelativePath(value.slice('entry:'.length))}`;
+    } catch {
+      return false;
+    }
+  }
+  return schemaVersion === '1.0'
+    ? value === 'lock'
+    : value === 'content-lock'
+      || value === 'repertoire-lock'
+      || value === 'source-provenance';
 }
 
 export async function writeProjectTemplateApplyJournal(options: {
