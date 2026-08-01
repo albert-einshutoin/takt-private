@@ -131,6 +131,9 @@ export interface TaktpackIndexV1 extends TaktpackDescriptorV1 {
 export interface InspectTaktpackOptions {
   currentTaktVersion?: string;
   limits?: Partial<TaktpackLimits>;
+  signal?: AbortSignal;
+  /** Absolute deadline in the monotonic performance time domain. */
+  deadlineMs?: number;
 }
 
 export interface WriteTaktpackOptions {

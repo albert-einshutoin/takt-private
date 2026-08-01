@@ -46,6 +46,10 @@ import {
 const TAR_BLOCK_BYTES = 512;
 const ZERO_BLOCK = Buffer.alloc(TAR_BLOCK_BYTES);
 const BLOB_NAME_PATTERN = /^blobs\/sha256\/([a-f0-9]{64})$/;
+const ABORTED_GETTER = Object.getOwnPropertyDescriptor(
+  AbortSignal.prototype,
+  'aborted',
+)?.get;
 
 interface ParsedHeader {
   name: string;
@@ -58,6 +62,35 @@ interface PackMetadata {
   exportReportSha256: string;
   lockSeed: TaktpackLockSeedV1;
   blobs: TaktpackBlobIndexEntry[];
+}
+
+function requireActiveInspection(
+  signal: AbortSignal | undefined,
+  deadlineMs: number | undefined,
+): void {
+  if (signal !== undefined) {
+    let aborted = true;
+    try {
+      aborted = ABORTED_GETTER === undefined
+        || Reflect.apply(ABORTED_GETTER, signal, []) as boolean;
+    } catch {
+      aborted = true;
+    }
+    if (aborted) {
+      throw new TaktpackError(
+        'OPERATION_ABORTED',
+        'project template remote preview was aborted',
+        'operation',
+      );
+    }
+  }
+  if (deadlineMs !== undefined && performance.now() >= deadlineMs) {
+    throw new TaktpackError(
+      'OPERATION_TIMEOUT',
+      'project template remote preview timed out',
+      'operation',
+    );
+  }
 }
 
 function parseOctal(field: Buffer, name: string): number {
@@ -384,6 +417,19 @@ async function inspectTaktpackWithExpectedLinks(
   expectedLinks: 1 | 2 = 1,
   retainedBlobs?: Map<string, Buffer>,
 ): Promise<TaktpackInspectResult> {
+  const signal = options.signal;
+  const deadlineMs = options.deadlineMs;
+  if (
+    deadlineMs !== undefined
+    && (!Number.isFinite(deadlineMs) || deadlineMs < 0)
+  ) {
+    throw new TaktpackError(
+      'OPERATION_TIMEOUT',
+      'project template remote preview timed out',
+      'operation',
+    );
+  }
+  requireActiveInspection(signal, deadlineMs);
   const currentVersion = options.currentTaktVersion === undefined
     ? undefined
     : requireSemVer(options.currentTaktVersion, 'currentTaktVersion');
@@ -394,6 +440,7 @@ async function inspectTaktpackWithExpectedLinks(
   } catch {
     throw new TaktpackError('UNSAFE_ARCHIVE_ENTRY', 'archive input cannot be read safely', 'archive');
   }
+  requireActiveInspection(signal, deadlineMs);
   if (
     pathSnapshot.isSymbolicLink()
     || !pathSnapshot.isFile()
@@ -424,8 +471,12 @@ async function inspectTaktpackWithExpectedLinks(
     operation: () => Promise<Value>,
   ): Promise<Value> => {
     try {
+      requireActiveInspection(signal, deadlineMs);
       ioSeam.onPhase?.(phase);
-      return await operation();
+      requireActiveInspection(signal, deadlineMs);
+      const value = await operation();
+      requireActiveInspection(signal, deadlineMs);
+      return value;
     } catch (error) {
       throw normalizeInspectorIoError(error, field);
     }
@@ -669,6 +720,7 @@ async function inspectTaktpackWithExpectedLinks(
   if (closeFailure !== undefined) {
     throw normalizeInspectorIoError(closeFailure, 'archive.close');
   }
+  requireActiveInspection(signal, deadlineMs);
   return result!;
 }
 
@@ -728,6 +780,7 @@ export async function materializeTaktpackContentsWithIoSeam(
   };
   let resolvedTotalBytes = 0;
   for (const entry of inspection.manifest.entries) {
+    requireActiveInspection(options.signal, options.deadlineMs);
     const retained = retainedFor(entry.sha256);
     // The archive stores each digest once, but materialization deliberately
     // creates independent bytes per manifest path. Account for that expanded
@@ -744,12 +797,14 @@ export async function materializeTaktpackContentsWithIoSeam(
   }
 
   const contents = inspection.manifest.entries.map(({ path, sha256 }) => {
+    requireActiveInspection(options.signal, options.deadlineMs);
     const retained = retainedFor(sha256);
     try {
       ioSeam.onMaterializedPathAllocation?.(path, retained.byteLength);
     } catch (error) {
       throw normalizeInspectorIoError(error, 'contents');
     }
+    requireActiveInspection(options.signal, options.deadlineMs);
     return Object.freeze({
       path,
       // Each manifest path receives independent bytes. A caller editing its

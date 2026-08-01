@@ -24,6 +24,10 @@ import {
   type ProjectTemplateSourceProvenanceV1,
 } from './source-provenance.js';
 import type { TemplateLockV1 } from './types.js';
+import {
+  requireActiveRemotePreview,
+  type ProjectTemplateRemotePreviewOperationContext,
+} from './remote-preview-operation.js';
 
 const CONTENT_LOCK_PATH = '.takt-template-lock.json';
 const MAX_CONTENT_LOCK_BYTES = 4 * 1024 * 1024;
@@ -299,7 +303,11 @@ function parseContentLock(content: Uint8Array): Readonly<TemplateLockV1> {
  */
 export function readProjectTemplateCompanionLockState(
   projectRoot: string,
+  operationContext?: ProjectTemplateRemotePreviewOperationContext,
 ): ProjectTemplateCompanionLockState {
+  if (operationContext !== undefined) {
+    requireActiveRemotePreview(operationContext);
+  }
   const absoluteRoot = resolve(projectRoot);
   let rootStat: Stats;
   try {
@@ -329,6 +337,9 @@ export function readProjectTemplateCompanionLockState(
       absoluteRoot,
       PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH,
     )));
+    if (operationContext !== undefined) {
+      requireActiveRemotePreview(operationContext);
+    }
     observed.push(observe(join(
       absoluteRoot,
       PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
@@ -339,6 +350,9 @@ export function readProjectTemplateCompanionLockState(
     verifyRootStable(absoluteRoot, rootFd, rootStat);
 
     if (present === 0) {
+      if (operationContext !== undefined) {
+        requireActiveRemotePreview(operationContext);
+      }
       return Object.freeze({
         state: 'first-install' as const,
         previousLocksSha256: previousLocksSha256(undefined),
@@ -367,6 +381,9 @@ export function readProjectTemplateCompanionLockState(
         sha256(repertoire.content),
       [PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH]: sha256(source.content),
     });
+    if (operationContext !== undefined) {
+      requireActiveRemotePreview(operationContext);
+    }
     return Object.freeze({
       state: 'update' as const,
       contentLock,

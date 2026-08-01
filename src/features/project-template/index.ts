@@ -129,9 +129,11 @@ export {
 } from './apply-preview.js';
 export {
   createGithubProjectTemplateRemotePreview,
+  GithubProjectTemplateRemotePreviewError,
 } from './remote-preview-facade.js';
 export type {
   CreateGithubProjectTemplateRemotePreviewOptions,
+  GithubProjectTemplateRemotePreviewErrorCode,
 } from './remote-preview-facade.js';
 export type {
   ProjectTemplateApplyPreview,

@@ -45,6 +45,16 @@ import {
   createProjectTemplateSourceProvenancePlan,
 } from './source-provenance-plan.js';
 import { captureProjectTemplateTargetSnapshot } from './target-snapshot.js';
+import {
+  createRemotePreviewOperationContext,
+  requireActiveRemotePreview,
+  type ProjectTemplateRemotePreviewOperationContext,
+} from './remote-preview-operation.js';
+
+export {
+  GithubProjectTemplateRemotePreviewError,
+  type GithubProjectTemplateRemotePreviewErrorCode,
+} from './remote-preview-operation.js';
 
 const DEFAULT_DEPENDENCY_INSPECTION_TIMEOUT_MS = 5_000;
 const MAX_DEPENDENCY_INSPECTION_TIMEOUT_MS = 30_000;
@@ -156,21 +166,6 @@ function exactOptions(
   });
 }
 
-const ABORTED_GETTER = Object.getOwnPropertyDescriptor(
-  AbortSignal.prototype,
-  'aborted',
-)?.get;
-
-function isAborted(signal: AbortSignal | undefined): boolean {
-  if (signal === undefined) return false;
-  try {
-    if (ABORTED_GETTER === undefined) return true;
-    return Reflect.apply(ABORTED_GETTER, signal, []) as boolean;
-  } catch {
-    return true;
-  }
-}
-
 /**
  * Creates an offline-only, non-authorizing preview from a stored signed receipt.
  * The receipt claim is deliberately retired before any target or installed
@@ -180,7 +175,13 @@ export async function createGithubProjectTemplateRemotePreview(
   value: CreateGithubProjectTemplateRemotePreviewOptions,
 ): Promise<ProjectTemplateRemoteApplyPreview> {
   const options = exactOptions(value);
-  if (isAborted(options.signal)) throw new Error('remote preview aborted');
+  // One monotonic deadline is shared by every downstream boundary. Resetting
+  // a duration after each await would allow a slow preview to exceed its bound.
+  const deadlineMs = performance.now()
+    + options.dependencyInspectionTimeoutMs!;
+  const operationContext: ProjectTemplateRemotePreviewOperationContext =
+    createRemotePreviewOperationContext(options.signal, deadlineMs);
+  requireActiveRemotePreview(operationContext);
   const cacheRoot = resolve(options.cacheRoot);
   const verified = await readGithubTemplateDownloadReceiptByReceiptKey({
     cacheRoot,
@@ -188,6 +189,7 @@ export async function createGithubProjectTemplateRemotePreview(
     verifier: options.verifier,
     ...(options.receiptIo === undefined ? {} : { io: options.receiptIo }),
   });
+  requireActiveRemotePreview(operationContext);
 
   // No await is permitted between offline verification and reservation.
   const receiptClaim = claimVerifiedGithubTemplateDownloadReceiptForApply(
@@ -207,11 +209,16 @@ export async function createGithubProjectTemplateRemotePreview(
       cacheRoot,
       archiveSha256: claimed.artifactSha256,
     });
-    if (isAborted(options.signal)) throw new Error('remote preview aborted');
+    requireActiveRemotePreview(operationContext);
     materialized = await materializeTaktpackContents(
       artifactPaths.artifactPath,
-      { currentTaktVersion: options.currentTaktVersion },
+      {
+        currentTaktVersion: options.currentTaktVersion,
+        signal: options.signal,
+        deadlineMs,
+      },
     );
+    requireActiveRemotePreview(operationContext);
     if (
       materialized.inspection.archiveSha256 !== claimed.artifactSha256
       || materialized.inspection.archiveSha256
@@ -245,7 +252,9 @@ export async function createGithubProjectTemplateRemotePreview(
 
   const companion = readProjectTemplateCompanionLockState(
     options.projectRoot,
+    operationContext,
   );
+  requireActiveRemotePreview(operationContext);
   const candidatePaths = new Set(
     materialized.inspection.manifest.entries.map((entry) => entry.path),
   );
@@ -257,7 +266,9 @@ export async function createGithubProjectTemplateRemotePreview(
   const target = await captureProjectTemplateTargetSnapshot(
     options.projectRoot,
     [...candidatePaths],
+    operationContext,
   );
+  requireActiveRemotePreview(operationContext);
   const contentPlan = createProjectTemplateApplyPlan({
     ...(companion.state === 'update'
       ? { baseLock: companion.contentLock }
@@ -282,15 +293,27 @@ export async function createGithubProjectTemplateRemotePreview(
     manifestSha256: materialized.inspection.manifestSha256,
     dependencies,
   });
-  const inspection = inspectProjectTemplateRepertoireDependencies({
-    request: {
-      sourceDescriptorSha256: incomingDependencyLock.sourceDescriptorSha256,
-      manifestSha256: incomingDependencyLock.manifestSha256,
-      dependencies,
-      deadlineMs: performance.now() + options.dependencyInspectionTimeoutMs!,
-    },
-    port: options.repertoireInspectionPort,
-  });
+  let inspection: ReturnType<
+    typeof inspectProjectTemplateRepertoireDependencies
+  >;
+  try {
+    inspection = inspectProjectTemplateRepertoireDependencies({
+      request: {
+        sourceDescriptorSha256: incomingDependencyLock.sourceDescriptorSha256,
+        manifestSha256: incomingDependencyLock.manifestSha256,
+        dependencies,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        deadlineMs,
+      },
+      port: options.repertoireInspectionPort,
+    });
+  } catch (error) {
+    // The port can only supply fixed inspection failures; cancellation and
+    // expiry are normalized to this facade's equally fixed public contract.
+    requireActiveRemotePreview(operationContext);
+    throw error;
+  }
+  requireActiveRemotePreview(operationContext);
   const dependencyPlan = createProjectTemplateRepertoireDependencyPlan({
     inspectionClaim:
       claimProjectTemplateRepertoireDependencyInspectionForPlanning(inspection),
