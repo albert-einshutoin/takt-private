@@ -3,6 +3,7 @@ import {
   ProjectTemplateCliContractError,
   createProjectTemplateCliFailure,
   createProjectTemplateCliSuccess,
+  presentProjectTemplateCliEnvelope,
 } from '../../features/project-template/cli-machine-contract.js';
 import {
   serializeProjectTemplateCliJson,
@@ -58,6 +59,47 @@ describe('project template CLI independent review hardening', () => {
     })).toThrow(ProjectTemplateCliContractError);
   });
 
+  it('rejects duplicate or excessive warnings and unknown schema versions', () => {
+    const result = { packId: HASH, entryCount: 1, valid: true };
+    expect(() => createProjectTemplateCliSuccess({
+      command: 'project-template inspect',
+      mode: 'dry-run',
+      result,
+      warnings: [
+        { code: 'PARTIAL_RESULT' },
+        { code: 'PARTIAL_RESULT' },
+      ],
+    })).toThrow(ProjectTemplateCliContractError);
+    expect(() => createProjectTemplateCliSuccess({
+      command: 'project-template inspect',
+      mode: 'dry-run',
+      result,
+      warnings: Array.from({ length: 11 }, () => ({ code: 'PARTIAL_RESULT' })),
+    })).toThrow(ProjectTemplateCliContractError);
+    expect(() => presentProjectTemplateCliEnvelope({
+      schemaVersion: '1.1',
+      command: 'project-template inspect',
+      mode: 'dry-run',
+      status: 'success',
+      result,
+      warnings: [],
+    } as never)).toThrow(ProjectTemplateCliContractError);
+  });
+
+  it.each([
+    ['project-template export', { packId: HASH, entryCount: 1, byteLength: 10 }],
+    ['project-template diff', { changeCount: 1, conflictCount: 0 }],
+    ['project-template apply', { applied: true }],
+    ['project-template update', { updated: true }],
+    ['project-template rollback', { rolledBack: true }],
+  ] as const)('requires planId for mutating or plan-producing command %s', (command, result) => {
+    expect(() => createProjectTemplateCliSuccess({
+      command,
+      mode: command === 'project-template diff' ? 'dry-run' : 'apply',
+      result: result as never,
+    })).toThrow(ProjectTemplateCliContractError);
+  });
+
   it('returns a deeply immutable success snapshot', () => {
     const envelope = createProjectTemplateCliSuccess({
       command: 'project-template list',
@@ -110,5 +152,26 @@ describe('project template CLI independent review hardening', () => {
     expect(Object.isFrozen(outcome)).toBe(true);
     expect(Object.isFrozen(outcome.envelope)).toBe(true);
     expect(Object.isFrozen((outcome.envelope as { result: object }).result)).toBe(true);
+  });
+
+  it('rejects a valid handler envelope for a different command', async () => {
+    const execution = startProjectTemplateCliLifecycle({
+      command: 'project-template inspect',
+      mode: 'dry-run',
+      dispose: () => undefined,
+      handle: async () => ({
+        envelope: createProjectTemplateCliSuccess({
+          command: 'project-template list',
+          mode: 'dry-run',
+          result: { installed: false, backupIds: [] },
+        }),
+        exitCode: 0,
+      }),
+    });
+
+    await expect(execution.result).resolves.toMatchObject({
+      exitCode: 70,
+      envelope: { status: 'error', error: { code: 'INTERNAL' } },
+    });
   });
 });

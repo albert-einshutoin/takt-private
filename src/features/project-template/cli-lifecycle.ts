@@ -88,10 +88,17 @@ export function startProjectTemplateCliLifecycle(input: {
   const result = (async (): Promise<ProjectTemplateCliOutcome> => {
     let outcome: ProjectTemplateCliOutcome;
     try {
-      outcome = snapshotProjectTemplateCliOutcome(await input.handle({
+      const handled = snapshotProjectTemplateCliOutcome(await input.handle({
         signal: controller.signal,
         admitMutation,
       }));
+      if (
+        handled.envelope.command !== input.command
+        || handled.envelope.mode !== input.mode
+      ) {
+        throw new Error('handler outcome identity does not match lifecycle input');
+      }
+      outcome = handled;
       if (interrupted && !admitted) {
         outcome = failureOutcome(input.command, input.mode, 'INTERRUPTED');
       }
