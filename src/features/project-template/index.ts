@@ -144,6 +144,13 @@ export { startProjectTemplateCliLifecycle } from './cli-lifecycle.js';
 export {
   createProductionProjectTemplateCliLocalApplyService,
 } from './cli-local-apply-service.js';
+export {
+  createProductionProjectTemplateCliRollbackService,
+} from './cli-rollback-service.js';
+export type {
+  ProjectTemplateCliRollbackOptions,
+  ProjectTemplateCliRollbackService,
+} from './cli-rollback-service.js';
 export type {
   ProjectTemplateCliLifecycleContext,
   ProjectTemplateCliLifecycleExecution,

@@ -118,6 +118,7 @@ export {
   renderProjectTemplateApplyPreviewHuman,
   renderProjectTemplateApplyPreviewJson,
   createGithubProjectTemplateRemotePreview,
+  createProductionProjectTemplateCliRollbackService,
   inspectProjectTemplateApplyGuard,
   runProjectTemplateDoctor,
   PROJECT_TEMPLATE_LOCK_PATH,
@@ -286,4 +287,6 @@ export type {
   ProjectTemplateCliReviewCode,
   ProjectTemplateCliApplyOptions,
   ProjectTemplateCliDryRunOptions,
+  ProjectTemplateCliRollbackOptions,
+  ProjectTemplateCliRollbackService,
 } from './features/project-template/index.js';
