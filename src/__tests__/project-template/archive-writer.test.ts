@@ -202,7 +202,7 @@ describe('taktpack deterministic writer', () => {
     expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
-  it('rolls back the exact approved target if post-publication identity is lost', async () => {
+  it('preserves a foreign post-publication replacement and retains recovery artifacts', async () => {
     const root = makeRoot();
     writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
     const plan = await makePlan(root);
@@ -210,7 +210,7 @@ describe('taktpack deterministic writer', () => {
     writeFileSync(output, 'approved-old');
     const captured = await captureTaktpackOutputPrecondition(output);
 
-    await expect(writeTaktpackWithOutputPrecondition(
+    const error = await writeTaktpackWithOutputPrecondition(
       output,
       plan,
       captured.authority,
@@ -223,12 +223,106 @@ describe('taktpack deterministic writer', () => {
           }
         },
       },
+    ).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(String(error)).not.toContain(root);
+    expect(readFileSync(output, 'utf8')).toBe('foreign-replacement');
+    expect(readdirSync(root).filter((name) => (
+      name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toHaveLength(2);
+  });
+
+  it('uses force evacuation as a CAS and restores a foreign object moved by the race', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'force-cas.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'force-cas') {
+            rmSync(output);
+            writeFileSync(output, 'foreign-racer');
+          }
+        },
+      },
     )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
-    expect(readFileSync(output, 'utf8')).toBe('approved-old');
+    expect(readFileSync(output, 'utf8')).toBe('foreign-racer');
     expect(readdirSync(root).some((name) => (
       name.endsWith('.tmp') || name.endsWith('.rollback')
     ))).toBe(false);
   });
+
+  it('does not overwrite a foreign insertion when publishing an authorized absent target', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'absent-cas.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'publish') writeFileSync(output, 'foreign-racer');
+        },
+      },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readFileSync(output, 'utf8')).toBe('foreign-racer');
+  });
+
+  it.each(['parent', 'target'] as const)(
+    'rejects a %s swap during held-directory fsync instead of reporting success',
+    async (swap) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const outputDirectory = join(root, 'exports');
+      const movedDirectory = join(root, 'moved-exports');
+      mkdirSync(outputDirectory);
+      const output = join(outputDirectory, 'fsync-race.taktpack');
+      const captured = await captureTaktpackOutputPrecondition(output);
+
+      const error = await writeTaktpackWithOutputPrecondition(
+        output,
+        plan,
+        captured.authority,
+        { force: true },
+        {
+          onPhase(phase) {
+            if (phase !== 'directory-fsync') return;
+            if (swap === 'parent') {
+              renameSync(outputDirectory, movedDirectory);
+              mkdirSync(outputDirectory);
+            } else {
+              rmSync(output);
+              writeFileSync(output, 'foreign-after-fsync');
+            }
+          },
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ artifactState: 'published' });
+      if (swap === 'target') {
+        expect(readFileSync(output, 'utf8')).toBe('foreign-after-fsync');
+      } else {
+        expect(existsSync(output)).toBe(false);
+      }
+    },
+  );
 
   it('treats directory fsync as unsupported on Windows without reporting failure', () => {
     let calls = 0;
