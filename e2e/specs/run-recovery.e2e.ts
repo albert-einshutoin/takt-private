@@ -41,6 +41,11 @@ interface TaskRecord {
   };
 }
 
+interface RunMetaRecord {
+  currentStep?: unknown;
+  phase?: unknown;
+}
+
 function createLocalRepo(): LocalRepo {
   const repoPath = mkdtempSync(join(tmpdir(), 'takt-e2e-run-recovery-'));
   execFileSync('git', ['init'], { cwd: repoPath, stdio: 'pipe' });
@@ -115,6 +120,16 @@ function inspectForcedTerminationReadiness(
     const meta = lstatSync(metaPath);
     if (!meta.isFile() || meta.isSymbolicLink()) {
       return { ready: false, diagnostic: 'run meta path is not a regular file' };
+    }
+    const runMeta = JSON.parse(readFileSync(metaPath, 'utf-8')) as RunMetaRecord;
+    // Why: phase 1 is published only after runtime/persona resolution has
+    // released the repertoire lease. The dedicated delayed mock then keeps the
+    // task in flight without letting SIGKILL strand a coordination claim.
+    if (runMeta.currentStep !== 'step-1' || runMeta.phase !== 1) {
+      return {
+        ready: false,
+        diagnostic: 'run meta has not entered the provider phase',
+      };
     }
   } catch (error) {
     return {
@@ -271,7 +286,10 @@ describe('E2E: Run interrupted task cleanup and high-priority run flows', () => 
     });
 
     const workflowPath = resolve(__dirname, '../fixtures/workflows/mock-slow-multi-step.yaml');
-    const scenarioPath = resolve(__dirname, '../fixtures/scenarios/run-sigint-parallel.json');
+    const scenarioPath = resolve(
+      __dirname,
+      '../fixtures/scenarios/run-recovery-forced-termination.json',
+    );
     const tasksFile = join(repo.path, '.takt', 'tasks.yaml');
 
     mkdirSync(join(repo.path, '.takt'), { recursive: true });
