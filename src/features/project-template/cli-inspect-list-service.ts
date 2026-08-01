@@ -589,7 +589,10 @@ async function listProjectTemplateBackupIdsReadOnly(
         'backup generation cannot be proven safe',
       );
     }
-    await awaitActive(readProjectTemplateBackupManifest({ storage, backupId }), signal);
+    const manifest = await awaitActive(
+      readProjectTemplateBackupManifest({ storage, backupId }),
+      signal,
+    );
     const generationAfter = await awaitActive(storage.io.lstat(generationPath), signal);
     if (!isStableDirectory(generationBefore, generationAfter)) {
       throw new ProjectTemplateApplyStorageError(
@@ -597,7 +600,20 @@ async function listProjectTemplateBackupIdsReadOnly(
         'backup generation changed during inspection',
       );
     }
-    backupIds.push(backupId);
+    const companionKinds = manifest.entries
+      .filter(({ target }) => target.kind === 'content-lock'
+        || target.kind === 'repertoire-lock'
+        || target.kind === 'source-provenance')
+      .map(({ target }) => target.kind)
+      .sort();
+    // Why: schema 1.0 rollback remains available only through the legacy core
+    // API. The CLI cannot safely provide path-based mutation admission for
+    // that format, so discovery exposes only exact atomic 1.1 cohorts.
+    if (manifest.schemaVersion === '1.1'
+      && companionKinds.join(',')
+        === 'content-lock,repertoire-lock,source-provenance') {
+      backupIds.push(backupId);
+    }
   }
   const backupsAfter = await awaitActive(storage.io.lstat(storage.backupsRoot), signal);
   const resolvedAfter = await awaitActive(storage.io.realpath(storage.backupsRoot), signal);

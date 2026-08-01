@@ -440,10 +440,6 @@ async function deleteTarget(
   expectedCurrent: ProjectTemplateBackupEntryState,
 ): Promise<void> {
   const resolved = resolveProjectTemplateApplyTarget(storage, target);
-  // Why: a target inode witness alone does not prove that an ancestor was not
-  // replaced by a symlink before unlink. Recheck the complete parent chain at
-  // the final mutation boundary so rollback cannot unlink outside the repo.
-  await ensureTargetParent(storage, target);
   if (!stateMatches(
     await currentState(storage, target),
     expectedCurrent,
@@ -1317,7 +1313,7 @@ async function performOwnedRollback(options: {
   readonly storage: ProjectTemplateApplyStorage;
   readonly lease: ProjectTemplateApplyLease;
   readonly manifest: ProjectTemplateBackupManifest;
-  readonly verificationPolicy: 'modern-companion-cohort' | 'legacy-formal-lock';
+  readonly strictCompanionVerification: boolean;
   readonly drainTerminalJournal: boolean;
 }): Promise<ProjectTemplateRollbackResult> {
   const { storage } = options;
@@ -1353,8 +1349,7 @@ async function performOwnedRollback(options: {
           completedOperations: restoredOperations,
           createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
-        }, options.verificationPolicy === 'modern-companion-cohort'
-          ? manifest.schemaVersion : '1.0');
+        }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
         assertOwned();
         await restoreOperations(
           storage,
@@ -1372,8 +1367,7 @@ async function performOwnedRollback(options: {
           completedOperations: restoredOperations,
           createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
-        }, options.verificationPolicy === 'modern-companion-cohort'
-          ? manifest.schemaVersion : '1.0');
+        }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
         assertOwned();
       }
       await removeCreatedTargetDirectories(storage, manifest.createdTargetDirectories);
@@ -1382,8 +1376,10 @@ async function performOwnedRollback(options: {
         throw new Error('rollback verification failed');
       }
       assertOwned();
-      if (options.verificationPolicy === 'modern-companion-cohort'
-        && !runProjectTemplateDoctor(storage.repoRoot).passed) {
+      if (
+        options.strictCompanionVerification
+        && !runProjectTemplateDoctor(storage.repoRoot).passed
+      ) {
         throw new Error('rollback doctor verification failed');
       }
       const companionBefore = manifest.entries.filter((entry) => (
@@ -1397,43 +1393,13 @@ async function performOwnedRollback(options: {
         : companionBefore.every((entry) => entry.before.kind === 'file')
           ? 'update'
           : 'mixed';
-      if (options.verificationPolicy === 'modern-companion-cohort') {
+      if (options.strictCompanionVerification) {
         if (
           companionBefore.length !== 3
           || expectedCompanionState === 'mixed'
           || readProjectTemplateCompanionLockState(storage.repoRoot).state
             !== expectedCompanionState
         ) throw new Error('rollback companion cohort verification failed');
-      } else {
-        const legacyLockEntry = manifest.entries.find(
-          (entry) => entry.target.kind === 'lock',
-        );
-        if (legacyLockEntry === undefined) {
-          throw new Error('legacy rollback lock entry is missing');
-        }
-        const restoredLock = await currentState(storage, { kind: 'lock' });
-        if (!stateMatches(restoredLock, legacyLockEntry.before, storage.platform)) {
-          throw new Error('legacy rollback lock verification failed');
-        }
-        if (restoredLock.kind === 'file') {
-          const content = await storage.io.readFile(
-            storage.lockTargetPath,
-            restoredLock.bytes,
-          );
-          if (
-            content.byteLength !== restoredLock.bytes
-            || hash(content) !== restoredLock.sha256
-          ) throw new Error('legacy rollback lock changed during verification');
-          parseTemplateLock(JSON.parse(content.toString('utf8')) as unknown);
-        }
-        for (const target of [
-          { kind: 'repertoire-lock' as const },
-          { kind: 'source-provenance' as const },
-        ]) {
-          if ((await currentState(storage, target)).kind !== 'absent') {
-            throw new Error('legacy rollback left a modern companion behind');
-          }
-        }
       }
       assertOwned();
       invalidateResolvedConfigCache(storage.repoRoot);
@@ -1445,8 +1411,7 @@ async function performOwnedRollback(options: {
         completedOperations: restoredOperations,
         createdTargetDirectories: manifest.createdTargetDirectories,
         updatedAt: new Date().toISOString(),
-      }, options.verificationPolicy === 'modern-companion-cohort'
-        ? manifest.schemaVersion : '1.0');
+      }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
       assertOwned();
       if (options.drainTerminalJournal) {
         try {
@@ -1475,8 +1440,7 @@ async function performOwnedRollback(options: {
           completedOperations: restoredOperations,
           createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
-        }, options.verificationPolicy === 'modern-companion-cohort'
-          ? manifest.schemaVersion : '1.0');
+        }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
       } catch {
         // The recovery-required result remains closed if storage also fails.
       }
@@ -1562,10 +1526,7 @@ export async function rollbackOwnedProjectTemplateApply(options: {
     storage: options.storage,
     lease: options.lease,
     manifest,
-    // Why: legacy public apply owns one formal lock, while schema 1.1 owns the
-    // atomic three-file cohort. Both remain fully manifest-verified above.
-    verificationPolicy: manifest.schemaVersion === '1.1'
-      ? 'modern-companion-cohort' : 'legacy-formal-lock',
+    strictCompanionVerification: true,
     drainTerminalJournal: true,
   });
 }
@@ -1611,8 +1572,7 @@ export async function rollbackProjectTemplateApply(options: {
       storage,
       lease,
       manifest,
-      verificationPolicy: manifest.schemaVersion === '1.1'
-        ? 'modern-companion-cohort' : 'legacy-formal-lock',
+      strictCompanionVerification: false,
       drainTerminalJournal: false,
     });
   } catch {

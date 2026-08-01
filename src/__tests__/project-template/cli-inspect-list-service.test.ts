@@ -16,6 +16,11 @@ import {
   listProjectTemplatesForCliWithDependencies,
   type ProjectTemplateCliInspectListDependencies,
 } from '../../features/project-template/cli-inspect-list-service.js';
+import {
+  initializeProjectTemplateApplyStorage,
+  writeProjectTemplateBackupManifest,
+  type ProjectTemplateBackupManifest,
+} from '../../features/project-template/apply-storage.js';
 
 const SHA = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
@@ -42,6 +47,34 @@ function localSourceProvenance(descriptorSha256 = SHA) {
       declarationSha256: SHA,
       count: 0 as const,
     },
+  };
+}
+
+function backupManifest(
+  backupId: string,
+  schemaVersion: '1.0' | '1.1',
+): ProjectTemplateBackupManifest {
+  const targets = schemaVersion === '1.0'
+    ? [{ kind: 'lock' as const }]
+    : [
+      { kind: 'content-lock' as const },
+      { kind: 'repertoire-lock' as const },
+      { kind: 'source-provenance' as const },
+    ];
+  return {
+    schemaVersion,
+    backupId,
+    planId: SHA,
+    preconditionToken: SHA_B,
+    createdAt: schemaVersion === '1.0'
+      ? '2026-08-01T00:00:00.000Z' : '2026-08-02T00:00:00.000Z',
+    createdTargetDirectories: [],
+    entries: targets.map((target) => ({
+      target,
+      action: 'add' as const,
+      before: { kind: 'absent' as const },
+      after: { kind: 'absent' as const },
+    })),
   };
 }
 
@@ -256,6 +289,56 @@ describe('project-template inspect CLI service', () => {
 });
 
 describe('project-template list CLI service', () => {
+  it('hides a validated schema 1.0-only backup from CLI discovery', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-cli-list-legacy-only-'));
+    roots.push(root);
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: root });
+    await writeProjectTemplateBackupManifest({
+      storage,
+      manifest: backupManifest('backup-legacy', '1.0'),
+    });
+
+    const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: root }, {
+      readCompanionLockState: vi.fn(() => ({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
+      })),
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+    });
+    expect(outcome.envelope).toMatchObject({
+      status: 'success', result: { backupIds: [] },
+    });
+  });
+
+  it('lists only the eligible schema 1.1 backup from a mixed backup store', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'takt-cli-list-mixed-schema-'));
+    roots.push(root);
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: root });
+    await writeProjectTemplateBackupManifest({
+      storage,
+      manifest: backupManifest('backup-legacy', '1.0'),
+    });
+    await writeProjectTemplateBackupManifest({
+      storage,
+      manifest: backupManifest('backup-modern', '1.1'),
+    });
+
+    const outcome = await listProjectTemplatesForCliWithDependencies({ cwd: root }, {
+      readCompanionLockState: vi.fn(() => ({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
+      })),
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+    });
+    expect(outcome.envelope).toMatchObject({
+      status: 'success', result: { backupIds: ['backup-modern'] },
+    });
+  });
+
   it('keeps a new repository byte-for-byte untouched while listing', async () => {
     const root = mkdtempSync(join(tmpdir(), 'takt-cli-list-'));
     roots.push(root);
