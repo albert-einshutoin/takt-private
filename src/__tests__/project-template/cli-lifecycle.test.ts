@@ -5,6 +5,7 @@ import {
 import {
   consumeProjectTemplateCliMutationAdmission,
   ProjectTemplateCliInvalidAdmission,
+  snapshotProjectTemplateCliOwnData,
   startProjectTemplateCliLifecycle,
   type ProjectTemplateCliMutationAdmission,
 } from '../../features/project-template/cli-lifecycle.js';
@@ -30,6 +31,33 @@ describe('project template CLI lifecycle', () => {
       () => undefined,
       {},
     ))).toThrow(ProjectTemplateCliInvalidAdmission);
+  });
+
+  it('snapshots own data with captured intrinsics after prototype poisoning', () => {
+    const originalSome = Array.prototype.some;
+    const originalIncludes = Array.prototype.includes;
+    const originalReflectApply = Reflect.apply;
+    let snapshot: Readonly<Record<string, unknown>> | undefined;
+    let thrown: unknown;
+    try {
+      Array.prototype.some = (() => { throw new Error('poisoned some'); }) as typeof Array.prototype.some;
+      Array.prototype.includes = (() => { throw new Error('poisoned includes'); }) as typeof Array.prototype.includes;
+      Reflect.apply = (() => { throw new Error('poisoned apply'); }) as typeof Reflect.apply;
+      snapshot = snapshotProjectTemplateCliOwnData({ required: 1 }, ['required'], []);
+      try {
+        snapshotProjectTemplateCliOwnData(Object.defineProperty({}, 'required', {
+          get: () => { throw new Error('getter executed'); },
+        }), ['required'], []);
+      } catch (error) {
+        thrown = error;
+      }
+    } finally {
+      Array.prototype.some = originalSome;
+      Array.prototype.includes = originalIncludes;
+      Reflect.apply = originalReflectApply;
+    }
+    expect(snapshot).toEqual({ required: 1 });
+    expect(thrown).toBeInstanceOf(ProjectTemplateCliInvalidAdmission);
   });
 
   it('consumes lifecycle admission exactly once and invalidates it after settle', async () => {

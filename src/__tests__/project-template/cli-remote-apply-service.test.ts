@@ -15,7 +15,7 @@ function createProjectTemplateCliRemoteApplyService(value: ProjectTemplateCliRem
     return startProjectTemplateCliLifecycle({
       command: `project-template ${command}` as const, mode: 'apply', dispose: () => undefined,
       handle: ({ admitMutation, signal }) => core[command]({
-        ...options, signal, admitMutation,
+        ...options, signal: options.signal ?? signal, admitMutation,
       }),
     }).result;
   };

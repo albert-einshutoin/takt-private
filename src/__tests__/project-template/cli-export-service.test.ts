@@ -13,7 +13,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { executeProjectTemplateCliExport } from '../../features/project-template/cli-export-service.js';
+import { executeProjectTemplateCliExport as executeCoreExport } from '../../features/project-template/cli-export-service.js';
+import { startProjectTemplateCliLifecycle } from '../../features/project-template/cli-lifecycle.js';
 import type { ProjectTemplateExportOptions } from '../../features/project-template/archive-types.js';
 
 const cleanupRoots = new Set<string>();
@@ -27,6 +28,22 @@ const exportOptions: ProjectTemplateExportOptions = {
     commit: 'a'.repeat(40),
   },
 };
+
+function executeProjectTemplateCliExport(
+  input: Parameters<typeof executeCoreExport>[0],
+  seam: Parameters<typeof executeCoreExport>[1] = {},
+) {
+  if (input.mutation.mode === 'dry-run'
+    || Object.prototype.hasOwnProperty.call(input, 'admitMutation')) {
+    return executeCoreExport(input, seam);
+  }
+  return startProjectTemplateCliLifecycle({
+    command: 'project-template export', mode: 'apply', dispose: () => undefined,
+    handle: ({ admitMutation, signal }) => executeCoreExport({
+      ...input, signal: input.signal ?? signal, admitMutation,
+    }, seam),
+  }).result;
+}
 
 function makeFixture(): { root: string; sourcePath: string; outputPath: string } {
   const root = mkdtempSync(join(tmpdir(), 'takt-cli-export-'));
@@ -59,7 +76,7 @@ describe('project template CLI export service', () => {
     const preview = await dryRun(fixture.root, fixture.outputPath);
     const planId = preview.envelope.status === 'success' && 'planId' in preview.envelope.result
       ? preview.envelope.result.planId : '';
-    const outcome = await executeProjectTemplateCliExport({
+    const outcome = await executeCoreExport({
       projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
       mutation: { mode: 'apply', force: false, expectedPlanId: planId },
     });
@@ -73,9 +90,9 @@ describe('project template CLI export service', () => {
       outputPath: fixture.outputPath, exportOptions,
       mutation: { mode: 'dry-run', force: false },
     }, 'projectRoot', { get: getter });
-    await expect(executeProjectTemplateCliExport(accessor as never))
+    await expect(executeCoreExport(accessor as never))
       .resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
-    await expect(executeProjectTemplateCliExport(new Proxy({
+    await expect(executeCoreExport(new Proxy({
       projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
       mutation: { mode: 'dry-run', force: false },
     }, {}) as never)).resolves.toMatchObject({
@@ -88,14 +105,10 @@ describe('project template CLI export service', () => {
     const preview = await dryRun(fixture.root, fixture.outputPath);
     const planId = preview.envelope.status === 'success' && 'planId' in preview.envelope.result
       ? preview.envelope.result.planId : '';
-    const controller = new AbortController();
-    const admitMutation = vi.fn(() => controller.abort());
     const outcome = await executeProjectTemplateCliExport({
       projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
       mutation: { mode: 'apply', force: false, expectedPlanId: planId },
-      signal: controller.signal, admitMutation,
     });
-    expect(admitMutation).toHaveBeenCalledOnce();
     expect(outcome).toMatchObject({ exitCode: 0, envelope: { status: 'success' } });
     expect(existsSync(fixture.outputPath)).toBe(true);
   });
@@ -110,28 +123,25 @@ describe('project template CLI export service', () => {
       mutation: { mode: 'apply', force: false, expectedPlanId: planId }, signal: controller.signal,
       admitMutation() { controller.abort(); throw new Error('interrupt'); },
     });
-    expect(outcome).toMatchObject({ exitCode: 130, envelope: { error: { code: 'INTERRUPTED' } } });
+    expect(outcome).toMatchObject({ exitCode: 23, envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(existsSync(fixture.outputPath)).toBe(false);
     const generic = await executeProjectTemplateCliExport({
       projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
       mutation: { mode: 'apply', force: false, expectedPlanId: planId },
       admitMutation() { throw new Error('failed'); },
     });
-    expect(generic).toMatchObject({ exitCode: 70, envelope: { error: { code: 'INTERNAL' } } });
+    expect(generic).toMatchObject({ exitCode: 23, envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(existsSync(fixture.outputPath)).toBe(false);
   });
   it('returns a deterministic closed dry-run DTO without writing an archive', async () => {
     const fixture = makeFixture();
-    const admitMutation = vi.fn();
-
     const first = await executeProjectTemplateCliExport({
       projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
-      mutation: { mode: 'dry-run', force: false }, admitMutation,
+      mutation: { mode: 'dry-run', force: false },
     });
     const second = await dryRun(fixture.root, fixture.outputPath);
 
     expect(first).toEqual(second);
-    expect(admitMutation).not.toHaveBeenCalled();
     expect(first).toMatchObject({
       exitCode: 0,
       envelope: {

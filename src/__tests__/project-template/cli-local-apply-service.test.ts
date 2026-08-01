@@ -16,7 +16,7 @@ function createProjectTemplateCliLocalApplyService(value: ProjectTemplateCliLoca
       return startProjectTemplateCliLifecycle({
         command: 'project-template apply', mode: 'apply', dispose: () => undefined,
         handle: ({ admitMutation, signal }) => core.apply({
-          ...options, signal, admitMutation,
+          ...options, signal: options.signal ?? signal, admitMutation,
         }),
       }).result;
     },
