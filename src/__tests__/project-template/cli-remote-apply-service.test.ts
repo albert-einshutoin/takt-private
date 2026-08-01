@@ -129,6 +129,73 @@ describe('project template remote CLI service', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('blocks non-zero conflicts and inconsistent non-applicable plans even with force', async () => {
+    const execute = vi.fn(port().execute);
+    const conflict = createProjectTemplateCliRemoteApplyService(port({
+      execute,
+      derive: async (options) => ({ ...(await port().derive(options)), conflictCount: 1 }),
+    }));
+    const inconsistent = createProjectTemplateCliRemoteApplyService(port({
+      execute,
+      derive: async (options) => ({
+        ...(await port().derive(options)), defaultApplyPossible: false,
+      }),
+    }));
+
+    await expect(conflict.apply({ ...base, force: true, mode: 'apply', expectedPlanId: PLAN_ID }))
+      .resolves.toMatchObject({ envelope: { error: { code: 'HARD_CONFLICT' } } });
+    await expect(inconsistent.apply({ ...base, force: true, mode: 'apply', expectedPlanId: PLAN_ID }))
+      .resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not mutate an up-to-date update plan', async () => {
+    const execute = vi.fn(port().execute);
+    const service = createProjectTemplateCliRemoteApplyService(port({
+      execute,
+      derive: async (options) => ({ ...(await port().derive(options)), updateAvailable: false }),
+    }));
+    const dry = await service.update({ ...base, mode: 'dry-run' });
+    const applied = await service.update({ ...base, mode: 'apply', expectedPlanId: PLAN_ID });
+
+    expect(dry).toMatchObject({ envelope: { result: { updateAvailable: false } } });
+    expect(applied).toMatchObject({ envelope: { error: { code: 'PLAN_DRIFT' } } });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('rejects accessor, proxy, prototype and oversized port results without executing them', async () => {
+    let getterCalls = 0;
+    const accessorPort = Object.create(null, {
+      inspectGuard: { enumerable: true, get() { getterCalls += 1; return port().inspectGuard; } },
+      derive: { enumerable: true, value: port().derive },
+      execute: { enumerable: true, value: port().execute },
+    });
+    expect(() => createProjectTemplateCliRemoteApplyService(accessorPort))
+      .toThrow('remote apply port is invalid');
+    expect(getterCalls).toBe(0);
+
+    const proxyResult = createProjectTemplateCliRemoteApplyService(port({
+      derive: async (options) => new Proxy(await port().derive(options), {}),
+    }));
+    await expect(proxyResult.diff(base)).resolves.toMatchObject({
+      envelope: { error: { code: 'INTERNAL' } },
+    });
+
+    const oversized = createProjectTemplateCliRemoteApplyService(port({
+      derive: async (options) => ({ ...(await port().derive(options)), changeCount: 1_000_000 }),
+    }));
+    await expect(oversized.diff(base)).resolves.toMatchObject({
+      envelope: { error: { code: 'INTERNAL' } },
+    });
+  });
+
+  it('rejects invalid runtime options with a closed redacted error', async () => {
+    const service = createProjectTemplateCliRemoteApplyService(port());
+    const outcome = await service.diff({ ...base, source: '' });
+    expect(outcome).toMatchObject({ envelope: { error: { code: 'INVALID_ARGUMENT' } } });
+    expect(JSON.stringify(outcome)).not.toContain('/repo');
+  });
+
   it('returns 130 before admission but drains admitted execution', async () => {
     const controller = new AbortController();
     controller.abort();
