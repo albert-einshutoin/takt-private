@@ -71,6 +71,7 @@ interface ProjectTemplateApplyPreviewApprovalRecord {
   readonly context: typeof APPROVAL_CONTEXT;
   readonly projectIdentity: string;
   readonly previewId: string;
+  readonly transactionPlanId?: string;
   readonly contentPlanId: string;
   readonly contentPreconditionToken: string;
   readonly repertoireDependencyPlanId: string;
@@ -303,6 +304,9 @@ export async function issueTrustedProjectTemplateApplyPreviewApproval(
       context: APPROVAL_CONTEXT,
       projectIdentity: identity,
       previewId: preview.previewId,
+      ...(preview.transactionPlanId === undefined
+        ? {}
+        : { transactionPlanId: preview.transactionPlanId }),
       contentPlanId: preview.bindings.contentPlanId,
       contentPreconditionToken: preview.bindings.contentPreconditionToken,
       repertoireDependencyPlanId: preview.bindings.repertoireDependencyPlanId,
@@ -521,6 +525,8 @@ function parseApprovalRecord(
     CAPTURED_REFLECT_RECEIVER,
     [descriptors],
   ) as PropertyKey[];
+  const transactionDescriptor = descriptors['transactionPlanId'];
+  if (transactionDescriptor !== undefined) expected.push('transactionPlanId');
   if (keys.length !== expected.length) return undefined;
   for (let index = 0; index < expected.length; index += 1) {
     const descriptor = descriptors[expected[index]!];
@@ -542,6 +548,8 @@ function parseApprovalRecord(
     || record.context !== APPROVAL_CONTEXT
     || typeof record.projectIdentity !== 'string'
     || typeof record.previewId !== 'string'
+    || (record.transactionPlanId !== undefined
+      && typeof record.transactionPlanId !== 'string')
     || typeof record.contentPlanId !== 'string'
     || typeof record.contentPreconditionToken !== 'string'
     || typeof record.repertoireDependencyPlanId !== 'string'
@@ -583,6 +591,8 @@ function recordMatches(options: {
     && options.record.projectIdentity === projectIdentity(options.storage)
     && options.record.previewId === expected.previewId
     && options.record.previewId === options.preview.previewId
+    && options.record.transactionPlanId === expected.transactionPlanId
+    && options.record.transactionPlanId === options.preview.transactionPlanId
     && options.record.contentPlanId === expected.contentPlanId
     && options.record.contentPlanId === options.preview.bindings.contentPlanId
     && options.record.contentPreconditionToken === expected.contentPreconditionToken
@@ -631,6 +641,9 @@ function dispositionClaim(options: {
     context: APPROVAL_CONTEXT,
     projectIdentity: record.projectIdentity,
     previewId: record.previewId,
+    ...(record.transactionPlanId === undefined
+      ? {}
+      : { transactionPlanId: record.transactionPlanId }),
     contentPlanId: record.contentPlanId,
     repertoireDependencyPlanId: record.repertoireDependencyPlanId,
     disposition: options.disposition,
