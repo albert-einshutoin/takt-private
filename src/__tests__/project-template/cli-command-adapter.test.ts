@@ -397,6 +397,39 @@ describe('project-template CLI command adapter', () => {
     });
   });
 
+  it.each([
+    '--pack-version',
+    '--min-takt-version',
+  ] as const)('rejects malformed %s after RegExp.exec poisoning', async (option) => {
+    const originalExec = RegExp.prototype.exec;
+    const value = harness({
+      cwd() {
+        // Commander has completed its own parsing before the adapter asks for
+        // cwd, isolating poisoning of the admission validator itself.
+        RegExp.prototype.exec = (() => ['forged']) as typeof RegExp.prototype.exec;
+        return '/workspace';
+      },
+    });
+    try {
+      await value.program.parseAsync([
+        'node', 'takt', 'project-template', 'export', 'template.taktpack',
+        '--pack-version', option === '--pack-version' ? 'not-semver' : '1.0.0',
+        '--min-takt-version', option === '--min-takt-version' ? 'not-semver' : '0.48.0',
+        '--source-commit', 'a'.repeat(40),
+        '--apply', '--expected-plan-id', PLAN_ID,
+      ]);
+    } finally {
+      RegExp.prototype.exec = originalExec;
+    }
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.admissions).toEqual([]);
+    expect(value.exitCodes).toEqual([20]);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      mode: 'apply', error: { code: 'INVALID_ARGUMENT' },
+    });
+  });
+
   it('installs SIGINT before synchronous mutation admission can begin', async () => {
     let listenerInstalled = false;
     const value = harness({

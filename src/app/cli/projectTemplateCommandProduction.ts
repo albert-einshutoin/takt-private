@@ -40,10 +40,10 @@ import { resolveConfigValue } from '../../infra/config/resolveConfigValue.js';
 import { DEFAULT_LANGUAGE } from '../../shared/constants.js';
 import type { Language } from '../../core/models/config-types.js';
 
-// Why: export admission must not become permissive if runtime code replaces
-// RegExp.prototype.test, an instance method lookup, or Reflect.apply later.
+// Why: call the captured exec intrinsic directly. Captured `test` still performs
+// a dynamic `regexp.exec` lookup and can be poisoned after module initialization.
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
-const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
+const CAPTURED_REGEXP_EXEC = RegExp.prototype.exec;
 // Why: repository export must accept exactly the commit formats that its manifest can validate.
 const COMMIT_PATTERN = new RegExp(COMMIT_PATTERN_SOURCE, 'u');
 const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE, 'u');
@@ -51,17 +51,17 @@ const REMOTE_DEADLINE_MS = 30_000;
 
 function isValidCommit(value: unknown): value is string {
   return typeof value === 'string'
-    && CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_TEST, COMMIT_PATTERN, [value]) as boolean;
+    && CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_EXEC, COMMIT_PATTERN, [value]) !== null;
 }
 
 function isValidExportSemVer(value: unknown): value is string {
   return typeof value === 'string'
     && value.length <= MAX_SEMVER_LENGTH
     && CAPTURED_REFLECT_APPLY(
-      CAPTURED_REGEXP_TEST,
+      CAPTURED_REGEXP_EXEC,
       SEMVER_PATTERN,
       [value],
-    ) as boolean;
+    ) !== null;
 }
 
 function privateDirectory(path: string): string {

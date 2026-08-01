@@ -282,16 +282,50 @@ describe('project-template production command dependencies', () => {
     expect(await readdir(root)).toEqual(['.takt']);
   });
 
+  it.each([
+    'packVersion',
+    'minTaktVersion',
+  ] as const)('rejects malformed %s after RegExp.exec poisoning without mutation', async (field) => {
+    const root = await createExportFixture();
+    const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
+    const request = exportRequest(root, 'a'.repeat(40));
+    const admitMutation = vi.fn();
+    const originalExec = RegExp.prototype.exec;
+    let outcome: ProjectTemplateCliOutcome;
+    try {
+      RegExp.prototype.exec = (() => ['forged']) as typeof RegExp.prototype.exec;
+      outcome = await dependencies.dispatch({
+        ...request,
+        mutation: {
+          mode: 'apply', force: false, expectedPlanId: 'a'.repeat(64),
+        },
+        exportMetadata: { ...request.exportMetadata, [field]: 'not-semver' },
+      }, { signal: new AbortController().signal, admitMutation });
+    } finally {
+      RegExp.prototype.exec = originalExec;
+      await dependencies.dispose();
+    }
+
+    expect(outcome!).toMatchObject({
+      exitCode: 20,
+      envelope: { mode: 'apply', error: { code: 'INVALID_ARGUMENT' } },
+    });
+    expect(admitMutation).not.toHaveBeenCalled();
+    expect(await readdir(root)).toEqual(['.takt']);
+  });
+
   it('rejects an invalid export commit with captured regexp intrinsics before planning', async () => {
     const root = await createExportFixture();
     const dependencies = createProjectTemplateCliCommandProductionDependencies('0.48.0');
     const originalTest = RegExp.prototype.test;
+    const originalExec = RegExp.prototype.exec;
     const originalApply = Reflect.apply;
     const controller = new AbortController();
     controller.abort();
     let outcome: ProjectTemplateCliOutcome;
     try {
       RegExp.prototype.test = () => true;
+      RegExp.prototype.exec = (() => ['forged']) as typeof RegExp.prototype.exec;
       Reflect.apply = (() => true) as typeof Reflect.apply;
       outcome = await dependencies.dispatch(exportRequest(root, 'g'.repeat(40)), {
         signal: controller.signal,
@@ -299,6 +333,7 @@ describe('project-template production command dependencies', () => {
       });
     } finally {
       RegExp.prototype.test = originalTest;
+      RegExp.prototype.exec = originalExec;
       Reflect.apply = originalApply;
       await dependencies.dispose();
     }

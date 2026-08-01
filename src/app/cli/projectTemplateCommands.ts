@@ -59,17 +59,17 @@ Command,
 (command: ProjectTemplateCliCommand, mode: 'dry-run' | 'apply') => Promise<void>
 >();
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
-const CAPTURED_REGEXP_TEST = RegExp.prototype.test;
+const CAPTURED_REGEXP_EXEC = RegExp.prototype.exec;
 const SEMVER_PATTERN = new RegExp(SEMVER_PATTERN_SOURCE, 'u');
 
 function isValidExportSemVer(value: unknown): value is string {
   return typeof value === 'string'
     && value.length <= MAX_SEMVER_LENGTH
     && CAPTURED_REFLECT_APPLY(
-      CAPTURED_REGEXP_TEST,
+      CAPTURED_REGEXP_EXEC,
       SEMVER_PATTERN,
       [value],
-    ) as boolean;
+    ) !== null;
 }
 
 export function settleProjectTemplateParserFailure(
