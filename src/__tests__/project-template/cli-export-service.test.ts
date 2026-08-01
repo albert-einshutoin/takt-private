@@ -66,6 +66,23 @@ describe('project template CLI export service', () => {
     expect(outcome).toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(existsSync(fixture.outputPath)).toBe(false);
   });
+  it('rejects accessor and proxied export options without invoking caller code', async () => {
+    const fixture = makeFixture();
+    const getter = vi.fn(() => fixture.root);
+    const accessor = Object.defineProperty({
+      outputPath: fixture.outputPath, exportOptions,
+      mutation: { mode: 'dry-run', force: false },
+    }, 'projectRoot', { get: getter });
+    await expect(executeProjectTemplateCliExport(accessor as never))
+      .resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    await expect(executeProjectTemplateCliExport(new Proxy({
+      projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
+      mutation: { mode: 'dry-run', force: false },
+    }, {}) as never)).resolves.toMatchObject({
+      envelope: { error: { code: 'SECURITY_GUARD' } },
+    });
+    expect(getter).not.toHaveBeenCalled();
+  });
   it('admits exact-once only after the exact export plan is revalidated', async () => {
     const fixture = makeFixture();
     const preview = await dryRun(fixture.root, fixture.outputPath);

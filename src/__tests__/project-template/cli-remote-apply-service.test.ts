@@ -65,6 +65,19 @@ describe('project template remote CLI service', () => {
     }
     expect(execute).not.toHaveBeenCalled();
   });
+  it('rejects an invalid plan id after RegExp prototype poisoning', async () => {
+    const execute = vi.fn(port().execute);
+    const service = createProjectTemplateCliRemoteApplyService(port({ execute }));
+    const original = RegExp.prototype.test;
+    try {
+      RegExp.prototype.test = () => true;
+      await expect(service.apply({ ...base, mode: 'apply', expectedPlanId: 'invalid' } as never))
+        .resolves.toMatchObject({ envelope: { error: { code: 'INVALID_EXPECTED_PLAN_ID' } } });
+    } finally {
+      RegExp.prototype.test = original;
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
   it.each(['apply', 'update'] as const)('admits %s exact-once before terminal execution', async (command) => {
     const controller = new AbortController();
     const admitMutation = vi.fn(() => controller.abort());
