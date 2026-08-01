@@ -358,6 +358,15 @@ describe('POSIX project template receipt key store', () => {
     expect(owned.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
 
     owned.length = 0;
+    expect(() => parseProjectTemplateReceiptKeyRegistry(valid, {
+      onOwnedSecretBuffer(buffer) {
+        owned.push(buffer);
+        if (owned.length === 2) throw new Error('ownership seam failure');
+      },
+    })).toThrow('ownership seam failure');
+    expect(owned.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
+
+    owned.length = 0;
     const invalid = Buffer.from(JSON.stringify({
       schemaVersion: 1,
       keys: [

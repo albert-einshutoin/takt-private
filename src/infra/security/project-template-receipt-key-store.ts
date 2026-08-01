@@ -270,10 +270,16 @@ export function parseProjectTemplateReceiptKeyRegistry(
           throw new ProjectTemplateReceiptKeyStoreError('Invalid encoded key secret');
         }
         const decoded = Buffer.from(encoded, 'base64url');
-        ownership?.onOwnedSecretBuffer?.(decoded);
         try {
-          secret = Uint8Array.from(decoded);
-          ownership?.onOwnedSecretBuffer?.(secret);
+          ownership?.onOwnedSecretBuffer?.(decoded);
+          const ownedSecret = Uint8Array.from(decoded);
+          try {
+            ownership?.onOwnedSecretBuffer?.(ownedSecret);
+            secret = ownedSecret;
+          } catch (error) {
+            ownedSecret.fill(0);
+            throw error;
+          }
         } finally {
           decoded.fill(0);
         }

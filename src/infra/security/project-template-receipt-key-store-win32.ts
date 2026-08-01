@@ -604,6 +604,8 @@ function recoverStaleLock(path: string, policy: Win32LockPolicy): boolean {
       !Number.isSafeInteger(pid)
       || (pid as number) < 1
       || typeof createdAtMs !== 'number'
+      || !Number.isFinite(now)
+      || now < 0
       || !Number.isFinite(createdAtMs)
       || createdAtMs < 0
       || createdAtMs > now
@@ -617,6 +619,7 @@ function recoverStaleLock(path: string, policy: Win32LockPolicy): boolean {
     } catch {
       return false;
     }
+    if (typeof alive !== 'boolean') return false;
     if (alive) return false;
     const beforeUnlink = lstatSync(path);
     if (
@@ -704,8 +707,25 @@ function releaseOwnedLock(
         if (count === 0) break;
         offset += count;
       }
-      tokenMatches = offset === descriptorStat.size
-        && bytes.subarray(0, offset).includes(tokenBytes);
+      if (offset === descriptorStat.size) {
+        try {
+          const parsed = JSON.parse(
+            bytes.subarray(0, offset).toString('utf8'),
+          ) as unknown;
+          if (
+            typeof parsed === 'object'
+            && parsed !== null
+            && !Array.isArray(parsed)
+          ) {
+            const descriptors = Object.getOwnPropertyDescriptors(parsed);
+            tokenMatches = Reflect.ownKeys(parsed).length === 3
+              && 'value' in (descriptors['token'] ?? {})
+              && descriptors['token']!.value === ownership.token;
+          }
+        } catch {
+          tokenMatches = false;
+        }
+      }
     } finally {
       bytes.fill(0);
       tokenBytes.fill(0);
