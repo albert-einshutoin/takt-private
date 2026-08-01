@@ -15,7 +15,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { win32 } from 'node:path';
 
-const SENTINEL_FILENAME = '.root.identity';
+export const WINDOWS_COORDINATION_SENTINEL_FILENAME = '.root.identity';
 const SENTINEL_VERSION = 1;
 const MAX_SENTINEL_BYTES = 4_096;
 const PUBLISHING_SUFFIX = '.publishing';
@@ -125,7 +125,7 @@ export function openWindowsCoordinationSentinel(options: {
     options.rootAuthority.canonicalRoot,
     '.takt-repertoire-coordination',
   );
-  const sentinelPath = win32.join(coordinationRoot, SENTINEL_FILENAME);
+  const sentinelPath = win32.join(coordinationRoot, WINDOWS_COORDINATION_SENTINEL_FILENAME);
   let sentinelFd: number | undefined;
   let ownPublishingPath: string | undefined;
   try {
@@ -257,7 +257,7 @@ function assertKnownPublishingEntries(
       // Lease claims also use a .publishing suffix in this directory. Sentinel
       // recovery owns only its reserved prefix and must not reinterpret valid
       // lease transitions as malformed sentinel state.
-      if (!name.startsWith(`${SENTINEL_FILENAME}.`)) continue;
+      if (!name.startsWith(`${WINDOWS_COORDINATION_SENTINEL_FILENAME}.`)) continue;
       if (!name.endsWith(PUBLISHING_SUFFIX)) throw failed();
       const match = PUBLISHING_PATTERN.exec(name);
       if (match === null || !UUID.test(match[1]!)) throw failed();
@@ -265,7 +265,7 @@ function assertKnownPublishingEntries(
       const publishingStat = requirePublishingSnapshot(dependencies.lstat(publishingPath));
       if (publishingStat.nlink === 2n) {
         const published = requirePublishingSnapshot(
-          dependencies.lstat(win32.join(coordinationRoot, SENTINEL_FILENAME)),
+          dependencies.lstat(win32.join(coordinationRoot, WINDOWS_COORDINATION_SENTINEL_FILENAME)),
         );
         if (
           published.nlink !== 2n

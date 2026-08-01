@@ -79,6 +79,14 @@ function fixture() {
 }
 
 describe('production Windows coordination filesystem policy', () => {
+  it('reserves only the sealed root identity entry for platform coordination', () => {
+    const { policy } = fixture();
+
+    expect(policy.isReservedRootEntry('.root.identity')).toBe(true);
+    expect(policy.isReservedRootEntry('.root.identity.publishing')).toBe(false);
+    expect(policy.isReservedRootEntry('unexpected')).toBe(false);
+  });
+
   it('accepts only an exact canonical non-reparse directory on the root volume', () => {
     const value = fixture();
     expect(() => value.policy.assertDirectory(DIRECTORY)).not.toThrow();

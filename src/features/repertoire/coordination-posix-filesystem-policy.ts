@@ -88,6 +88,7 @@ export const posixCoordinationFilesystemPolicy: CoordinationFilesystemPolicy = f
   sealRoot(authority: CoordinationDirectoryAuthority): void {
     authority.assertUnchanged();
   },
+  isReservedRootEntry(_entry: string): boolean { return false; },
   ensurePrivateDirectory(path: string): void {
     try {
       mkdirSync(path, { mode: DIRECTORY_MODE });

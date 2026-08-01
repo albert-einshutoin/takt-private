@@ -631,6 +631,7 @@ function scanStateOnce(
       && entry !== RELEASED_DIRECTORY_NAME
       && entry !== WRITER_INTENT_FILENAME
       && entry !== WRITER_INTENT_PUBLISHING_FILENAME
+      && !coordinationFilesystemPolicy.isReservedRootEntry(entry)
     ) {
       throw new RepertoireCoordinationError('UNSAFE_STATE');
     }

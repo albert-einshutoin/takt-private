@@ -31,6 +31,7 @@ import {
 import { openBuiltinWindowsRootAuthority } from './coordination-win32-root-authority.js';
 import {
   CoordinationWindowsSentinelBusyError,
+  WINDOWS_COORDINATION_SENTINEL_FILENAME,
   openWindowsCoordinationSentinel,
   type WindowsCoordinationSentinelAuthority,
 } from './coordination-win32-sentinel.js';
@@ -144,6 +145,9 @@ export function createWin32CoordinationFilesystemPolicy(
       }
     }
     state.sentinel.assertUnchanged();
+  },
+  isReservedRootEntry(entry: string): boolean {
+    return entry === WINDOWS_COORDINATION_SENTINEL_FILENAME;
   },
   ensurePrivateDirectory(path: string): void {
     try { dependencies.mkdir(path); } catch (error) {

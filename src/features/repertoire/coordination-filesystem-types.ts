@@ -58,6 +58,7 @@ export type CoordinationStableDirectory = {
 export interface CoordinationFilesystemPolicy extends CoordinationIdentityPolicy {
   preflightRoot(path: string): CoordinationDirectoryAuthority;
   sealRoot(authority: CoordinationDirectoryAuthority): void;
+  isReservedRootEntry(entry: string): boolean;
   ensurePrivateDirectory(path: string): void;
   createPrivateDirectoryExclusive(path: string): CoordinationIdentity;
   sealPrivateDirectory(path: string): void;
