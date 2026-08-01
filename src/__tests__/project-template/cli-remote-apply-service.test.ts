@@ -1,11 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ProjectTemplateCliRemotePortError,
-  createProjectTemplateCliRemoteApplyService,
+  createProjectTemplateCliRemoteApplyService as createCoreService,
   type ProjectTemplateCliRemoteApplyPort,
 } from '../../features/project-template/cli-remote-apply-service.js';
+import { startProjectTemplateCliLifecycle } from '../../features/project-template/cli-lifecycle.js';
 
 const PLAN_ID = 'a'.repeat(64);
+
+function createProjectTemplateCliRemoteApplyService(value: ProjectTemplateCliRemoteApplyPort) {
+  const core = createCoreService(value);
+  const mutate = (command: 'apply' | 'update', options: Parameters<typeof core.apply>[0]) => {
+    if (options.mode === 'dry-run') return core[command](options);
+    return startProjectTemplateCliLifecycle({
+      command: `project-template ${command}` as const, mode: 'apply', dispose: () => undefined,
+      handle: ({ admitMutation, signal }) => core[command]({
+        ...options, signal, admitMutation,
+      }),
+    }).result;
+  };
+  return { diff: core.diff, apply: (options: Parameters<typeof core.apply>[0]) => mutate('apply', options),
+    update: (options: Parameters<typeof core.update>[0]) => mutate('update', options) };
+}
 
 function port(overrides: Partial<ProjectTemplateCliRemoteApplyPort> = {}): ProjectTemplateCliRemoteApplyPort {
   return {
@@ -40,6 +56,15 @@ const base = {
 };
 
 describe('project template remote CLI service', () => {
+  it('rejects missing admission capability before apply and update execution', async () => {
+    const execute = vi.fn(port().execute);
+    const service = createCoreService(port({ execute }));
+    for (const command of ['apply', 'update'] as const) {
+      await expect(service[command]({ ...base, mode: 'apply', expectedPlanId: PLAN_ID }))
+        .resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
   it.each(['apply', 'update'] as const)('admits %s exact-once before terminal execution', async (command) => {
     const controller = new AbortController();
     const admitMutation = vi.fn(() => controller.abort());
@@ -47,20 +72,19 @@ describe('project template remote CLI service', () => {
     const service = createProjectTemplateCliRemoteApplyService(port({ execute }));
     await service[command]({ ...base, mode: 'apply', expectedPlanId: PLAN_ID,
       signal: controller.signal, admitMutation });
-    expect(admitMutation).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledOnce();
   });
   it.each([
     ['INTERNAL', false, 70],
     ['INTERRUPTED', true, 130],
-  ] as const)('maps %s when admission throws before remote execution', async (code, interrupt, exitCode) => {
+  ] as const)('rejects arbitrary callback before remote execution (%s)', async (_code, interrupt, _exitCode) => {
     const execute = vi.fn();
     const controller = new AbortController();
-    const service = createProjectTemplateCliRemoteApplyService(port({ execute }));
+    const service = createCoreService(port({ execute }));
     const outcome = await service.apply({ ...base, mode: 'apply', expectedPlanId: PLAN_ID,
       signal: controller.signal,
       admitMutation() { if (interrupt) controller.abort(); throw new Error('admission failed'); } });
-    expect(outcome).toMatchObject({ exitCode, envelope: { error: { code } } });
+    expect(outcome).toMatchObject({ exitCode: 23, envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(execute).not.toHaveBeenCalled();
   });
   it('returns only the closed safe diff DTO from a fresh derivation', async () => {

@@ -54,6 +54,18 @@ afterEach(() => {
 });
 
 describe('project template CLI export service', () => {
+  it('rejects a missing mutation admission capability before publication', async () => {
+    const fixture = makeFixture();
+    const preview = await dryRun(fixture.root, fixture.outputPath);
+    const planId = preview.envelope.status === 'success' && 'planId' in preview.envelope.result
+      ? preview.envelope.result.planId : '';
+    const outcome = await executeProjectTemplateCliExport({
+      projectRoot: fixture.root, outputPath: fixture.outputPath, exportOptions,
+      mutation: { mode: 'apply', force: false, expectedPlanId: planId },
+    });
+    expect(outcome).toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    expect(existsSync(fixture.outputPath)).toBe(false);
+  });
   it('admits exact-once only after the exact export plan is revalidated', async () => {
     const fixture = makeFixture();
     const preview = await dryRun(fixture.root, fixture.outputPath);

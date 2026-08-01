@@ -1,11 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  createProjectTemplateCliRollbackService,
+  createProjectTemplateCliRollbackService as createCoreService,
   type ProjectTemplateCliRollbackPort,
 } from '../../features/project-template/cli-rollback-service.js';
 import { settleProjectTemplateRollbackAfterLease } from '../../features/project-template/rollback-transaction-apply-facade.js';
+import { startProjectTemplateCliLifecycle } from '../../features/project-template/cli-lifecycle.js';
 
 const planId = 'a'.repeat(64);
+
+function createProjectTemplateCliRollbackService(value: ProjectTemplateCliRollbackPort) {
+  const core = createCoreService(value);
+  return { rollback(options: Parameters<typeof core.rollback>[0]) {
+    if (options.mode === 'dry-run') return core.rollback(options);
+    return startProjectTemplateCliLifecycle({
+      command: 'project-template rollback', mode: 'apply', dispose: () => undefined,
+      handle: ({ admitMutation, signal }) => core.rollback({ ...options, signal, admitMutation }),
+    }).result;
+  } };
+}
 const derived = Object.freeze({
   planId,
   backupId: 'backup-1',
@@ -23,6 +35,22 @@ function port(overrides: Partial<ProjectTemplateCliRollbackPort> = {}): ProjectT
 }
 
 describe('project template CLI rollback service', () => {
+  it('rejects missing, accessor, and proxied admission inputs before execute', async () => {
+    const execute = vi.fn(port().execute);
+    const service = createCoreService(port({ execute }));
+    const base = { cwd: '/safe/repo', backupId: 'backup-1', force: false,
+      mode: 'apply' as const, expectedPlanId: planId };
+    await expect(service.rollback(base)).resolves.toMatchObject({
+      envelope: { error: { code: 'SECURITY_GUARD' } },
+    });
+    const forceGetter = vi.fn(() => false);
+    await expect(service.rollback(Object.defineProperty({ ...base }, 'force', { get: forceGetter }) as never))
+      .resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    await expect(service.rollback(new Proxy(base, {}) as never))
+      .resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    expect(forceGetter).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
   it('admits exact-once and drains rollback without forwarding the signal', async () => {
     const controller = new AbortController();
     const admitMutation = vi.fn(() => controller.abort());
@@ -32,23 +60,22 @@ describe('project template CLI rollback service', () => {
       cwd: '/safe/repo', backupId: 'backup-1', force: false, mode: 'apply',
       expectedPlanId: planId, signal: controller.signal, admitMutation,
     });
-    expect(admitMutation).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledOnce();
     expect(execute.mock.calls[0]![0]).not.toHaveProperty('signal');
   });
-  it('maps an admission interrupt before rollback execution', async () => {
+  it('rejects arbitrary admission before rollback execution', async () => {
     const controller = new AbortController();
     const execute = vi.fn();
-    const service = createProjectTemplateCliRollbackService(port({ execute }));
+    const service = createCoreService(port({ execute }));
     const outcome = await service.rollback({ cwd: '/safe/repo', backupId: 'backup-1', force: false,
       mode: 'apply', expectedPlanId: planId, signal: controller.signal,
       admitMutation() { controller.abort(); throw new Error('interrupt'); } });
-    expect(outcome).toMatchObject({ exitCode: 130, envelope: { error: { code: 'INTERRUPTED' } } });
+    expect(outcome).toMatchObject({ exitCode: 23, envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(execute).not.toHaveBeenCalled();
     const generic = await service.rollback({ cwd: '/safe/repo', backupId: 'backup-1', force: false,
       mode: 'apply', expectedPlanId: planId,
       admitMutation() { throw new Error('failed'); } });
-    expect(generic).toMatchObject({ exitCode: 70, envelope: { error: { code: 'INTERNAL' } } });
+    expect(generic).toMatchObject({ exitCode: 23, envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(execute).not.toHaveBeenCalled();
   });
   it('classifies lease release failure as indeterminate', () => {

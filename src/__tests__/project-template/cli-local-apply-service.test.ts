@@ -1,10 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  createProjectTemplateCliLocalApplyService,
+  createProjectTemplateCliLocalApplyService as createCoreService,
   type ProjectTemplateCliLocalApplyPort,
 } from '../../features/project-template/cli-local-apply-service.js';
+import { startProjectTemplateCliLifecycle } from '../../features/project-template/cli-lifecycle.js';
 
 const PLAN_ID = 'a'.repeat(64);
+
+function createProjectTemplateCliLocalApplyService(value: ProjectTemplateCliLocalApplyPort) {
+  const core = createCoreService(value);
+  return {
+    diff: core.diff,
+    apply(options: Parameters<typeof core.apply>[0]) {
+      if (options.mode === 'dry-run') return core.apply(options);
+      return startProjectTemplateCliLifecycle({
+        command: 'project-template apply', mode: 'apply', dispose: () => undefined,
+        handle: ({ admitMutation, signal }) => core.apply({
+          ...options, signal, admitMutation,
+        }),
+      }).result;
+    },
+  };
+}
 
 function port(
   overrides: Partial<ProjectTemplateCliLocalApplyPort> = {},
@@ -32,6 +49,22 @@ function port(
 }
 
 describe('local project-template CLI diff/apply service', () => {
+  it('rejects missing, accessor, and proxied admission inputs before execute', async () => {
+    const execute = vi.fn(port().execute);
+    const service = createCoreService(port({ execute }));
+    const base = { cwd: '/safe/repo', sourcePath: 'pack.taktpack', currentTaktVersion: '0.48.0',
+      force: false, mode: 'apply' as const, expectedPlanId: PLAN_ID };
+    await expect(service.apply(base)).resolves.toMatchObject({
+      envelope: { error: { code: 'SECURITY_GUARD' } },
+    });
+    const forceGetter = vi.fn(() => false);
+    await expect(service.apply(Object.defineProperty({ ...base }, 'force', { get: forceGetter }) as never))
+      .resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    await expect(service.apply(new Proxy(base, {}) as never))
+      .resolves.toMatchObject({ envelope: { error: { code: 'SECURITY_GUARD' } } });
+    expect(forceGetter).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
   it('admits exact-once and drains execution without forwarding the signal', async () => {
     const controller = new AbortController();
     const admitMutation = vi.fn(() => controller.abort());
@@ -42,27 +75,26 @@ describe('local project-template CLI diff/apply service', () => {
       force: false, mode: 'apply', expectedPlanId: PLAN_ID,
       signal: controller.signal, admitMutation,
     });
-    expect(admitMutation).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledOnce();
     expect(execute.mock.calls[0]![0]).not.toHaveProperty('signal');
   });
-  it('maps an admission interrupt before execute', async () => {
+  it('rejects an arbitrary admission callback before execute', async () => {
     const controller = new AbortController();
     const execute = vi.fn();
-    const service = createProjectTemplateCliLocalApplyService(port({ execute }));
+    const service = createCoreService(port({ execute }));
     const outcome = await service.apply({
       cwd: '/safe/repo', sourcePath: 'pack.taktpack', currentTaktVersion: '0.48.0',
       force: false, mode: 'apply', expectedPlanId: PLAN_ID, signal: controller.signal,
       admitMutation() { controller.abort(); throw new Error('interrupt'); },
     });
-    expect(outcome).toMatchObject({ exitCode: 130, envelope: { error: { code: 'INTERRUPTED' } } });
+    expect(outcome).toMatchObject({ exitCode: 23, envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(execute).not.toHaveBeenCalled();
     const generic = await service.apply({
       cwd: '/safe/repo', sourcePath: 'pack.taktpack', currentTaktVersion: '0.48.0',
       force: false, mode: 'apply', expectedPlanId: PLAN_ID,
       admitMutation() { throw new Error('failed'); },
     });
-    expect(generic).toMatchObject({ exitCode: 70, envelope: { error: { code: 'INTERNAL' } } });
+    expect(generic).toMatchObject({ exitCode: 23, envelope: { error: { code: 'SECURITY_GUARD' } } });
     expect(execute).not.toHaveBeenCalled();
   });
   it('returns the same closed dry-run plan for diff and apply', async () => {
