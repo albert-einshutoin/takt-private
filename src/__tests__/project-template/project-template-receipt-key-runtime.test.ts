@@ -118,9 +118,10 @@ describe('project template receipt authentication runtime', () => {
 
   it('persists explicit revocation and zeroizes authority on dispose', async () => {
     const store = memoryStore();
+    let seed = 9;
     const runtime = await createProjectTemplateReceiptAuthenticationRuntime({
       keyStore: store,
-      randomBytes: () => new Uint8Array(32).fill(9),
+      randomBytes: () => new Uint8Array(32).fill(seed++),
     });
     const lease = await runtime.authenticator.acquireSigningKey() as {
       readonly keyId: string;
@@ -140,6 +141,15 @@ describe('project template receipt authentication runtime', () => {
     await expect(runtime.authenticator.acquireSigningKey()).rejects.toThrow(
       /disposed/i,
     );
+    const restarted = await createProjectTemplateReceiptAuthenticationRuntime({
+      keyStore: store,
+      randomBytes: () => new Uint8Array(32).fill(seed++),
+    });
+    expect(await restarted.verifier.verify({
+      keyId: lease.keyId,
+      input,
+      tag,
+    })).toBe('invalid');
   });
 
   it('treats malformed tags as invalid without calling an unequal-length compare', async () => {
