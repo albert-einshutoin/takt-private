@@ -137,9 +137,6 @@ describe('project template source provenance', () => {
       source(value)['canonicalSource'] =
         'github:acme/takt-template@refs/tags/v2.2.0';
     }],
-    ['requested ref and release tag mismatch', (value: Record<string, unknown>) => {
-      source(value)['requestedRef'] = 'refs/tags/v2.2.0';
-    }],
     ['version and release tag mismatch', (value: Record<string, unknown>) => {
       archive(value)['version'] = '2.2.0';
     }],

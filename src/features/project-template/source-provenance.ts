@@ -134,10 +134,6 @@ function freeze<T extends object>(value: T): Readonly<T> {
   ) as Readonly<T>;
 }
 
-function normalizeTagRef(ref: string): string {
-  return ref.startsWith('refs/tags/') ? ref.slice('refs/tags/'.length) : ref;
-}
-
 export function parseProjectTemplateSourceProvenance(
   value: unknown,
 ): ProjectTemplateSourceProvenanceV1 {
@@ -202,7 +198,6 @@ export function parseProjectTemplateSourceProvenance(
     || parsedSource.repo !== repo
     || parsedSource.repositoryUrl !== repositoryUrl
     || parsedSource.ref !== requestedRef
-    || normalizeTagRef(requestedRef) !== releaseTag
   ) {
     validationError(
       'INVALID_SOURCE',
