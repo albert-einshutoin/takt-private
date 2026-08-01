@@ -271,6 +271,28 @@ describe('companion lock rollback current-state guard', () => {
     })).resolves.toEqual({ status: 'rolled-back' });
   });
 
+  it('accepts 32 MiB of template content plus companion evidence', async () => {
+    const entries = [
+      ...largeCohortEntries(32),
+      {
+        target: { kind: 'content-lock' as const }, action: 'update' as const,
+        before: 'x', after: 'new-lock', current: 'after' as const,
+      },
+    ];
+    const value = await recoveryFixture({
+      completedOperations: [
+        ...entries.slice(0, -1).map((entry) => (
+          `entry:${(entry.target as { path: string }).path}`
+        )),
+        'content-lock',
+      ],
+      entries,
+    });
+    await expect(recoverProjectTemplateCompanionLockTransaction({
+      projectRoot: value.projectRoot,
+    })).resolves.toEqual({ status: 'rolled-back' });
+  });
+
   it('blocks 32 MiB plus one byte without mutation and retains evidence', async () => {
     const entries = largeCohortEntries(32, 1);
     const value = await recoveryFixture({
