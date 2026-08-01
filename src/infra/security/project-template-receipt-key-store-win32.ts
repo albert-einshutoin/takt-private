@@ -6,16 +6,20 @@ import {
   existsSync,
   fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
   openSync,
   readSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
+  type BigIntStats,
 } from 'node:fs';
-import { isAbsolute, join, normalize, resolve } from 'node:path';
+import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import {
   parseProjectTemplateReceiptKeySnapshot,
@@ -84,6 +88,9 @@ export interface Win32ProjectTemplateReceiptKeyStoreIo {
   readonly fsyncDirectory?: (directory: string) => void;
   readonly onHashBuffer?: (buffer: Uint8Array) => void;
   readonly beforeStaleLockQuarantine?: (path: string) => void;
+  readonly openStaleLock?: (path: string) => number;
+  readonly renameStaleLock?: typeof renameSync;
+  readonly linkStaleLock?: typeof linkSync;
 }
 
 export interface Win32ProjectTemplateReceiptKeyStoreOptions {
@@ -546,6 +553,17 @@ interface Win32LockPolicy {
   readonly isProcessAlive: (pid: number) => boolean;
 }
 
+interface Win32LockOwnerRecord {
+  readonly pid: number;
+  readonly createdAtMs: number;
+  readonly token: string;
+}
+
+interface Win32LockObservation {
+  readonly record: Win32LockOwnerRecord;
+  readonly stat: BigIntStats;
+}
+
 function defaultProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -555,87 +573,219 @@ function defaultProcessAlive(pid: number): boolean {
   }
 }
 
-function recoverStaleLock(path: string, policy: Win32LockPolicy): boolean {
-  let fd: number | undefined;
-  let bytes: Buffer | undefined;
+function parseCanonicalWin32LockOwner(
+  bytes: Uint8Array,
+): Win32LockOwnerRecord | undefined {
+  const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8');
+  const parsed = JSON.parse(text) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  const descriptors = Object.getOwnPropertyDescriptors(parsed);
+  if (
+    Reflect.ownKeys(parsed).length !== 3
+    || !('value' in (descriptors['pid'] ?? {}))
+    || !('value' in (descriptors['createdAtMs'] ?? {}))
+    || !('value' in (descriptors['token'] ?? {}))
+  ) return undefined;
+  const pid = descriptors['pid']!.value as unknown;
+  const createdAtMs = descriptors['createdAtMs']!.value as unknown;
+  const token = descriptors['token']!.value as unknown;
+  if (
+    !Number.isSafeInteger(pid)
+    || (pid as number) < 1
+    || typeof createdAtMs !== 'number'
+    || !Number.isFinite(createdAtMs)
+    || createdAtMs < 0
+    || typeof token !== 'string'
+    || !/^[a-f0-9]{32}$/.test(token)
+  ) return undefined;
+  const record = { pid: pid as number, createdAtMs, token };
+  return text === JSON.stringify(record) ? record : undefined;
+}
+
+function sameWin32FileState(before: BigIntStats, after: BigIntStats): boolean {
+  return before.dev === after.dev
+    && before.ino === after.ino
+    && before.size === after.size
+    && before.mode === after.mode
+    && before.uid === after.uid
+    && before.gid === after.gid
+    && before.nlink === after.nlink
+    && before.mtimeNs === after.mtimeNs
+    && before.ctimeNs === after.ctimeNs
+    && before.birthtimeNs === after.birthtimeNs;
+}
+
+function observeStaleWin32Lock(
+  fd: number,
+  path: string,
+  policy: Win32LockPolicy,
+  expected?: Win32LockObservation,
+  afterRename = false,
+): Win32LockObservation | undefined {
+  const initial = fstatSync(fd, { bigint: true });
+  if (
+    !initial.isFile()
+    || initial.nlink !== 1n
+    || initial.size < 1n
+    || initial.size > 512n
+  ) return undefined;
+  const first = Buffer.alloc(Number(initial.size) + 1);
+  const second = Buffer.alloc(Number(initial.size) + 1);
   try {
-    const pathStat = lstatSync(path);
-    if (pathStat.isSymbolicLink() || !pathStat.isFile() || pathStat.nlink !== 1) return false;
-    fd = openSync(path, constants.O_RDONLY);
-    const descriptorStat = fstatSync(fd);
+    const readExact = (buffer: Buffer): number => {
+      let offset = 0;
+      while (offset < buffer.byteLength) {
+        const count = readSync(fd, buffer, offset, buffer.byteLength - offset, offset);
+        if (count === 0) break;
+        offset += count;
+      }
+      return offset;
+    };
+    const firstLength = readExact(first);
+    const secondLength = readExact(second);
+    const finalDescriptor = fstatSync(fd, { bigint: true });
+    const finalPath = lstatSync(path, { bigint: true });
     if (
-      !descriptorStat.isFile()
-      || descriptorStat.nlink !== 1
-      || descriptorStat.dev !== pathStat.dev
-      || descriptorStat.ino !== pathStat.ino
-      || descriptorStat.size < 1
-      || descriptorStat.size > 512
-    ) return false;
-    bytes = Buffer.alloc(descriptorStat.size + 1);
-    let offset = 0;
-    while (offset < bytes.byteLength) {
-      const count = readSync(fd, bytes, offset, bytes.byteLength - offset, offset);
-      if (count === 0) break;
-      offset += count;
-    }
-    const finalDescriptor = fstatSync(fd);
-    const finalPath = lstatSync(path);
-    if (
-      offset !== descriptorStat.size
-      || finalDescriptor.dev !== descriptorStat.dev
-      || finalDescriptor.ino !== descriptorStat.ino
-      || finalDescriptor.size !== descriptorStat.size
-      || finalPath.dev !== descriptorStat.dev
-      || finalPath.ino !== descriptorStat.ino
-    ) return false;
-    const parsed = JSON.parse(bytes.subarray(0, offset).toString('utf8')) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
-    const descriptors = Object.getOwnPropertyDescriptors(parsed);
-    if (
-      Reflect.ownKeys(parsed).length !== 3
-      || !('value' in (descriptors['pid'] ?? {}))
-      || !('value' in (descriptors['createdAtMs'] ?? {}))
-      || !('value' in (descriptors['token'] ?? {}))
-    ) return false;
-    const pid = descriptors['pid']!.value as unknown;
-    const createdAtMs = descriptors['createdAtMs']!.value as unknown;
-    const token = descriptors['token']!.value as unknown;
+      BigInt(firstLength) !== initial.size
+      || firstLength !== secondLength
+      || !timingSafeEqual(
+        first.subarray(0, firstLength),
+        second.subarray(0, secondLength),
+      )
+      || !sameWin32FileState(initial, finalDescriptor)
+      || finalPath.dev !== finalDescriptor.dev
+      || finalPath.ino !== finalDescriptor.ino
+      || finalPath.size !== finalDescriptor.size
+      || finalPath.mode !== finalDescriptor.mode
+      || finalPath.uid !== finalDescriptor.uid
+      || finalPath.gid !== finalDescriptor.gid
+      || finalPath.nlink !== 1n
+      || finalPath.mtimeNs !== finalDescriptor.mtimeNs
+      || finalPath.ctimeNs !== finalDescriptor.ctimeNs
+      || finalPath.birthtimeNs !== finalDescriptor.birthtimeNs
+      || (expected !== undefined && (
+        expected.stat.dev !== finalDescriptor.dev
+        || expected.stat.ino !== finalDescriptor.ino
+        || expected.stat.size !== finalDescriptor.size
+        || expected.stat.mode !== finalDescriptor.mode
+        || expected.stat.uid !== finalDescriptor.uid
+        || expected.stat.gid !== finalDescriptor.gid
+        || expected.stat.nlink !== finalDescriptor.nlink
+        || expected.stat.mtimeNs !== finalDescriptor.mtimeNs
+        || expected.stat.birthtimeNs !== finalDescriptor.birthtimeNs
+        || (!afterRename && expected.stat.ctimeNs !== finalDescriptor.ctimeNs)
+      ))
+    ) return undefined;
+    const record = parseCanonicalWin32LockOwner(second.subarray(0, secondLength));
     const now = policy.now();
     if (
-      !Number.isSafeInteger(pid)
-      || (pid as number) < 1
-      || typeof createdAtMs !== 'number'
+      record === undefined
       || !Number.isFinite(now)
       || now < 0
-      || !Number.isFinite(createdAtMs)
-      || createdAtMs < 0
-      || createdAtMs > now
-      || now - createdAtMs < policy.staleAfterMs
-      || typeof token !== 'string'
-      || !/^[a-f0-9]{32}$/.test(token)
-    ) return false;
+      || record.createdAtMs > now
+      || now - record.createdAtMs < policy.staleAfterMs
+      || (expected !== undefined && (
+        record.pid !== expected.record.pid
+        || record.createdAtMs !== expected.record.createdAtMs
+        || record.token !== expected.record.token
+      ))
+    ) return undefined;
     let alive: boolean;
     try {
-      alive = policy.isProcessAlive(pid as number);
+      alive = policy.isProcessAlive(record.pid);
     } catch {
-      return false;
+      return undefined;
     }
-    if (typeof alive !== 'boolean') return false;
-    if (alive) return false;
-    const beforeUnlink = lstatSync(path);
-    if (
-      beforeUnlink.dev !== descriptorStat.dev
-      || beforeUnlink.ino !== descriptorStat.ino
-      || beforeUnlink.nlink !== 1
-    ) return false;
-    closeSync(fd);
-    fd = undefined;
-    unlinkSync(path);
+    if (typeof alive !== 'boolean' || alive) return undefined;
+    return { record, stat: finalDescriptor };
+  } finally {
+    first.fill(0);
+    second.fill(0);
+  }
+}
+
+function restoreQuarantinedWin32Lock(
+  quarantinePath: string,
+  lockPath: string,
+  io: Win32ProjectTemplateReceiptKeyStoreIo | undefined,
+): boolean {
+  try {
+    // A hard-link create is the Node/NTFS no-clobber primitive: it restores the
+    // raced owner only when no newer process already recreated the lock path.
+    (io?.linkStaleLock ?? linkSync)(quarantinePath, lockPath);
+    unlinkSync(quarantinePath);
     return true;
   } catch {
     return false;
+  }
+}
+
+function quarantineAndRemoveStaleWin32Lock(
+  lockPath: string,
+  fd: number,
+  observation: Win32LockObservation,
+  policy: Win32LockPolicy,
+  io: Win32ProjectTemplateReceiptKeyStoreIo | undefined,
+): boolean {
+  const quarantineDirectory = mkdtempSync(join(
+    dirname(lockPath),
+    `.keyring.lock.stale-${observation.record.token}-`,
+  ));
+  const quarantinePath = join(quarantineDirectory, 'owner');
+  let moved = false;
+  try {
+    // Node does not expose Windows rename-with-no-replace directly. A fresh
+    // same-directory private directory guarantees an absent destination while
+    // retaining an atomic same-volume move. EPERM/share-delete failures remain
+    // fail-closed and leave the canonical owner untouched.
+    (io?.renameStaleLock ?? renameSync)(lockPath, quarantinePath);
+    moved = true;
+    const quarantined = observeStaleWin32Lock(
+      fd,
+      quarantinePath,
+      policy,
+      observation,
+      true,
+    );
+    if (quarantined === undefined) {
+      if (restoreQuarantinedWin32Lock(quarantinePath, lockPath, io)) moved = false;
+      return false;
+    }
+    unlinkSync(quarantinePath);
+    moved = false;
+    return true;
   } finally {
-    bytes?.fill(0);
+    if (!moved) rmdirSync(quarantineDirectory);
+  }
+}
+
+function recoverStaleLock(
+  path: string,
+  policy: Win32LockPolicy,
+  io: Win32ProjectTemplateReceiptKeyStoreIo | undefined,
+): boolean {
+  let fd: number | undefined;
+  try {
+    const pathStat = lstatSync(path);
+    if (pathStat.isSymbolicLink() || !pathStat.isFile() || pathStat.nlink !== 1) return false;
+    // libuv opens Windows files with share-delete support. Keeping this seam
+    // explicit lets native Windows contract tests model a filesystem/provider
+    // that rejects rename while the descriptor is held.
+    fd = (io?.openStaleLock ?? ((lockPath) => openSync(
+      lockPath,
+      constants.O_RDONLY,
+    )))(path);
+    const descriptorStat = fstatSync(fd);
+    if (descriptorStat.dev !== pathStat.dev || descriptorStat.ino !== pathStat.ino) return false;
+    const observation = observeStaleWin32Lock(fd, path, policy);
+    if (observation === undefined) return false;
+    io?.beforeStaleLockQuarantine?.(path);
+    const revalidated = observeStaleWin32Lock(fd, path, policy, observation);
+    if (revalidated === undefined) return false;
+    return quarantineAndRemoveStaleWin32Lock(path, fd, revalidated, policy, io);
+  } catch {
+    return false;
+  } finally {
     if (fd !== undefined) closeSync(fd);
   }
 }
@@ -643,6 +793,7 @@ function recoverStaleLock(path: string, policy: Win32LockPolicy): boolean {
 async function acquireLock(
   path: string,
   policy: Win32LockPolicy,
+  io: Win32ProjectTemplateReceiptKeyStoreIo | undefined,
 ): Promise<Win32OwnedLock> {
   for (let attempt = 0; attempt < policy.attempts; attempt += 1) {
     let fd: number | undefined;
@@ -677,7 +828,7 @@ async function acquireLock(
         releaseOwnedLock(path, openedOwnership, false);
       } else if (fd !== undefined) closeSync(fd);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (!recoverStaleLock(path, policy)) {
+      if (!recoverStaleLock(path, policy, io)) {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, policy.waitMs));
       }
     }
@@ -784,7 +935,7 @@ export function createWin32ProjectTemplateReceiptKeyStore(
   ): Promise<T> {
     if (disposed) throw failure('Key store is disposed');
     validateDirectory(directory);
-    const ownedLock = await acquireLock(lockPath, leasePolicy);
+    const ownedLock = await acquireLock(lockPath, leasePolicy, options.io);
     let snapshot: ProjectTemplateReceiptKeySnapshot | undefined;
     try {
       snapshot = await readSnapshot(registryPath, dpapi, options.io);

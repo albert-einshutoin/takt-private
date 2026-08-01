@@ -495,6 +495,49 @@ describe('Windows project template receipt key store', () => {
     expect(readFileSync(otherQuarantine, 'utf8')).toBe(staleRecord);
   });
 
+  it('keeps the canonical lock when Windows sharing rejects quarantine rename', async () => {
+    const directory = join(root(), 'keys');
+    const healthy = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+    });
+    await healthy.write(registry());
+    const lockPath = join(directory, '.keyring.lock');
+    const staleRecord = JSON.stringify({
+      pid: 424242,
+      createdAtMs: 1,
+      token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    });
+    writeFileSync(lockPath, staleRecord, { mode: 0o600 });
+    let openedWithShareDeleteSeam = false;
+    const store = createWin32ProjectTemplateReceiptKeyStore({
+      directory,
+      dpapi: reversibleDpapi(),
+      io: {
+        openStaleLock(path) {
+          openedWithShareDeleteSeam = true;
+          return openSync(path, 'r');
+        },
+        renameStaleLock() {
+          const error = new Error('sharing violation') as NodeJS.ErrnoException;
+          error.code = 'EPERM';
+          throw error;
+        },
+      },
+      leasePolicy: {
+        attempts: 2,
+        waitMs: 1,
+        staleAfterMs: 100,
+        now: () => 1_000,
+        isProcessAlive: () => false,
+      },
+    });
+
+    await expect(store.read()).rejects.toThrow(/lease is unavailable/i);
+    expect(openedWithShareDeleteSeam).toBe(true);
+    expect(readFileSync(lockPath, 'utf8')).toBe(staleRecord);
+  });
+
   it('rejects same-size in-place DPAPI ciphertext changes', async () => {
     const directory = join(root(), 'keys');
     const healthy = createWin32ProjectTemplateReceiptKeyStore({
