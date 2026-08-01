@@ -126,6 +126,8 @@ export {
   rollbackProjectTemplateApply,
   canonicalizeTaktpackJson,
   PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
+  PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES,
+  parseProjectTemplateCliEnvelopeJson,
   parseProjectTemplateCliMutationOptions,
   presentProjectTemplateCliEnvelope,
   TAKTPACK_ENTRY_NAMES,
@@ -271,6 +273,9 @@ export type {
   ProjectTemplateCliMode,
   ProjectTemplateCliMutationOptions,
   ProjectTemplateCliResult,
+  ProjectTemplateCliReadiness,
+  ProjectTemplateCliRecoveryState,
+  ProjectTemplateCliReviewCode,
   ProjectTemplateCliApplyOptions,
   ProjectTemplateCliDryRunOptions,
 } from './features/project-template/index.js';

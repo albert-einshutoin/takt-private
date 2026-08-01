@@ -14,13 +14,32 @@ const HASH = 'a'.repeat(64);
 
 describe('project template CLI independent review hardening', () => {
   it.each([
-    ['project-template export', { planId: HASH, packId: HASH, entryCount: 2, byteLength: 512 }],
-    ['project-template inspect', { packId: HASH, entryCount: 2, valid: true }],
-    ['project-template diff', { planId: HASH, changeCount: 2, conflictCount: 0 }],
-    ['project-template apply', { planId: HASH, applied: true }],
-    ['project-template update', { planId: HASH, updateAvailable: true }],
-    ['project-template rollback', { planId: HASH, rolledBack: true }],
-    ['project-template list', { installed: true, targetId: 'team.default', backupIds: ['backup-1'] }],
+    ['project-template export', {
+      planId: HASH, packId: HASH, entryCount: 2, archiveBytes: 512,
+      dependencyCount: 1, readiness: 'ready', reviewCodes: [],
+    }],
+    ['project-template inspect', {
+      packId: HASH, entryCount: 2, archiveBytes: 512, dependencyCount: 1,
+      readiness: 'ready', reviewCodes: [],
+    }],
+    ['project-template diff', {
+      planId: HASH, changeCount: 2, conflictCount: 0, dependencyCount: 1,
+      readiness: 'ready', reviewCodes: [],
+    }],
+    ['project-template apply', {
+      planId: HASH, applied: true, backupId: 'backup-1', recoveryState: 'clean',
+    }],
+    ['project-template update', {
+      planId: HASH, updateAvailable: true, dependencyCount: 1,
+      readiness: 'ready', reviewCodes: [],
+    }],
+    ['project-template rollback', {
+      planId: HASH, rolledBack: true, backupId: 'backup-1', recoveryState: 'clean',
+    }],
+    ['project-template list', {
+      installed: true, targetId: 'team.default', backupIds: ['backup-1'],
+      recoveryState: 'clean',
+    }],
   ] as const)('accepts the closed success DTO for %s', (command, result) => {
     expect(createProjectTemplateCliSuccess({
       command,
@@ -54,13 +73,19 @@ describe('project template CLI independent review hardening', () => {
     expect(() => createProjectTemplateCliSuccess({
       command: 'project-template inspect',
       mode: 'dry-run',
-      result: { packId: HASH, entryCount: 1, valid: true },
+      result: {
+        packId: HASH, entryCount: 1, archiveBytes: 1, dependencyCount: 0,
+        readiness: 'ready', reviewCodes: [],
+      },
       warnings: [{ code: 'PROVIDER_WARNING' }],
     })).toThrow(ProjectTemplateCliContractError);
   });
 
   it('rejects duplicate or excessive warnings and unknown schema versions', () => {
-    const result = { packId: HASH, entryCount: 1, valid: true };
+    const result = {
+      packId: HASH, entryCount: 1, archiveBytes: 1, dependencyCount: 0,
+      readiness: 'ready' as const, reviewCodes: [],
+    };
     expect(() => createProjectTemplateCliSuccess({
       command: 'project-template inspect',
       mode: 'dry-run',
@@ -104,7 +129,7 @@ describe('project template CLI independent review hardening', () => {
     const envelope = createProjectTemplateCliSuccess({
       command: 'project-template list',
       mode: 'dry-run',
-      result: { installed: false, backupIds: ['backup-1'] },
+      result: { installed: false, backupIds: ['backup-1'], recoveryState: 'clean' },
     });
 
     expect(Object.isFrozen(envelope)).toBe(true);
@@ -142,7 +167,9 @@ describe('project template CLI independent review hardening', () => {
         envelope: createProjectTemplateCliSuccess({
           command: 'project-template list',
           mode: 'dry-run',
-          result: { installed: false, backupIds: ['backup-1'] },
+          result: {
+            installed: false, backupIds: ['backup-1'], recoveryState: 'clean',
+          },
         }),
         exitCode: 0,
       }),
@@ -163,7 +190,7 @@ describe('project template CLI independent review hardening', () => {
         envelope: createProjectTemplateCliSuccess({
           command: 'project-template list',
           mode: 'dry-run',
-          result: { installed: false, backupIds: [] },
+          result: { installed: false, backupIds: [], recoveryState: 'clean' },
         }),
         exitCode: 0,
       }),

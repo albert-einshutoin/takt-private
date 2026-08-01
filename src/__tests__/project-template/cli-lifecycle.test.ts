@@ -93,7 +93,12 @@ describe('project template CLI lifecycle', () => {
           envelope: createProjectTemplateCliSuccess({
             command: 'project-template apply',
             mode: 'apply',
-            result: { planId: PLAN_ID, applied: true },
+            result: {
+              planId: PLAN_ID,
+              applied: true,
+              backupId: 'backup-1',
+              recoveryState: 'clean',
+            },
           }),
           exitCode: 0,
         };
@@ -162,7 +167,12 @@ describe('project template CLI lifecycle', () => {
           envelope: createProjectTemplateCliSuccess({
             command: 'project-template apply',
             mode: 'apply',
-            result: { planId: PLAN_ID, applied: true },
+            result: {
+              planId: PLAN_ID,
+              applied: true,
+              backupId: 'backup-1',
+              recoveryState: 'clean',
+            },
           }),
           exitCode: 0,
         };
@@ -205,7 +215,12 @@ describe('project template CLI lifecycle', () => {
           envelope: createProjectTemplateCliSuccess({
             command: 'project-template apply',
             mode: 'apply',
-            result: { planId: PLAN_ID, applied: true },
+            result: {
+              planId: PLAN_ID,
+              applied: true,
+              backupId: 'backup-1',
+              recoveryState: 'clean',
+            },
           }),
           exitCode: 0,
         };

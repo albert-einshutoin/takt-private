@@ -16,11 +16,18 @@ describe('project template CLI machine contract', () => {
     const envelope = createProjectTemplateCliSuccess({
       command: 'project-template inspect',
       mode: 'dry-run',
-      result: { packId: PLAN_ID, entryCount: 0, valid: true },
+      result: {
+        packId: PLAN_ID,
+        entryCount: 0,
+        archiveBytes: 0,
+        dependencyCount: 0,
+        readiness: 'ready',
+        reviewCodes: [],
+      },
     });
 
     expect(presentProjectTemplateCliEnvelope(envelope)).toBe(
-      `{"command":"project-template inspect","mode":"dry-run","result":{"entryCount":0,"packId":"${PLAN_ID}","valid":true},"schemaVersion":"1.0","status":"success","warnings":[]}\n`,
+      `{"command":"project-template inspect","mode":"dry-run","result":{"archiveBytes":0,"dependencyCount":0,"entryCount":0,"packId":"${PLAN_ID}","readiness":"ready","reviewCodes":[]},"schemaVersion":"1.0","status":"success","warnings":[]}\n`,
     );
     expect(presentProjectTemplateCliEnvelope(envelope).split('\n')).toHaveLength(2);
   });
@@ -166,7 +173,14 @@ describe('project template CLI machine contract', () => {
       envelope: createProjectTemplateCliSuccess({
         command: 'project-template inspect',
         mode: 'dry-run',
-        result: { packId: PLAN_ID, entryCount: 0, valid: true },
+        result: {
+          packId: PLAN_ID,
+          entryCount: 0,
+          archiveBytes: 0,
+          dependencyCount: 0,
+          readiness: 'ready',
+          reviewCodes: [],
+        },
       }),
       exitCode: 0 as const,
     };

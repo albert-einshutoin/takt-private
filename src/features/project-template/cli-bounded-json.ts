@@ -254,3 +254,17 @@ export function snapshotProjectTemplateCliJson(value: unknown): unknown {
   }
   return snapshot;
 }
+
+export function parseProjectTemplateCliJson(text: unknown): unknown {
+  if (
+    typeof text !== 'string'
+    || utf8Bytes(text) > PROJECT_TEMPLATE_CLI_JSON_LIMITS.maxBytes
+  ) invalidGraph();
+  let parsed: unknown;
+  try {
+    parsed = apply(CAPTURED_JSON_PARSE, CAPTURED_JSON_RECEIVER, [text]);
+  } catch {
+    invalidGraph();
+  }
+  return snapshotProjectTemplateCliJson(parsed);
+}

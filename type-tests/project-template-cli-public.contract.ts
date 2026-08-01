@@ -40,9 +40,9 @@ presentProjectTemplateCliEnvelope(envelope);
 if (envelope.status === 'success') {
   if (envelope.command === 'project-template inspect') {
     const mode: 'dry-run' = envelope.mode;
-    const valid: boolean = envelope.result.valid;
+    const archiveBytes: number = envelope.result.archiveBytes;
     void mode;
-    void valid;
+    void archiveBytes;
   }
   if (envelope.command === 'project-template apply') {
     if (envelope.mode === 'apply') {

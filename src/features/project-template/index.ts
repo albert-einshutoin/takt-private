@@ -109,10 +109,12 @@ export type {
 export { canonicalizeTaktpackJson } from './canonical-json.js';
 export {
   PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
+  PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES,
   ProjectTemplateCliContractError,
   createProjectTemplateCliFailure,
   createProjectTemplateCliSuccess,
   parseProjectTemplateCliMutationOptions,
+  parseProjectTemplateCliEnvelopeJson,
   presentProjectTemplateCliEnvelope,
   projectTemplateCliExitCodeForErrorCode,
   writeProjectTemplateCliOutcome,
@@ -133,6 +135,10 @@ export type {
   ProjectTemplateCliWarningCode,
   ProjectTemplateCliDryRunOptions,
   ProjectTemplateCliResult,
+  ProjectTemplateCliReadiness,
+  ProjectTemplateCliRecoveryState,
+  ProjectTemplateCliReviewCode,
+  ProjectTemplateCliSuccessInput,
 } from './cli-machine-contract.js';
 export { startProjectTemplateCliLifecycle } from './cli-lifecycle.js';
 export type {
