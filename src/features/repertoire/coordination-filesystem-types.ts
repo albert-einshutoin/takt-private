@@ -35,6 +35,41 @@ export interface CoordinationIdentityPolicy {
   identityDigest(identity: CoordinationIdentity): string;
 }
 
+export type CoordinationFileObservation = {
+  readonly identity: CoordinationIdentity;
+  readonly digest: string;
+  readonly kind: 'file' | 'directory' | 'other';
+  readonly linkCount: number;
+  readonly size: number;
+};
+
+export type CoordinationStableFile = {
+  readonly bytes: Buffer;
+  readonly identity: CoordinationIdentity;
+  readonly digest: string;
+};
+
+export type CoordinationStableDirectory = {
+  readonly entries: readonly string[];
+  readonly digest: string;
+};
+
+export interface CoordinationFilesystemPolicy extends CoordinationIdentityPolicy {
+  preflightRoot(path: string): CoordinationDirectoryAuthority;
+  ensurePrivateDirectory(path: string): void;
+  assertDirectory(path: string): void;
+  listStable(path: string): CoordinationStableDirectory;
+  createStagedExclusiveFile(path: string, bytes: Buffer): CoordinationStableFile;
+  readStableFile(path: string, maximumBytes: number): CoordinationStableFile;
+  statPath(path: string, maximumBytes: number): CoordinationFileObservation | undefined;
+  linkNoReplace(source: string, destination: string): void;
+  unlinkOwned(path: string, identity: CoordinationIdentity): void;
+  renameOwned(source: string, destination: string, identity: CoordinationIdentity): void;
+  syncDirectory(path: string): void;
+  sameObject(left: CoordinationFileObservation, right: CoordinationFileObservation): boolean;
+  sameStableFile(left: CoordinationFileObservation, right: CoordinationFileObservation): boolean;
+}
+
 /** Identity operations stay platform-owned so bigint evidence is never coerced. */
 export function createCoordinationIdentityPolicy(
   kind: CoordinationIdentity['kind'],
