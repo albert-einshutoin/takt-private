@@ -106,6 +106,30 @@ describe('workflow retry generation witness', () => {
     expect(resolve(pinnedRight!, 'leaf', 'call-0')).toBe(rightLeaf);
   });
 
+  it('returns one canonical child for memoized DAG objects so every edge resolves grandchildren', () => {
+    const root = callWorkflow('root', ['left', 'right']);
+    const left = callWorkflow('shared', ['leaf']);
+    const right = callWorkflow('shared', ['leaf']);
+    const leaf = agentWorkflow('leaf');
+    mockResolveWorkflowCallTarget.mockImplementation((
+      parent: WorkflowConfig,
+      identifier: string,
+    ) => {
+      if (parent === root) return identifier === 'left' ? left : right;
+      if (parent === left || parent === right) return leaf;
+      return null;
+    });
+
+    const snapshot = buildWorkflowGenerationSnapshot(root, '/project', '/project', readContext);
+    const resolve = bindWorkflowGenerationSnapshot(snapshot, root);
+    const pinnedLeft = resolve(root, 'left', 'call-0');
+    const pinnedRight = resolve(root, 'right', 'call-1');
+
+    expect(pinnedRight).toBe(pinnedLeft);
+    expect(resolve(pinnedLeft!, 'leaf', 'call-0')).toBe(leaf);
+    expect(resolve(pinnedRight!, 'leaf', 'call-0')).toBe(leaf);
+  });
+
   it('rejects forged and disposed run snapshots with the stable discovery taxonomy', () => {
     const root = callWorkflow('root', ['child']);
     const child = agentWorkflow('child');

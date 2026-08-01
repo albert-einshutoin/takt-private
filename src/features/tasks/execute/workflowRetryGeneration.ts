@@ -90,6 +90,7 @@ export function buildWorkflowGenerationSnapshot(
     steps: 0,
     bytes: 0,
     memo: new Map(),
+    canonicalWorkflows: new WeakMap(),
     edges: new WeakMap(),
   };
   const tree = captureWorkflowTree(workflow, projectCwd, lookupCwd, readContext, [], 1, state);
@@ -258,7 +259,8 @@ interface TraversalState {
   nodes: number;
   steps: number;
   bytes: number;
-  memo: Map<string, number>;
+  memo: Map<string, WorkflowMemoEntry>;
+  canonicalWorkflows: WeakMap<WorkflowConfig, WorkflowConfig>;
   edges: WeakMap<WorkflowConfig, Map<string, PinnedWorkflowEdge>>;
 }
 
@@ -277,6 +279,12 @@ interface WorkflowGenerationSnapshotState {
 interface WorkflowAncestor {
   readonly reference: string;
   readonly id: number;
+  readonly workflow: WorkflowConfig;
+}
+
+interface WorkflowMemoEntry {
+  readonly id: number;
+  readonly workflow: WorkflowConfig;
 }
 
 function captureWorkflowTree(
@@ -294,6 +302,7 @@ function captureWorkflowTree(
   const reference = getWorkflowReference(workflow);
   const cycleTarget = ancestors.find((ancestor) => ancestor.reference === reference);
   if (cycleTarget) {
+    state.canonicalWorkflows.set(workflow, cycleTarget.workflow);
     return { cycle: cycleTarget.id };
   }
   const canonicalWorkflow = JSON.stringify(canonicalize(workflow));
@@ -301,16 +310,23 @@ function captureWorkflowTree(
   if (state.bytes > MAX_WORKFLOW_GENERATION_BYTES) throw new WorkflowDiscoveryReadError();
   const workflowHash = createHash('sha256').update(canonicalWorkflow).digest('hex');
   const memoKey = `${reference}\0${workflowHash}`;
-  const memoId = state.memo.get(memoKey);
-  if (memoId !== undefined) return { memo: memoId };
+  const memoEntry = state.memo.get(memoKey);
+  if (memoEntry) {
+    // Different loader objects may describe the same memoized DAG node. Every
+    // incoming edge must return the already-captured object whose child edges
+    // are present in the WeakMap, otherwise only the first path is callable.
+    state.canonicalWorkflows.set(workflow, memoEntry.workflow);
+    return { memo: memoEntry.id };
+  }
   state.nodes += 1;
   state.steps += workflow.steps.length;
   if (state.nodes > MAX_WORKFLOW_GENERATION_NODES || state.steps > MAX_WORKFLOW_GENERATION_STEPS) {
     throw new WorkflowDiscoveryReadError();
   }
   const id = state.nodes;
-  state.memo.set(memoKey, id);
-  const nextAncestors = [...ancestors, { reference, id }];
+  state.memo.set(memoKey, { id, workflow });
+  state.canonicalWorkflows.set(workflow, workflow);
+  const nextAncestors = [...ancestors, { reference, id, workflow }];
   const children: unknown[] = [];
   for (const step of workflow.steps) {
     if (!isWorkflowCallStep(step)) continue;
@@ -342,7 +358,7 @@ function captureWorkflowTree(
       workflow,
       step.name,
       step.call,
-      child,
+      requireCanonicalWorkflow(state.canonicalWorkflows, child),
     );
     children.push({
       step: step.name,
@@ -358,6 +374,15 @@ function captureWorkflowTree(
     trust: getPortableWorkflowTrust(workflow, projectCwd),
     children,
   };
+}
+
+function requireCanonicalWorkflow(
+  canonicalWorkflows: WeakMap<WorkflowConfig, WorkflowConfig>,
+  workflow: WorkflowConfig,
+): WorkflowConfig {
+  const canonical = canonicalWorkflows.get(workflow);
+  if (!canonical) throw new WorkflowDiscoveryReadError();
+  return canonical;
 }
 
 function getPortableWorkflowTrust(workflow: WorkflowConfig, projectCwd: string) {
