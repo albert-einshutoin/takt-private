@@ -52,6 +52,7 @@ describe('project template remote CLI service', () => {
           planId: PLAN_ID, changeCount: 2, conflictCount: 0, dependencyCount: 1,
           readiness: 'ready', reviewCodes: [],
         },
+        warnings: [],
       },
     });
     expect(JSON.stringify(outcome)).not.toMatch(
