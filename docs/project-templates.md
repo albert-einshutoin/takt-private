@@ -350,8 +350,29 @@ its running record becomes stale and requires the existing explicit recovery
 flow; TAKT does not expire it by time alone or guess that a long copy is
 abandoned.
 
+Remote GitHub previews reopen a signed receipt by `receiptKey` and work
+offline: the receipt HMAC, cache path identity, archive digest, canonical USTAR
+layout, manifest, and dependency-ref verification evidence are checked again.
+Only manifest-addressed blobs are retained in bounded memory. Receipt file
+authority is consumed before target or installed-repertoire inspection, and a
+preview carries no cache path, credential, receipt key, timestamp, or apply
+authority. Apply must therefore perform a fresh receipt/cache read.
+
+Portable installs commit three companion locks as one cohort:
+`.takt-template-lock.json`, `.takt-template-repertoire-lock.json`, and
+`.takt-template-source-lock.json`. Preview accepts only all-absent first install
+or all-present update state. Mixed, noncanonical, unreadable, symlinked,
+hardlinked, or special-file state is blocked. The source lock records canonical
+repository/ref/tag/commit, archive/manifest/descriptor hashes, version, and
+dependency-verification digest only. Repository changes, version downgrades,
+and a tag resolving to a different commit are hard conflicts. One
+domain-separated `transactionPlanId` binds the content, dependency, and source
+plans; current and next three-lock hashes; target preconditions; baseline
+strategy; and authenticated receipt provenance. Approval explicitly binds both
+`previewId` and `transactionPlanId` and remains TTL-limited and single-use.
+
 Apply stages and validates every output before changing `.takt/`. The formal
-lock is stored at `.takt-template-lock.json`. Private staging, journal, and
+content lock is stored at `.takt-template-lock.json`. Private staging, journal, and
 bounded backup generations live under `.takt-template-state/`, which must be
 ignored by Git and is created with owner-only permissions. Every control root
 contains a private `*` `.gitignore`, preventing backup data from entering

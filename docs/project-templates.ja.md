@@ -294,7 +294,26 @@ coordination mirrorをdurableに公開した後でpreparation recordをterminal�
 予期せず停止した場合、running recordはstaleとなり、既存の明示的なrecovery flowを
 必要とします。長時間のcopyを放棄と推測して時間だけで自動解除することはありません。
 
-applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を変更します。正式lock
+GitHub remote previewは`receiptKey`から署名済みreceiptをofflineで開き直し、receipt
+HMAC、cache path identity、archive digest、canonical USTAR、manifest、dependency refの
+検証証拠を再確認します。bounded memoryへ保持するのはmanifestが参照するblobだけです。
+receiptのfile authorityはtargetやinstall済みrepertoireを調べる前に消費され、previewへ
+cache path、credential、receipt key、timestamp、apply authorityを残しません。そのため
+apply時にはreceipt/cacheを必ずfresh readします。
+
+portable installは`.takt-template-lock.json`、
+`.takt-template-repertoire-lock.json`、`.takt-template-source-lock.json`の
+3 companion lockを1 cohortとして扱います。previewが許可するのは全absentのfirst install
+または全presentのupdateだけです。mixed、noncanonical、unreadable、symlink、hardlink、
+special fileはfail-closedで拒否します。source lockへ保存するのはcanonicalな
+repository/ref/tag/commit、archive/manifest/descriptor hash、version、dependency verification
+digestだけで、credential、absolute path、receipt key、timestampは保存しません。
+repository変更、version downgrade、同じtagが別commitを指すrepublishはhard conflictです。
+domain-separatedな`transactionPlanId`がcontent/dependency/source plan、現在と次の3 lock、
+target precondition、baseline strategy、認証済みreceipt provenanceを結びます。approvalは
+`previewId`と`transactionPlanId`を明示的にbindし、TTL付きsingle-useを維持します。
+
+applyは全outputをsecure stagingへ生成・再検証してから`.takt/`を変更します。正式content lock
 は`.takt-template-lock.json`、privateなstaging・journal・世代数を制限したbackupは
 `.takt-template-state/`へ保存します。後者はGit ignore対象かつowner-only permission
 です。各control root自身にも`*`のprivate `.gitignore`を生成するため、任意の適用先で
