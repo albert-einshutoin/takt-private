@@ -61,6 +61,9 @@ import {
 import {
   calculateProjectTemplateRepertoireDependencyDeclarationSha256,
 } from '../../features/project-template/repertoire-dependency-canonical.js';
+import {
+  issueTrustedProjectTemplateApplyPreviewApproval,
+} from '../../features/project-template/apply-preview-approval.js';
 
 const roots: string[] = [];
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
@@ -635,5 +638,113 @@ describe('GitHub project template remote transaction apply facade', () => {
       code: 'PROJECT_TEMPLATE_COORDINATION_UNAVAILABLE',
     });
     expect(inspections).toBe(0);
+  });
+
+  it('accepts only the original process-local approval and leaves it active after clone rejection', async () => {
+    const value = await storedFixture();
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    expect(preview.reviewRequired).toBe(true);
+    expect(preview.hardConflict).toBe(false);
+    const approval = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot: value.projectRoot,
+      preview,
+      baselineStrategy: 'conflict',
+    });
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: inspectionPort(),
+    });
+    const options = {
+      ...publicOptions(value.cacheRoot, value.projectRoot),
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: preview.transactionPlanId,
+    };
+
+    await expect(composition.apply({
+      ...options,
+      approvalEvidence: { ...approval },
+    } as never)).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+    await expect(composition.apply({
+      ...options,
+      approvalEvidence: approval,
+    } as never)).rejects.toMatchObject({
+      code: 'TRUSTED_INFRASTRUCTURE_UNAVAILABLE',
+    });
+  });
+
+  it('rejects an expired original approval before execution', async () => {
+    const value = await storedFixture();
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    const approval = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot: value.projectRoot,
+      preview,
+      baselineStrategy: 'conflict',
+      now: new Date('2020-01-01T00:00:00.000Z'),
+      expiresInMs: 1,
+    });
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: inspectionPort(),
+    });
+
+    await expect(composition.apply({
+      ...publicOptions(value.cacheRoot, value.projectRoot),
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: preview.transactionPlanId,
+      approvalEvidence: approval,
+    } as never)).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+  });
+
+  it('reserves one concurrent approval consumer and burns it after a post-consume failure', async () => {
+    const value = await storedFixture();
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    const approval = await issueTrustedProjectTemplateApplyPreviewApproval({
+      projectRoot: value.projectRoot,
+      preview,
+      baselineStrategy: 'conflict',
+    });
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: inspectionPort(),
+    });
+    const options = {
+      ...publicOptions(value.cacheRoot, value.projectRoot),
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: preview.transactionPlanId,
+      approvalEvidence: approval,
+    };
+
+    const concurrent = await Promise.allSettled([
+      composition.apply(options as never),
+      composition.apply(options as never),
+    ]);
+    expect(concurrent.every((result) => result.status === 'rejected')).toBe(true);
+    await expect(composition.apply(options as never)).rejects.toMatchObject({
+      code: 'APPROVAL_INVALID',
+    });
   });
 });
