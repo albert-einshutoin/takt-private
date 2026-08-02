@@ -322,6 +322,33 @@ describe('instruction-builder', () => {
       );
     });
 
+    it.each([
+      ['explicit placeholder', 'Synthesize: {previous_response}'],
+      ['auto-injected section', 'Synthesize all reviews'],
+    ])('should enforce the byte cap after escaping braces in the %s path', (
+      _path,
+      instruction,
+    ) => {
+      const step = createMinimalStep(instruction);
+      step.passPreviousResponse = true;
+      step.previousResponseMaxBytes = 100;
+      step.previousResponseOverflow = 'error';
+      const context = createMinimalContext({
+        previousOutput: {
+          persona: 'reviewers',
+          status: 'done',
+          // Raw input is 100 bytes. Escaping produces 100 full-width braces,
+          // which are 300 UTF-8 bytes in the exact body delivered to provider.
+          content: '{'.repeat(100),
+          timestamp: new Date(),
+        },
+      });
+
+      expect(() => buildInstruction(step, context)).toThrow(
+        'Previous Response exceeds the configured 100 byte limit.',
+      );
+    });
+
     it('should inject required truncated warning and source path for knowledge/policy', () => {
       const step = createMinimalStep('Do work');
       const longKnowledge = 'k'.repeat(2200);

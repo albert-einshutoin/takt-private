@@ -106,6 +106,17 @@ describe('replaceTemplatePlaceholders', () => {
     expect(result).toBe('Previous: processed previous output');
   });
 
+  it('should insert an already escaped previous response without escaping it twice', () => {
+    const step = makeStep({ passPreviousResponse: true });
+    const ctx = makeInstructionContext({
+      previousResponseEscapedText: 'escaped ｛review｝',
+    });
+
+    const result = replaceTemplatePlaceholders('Previous: {previous_response}', step, ctx);
+
+    expect(result).toBe('Previous: escaped ｛review｝');
+  });
+
   it('should replace {previous_response} with empty string when no previous output', () => {
     const step = makeStep({ passPreviousResponse: true });
     const ctx = makeInstructionContext();
