@@ -31,6 +31,26 @@ function declaredRootCommands(text: string, file: typeof completionFiles[number]
   return match[1].trim().split(/\s+/u);
 }
 
+function executeBashCompletion(words: string, current: number): string {
+  return execFileSync('bash', ['-c', [
+    'source bin/completions/takt.bash',
+    `COMP_WORDS=${words}`,
+    `COMP_CWORD=${String(current)}`,
+    '_takt_project_template',
+    'printf "%s\\n" "${COMPREPLY[@]}"',
+  ].join('; ')], { encoding: 'utf8' });
+}
+
+function executeZshCompletion(words: string, current: number): string {
+  return execFileSync('zsh', ['-c', [
+    '_values() { shift; print -l -- "$@"; }',
+    '_describe() { local array_name=$2; eval "print -l -- \\${${array_name}[@]}"; }',
+    `words=${words}`,
+    `CURRENT=${String(current)}`,
+    'source bin/completions/_takt',
+  ].join('; ')], { encoding: 'utf8' });
+}
+
 describe('project-template shell completions', () => {
   for (const file of completionFiles) {
     it(`${file} exposes the deterministic seven-command option contract`, () => {
@@ -106,6 +126,70 @@ describe('project-template shell completions', () => {
   );
 
   it.each([
+    ['reset', 'categories'],
+    ['workflow', 'doctor'],
+    ['metrics', 'review'],
+    ['repertoire', 'remove'],
+  ] as const)(
+    'fails closed for bash %s completion after trailing unknown options',
+    (group, child) => {
+      expect(executeBashCompletion(`(takt ${group} -x "")`, 3)).not.toContain(child);
+      expect(executeBashCompletion(`(takt ${group} --mystery "")`, 3)).not.toContain(child);
+    },
+  );
+
+  it('parses bash project-template group options and delimiters before the child', () => {
+    expect(executeBashCompletion('(takt project-template --cwd /work "")', 4)).toContain('rollback');
+    expect(executeBashCompletion('(takt project-template --cwd=/work "")', 3)).toContain('rollback');
+    expect(executeBashCompletion('(takt project-template --json "")', 3)).toContain('rollback');
+    expect(executeBashCompletion('(takt project-template -x rollback "")', 4)).not.toContain('--force');
+    expect(executeBashCompletion('(takt project-template --mystery rollback "")', 4)).not.toContain('--force');
+    expect(executeBashCompletion('(takt project-template --help rollback "")', 4)).not.toContain('--force');
+    expect(executeBashCompletion('(takt -- --quiet project-template "")', 4)).not.toContain('rollback');
+    expect(executeBashCompletion('(takt -- project-template "")', 3)).toContain('rollback');
+    expect(executeBashCompletion('(takt -- project-template rollback "")', 4)).not.toContain('--force');
+    expect(executeBashCompletion('(takt -- project-template --cwd /work rollback "")', 6)).not.toContain('--force');
+  });
+
+  it.each(commands)('validates the complete bash %s child prefix', (command) => {
+    const complete = (tokens: readonly string[]): string => executeBashCompletion(
+      `(takt ${tokens.join(' ')} "")`,
+      tokens.length + 1,
+    );
+    expect(complete(['project-template', command, '--mystery'])).not.toContain('--cwd');
+    expect(complete(['project-template', command, '-x'])).not.toContain('--cwd');
+    expect(complete(['project-template', command, '--help'])).not.toContain('--cwd');
+    const excess = command === 'list'
+      ? ['project-template', command, 'unexpected']
+      : ['project-template', command, 'operand', 'extra'];
+    expect(complete(excess)).not.toContain('--cwd');
+    const delimitedExcess = command === 'list'
+      ? ['project-template', command, '--', 'unexpected']
+      : ['project-template', command, '--', 'operand', 'extra'];
+    expect(complete(delimitedExcess)).not.toContain('--cwd');
+    expect(complete(['project-template', command, '--'])).not.toContain('--cwd');
+    expect(complete(['project-template', command, '--cwd', '/work'])).toContain('--json');
+    expect(complete(['project-template', command, '--cwd=/work'])).toContain('--json');
+    expect(complete(['project-template', command, '--json'])).toContain('--cwd');
+  });
+
+  it.each([
+    ['inspect', '--current-takt-version', '0.48.0', '--json'],
+    ['export', '--pack-version', '1.0.0', '--force'],
+    ['diff', '--current-takt-version', '0.48.0', '--json'],
+    ['apply', '--expected-plan-id', 'abc', '--force'],
+    ['update', '--dry-run', '', '--force'],
+    ['rollback', '--expected-plan-id', 'abc', '--force'],
+  ] as const)(
+    'keeps bash %s command options available after known child options',
+    (command, option, value, expected) => {
+      const tokens = ['project-template', command, option, ...(value === '' ? [] : [value])];
+      expect(executeBashCompletion(`(takt ${tokens.join(' ')} "")`, tokens.length + 1))
+        .toContain(expected);
+    },
+  );
+
+  it.each([
     ['boolean short', '-q', true],
     ['attached short value', '-iqfoo', true],
     ['boolean cluster', '-qV', true],
@@ -164,6 +248,70 @@ describe('project-template shell completions', () => {
       );
       expect(complete('-x')).not.toContain(child);
       expect(complete('--mystery')).not.toContain(child);
+    },
+  );
+
+  it.each([
+    ['reset', 'categories'],
+    ['workflow', 'doctor'],
+    ['metrics', 'review'],
+    ['repertoire', 'remove'],
+  ] as const)(
+    'fails closed for zsh %s completion after trailing unknown options',
+    (group, child) => {
+      expect(executeZshCompletion(`(takt ${group} -x "")`, 4)).not.toContain(child);
+      expect(executeZshCompletion(`(takt ${group} --mystery "")`, 4)).not.toContain(child);
+    },
+  );
+
+  it('parses zsh project-template group options and delimiters before the child', () => {
+    expect(executeZshCompletion('(takt project-template --cwd /work "")', 5)).toContain('rollback');
+    expect(executeZshCompletion('(takt project-template --cwd=/work "")', 4)).toContain('rollback');
+    expect(executeZshCompletion('(takt project-template --json "")', 4)).toContain('rollback');
+    expect(executeZshCompletion('(takt project-template -x rollback "")', 5)).not.toContain('--force');
+    expect(executeZshCompletion('(takt project-template --mystery rollback "")', 5)).not.toContain('--force');
+    expect(executeZshCompletion('(takt project-template --help rollback "")', 5)).not.toContain('--force');
+    expect(executeZshCompletion('(takt -- --quiet project-template "")', 5)).not.toContain('rollback');
+    expect(executeZshCompletion('(takt -- project-template "")', 4)).toContain('rollback');
+    expect(executeZshCompletion('(takt -- project-template rollback "")', 5)).not.toContain('--force');
+    expect(executeZshCompletion('(takt -- project-template --cwd /work rollback "")', 7)).not.toContain('--force');
+  });
+
+  it.each(commands)('validates the complete zsh %s child prefix', (command) => {
+    const complete = (tokens: readonly string[]): string => executeZshCompletion(
+      `(takt ${tokens.join(' ')} "")`,
+      tokens.length + 2,
+    );
+    expect(complete(['project-template', command, '--mystery'])).not.toContain('--cwd');
+    expect(complete(['project-template', command, '-x'])).not.toContain('--cwd');
+    expect(complete(['project-template', command, '--help'])).not.toContain('--cwd');
+    const excess = command === 'list'
+      ? ['project-template', command, 'unexpected']
+      : ['project-template', command, 'operand', 'extra'];
+    expect(complete(excess)).not.toContain('--cwd');
+    const delimitedExcess = command === 'list'
+      ? ['project-template', command, '--', 'unexpected']
+      : ['project-template', command, '--', 'operand', 'extra'];
+    expect(complete(delimitedExcess)).not.toContain('--cwd');
+    expect(complete(['project-template', command, '--'])).not.toContain('--cwd');
+    expect(complete(['project-template', command, '--cwd', '/work'])).toContain('--json');
+    expect(complete(['project-template', command, '--cwd=/work'])).toContain('--json');
+    expect(complete(['project-template', command, '--json'])).toContain('--cwd');
+  });
+
+  it.each([
+    ['inspect', '--current-takt-version', '0.48.0', '--json'],
+    ['export', '--pack-version', '1.0.0', '--force'],
+    ['diff', '--current-takt-version', '0.48.0', '--json'],
+    ['apply', '--expected-plan-id', 'abc', '--force'],
+    ['update', '--dry-run', '', '--force'],
+    ['rollback', '--expected-plan-id', 'abc', '--force'],
+  ] as const)(
+    'keeps zsh %s command options available after known child options',
+    (command, option, value, expected) => {
+      const tokens = ['project-template', command, option, ...(value === '' ? [] : [value])];
+      expect(executeZshCompletion(`(takt ${tokens.join(' ')} "")`, tokens.length + 2))
+        .toContain(expected);
     },
   );
 
@@ -264,11 +412,24 @@ describe('project-template shell completions', () => {
 
   it('binds every fish project-template child and option to its root predicate', () => {
     const fish = readFileSync(resolve('bin/completions/takt.fish'), 'utf8');
-    expect(fish).toContain('function __takt_is_root_command');
+    expect(fish).toContain('function __takt_matches_commandline');
     expect(fish).toContain('set -l short_options_with_value i w b t');
     expect(fish).toContain('set -l short_boolean_options q c h V');
-    expect(fish).toContain('set -l ambiguous 0');
+    expect(fish).toContain('set -l phase root');
+    expect(fish).toContain('set -l delimiter_seen 0');
+    expect(fish).toContain('set -l root_ambiguous 0');
+    expect(fish).toContain('set -l group_ambiguous 0');
+    expect(fish).toContain('set -l child_operand_count 0');
+    expect(fish).toContain('case --cwd');
+    expect(fish).toContain("case '--cwd=*'");
+    expect(fish).toContain('case --json');
+    expect(fish).toContain('case --help -h');
+    expect(fish).toContain('case --expected-plan-id');
+    expect(fish).toContain('case --current-takt-version');
+    expect(fish).toContain('case --pack-version --min-takt-version --source-commit --approve-policy --approve-capability');
     expect(fish).toContain('function __takt_project_template_is_root_command');
+    expect(fish).toContain("-n '__takt_project_template_is_root_command' -l cwd -r");
+    expect(fish).toContain("-n '__takt_project_template_is_root_command' -l json");
     expect(fish).not.toMatch(
       /__fish_seen_subcommand_from (?:project-template|reset|workflow|metrics|repertoire)/u,
     );
@@ -277,12 +438,12 @@ describe('project-template shell completions', () => {
     }
     for (const line of fish.split('\n').filter((candidate) => (
       candidate.startsWith('complete -c takt')
-      && !candidate.includes('__fish_use_subcommand')
+      && !candidate.includes('__takt_is_root_position')
       && !candidate.includes('__takt_is_root_command reset')
       && !candidate.includes('__takt_is_root_command workflow')
       && !candidate.includes('__takt_is_root_command metrics')
       && !candidate.includes('__takt_is_root_command repertoire')
-    ))) expect(line).toContain('__takt_project_template_is_root_command');
+    ))) expect(line).toMatch(/__takt_project_template_is_(?:root_)?command/u);
   });
 
   it('keeps the English and Japanese operator contracts synchronized', () => {

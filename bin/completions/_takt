@@ -2,33 +2,45 @@
 
 _takt() {
   local -a root_commands pt_commands common mutation
-  local command='' root_command='' index pt_index=0 skip_value=0 root_skip_value=0 root_ambiguous=0 short_index=0 short_name=''
+  local command='' root_command='' root_child='' phase='root' index skip_value=0 root_ambiguous=0 group_ambiguous=0 delimiter_seen=0 terminal=0 child_operand_count=0 short_index=0 short_name='' word=''
   root_commands=(release-info run watch add list resume clear eject reset prompt export-cc export-codex catalog workflow metrics purge repertoire)
   pt_commands=(export inspect diff apply update rollback list)
   common=(--cwd --json)
   mutation=(--dry-run --apply --expected-plan-id --force)
+  # Why: matching the CLI's delimiter/root/group/child phases prevents a later
+  # familiar word from reviving completion after ambiguous input.
   for (( index = 2; index < CURRENT; index++ )); do
-    if (( pt_index == 0 )); then
-      if (( root_skip_value )); then root_skip_value=0; continue; fi
-      case ${words[index]} in
+    word=${words[index]}
+    if [[ $phase == root || $phase == legacy ]]; then
+      if (( skip_value )); then skip_value=0; continue; fi
+      if (( delimiter_seen )); then
+        if [[ $phase == root ]]; then
+          root_command=$word
+          if [[ $word == project-template ]]; then phase=group; else phase=legacy; fi
+        elif [[ -z $root_child ]]; then
+          root_child=$word
+        fi
+        continue
+      fi
+      case $word in
         --issue|--pr|--workflow|--branch|--repo|--provider|--model|--task|--isolation|--cwd)
-          root_skip_value=1; continue ;;
+          skip_value=1; continue ;;
         --issue=*|--pr=*|--workflow=*|--branch=*|--repo=*|--provider=*|--model=*|--task=*|--isolation=*|--cwd=*)
           continue ;;
         --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue|--help|--version)
           continue ;;
         --auto-pr=*|--draft=*|--pipeline=*|--copy-workspace=*|--skip-git=*|--quiet=*|--continue=*|--help=*|--version=*)
           continue ;;
-        --) continue ;;
+        --) delimiter_seen=1; continue ;;
         --*) root_ambiguous=1; continue ;;
         -*)
-          for (( short_index = 2; short_index <= ${#words[index]}; short_index++ )); do
-            short_name=${words[index][short_index]}
+          for (( short_index = 2; short_index <= ${#word}; short_index++ )); do
+            short_name=${word[short_index]}
             case $short_name in
               q|c|h|V) ;;
               i|w|b|t)
-                if (( short_index == ${#words[index]} )); then
-                  root_skip_value=1
+                if (( short_index == ${#word} )); then
+                  skip_value=1
                 fi
                 break ;;
               *) root_ambiguous=1; break ;;
@@ -36,24 +48,86 @@ _takt() {
           done
           continue ;;
         project-template)
-          if [[ -z $root_command ]] && (( ! root_ambiguous )); then
+          if [[ $phase == root ]] && (( ! root_ambiguous )); then
             root_command=project-template
-            pt_index=$index
+            phase=group
+          elif [[ $phase == legacy && -z $root_child ]]; then
+            root_child=$word
           fi
           continue ;;
         *)
-          if [[ -z $root_command ]]; then root_command=${words[index]}; fi
+          if [[ $phase == root ]]; then
+            root_command=$word
+            phase=legacy
+          elif [[ -z $root_child ]]; then
+            root_child=$word
+          fi
           continue ;;
       esac
     fi
-    if (( pt_index > 0 )); then
+    if [[ $phase == group ]]; then
       if (( skip_value )); then skip_value=0; continue; fi
-      if [[ ${words[index]} == --cwd ]]; then skip_value=1; continue; fi
-      if [[ ${words[index]} != -* ]]; then command=${words[index]}; break; fi
+      if (( terminal )); then continue; fi
+      if (( ! delimiter_seen )); then
+        case $word in
+          --cwd) skip_value=1; continue ;;
+          --cwd=*) continue ;;
+          --json) continue ;;
+          --help|-h) terminal=1; continue ;;
+          --) delimiter_seen=1; continue ;;
+          -*) group_ambiguous=1; continue ;;
+        esac
+      fi
+      if (( ${pt_commands[(Ie)$word]} )); then
+        command=$word
+      else
+        group_ambiguous=1
+      fi
+      phase=child
+      continue
+    fi
+    if [[ $phase == child ]]; then
+      if (( skip_value )); then skip_value=0; continue; fi
+      if (( terminal )); then continue; fi
+      if (( ! delimiter_seen )); then
+        case $word in
+          --cwd) skip_value=1; continue ;;
+          --cwd=*) continue ;;
+          --json) continue ;;
+          --help|-h) terminal=1; continue ;;
+          --current-takt-version)
+            case $command in inspect|diff|apply|update) skip_value=1 ;; *) group_ambiguous=1 ;; esac
+            continue ;;
+          --current-takt-version=*)
+            case $command in inspect|diff|apply|update) ;; *) group_ambiguous=1 ;; esac
+            continue ;;
+          --dry-run|--apply|--force)
+            case $command in export|apply|update|rollback) ;; *) group_ambiguous=1 ;; esac
+            continue ;;
+          --expected-plan-id)
+            case $command in export|apply|update|rollback) skip_value=1 ;; *) group_ambiguous=1 ;; esac
+            continue ;;
+          --expected-plan-id=*)
+            case $command in export|apply|update|rollback) ;; *) group_ambiguous=1 ;; esac
+            continue ;;
+          --pack-version|--min-takt-version|--source-commit|--approve-policy|--approve-capability)
+            if [[ $command == export ]]; then skip_value=1; else group_ambiguous=1; fi
+            continue ;;
+          --pack-version=*|--min-takt-version=*|--source-commit=*|--approve-policy=*|--approve-capability=*)
+            if [[ $command != export ]]; then group_ambiguous=1; fi
+            continue ;;
+          --) delimiter_seen=1; continue ;;
+          -*) group_ambiguous=1; continue ;;
+        esac
+      fi
+      ((child_operand_count++))
+      if [[ $command == list ]] || (( child_operand_count > 1 )); then
+        group_ambiguous=1
+      fi
     fi
   done
-  if (( pt_index == 0 )); then
-    if (( ! root_ambiguous )); then
+  if [[ $root_command != project-template ]]; then
+    if (( ! root_ambiguous )) && [[ -z $root_child ]]; then
       case $root_command in
         reset) _values 'reset command' config categories ;;
         workflow) _values 'workflow command' init doctor ;;
@@ -64,9 +138,11 @@ _takt() {
     fi
     return
   fi
+  if (( root_ambiguous || group_ambiguous || terminal )); then return; fi
+  if [[ -n $command ]] && (( delimiter_seen )); then return; fi
   if [[ -z $command ]]; then
     _describe 'project template command' pt_commands
-    _values 'option' --cwd
+    _values 'option' --cwd --json
     return
   fi
   case $command in
