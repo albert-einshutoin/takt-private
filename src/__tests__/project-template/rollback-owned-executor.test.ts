@@ -4,13 +4,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { writeTaktpack } from '../../features/project-template/archive-writer.js';
 import { createProjectTemplateExportPlan } from '../../features/project-template/export-plan.js';
@@ -275,10 +276,22 @@ describe('owned project template rollback executor', () => {
     expect(existsSync(storage.journalPath)).toBe(false);
   });
 
-  it('recovers a crashed rollback from durable staging without reopening backup blobs', async () => {
+  it.each([
+    ['corrupt', (path: string) => writeFileSync(path, '{corrupt')],
+    ['missing', (path: string) => unlinkSync(path)],
+    ['symlink', (path: string) => {
+      const outside = `${path}.outside`;
+      writeFileSync(outside, '{}', { mode: 0o600 });
+      unlinkSync(path);
+      symlinkSync(outside, path);
+    }],
+  ] as const)(
+    'recovers a crashed rollback after the original manifest becomes %s',
+    async (_state, mutateManifest) => {
     const value = await updatedInstallation();
     let journalPath = '';
     let crashed = false;
+    let originalManifestPath = '';
     const crashIo = createProjectTemplateApplyStorageIo({
       before(operation, path) {
         if (crashed && operation === 'rename' && path === journalPath) {
@@ -289,6 +302,77 @@ describe('owned project template rollback executor', () => {
         if (!crashed && operation === 'rename' && path === journalPath) {
           crashed = true;
           writeFileSync(value.blobPath, 'original-blob-drift-after-journal');
+          mutateManifest(originalManifestPath);
+          throw new Error('process terminated after journal publication');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io: crashIo,
+    });
+    journalPath = storage.journalPath;
+    originalManifestPath = join(
+      storage.backupsRoot,
+      value.backupId,
+      'manifest.json',
+    );
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'recovery_required' });
+    } finally {
+      lease.release();
+    }
+    expect(crashed).toBe(true);
+    expect(existsSync(storage.journalPath)).toBe(true);
+    const transactionId = (JSON.parse(
+      readFileSync(storage.journalPath, 'utf8'),
+    ) as { transactionId: string }).transactionId;
+
+    const recoveryIo = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (
+          operation === 'read'
+          && (path === value.blobPath || path === originalManifestPath)
+        ) {
+          throw new Error('recovery reopened replaceable original backup evidence');
+        }
+      },
+    });
+    await expect(recoverProjectTemplateApply({
+      projectRoot: value.projectRoot,
+      io: recoveryIo,
+    })).resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
+    expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
+    expect(existsSync(join(storage.stagingRoot, transactionId))).toBe(false);
+  });
+
+  it.each([
+    ['manifest tamper', (stagingRoot: string, transactionId: string) => {
+      writeFileSync(
+        join(stagingRoot, transactionId, 'rollback-manifest.json'),
+        '{tampered',
+      );
+    }],
+    ['transaction directory symlink', (stagingRoot: string, transactionId: string) => {
+      const transactionRoot = join(stagingRoot, transactionId);
+      const outside = join(stagingRoot, `${transactionId}-outside`);
+      renameSync(transactionRoot, outside);
+      symlinkSync(outside, transactionRoot);
+    }],
+  ] as const)('fails closed after crashed rollback %s', async (_case, mutateStaging) => {
+    const value = await updatedInstallation();
+    let journalPath = '';
+    let crashed = false;
+    const crashIo = createProjectTemplateApplyStorageIo({
+      after(operation, path) {
+        if (!crashed && operation === 'rename' && path === journalPath) {
+          crashed = true;
           throw new Error('process terminated after journal publication');
         }
       },
@@ -309,25 +393,19 @@ describe('owned project template rollback executor', () => {
     } finally {
       lease.release();
     }
-    expect(crashed).toBe(true);
-    expect(existsSync(storage.journalPath)).toBe(true);
     const transactionId = (JSON.parse(
       readFileSync(storage.journalPath, 'utf8'),
     ) as { transactionId: string }).transactionId;
+    mutateStaging(storage.stagingRoot, transactionId);
 
-    const recoveryIo = createProjectTemplateApplyStorageIo({
-      before(operation, path) {
-        if (operation === 'read' && path === value.blobPath) {
-          throw new Error('recovery reopened the original backup blob');
-        }
-      },
-    });
-    await expect(recoverProjectTemplateApply({
-      projectRoot: value.projectRoot,
-      io: recoveryIo,
-    })).resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
-    expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
-    expect(existsSync(join(storage.stagingRoot, transactionId))).toBe(false);
+    await expect(recoverProjectTemplateApply({ projectRoot: value.projectRoot }))
+      .resolves.toMatchObject({
+        status: 'recovery_required',
+        code: 'RECOVERY_REQUIRED',
+      });
+    expect(existsSync(storage.journalPath)).toBe(true);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
+      .toBe(false);
   });
 
   it('does not publish a journal when durable rollback staging fails', async () => {
@@ -336,7 +414,12 @@ describe('owned project template rollback executor', () => {
     let injected = false;
     const io = createProjectTemplateApplyStorageIo({
       before(operation, path) {
-        if (!injected && operation === 'write' && path.startsWith(stagingRoot)) {
+        if (
+          !injected
+          && operation === 'write'
+          && path.startsWith(stagingRoot)
+          && path.includes(`${sep}.rollback-manifest.json.`)
+        ) {
           injected = true;
           throw new Error('durable staging failed');
         }

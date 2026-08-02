@@ -1475,6 +1475,60 @@ export async function writeProjectTemplateStagingFile(options: {
   };
 }
 
+async function assertPrivateStagingDirectories(options: {
+  storage: ProjectTemplateApplyStorage;
+  transactionRoot: string;
+  relativePath: string;
+  io: ProjectTemplateApplyStorageIo;
+}): Promise<Array<Awaited<ReturnType<ProjectTemplateApplyStorageIo['lstat']>>>> {
+  const snapshots: Array<Awaited<ReturnType<ProjectTemplateApplyStorageIo['lstat']>>> = [];
+  for (const directory of [
+    options.storage.stagingRoot,
+    options.transactionRoot,
+    ...options.relativePath.split('/').slice(0, -1).map(
+      (_segment, index, segments) => join(
+        options.transactionRoot,
+        ...segments.slice(0, index + 1),
+      ),
+    ),
+  ]) {
+    const entry = await options.io.lstat(directory);
+    if (
+      entry.isSymbolicLink()
+      || !entry.isDirectory()
+      || entry.dev !== options.storage.device
+      || !isProjectTemplatePrivateDirectoryMode(
+        entry.mode,
+        options.storage.platform,
+      )
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'project template staging directory is unsafe',
+      );
+    }
+    snapshots.push(entry);
+  }
+  return snapshots;
+}
+
+function assertStableStagingDirectoryWitnesses(
+  before: readonly Awaited<ReturnType<ProjectTemplateApplyStorageIo['lstat']>>[],
+  after: readonly Awaited<ReturnType<ProjectTemplateApplyStorageIo['lstat']>>[],
+): void {
+  if (
+    before.length !== after.length
+    || before.some((entry, index) => (
+      !areProjectTemplateDirectorySnapshotsStable(entry, after[index]!)
+    ))
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template staging directory changed while reading',
+    );
+  }
+}
+
 /** Reads one already-durable staging member without falling back to backups. */
 export async function readProjectTemplateStagingFile(options: {
   storage: ProjectTemplateApplyStorage;
@@ -1495,34 +1549,24 @@ export async function readProjectTemplateStagingFile(options: {
   }
   const io = options.io ?? options.storage.io;
   const transactionRoot = join(options.storage.stagingRoot, transactionId);
-  for (const directory of [
-    options.storage.stagingRoot,
+  const directoriesBefore = await assertPrivateStagingDirectories({
+    storage: options.storage,
     transactionRoot,
-    ...target.stagingRelativePath.split('/').slice(0, -1).map(
-      (_segment, index, segments) => join(
-        transactionRoot,
-        ...segments.slice(0, index + 1),
-      ),
-    ),
-  ]) {
-    const entry = await io.lstat(directory);
-    if (
-      entry.isSymbolicLink()
-      || !entry.isDirectory()
-      || entry.dev !== options.storage.device
-      || !isProjectTemplatePrivateDirectoryMode(entry.mode, options.storage.platform)
-    ) {
-      throw new ProjectTemplateApplyStorageError(
-        'UNSAFE_CONTROL_ROOT',
-        'project template staging directory is unsafe',
-      );
-    }
-  }
+    relativePath: target.stagingRelativePath,
+    io,
+  });
   const content = await io.readPrivateFile(
     join(transactionRoot, target.stagingRelativePath),
     options.expectedBytes,
     options.storage.device,
   );
+  const directoriesAfter = await assertPrivateStagingDirectories({
+    storage: options.storage,
+    transactionRoot,
+    relativePath: target.stagingRelativePath,
+    io,
+  });
+  assertStableStagingDirectoryWitnesses(directoriesBefore, directoriesAfter);
   if (
     content.byteLength !== options.expectedBytes
     || sha256(content) !== expectedSha256
@@ -1904,6 +1948,88 @@ export async function writeProjectTemplateBackupManifest(options: {
     replace: false,
     io,
   });
+}
+
+const ROLLBACK_STAGING_MANIFEST_NAME = 'rollback-manifest.json';
+
+export async function writeProjectTemplateRollbackStagingManifest(options: {
+  storage: ProjectTemplateApplyStorage;
+  transactionId: string;
+  manifest: ProjectTemplateBackupManifest;
+}): Promise<void> {
+  const transactionId = assertSafeIdentifier(options.transactionId, 'transactionId');
+  const manifest = validateBackupManifest(options.manifest);
+  const content = Buffer.from(`${canonicalizeTaktpackJson(manifest)}\n`);
+  if (content.byteLength > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST', 'rollback staging manifest exceeds its serialized byte budget',
+    );
+  }
+  const transactionRoot = join(options.storage.stagingRoot, transactionId);
+  await ensurePrivateDirectory(
+    options.storage.io,
+    transactionRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
+  await writePrivateDurableFile({
+    storage: options.storage,
+    finalPath: join(transactionRoot, ROLLBACK_STAGING_MANIFEST_NAME),
+    content,
+    replace: false,
+    io: options.storage.io,
+  });
+}
+
+export async function readProjectTemplateRollbackStagingManifest(options: {
+  storage: ProjectTemplateApplyStorage;
+  transactionId: string;
+  expectedPlanId: string;
+  expectedBackupId: string;
+}): Promise<ProjectTemplateBackupManifest> {
+  const transactionId = assertSafeIdentifier(options.transactionId, 'transactionId');
+  const expectedPlanId = assertHash(options.expectedPlanId, 'expectedPlanId');
+  const expectedBackupId = assertSafeIdentifier(options.expectedBackupId, 'expectedBackupId');
+  const transactionRoot = join(options.storage.stagingRoot, transactionId);
+  let parsed: unknown;
+  try {
+    const directoriesBefore = await assertPrivateStagingDirectories({
+      storage: options.storage,
+      transactionRoot,
+      relativePath: ROLLBACK_STAGING_MANIFEST_NAME,
+      io: options.storage.io,
+    });
+    const content = await options.storage.io.readPrivateFile(
+      join(
+        transactionRoot,
+        ROLLBACK_STAGING_MANIFEST_NAME,
+      ),
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes,
+      options.storage.device,
+    );
+    const directoriesAfter = await assertPrivateStagingDirectories({
+      storage: options.storage,
+      transactionRoot,
+      relativePath: ROLLBACK_STAGING_MANIFEST_NAME,
+      io: options.storage.io,
+    });
+    assertStableStagingDirectoryWitnesses(directoriesBefore, directoriesAfter);
+    parsed = JSON.parse(content.toString('utf8')) as unknown;
+  } catch {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST', 'rollback staging manifest cannot be read',
+    );
+  }
+  const manifest = validateBackupManifest(parsed as ProjectTemplateBackupManifest);
+  if (
+    manifest.planId !== expectedPlanId
+    || manifest.backupId !== expectedBackupId
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST', 'rollback staging manifest does not match its journal',
+    );
+  }
+  return manifest;
 }
 
 export function parseProjectTemplateApplyJournal(

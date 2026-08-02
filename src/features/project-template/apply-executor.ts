@@ -35,12 +35,14 @@ import {
   reclaimProjectTemplatePreparationOrphans,
   parseProjectTemplateApplyJournal,
   readProjectTemplateBackupManifest,
+  readProjectTemplateRollbackStagingManifest,
   readProjectTemplateStagingFile,
   removeProjectTemplateBackupGeneration,
   removeProjectTemplateStagingTransaction,
   resolveProjectTemplateApplyTarget,
   writeProjectTemplateApplyJournal,
   writeProjectTemplateBackupManifest,
+  writeProjectTemplateRollbackStagingManifest,
   writeProjectTemplateStagingFile,
   type ProjectTemplateApplyJournal,
   type ProjectTemplateApplyStorage,
@@ -838,6 +840,10 @@ async function stageRollbackOperations(options: {
       targetMode: entry.before.mode,
     });
   }
+  // Why: backup manifests are operator-visible retained history and can be
+  // replaced after journal publication. Recovery identity and ordering must
+  // travel with the already-validated private rollback cohort instead.
+  await writeProjectTemplateRollbackStagingManifest(options);
 }
 
 export async function applyProjectTemplatePlan(options: {
@@ -1740,10 +1746,17 @@ export async function recoverProjectTemplateApply(options: {
         message: 'no project template recovery state exists',
       };
     }
-    const manifest = await readProjectTemplateBackupManifest({
-      storage,
-      backupId: journal.backupId,
-    });
+    const manifest = journal.transactionId.startsWith('rollback-')
+      ? await readProjectTemplateRollbackStagingManifest({
+          storage,
+          transactionId: journal.transactionId,
+          expectedPlanId: journal.planId,
+          expectedBackupId: journal.backupId,
+        })
+      : await readProjectTemplateBackupManifest({
+          storage,
+          backupId: journal.backupId,
+        });
     if (manifest.planId !== journal.planId) throw new Error('journal plan mismatch');
     if (
       manifest.createdTargetDirectories.length !== journal.createdTargetDirectories.length
