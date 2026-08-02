@@ -91,6 +91,37 @@ describe('project-template shell completions', () => {
     expect(output).not.toContain('rollback');
   });
 
+  it.each(['i', 'w', 'b', 't'] as const)(
+    'treats a terminal -%s in a bash short cluster as consuming project-template',
+    (option) => {
+      const output = execFileSync('bash', ['-c', [
+        'source bin/completions/takt.bash',
+        `COMP_WORDS=(takt -q${option} project-template "")`,
+        'COMP_CWORD=3',
+        '_takt_project_template',
+        'printf "%s\\n" "${COMPREPLY[@]}"',
+      ].join('; ')], { encoding: 'utf8' });
+      expect(output).not.toContain('rollback');
+    },
+  );
+
+  it.each([
+    ['boolean short', '-q', true],
+    ['attached short value', '-iqfoo', true],
+    ['boolean cluster', '-qV', true],
+    ['unknown short', '-x', false],
+    ['unknown long', '--mystery', false],
+  ] as const)('classifies bash %s before project-template', (_name, option, expected) => {
+    const output = execFileSync('bash', ['-c', [
+      'source bin/completions/takt.bash',
+      `COMP_WORDS=(takt ${option} project-template "")`,
+      'COMP_CWORD=3',
+      '_takt_project_template',
+      'printf "%s\\n" "${COMPREPLY[@]}"',
+    ].join('; ')], { encoding: 'utf8' });
+    expect(output.includes('rollback')).toBe(expected);
+  });
+
   it.each([
     ['reset', 'categories'],
     ['workflow', 'doctor'],
@@ -131,6 +162,37 @@ describe('project-template shell completions', () => {
     expect(output.includes('rollback')).toBe(expected);
   });
 
+  it.each(['i', 'w', 'b', 't'] as const)(
+    'treats a terminal -%s in a zsh short cluster as consuming project-template',
+    (option) => {
+      const output = execFileSync('zsh', ['-c', [
+        '_values() { shift; print -l -- "$@"; }',
+        '_describe() { local array_name=$2; eval "print -l -- \\${${array_name}[@]}"; }',
+        `words=(takt -q${option} project-template "")`,
+        'CURRENT=4',
+        'source bin/completions/_takt',
+      ].join('; ')], { encoding: 'utf8' });
+      expect(output).not.toContain('rollback');
+    },
+  );
+
+  it.each([
+    ['boolean short', '-q', true],
+    ['attached short value', '-iqfoo', true],
+    ['boolean cluster', '-qV', true],
+    ['unknown short', '-x', false],
+    ['unknown long', '--mystery', false],
+  ] as const)('classifies zsh %s before project-template', (_name, option, expected) => {
+    const output = execFileSync('zsh', ['-c', [
+      '_values() { shift; print -l -- "$@"; }',
+      '_describe() { local array_name=$2; eval "print -l -- \\${${array_name}[@]}"; }',
+      `words=(takt ${option} project-template "")`,
+      'CURRENT=4',
+      'source bin/completions/_takt',
+    ].join('; ')], { encoding: 'utf8' });
+    expect(output.includes('rollback')).toBe(expected);
+  });
+
   it.each([
     ['reset', 'categories'],
     ['workflow', 'doctor'],
@@ -155,6 +217,9 @@ describe('project-template shell completions', () => {
   it('binds every fish project-template child and option to its root predicate', () => {
     const fish = readFileSync(resolve('bin/completions/takt.fish'), 'utf8');
     expect(fish).toContain('function __takt_is_root_command');
+    expect(fish).toContain('set -l short_options_with_value i w b t');
+    expect(fish).toContain('set -l short_boolean_options q c h V');
+    expect(fish).toContain('set -l ambiguous 0');
     expect(fish).toContain('function __takt_project_template_is_root_command');
     expect(fish).not.toMatch(
       /__fish_seen_subcommand_from (?:project-template|reset|workflow|metrics|repertoire)/u,
