@@ -15,15 +15,17 @@ import { installOpencodeExitCleanup } from './opencodeExitCleanup.js';
 import {
   isProjectTemplateCliInvocation,
   projectTemplateCommandCandidate,
+  projectTemplateCommandUsesApplyMode,
 } from './projectTemplateInvocation.js';
 import {
   type ProjectTemplateCliCommand,
 } from '../../features/project-template/index.js';
 import { settleProjectTemplateParserFailure } from './projectTemplateCommands.js';
 
-const projectTemplateInvocation = isProjectTemplateCliInvocation(
-  process.argv.slice(2),
-);
+// Commander may normalize argv while parsing. Preserve the exact token stream
+// once so parser-failure identity never reclassifies a delimited operand.
+const entrypointArgs = Object.freeze([...process.argv.slice(2)]);
+const projectTemplateInvocation = isProjectTemplateCliInvocation(entrypointArgs);
 if (!projectTemplateInvocation) checkForUpdates();
 
 // Import in dependency order
@@ -111,7 +113,7 @@ function projectTemplateParserFailureIdentity(
   }
 
   const apply = PROJECT_TEMPLATE_APPLY_COMMANDS.has(name)
-    && args.slice(commandIndex! + 1).some((argument) => argument === '--apply');
+    && projectTemplateCommandUsesApplyMode(args, commandIndex!);
   return {
     command: `project-template ${name}`,
     mode: apply ? 'apply' : 'dry-run',
@@ -119,14 +121,14 @@ function projectTemplateParserFailureIdentity(
 }
 
 async function writeProjectTemplateEntrypointFailure(): Promise<void> {
-  const { command, mode } = projectTemplateParserFailureIdentity(process.argv.slice(2));
+  const { command, mode } = projectTemplateParserFailureIdentity(entrypointArgs);
   if (!await settleProjectTemplateParserFailure(program, command, mode)) {
     throw new Error('project template parser lifecycle is unavailable');
   }
 }
 
 (async () => {
-  const args = process.argv.slice(2);
+  const args = [...entrypointArgs];
   installOpencodeExitCleanup();
   const cleanupImmediateSigintExit = projectTemplateInvocation
     ? () => {}

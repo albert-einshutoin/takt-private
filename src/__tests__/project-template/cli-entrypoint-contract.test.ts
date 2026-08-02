@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   isProjectTemplateCliInvocation,
+  projectTemplateNamedCommandUsesApplyMode,
 } from '../../app/cli/projectTemplateInvocation.js';
 
 const runner = resolve('node_modules/.bin/vite-node');
@@ -596,5 +597,26 @@ writeFileSync(
       command: 'project-template apply', mode: 'apply',
       error: { code: 'UNKNOWN_OPTION' },
     });
+  });
+
+  it('does not recover apply mode from a global value', () => {
+    const result = run([
+      '--wat', 'project-template', 'apply', 'missing.taktpack', '--task', '--apply',
+    ]);
+
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template apply', mode: 'dry-run',
+      error: { code: 'UNKNOWN_OPTION' },
+    });
+  });
+
+  it('does not recover apply mode from a delimited operand', () => {
+    expect(projectTemplateNamedCommandUsesApplyMode([
+      '--wat', 'project-template', 'apply', 'missing.taktpack', '--', '--apply',
+    ], 'apply')).toBe(false);
   });
 });

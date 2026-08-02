@@ -26,6 +26,16 @@ import {
   isProjectTemplateCliExportApprovalError,
   parseProjectTemplateCliExportApprovals,
 } from '../../features/project-template/cli-export-approvals.js';
+import { projectTemplateNamedCommandUsesApplyMode } from './projectTemplateInvocation.js';
+
+function parserFailureMode(commandName: string): 'dry-run' | 'apply' {
+  // Why: Commander's option object can include flag-shaped values after an
+  // earlier parser error. Re-tokenize the original argv before reporting mode.
+  return projectTemplateNamedCommandUsesApplyMode(
+    process.argv.slice(2),
+    commandName,
+  ) ? 'apply' : 'dry-run';
+}
 
 export type ProjectTemplateCliCommandSource =
   | { readonly kind: 'local'; readonly value: string }
@@ -142,12 +152,13 @@ function failure(
 function mutation(
   command: ProjectTemplateCliCommand,
   flags: MutationFlags,
+  applyRequested = flags.apply === true,
 ): ProjectTemplateCliMutationOptions | ProjectTemplateCliOutcome {
-  if (flags.force === true && flags.apply !== true) {
+  if (flags.force === true && !applyRequested) {
     return failure(command, 'dry-run', 'INVALID_ARGUMENT');
   }
   const argv: string[] = [];
-  if (flags.apply === true) argv.push('--apply');
+  if (applyRequested) argv.push('--apply');
   if (flags.dryRun === true) argv.push('--dry-run');
   if (flags.force === true) argv.push('--force');
   if (flags.expectedPlanId !== undefined) {
@@ -159,11 +170,11 @@ function mutation(
     if (error instanceof ProjectTemplateCliContractError) {
       return failure(
         command,
-        flags.apply === true ? 'apply' : 'dry-run',
+        applyRequested ? 'apply' : 'dry-run',
         error.code as ProjectTemplateCliErrorCode,
       );
     }
-    return failure(command, flags.apply === true ? 'apply' : 'dry-run', 'INTERNAL');
+    return failure(command, applyRequested ? 'apply' : 'dry-run', 'INTERNAL');
   }
 }
 
@@ -406,10 +417,14 @@ export function registerProjectTemplateCommands(
     .option('--approve-capability <capability>', 'Approve a detected capability', collectCapabilityApproval, [])
     .action(async (output: string | undefined, flags: CommonFlags, command: Command) => {
       if (hasUnknownOption(command)) {
-        await invalid('project-template export', flags.apply === true ? 'apply' : 'dry-run', 'UNKNOWN_OPTION');
+        await invalid(
+          'project-template export', parserFailureMode('export'), 'UNKNOWN_OPTION',
+        );
         return;
       }
-      const parsedMutation = mutation('project-template export', flags);
+      const parsedMutation = mutation(
+        'project-template export', flags, parserFailureMode('export') === 'apply',
+      );
       const cwd = requestedCwd(root, command, flags, dependencies);
       // Why: version metadata is operator input, so reject it before planning
       // or mutation admission. Do not broaden the dispatch catch boundary,
@@ -459,11 +474,11 @@ export function registerProjectTemplateCommands(
       .action(async (source: string | undefined, flags: CommonFlags, action: Command) => {
         const machineCommand = `project-template ${name}` as ProjectTemplateCliCommand;
         if (hasUnknownOption(action)) {
-          await invalid(machineCommand, flags.apply === true ? 'apply' : 'dry-run', 'UNKNOWN_OPTION');
+          await invalid(machineCommand, parserFailureMode(name), 'UNKNOWN_OPTION');
           return;
         }
         const parsedMutation = mutating
-          ? mutation(machineCommand, flags)
+          ? mutation(machineCommand, flags, parserFailureMode(name) === 'apply')
           : ({ mode: 'dry-run', force: false } as const);
         const cwd = requestedCwd(root, action, flags, dependencies);
         const parsedSource = canonicalSource(cwd, source);
@@ -487,10 +502,14 @@ export function registerProjectTemplateCommands(
     .argument('[backup-id]', 'Backup identifier'))
     .action(async (backupId: string | undefined, flags: CommonFlags, command: Command) => {
       if (hasUnknownOption(command)) {
-        await invalid('project-template rollback', flags.apply === true ? 'apply' : 'dry-run', 'UNKNOWN_OPTION');
+        await invalid(
+          'project-template rollback', parserFailureMode('rollback'), 'UNKNOWN_OPTION',
+        );
         return;
       }
-      const parsedMutation = mutation('project-template rollback', flags);
+      const parsedMutation = mutation(
+        'project-template rollback', flags, parserFailureMode('rollback') === 'apply',
+      );
       if ('envelope' in parsedMutation || backupId === undefined) {
         const result = invalidMutationInput('project-template rollback', parsedMutation);
         await settle('project-template rollback', result.envelope.mode, async () => result);

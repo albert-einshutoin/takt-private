@@ -12,6 +12,14 @@ const ROOT_SHORT_BOOLEAN_OPTIONS = new Set(['q', 'c', 'h', 'V']);
 const PROJECT_TEMPLATE_SUBCOMMANDS = new Set([
   'inspect', 'list', 'export', 'diff', 'apply', 'update', 'rollback',
 ]);
+const PROJECT_TEMPLATE_CHILD_OPTIONS_WITH_VALUE = new Set([
+  '--current-takt-version', '--expected-plan-id', '--pack-version',
+  '--min-takt-version', '--source-commit', '--approve-policy',
+  '--approve-capability',
+]);
+const PROJECT_TEMPLATE_CHILD_BOOLEAN_OPTIONS = new Set([
+  '--json', '--dry-run', '--force',
+]);
 
 type ShortOptionShape = 'self-contained' | 'consumes-next' | 'terminal' | 'unknown';
 
@@ -77,6 +85,56 @@ export function projectTemplateCommandCandidate(
       : null;
   }
   return { commandIndex: null };
+}
+
+/** Recovers mutation mode without treating option values or delimited operands as flags. */
+export function projectTemplateCommandUsesApplyMode(
+  args: readonly string[],
+  commandIndex: number,
+): boolean {
+  for (let cursor = commandIndex + 1; cursor < args.length; cursor += 1) {
+    const argument = args[cursor]!;
+    if (argument === '--') return false;
+    if (argument === '--apply') return true;
+    const equals = argument.indexOf('=');
+    const option = equals < 0 ? argument : argument.slice(0, equals);
+    if (
+      ROOT_OPTIONS_WITH_VALUE.has(option)
+      || PROJECT_TEMPLATE_CHILD_OPTIONS_WITH_VALUE.has(option)
+    ) {
+      if (equals < 0 && args[cursor + 1] !== undefined) cursor += 1;
+      continue;
+    }
+    if (
+      ROOT_BOOLEAN_OPTIONS.has(argument)
+      || PROJECT_TEMPLATE_CHILD_BOOLEAN_OPTIONS.has(argument)
+    ) continue;
+    if (ROOT_TERMINAL_OPTIONS.has(argument)) return false;
+    if (argument.startsWith('-') && !argument.startsWith('--')) {
+      const shape = shortOptionShape(argument);
+      if (shape === 'consumes-next' && args[cursor + 1] !== undefined) cursor += 1;
+      else if (shape === 'terminal' || shape === 'unknown') return false;
+      continue;
+    }
+    if (argument.startsWith('-')) return false;
+  }
+  return false;
+}
+
+export function projectTemplateNamedCommandUsesApplyMode(
+  args: readonly string[],
+  commandName: string,
+): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== 'project-template') continue;
+    const candidate = projectTemplateCommandCandidate(args, index);
+    if (
+      candidate?.commandIndex !== null
+      && candidate?.commandIndex !== undefined
+      && args[candidate.commandIndex] === commandName
+    ) return projectTemplateCommandUsesApplyMode(args, candidate.commandIndex);
+  }
+  return false;
 }
 
 /** Pure command detection that never mistakes an option value or later operand for a command. */
