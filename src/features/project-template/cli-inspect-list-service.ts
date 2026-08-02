@@ -1010,12 +1010,28 @@ export async function listProjectTemplatesForCliV1_1WithDependencies(
       if (!testPattern(BACKUP_ID_PATTERN, backupId)) throw new Error('invalid backup id');
     }
     REFLECT_APPLY(ARRAY_SORT, backupIds, []);
-    const companionAfter = snapshotCompanion(dependencies.readCompanionLockState(cwd));
+    let companionAfter: CompanionSnapshot | undefined;
+    let companionAfterError: unknown;
+    try {
+      companionAfter = snapshotCompanion(dependencies.readCompanionLockState(cwd));
+    } catch (error) {
+      companionAfterError = error;
+    }
     requireActive(options.signal);
     if (recoveryRequired(dependencies.inspectApplyGuard({ repoPath: cwd }))) {
       return listV1_1Failure('RECOVERY_REQUIRED');
     }
-    if (!sameCompanionSnapshot(companion, companionAfter)) {
+    // Once backup enumeration has started, a newly mixed lock cohort is
+    // target drift rather than corruption of the source we initially read.
+    // This preserves the schema 1.0 concurrency classification and exit code.
+    if (companionAfterError !== undefined) {
+      if (companionAfterError instanceof ProjectTemplateCompanionLockStateError
+        && companionAfterError.code === 'MIXED_STATE') {
+        return listV1_1Failure('TARGET_DRIFT');
+      }
+      throw companionAfterError;
+    }
+    if (companionAfter === undefined || !sameCompanionSnapshot(companion, companionAfter)) {
       return listV1_1Failure('TARGET_DRIFT');
     }
     const envelope = createProjectTemplateCliV1_1Success({

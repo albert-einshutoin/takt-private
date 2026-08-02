@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaktpackError } from '../../features/project-template/errors.js';
+import { ProjectTemplateCompanionLockStateError } from '../../features/project-template/companion-lock-state-reader.js';
 import {
   inspectProjectTemplateForCliV1_1WithDependencies,
   inspectProjectTemplateForCliWithDependencies,
@@ -778,6 +779,80 @@ describe('project-template list CLI service', () => {
       envelope: { status: 'error', error: { code: 'TARGET_DRIFT' } },
     });
     expect(readCompanionLockState).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a mixed companion cohort on the second schema 1.1 read as target drift', async () => {
+    const readCompanionLockState = vi.fn()
+      .mockReturnValueOnce({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
+      })
+      .mockImplementationOnce(() => {
+        throw new ProjectTemplateCompanionLockStateError('MIXED_STATE');
+      });
+
+    const outcome = await listProjectTemplatesForCliV1_1WithDependencies({ cwd: '/safe/repo' }, {
+      readCompanionLockState,
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+      listBackupIds: vi.fn(async () => []),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 22,
+      envelope: { schemaVersion: '1.1', status: 'error', error: { code: 'TARGET_DRIFT' } },
+    });
+    expect(readCompanionLockState).toHaveBeenCalledTimes(2);
+  });
+
+  it('prioritizes recovery over a mixed companion cohort on the second schema 1.1 read', async () => {
+    const readCompanionLockState = vi.fn()
+      .mockReturnValueOnce({
+        state: 'update',
+        contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA,
+        sourceProvenance: localSourceProvenance(),
+      })
+      .mockImplementationOnce(() => {
+        throw new ProjectTemplateCompanionLockStateError('MIXED_STATE');
+      });
+    const inspectApplyGuard = vi.fn()
+      .mockReturnValueOnce({ blocks: [] })
+      .mockReturnValueOnce({ blocks: [{ code: 'RECOVERY_REQUIRED' }] });
+
+    const outcome = await listProjectTemplatesForCliV1_1WithDependencies({ cwd: '/safe/repo' }, {
+      readCompanionLockState,
+      inspectApplyGuard,
+      listBackupIds: vi.fn(async () => []),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 25,
+      envelope: { schemaVersion: '1.1', status: 'error', error: { code: 'RECOVERY_REQUIRED' } },
+    });
+  });
+
+  it.each([
+    ['MIXED_STATE', 'SOURCE_INTEGRITY_FAILED', 24],
+    ['UNREADABLE_LOCK', 'SOURCE_UNAVAILABLE', 24],
+  ] as const)('classifies a first-read schema 1.1 %s without claiming target drift', async (
+    stateCode,
+    expectedCode,
+    exitCode,
+  ) => {
+    const outcome = await listProjectTemplatesForCliV1_1WithDependencies({ cwd: '/safe/repo' }, {
+      readCompanionLockState: vi.fn(() => {
+        throw new ProjectTemplateCompanionLockStateError(stateCode);
+      }),
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+      listBackupIds: vi.fn(async () => []),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode,
+      envelope: { schemaVersion: '1.1', status: 'error', error: { code: expectedCode } },
+    });
   });
 
   it('fails closed when only the installed source provenance changes', async () => {

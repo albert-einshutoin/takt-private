@@ -44,6 +44,188 @@ describe('project template CLI machine contract schema 1.1', () => {
   });
 
   it.each([
+    ['inspect compatibility summary', 'inspect.json', (value: Record<string, any>) => {
+      value.result.detail.compatibility.status = 'incompatible';
+    }],
+    ['unknown inspect compatibility summary', 'inspect.json', (value: Record<string, any>) => {
+      value.result.detail.compatibility.status = 'unknown';
+    }],
+    ['compatible inspect blocked summary', 'inspect.json', (value: Record<string, any>) => {
+      value.result.readiness = 'blocked';
+      value.result.reviewCodes = ['HARD_CONFLICT'];
+    }],
+    ['export reason classification counts', 'export.json', (value: Record<string, any>) => {
+      value.result.detail.securitySummary.reasons.items[0].classification = 'blocked';
+    }],
+    ['reverse export reason classification counts', 'export.json', (value: Record<string, any>) => {
+      value.result.detail.securitySummary.counts.excluded = 0;
+      value.result.detail.securitySummary.counts.blocked = 1;
+      value.result.readiness = 'blocked';
+      value.result.reviewCodes = ['HARD_CONFLICT'];
+    }],
+    ['list source kind', 'list.json', (value: Record<string, any>) => {
+      value.result.sourceProvenance.kind = 'local-import';
+    }],
+    ['list source revision', 'list.json', (value: Record<string, any>) => {
+      value.result.sourceProvenance.revision = 'f'.repeat(40);
+    }],
+  ])('fails closed for a contradictory %s', (_name, fixtureName, mutate) => {
+    const value = JSON.parse(fixture(fixtureName)) as Record<string, unknown>;
+    mutate(value);
+
+    expect(() => createProjectTemplateCliV1_1Success(value as never)).toThrow(
+      ProjectTemplateCliV1_1ContractError,
+    );
+  });
+
+  it.each([
+    ['compatible', 'ready', []],
+    ['unknown', 'review-required', ['REVIEW_REQUIRED']],
+    ['incompatible', 'blocked', ['HARD_CONFLICT']],
+  ])('accepts the exact inspect summary for %s', (status, readiness, reviewCodes) => {
+    const value = JSON.parse(fixture('inspect.json')) as Record<string, any>;
+    value.result.detail.compatibility.status = status;
+    value.result.readiness = readiness;
+    value.result.reviewCodes = reviewCodes;
+
+    expect(createProjectTemplateCliV1_1Success(value as never)).toMatchObject({
+      result: { readiness, reviewCodes, detail: { compatibility: { status } } },
+    });
+  });
+
+  it('rejects a truncated export reason subset that exceeds its declared classification count', () => {
+    const value = JSON.parse(fixture('export.json')) as Record<string, any>;
+    value.result.detail.securitySummary.counts.excluded = 0;
+    value.result.detail.securitySummary.reasons.totalCount = 2;
+    value.result.detail.securitySummary.reasons.truncated = true;
+    value.warnings = [{ code: 'PARTIAL_RESULT' }];
+
+    expect(() => createProjectTemplateCliV1_1Success(value as never)).toThrow(
+      ProjectTemplateCliV1_1ContractError,
+    );
+  });
+
+  it('keeps emitted inspect capability warnings complete when targets are truncated', () => {
+    const value = JSON.parse(fixture('inspect.json')) as Record<string, any>;
+    value.result.entryCount = 2;
+    value.result.detail.targets.totalCount = 2;
+    value.result.detail.targets.truncated = true;
+    value.result.detail.capabilityWarnings.items = [];
+    value.result.detail.capabilityWarnings.totalCount = 0;
+    value.result.detail.capabilityWarnings.truncated = false;
+    value.warnings = [{ code: 'PARTIAL_RESULT' }];
+
+    expect(() => createProjectTemplateCliV1_1Success(value as never)).toThrow(
+      ProjectTemplateCliV1_1ContractError,
+    );
+  });
+
+  it('keeps emitted preview capability warnings complete when targets are truncated', () => {
+    const value = JSON.parse(fixture('diff.json')) as Record<string, any>;
+    value.result.detail.targetCount = 3;
+    value.result.detail.actionCounts.keep = 1;
+    value.result.detail.targets.totalCount = 3;
+    value.result.detail.targets.truncated = true;
+    value.result.detail.capabilityWarnings.items = [];
+    value.result.detail.capabilityWarnings.totalCount = 0;
+    value.result.detail.capabilityWarnings.truncated = false;
+    value.warnings = [{ code: 'PARTIAL_RESULT' }];
+
+    expect(() => createProjectTemplateCliV1_1Success(value as never)).toThrow(
+      ProjectTemplateCliV1_1ContractError,
+    );
+  });
+
+  it('binds the local list projection to the same revision', () => {
+    const value = JSON.parse(fixture('list.json')) as Record<string, any>;
+    const source = value.result.detail.source;
+    value.result.sourceProvenance.kind = 'local-import';
+    value.result.detail.source = {
+      kind: 'local-import',
+      sourceId: source.sourceId,
+      revision: value.result.sourceProvenance.revision,
+      archiveId: source.archiveId,
+      manifestId: source.manifestId,
+    };
+    expect(createProjectTemplateCliV1_1Success(value as never)).toMatchObject({
+      result: { sourceProvenance: { kind: 'local-import' } },
+    });
+
+    value.result.sourceProvenance.revision = 'f'.repeat(40);
+    expect(() => createProjectTemplateCliV1_1Success(value as never)).toThrow(
+      ProjectTemplateCliV1_1ContractError,
+    );
+  });
+
+  it.each([
+    ['export review evidence', 'export.json', (value: Record<string, any>) => {
+      value.result.detail.securitySummary.counts.reviewRequired = 1;
+    }],
+    ['preview target review evidence', 'apply-dry-run.json', (value: Record<string, any>) => {
+      value.result.detail.targets.items[0].reviewRequired = true;
+    }],
+    ['preview conflict evidence', 'diff.json', (value: Record<string, any>) => {
+      value.result.readiness = 'review-required';
+      value.result.reviewCodes = ['REVIEW_REQUIRED'];
+    }],
+    ['inspect capability summary', 'inspect.json', (value: Record<string, any>) => {
+      value.result.detail.detectedCapabilities = [];
+    }],
+    ['inspect capability summary with an unsupported extra claim', 'inspect.json',
+      (value: Record<string, any>) => {
+        value.result.detail.detectedCapabilities = ['executable', 'external-command'];
+      }],
+    ['inspect missing capability warning aggregate', 'inspect.json', (value: Record<string, any>) => {
+      value.result.detail.capabilityWarnings.items = [];
+      value.result.detail.capabilityWarnings.totalCount = 0;
+    }],
+    ['inspect excess capability warning aggregate', 'inspect.json', (value: Record<string, any>) => {
+      value.result.detail.capabilityWarnings.totalCount = 2;
+      value.result.detail.capabilityWarnings.truncated = true;
+      value.warnings = [{ code: 'PARTIAL_RESULT' }];
+    }],
+    ['inspect capability warning path', 'inspect.json', (value: Record<string, any>) => {
+      value.result.detail.capabilityWarnings.items[0].path = 'wrong/path.yaml';
+    }],
+    ['preview capability warning', 'diff.json', (value: Record<string, any>) => {
+      value.result.detail.capabilityWarnings.items[0].capability = 'external-command';
+    }],
+    ['preview missing capability warning', 'diff.json', (value: Record<string, any>) => {
+      value.result.detail.capabilityWarnings.items = [];
+      value.result.detail.capabilityWarnings.totalCount = 0;
+    }],
+    ['preview excess capability warning aggregate', 'diff.json', (value: Record<string, any>) => {
+      value.result.detail.capabilityWarnings.totalCount = 2;
+      value.result.detail.capabilityWarnings.truncated = true;
+      value.warnings = [{ code: 'PARTIAL_RESULT' }];
+    }],
+    ['recovery readiness code', 'apply-dry-run.json', (value: Record<string, any>) => {
+      value.result.readiness = 'recovery-required';
+      value.result.reviewCodes = ['REVIEW_REQUIRED'];
+    }],
+  ])('rejects contradictory %s', (_name, fixtureName, mutate) => {
+    const value = JSON.parse(fixture(fixtureName)) as Record<string, unknown>;
+    mutate(value);
+
+    expect(() => createProjectTemplateCliV1_1Success(value as never)).toThrow(
+      ProjectTemplateCliV1_1ContractError,
+    );
+  });
+
+  it.each([
+    ['recovery-required', ['RECOVERY_REQUIRED']],
+    ['blocked', ['ACTIVE_RUN']],
+  ])('allows %s to take precedence over content conflict review', (readiness, reviewCodes) => {
+    const value = JSON.parse(fixture('diff.json')) as Record<string, any>;
+    value.result.readiness = readiness;
+    value.result.reviewCodes = reviewCodes;
+
+    expect(createProjectTemplateCliV1_1Success(value as never)).toMatchObject({
+      result: { readiness, reviewCodes, conflictCount: 1 },
+    });
+  });
+
+  it.each([
     ['unknown root key', (value: Record<string, unknown>) => { value.extra = true; }],
     ['flat detail field', (value: Record<string, any>) => { value.result.manifestId = HASH; }],
     ['unknown action', (value: Record<string, any>) => { value.result.detail.targets.items[0].action = 'replace'; }],
@@ -96,6 +278,11 @@ describe('project template CLI machine contract schema 1.1', () => {
 
   it('accepts the bounded per-capability warning aggregate up to 4096 x 3', () => {
     const value = JSON.parse(fixture('diff.json')) as Record<string, any>;
+    value.result.changeCount = 4_095;
+    value.result.detail.targetCount = 4_096;
+    value.result.detail.actionCounts.add = 4_095;
+    value.result.detail.targets.totalCount = 4_096;
+    value.result.detail.targets.truncated = true;
     value.result.detail.capabilityWarnings.totalCount = 12_288;
     value.result.detail.capabilityWarnings.truncated = true;
     value.warnings = [{ code: 'PARTIAL_RESULT' }];

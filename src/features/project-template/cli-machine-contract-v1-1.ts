@@ -441,11 +441,16 @@ function warnings(value: Json | undefined): readonly ProjectTemplateCliWarning[]
   }]) as readonly ProjectTemplateCliWarning[];
 }
 
-function reviewSummary(result: RecordJson): void {
+function reviewSummary(result: RecordJson): readonly ProjectTemplateCliReviewCode[] {
   if (result.readiness !== 'ready' && result.readiness !== 'review-required'
     && result.readiness !== 'blocked' && result.readiness !== 'recovery-required') invalid();
   const codes = uniqueStrings(result.reviewCodes, REVIEW_CODES, 32);
   if ((result.readiness === 'ready') !== (codes.length === 0)) invalid();
+  if ((result.readiness === 'review-required'
+      && (codes.length !== 1 || codes[0] !== 'REVIEW_REQUIRED'))
+    || (result.readiness === 'recovery-required'
+      && (codes.length !== 1 || codes[0] !== 'RECOVERY_REQUIRED'))) invalid();
+  return codes;
 }
 
 function source(value: Json | undefined): ProjectTemplateCliSourceV1_1 {
@@ -579,7 +584,7 @@ function validateInspect(result: RecordJson, rootWarnings: readonly ProjectTempl
   const raw = exact(result, [
     'packId', 'entryCount', 'archiveBytes', 'dependencyCount', 'readiness', 'reviewCodes', 'detail',
   ]);
-  reviewSummary(raw);
+  const reviewCodes = reviewSummary(raw);
   const detail = exact(raw.detail, [
     'identity', 'compatibility', 'source', 'declaredCapabilities',
     'detectedCapabilities', 'targets', 'capabilityWarnings',
@@ -596,13 +601,24 @@ function validateInspect(result: RecordJson, rootWarnings: readonly ProjectTempl
   ]);
   if (compatibility.status !== 'unknown' && compatibility.status !== 'compatible'
     && compatibility.status !== 'incompatible') invalid();
+  // Compatibility is the sole inspect readiness input. Keeping the closed
+  // projections bound prevents a contradictory envelope from presenting an
+  // incompatible pack as safe in TaktDesk.
+  if ((compatibility.status === 'compatible'
+      && (raw.readiness !== 'ready' || reviewCodes.length !== 0))
+    || (compatibility.status === 'unknown'
+      && (raw.readiness !== 'review-required' || reviewCodes.length !== 1
+        || reviewCodes[0] !== 'REVIEW_REQUIRED'))
+    || (compatibility.status === 'incompatible'
+      && (raw.readiness !== 'blocked' || reviewCodes.length !== 1
+        || reviewCodes[0] !== 'HARD_CONFLICT'))) invalid();
   safeString(compatibility.minTaktVersion, 128);
   nullableSafeString(compatibility.maxTaktVersion, 128);
   nullableSafeString(compatibility.currentTaktVersion, 128);
   const provenance = source(detail.source);
   if (provenance.archiveId !== archiveId || provenance.manifestId !== manifestId) invalid();
   uniqueStrings(detail.declaredCapabilities, CAPABILITIES, 3);
-  uniqueStrings(detail.detectedCapabilities, CAPABILITIES, 3);
+  const detectedCapabilities = uniqueStrings(detail.detectedCapabilities, CAPABILITIES, 3);
   const targets = collection(detail.targets, inspectTarget);
   const capabilityWarnings = collection(
     detail.capabilityWarnings,
@@ -611,18 +627,58 @@ function validateInspect(result: RecordJson, rootWarnings: readonly ProjectTempl
   );
   if (targets.totalCount !== raw.entryCount) invalid();
   assertUnique(targets.items, 'targetId'); assertUnique(targets.items, 'path');
-  const targetIds = new CAPTURED_SET<unknown>();
+  const targetsById = new CAPTURED_MAP<unknown, Readonly<Record<string, unknown>>>();
+  const emittedCapabilities = new CAPTURED_SET<ProjectTemplateCliCapabilityV1_1>();
+  let expectedWarningTotal = 0;
   for (let index = 0; index < targets.items.length; index += 1) {
-    setAdd(targetIds, targets.items[index]!.targetId);
+    const item = targets.items[index]!;
+    mapSet(targetsById, item.targetId, item);
+    const capabilities = item.capabilities as readonly ProjectTemplateCliCapabilityV1_1[];
+    expectedWarningTotal += capabilities.length;
+    for (let capabilityIndex = 0; capabilityIndex < capabilities.length; capabilityIndex += 1) {
+      const capability = capabilities[capabilityIndex]!;
+      const detected = apply(CAPTURED_ARRAY_SOME, detectedCapabilities, [
+        (candidate: ProjectTemplateCliCapabilityV1_1) => candidate === capability,
+      ]);
+      if (!detected) invalid();
+      setAdd(emittedCapabilities, capability);
+    }
   }
   for (let index = 0; index < targets.items.length; index += 1) {
     const item = targets.items[index]!;
     if (item.manifestId !== manifestId) invalid();
   }
+  const warningPairs = new CAPTURED_SET<string>();
   for (let index = 0; index < capabilityWarnings.items.length; index += 1) {
     const item = capabilityWarnings.items[index]!;
-    if (item.manifestId !== manifestId) invalid();
-    if (!setHas(targetIds, item.targetId)) invalid();
+    const target = apply(CAPTURED_MAP_GET, targetsById, [item.targetId]);
+    if (item.manifestId !== manifestId || target === undefined || target.path !== item.path) invalid();
+    const capabilities = target.capabilities as readonly ProjectTemplateCliCapabilityV1_1[];
+    if (!apply(CAPTURED_ARRAY_SOME, capabilities, [
+      (capability: ProjectTemplateCliCapabilityV1_1) => capability === item.capability,
+    ])) invalid();
+    const pair = `${item.targetId as string}:${item.capability as string}`;
+    if (setHas(warningPairs, pair)) invalid();
+    setAdd(warningPairs, pair);
+  }
+  if (capabilityWarnings.totalCount < expectedWarningTotal) invalid();
+  if (!targets.truncated) {
+    if (capabilityWarnings.totalCount !== expectedWarningTotal) invalid();
+    for (let index = 0; index < detectedCapabilities.length; index += 1) {
+      if (!setHas(emittedCapabilities, detectedCapabilities[index]!)) invalid();
+    }
+  }
+  if (!capabilityWarnings.truncated) {
+    if (capabilityWarnings.items.length !== expectedWarningTotal) invalid();
+    for (let index = 0; index < targets.items.length; index += 1) {
+      const item = targets.items[index]!;
+      const capabilities = item.capabilities as readonly ProjectTemplateCliCapabilityV1_1[];
+      for (let capabilityIndex = 0; capabilityIndex < capabilities.length; capabilityIndex += 1) {
+        if (!setHas(warningPairs, `${item.targetId as string}:${capabilities[capabilityIndex]!}`)) {
+          invalid();
+        }
+      }
+    }
   }
   assertUnique(capabilityWarnings.items, 'warningId');
   assertPartialWarning(rootWarnings, [targets, capabilityWarnings]);
@@ -641,8 +697,9 @@ function validateExport(result: RecordJson, rootWarnings: readonly ProjectTempla
   const portable = count(counts.portable, 4_096);
   const excluded = count(counts.excluded, 8_193);
   const blocked = count(counts.blocked, 8_193);
-  count(counts.reviewRequired, 4_096);
-  if (portable !== raw.entryCount || (blocked > 0 && raw.readiness !== 'blocked')) invalid();
+  const reviewRequired = count(counts.reviewRequired, 4_096);
+  if (portable !== raw.entryCount || (blocked > 0 && raw.readiness !== 'blocked')
+    || (reviewRequired > 0 && raw.readiness === 'ready')) invalid();
   const reasons = collection(summary.reasons, (value) => {
     const item = exact(value, [
       'detailId', 'manifestId', 'classification', 'reason', 'count', 'paths',
@@ -655,11 +712,19 @@ function validateExport(result: RecordJson, rootWarnings: readonly ProjectTempla
       paths: apply(CAPTURED_ARRAY_MAP, array(item.paths, 8), [portablePath]),
     };
   }, 8_193);
-  const reportedReasons = apply(CAPTURED_ARRAY_REDUCE, reasons.items, [
-    (sum: number, item: Readonly<Record<string, unknown>>) => sum + (item.count as number),
-    0,
-  ]) as number;
-  if (!reasons.truncated && reportedReasons !== excluded + blocked) invalid();
+  let reportedExcluded = 0;
+  let reportedBlocked = 0;
+  for (let index = 0; index < reasons.items.length; index += 1) {
+    const item = reasons.items[index]!;
+    if (item.classification === 'excluded') reportedExcluded += item.count as number;
+    else reportedBlocked += item.count as number;
+  }
+  // A combined total cannot prove that the security classification is true;
+  // compare each class independently so blocked rows cannot masquerade as
+  // harmless exclusions.
+  if (reportedExcluded > excluded || reportedBlocked > blocked
+    || (!reasons.truncated
+      && (reportedExcluded !== excluded || reportedBlocked !== blocked))) invalid();
   for (let index = 0; index < reasons.items.length; index += 1) {
     if (reasons.items[index]!.manifestId !== manifestId) invalid();
   }
@@ -695,6 +760,10 @@ function validatePreview(result: RecordJson, rootWarnings: readonly ProjectTempl
   if (countedTargets !== targetCount
     || counts.conflict !== conflictCount
     || counts.add! + counts.update! + counts.delete! !== changeCount) invalid();
+  // Content conflicts cannot be presented as ready/review-only. Recovery and
+  // active-run guards may legitimately take precedence in the producer.
+  if (conflictCount > 0
+    && (raw.readiness === 'ready' || raw.readiness === 'review-required')) invalid();
   const targets = collection(detail.targets, previewTarget);
   const conflicts = collection(detail.conflicts, conflict);
   const capabilityWarnings = collection(
@@ -721,6 +790,7 @@ function validatePreview(result: RecordJson, rootWarnings: readonly ProjectTempl
   for (let index = 0; index < targets.items.length; index += 1) {
     const item = targets.items[index]!;
     if (item.manifestId !== manifestId) invalid();
+    if (item.reviewRequired === true && raw.readiness === 'ready') invalid();
     emittedCounts[item.action as ProjectTemplateCliActionV1_1] += 1;
   }
   if (!targets.truncated && apply(CAPTURED_ARRAY_SOME, ACTION_ORDER, [
@@ -732,10 +802,41 @@ function validatePreview(result: RecordJson, rootWarnings: readonly ProjectTempl
     if (item.manifestId !== manifestId || target === undefined || target.path !== item.path
       || target.action !== 'conflict' || target.reason !== item.reason) invalid();
   }
+  const warningPairs = new CAPTURED_SET<string>();
+  let expectedWarningTotal = 0;
+  for (let index = 0; index < targets.items.length; index += 1) {
+    expectedWarningTotal += (
+      targets.items[index]!.capabilitiesAfter as readonly ProjectTemplateCliCapabilityV1_1[]
+    ).length;
+  }
   for (let index = 0; index < capabilityWarnings.items.length; index += 1) {
     const item = capabilityWarnings.items[index]!;
     const target = apply(CAPTURED_MAP_GET, byTarget, [item.targetId]);
-    if (item.manifestId !== manifestId || target === undefined || target.path !== item.path) invalid();
+    if (item.manifestId !== manifestId || target === undefined || target.path !== item.path
+      || !apply(CAPTURED_ARRAY_SOME, target.capabilitiesAfter as readonly ProjectTemplateCliCapabilityV1_1[], [
+        (capability: ProjectTemplateCliCapabilityV1_1) => capability === item.capability,
+      ])) invalid();
+    const pair = `${item.targetId as string}:${item.capability as string}`;
+    if (setHas(warningPairs, pair)) invalid();
+    setAdd(warningPairs, pair);
+  }
+  if (capabilityWarnings.totalCount < expectedWarningTotal) invalid();
+  if (!targets.truncated) {
+    if (capabilityWarnings.totalCount !== expectedWarningTotal) invalid();
+  }
+  if (!capabilityWarnings.truncated) {
+    let expectedWarnings = 0;
+    for (let index = 0; index < targets.items.length; index += 1) {
+      const item = targets.items[index]!;
+      const capabilities = item.capabilitiesAfter as readonly ProjectTemplateCliCapabilityV1_1[];
+      expectedWarnings += capabilities.length;
+      for (let capabilityIndex = 0; capabilityIndex < capabilities.length; capabilityIndex += 1) {
+        if (!setHas(warningPairs, `${item.targetId as string}:${capabilities[capabilityIndex]!}`)) {
+          invalid();
+        }
+      }
+    }
+    if (expectedWarnings !== capabilityWarnings.items.length) invalid();
   }
   assertPartialWarning(rootWarnings, [targets, conflicts, capabilityWarnings]);
 }
@@ -766,7 +867,9 @@ function validateList(result: RecordJson): void {
   const detail = exact(raw.detail, ['source']);
   const provenance = source(detail.source);
   if (provenance.manifestId !== targetId || provenance.sourceId !== legacy.sourceId
-    || provenance.archiveId !== legacy.archiveId) invalid();
+    || provenance.archiveId !== legacy.archiveId || provenance.kind !== legacy.kind
+    || (provenance.kind === 'local-import' && provenance.revision !== legacy.revision)
+    || (provenance.kind === 'github' && provenance.resolvedCommit !== legacy.revision)) invalid();
   backupIds(raw.backupIds); recoveryState(raw.recoveryState);
 }
 
