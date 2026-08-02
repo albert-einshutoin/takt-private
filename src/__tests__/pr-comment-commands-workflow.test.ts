@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -76,6 +77,59 @@ function findStep(job: WorkflowJob, idOrName: string): WorkflowStep {
   ));
   expect(step, `missing workflow step: ${idOrName}`).toBeDefined();
   return step as WorkflowStep;
+}
+
+function runResolveShellStep(
+  stepName: string,
+  branch: string,
+): readonly string[][] {
+  const directory = mkdtempSync(resolve(tmpdir(), 'takt-resolve-shell-'));
+  temporaryDirectories.push(directory);
+  const binDirectory = resolve(directory, 'bin');
+  const logPath = resolve(directory, 'commands.ndjson');
+  mkdirSync(binDirectory);
+
+  const mock = `#!/bin/sh
+node -e 'const fs = require("node:fs"); fs.appendFileSync(process.env.COMMAND_LOG, JSON.stringify(process.argv.slice(1)) + "\\n")' "$0" "$@"
+if [ "$(basename "$0")" = git ]; then
+  case "$1" in
+    diff) exit 0 ;;
+    rev-parse) printf '%s\\n' '0123456789abcdef0123456789abcdef01234567'; exit 0 ;;
+    rev-list) printf '%s\\n' "$MOCK_AHEAD"; exit 0 ;;
+  esac
+fi
+exit 0
+`;
+  for (const command of ['git', 'gh']) {
+    const commandPath = resolve(binDirectory, command);
+    writeFileSync(commandPath, mock);
+    chmodSync(commandPath, 0o755);
+  }
+
+  const step = findStep(readWorkflow().jobs.resolve!, stepName);
+  // GitHub expands expressions before handing the script to bash. Reproduce
+  // that boundary so command substitution in an expression value is observable.
+  const expandedRun = step.run!.replaceAll('${{ steps.pr.outputs.branch }}', branch);
+  execFileSync('bash', ['-eu', '-o', 'pipefail', '-c', expandedRun], {
+    cwd: directory,
+    env: {
+      ...process.env,
+      COMMAND_LOG: logPath,
+      GITHUB_OUTPUT: resolve(directory, 'github-output'),
+      MOCK_AHEAD: stepName === 'Commit and push' ? '1' : '0',
+      PATH: `${binDirectory}:${process.env.PATH ?? ''}`,
+      PR_BRANCH: branch,
+      PR_HEAD_SHA: REVIEWED_HEAD_SHA,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 3_000,
+  });
+
+  return readFileSync(logPath, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line) as string[]);
 }
 
 function compileReviewCondition(
@@ -571,13 +625,30 @@ describe('PR Comment Commands workflow contract', () => {
       .every(block => !block.text?.text?.includes(maliciousTitle))).toBe(true);
   });
 
-  it('never interpolates untrusted comment or PR data into a shell script', () => {
-    const review = readWorkflow().jobs.review!;
-    const scripts = review.steps
-      .map(step => step.run ?? '')
+  it('never interpolates untrusted comment or PR data into any shell script', () => {
+    const scripts = Object.values(readWorkflow().jobs)
+      .flatMap(job => job.steps.map(step => step.run ?? ''))
       .join('\n');
     expect(scripts).not.toMatch(
       /\$\{\{\s*github\.event\.(?:comment|issue\.(?:title|body)|pull_request)/u,
     );
+    expect(scripts).not.toContain('${{ steps.pr.outputs.branch }}');
   });
+
+  it.each(['Commit and push', 'Trigger CI'])(
+    'passes a command-shaped PR branch literally in %s',
+    (stepName) => {
+      const branch = 'x$(printf${IFS}PWNED)';
+      const commands = runResolveShellStep(stepName, branch);
+      const flattenedArguments = commands.flat();
+      expect(flattenedArguments).toContain(branch);
+      expect(flattenedArguments.some(argument => argument.includes('xPWNED'))).toBe(false);
+      if (stepName === 'Commit and push') {
+        expect(commands.some(command => (
+          command.includes('push')
+          && command.includes(`HEAD:refs/heads/${branch}`)
+        ))).toBe(true);
+      }
+    },
+  );
 });
