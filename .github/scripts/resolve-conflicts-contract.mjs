@@ -11,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { TextDecoder } from 'node:util';
 
 const SCHEMA_VERSION = 1;
@@ -23,7 +23,7 @@ const MAX_CONTRACT_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_REPLACEMENT_BYTES = 512 * 1024;
 const CONTEXT_LINES = 3;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
-const MARKER_LINE_PATTERN = /^(?:<<<<<<<|\|\|\|\|\|\|\||=======|>>>>>>>)(?: .*|)\r?$/gm;
+const MARKER_LINE_PATTERN = /^(?:<{7,}|\|{7,}|={7,}|>{7,})(?: .*|)\r?$/gm;
 const BLOCK_PATTERN = /^<<<<<<< ([^\r\n]+)\r?\n([\s\S]*?)^\|\|\|\|\|\|\| ([^\r\n]+)\r?\n([\s\S]*?)^=======\r?\n([\s\S]*?)^>>>>>>> ([^\r\n]+)(?:\r?\n|$)/gm;
 
 function fail(message) {
@@ -98,12 +98,29 @@ function resolveRegularPath(repoRoot, path) {
   if (stat.isSymbolicLink() || !stat.isFile()) fail(`${path} is not a regular file`);
   // A regular leaf can still escape through a symlinked parent. realpath closes
   // that gap before any model-controlled path is read or replaced.
+  const canonicalParent = realpathSync(dirname(absolute));
+  const parentStat = lstatSync(canonicalParent);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) fail(`${path} parent is not a canonical directory`);
   const canonical = realpathSync(absolute);
+  if (dirname(canonical) !== canonicalParent || basename(canonical) !== basename(absolute)) {
+    fail(`${path} target identity is ambiguous`);
+  }
+  const canonicalStat = lstatSync(canonical);
+  if (!canonicalStat.isFile() || canonicalStat.isSymbolicLink()) fail(`${path} canonical target is not a regular file`);
   const canonicalRel = relative(repoRoot, canonical);
   if (canonicalRel.startsWith(`..${sep}`) || canonicalRel === '..' || isAbsolute(canonicalRel)) {
     fail(`${path} resolves outside the repository`);
   }
-  return { absolute, mode: stat.mode & 0o777 };
+  return {
+    absolute: canonical,
+    canonicalParent,
+    targetName: basename(canonical),
+    parentDev: parentStat.dev,
+    parentIno: parentStat.ino,
+    targetDev: canonicalStat.dev,
+    targetIno: canonicalStat.ino,
+    mode: canonicalStat.mode & 0o777,
+  };
 }
 
 function classifyStages(path, stages) {
@@ -274,7 +291,7 @@ function buildContract(repoRoot) {
   return { ...payload, input_digest: sha256(JSON.stringify(payload)) };
 }
 
-function atomicWrite(path, bytes, mode) {
+function atomicWriteUnbound(path, bytes, mode) {
   const temp = `${path}.takt-resolve-${process.pid}-${randomBytes(8).toString('hex')}`;
   try {
     writeFileSync(temp, bytes, { flag: 'wx', mode });
@@ -283,6 +300,122 @@ function atomicWrite(path, bytes, mode) {
   } finally {
     rmSync(temp, { force: true });
   }
+}
+
+function assertParentBinding(binding) {
+  const canonicalNow = realpathSync(binding.canonicalParent);
+  const stat = lstatSync(binding.canonicalParent);
+  if (canonicalNow !== binding.canonicalParent || !stat.isDirectory() || stat.isSymbolicLink() ||
+      stat.dev !== binding.parentDev || stat.ino !== binding.parentIno) {
+    fail('canonical parent directory identity changed');
+  }
+}
+
+function targetPathFor(binding) {
+  const target = resolve(binding.canonicalParent, binding.targetName);
+  if (dirname(target) !== binding.canonicalParent || basename(target) !== binding.targetName) {
+    fail('bound target no longer resolves inside its canonical parent');
+  }
+  return target;
+}
+
+function assertBoundTarget(binding, expectedBytes) {
+  assertParentBinding(binding);
+  const target = targetPathFor(binding);
+  const stat = lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink() || realpathSync(target) !== target ||
+      stat.dev !== binding.targetDev || stat.ino !== binding.targetIno ||
+      (stat.mode & 0o777) !== binding.mode || sha256(readFileSync(target)) !== sha256(expectedBytes)) {
+    fail('bound target identity, mode, or content changed');
+  }
+  return target;
+}
+
+function assertBoundTargetMissing(binding) {
+  assertParentBinding(binding);
+  const target = targetPathFor(binding);
+  try {
+    lstatSync(target);
+    fail('bound target unexpectedly exists');
+  } catch (error) {
+    if (!(error && typeof error === 'object' && error.code === 'ENOENT')) throw error;
+  }
+  return target;
+}
+
+function refreshBinding(binding, expectedBytes, mode) {
+  assertParentBinding(binding);
+  const target = targetPathFor(binding);
+  const stat = lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink() || realpathSync(target) !== target ||
+      (stat.mode & 0o777) !== mode || sha256(readFileSync(target)) !== sha256(expectedBytes)) {
+    fail('mutated target did not retain its canonical identity, mode, and bytes');
+  }
+  return { ...binding, absolute: target, targetDev: stat.dev, targetIno: stat.ino, mode };
+}
+
+function atomicWriteBound(binding, expectedBytes, bytes, mode) {
+  const target = assertBoundTarget(binding, expectedBytes);
+  const temp = resolve(binding.canonicalParent, `.${binding.targetName}.takt-resolve-${process.pid}-${randomBytes(8).toString('hex')}`);
+  if (dirname(temp) !== binding.canonicalParent) fail('temporary path escaped its canonical parent');
+  try {
+    // Node does not expose openat/renameat with a retained directory fd. These
+    // repeated dev/ino checks minimize the remaining syscall-sized race while
+    // ensuring neither lexical repository paths nor exchanged symlinks are used.
+    assertParentBinding(binding);
+    writeFileSync(temp, bytes, { flag: 'wx', mode });
+    chmodSync(temp, mode);
+    assertParentBinding(binding);
+    assertBoundTarget(binding, expectedBytes);
+    renameSync(temp, target);
+    return refreshBinding(binding, bytes, mode);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function atomicCreateBound(binding, bytes, mode) {
+  const target = assertBoundTargetMissing(binding);
+  const temp = resolve(binding.canonicalParent, `.${binding.targetName}.takt-resolve-${process.pid}-${randomBytes(8).toString('hex')}`);
+  if (dirname(temp) !== binding.canonicalParent) fail('temporary path escaped its canonical parent');
+  try {
+    assertParentBinding(binding);
+    writeFileSync(temp, bytes, { flag: 'wx', mode });
+    chmodSync(temp, mode);
+    assertParentBinding(binding);
+    assertBoundTargetMissing(binding);
+    renameSync(temp, target);
+    return refreshBinding(binding, bytes, mode);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function deleteBound(binding, expectedBytes) {
+  const target = assertBoundTarget(binding, expectedBytes);
+  assertParentBinding(binding);
+  assertBoundTarget(binding, expectedBytes);
+  rmSync(target);
+  assertBoundTargetMissing(binding);
+}
+
+function waitForTestMutationGate(index) {
+  if (process.env.NODE_ENV !== 'test' || Number(process.env.TAKT_RESOLVE_TEST_GATE_AT) !== index + 1) return;
+  const signal = process.env.TAKT_RESOLVE_TEST_GATE_SIGNAL;
+  const release = process.env.TAKT_RESOLVE_TEST_GATE_RELEASE;
+  if (!signal || !release) fail('test mutation gate paths are missing');
+  writeFileSync(signal, 'ready\n', { flag: 'wx', mode: 0o600 });
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      lstatSync(release);
+      return;
+    } catch (error) {
+      if (!(error && typeof error === 'object' && error.code === 'ENOENT')) throw error;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+  fail('test mutation gate timed out');
 }
 
 function readJson(path, label) {
@@ -365,7 +498,7 @@ function prepare(repoRootArg, outputPath) {
   // Measure the bytes actually handed to the model after JSON escaping rather
   // than only the smaller source file bytes.
   if (serialized.length > MAX_CONTRACT_JSON_BYTES) fail('input contract exceeds its serialized byte limit');
-  atomicWrite(resolve(outputPath), serialized, 0o600);
+  atomicWriteUnbound(resolve(outputPath), serialized, 0o600);
 }
 
 function apply(repoRootArg, inputPath, proposalPath) {
@@ -388,7 +521,8 @@ function apply(repoRootArg, inputPath, proposalPath) {
     grouped.set(conflict.path, entries);
   }
   for (const [path, conflicts] of grouped) {
-    const { absolute, mode } = resolveRegularPath(repoRoot, path);
+    const binding = resolveRegularPath(repoRoot, path);
+    const { absolute, mode } = binding;
     const originalBytes = readFileSync(absolute);
     const original = decodeUtf8(originalBytes, path);
     const representative = conflicts[0];
@@ -399,7 +533,7 @@ function apply(repoRootArg, inputPath, proposalPath) {
       const resolution = resolutions.get(representative.conflict_id);
       plans.push({
         path,
-        absolute,
+        binding,
         mode,
         stages: representative.stages,
         kind: representative.kind,
@@ -417,7 +551,7 @@ function apply(repoRootArg, inputPath, proposalPath) {
     MARKER_LINE_PATTERN.lastIndex = 0;
     plans.push({
       path,
-      absolute,
+      binding,
       mode,
       stages: representative.stages,
       kind: representative.kind,
@@ -430,13 +564,17 @@ function apply(repoRootArg, inputPath, proposalPath) {
   const applied = [];
   try {
     for (const [index, plan] of plans.entries()) {
+      waitForTestMutationGate(index);
       const currentEntry = unresolvedEntries(repoRoot).find((entry) => entry.path === plan.path);
       if (!currentEntry || currentEntry.kind !== plan.kind || JSON.stringify(currentEntry.stages) !== JSON.stringify(plan.stages)) {
         fail(`${plan.path} index stages changed immediately before mutation`);
       }
       const currentPath = resolveRegularPath(repoRoot, plan.path);
       const currentBytes = readFileSync(currentPath.absolute);
-      if (currentPath.absolute !== plan.absolute || currentPath.mode !== plan.mode || sha256(currentBytes) !== sha256(plan.originalBytes)) {
+      if (currentPath.absolute !== plan.binding.absolute || currentPath.canonicalParent !== plan.binding.canonicalParent ||
+          currentPath.parentDev !== plan.binding.parentDev || currentPath.parentIno !== plan.binding.parentIno ||
+          currentPath.targetDev !== plan.binding.targetDev || currentPath.targetIno !== plan.binding.targetIno ||
+          currentPath.mode !== plan.mode || sha256(currentBytes) !== sha256(plan.originalBytes)) {
         fail(`${plan.path} canonical path, mode, or content changed immediately before mutation`);
       }
       // Test-only failpoint proves that a later-file failure restores earlier
@@ -444,15 +582,18 @@ function apply(repoRootArg, inputPath, proposalPath) {
       if (process.env.NODE_ENV === 'test' && Number(process.env.TAKT_RESOLVE_TEST_FAIL_WRITE_AT) === index + 1) {
         fail(`injected write failure at mutation ${index + 1}`);
       }
-      if (plan.delete) rmSync(plan.absolute);
-      else atomicWrite(plan.absolute, plan.bytes, plan.mode);
-      applied.push(plan);
+      const postBinding = plan.delete
+        ? (deleteBound(plan.binding, plan.originalBytes), undefined)
+        : atomicWriteBound(plan.binding, plan.originalBytes, plan.bytes, plan.mode);
+      applied.push({ plan, postBinding });
     }
   } catch (error) {
     const rollbackErrors = [];
-    for (const plan of [...applied].reverse()) {
+    for (const appliedMutation of [...applied].reverse()) {
+      const { plan, postBinding } = appliedMutation;
       try {
-        atomicWrite(plan.absolute, plan.originalBytes, plan.mode);
+        if (plan.delete) atomicCreateBound(plan.binding, plan.originalBytes, plan.mode);
+        else atomicWriteBound(postBinding, plan.bytes, plan.originalBytes, plan.mode);
       } catch (rollbackError) {
         rollbackErrors.push(`${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
       }

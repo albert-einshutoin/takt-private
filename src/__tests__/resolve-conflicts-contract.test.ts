@@ -1,5 +1,5 @@
-import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -237,6 +237,14 @@ describe('resolve-conflicts contract', () => {
     );
   });
 
+  it('rejects overlong marker-like lines in conflict input', () => {
+    for (const marker of ['<<<<<<<< injected', '|||||||| injected', '========', '>>>>>>>> injected']) {
+      const repo = makeConflict();
+      writeFileSync(join(repo, 'note.txt'), `${readFileSync(join(repo, 'note.txt'), 'utf8')}${marker}\n`);
+      expect(run(repo, 'prepare', repo, join(repo, 'input.json')).status).not.toBe(0);
+    }
+  });
+
   it('rejects more than twenty conflict blocks across the contract', () => {
     const repo = makeConflict();
     const blocks = Array.from({ length: 21 }, (_, index) => [
@@ -335,7 +343,15 @@ describe('resolve-conflicts contract', () => {
     const cleanInputPath = join(cleanRepo, 'input.json');
     expect(run(cleanRepo, 'prepare', cleanRepo, cleanInputPath).status).toBe(0);
     const clean = JSON.parse(readFileSync(cleanInputPath, 'utf8'));
-    for (const replacement of ['bad\0value', '<<<<<<< injected\n', 'x'.repeat(512 * 1024 + 1)]) {
+    for (const replacement of [
+      'bad\0value',
+      '<<<<<<< injected\n',
+      '<<<<<<<< injected\n',
+      '|||||||| injected\n',
+      '========\n',
+      '>>>>>>>> injected\n',
+      'x'.repeat(512 * 1024 + 1),
+    ]) {
       writeFileSync(proposalPath, JSON.stringify({ schema_version: 1, input_digest: clean.input_digest, resolutions: [
         { conflict_id: clean.conflicts[0].conflict_id, action: 'replace', replacement },
       ] }));
@@ -387,5 +403,62 @@ describe('resolve-conflicts contract', () => {
       'apply', repo, inputPath, proposalPath).status).not.toBe(0);
     expect(readFileSync(join(repo, 'note.txt'))).toEqual(firstBefore);
     expect(readFileSync(join(repo, 'second.txt'))).toEqual(secondBefore);
+  });
+
+  it('rejects a parent symlink exchange, rolls back earlier files, and leaves outside bytes unchanged', async () => {
+    const repo = makeConflict();
+    mkdirSync(join(repo, 'zested'));
+    writeFileSync(join(repo, 'zested', 'second.txt'), readFileSync(join(repo, 'note.txt')));
+    for (const stage of ['1', '2', '3']) {
+      const source = git(repo, 'rev-parse', `:${stage}:note.txt`);
+      execFileSync('git', ['update-index', '--index-info'], {
+        cwd: repo,
+        input: `100644 ${source} ${stage}\tzested/second.txt\n`,
+      });
+    }
+    const outside = mkdtempSync(join(tmpdir(), 'takt-resolve-outside-'));
+    temporaryRepositories.add(outside);
+    const outsideTarget = join(outside, 'second.txt');
+    writeFileSync(outsideTarget, 'outside sentinel\n');
+    const inputPath = join(repo, 'input.json');
+    const proposalPath = join(repo, 'proposal.json');
+    expect(run(repo, 'prepare', repo, inputPath).status).toBe(0);
+    const input = JSON.parse(readFileSync(inputPath, 'utf8'));
+    writeFileSync(proposalPath, JSON.stringify({
+      schema_version: 1,
+      input_digest: input.input_digest,
+      resolutions: input.conflicts.map((conflict: { conflict_id: string }) => ({
+        conflict_id: conflict.conflict_id,
+        action: 'replace',
+        replacement: 'resolved\n',
+      })),
+    }));
+    const firstBefore = readFileSync(join(repo, 'note.txt'));
+    const signal = join(repo, 'mutation-ready');
+    const release = join(repo, 'mutation-release');
+    const child = spawn(process.execPath, [script, 'apply', repo, inputPath, proposalPath], {
+      cwd: repo,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        TAKT_RESOLVE_TEST_GATE_AT: '2',
+        TAKT_RESOLVE_TEST_GATE_SIGNAL: signal,
+        TAKT_RESOLVE_TEST_GATE_RELEASE: release,
+      },
+    });
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(signal) && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    expect(existsSync(signal)).toBe(true);
+    renameSync(join(repo, 'zested'), join(repo, 'zested.original'));
+    symlinkSync(outside, join(repo, 'zested'));
+    writeFileSync(release, 'continue\n');
+    const status = await new Promise<number | null>((resolveExit) => child.once('close', resolveExit));
+
+    expect(status).not.toBe(0);
+    expect(readFileSync(join(repo, 'note.txt'))).toEqual(firstBefore);
+    expect(readFileSync(outsideTarget, 'utf8')).toBe('outside sentinel\n');
   });
 });
