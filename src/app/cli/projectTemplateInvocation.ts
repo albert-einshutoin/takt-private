@@ -4,19 +4,21 @@ const ROOT_OPTIONS_WITH_VALUE = new Set([
 ]);
 const ROOT_BOOLEAN_OPTIONS = new Set([
   '--auto-pr', '--draft', '--pipeline', '--copy-workspace', '--skip-git',
-  '-q', '--quiet', '-c', '--continue', '-h', '--help', '-V', '--version',
+  '-q', '--quiet', '-c', '--continue',
 ]);
+const ROOT_TERMINAL_OPTIONS = new Set(['-h', '--help', '-V', '--version']);
 const ROOT_SHORT_OPTIONS_WITH_VALUE = new Set(['i', 'w', 'b', 't']);
 const ROOT_SHORT_BOOLEAN_OPTIONS = new Set(['q', 'c', 'h', 'V']);
 const PROJECT_TEMPLATE_SUBCOMMANDS = new Set([
   'inspect', 'list', 'export', 'diff', 'apply', 'update', 'rollback',
 ]);
 
-type ShortOptionShape = 'self-contained' | 'consumes-next' | 'unknown';
+type ShortOptionShape = 'self-contained' | 'consumes-next' | 'terminal' | 'unknown';
 
 function shortOptionShape(argument: string): ShortOptionShape {
   for (let index = 1; index < argument.length; index += 1) {
     const name = argument[index]!;
+    if (name === 'h' || name === 'V') return 'terminal';
     if (ROOT_SHORT_BOOLEAN_OPTIONS.has(name)) continue;
     if (ROOT_SHORT_OPTIONS_WITH_VALUE.has(name)) {
       return index === argument.length - 1 ? 'consumes-next' : 'self-contained';
@@ -32,23 +34,39 @@ function isProjectTemplateCommandCandidate(
 ): boolean {
   if (args[index] !== 'project-template') return false;
   let cursor = index + 1;
+  // Why: this recovery path runs after an unknown root option. Mirror the
+  // parent Commander's global grammar here so valid trailing options still
+  // enter the redacted project-template machine lifecycle.
   while (cursor < args.length) {
-    const option = args[cursor]!;
-    if (option === '--cwd') {
-      cursor += args[cursor + 1] === undefined ? 1 : 2;
-      continue;
-    }
-    if (option.startsWith('--cwd=')) {
+    const argument = args[cursor]!;
+    if (argument === '--') return PROJECT_TEMPLATE_SUBCOMMANDS.has(args[cursor + 1] ?? '');
+    if (argument === '--json') {
       cursor += 1;
       continue;
     }
-    break;
+    const equals = argument.indexOf('=');
+    const option = equals < 0 ? argument : argument.slice(0, equals);
+    if (ROOT_OPTIONS_WITH_VALUE.has(option)) {
+      cursor += equals < 0 && args[cursor + 1] !== undefined ? 2 : 1;
+      continue;
+    }
+    if (ROOT_TERMINAL_OPTIONS.has(argument)) return true;
+    if (ROOT_BOOLEAN_OPTIONS.has(argument)) {
+      cursor += 1;
+      continue;
+    }
+    if (argument === '-') return false;
+    if (argument.startsWith('-') && !argument.startsWith('--')) {
+      const shape = shortOptionShape(argument);
+      if (shape === 'terminal') return true;
+      if (shape === 'unknown') return false;
+      cursor += shape === 'consumes-next' && args[cursor + 1] !== undefined ? 2 : 1;
+      continue;
+    }
+    if (argument.startsWith('-')) return false;
+    return PROJECT_TEMPLATE_SUBCOMMANDS.has(argument);
   }
-  const next = args[cursor];
-  return next === undefined
-    || next === '--help'
-    || next === '-h'
-    || PROJECT_TEMPLATE_SUBCOMMANDS.has(next);
+  return true;
 }
 
 /** Pure command detection that never mistakes an option value or later operand for a command. */
@@ -73,10 +91,12 @@ export function isProjectTemplateCliInvocation(args: readonly string[]): boolean
       }
       continue;
     }
-    if (ROOT_BOOLEAN_OPTIONS.has(option)) continue;
+    if (ROOT_TERMINAL_OPTIONS.has(argument)) return false;
+    if (ROOT_BOOLEAN_OPTIONS.has(argument)) continue;
     if (argument.startsWith('-') && !argument.startsWith('--')) {
       const shape = shortOptionShape(argument);
       if (shape === 'consumes-next' && args[index + 1] !== undefined) index += 1;
+      else if (shape === 'terminal') return false;
       else if (shape === 'unknown') unknownOptionValuePending = true;
       continue;
     }

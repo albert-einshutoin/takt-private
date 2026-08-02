@@ -106,6 +106,41 @@ describe('project-template CLI entrypoint contract', () => {
     expect(isProjectTemplateCliInvocation([
       '--wat', 'project-template', '--cwd', '/repo', 'list',
     ])).toBe(true);
+    for (const option of [
+      '--auto-pr', '--draft', '--pipeline', '--copy-workspace', '--skip-git',
+      '--quiet', '--continue', '-q', '-c', '-qc',
+    ]) {
+      expect(isProjectTemplateCliInvocation(['--wat', 'project-template', option, 'list']))
+        .toBe(true);
+    }
+    for (const option of [
+      '--issue', '--pr', '--workflow', '--branch', '--repo', '--provider', '--model',
+      '--task', '--isolation', '--cwd', '-i', '-w', '-b', '-t', '-qi', '-qw', '-qb', '-qt',
+    ]) {
+      expect(isProjectTemplateCliInvocation([
+        '--wat', 'project-template', option, 'value', 'list',
+      ])).toBe(true);
+    }
+    for (const option of [
+      '--issue=value', '--pr=value', '--workflow=value', '--branch=value',
+      '--repo=value', '--provider=value', '--model=value', '--task=value',
+      '--isolation=value', '--cwd=value', '-ivalue', '-wvalue', '-bvalue', '-tvalue',
+      '-qivalue', '-qwvalue', '-qbvalue', '-qtvalue',
+    ]) {
+      expect(isProjectTemplateCliInvocation(['--wat', 'project-template', option, 'list']))
+        .toBe(true);
+    }
+    for (const option of ['--help', '--version', '-h', '-V', '-qh', '-qV']) {
+      expect(isProjectTemplateCliInvocation(['--wat', 'project-template', option]))
+        .toBe(true);
+    }
+    expect(isProjectTemplateCliInvocation(['--help', 'project-template', 'list']))
+      .toBe(false);
+    expect(isProjectTemplateCliInvocation(['-qV', 'project-template', 'list']))
+      .toBe(false);
+    expect(isProjectTemplateCliInvocation([
+      '--wat', 'project-template', '--quiet=true', 'list',
+    ])).toBe(false);
     expect(isProjectTemplateCliInvocation(['--wat', 'project-template', 'run']))
       .toBe(false);
     expect(isProjectTemplateCliInvocation(['--task', 'project-template', 'run']))
@@ -119,6 +154,27 @@ describe('project-template CLI entrypoint contract', () => {
     expect(isProjectTemplateCliInvocation([
       '-qc', 'workflow', 'init', 'project-template',
     ])).toBe(false);
+  });
+
+  it.each([
+    ['group boolean', ['--wat', 'project-template', '--quiet', 'list']],
+    ['group value', ['--wat', 'project-template', '--issue', '1', 'list']],
+    ['group cluster', ['--wat', 'project-template', '-qc', 'list']],
+    [
+      'child boolean',
+      ['--wat', 'project-template', 'apply', 'missing.taktpack', '--quiet'],
+    ],
+  ] as const)('keeps the closed machine lifecycle for a trailing global %s option', (
+    _name,
+    args,
+  ) => {
+    const result = run(args);
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: '1.0', status: 'error', error: { code: 'UNKNOWN_OPTION' },
+    });
   });
 
   it('prints seven-command help without update UI, ANSI, or stderr', () => {

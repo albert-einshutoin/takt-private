@@ -12,6 +12,34 @@ const commands = ['export', 'inspect', 'diff', 'apply', 'update', 'rollback', 'l
 const common = ['--cwd', '--json'];
 const mutation = ['--dry-run', '--apply', '--expected-plan-id', '--force'];
 const exportApprovals = ['--approve-policy', '--approve-capability'];
+const rootValueOptions = [
+  '--issue', '--pr', '--workflow', '--branch', '--repo', '--provider', '--model',
+  '--task', '--isolation', '--cwd', '-i', '-w', '-b', '-t', '-qi', '-qw', '-qb', '-qt',
+] as const;
+const rootAttachedValueOptions = [
+  '--issue=value', '--pr=value', '--workflow=value', '--branch=value', '--repo=value',
+  '--provider=value', '--model=value', '--task=value', '--isolation=value', '--cwd=value',
+  '-ivalue', '-wvalue', '-bvalue', '-tvalue',
+  '-qivalue', '-qwvalue', '-qbvalue', '-qtvalue',
+] as const;
+const rootBooleanOptions = [
+  '--auto-pr', '--draft', '--pipeline', '--copy-workspace', '--skip-git',
+  '--quiet', '--continue', '-q', '-c', '-qc',
+] as const;
+const rootTerminalOptions = ['--help', '--version', '-h', '-V', '-qh', '-qV'] as const;
+const childValueOptions: ReadonlyArray<readonly [string, string]> = [
+  ...commands.map((command) => [command, '--cwd'] as const),
+  ...['inspect', 'diff', 'apply', 'update'].map(
+    (command) => [command, '--current-takt-version'] as const,
+  ),
+  ...['export', 'apply', 'update', 'rollback'].map(
+    (command) => [command, '--expected-plan-id'] as const,
+  ),
+  ...[
+    '--pack-version', '--min-takt-version', '--source-commit',
+    '--approve-policy', '--approve-capability',
+  ].map((option) => ['export', option] as const),
+];
 
 function registeredRootCommands(): string[] {
   const source = readFileSync(resolve('src/app/cli/commands.ts'), 'utf8');
@@ -138,11 +166,95 @@ describe('project-template shell completions', () => {
     },
   );
 
+  it.each(rootTerminalOptions)(
+    'treats bash root terminal option %s as final',
+    (option) => {
+      const root = executeBashCompletion(`(takt ${option} "")`, 2);
+      expect(root).not.toContain('project-template');
+      expect(root).not.toContain('run');
+      expect(executeBashCompletion(`(takt ${option} reset "")`, 3)).not.toContain('categories');
+      expect(executeBashCompletion(`(takt reset ${option} "")`, 3)).not.toContain('categories');
+      expect(executeBashCompletion(`(takt project-template ${option} list "")`, 4))
+        .not.toContain('--json');
+      expect(executeBashCompletion(`(takt project-template list ${option} "")`, 4))
+        .not.toContain('--cwd');
+    },
+  );
+
+  it.each(rootValueOptions)(
+    'fails closed while bash root option %s is missing its value',
+    (option) => {
+      expect(executeBashCompletion(`(takt ${option} "")`, 2)).not.toContain('project-template');
+      expect(executeBashCompletion(`(takt ${option} value "")`, 3)).toContain('project-template');
+    },
+  );
+
+  it.each(rootValueOptions)(
+    'accepts bash global value option %s after the project-template group and child',
+    (option) => {
+      const complete = (tokens: readonly string[]): string => executeBashCompletion(
+        `(takt ${tokens.join(' ')} "")`,
+        tokens.length + 1,
+      );
+      expect(complete(['project-template', option])).not.toContain('rollback');
+      expect(complete(['project-template', option, 'value'])).toContain('rollback');
+      expect(complete(['project-template', option, 'value', 'list'])).toContain('--json');
+      expect(complete(['project-template', 'apply', 'pack.taktpack', option]))
+        .not.toContain('--json');
+      expect(complete(['project-template', 'apply', 'pack.taktpack', option, 'value']))
+        .toContain('--json');
+    },
+  );
+
+  it.each(rootBooleanOptions)(
+    'accepts bash global boolean option %s after the project-template group and child',
+    (option) => {
+      const complete = (tokens: readonly string[]): string => executeBashCompletion(
+        `(takt ${tokens.join(' ')} "")`,
+        tokens.length + 1,
+      );
+      expect(complete(['project-template', option])).toContain('rollback');
+      expect(complete(['project-template', option, 'list'])).toContain('--json');
+      expect(complete(['project-template', 'apply', 'pack.taktpack', option]))
+        .toContain('--json');
+    },
+  );
+
+  it.each(rootAttachedValueOptions)(
+    'accepts bash attached global value option %s after the project-template group and child',
+    (option) => {
+      expect(executeBashCompletion(`(takt project-template ${option} "")`, 3))
+        .toContain('rollback');
+      expect(executeBashCompletion(
+        `(takt project-template apply pack.taktpack ${option} "")`,
+        5,
+      )).toContain('--json');
+    },
+  );
+
+  it('fails closed while bash project-template group --cwd is missing its value', () => {
+    expect(executeBashCompletion('(takt project-template --cwd "")', 3)).not.toContain('rollback');
+    expect(executeBashCompletion('(takt project-template --cwd /work "")', 4)).toContain('rollback');
+  });
+
+  it.each(childValueOptions)(
+    'fails closed while bash %s option %s is missing its value',
+    (command, option) => {
+      const pending = ['project-template', command, option];
+      const complete = ['project-template', command, option, 'value'];
+      expect(executeBashCompletion(`(takt ${pending.join(' ')} "")`, pending.length + 1))
+        .not.toContain('--json');
+      expect(executeBashCompletion(`(takt ${complete.join(' ')} "")`, complete.length + 1))
+        .toContain('--json');
+    },
+  );
+
   it('parses bash project-template group options and delimiters before the child', () => {
     expect(executeBashCompletion('(takt project-template --cwd /work "")', 4)).toContain('rollback');
     expect(executeBashCompletion('(takt project-template --cwd=/work "")', 3)).toContain('rollback');
     expect(executeBashCompletion('(takt project-template --json "")', 3)).toContain('rollback');
     expect(executeBashCompletion('(takt project-template -x rollback "")', 4)).not.toContain('--force');
+    expect(executeBashCompletion('(takt project-template - rollback "")', 4)).not.toContain('--force');
     expect(executeBashCompletion('(takt project-template --mystery rollback "")', 4)).not.toContain('--force');
     expect(executeBashCompletion('(takt project-template --help rollback "")', 4)).not.toContain('--force');
     expect(executeBashCompletion('(takt -- --quiet project-template "")', 4)).not.toContain('rollback');
@@ -158,6 +270,7 @@ describe('project-template shell completions', () => {
     );
     expect(complete(['project-template', command, '--mystery'])).not.toContain('--cwd');
     expect(complete(['project-template', command, '-x'])).not.toContain('--cwd');
+    expect(complete(['project-template', command, '-'])).not.toContain('--cwd');
     expect(complete(['project-template', command, '--help'])).not.toContain('--cwd');
     const excess = command === 'list'
       ? ['project-template', command, 'unexpected']
@@ -192,7 +305,7 @@ describe('project-template shell completions', () => {
   it.each([
     ['boolean short', '-q', true],
     ['attached short value', '-iqfoo', true],
-    ['boolean cluster', '-qV', true],
+    ['boolean cluster', '-qc', true],
     ['unknown short', '-x', false],
     ['unknown long', '--mystery', false],
   ] as const)('classifies bash %s before project-template', (_name, option, expected) => {
@@ -251,6 +364,89 @@ describe('project-template shell completions', () => {
     },
   );
 
+  it.each(rootTerminalOptions)(
+    'treats zsh root terminal option %s as final',
+    (option) => {
+      const root = executeZshCompletion(`(takt ${option} "")`, 3);
+      expect(root).not.toContain('project-template');
+      expect(root).not.toContain('run');
+      expect(executeZshCompletion(`(takt ${option} reset "")`, 4)).not.toContain('categories');
+      expect(executeZshCompletion(`(takt reset ${option} "")`, 4)).not.toContain('categories');
+      expect(executeZshCompletion(`(takt project-template ${option} list "")`, 5))
+        .not.toContain('--json');
+      expect(executeZshCompletion(`(takt project-template list ${option} "")`, 5))
+        .not.toContain('--cwd');
+    },
+  );
+
+  it.each(rootValueOptions)(
+    'fails closed while zsh root option %s is missing its value',
+    (option) => {
+      expect(executeZshCompletion(`(takt ${option} "")`, 3)).not.toContain('project-template');
+      expect(executeZshCompletion(`(takt ${option} value "")`, 4)).toContain('project-template');
+    },
+  );
+
+  it.each(rootValueOptions)(
+    'accepts zsh global value option %s after the project-template group and child',
+    (option) => {
+      const complete = (tokens: readonly string[]): string => executeZshCompletion(
+        `(takt ${tokens.join(' ')} "")`,
+        tokens.length + 2,
+      );
+      expect(complete(['project-template', option])).not.toContain('rollback');
+      expect(complete(['project-template', option, 'value'])).toContain('rollback');
+      expect(complete(['project-template', option, 'value', 'list'])).toContain('--json');
+      expect(complete(['project-template', 'apply', 'pack.taktpack', option]))
+        .not.toContain('--json');
+      expect(complete(['project-template', 'apply', 'pack.taktpack', option, 'value']))
+        .toContain('--json');
+    },
+  );
+
+  it.each(rootBooleanOptions)(
+    'accepts zsh global boolean option %s after the project-template group and child',
+    (option) => {
+      const complete = (tokens: readonly string[]): string => executeZshCompletion(
+        `(takt ${tokens.join(' ')} "")`,
+        tokens.length + 2,
+      );
+      expect(complete(['project-template', option])).toContain('rollback');
+      expect(complete(['project-template', option, 'list'])).toContain('--json');
+      expect(complete(['project-template', 'apply', 'pack.taktpack', option]))
+        .toContain('--json');
+    },
+  );
+
+  it.each(rootAttachedValueOptions)(
+    'accepts zsh attached global value option %s after the project-template group and child',
+    (option) => {
+      expect(executeZshCompletion(`(takt project-template ${option} "")`, 4))
+        .toContain('rollback');
+      expect(executeZshCompletion(
+        `(takt project-template apply pack.taktpack ${option} "")`,
+        6,
+      )).toContain('--json');
+    },
+  );
+
+  it('fails closed while zsh project-template group --cwd is missing its value', () => {
+    expect(executeZshCompletion('(takt project-template --cwd "")', 4)).not.toContain('rollback');
+    expect(executeZshCompletion('(takt project-template --cwd /work "")', 5)).toContain('rollback');
+  });
+
+  it.each(childValueOptions)(
+    'fails closed while zsh %s option %s is missing its value',
+    (command, option) => {
+      const pending = ['project-template', command, option];
+      const complete = ['project-template', command, option, 'value'];
+      expect(executeZshCompletion(`(takt ${pending.join(' ')} "")`, pending.length + 2))
+        .not.toContain('--json');
+      expect(executeZshCompletion(`(takt ${complete.join(' ')} "")`, complete.length + 2))
+        .toContain('--json');
+    },
+  );
+
   it.each([
     ['reset', 'categories'],
     ['workflow', 'doctor'],
@@ -269,6 +465,7 @@ describe('project-template shell completions', () => {
     expect(executeZshCompletion('(takt project-template --cwd=/work "")', 4)).toContain('rollback');
     expect(executeZshCompletion('(takt project-template --json "")', 4)).toContain('rollback');
     expect(executeZshCompletion('(takt project-template -x rollback "")', 5)).not.toContain('--force');
+    expect(executeZshCompletion('(takt project-template - rollback "")', 5)).not.toContain('--force');
     expect(executeZshCompletion('(takt project-template --mystery rollback "")', 5)).not.toContain('--force');
     expect(executeZshCompletion('(takt project-template --help rollback "")', 5)).not.toContain('--force');
     expect(executeZshCompletion('(takt -- --quiet project-template "")', 5)).not.toContain('rollback');
@@ -284,6 +481,7 @@ describe('project-template shell completions', () => {
     );
     expect(complete(['project-template', command, '--mystery'])).not.toContain('--cwd');
     expect(complete(['project-template', command, '-x'])).not.toContain('--cwd');
+    expect(complete(['project-template', command, '-'])).not.toContain('--cwd');
     expect(complete(['project-template', command, '--help'])).not.toContain('--cwd');
     const excess = command === 'list'
       ? ['project-template', command, 'unexpected']
@@ -351,7 +549,7 @@ describe('project-template shell completions', () => {
   it.each([
     ['boolean short', '-q', true],
     ['attached short value', '-iqfoo', true],
-    ['boolean cluster', '-qV', true],
+    ['boolean cluster', '-qc', true],
     ['unknown short', '-x', false],
     ['unknown long', '--mystery', false],
   ] as const)('classifies zsh %s before project-template', (_name, option, expected) => {
@@ -420,10 +618,13 @@ describe('project-template shell completions', () => {
     expect(fish).toContain('set -l root_ambiguous 0');
     expect(fish).toContain('set -l group_ambiguous 0');
     expect(fish).toContain('set -l child_operand_count 0');
+    expect(fish).toContain('test $skip_value -eq 0; or return 1');
+    expect(fish).toContain('case --auto-pr --draft --pipeline --copy-workspace --skip-git --quiet --continue');
+    expect(fish).toContain('contains -- $short_name h V');
     expect(fish).toContain('case --cwd');
     expect(fish).toContain("case '--cwd=*'");
     expect(fish).toContain('case --json');
-    expect(fish).toContain('case --help -h');
+    expect(fish).toContain('case --help --version');
     expect(fish).toContain('case --expected-plan-id');
     expect(fish).toContain('case --current-takt-version');
     expect(fish).toContain('case --pack-version --min-takt-version --source-commit --approve-policy --approve-capability');

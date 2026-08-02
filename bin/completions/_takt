@@ -11,6 +11,7 @@ _takt() {
   # familiar word from reviving completion after ambiguous input.
   for (( index = 2; index < CURRENT; index++ )); do
     word=${words[index]}
+    if (( terminal )); then continue; fi
     if [[ $phase == root || $phase == legacy ]]; then
       if (( skip_value )); then skip_value=0; continue; fi
       if (( delimiter_seen )); then
@@ -27,9 +28,10 @@ _takt() {
           skip_value=1; continue ;;
         --issue=*|--pr=*|--workflow=*|--branch=*|--repo=*|--provider=*|--model=*|--task=*|--isolation=*|--cwd=*)
           continue ;;
-        --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue|--help|--version)
+        --help|--version) terminal=1; continue ;;
+        --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue)
           continue ;;
-        --auto-pr=*|--draft=*|--pipeline=*|--copy-workspace=*|--skip-git=*|--quiet=*|--continue=*|--help=*|--version=*)
+        --auto-pr=*|--draft=*|--pipeline=*|--copy-workspace=*|--skip-git=*|--quiet=*|--continue=*)
           continue ;;
         --) delimiter_seen=1; continue ;;
         --*) root_ambiguous=1; continue ;;
@@ -37,7 +39,8 @@ _takt() {
           for (( short_index = 2; short_index <= ${#word}; short_index++ )); do
             short_name=${word[short_index]}
             case $short_name in
-              q|c|h|V) ;;
+              q|c) ;;
+              h|V) terminal=1; break ;;
               i|w|b|t)
                 if (( short_index == ${#word} )); then
                   skip_value=1
@@ -73,9 +76,28 @@ _takt() {
           --cwd) skip_value=1; continue ;;
           --cwd=*) continue ;;
           --json) continue ;;
-          --help|-h) terminal=1; continue ;;
+          --issue|--pr|--workflow|--branch|--repo|--provider|--model|--task|--isolation)
+            skip_value=1; continue ;;
+          --issue=*|--pr=*|--workflow=*|--branch=*|--repo=*|--provider=*|--model=*|--task=*|--isolation=*)
+            continue ;;
+          --help|--version) terminal=1; continue ;;
+          --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue)
+            continue ;;
           --) delimiter_seen=1; continue ;;
-          -*) group_ambiguous=1; continue ;;
+          -) group_ambiguous=1; continue ;;
+          -*)
+            for (( short_index = 2; short_index <= ${#word}; short_index++ )); do
+              short_name=${word[short_index]}
+              case $short_name in
+                q|c) ;;
+                h|V) terminal=1; break ;;
+                i|w|b|t)
+                  if (( short_index == ${#word} )); then skip_value=1; fi
+                  break ;;
+                *) group_ambiguous=1; break ;;
+              esac
+            done
+            continue ;;
         esac
       fi
       if (( ${pt_commands[(Ie)$word]} )); then
@@ -94,7 +116,13 @@ _takt() {
           --cwd) skip_value=1; continue ;;
           --cwd=*) continue ;;
           --json) continue ;;
-          --help|-h) terminal=1; continue ;;
+          --issue|--pr|--workflow|--branch|--repo|--provider|--model|--task|--isolation)
+            skip_value=1; continue ;;
+          --issue=*|--pr=*|--workflow=*|--branch=*|--repo=*|--provider=*|--model=*|--task=*|--isolation=*)
+            continue ;;
+          --help|--version) terminal=1; continue ;;
+          --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue)
+            continue ;;
           --current-takt-version)
             case $command in inspect|diff|apply|update) skip_value=1 ;; *) group_ambiguous=1 ;; esac
             continue ;;
@@ -117,7 +145,20 @@ _takt() {
             if [[ $command != export ]]; then group_ambiguous=1; fi
             continue ;;
           --) delimiter_seen=1; continue ;;
-          -*) group_ambiguous=1; continue ;;
+          -) group_ambiguous=1; continue ;;
+          -*)
+            for (( short_index = 2; short_index <= ${#word}; short_index++ )); do
+              short_name=${word[short_index]}
+              case $short_name in
+                q|c) ;;
+                h|V) terminal=1; break ;;
+                i|w|b|t)
+                  if (( short_index == ${#word} )); then skip_value=1; fi
+                  break ;;
+                *) group_ambiguous=1; break ;;
+              esac
+            done
+            continue ;;
         esac
       fi
       ((child_operand_count++))
@@ -127,7 +168,7 @@ _takt() {
     fi
   done
   if [[ $root_command != project-template ]]; then
-    if (( ! root_ambiguous )) && [[ -z $root_child ]]; then
+    if (( ! root_ambiguous && ! terminal && ! skip_value )) && [[ -z $root_child ]]; then
       case $root_command in
         reset) _values 'reset command' config categories ;;
         workflow) _values 'workflow command' init doctor ;;
@@ -138,7 +179,7 @@ _takt() {
     fi
     return
   fi
-  if (( root_ambiguous || group_ambiguous || terminal )); then return; fi
+  if (( root_ambiguous || group_ambiguous || terminal || skip_value )); then return; fi
   if [[ -n $command ]] && (( delimiter_seen )); then return; fi
   if [[ -z $command ]]; then
     _describe 'project template command' pt_commands

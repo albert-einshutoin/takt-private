@@ -7,6 +7,7 @@ _takt_project_template() {
   # familiar word from reviving completion after ambiguous input.
   for ((index = 1; index < COMP_CWORD; index++)); do
     word=${COMP_WORDS[index]}
+    if (( terminal )); then continue; fi
     if [[ $phase == root || $phase == legacy ]]; then
       if (( skip_value )); then skip_value=0; continue; fi
       if (( delimiter_seen )); then
@@ -23,9 +24,10 @@ _takt_project_template() {
           skip_value=1; continue ;;
         --issue=*|--pr=*|--workflow=*|--branch=*|--repo=*|--provider=*|--model=*|--task=*|--isolation=*|--cwd=*)
           continue ;;
-        --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue|--help|--version)
+        --help|--version) terminal=1; continue ;;
+        --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue)
           continue ;;
-        --auto-pr=*|--draft=*|--pipeline=*|--copy-workspace=*|--skip-git=*|--quiet=*|--continue=*|--help=*|--version=*)
+        --auto-pr=*|--draft=*|--pipeline=*|--copy-workspace=*|--skip-git=*|--quiet=*|--continue=*)
           continue ;;
         --) delimiter_seen=1; continue ;;
         --*) root_ambiguous=1; continue ;;
@@ -33,7 +35,8 @@ _takt_project_template() {
           for ((short_index = 1; short_index < ${#word}; short_index++)); do
             short_name=${word:short_index:1}
             case $short_name in
-              q|c|h|V) ;;
+              q|c) ;;
+              h|V) terminal=1; break ;;
               i|w|b|t)
                 if (( short_index == ${#word} - 1 )); then
                   skip_value=1
@@ -69,9 +72,28 @@ _takt_project_template() {
           --cwd) skip_value=1; continue ;;
           --cwd=*) continue ;;
           --json) continue ;;
-          --help|-h) terminal=1; continue ;;
+          --issue|--pr|--workflow|--branch|--repo|--provider|--model|--task|--isolation)
+            skip_value=1; continue ;;
+          --issue=*|--pr=*|--workflow=*|--branch=*|--repo=*|--provider=*|--model=*|--task=*|--isolation=*)
+            continue ;;
+          --help|--version) terminal=1; continue ;;
+          --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue)
+            continue ;;
           --) delimiter_seen=1; continue ;;
-          -*) group_ambiguous=1; continue ;;
+          -) group_ambiguous=1; continue ;;
+          -*)
+            for ((short_index = 1; short_index < ${#word}; short_index++)); do
+              short_name=${word:short_index:1}
+              case $short_name in
+                q|c) ;;
+                h|V) terminal=1; break ;;
+                i|w|b|t)
+                  if (( short_index == ${#word} - 1 )); then skip_value=1; fi
+                  break ;;
+                *) group_ambiguous=1; break ;;
+              esac
+            done
+            continue ;;
         esac
       fi
       case " $pt_commands " in
@@ -89,7 +111,13 @@ _takt_project_template() {
           --cwd) skip_value=1; continue ;;
           --cwd=*) continue ;;
           --json) continue ;;
-          --help|-h) terminal=1; continue ;;
+          --issue|--pr|--workflow|--branch|--repo|--provider|--model|--task|--isolation)
+            skip_value=1; continue ;;
+          --issue=*|--pr=*|--workflow=*|--branch=*|--repo=*|--provider=*|--model=*|--task=*|--isolation=*)
+            continue ;;
+          --help|--version) terminal=1; continue ;;
+          --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue)
+            continue ;;
           --current-takt-version)
             case $command in inspect|diff|apply|update) skip_value=1 ;; *) group_ambiguous=1 ;; esac
             continue ;;
@@ -112,7 +140,20 @@ _takt_project_template() {
             if [[ $command != export ]]; then group_ambiguous=1; fi
             continue ;;
           --) delimiter_seen=1; continue ;;
-          -*) group_ambiguous=1; continue ;;
+          -) group_ambiguous=1; continue ;;
+          -*)
+            for ((short_index = 1; short_index < ${#word}; short_index++)); do
+              short_name=${word:short_index:1}
+              case $short_name in
+                q|c) ;;
+                h|V) terminal=1; break ;;
+                i|w|b|t)
+                  if (( short_index == ${#word} - 1 )); then skip_value=1; fi
+                  break ;;
+                *) group_ambiguous=1; break ;;
+              esac
+            done
+            continue ;;
         esac
       fi
       ((child_operand_count++))
@@ -122,7 +163,7 @@ _takt_project_template() {
     fi
   done
   if [[ $root_command != project-template ]]; then
-    if (( root_ambiguous )) || [[ -n $root_child ]]; then
+    if (( root_ambiguous || terminal || skip_value )) || [[ -n $root_child ]]; then
       candidates=""
     else
       case "$root_command" in
@@ -134,7 +175,7 @@ repertoire) candidates="add remove list" ;;
 *) candidates="" ;;
       esac
     fi
-  elif (( root_ambiguous || group_ambiguous || terminal )); then
+  elif (( root_ambiguous || group_ambiguous || terminal || skip_value )); then
     candidates=""
   elif [[ -n $command ]] && (( delimiter_seen )); then
     candidates=""

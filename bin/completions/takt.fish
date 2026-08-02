@@ -19,6 +19,9 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
   set -l terminal 0
   set -l child_operand_count 0
   for word in $argv_words
+    if test $terminal -eq 1
+      continue
+    end
     if test $skip_value -eq 1
       set skip_value 0
       continue
@@ -45,9 +48,12 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
           continue
         case '--issue=*' '--pr=*' '--workflow=*' '--branch=*' '--repo=*' '--provider=*' '--model=*' '--task=*' '--isolation=*' '--cwd=*'
           continue
-        case --auto-pr --draft --pipeline --copy-workspace --skip-git --quiet --continue --help --version
+        case --help --version
+          set terminal 1
           continue
-        case '--auto-pr=*' '--draft=*' '--pipeline=*' '--copy-workspace=*' '--skip-git=*' '--quiet=*' '--continue=*' '--help=*' '--version=*'
+        case --auto-pr --draft --pipeline --copy-workspace --skip-git --quiet --continue
+          continue
+        case '--auto-pr=*' '--draft=*' '--pipeline=*' '--copy-workspace=*' '--skip-git=*' '--quiet=*' '--continue=*'
           continue
         case '--'
           set delimiter_seen 1
@@ -61,6 +67,10 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
           set -l short_names (string split '' -- (string sub -s 2 -- $word))
           for short_index in (seq (count $short_names))
             set -l short_name $short_names[$short_index]
+            if contains -- $short_name h V
+              set terminal 1
+              break
+            end
             if contains -- $short_name $short_boolean_options
               continue
             end
@@ -106,14 +116,42 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
             continue
           case --json
             continue
-          case --help -h
+          case --issue --pr --workflow --branch --repo --provider --model --task --isolation
+            set skip_value 1
+            continue
+          case '--issue=*' '--pr=*' '--workflow=*' '--branch=*' '--repo=*' '--provider=*' '--model=*' '--task=*' '--isolation=*'
+            continue
+          case --help --version
             set terminal 1
+            continue
+          case --auto-pr --draft --pipeline --copy-workspace --skip-git --quiet --continue
             continue
           case '--'
             set delimiter_seen 1
             continue
-          case '-*'
+          case '-'
             set group_ambiguous 1
+            continue
+          case '-*'
+            set -l short_names (string split '' -- (string sub -s 2 -- $word))
+            for short_index in (seq (count $short_names))
+              set -l short_name $short_names[$short_index]
+              if contains -- $short_name h V
+                set terminal 1
+                break
+              end
+              if contains -- $short_name q c
+                continue
+              end
+              if contains -- $short_name $short_options_with_value
+                if test $short_index -eq (count $short_names)
+                  set skip_value 1
+                end
+                break
+              end
+              set group_ambiguous 1
+              break
+            end
             continue
         end
       end
@@ -139,8 +177,15 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
             continue
           case --json
             continue
-          case --help -h
+          case --issue --pr --workflow --branch --repo --provider --model --task --isolation
+            set skip_value 1
+            continue
+          case '--issue=*' '--pr=*' '--workflow=*' '--branch=*' '--repo=*' '--provider=*' '--model=*' '--task=*' '--isolation=*'
+            continue
+          case --help --version
             set terminal 1
+            continue
+          case --auto-pr --draft --pipeline --copy-workspace --skip-git --quiet --continue
             continue
           case --current-takt-version
             if contains -- $command inspect diff apply update
@@ -178,8 +223,29 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
           case '--'
             set delimiter_seen 1
             continue
-          case '-*'
+          case '-'
             set group_ambiguous 1
+            continue
+          case '-*'
+            set -l short_names (string split '' -- (string sub -s 2 -- $word))
+            for short_index in (seq (count $short_names))
+              set -l short_name $short_names[$short_index]
+              if contains -- $short_name h V
+                set terminal 1
+                break
+              end
+              if contains -- $short_name q c
+                continue
+              end
+              if contains -- $short_name $short_options_with_value
+                if test $short_index -eq (count $short_names)
+                  set skip_value 1
+                end
+                break
+              end
+              set group_ambiguous 1
+              break
+            end
             continue
         end
       end
@@ -192,6 +258,7 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
 
   # Why: every completion predicate must validate the full argument prefix. This
   # prevents a later unknown option or positional operand from reviving a group.
+  test $skip_value -eq 0; or return 1
   test $root_ambiguous -eq 0; or return 1
   test $group_ambiguous -eq 0; or return 1
   test $terminal -eq 0; or return 1
