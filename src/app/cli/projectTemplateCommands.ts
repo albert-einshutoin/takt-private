@@ -6,12 +6,20 @@ import {
   createProjectTemplateCliFailure,
   parseProjectTemplateCliMutationOptions,
   projectTemplateCliExitCodeForErrorCode,
+  snapshotProjectTemplateCliOutcome,
   writeProjectTemplateCliOutcome,
   type ProjectTemplateCliCommand,
   type ProjectTemplateCliErrorCode,
+  type ProjectTemplateCliFailureEnvelope,
   type ProjectTemplateCliMutationOptions,
   type ProjectTemplateCliOutcome,
 } from '../../features/project-template/cli-machine-contract.js';
+import {
+  createProjectTemplateCliV1_1FailureFor,
+  snapshotProjectTemplateCliV1_1Outcome,
+  writeProjectTemplateCliV1_1Outcome,
+  type ProjectTemplateCliV1_1Outcome,
+} from '../../features/project-template/cli-machine-contract-v1-1.js';
 import {
   startProjectTemplateCliLifecycle,
   type ProjectTemplateCliLifecycleContext,
@@ -38,6 +46,26 @@ function parserFailureMode(
   ) ? 'apply' : 'dry-run';
 }
 
+function requestedSchemaVersions(args: readonly string[]): readonly string[] {
+  const versions: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--schema-version') {
+      const value = args[index + 1];
+      if (value !== undefined && !value.startsWith('--')) {
+        versions.push(value);
+        index += 1;
+      } else {
+        versions.push('');
+      }
+    } else if (argument?.startsWith('--schema-version=')) {
+      versions.push(argument.slice('--schema-version='.length));
+    }
+    if (versions.length > 2) break;
+  }
+  return Object.freeze(versions);
+}
+
 export type ProjectTemplateCliCommandSource =
   | { readonly kind: 'local'; readonly value: string }
   | { readonly kind: 'github'; readonly value: string };
@@ -46,6 +74,7 @@ export interface ProjectTemplateCliCommandRequest {
   readonly command: ProjectTemplateCliCommand;
   readonly cwd: string;
   readonly json: boolean;
+  readonly schemaVersion?: '1.0' | '1.1';
   readonly source?: ProjectTemplateCliCommandSource;
   readonly outputPath?: string;
   readonly backupId?: string;
@@ -64,7 +93,7 @@ export interface ProjectTemplateCliCommandAdapterDependencies {
   readonly dispatch: (
     request: ProjectTemplateCliCommandRequest,
     context: ProjectTemplateCliLifecycleContext,
-  ) => Promise<ProjectTemplateCliOutcome>;
+  ) => Promise<ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome>;
   readonly dispose: () => void | Promise<void>;
   readonly writeStdout: (chunk: string) => void | Promise<void>;
   readonly setExitCode: (code: number) => void;
@@ -72,6 +101,8 @@ export interface ProjectTemplateCliCommandAdapterDependencies {
   readonly cwd: () => string;
   readonly currentTaktVersion: string;
 }
+
+type ProjectTemplateCliAnyOutcome = ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome;
 
 const parserFailureHandlers = new WeakMap<
 Command,
@@ -116,6 +147,7 @@ interface MutationFlags {
 interface CommonFlags extends MutationFlags {
   readonly cwd?: string;
   readonly json?: boolean;
+  readonly schemaVersion?: readonly string[];
   readonly currentTaktVersion?: readonly string[];
   readonly packVersion?: string;
   readonly minTaktVersion?: string;
@@ -143,7 +175,14 @@ function failure(
   command: ProjectTemplateCliCommand,
   mode: 'dry-run' | 'apply',
   code: ProjectTemplateCliErrorCode,
-): ProjectTemplateCliOutcome {
+  schemaVersion: '1.0' | '1.1' = '1.0',
+): ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome {
+  if (schemaVersion === '1.1') {
+    return {
+      envelope: createProjectTemplateCliV1_1FailureFor({ command, mode, code }),
+      exitCode: projectTemplateCliExitCodeForErrorCode(code),
+    };
+  }
   return {
     envelope: createProjectTemplateCliFailure({ command, mode, code }),
     exitCode: projectTemplateCliExitCodeForErrorCode(code),
@@ -154,7 +193,7 @@ function mutation(
   command: ProjectTemplateCliCommand,
   flags: MutationFlags,
   applyRequested = flags.apply === true,
-): ProjectTemplateCliMutationOptions | ProjectTemplateCliOutcome {
+): ProjectTemplateCliMutationOptions | ProjectTemplateCliAnyOutcome {
   if (flags.force === true && !applyRequested) {
     return failure(command, 'dry-run', 'INVALID_ARGUMENT');
   }
@@ -181,13 +220,23 @@ function mutation(
 
 function invalidMutationInput(
   command: ProjectTemplateCliCommand,
-  parsed: ProjectTemplateCliMutationOptions | ProjectTemplateCliOutcome,
-): ProjectTemplateCliOutcome {
-  if ('envelope' in parsed) return parsed;
+  parsed: ProjectTemplateCliMutationOptions | ProjectTemplateCliAnyOutcome,
+): { readonly envelope: ProjectTemplateCliFailureEnvelope; readonly exitCode: number } {
+  if ('envelope' in parsed) {
+    if (parsed.envelope.schemaVersion !== '1.0' || parsed.envelope.status !== 'error') {
+      throw new Error('mutation option parser returned an invalid failure outcome');
+    }
+    return parsed as { envelope: ProjectTemplateCliFailureEnvelope; exitCode: number };
+  }
   // Why: machine clients correlate errors with the invocation they attempted.
   // Preserve an already-validated apply mode even when a later operand check
   // fails, instead of misreporting the request as a dry-run.
-  return failure(command, parsed.mode, 'INVALID_ARGUMENT');
+  return {
+    envelope: createProjectTemplateCliFailure({
+      command, mode: parsed.mode, code: 'INVALID_ARGUMENT',
+    }),
+    exitCode: projectTemplateCliExitCodeForErrorCode('INVALID_ARGUMENT'),
+  };
 }
 
 function canonicalSource(cwd: string, value: string | undefined): ProjectTemplateCliCommandSource | undefined {
@@ -223,6 +272,14 @@ function addCommonOptions(command: Command): Command {
     .allowUnknownOption(true)
     .allowExcessArguments(true)
     .option('--cwd <path>', 'Project root (overrides root/project-template --cwd)')
+    .option(
+      '--schema-version <version>',
+      'Machine schema version (1.0 default; 1.1 detailed review contract)',
+      (value: string, previous: readonly string[] | undefined): readonly string[] => [
+        ...(previous ?? []), value,
+      ],
+      [],
+    )
     .option('--json', 'Explicitly request the always-machine JSON output contract');
 }
 
@@ -284,56 +341,82 @@ export function registerProjectTemplateCommands(
     .exitOverride()
     .allowUnknownOption(true)
     .option('--cwd <path>', 'Project root')
+    .option('--schema-version <version>', 'Machine schema version (1.0 or 1.1)')
     .option('--json', 'Explicitly request the always-machine JSON output contract');
 
   const settle = async (
     command: ProjectTemplateCliCommand,
     mode: 'dry-run' | 'apply',
     handle: (context: ProjectTemplateCliLifecycleContext) =>
-      Promise<ProjectTemplateCliOutcome>,
+      Promise<ProjectTemplateCliAnyOutcome>,
+    schemaVersion: '1.0' | '1.1' = '1.0',
   ): Promise<void> => {
     const lifecycleState: {
-      current?: ReturnType<typeof startProjectTemplateCliLifecycle>;
+      current?: { readonly interrupt: () => void };
     } = {};
     let interruptedBeforeStart = false;
     let removeInterrupt: (() => void) | undefined;
-    const lifecycle = startProjectTemplateCliLifecycle({
+    const dispose = async (): Promise<void> => {
+      let disposalError: unknown;
+      try {
+        await dependencies.dispose();
+      } catch (error) {
+        disposalError = error;
+      }
+      let listenerError: unknown;
+      try {
+        removeInterrupt?.();
+      } catch (error) {
+        listenerError = error;
+      }
+      if (disposalError !== undefined && listenerError !== undefined) {
+        throw new AggregateError([disposalError, listenerError], 'project template cleanup failed');
+      }
+      if (disposalError !== undefined) throw disposalError;
+      if (listenerError !== undefined) throw listenerError;
+    };
+    const invoke = async (
+      context: ProjectTemplateCliLifecycleContext,
+    ): Promise<ProjectTemplateCliAnyOutcome> => {
+      removeInterrupt = dependencies.installInterrupt(() => {
+        if (lifecycleState.current === undefined) interruptedBeforeStart = true;
+        else lifecycleState.current.interrupt();
+      });
+      // Yield once so the returned lifecycle can receive a SIGINT that fired
+      // during listener installation before dispatch can admit mutation.
+      await Promise.resolve();
+      return await handle(context);
+    };
+    const lifecycle = schemaVersion === '1.1'
+      ? startProjectTemplateCliLifecycle({
+        command, mode, schemaVersion: '1.1', dispose,
+        async handle(context) {
+          return snapshotProjectTemplateCliV1_1Outcome(await invoke(context));
+        },
+      })
+      : startProjectTemplateCliLifecycle({
       command,
       mode,
-      async dispose() {
-        let disposalError: unknown;
-        try {
-          await dependencies.dispose();
-        } catch (error) {
-          disposalError = error;
-        }
-        let listenerError: unknown;
-        try {
-          removeInterrupt?.();
-        } catch (error) {
-          listenerError = error;
-        }
-        if (disposalError !== undefined && listenerError !== undefined) {
-          throw new AggregateError([disposalError, listenerError], 'project template cleanup failed');
-        }
-        if (disposalError !== undefined) throw disposalError;
-        if (listenerError !== undefined) throw listenerError;
-      },
+      schemaVersion: '1.0',
+      dispose,
       async handle(context) {
-        removeInterrupt = dependencies.installInterrupt(() => {
-          if (lifecycleState.current === undefined) interruptedBeforeStart = true;
-          else lifecycleState.current.interrupt();
-        });
-        // Yield once so the returned lifecycle can receive a SIGINT that fired
-        // during listener installation before dispatch can admit mutation.
-        await Promise.resolve();
-        return await handle(context);
+        return snapshotProjectTemplateCliOutcome(await invoke(context));
       },
     });
     lifecycleState.current = lifecycle;
     if (interruptedBeforeStart) lifecycle.interrupt();
     const result = await lifecycle.result;
-    await writeProjectTemplateCliOutcome(result, dependencies.writeStdout);
+    if (result.envelope.schemaVersion === '1.1') {
+      await writeProjectTemplateCliV1_1Outcome(
+        result as ProjectTemplateCliV1_1Outcome,
+        dependencies.writeStdout,
+      );
+    } else {
+      await writeProjectTemplateCliOutcome(
+        result as ProjectTemplateCliOutcome,
+        dependencies.writeStdout,
+      );
+    }
     dependencies.setExitCode(result.exitCode);
   };
 
@@ -341,7 +424,18 @@ export function registerProjectTemplateCommands(
     command: ProjectTemplateCliCommand,
     mode: 'dry-run' | 'apply',
     code: ProjectTemplateCliErrorCode,
-  ): Promise<void> => settle(command, mode, async () => failure(command, mode, code));
+    requestedVersion?: '1.0' | '1.1',
+  ): Promise<void> => {
+    const selected = requestedSchemaVersions(rawArgs());
+    // Why: once a caller has made one valid exact schema selection, every
+    // parser and operand failure must remain in that schema. Invalid or
+    // duplicate negotiation itself stays on the backward-compatible 1.0 path.
+    const schemaVersion = requestedVersion
+      ?? (selected.length === 1 && selected[0] === '1.1' ? '1.1' : '1.0');
+    return settle(
+      command, mode, async () => failure(command, mode, code, schemaVersion), schemaVersion,
+    );
+  };
 
   parserFailureHandlers.set(root, (command, mode) => (
     invalid(command, mode, 'UNKNOWN_OPTION')
@@ -362,8 +456,17 @@ export function registerProjectTemplateCommands(
   const run = async (
     command: Command,
     flags: CommonFlags,
-    request: Omit<ProjectTemplateCliCommandRequest, 'cwd' | 'json' | 'currentTaktVersion'>,
+    request: Omit<ProjectTemplateCliCommandRequest, 'cwd' | 'json' | 'schemaVersion' | 'currentTaktVersion'>,
   ): Promise<void> => {
+    const schemaVersions = requestedSchemaVersions(rawArgs());
+    if (schemaVersions.length > 1
+      || (schemaVersions[0] !== undefined
+        && schemaVersions[0] !== '1.0'
+        && schemaVersions[0] !== '1.1')) {
+      await invalid(request.command, request.mutation?.mode ?? 'dry-run', 'INVALID_ARGUMENT');
+      return;
+    }
+    const schemaVersion = (schemaVersions[0] ?? '1.0') as '1.0' | '1.1';
     const currentVersionAssertions = flags.currentTaktVersion ?? [];
     if (currentVersionAssertions.length > 1
       || (currentVersionAssertions[0] !== undefined
@@ -383,12 +486,14 @@ export function registerProjectTemplateCommands(
       ...request,
       cwd,
       json: flags.json === true,
+      schemaVersion,
       currentTaktVersion: dependencies.currentTaktVersion,
     };
     await settle(
       fullRequest.command,
       fullRequest.mutation?.mode ?? 'dry-run',
       (context) => dependencies.dispatch(fullRequest, context),
+      schemaVersion,
     );
   };
 
@@ -457,9 +562,8 @@ export function registerProjectTemplateCommands(
       if ('envelope' in parsedMutation || output === undefined
         || !output.endsWith('.taktpack') || !validMetadata || approvals === undefined) {
         const result = invalidMutationInput('project-template export', parsedMutation);
-        await settle(
-          'project-template export', result.envelope.mode,
-          async () => result,
+        await invalid(
+          'project-template export', result.envelope.mode, result.envelope.error.code,
         );
         return;
       }
@@ -498,7 +602,7 @@ export function registerProjectTemplateCommands(
         if ('envelope' in parsedMutation || parsedSource === undefined
           || (name === 'update' && parsedSource.kind !== 'github')) {
           const result = invalidMutationInput(machineCommand, parsedMutation);
-          await settle(machineCommand, result.envelope.mode, async () => result);
+          await invalid(machineCommand, result.envelope.mode, result.envelope.error.code);
           return;
         }
         await run(action, flags, {
@@ -526,7 +630,9 @@ export function registerProjectTemplateCommands(
       );
       if ('envelope' in parsedMutation || backupId === undefined) {
         const result = invalidMutationInput('project-template rollback', parsedMutation);
-        await settle('project-template rollback', result.envelope.mode, async () => result);
+        await invalid(
+          'project-template rollback', result.envelope.mode, result.envelope.error.code,
+        );
         return;
       }
       await run(command, flags, {

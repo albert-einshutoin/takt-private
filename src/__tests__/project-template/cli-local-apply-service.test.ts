@@ -49,6 +49,48 @@ function port(
 }
 
 describe('local project-template CLI diff/apply service', () => {
+  it('keeps non-content conflicts blocking without corrupting schema 1.1 target counts', async () => {
+    const manifestId = 'b'.repeat(64);
+    const service = createCoreService(port({
+      derive: vi.fn(async () => ({
+        transactionPlanId: PLAN_ID,
+        changeCount: 0,
+        conflictCount: 1,
+        dependencyCount: 1,
+        reviewRequired: true,
+        hardConflict: true,
+        defaultApplyPossible: false,
+        forceApplicable: false,
+        authority: Object.freeze({ kind: 'test-authority' }),
+        review: {
+          archiveId: 'c'.repeat(64), manifestId, revision: '1'.repeat(40),
+          targetCount: 0,
+          actionCounts: { add: 0, update: 0, keep: 0, delete: 0, conflict: 0, excluded: 0 },
+          items: [], conflicts: [], warnings: [],
+          summary: {
+            totalItems: 0, emittedItems: 0, omittedItems: 0,
+            totalConflicts: 0, emittedConflicts: 0, omittedConflicts: 0,
+            totalWarnings: 0, emittedWarnings: 0, omittedWarnings: 0,
+            truncated: false,
+          },
+        },
+      })),
+    }));
+
+    const outcome = await service.diffV1_1({
+      cwd: '/safe/repo', sourcePath: 'pack.taktpack',
+      currentTaktVersion: '0.48.0', force: false,
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: { result: {
+        conflictCount: 0, readiness: 'blocked', reviewCodes: ['HARD_CONFLICT'],
+        detail: { conflicts: { totalCount: 0 }, actionCounts: { conflict: 0 } },
+      } },
+    });
+  });
+
   it('rejects missing, accessor, and proxied admission inputs before execute', async () => {
     const execute = vi.fn(port().execute);
     const service = createCoreService(port({ execute }));

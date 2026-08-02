@@ -21,6 +21,13 @@ import {
   type ProjectTemplateCliReadiness,
   type ProjectTemplateCliReviewCode,
 } from './cli-machine-contract.js';
+import {
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION_V1_1,
+  createProjectTemplateCliV1_1FailureFor,
+  createProjectTemplateCliV1_1Success,
+  type ProjectTemplateCliV1_1Outcome,
+} from './cli-machine-contract-v1-1.js';
+import { calculateProjectTemplateManifestSha256 } from './binding.js';
 import { TaktpackError } from './errors.js';
 import {
   consumeProjectTemplateCliMutationAdmission,
@@ -47,6 +54,7 @@ interface ProjectTemplateCliExportInput {
   readonly mutation: ProjectTemplateCliMutationOptions;
   readonly signal?: AbortSignal;
   readonly admitMutation?: ProjectTemplateCliMutationAdmission;
+  readonly schemaVersion?: '1.0' | '1.1';
 }
 
 interface PlannedExport {
@@ -78,7 +86,16 @@ class CliExportBoundaryError extends Error {
 function failure(
   mode: ProjectTemplateCliMutationOptions['mode'],
   code: ProjectTemplateCliErrorCode,
-): ProjectTemplateCliOutcome {
+  schemaVersion: '1.0' | '1.1' = '1.0',
+): ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome {
+  if (schemaVersion === '1.1') {
+    return {
+      envelope: createProjectTemplateCliV1_1FailureFor({
+        command: 'project-template export', mode, code,
+      }),
+      exitCode: projectTemplateCliExitCodeForErrorCode(code),
+    };
+  }
   return {
     envelope: createProjectTemplateCliFailure({
       command: 'project-template export',
@@ -216,16 +233,30 @@ function mapError(error: unknown): ProjectTemplateCliErrorCode {
   }
 }
 
+export function executeProjectTemplateCliExport(
+  input: ProjectTemplateCliExportInput & { readonly schemaVersion: '1.1' },
+  testSeam?: ProjectTemplateCliExportTestSeam,
+): Promise<ProjectTemplateCliV1_1Outcome>;
+export function executeProjectTemplateCliExport(
+  input: ProjectTemplateCliExportInput,
+  testSeam?: ProjectTemplateCliExportTestSeam,
+): Promise<ProjectTemplateCliOutcome>;
 export async function executeProjectTemplateCliExport(
   input: ProjectTemplateCliExportInput,
   testSeam: ProjectTemplateCliExportTestSeam = {},
-): Promise<ProjectTemplateCliOutcome> {
+): Promise<ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome> {
   let mode: ProjectTemplateCliMutationOptions['mode'] = 'dry-run';
+  let schemaVersion: '1.0' | '1.1' = '1.0';
   let mutationAdmitted = false;
   try {
     const snapshot = snapshotProjectTemplateCliOwnData(input,
       ['projectRoot', 'outputPath', 'exportOptions', 'mutation'],
-      ['signal', 'admitMutation']);
+      ['signal', 'admitMutation', 'schemaVersion']);
+    if (snapshot['schemaVersion'] !== undefined
+      && snapshot['schemaVersion'] !== '1.0' && snapshot['schemaVersion'] !== '1.1') {
+      throw new ProjectTemplateCliInvalidAdmission();
+    }
+    schemaVersion = (snapshot['schemaVersion'] ?? '1.0') as '1.0' | '1.1';
     const mutation = snapshotProjectTemplateCliOwnData(snapshot['mutation'],
       ['mode', 'force'], ['expectedPlanId']);
     const applyMode = mutation['mode'] === 'apply';
@@ -255,7 +286,7 @@ export async function executeProjectTemplateCliExport(
     input.signal?.throwIfAborted();
     const initialGuard = guardSummary(projectRoot);
     if (mode === 'apply' && initialGuard.applyError !== undefined) {
-      return failure(mode, initialGuard.applyError);
+      return failure(mode, initialGuard.applyError, schemaVersion);
     }
     const approvals = approvalSnapshot.projection;
     const planned = await createPlannedExport(input, projectRoot, approvals, testSeam);
@@ -279,6 +310,49 @@ export async function executeProjectTemplateCliExport(
     if (mode === 'dry-run') {
       testSeam.onPhase?.('before-dry-run-success');
       input.signal?.throwIfAborted();
+      if (schemaVersion === '1.1') {
+        const manifestId = calculateProjectTemplateManifestSha256(planned.plan.manifest);
+        const reasons = Object.entries(planned.plan.report.excludedReasons)
+          .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([reason, reasonCount]) => ({
+            detailId: createHash('sha256').update(
+              `takt.project-template.cli.export.reason.v1\0${manifestId}\0${reason}`,
+            ).digest('hex'),
+            manifestId,
+            classification: 'excluded' as const,
+            reason,
+            count: reasonCount,
+            // Why: the export report intentionally stores bounded aggregate
+            // reasons, not local paths. Empty samples preserve that redaction
+            // instead of re-scanning and creating a second source of truth.
+            paths: [] as const,
+          }));
+        const excluded = reasons.reduce((sum, reason) => sum + reason.count, 0);
+        return {
+          envelope: createProjectTemplateCliV1_1Success({
+            schemaVersion: PROJECT_TEMPLATE_CLI_SCHEMA_VERSION_V1_1,
+            command: 'project-template export', status: 'success', mode,
+            result: {
+              ...baseResult,
+              detail: {
+                manifestId,
+                securitySummary: {
+                  counts: {
+                    portable: planned.plan.manifest.entries.length,
+                    excluded,
+                    blocked: 0,
+                    reviewRequired: reviewSummary.readiness === 'review-required' ? 1 : 0,
+                  },
+                  reasons: { items: reasons, totalCount: reasons.length, truncated: false },
+                },
+              },
+            },
+            warnings: [],
+          }),
+          exitCode: 0,
+        };
+      }
       return {
         envelope: createProjectTemplateCliSuccess({
           command: 'project-template export',
@@ -294,14 +368,14 @@ export async function executeProjectTemplateCliExport(
         && applyMutation.expectedPlanId === planned.absentTargetPlanId
         ? 'TARGET_DRIFT'
         : 'PLAN_DRIFT';
-      return failure(mode, code);
+      return failure(mode, code, schemaVersion);
     }
     const finalGuard = guardSummary(projectRoot);
-    if (finalGuard.applyError !== undefined) return failure(mode, finalGuard.applyError);
+    if (finalGuard.applyError !== undefined) return failure(mode, finalGuard.applyError, schemaVersion);
     if (!input.mutation.force && planned.output.projection.target.state !== 'absent') {
       // Why: the exact plan already binds this regular output. Missing force is
       // an approval decision, not evidence that the target changed after review.
-      return failure(mode, 'APPROVAL_REQUIRED');
+      return failure(mode, 'APPROVAL_REQUIRED', schemaVersion);
     }
     input.signal?.throwIfAborted();
     const finalOutput = await captureTaktpackOutputPrecondition(input.outputPath, {
@@ -315,13 +389,13 @@ export async function executeProjectTemplateCliExport(
       finalOutput.projection,
       approvals,
     );
-    if (finalPlanId !== planned.planId) return failure(mode, 'TARGET_DRIFT');
+    if (finalPlanId !== planned.planId) return failure(mode, 'TARGET_DRIFT', schemaVersion);
     try {
       consumeProjectTemplateCliMutationAdmission(input.admitMutation);
       mutationAdmitted = true;
     } catch (error) {
       return failure(mode, input.signal?.aborted === true ? 'INTERRUPTED'
-        : error instanceof ProjectTemplateCliInvalidAdmission ? 'SECURITY_GUARD' : 'INTERNAL');
+        : error instanceof ProjectTemplateCliInvalidAdmission ? 'SECURITY_GUARD' : 'INTERNAL', schemaVersion);
     }
     const archive = await writeTaktpackWithOutputPrecondition(
       input.outputPath,
@@ -343,10 +417,10 @@ export async function executeProjectTemplateCliExport(
       exitCode: 0,
     };
   } catch (error) {
-    if (mutationAdmitted) return failure(mode, 'RESULT_INDETERMINATE');
+    if (mutationAdmitted) return failure(mode, 'RESULT_INDETERMINATE', schemaVersion);
     if (error instanceof ProjectTemplateCliInvalidAdmission) {
-      return failure(mode, 'SECURITY_GUARD');
+      return failure(mode, 'SECURITY_GUARD', schemaVersion);
     }
-    return failure(mode, mapError(error));
+    return failure(mode, mapError(error), schemaVersion);
   }
 }

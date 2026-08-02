@@ -32,6 +32,7 @@ import {
 } from './remote-preview-operation.js';
 import { createProjectTemplateSourceProvenancePlan } from './source-provenance-plan.js';
 import { serializeProjectTemplateSourceProvenance } from './source-provenance.js';
+import { createProjectTemplateCliReviewProjectionV1_1 } from './cli-review-projection-v1-1.js';
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -79,9 +80,26 @@ export interface GithubProjectTemplateRemoteTransactionSummary {
   readonly defaultApplyPossible: boolean;
 }
 
+export interface GithubProjectTemplateRemoteTransactionReview {
+  readonly manifestId: string;
+  readonly source: Readonly<Record<string, unknown>>;
+  readonly targetCount: number;
+  readonly actionCounts: Readonly<Record<
+    'add' | 'update' | 'keep' | 'delete' | 'conflict' | 'excluded', number
+  >>;
+  readonly items: readonly Readonly<Record<string, unknown>>[];
+  readonly conflicts: readonly Readonly<Record<string, unknown>>[];
+  readonly warnings: readonly Readonly<Record<string, unknown>>[];
+  readonly summary: Readonly<Record<string, number | boolean>>;
+}
+
 const REMOTE_TRANSACTION_SUMMARIES = new WeakMap<
   ProjectTemplateRemoteApplyPreview,
   GithubProjectTemplateRemoteTransactionSummary
+>();
+const REMOTE_TRANSACTION_REVIEWS = new WeakMap<
+  ProjectTemplateRemoteApplyPreview,
+  GithubProjectTemplateRemoteTransactionReview
 >();
 
 export function readGithubProjectTemplateRemoteTransactionSummary(
@@ -89,6 +107,12 @@ export function readGithubProjectTemplateRemoteTransactionSummary(
 ): GithubProjectTemplateRemoteTransactionSummary | undefined {
   const summary = REMOTE_TRANSACTION_SUMMARIES.get(preview);
   return summary === undefined ? undefined : Object.freeze({ ...summary });
+}
+
+export function readGithubProjectTemplateRemoteTransactionReview(
+  preview: ProjectTemplateRemoteApplyPreview,
+): GithubProjectTemplateRemoteTransactionReview | undefined {
+  return REMOTE_TRANSACTION_REVIEWS.get(preview);
 }
 
 function requireActive(
@@ -301,6 +325,38 @@ export async function deriveGithubProjectTemplateRemoteTransaction(
       mode: entry.afterMode,
     });
   }
+  const reviewProjection = createProjectTemplateCliReviewProjectionV1_1({
+    manifestId: materialized.inspection.manifestSha256,
+    items: contentPlan.entries.map((entry) => ({
+      path: entry.path,
+      policy: entry.policy,
+      action: entry.action,
+      reason: entry.reasonCode,
+      reviewRequired: entry.reviewRequired,
+      capabilities: entry.capabilitiesAfter,
+    })),
+  });
+  const reviewByPath = new Map(contentPlan.entries.map((entry) => [entry.path, entry]));
+  const actionCounts = {
+    add: 0, update: 0, keep: 0, delete: 0, conflict: 0, excluded: 0,
+  };
+  for (const entry of contentPlan.entries) actionCounts[entry.action] += 1;
+  const reviewItems = reviewProjection.items.map((item) => {
+    const entry = reviewByPath.get(item.path)!;
+    return Object.freeze({
+      itemId: item.id,
+      targetId: item.targetId,
+      manifestId: materialized.inspection.manifestSha256,
+      path: item.path,
+      policy: item.policy,
+      action: item.action,
+      reason: item.reason,
+      reviewRequired: item.reviewRequired,
+      capabilitiesBefore: entry.capabilitiesBefore,
+      capabilitiesAfter: entry.capabilitiesAfter,
+    });
+  });
+  const itemByTarget = new Map(reviewItems.map((item) => [item.targetId, item]));
   REMOTE_TRANSACTION_SUMMARIES.set(preview, Object.freeze({
     changeCount: contentEntries.length,
     conflictCount: preview.compositionConflicts.length
@@ -311,6 +367,44 @@ export async function deriveGithubProjectTemplateRemoteTransaction(
     reviewRequired: preview.reviewRequired,
     hardConflict: preview.hardConflict,
     defaultApplyPossible: preview.defaultApplyPossible,
+  }));
+  REMOTE_TRANSACTION_REVIEWS.set(preview, Object.freeze({
+    manifestId: materialized.inspection.manifestSha256,
+    source: Object.freeze({
+        kind: 'github',
+        sourceId: sourceProvenance.source.descriptorSha256,
+        owner: sourceProvenance.source.owner,
+        repo: sourceProvenance.source.repo,
+        requestedRef: sourceProvenance.source.requestedRef,
+        resolvedCommit: sourceProvenance.source.commit,
+        releaseTag: sourceProvenance.source.releaseTag,
+        assetName: sourceProvenance.source.assetName ?? null,
+        archiveId: sourceProvenance.archive.sha256,
+        manifestId: sourceProvenance.archive.manifestSha256,
+    }),
+    targetCount: contentPlan.entries.length,
+    actionCounts: Object.freeze(actionCounts),
+    items: Object.freeze(reviewItems),
+    conflicts: Object.freeze(reviewProjection.conflicts.map((conflict) => Object.freeze({
+        conflictId: conflict.id,
+        targetId: conflict.targetId,
+        manifestId: materialized.inspection.manifestSha256,
+        path: conflict.path,
+        reason: conflict.reason,
+        safeDefaultAction: conflict.safeDefaultAction,
+        allowedActions: conflict.allowedActions,
+    }))),
+    warnings: Object.freeze(reviewProjection.warnings.map((warning) => {
+        const item = itemByTarget.get(warning.targetId)!;
+        return Object.freeze({
+          warningId: warning.id,
+          targetId: warning.targetId,
+          manifestId: materialized.inspection.manifestSha256,
+          path: item.path,
+          capability: warning.capability,
+        });
+    })),
+    summary: reviewProjection.summary,
   }));
   return Object.freeze({
     preview,

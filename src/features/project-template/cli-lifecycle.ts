@@ -6,6 +6,11 @@ import {
   type ProjectTemplateCliOutcome,
 } from './cli-machine-contract.js';
 import { types } from 'node:util';
+import {
+  createProjectTemplateCliV1_1FailureFor,
+  snapshotProjectTemplateCliV1_1Outcome,
+  type ProjectTemplateCliV1_1Outcome,
+} from './cli-machine-contract-v1-1.js';
 
 declare const PROJECT_TEMPLATE_ADMISSION_BRAND: unique symbol;
 export type ProjectTemplateCliMutationAdmission = (() => void) & {
@@ -30,9 +35,11 @@ export interface ProjectTemplateCliLifecycleContext {
   readonly admitMutation: ProjectTemplateCliMutationAdmission;
 }
 
-export interface ProjectTemplateCliLifecycleExecution {
+export interface ProjectTemplateCliLifecycleExecution<
+  Outcome extends ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome = ProjectTemplateCliOutcome,
+> {
   readonly interrupt: () => void;
-  readonly result: Promise<ProjectTemplateCliOutcome>;
+  readonly result: Promise<Outcome>;
 }
 
 class ProjectTemplateCliPreAdmissionInterrupt extends Error {
@@ -121,26 +128,46 @@ function failureOutcome(
     | 'INTERNAL'
     | 'RECOVERY_REQUIRED'
     | 'RESULT_INDETERMINATE',
-): ProjectTemplateCliOutcome {
+  schemaVersion: '1.0' | '1.1',
+): ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome {
   const exitCode = code === 'INTERRUPTED'
     ? 130
     : code === 'RECOVERY_REQUIRED' || code === 'RESULT_INDETERMINATE'
       ? 25
       : 70;
-  return {
-    envelope: createProjectTemplateCliFailure({ command, mode, code }),
-    exitCode,
-  };
+  if (schemaVersion === '1.1') {
+    return { envelope: createProjectTemplateCliV1_1FailureFor({ command, mode, code }), exitCode };
+  }
+  return { envelope: createProjectTemplateCliFailure({ command, mode, code }), exitCode };
 }
 
-export function startProjectTemplateCliLifecycle(input: {
+interface ProjectTemplateCliLifecycleInput<Outcome> {
   readonly command: ProjectTemplateCliCommand;
   readonly mode: ProjectTemplateCliMode;
   readonly dispose: () => void | Promise<void>;
   readonly handle: (
     context: ProjectTemplateCliLifecycleContext,
-  ) => Promise<ProjectTemplateCliOutcome>;
-}): ProjectTemplateCliLifecycleExecution {
+  ) => Promise<Outcome>;
+}
+
+export function startProjectTemplateCliLifecycle(
+  input: ProjectTemplateCliLifecycleInput<ProjectTemplateCliOutcome> & {
+    readonly schemaVersion?: '1.0';
+  },
+): ProjectTemplateCliLifecycleExecution<ProjectTemplateCliOutcome>;
+export function startProjectTemplateCliLifecycle(
+  input: ProjectTemplateCliLifecycleInput<ProjectTemplateCliV1_1Outcome> & {
+    readonly schemaVersion: '1.1';
+  },
+): ProjectTemplateCliLifecycleExecution<ProjectTemplateCliV1_1Outcome>;
+export function startProjectTemplateCliLifecycle(
+  input: ProjectTemplateCliLifecycleInput<
+    ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome
+  > & { readonly schemaVersion?: '1.0' | '1.1' },
+): ProjectTemplateCliLifecycleExecution<
+  ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome
+> {
+  const schemaVersion = input.schemaVersion ?? '1.0';
   const controller = new AbortController();
   let admitted = false;
   let interrupted = false;
@@ -181,13 +208,18 @@ export function startProjectTemplateCliLifecycle(input: {
   admitMutation = capability;
   CAPTURED_REFLECT_APPLY(CAPTURED_WEAK_SET_ADD, ACTIVE_ADMISSIONS, [admitMutation]);
 
-  const result = (async (): Promise<ProjectTemplateCliOutcome> => {
-    let outcome: ProjectTemplateCliOutcome;
+  const result = (async (): Promise<
+    ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome
+  > => {
+    let outcome: ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome;
     try {
-      const handled = snapshotProjectTemplateCliOutcome(await input.handle({
+      const rawHandled = await input.handle({
         signal: controller.signal,
         admitMutation: admitMutation!,
-      }));
+      });
+      const handled = schemaVersion === '1.1'
+        ? snapshotProjectTemplateCliV1_1Outcome(rawHandled)
+        : snapshotProjectTemplateCliOutcome(rawHandled);
       if (
         handled.envelope.command !== input.command
         || handled.envelope.mode !== input.mode
@@ -196,20 +228,20 @@ export function startProjectTemplateCliLifecycle(input: {
       }
       outcome = handled;
       if (interrupted && !admitted) {
-        outcome = failureOutcome(input.command, input.mode, 'INTERRUPTED');
+        outcome = failureOutcome(input.command, input.mode, 'INTERRUPTED', schemaVersion);
       }
     } catch (error) {
       if (
         !admitted
         && (interrupted || error instanceof ProjectTemplateCliPreAdmissionInterrupt)
       ) {
-        outcome = failureOutcome(input.command, input.mode, 'INTERRUPTED');
+        outcome = failureOutcome(input.command, input.mode, 'INTERRUPTED', schemaVersion);
       } else if (admitted) {
-        outcome = failureOutcome(input.command, input.mode, 'RESULT_INDETERMINATE');
+        outcome = failureOutcome(input.command, input.mode, 'RESULT_INDETERMINATE', schemaVersion);
       } else {
         // Exception messages are intentionally not reflected into the envelope:
         // upstream errors can contain paths, credentials, or provider details.
-        outcome = failureOutcome(input.command, input.mode, 'INTERNAL');
+        outcome = failureOutcome(input.command, input.mode, 'INTERNAL', schemaVersion);
       }
     }
 
@@ -225,9 +257,12 @@ export function startProjectTemplateCliLifecycle(input: {
         input.command,
         input.mode,
         admitted ? 'RECOVERY_REQUIRED' : 'INTERNAL',
+        schemaVersion,
       );
     }
-    return snapshotProjectTemplateCliOutcome(outcome);
+    return schemaVersion === '1.1'
+      ? snapshotProjectTemplateCliV1_1Outcome(outcome)
+      : snapshotProjectTemplateCliOutcome(outcome);
   })();
 
   return Object.freeze({ interrupt, result });

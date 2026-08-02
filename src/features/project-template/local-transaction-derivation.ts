@@ -69,6 +69,24 @@ export interface DerivedLocalProjectTemplateTransaction {
     }
     | { readonly path: string; readonly action: 'delete' }
   )[];
+  /**
+   * Safe read/review facts retained separately from content and transaction
+   * authority so a desktop consumer never needs the executable plan object.
+   */
+  readonly review: {
+    readonly archiveId: string;
+    readonly manifestId: string;
+    readonly revision: string;
+    readonly entries: readonly {
+      readonly path: string;
+      readonly policy: 'managed' | 'merge' | 'scaffold' | 'excluded';
+      readonly action: 'add' | 'update' | 'keep' | 'delete' | 'conflict' | 'excluded';
+      readonly reason: import('./apply-plan-types.js').ProjectTemplateApplyReasonCode;
+      readonly reviewRequired: boolean;
+      readonly capabilitiesBefore: readonly import('./types.js').TemplateCapability[];
+      readonly capabilitiesAfter: readonly import('./types.js').TemplateCapability[];
+    }[];
+  };
   readonly companionOutputs: {
     readonly contentLock: Uint8Array;
     readonly repertoireLock: Uint8Array;
@@ -278,6 +296,20 @@ export async function deriveLocalProjectTemplateTransaction(
   }
   return Object.freeze({
     preview,
+    review: Object.freeze({
+      archiveId: materialized.inspection.archiveSha256,
+      manifestId: materialized.inspection.manifestSha256,
+      revision: localImportSource.commit,
+      entries: Object.freeze(contentPlan.entries.map((entry) => Object.freeze({
+        path: entry.path,
+        policy: entry.policy,
+        action: entry.action,
+        reason: entry.reasonCode,
+        reviewRequired: entry.reviewRequired,
+        capabilitiesBefore: Object.freeze([...entry.capabilitiesBefore]),
+        capabilitiesAfter: Object.freeze([...entry.capabilitiesAfter]),
+      }))),
+    }),
     candidatePaths: Object.freeze(contentPlan.entries.map((entry) => entry.path)),
     mergeBaselines: Object.freeze(mergeBaselines),
     contentEntries: Object.freeze(contentEntries),

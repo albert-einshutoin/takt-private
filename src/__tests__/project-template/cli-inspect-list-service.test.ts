@@ -11,8 +11,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaktpackError } from '../../features/project-template/errors.js';
 import {
+  inspectProjectTemplateForCliV1_1WithDependencies,
   inspectProjectTemplateForCliWithDependencies,
   listProjectTemplatesForCli,
+  listProjectTemplatesForCliV1_1WithDependencies,
   listProjectTemplatesForCliWithDependencies,
   type ProjectTemplateCliInspectListDependencies,
 } from '../../features/project-template/cli-inspect-list-service.js';
@@ -124,7 +126,178 @@ function inspectDependencies(
   };
 }
 
+function inspectV1_1Archive(entries: readonly unknown[], sourceKind: string = 'local') {
+  return {
+    archiveSha256: SHA,
+    manifestSha256: SHA_B,
+    descriptor: { version: '1.0' as const },
+    manifest: {
+      packVersion: '1.2.3',
+      takt: { minVersion: '0.48.0' },
+      source: {
+        kind: sourceKind,
+        uri: sourceKind === 'github' ? 'https://github.com/owner/template' : '.',
+        ref: sourceKind === 'github' ? 'v1.2.3' : 'workspace',
+        commit: COMMIT,
+      },
+      capabilities: [],
+      entries,
+    },
+    compatibility: {
+      status: 'compatible' as const,
+      minVersion: '0.48.0',
+      currentVersion: '0.48.0',
+    },
+  };
+}
+
 describe('project-template inspect CLI service', () => {
+  it('validates every entry before truncating detail and aggregates tail capabilities', async () => {
+    const entries = Array.from({ length: 257 }, (_, index) => ({
+      path: `workflows/${String(index).padStart(3, '0')}.yaml`,
+      policy: 'managed' as const,
+      capabilities: index === 256 ? ['external-command' as const] : [],
+    }));
+    const outcome = await inspectProjectTemplateForCliV1_1WithDependencies({
+      cwd: '/safe/repo', sourcePath: 'template.taktpack',
+      currentTaktVersion: '0.48.0', schemaVersion: '1.1',
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => inspectV1_1Archive(entries)),
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        schemaVersion: '1.1',
+        warnings: [{ code: 'PARTIAL_RESULT' }],
+        result: { detail: {
+          detectedCapabilities: ['external-command'],
+          targets: { totalCount: 257, truncated: true },
+          capabilityWarnings: { items: [], totalCount: 1, truncated: true },
+        } },
+      },
+    });
+    if (outcome.envelope.status !== 'success') throw new Error('expected success');
+    expect(outcome.envelope.result.detail.targets.items).toHaveLength(256);
+  });
+
+  it('emits one warning for every capability on an affected target', async () => {
+    const outcome = await inspectProjectTemplateForCliV1_1WithDependencies({
+      cwd: '/safe/repo', sourcePath: 'template.taktpack', schemaVersion: '1.1',
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => inspectV1_1Archive([{
+        path: 'workflows/release.yaml', policy: 'managed',
+        capabilities: ['executable', 'github-write', 'external-command'],
+      }])),
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: { result: { detail: { capabilityWarnings: {
+        totalCount: 3, truncated: false,
+        items: [
+          { capability: 'executable' },
+          { capability: 'github-write' },
+          { capability: 'external-command' },
+        ],
+      } } } },
+    });
+  });
+
+  it('rejects an invalid tail entry outside the 256-row display budget', async () => {
+    let accessed = false;
+    const hostileTail = { policy: 'managed', capabilities: [] } as Record<string, unknown>;
+    Object.defineProperty(hostileTail, 'path', { enumerable: true, get() {
+      accessed = true;
+      throw new Error('must not execute');
+    } });
+    const entries: unknown[] = Array.from({ length: 256 }, (_, index) => ({
+      path: `workflows/${String(index).padStart(3, '0')}.yaml`,
+      policy: 'managed', capabilities: [],
+    }));
+    entries.push(hostileTail);
+
+    const outcome = await inspectProjectTemplateForCliV1_1WithDependencies({
+      cwd: '/safe/repo', sourcePath: 'template.taktpack', schemaVersion: '1.1',
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => inspectV1_1Archive(entries)),
+    }));
+
+    expect(accessed).toBe(false);
+    expect(outcome).toMatchObject({
+      exitCode: 24,
+      envelope: { schemaVersion: '1.1', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
+  });
+
+  it.each([
+    ['accessor entry', () => {
+      let accessed = false;
+      const entry = { policy: 'managed', capabilities: [] } as Record<string, unknown>;
+      Object.defineProperty(entry, 'path', { enumerable: true, get() {
+        accessed = true;
+        throw new Error('must not execute');
+      } });
+      return { entries: [entry], accessed: () => accessed };
+    }],
+    ['proxy entry', () => {
+      let accessed = false;
+      const entry = new Proxy({ path: 'workflows/a.yaml', policy: 'managed', capabilities: [] }, {
+        getOwnPropertyDescriptor() {
+          accessed = true;
+          throw new Error('must not execute');
+        },
+      });
+      return { entries: [entry], accessed: () => accessed };
+    }],
+    ['sparse entries', () => {
+      const entries = new Array(1) as unknown[];
+      return { entries, accessed: () => false };
+    }],
+    ['poisoned array prototype', () => {
+      let accessed = false;
+      const prototype = Object.create(Array.prototype) as Record<string, unknown>;
+      Object.defineProperty(prototype, 'slice', { get() {
+        accessed = true;
+        throw new Error('must not execute');
+      } });
+      const entries = [{ path: 'workflows/a.yaml', policy: 'managed', capabilities: [] }];
+      Object.setPrototypeOf(entries, prototype);
+      return { entries, accessed: () => accessed };
+    }],
+  ])('rejects hostile %s without executing caller code', async (_label, createHostile) => {
+    const hostile = createHostile();
+    const outcome = await inspectProjectTemplateForCliV1_1WithDependencies({
+      cwd: '/safe/repo', sourcePath: 'template.taktpack', schemaVersion: '1.1',
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => inspectV1_1Archive(hostile.entries)),
+    }));
+
+    expect(hostile.accessed()).toBe(false);
+    expect(outcome).toMatchObject({
+      exitCode: 24,
+      envelope: { schemaVersion: '1.1', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
+  });
+
+  it.each(['future-provider', 'git'])(
+    'fails closed for unsupported manifest source kind %s',
+    async (sourceKind) => {
+    const outcome = await inspectProjectTemplateForCliV1_1WithDependencies({
+      cwd: '/safe/repo', sourcePath: 'template.taktpack', schemaVersion: '1.1',
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => inspectV1_1Archive([
+        { path: 'workflows/a.yaml', policy: 'managed', capabilities: [] },
+      ], sourceKind)),
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 24,
+      envelope: { schemaVersion: '1.1', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
+    },
+  );
+
   it('projects bounded archive inspection into the exact closed 1.0 DTO', async () => {
     const inspect = vi.fn(async () => ({
       archiveSha256: SHA,
@@ -289,6 +462,40 @@ describe('project-template inspect CLI service', () => {
 });
 
 describe('project-template list CLI service', () => {
+  it('exposes bounded GitHub provenance only in schema 1.1 detail', async () => {
+    const githubProvenance = {
+      ...localSourceProvenance(),
+      source: {
+        owner: 'owner', repo: 'template', repositoryUrl: 'https://github.com/owner/template',
+        canonicalSource: 'github:owner/template@v1.0.0', requestedRef: 'v1.0.0',
+        releaseTag: 'v1.0.0', assetName: 'template.taktpack', commit: COMMIT,
+        descriptorSha256: SHA,
+      },
+      dependencyVerification: {
+        method: 'github-ref-to-commit-v1' as const,
+        declarationSha256: SHA,
+        count: 0 as const,
+      },
+    };
+    const outcome = await listProjectTemplatesForCliV1_1WithDependencies({ cwd: '/safe/repo' }, {
+      readCompanionLockState: vi.fn(() => ({
+        state: 'update', contentLock: { manifestSha256: SHA },
+        previousLocksSha256: SHA, sourceProvenance: githubProvenance,
+      })),
+      inspectApplyGuard: vi.fn(() => ({ blocks: [] })),
+      listBackupIds: vi.fn(async () => []),
+    });
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: { schemaVersion: '1.1', result: { detail: { source: {
+        kind: 'github', owner: 'owner', repo: 'template', requestedRef: 'v1.0.0',
+        resolvedCommit: COMMIT, releaseTag: 'v1.0.0', assetName: 'template.taktpack',
+      } } } },
+    });
+    expect(JSON.stringify(outcome)).not.toContain('repositoryUrl');
+  });
+
   it('hides a validated schema 1.0-only backup from CLI discovery', async () => {
     const root = mkdtempSync(join(tmpdir(), 'takt-cli-list-legacy-only-'));
     roots.push(root);

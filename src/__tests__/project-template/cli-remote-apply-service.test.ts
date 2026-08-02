@@ -120,6 +120,55 @@ describe('project template remote CLI service', () => {
     );
   });
 
+  it('projects bounded GitHub provenance and review facts in schema 1.1', async () => {
+    const targetId = 'b'.repeat(64);
+    const manifestId = 'c'.repeat(64);
+    const service = createCoreService(port({
+      derive: async () => ({
+        ...(await port().derive(base)),
+        changeCount: 1,
+        conflictCount: 1,
+        hardConflict: true,
+        defaultApplyPossible: false,
+        review: {
+          manifestId,
+          source: {
+            kind: 'github', sourceId: 'd'.repeat(64), owner: 'owner', repo: 'repo',
+            requestedRef: 'v1.0.0', resolvedCommit: '1'.repeat(40),
+            releaseTag: 'v1.0.0', assetName: 'template.taktpack',
+            archiveId: 'e'.repeat(64), manifestId,
+          },
+          targetCount: 1,
+          actionCounts: { add: 1, update: 0, keep: 0, delete: 0, conflict: 0, excluded: 0 },
+          items: [{
+            itemId: 'f'.repeat(64), targetId, manifestId, path: 'workflows/a.yaml',
+            policy: 'managed', action: 'add', reason: 'TARGET_ABSENT',
+            reviewRequired: false, capabilitiesBefore: [], capabilitiesAfter: [],
+          }],
+          conflicts: [], warnings: [],
+          summary: {
+            totalItems: 1, emittedItems: 1, omittedItems: 0,
+            totalConflicts: 0, emittedConflicts: 0, omittedConflicts: 0,
+            totalWarnings: 0, emittedWarnings: 0, omittedWarnings: 0,
+            truncated: false,
+          },
+        },
+      }),
+    }));
+
+    const outcome = await service.diffV1_1(base);
+
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: { schemaVersion: '1.1', result: { detail: {
+        source: { kind: 'github', owner: 'owner', repo: 'repo', resolvedCommit: '1'.repeat(40) },
+        actionCounts: { add: 1 },
+        targets: { totalCount: 1, truncated: false, items: [{ path: 'workflows/a.yaml' }] },
+      }, conflictCount: 0, readiness: 'blocked' } },
+    });
+    expect(JSON.stringify(outcome)).not.toMatch(/authority|repositoryUrl|token/iu);
+  });
+
   it('re-derives in a new process and admits only an exact expected plan', async () => {
     const execute = vi.fn(port().execute);
     const service = createProjectTemplateCliRemoteApplyService(port({ execute }));

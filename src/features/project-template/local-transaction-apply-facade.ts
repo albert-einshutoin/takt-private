@@ -33,6 +33,7 @@ import {
 } from './local-transaction-derivation.js';
 import { ProjectTemplateRemoteTransactionLinearizationError } from './remote-transaction-linearization.js';
 import { ProjectTemplateValidationError, TaktpackError } from './errors.js';
+import { createProjectTemplateCliReviewProjectionV1_1 } from './cli-review-projection-v1-1.js';
 
 interface ActiveLocalDerivation {
   readonly transactionPlanId: string;
@@ -85,6 +86,22 @@ async function derive(options: {
     state: 'active',
   });
   const conflicts = conflictCount(derived);
+  const projection = createProjectTemplateCliReviewProjectionV1_1({
+    manifestId: derived.review.manifestId,
+    items: derived.review.entries.map((entry) => ({
+      path: entry.path,
+      policy: entry.policy,
+      action: entry.action,
+      reason: entry.reason,
+      reviewRequired: entry.reviewRequired,
+      capabilities: entry.capabilitiesAfter,
+    })),
+  });
+  const reviewByPath = new Map(derived.review.entries.map((entry) => [entry.path, entry]));
+  const actionCounts = {
+    add: 0, update: 0, keep: 0, delete: 0, conflict: 0, excluded: 0,
+  };
+  for (const entry of derived.review.entries) actionCounts[entry.action] += 1;
   return Object.freeze({
     transactionPlanId: derived.preview.transactionPlanId,
     changeCount: derived.contentEntries.length,
@@ -95,6 +112,50 @@ async function derive(options: {
     defaultApplyPossible: derived.preview.defaultApplyPossible,
     forceApplicable:
       derived.preview.reviewRequired && !derived.preview.hardConflict,
+    review: Object.freeze({
+      archiveId: derived.review.archiveId,
+      manifestId: derived.review.manifestId,
+      revision: derived.review.revision,
+      targetCount: derived.review.entries.length,
+      actionCounts: Object.freeze(actionCounts),
+      items: Object.freeze(projection.items.map((item) => {
+        const source = reviewByPath.get(item.path)!;
+        return Object.freeze({
+          itemId: item.id,
+          targetId: item.targetId,
+          manifestId: derived.review.manifestId,
+          path: item.path,
+          policy: item.policy,
+          action: item.action,
+          reason: item.reason,
+          reviewRequired: item.reviewRequired,
+          capabilitiesBefore: source.capabilitiesBefore,
+          capabilitiesAfter: source.capabilitiesAfter,
+        });
+      })),
+      conflicts: Object.freeze(projection.conflicts.map((conflict) => Object.freeze({
+        conflictId: conflict.id,
+        targetId: conflict.targetId,
+        manifestId: derived.review.manifestId,
+        path: conflict.path,
+        reason: conflict.reason,
+        safeDefaultAction: conflict.safeDefaultAction,
+        allowedActions: conflict.allowedActions,
+      }))),
+      warnings: Object.freeze(projection.warnings.map((warning) => {
+        const source = reviewByPath.get(
+          projection.items.find((item) => item.targetId === warning.targetId)!.path,
+        )!;
+        return Object.freeze({
+          warningId: warning.id,
+          targetId: warning.targetId,
+          manifestId: derived.review.manifestId,
+          path: source.path,
+          capability: warning.capability,
+        });
+      })),
+      summary: projection.summary,
+    }),
     authority,
   });
 }

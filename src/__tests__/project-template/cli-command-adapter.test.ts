@@ -337,6 +337,25 @@ describe('project-template CLI command adapter', () => {
     expect(value.writes[0]).not.toContain('/secret');
   });
 
+  it.each([
+    ['unknown option', ['project-template', 'list', '--schema-version', '1.1', '--wat']],
+    ['missing inspect source', ['project-template', 'inspect', '--schema-version', '1.1']],
+    ['invalid apply operand', [
+      'project-template', 'apply', '--schema-version', '1.1',
+      '--apply', '--expected-plan-id', PLAN_ID,
+    ]],
+  ] as const)('keeps an explicit schema 1.1 selection for %s failures', async (_label, args) => {
+    const value = harness();
+    await value.program.parseAsync(['node', 'takt', ...args]);
+
+    expect(value.dispatch).not.toHaveBeenCalled();
+    expect(value.dispose).toHaveBeenCalledOnce();
+    expect(value.writes).toHaveLength(1);
+    expect(JSON.parse(value.writes[0]!)).toMatchObject({
+      schemaVersion: '1.1', status: 'error',
+    });
+  });
+
   it('maps excess operands to UNKNOWN_OPTION without Commander stderr', async () => {
     const value = harness();
     await value.program.parseAsync([

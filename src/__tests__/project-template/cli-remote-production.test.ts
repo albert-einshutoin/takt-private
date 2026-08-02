@@ -1,9 +1,34 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GithubTemplateSourceResolverPort } from '../../features/project-template/github-source-resolver-port.js';
-import type { GithubTemplateSourceAdvisory } from '../../features/project-template/github-update-check.js';
+import {
+  demoteResolvedGithubTemplateSourceToAdvisory,
+  resolveGithubTemplateSource,
+  resolveGithubTemplateSourceForAuthenticatedDownload,
+  type GithubTemplateSourceAdvisory,
+  type GithubTemplateSourceMetadataPort,
+} from '../../features/project-template/github-update-check.js';
+import {
+  createProjectTemplateExportPlan,
+  parseProjectTemplateGithubSourceSpec,
+  writeTaktpack,
+} from '../../features/project-template/index.js';
+import { serializeProjectTemplateSourceDescriptor } from '../../features/project-template/source-descriptor.js';
+import type {
+  ProjectTemplateReceiptKeyRegistry,
+  ProjectTemplateReceiptKeyStore,
+} from '../../infra/security/project-template-receipt-key-store.js';
 import {
   createProjectTemplateCliRemoteProductionRuntimeForTest as createCoreRemoteRuntime,
 } from '../../infra/github/project-template-cli-remote-production.js';
@@ -15,11 +40,42 @@ import type {
   ProjectTemplateRemoteProductionComposition,
 } from '../../infra/github/project-template-remote-production-composition.js';
 import {
+  createProjectTemplateRemoteProductionComposition,
   ProjectTemplateRemoteProductionCompositionError,
 } from '../../infra/github/project-template-remote-production-composition.js';
 
 const roots: string[] = [];
 const PLAN_ID = 'a'.repeat(64);
+const COMMIT = '0123456789abcdef0123456789abcdef01234567';
+
+function memoryReceiptKeyStore(): ProjectTemplateReceiptKeyStore {
+  let registry: ProjectTemplateReceiptKeyRegistry | undefined;
+  let generation: number | undefined;
+  let tail = Promise.resolve();
+  return {
+    async read() { return registry === undefined ? undefined : structuredClone(registry); },
+    async write(value) {
+      registry = structuredClone(value);
+      generation = (generation ?? -1) + 1;
+    },
+    async withExclusiveLease(operation) {
+      const run = tail.then(async () => operation({
+        snapshot: registry === undefined ? undefined : {
+          generation: generation!, registry: structuredClone(registry),
+        },
+        compareAndSwap: async (expected, next) => {
+          if (expected !== generation) return undefined;
+          generation = (generation ?? -1) + 1;
+          registry = structuredClone(next);
+          return { generation, registry: structuredClone(registry) };
+        },
+      }));
+      tail = run.then(() => undefined, () => undefined);
+      return await run;
+    },
+    async dispose() {},
+  };
+}
 
 type RemoteMutationTestOptions =
   | Extract<ProjectTemplateCliRemoteMutationOptions, { mode: 'dry-run' }>
@@ -60,6 +116,144 @@ afterEach(() => {
 });
 
 describe('project template remote CLI production runtime', () => {
+  it('carries the authenticated GitHub review through the production WeakMap into schema 1.1', async () => {
+    const sourceRoot = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'takt-cli-remote-v1-1-source-')),
+    );
+    const projectRoot = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'takt-cli-remote-v1-1-target-')),
+    );
+    const cacheRoot = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'takt-cli-remote-v1-1-cache-')),
+    );
+    roots.push(sourceRoot, projectRoot, cacheRoot);
+    chmodSync(cacheRoot, 0o700);
+    const workflowPath = join(sourceRoot, '.takt', 'workflows', 'review.yaml');
+    mkdirSync(dirname(workflowPath), { recursive: true });
+    writeFileSync(workflowPath, `name: review
+initial_step: review
+max_steps: 1
+steps:
+  - name: review
+    rules:
+      - condition: done
+        next: COMPLETE
+`);
+    const exportPlan = await createProjectTemplateExportPlan(sourceRoot, {
+      packVersion: '1.2.3',
+      takt: { minVersion: '0.48.0' },
+      source: {
+        kind: 'github',
+        uri: 'https://github.com/acme/template',
+        ref: 'v1.2.3',
+        commit: COMMIT,
+      },
+    });
+    const packPath = join(sourceRoot, 'template.taktpack');
+    await writeTaktpack(packPath, exportPlan);
+    const archive = readFileSync(packPath);
+    const archiveId = createHash('sha256').update(archive).digest('hex');
+    const descriptor = serializeProjectTemplateSourceDescriptor({
+      schemaVersion: '1.0',
+      pack: {
+        version: '1.2.3',
+        releaseTag: 'v1.2.3',
+        assetName: 'template.taktpack',
+        checksumAssetName: 'template.taktpack.sha256',
+        sha256: archiveId,
+      },
+      repertoireDependencies: [],
+    });
+    const checksum = `${archiveId}  template.taktpack\n`;
+    const metadata: GithubTemplateSourceMetadataPort = {
+      async resolveRefToCommit() { return { commit: COMMIT }; },
+      async readFileAtCommit() { return new TextEncoder().encode(descriptor); },
+      async getReleaseByTag() {
+        return {
+          id: 1,
+          tagName: 'v1.2.3',
+          assets: [
+            { id: 2, name: 'template.taktpack', size: archive.byteLength },
+            { id: 3, name: 'template.taktpack.sha256', size: checksum.length },
+          ],
+        };
+      },
+      async readReleaseAsset() { return new TextEncoder().encode(checksum); },
+    };
+    const source = 'https://github.com/acme/template/releases/download/v1.2.3/template.taktpack';
+    const sourceSpec = parseProjectTemplateGithubSourceSpec(source);
+    const advisory = demoteResolvedGithubTemplateSourceToAdvisory(
+      await resolveGithubTemplateSource({ source: sourceSpec, metadata }),
+    );
+    const resolver: GithubTemplateSourceResolverPort = {
+      async resolveAdvisory() { return advisory; },
+      async resolveForDownload(input) {
+        return await resolveGithubTemplateSourceForAuthenticatedDownload({
+          source: parseProjectTemplateGithubSourceSpec(input.source),
+          metadata,
+        });
+      },
+    };
+    const composition = await createProjectTemplateRemoteProductionComposition({
+      keyStore: memoryReceiptKeyStore(),
+      resolver,
+      asset: {
+        openReleaseAsset() {
+          return (async function* () { yield archive; })();
+        },
+      },
+      repertoireInspectionPort: {
+        inspect() { return { witnessSha256: 'e'.repeat(64), observations: [] }; },
+      },
+    });
+    const runtime = createCoreRemoteRuntime({ cacheRoot, resolver, composition });
+
+    const outcome = await runtime.service.diffV1_1({
+      cwd: projectRoot,
+      source,
+      currentTaktVersion: '0.48.0',
+      baselineStrategy: 'conflict',
+      force: false,
+    });
+
+    expect(outcome.exitCode, JSON.stringify(outcome)).toBe(0);
+    expect(outcome).toMatchObject({
+      exitCode: 0,
+      envelope: {
+        schemaVersion: '1.1',
+        status: 'success',
+        command: 'project-template diff',
+        result: {
+          detail: {
+            source: {
+              kind: 'github',
+              owner: 'acme',
+              repo: 'template',
+              requestedRef: 'v1.2.3',
+              resolvedCommit: COMMIT,
+              releaseTag: 'v1.2.3',
+              assetName: 'template.taktpack',
+              archiveId,
+            },
+            actionCounts: { add: 1, update: 0, keep: 0, delete: 0, conflict: 0, excluded: 0 },
+            targets: {
+              totalCount: 1,
+              truncated: false,
+              items: [{ path: 'workflows/review.yaml', action: 'add' }],
+            },
+          },
+        },
+      },
+    });
+    const json = JSON.stringify(outcome);
+    expect(json).not.toContain(cacheRoot);
+    expect(json).not.toContain(projectRoot);
+    expect(json).not.toMatch(
+      /receiptKey|previewId|approval|authority|repositoryUrl|canonicalSource|token|credential/iu,
+    );
+    await runtime.dispose();
+  });
+
   it('keeps receipt/preview authority private and never calls public approve', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'takt-cli-remote-production-'));
     roots.push(cwd);

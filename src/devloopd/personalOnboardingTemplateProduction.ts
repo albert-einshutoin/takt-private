@@ -13,6 +13,7 @@ import {
 import type {
   ProjectTemplateCliCommandAdapterDependencies,
 } from '../app/cli/projectTemplateCommands.js';
+import type { ProjectTemplateCliOutcome } from '../features/project-template/cli-machine-contract.js';
 
 type CommandDependenciesFactory = (
   currentTaktVersion: string,
@@ -62,7 +63,7 @@ export function createProductionPersonalOnboardingTemplateFacade(
       let commandDependencies: ProjectTemplateCliCommandAdapterDependencies | undefined;
       let removeInterrupt: (() => void) | undefined;
       const executionState: {
-        current?: ReturnType<typeof startProjectTemplateCliLifecycle>;
+        current?: { readonly interrupt: () => void };
       } = {};
       let interruptedBeforeStart = false;
       const command = 'project-template apply' as const;
@@ -96,14 +97,19 @@ export function createProductionPersonalOnboardingTemplateFacade(
           const createCommandDependencies = await loadFactory();
           context.signal.throwIfAborted();
           commandDependencies = createCommandDependencies(options.currentTaktVersion);
-          return await commandDependencies.dispatch({
+          const outcome = await commandDependencies.dispatch({
             command,
             cwd: request.repoPath,
             json: true,
+            schemaVersion: '1.0',
             currentTaktVersion: options.currentTaktVersion,
             source: request.source,
             mutation: request.mutation,
           }, context);
+          if (outcome.envelope.schemaVersion !== '1.0') {
+            throw new Error('personal onboarding requires project-template schema 1.0');
+          }
+          return outcome as ProjectTemplateCliOutcome;
         },
       });
       executionState.current = lifecycle;
