@@ -5,102 +5,617 @@ on:
     types: [closed]
     branches: [main]
 
+permissions: {}
+
+# A rerun must converge instead of racing another release attempt. Publication
+# is never cancelled midway because an interrupted npm mutation is ambiguous.
+concurrency:
+  group: auto-tag-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
-  tag:
+  validate:
     if: >
       github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.title, 'Release v') &&
-      startsWith(github.event.pull_request.head.ref, 'release/')
+      startsWith(github.event.pull_request.head.ref, 'release/') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.package.outputs.commit }}
+      npm_dist_tag: ${{ steps.package.outputs.npm_dist_tag }}
+      package_name: ${{ steps.package.outputs.package_name }}
+      package_version: ${{ steps.package.outputs.package_version }}
+      tag: ${{ steps.package.outputs.tag }}
+    steps:
+      - name: Validate release title and branch
+        id: release
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          export LC_ALL=C
+          # Keep this grammar aligned with the product's SemVer contract. The
+          # length bound prevents attacker-controlled event data from growing
+          # without limit before it reaches a write-capable job.
+          SEMVER_IDENTIFIER='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          SEMVER_PATTERN="(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-${SEMVER_IDENTIFIER}(\\.${SEMVER_IDENTIFIER})*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?"
+
+          case "$PR_TITLE" in
+            'Release v'*) VERSION=${PR_TITLE#'Release v'} ;;
+            *) echo 'Release title must be exactly: Release v<semver>' >&2; exit 1 ;;
+          esac
+
+          if [ "${#VERSION}" -gt 128 ] || [[ ! "$VERSION" =~ ^${SEMVER_PATTERN}$ ]]; then
+            echo 'Release title contains an invalid SemVer version.' >&2
+            exit 1
+          fi
+
+          # npm's node-semver rejects numeric identifiers outside JavaScript's
+          # safe integer range. Enforce the same boundary before any tag write.
+          node - "$VERSION" <<'NODE'
+          const version = process.argv[2];
+          const withoutBuild = version.split('+', 1)[0];
+          // Split only at the first hyphen so later hyphens remain part of the
+          // complete prerelease suffix and cannot hide a numeric identifier.
+          const prereleaseIndex = withoutBuild.indexOf('-');
+          const core = prereleaseIndex === -1
+            ? withoutBuild
+            : withoutBuild.slice(0, prereleaseIndex);
+          const prerelease = prereleaseIndex === -1
+            ? ''
+            : withoutBuild.slice(prereleaseIndex + 1);
+          const numeric = [...core.split('.'), ...prerelease.split('.').filter(Boolean)]
+            .filter((identifier) => /^[0-9]+$/u.test(identifier));
+          if (numeric.some((identifier) => !Number.isSafeInteger(Number(identifier)))) {
+            throw new Error('numeric SemVer identifier exceeds npm safe integer range');
+          }
+          NODE
+
+          TAG="v${VERSION}"
+          if [ "$PR_HEAD_REF" != "release/${TAG}" ]; then
+            echo 'Release branch must exactly match the validated tag.' >&2
+            exit 1
+          fi
+
+          # Build metadata is not part of SemVer precedence. Only a hyphen in
+          # the core/prerelease portion marks a prerelease; `+build-7` remains
+          # a stable version.
+          VERSION_WITHOUT_BUILD=${VERSION%%+*}
+          if [[ "$VERSION_WITHOUT_BUILD" == *-* ]]; then
+            NPM_DIST_TAG=next
+          else
+            NPM_DIST_TAG=latest
+          fi
+
+          # These values remain job-local until package.json from the exact PR
+          # head independently confirms the same release identity.
+          {
+            printf 'NPM_DIST_TAG=%s\n' "$NPM_DIST_TAG"
+            printf 'RELEASE_TAG=%s\n' "$TAG"
+            printf 'RELEASE_VERSION=%s\n' "$VERSION"
+          } >> "$GITHUB_ENV"
+
+      - name: Read package metadata from merged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          sparse-checkout: package.json
+          sparse-checkout-cone-mode: false
+
+      - name: Bind validated release metadata
+        id: package
+        env:
+          MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          # Fail closed before emitting any output. A taggable release is one
+          # immutable tuple: merged main commit, title/branch version, package version,
+          # package name, tag, and npm dist-tag.
+          if [[ ! "$MERGE_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Merge commit is not a full lowercase SHA.' >&2
+            exit 1
+          fi
+          if [ "$RELEASE_TAG" != "v${RELEASE_VERSION}" ]; then
+            echo 'Release tag and version are inconsistent.' >&2
+            exit 1
+          fi
+          RELEASE_WITHOUT_BUILD=${RELEASE_VERSION%%+*}
+          if { [[ "$RELEASE_WITHOUT_BUILD" == *-* ]] && [ "$NPM_DIST_TAG" != next ]; } ||
+             { [[ "$RELEASE_WITHOUT_BUILD" != *-* ]] && [ "$NPM_DIST_TAG" != latest ]; }; then
+            echo 'npm dist-tag does not match release stability.' >&2
+            exit 1
+          fi
+
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PACKAGE_NAME" != takt ] || [ "$PACKAGE_VERSION" != "$RELEASE_VERSION" ]; then
+            echo 'package.json does not match the validated release.' >&2
+            exit 1
+          fi
+
+          {
+            printf 'commit=%s\n' "$MERGE_COMMIT_SHA"
+            printf 'npm_dist_tag=%s\n' "$NPM_DIST_TAG"
+            printf 'package_name=%s\n' "$PACKAGE_NAME"
+            printf 'package_version=%s\n' "$PACKAGE_VERSION"
+            printf 'tag=%s\n' "$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+  tag:
+    needs: [validate, test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ needs.validate.outputs.commit }}
+      npm_dist_tag: ${{ needs.validate.outputs.npm_dist_tag }}
+      package_name: ${{ needs.validate.outputs.package_name }}
+      package_version: ${{ needs.validate.outputs.package_version }}
+      tag: ${{ needs.validate.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
 
-      - name: Extract version from PR title
-        id: version
+      - name: Verify checkout commit binding
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
         run: |
-          VERSION=$(echo "${{ github.event.pull_request.title }}" | sed 's/^Release //')
-          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Expected release commit is not a full lowercase SHA.' >&2
+            exit 1
+          fi
+          CHECKED_OUT_COMMIT=$(git rev-parse --verify 'HEAD^{commit}')
+          if [ "$CHECKED_OUT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+            echo 'Release checkout no longer matches the validated commit.' >&2
+            exit 1
+          fi
 
-      - name: Create and push tag on PR head commit
+      - name: Create or verify exact merged-commit tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
-          git tag "${{ steps.version.outputs.tag }}" "${{ github.event.pull_request.head.sha }}"
-          git push origin "${{ steps.version.outputs.tag }}"
+          # checkout must not persist credentials. Install gh's ephemeral Git
+          # credential helper only for this mutation step and short-lived job.
+          gh auth setup-git
+          # Reruns converge only when the immutable remote tag already resolves
+          # to the exact merged commit; a retargeted tag is a hard failure.
+          remote_ref=$(git ls-remote --refs origin "refs/tags/${RELEASE_TAG}")
+          if [ -n "$remote_ref" ]; then
+            git fetch --no-tags origin "refs/tags/${RELEASE_TAG}"
+            existing_commit=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
+            if [ "$existing_commit" != "$EXPECTED_COMMIT" ]; then
+              echo 'Existing release tag resolves to a different commit.' >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          git tag -- "$RELEASE_TAG" "$EXPECTED_COMMIT"
+          git push -- origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
 
-  publish:
-    needs: tag
+  candidate-pack:
+    needs: validate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_digest: ${{ steps.candidate.outputs.artifact-digest }}
+      artifact_id: ${{ steps.candidate.outputs.artifact-id }}
+      filename: ${{ steps.pack.outputs.filename }}
+      integrity: ${{ steps.pack.outputs.integrity }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
 
-      - uses: actions/setup-node@v4
+      - name: Verify exact merged checkout binding
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          if [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'Expected release commit is not a full lowercase SHA.' >&2
+            exit 1
+          fi
+          CHECKED_OUT_COMMIT=$(git rev-parse --verify 'HEAD^{commit}')
+          if [ "$CHECKED_OUT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+            echo 'Candidate checkout no longer matches the validated merged commit.' >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - run: npm ci
-
-      - name: Determine npm tag
-        id: npm-tag
+      - name: Install and audit locked dependencies without lifecycle scripts
         run: |
-          VERSION="${{ needs.tag.outputs.tag }}"
-          VERSION="${VERSION#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if echo "$VERSION" | grep -qE '(alpha|beta|rc|next)'; then
-            echo "tag=next" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-          fi
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm audit --audit-level=high
 
-      - name: Publish package
-        run: npm publish --tag ${{ steps.npm-tag.outputs.tag }}
+      - name: Deterministically build package without project npm scripts
+        run: |
+          # TypeScript does not execute project source while compiling. Avoid
+          # package-controlled npm lifecycle/build scripts in the artifact job.
+          ./node_modules/.bin/tsc --project tsconfig.json
+          while IFS='|' read -r source destination extension; do
+            mkdir -p -- "$destination"
+            find "$source" -maxdepth 1 -type f -name "*.$extension" -exec cp -- {} "$destination/" \;
+          done <<'ASSETS'
+          src/shared/prompts/en|dist/shared/prompts/en|md
+          src/shared/prompts/ja|dist/shared/prompts/ja|md
+          src/core/runtime/presets|dist/core/runtime/presets|sh
+          ASSETS
+          install -D --mode=0644 src/shared/i18n/labels_en.yaml dist/shared/i18n/labels_en.yaml
+          install -D --mode=0644 src/shared/i18n/labels_ja.yaml dist/shared/i18n/labels_ja.yaml
+
+      - name: Pack release artifact without credentials
+        id: pack
+        env:
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+          EXPECTED_NAME: ${{ needs.validate.outputs.package_name }}
+          EXPECTED_TAG: ${{ needs.validate.outputs.tag }}
+          EXPECTED_VERSION: ${{ needs.validate.outputs.package_version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/takt-package"
+          PACK_JSON=$(npm pack --ignore-scripts --json)
+          PACKAGE_FILE=$(node -e '
+            let input = "";
+            process.stdin.setEncoding("utf8");
+            process.stdin.on("data", chunk => { input += chunk; });
+            process.stdin.on("end", () => {
+              const result = JSON.parse(input);
+              const expectedFilename = "takt-" + process.env.EXPECTED_VERSION + ".tgz";
+              if (!Array.isArray(result) || result.length !== 1 ||
+                  result[0].name !== process.env.EXPECTED_NAME || result[0].version !== process.env.EXPECTED_VERSION ||
+                  result[0].filename !== expectedFilename) process.exit(1);
+              process.stdout.write(result[0].filename);
+            });
+          ' <<<"$PACK_JSON")
+          PACKAGE_INTEGRITY=$(node -e '
+            const result = JSON.parse(process.argv[1]);
+            if (!Array.isArray(result) || result.length !== 1 ||
+                !/^sha512-[A-Za-z0-9+/]{86}==$/.test(result[0].integrity)) process.exit(1);
+            process.stdout.write(result[0].integrity);
+          ' "$PACK_JSON")
+          install -m 0600 -- "$PACKAGE_FILE" "$RUNNER_TEMP/takt-package/$PACKAGE_FILE"
+          tar -xOf "$RUNNER_TEMP/takt-package/$PACKAGE_FILE" package/package.json \
+            > "$RUNNER_TEMP/internal-package.json"
+          node - "$RUNNER_TEMP/takt-package/$PACKAGE_FILE" "$RUNNER_TEMP/internal-package.json" \
+            "$RUNNER_TEMP/takt-package/manifest.json" "$PACKAGE_FILE" "$PACKAGE_INTEGRITY" <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { readFileSync, writeFileSync } = require('node:fs');
+          const bytes = readFileSync(process.argv[2]);
+          const internalPackage = JSON.parse(readFileSync(process.argv[3], 'utf8'));
+          if (internalPackage.name !== process.env.EXPECTED_NAME
+            || internalPackage.version !== process.env.EXPECTED_VERSION) {
+            throw new Error('packed package identity mismatch');
+          }
+          const manifest = {
+            schema_version: 1,
+            repository: process.env.GITHUB_REPOSITORY,
+            commit: process.env.EXPECTED_COMMIT,
+            tag: process.env.EXPECTED_TAG,
+            package_name: process.env.EXPECTED_NAME,
+            package_version: process.env.EXPECTED_VERSION,
+            filename: process.argv[5],
+            integrity: process.argv[6],
+            sha512: createHash('sha512').update(bytes).digest('hex'),
+            internal_package: {
+              name: internalPackage.name,
+              version: internalPackage.version,
+            },
+          };
+          writeFileSync(process.argv[4], JSON.stringify(manifest) + '\n', { mode: 0o400 });
+          NODE
+          printf 'filename=%s\nintegrity=%s\n' "$PACKAGE_FILE" "$PACKAGE_INTEGRITY" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifact
+        id: candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: takt-npm-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/takt-package
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    needs: [validate, candidate-pack]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.commit }}
+
+      - name: Download exact candidate artifact for testing
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.candidate-pack.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/takt-package
+
+      - name: Verify exact candidate before executing project code
+        env:
+          ARTIFACT_DIGEST: ${{ needs.candidate-pack.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.candidate-pack.outputs.artifact_id }}
+          CANDIDATE_DIR: ${{ runner.temp }}/takt-package
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+          EXPECTED_FILENAME: ${{ needs.candidate-pack.outputs.filename }}
+          EXPECTED_INTEGRITY: ${{ needs.candidate-pack.outputs.integrity }}
+          EXPECTED_NAME: ${{ needs.validate.outputs.package_name }}
+          EXPECTED_TAG: ${{ needs.validate.outputs.tag }}
+          EXPECTED_VERSION: ${{ needs.validate.outputs.package_version }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          node - "$CANDIDATE_DIR" <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { lstatSync, readFileSync, readdirSync } = require('node:fs');
+          const { join } = require('node:path');
+          const dir = process.argv[2];
+          const expectedEntries = [process.env.EXPECTED_FILENAME, 'manifest.json'].sort();
+          const entries = readdirSync(dir).sort();
+          if (JSON.stringify(entries) !== JSON.stringify(expectedEntries)) {
+            throw new Error('candidate artifact entries mismatch');
+          }
+          for (const entry of entries) {
+            if (!lstatSync(join(dir, entry)).isFile()) throw new Error('candidate entry is not regular');
+          }
+          const tarball = readFileSync(join(dir, process.env.EXPECTED_FILENAME));
+          const manifestBytes = readFileSync(join(dir, 'manifest.json'));
+          if (tarball.length < 1 || tarball.length > 52428800
+            || manifestBytes.length < 1 || manifestBytes.length > 16384) {
+            throw new Error('candidate size boundary violated');
+          }
+          const manifest = JSON.parse(manifestBytes);
+          const integrity = `sha512-${createHash('sha512').update(tarball).digest('base64')}`;
+          const sha512 = createHash('sha512').update(tarball).digest('hex');
+          if (manifest.schema_version !== 1 || manifest.repository !== process.env.GITHUB_REPOSITORY
+            || manifest.commit !== process.env.EXPECTED_COMMIT || manifest.tag !== process.env.EXPECTED_TAG
+            || manifest.package_name !== process.env.EXPECTED_NAME
+            || manifest.package_version !== process.env.EXPECTED_VERSION
+            || manifest.filename !== process.env.EXPECTED_FILENAME
+            || manifest.integrity !== process.env.EXPECTED_INTEGRITY
+            || manifest.integrity !== integrity || manifest.sha512 !== sha512
+            || manifest.internal_package?.name !== process.env.EXPECTED_NAME
+            || manifest.internal_package?.version !== process.env.EXPECTED_VERSION) {
+            throw new Error('candidate manifest binding mismatch');
+          }
+          NODE
+          tar -tzf "$CANDIDATE_DIR/$EXPECTED_FILENAME" | \
+            awk 'BEGIN { found=0; bad=0 } $0 !~ /^package\// || $0 ~ /(^|\/)\.\.\// { bad=1; next } $0 == "package/package.json" { found=1 } END { exit bad || !found }'
+          tar -xOf "$CANDIDATE_DIR/$EXPECTED_FILENAME" package/package.json | \
+            node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => { const p=JSON.parse(s); if (p.name !== process.env.EXPECTED_NAME || p.version !== process.env.EXPECTED_VERSION) process.exit(1); });'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - name: Smoke test the exact candidate tarball in isolation
+        env:
+          CANDIDATE_DIR: ${{ runner.temp }}/takt-package
+          EXPECTED_FILENAME: ${{ needs.candidate-pack.outputs.filename }}
+          EXPECTED_VERSION: ${{ needs.validate.outputs.package_version }}
+        run: |
+          prefix=$RUNNER_TEMP/candidate-smoke
+          mkdir -p -- "$prefix"
+          npm install --prefix "$prefix" --ignore-scripts --no-audit --no-fund \
+            "$CANDIDATE_DIR/$EXPECTED_FILENAME"
+          installed_version=$(node -p "require('$prefix/node_modules/takt/package.json').version")
+          [ "$installed_version" = "$EXPECTED_VERSION" ]
+          "$prefix/node_modules/.bin/takt" --version | grep -Fx -- "$EXPECTED_VERSION"
+          "$prefix/node_modules/.bin/takt" --help >/dev/null
+
+      - name: Audit, build, and test exact merged source without secrets
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm audit --audit-level=high
+          npm run build
+          npm test
+
+  publish:
+    needs: [validate, candidate-pack, test, tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download exact release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.candidate-pack.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/takt-package
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify exact candidate before publication credentials
+        env:
+          ARTIFACT_DIGEST: ${{ needs.candidate-pack.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.candidate-pack.outputs.artifact_id }}
+          CANDIDATE_DIR: ${{ runner.temp }}/takt-package
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+          EXPECTED_FILENAME: ${{ needs.candidate-pack.outputs.filename }}
+          EXPECTED_INTEGRITY: ${{ needs.candidate-pack.outputs.integrity }}
+          EXPECTED_NAME: ${{ needs.validate.outputs.package_name }}
+          EXPECTED_TAG: ${{ needs.validate.outputs.tag }}
+          EXPECTED_VERSION: ${{ needs.validate.outputs.package_version }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          node - "$CANDIDATE_DIR" <<'NODE'
+          const { createHash } = require('node:crypto');
+          const { lstatSync, readFileSync, readdirSync } = require('node:fs');
+          const { join } = require('node:path');
+          const dir = process.argv[2];
+          const expectedEntries = [process.env.EXPECTED_FILENAME, 'manifest.json'].sort();
+          const entries = readdirSync(dir).sort();
+          if (JSON.stringify(entries) !== JSON.stringify(expectedEntries)) throw new Error('candidate entries mismatch');
+          for (const entry of entries) {
+            if (!lstatSync(join(dir, entry)).isFile()) throw new Error('candidate entry is not regular');
+          }
+          const tarball = readFileSync(join(dir, process.env.EXPECTED_FILENAME));
+          const manifestBytes = readFileSync(join(dir, 'manifest.json'));
+          if (tarball.length < 1 || tarball.length > 52428800
+            || manifestBytes.length < 1 || manifestBytes.length > 16384) throw new Error('candidate size invalid');
+          const manifest = JSON.parse(manifestBytes);
+          const integrity = `sha512-${createHash('sha512').update(tarball).digest('base64')}`;
+          const sha512 = createHash('sha512').update(tarball).digest('hex');
+          if (manifest.schema_version !== 1 || manifest.repository !== process.env.GITHUB_REPOSITORY
+            || manifest.commit !== process.env.EXPECTED_COMMIT || manifest.tag !== process.env.EXPECTED_TAG
+            || manifest.package_name !== process.env.EXPECTED_NAME
+            || manifest.package_version !== process.env.EXPECTED_VERSION
+            || manifest.filename !== process.env.EXPECTED_FILENAME
+            || manifest.integrity !== process.env.EXPECTED_INTEGRITY
+            || manifest.integrity !== integrity || manifest.sha512 !== sha512
+            || manifest.internal_package?.name !== process.env.EXPECTED_NAME
+            || manifest.internal_package?.version !== process.env.EXPECTED_VERSION) {
+            throw new Error('candidate manifest binding mismatch');
+          }
+          NODE
+          tar -tzf "$CANDIDATE_DIR/$EXPECTED_FILENAME" | \
+            awk 'BEGIN { found=0; bad=0 } $0 !~ /^package\// || $0 ~ /(^|\/)\.\.\// { bad=1; next } $0 == "package/package.json" { found=1 } END { exit bad || !found }'
+          tar -xOf "$CANDIDATE_DIR/$EXPECTED_FILENAME" package/package.json | \
+            node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => { const p=JSON.parse(s); if (p.name !== process.env.EXPECTED_NAME || p.version !== process.env.EXPECTED_VERSION) process.exit(1); });'
+
+      - name: Publish or verify existing package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Sync next tag on stable release
-        if: steps.npm-tag.outputs.tag == 'latest'
+          EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+          EXPECTED_INTEGRITY: ${{ needs.candidate-pack.outputs.integrity }}
+          EXPECTED_VERSION: ${{ needs.validate.outputs.package_version }}
+          GH_TOKEN: ${{ github.token }}
+          NPM_DIST_TAG: ${{ needs.validate.outputs.npm_dist_tag }}
+          PACKAGE_FILENAME: ${{ needs.candidate-pack.outputs.filename }}
+          PACKAGE_NAME: ${{ needs.validate.outputs.package_name }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        # `--ignore-scripts` is a credential boundary: package-controlled
+        # lifecycle hooks must never execute while NODE_AUTH_TOKEN is present.
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          VERSION="${{ steps.npm-tag.outputs.version }}"
-
-          for attempt in 1 2 3; do
-            if npm dist-tag add "${PACKAGE_NAME}@${VERSION}" next; then
-              exit 0
+          assert_remote_tag() {
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')
+            type=${object%%$'\t'*}
+            sha=${object#*$'\t'}
+            for _ in 1 2 3 4 5; do
+              [ "$type" = tag ] || break
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object | [.type, .sha] | @tsv')
+              type=${object%%$'\t'*}
+              sha=${object#*$'\t'}
+            done
+            if [ "$type" != commit ] || [ "$sha" != "$EXPECTED_COMMIT" ]; then
+              echo 'Remote release tag no longer resolves to the expected merged commit.' >&2
+              return 1
             fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Failed to sync next tag after 3 attempts."
+          }
+
+          # Repeated reads narrow the observation-to-mutation window but are
+          # not atomic. An active repository ruleset that blocks update and
+          # deletion of refs/tags/v* is the durable immutability invariant.
+          assert_remote_tag
+
+          LOCAL_INTEGRITY=$(node -e '
+            const { createHash } = require("node:crypto");
+            const { readFileSync } = require("node:fs");
+            process.stdout.write("sha512-" + createHash("sha512").update(readFileSync(process.argv[1])).digest("base64"));
+          ' "$RUNNER_TEMP/takt-package/$PACKAGE_FILENAME")
+          [ "$LOCAL_INTEGRITY" = "$EXPECTED_INTEGRITY" ]
+
+          tags=$NPM_DIST_TAG
+          if [ "$NPM_DIST_TAG" = latest ]; then tags='latest next'; fi
+          for tag in $tags; do
+            if ! current=$(npm view "$PACKAGE_NAME" "dist-tags.$tag"); then
+              echo "Unable to read current npm dist-tag: $tag" >&2
               exit 1
             fi
-            sleep $((attempt * 5))
+            [ -n "$current" ] || continue
+            node - "$current" "$EXPECTED_VERSION" <<'NODE'
+          const parse = (value) => {
+            const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(value);
+            if (!match) throw new Error('registry dist-tag is not valid SemVer');
+            const core = match.slice(1, 4).map(Number);
+            const pre = match[4]?.split('.') ?? [];
+            if ([...core, ...pre.filter((v) => /^[0-9]+$/u.test(v)).map(Number)].some((v) => !Number.isSafeInteger(v))) throw new Error('unsafe numeric SemVer');
+            return { core, pre };
+          };
+          const compare = (a, b) => {
+            for (let i = 0; i < 3; i += 1) if (a.core[i] !== b.core[i]) return a.core[i] < b.core[i] ? -1 : 1;
+            if (!a.pre.length || !b.pre.length) return a.pre.length === b.pre.length ? 0 : (a.pre.length ? -1 : 1);
+            for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i += 1) {
+              if (a.pre[i] === undefined || b.pre[i] === undefined) return a.pre[i] === undefined ? -1 : 1;
+              if (a.pre[i] === b.pre[i]) continue;
+              const an = /^[0-9]+$/u.test(a.pre[i]); const bn = /^[0-9]+$/u.test(b.pre[i]);
+              if (an && bn) return Number(a.pre[i]) < Number(b.pre[i]) ? -1 : 1;
+              if (an !== bn) return an ? -1 : 1;
+              return a.pre[i] < b.pre[i] ? -1 : 1;
+            }
+            return 0;
+          };
+          if (compare(parse(process.argv[2]), parse(process.argv[3])) > 0) {
+            throw new Error('release would downgrade an npm dist-tag');
+          }
+          NODE
           done
+
+          registry_json=$RUNNER_TEMP/registry-package.json
+          registry_error=$RUNNER_TEMP/registry-package.err
+          if npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" name version dist.integrity --json \
+            > "$registry_json" 2> "$registry_error"; then
+            node - "$registry_json" <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const value = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          if (value.name !== process.env.PACKAGE_NAME || value.version !== process.env.EXPECTED_VERSION
+            || value['dist.integrity'] !== process.env.EXPECTED_INTEGRITY) {
+            throw new Error('existing registry package does not match candidate identity and integrity');
+          }
+          NODE
+          elif grep -Eq 'E404|404 Not Found' "$registry_error"; then
+            assert_remote_tag
+            npm publish "$RUNNER_TEMP/takt-package/$PACKAGE_FILENAME" --tag "$NPM_DIST_TAG" --ignore-scripts
+          else
+            echo 'Unable to determine whether the package version already exists.' >&2
+            exit 1
+          fi
+
+          for tag in $tags; do
+            assert_remote_tag
+            npm dist-tag add "${PACKAGE_NAME}@${EXPECTED_VERSION}" "$tag"
+          done
+
+      - name: Verify published package identity
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Verify dist-tags
+          EXPECTED_DIST_TAG: ${{ needs.tag.outputs.npm_dist_tag }}
+          EXPECTED_INTEGRITY: ${{ needs.candidate-pack.outputs.integrity }}
+          EXPECTED_VERSION: ${{ needs.validate.outputs.package_version }}
+          PACKAGE_NAME: ${{ needs.validate.outputs.package_name }}
         run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-
           for attempt in 1 2 3 4 5; do
-            LATEST=$(npm view "${PACKAGE_NAME}" dist-tags.latest)
-            NEXT=$(npm view "${PACKAGE_NAME}" dist-tags.next || true)
-
-            echo "Attempt ${attempt}: latest=${LATEST}, next=${NEXT}"
-
-            if [ "${{ steps.npm-tag.outputs.tag }}" != "latest" ] || [ "${LATEST}" = "${NEXT}" ]; then
-              echo "Dist-tags verified."
+            PUBLISHED_VERSION=$(npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" version || true)
+            PUBLISHED_INTEGRITY=$(npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" dist.integrity || true)
+            TAGGED_VERSION=$(npm view "$PACKAGE_NAME" "dist-tags.${EXPECTED_DIST_TAG}" || true)
+            if [ "$PUBLISHED_VERSION" = "$EXPECTED_VERSION" ] &&
+               [ "$PUBLISHED_INTEGRITY" = "$EXPECTED_INTEGRITY" ] &&
+               [ "$TAGGED_VERSION" = "$EXPECTED_VERSION" ]; then
+              echo "Published package identity verified."
               exit 0
             fi
 
             if [ "$attempt" -eq 5 ]; then
-              echo "::warning::dist-tags not synced after 5 attempts (latest=${LATEST}, next=${NEXT}). Registry propagation may be delayed."
-              exit 0
+              echo "Published package identity did not converge after 5 attempts." >&2
+              exit 1
             fi
             sleep $((attempt * 10))
           done
