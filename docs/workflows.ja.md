@@ -391,6 +391,8 @@ promotion は並列サブ step ではサポートされません。
 | `instruction` | - | instruction キー（section map 参照） |
 | `edit` | - | step がプロジェクトファイルを編集できるか (`true` / `false`) |
 | `pass_previous_response` | `true` | 前の step の出力を `{previous_response}` に渡す |
+| `previous_response_max_bytes` | - | 前の応答本文を全文渡すための UTF-8 byte 上限 (`1`–`98304`)。`previous_response_overflow: error` と必ず併用し、`pass_previous_response: false` では指定不可。信頼済みの source path / conflict notice は本文上限の外側に付加される |
+| `previous_response_overflow` | - | `previous_response_max_bytes` 指定時は `error` 固定。上限超過時は切り詰めず provider 実行前に中止する。この2項目を指定しない既定動作は従来どおり2,000文字で切り詰める |
 | `provider_options.claude.allowed_tools` | - | step または workflow に対する Claude ツール許可リスト |
 | `provider_options.claude.base_url` | - | `claude` / `claude-sdk` 用の Anthropic 互換 base URL（[configuration ガイド](./configuration.ja.md#provider-base-url-base_url) 参照） |
 | `provider_options.claude.effort` | - | Claude reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`（`xhigh` は Opus 4.7 が必要） |

@@ -39,6 +39,8 @@ export interface InstructionContext {
   fallbackContext?: FallbackContext;
   /** Preprocessed previous response text for template placeholder replacement */
   previousResponseText?: string;
+  /** Fully escaped previous response ready for direct placeholder insertion. */
+  previousResponseEscapedText?: string;
   /** Report directory path */
   reportDir?: string;
   /** Latest report paths for the current step */

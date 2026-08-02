@@ -157,6 +157,10 @@ interface WorkflowStepBase {
   delayBeforeMs?: number;
   rules?: WorkflowRule[];
   passPreviousResponse?: boolean;
+  /** UTF-8 byte cap for opt-in full previous-response delivery. */
+  previousResponseMaxBytes?: number;
+  /** Full delivery must fail instead of silently truncating on overflow. */
+  previousResponseOverflow?: 'error';
 }
 
 interface AgentWorkflowStepBase extends WorkflowStepBase {

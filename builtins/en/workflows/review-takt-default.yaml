@@ -246,7 +246,11 @@ steps:
           - Grep
           - WebSearch
           - WebFetch
-    pass_previous_response: false
+    pass_previous_response: true
+    # Why: this supervisor has no tools, so all seven reviewer bodies must be
+    # delivered inline. Overflow aborts rather than producing a partial verdict.
+    previous_response_max_bytes: 65536
+    previous_response_overflow: error
     rules:
       - condition: Review synthesis complete
         next: COMPLETE

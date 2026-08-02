@@ -35,6 +35,33 @@ import { WORKFLOW_SESSION_MODES } from './workflow-types.js';
 import { MAX_TEAM_LEADER_MAX_TOTAL_PARTS } from '../../shared/constants.js';
 
 const RESERVED_WORKFLOW_CALL_RESULTS = ['COMPLETE', 'ABORT'] as const;
+const PREVIOUS_RESPONSE_MAX_BYTES = 98_304;
+
+function validatePreviousResponseDelivery(
+  data: {
+    pass_previous_response?: boolean;
+    previous_response_max_bytes?: number;
+    previous_response_overflow?: 'error';
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const hasMax = data.previous_response_max_bytes !== undefined;
+  const hasOverflow = data.previous_response_overflow !== undefined;
+  if (hasMax !== hasOverflow) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [hasMax ? 'previous_response_overflow' : 'previous_response_max_bytes'],
+      message: 'full previous-response delivery requires both a byte limit and overflow: error',
+    });
+  }
+  if ((hasMax || hasOverflow) && data.pass_previous_response === false) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['pass_previous_response'],
+      message: 'full previous-response delivery requires pass_previous_response to be enabled',
+    });
+  }
+}
 
 export const WorkflowParamReferenceRawSchema = z.object({
   $param: z.string().min(1),
@@ -234,7 +261,10 @@ export const ParallelSubStepRawSchema = z.object({
   output_contracts: OutputContractsFieldSchema,
   quality_gates: QualityGatesSchema,
   pass_previous_response: z.boolean().optional(),
+  previous_response_max_bytes: z.number().int().min(1).max(PREVIOUS_RESPONSE_MAX_BYTES).optional(),
+  previous_response_overflow: z.literal('error').optional(),
 }).superRefine((data, ctx) => {
+  validatePreviousResponseDelivery(data, ctx);
   data.rules?.forEach((rule, index) => {
     if (rule.return !== undefined) {
       ctx.addIssue({
@@ -338,6 +368,8 @@ function createWorkflowStepRawSchema(options?: { relaxWorkflowCallConditions?: b
     output_contracts: OutputContractsFieldSchema,
     quality_gates: QualityGatesSchema,
     pass_previous_response: z.boolean().optional(),
+    previous_response_max_bytes: z.number().int().min(1).max(PREVIOUS_RESPONSE_MAX_BYTES).optional(),
+    previous_response_overflow: z.literal('error').optional(),
     parallel: z.array(ParallelSubStepRawSchema).optional(),
     concurrency: z.number().int().min(1).optional(),
     arpeggio: ArpeggioConfigRawSchema.optional(),
@@ -349,6 +381,7 @@ function createWorkflowStepRawSchema(options?: { relaxWorkflowCallConditions?: b
       path: ['parallel'],
     },
   ).superRefine((data, ctx) => {
+    validatePreviousResponseDelivery(data, ctx);
     if (data.kind !== undefined && data.mode !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -457,6 +490,8 @@ function createWorkflowStepRawSchema(options?: { relaxWorkflowCallConditions?: b
         'output_contracts',
         'quality_gates',
         'pass_previous_response',
+        'previous_response_max_bytes',
+        'previous_response_overflow',
       ] as const) {
         if (data[field] !== undefined) {
           ctx.addIssue({

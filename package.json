@@ -18,9 +18,10 @@
     "devloopd": "./bin/devloopd.mjs"
   },
   "scripts": {
-    "build": "tsc && npm run typecheck:contracts && npm run typecheck:workflow-tests && node scripts/copy-build-assets.mjs",
+    "build": "tsc && npm run typecheck:contracts && npm run typecheck:workflow-tests && npm run typecheck:resolve-contracts && node scripts/copy-build-assets.mjs",
     "typecheck:contracts": "tsc -p tsconfig.type-tests.json",
     "typecheck:workflow-tests": "tsc -p tsconfig.workflow-tests.json",
+    "typecheck:resolve-contracts": "tsc -p tsconfig.resolve-contracts.json",
     "watch": "tsc --watch",
     "analyze:usage": "node dist/commands/analyze-usage.js",
     "test": "vitest run",
@@ -39,7 +40,7 @@
     "test:e2e:opencode": "npm run test:e2e:provider:opencode",
     "test:e2e:cursor": "npm run test:e2e:provider:cursor",
     "test:devloopd:soak": "vitest run src/__tests__/devloopd-soak-harness.test.ts src/__tests__/devloopd-staged-scheduler.test.ts src/__tests__/devloopd-ci-fix.test.ts src/__tests__/devloopd-merge-queue.test.ts",
-    "lint": "eslint src/",
+    "lint": "eslint src/ .github/scripts/resolve-conflicts-contract.mjs",
     "check:personal": "npm run build && node dist/app/devloopd/index.js check-personal --cwd . --skip-build",
     "release:personal:check": "npm run check:personal && npm pack --dry-run && node dist/app/devloopd/index.js release-info --json",
     "check:release": "npm run build && npm run lint && npm run test && npm run test:e2e:all; code=$?; if [ \"$code\" -eq 0 ]; then msg='check:release passed'; else msg=\"check:release failed (exit=$code)\"; fi; if command -v osascript >/dev/null 2>&1; then osascript -e \"display notification \\\"$msg\\\" with title \\\"takt\\\" subtitle \\\"Release Check\\\"\" >/dev/null 2>&1 || true; fi; echo \"[takt] $msg\"; exit $code",
