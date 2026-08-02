@@ -12,7 +12,10 @@ import { error as errorLog } from '../../shared/ui/index.js';
 import { resolveRemovedRootCommand, resolveSlashFallbackTask } from './helpers.js';
 import { installImmediateSigintExit } from './immediateSigintExit.js';
 import { installOpencodeExitCleanup } from './opencodeExitCleanup.js';
-import { isProjectTemplateCliInvocation } from './projectTemplateInvocation.js';
+import {
+  isProjectTemplateCliInvocation,
+  projectTemplateCommandCandidate,
+} from './projectTemplateInvocation.js';
 import {
   type ProjectTemplateCliCommand,
 } from '../../features/project-template/index.js';
@@ -95,18 +98,20 @@ function projectTemplateParserFailureIdentity(
     return { command: 'project-template list', mode: 'dry-run' };
   }
 
-  let commandIndex = groupIndex + 1;
-  while (args[commandIndex] === '--cwd' || args[commandIndex]?.startsWith('--cwd=')) {
-    if (args[commandIndex] === '--cwd') commandIndex += 2;
-    else commandIndex += 1;
-  }
-  const name = args[commandIndex];
+  // Why: parser-failure identity must use the same global-option grammar as
+  // invocation detection. Otherwise a valid trailing global can hide a real
+  // mutation command and report the wrong lifecycle mode.
+  const candidate = projectTemplateCommandCandidate(args, groupIndex);
+  const commandIndex = candidate?.commandIndex;
+  const name = commandIndex === null || commandIndex === undefined
+    ? undefined
+    : args[commandIndex];
   if (!isProjectTemplateCommandName(name)) {
     return { command: 'project-template list', mode: 'dry-run' };
   }
 
   const apply = PROJECT_TEMPLATE_APPLY_COMMANDS.has(name)
-    && args.slice(commandIndex + 1).some((argument) => argument === '--apply');
+    && args.slice(commandIndex! + 1).some((argument) => argument === '--apply');
   return {
     command: `project-template ${name}`,
     mode: apply ? 'apply' : 'dry-run',

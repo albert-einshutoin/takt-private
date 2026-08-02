@@ -27,10 +27,9 @@ _takt_project_template() {
         --help|--version) terminal=1; continue ;;
         --auto-pr|--draft|--pipeline|--copy-workspace|--skip-git|--quiet|--continue)
           continue ;;
-        --auto-pr=*|--draft=*|--pipeline=*|--copy-workspace=*|--skip-git=*|--quiet=*|--continue=*)
-          continue ;;
         --) delimiter_seen=1; continue ;;
         --*) root_ambiguous=1; continue ;;
+        -) root_ambiguous=1; continue ;;
         -*)
           for ((short_index = 1; short_index < ${#word}; short_index++)); do
             short_name=${word:short_index:1}

@@ -26,6 +26,10 @@ const rootBooleanOptions = [
   '--auto-pr', '--draft', '--pipeline', '--copy-workspace', '--skip-git',
   '--quiet', '--continue', '-q', '-c', '-qc',
 ] as const;
+const rootLongBooleanOptions = [
+  '--auto-pr', '--draft', '--pipeline', '--copy-workspace', '--skip-git',
+  '--quiet', '--continue',
+] as const;
 const rootTerminalOptions = ['--help', '--version', '-h', '-V', '-qh', '-qV'] as const;
 const childValueOptions: ReadonlyArray<readonly [string, string]> = [
   ...commands.map((command) => [command, '--cwd'] as const),
@@ -219,6 +223,23 @@ describe('project-template shell completions', () => {
         .toContain('--json');
     },
   );
+
+  it.each(rootLongBooleanOptions)(
+    'fails closed for bash boolean assignment %s at root, group, and child',
+    (option) => {
+      expect(executeBashCompletion(`(takt ${option}=true "")`, 2))
+        .not.toContain('project-template');
+      expect(executeBashCompletion(`(takt project-template ${option}=true "")`, 3))
+        .not.toContain('rollback');
+      expect(executeBashCompletion(`(takt project-template list ${option}=true "")`, 4))
+        .not.toContain('--cwd');
+    },
+  );
+
+  it('fails closed for a lone dash in the bash root prefix', () => {
+    expect(executeBashCompletion('(takt - "")', 2)).not.toContain('project-template');
+    expect(executeBashCompletion('(takt - project-template "")', 3)).not.toContain('rollback');
+  });
 
   it.each(rootAttachedValueOptions)(
     'accepts bash attached global value option %s after the project-template group and child',
@@ -417,6 +438,23 @@ describe('project-template shell completions', () => {
         .toContain('--json');
     },
   );
+
+  it.each(rootLongBooleanOptions)(
+    'fails closed for zsh boolean assignment %s at root, group, and child',
+    (option) => {
+      expect(executeZshCompletion(`(takt ${option}=true "")`, 3))
+        .not.toContain('project-template');
+      expect(executeZshCompletion(`(takt project-template ${option}=true "")`, 4))
+        .not.toContain('rollback');
+      expect(executeZshCompletion(`(takt project-template list ${option}=true "")`, 5))
+        .not.toContain('--cwd');
+    },
+  );
+
+  it('fails closed for a lone dash in the zsh root prefix', () => {
+    expect(executeZshCompletion('(takt - "")', 3)).not.toContain('project-template');
+    expect(executeZshCompletion('(takt - project-template "")', 4)).not.toContain('rollback');
+  });
 
   it.each(rootAttachedValueOptions)(
     'accepts zsh attached global value option %s after the project-template group and child',
@@ -620,6 +658,8 @@ describe('project-template shell completions', () => {
     expect(fish).toContain('set -l child_operand_count 0');
     expect(fish).toContain('test $skip_value -eq 0; or return 1');
     expect(fish).toContain('case --auto-pr --draft --pipeline --copy-workspace --skip-git --quiet --continue');
+    expect(fish).not.toContain("case '--auto-pr=*'");
+    expect(fish).toMatch(/case '-'\n\s+set root_ambiguous 1/u);
     expect(fish).toContain('contains -- $short_name h V');
     expect(fish).toContain('case --cwd');
     expect(fish).toContain("case '--cwd=*'");

@@ -12,6 +12,10 @@ const runner = resolve('node_modules/.bin/vite-node');
 const entrypoint = resolve('src/app/cli/index.ts');
 const roots: string[] = [];
 const CLI_CHILD_TIMEOUT_MS = 12_000;
+const rootLongBooleanOptions = [
+  '--auto-pr', '--draft', '--pipeline', '--copy-workspace', '--skip-git',
+  '--quiet', '--continue',
+] as const;
 const duplicateRuntimeAssertionCases = [
   [
     'inspect', './missing.taktpack',
@@ -138,6 +142,8 @@ describe('project-template CLI entrypoint contract', () => {
       .toBe(false);
     expect(isProjectTemplateCliInvocation(['-qV', 'project-template', 'list']))
       .toBe(false);
+    expect(isProjectTemplateCliInvocation(['-', 'project-template', 'list']))
+      .toBe(false);
     expect(isProjectTemplateCliInvocation([
       '--wat', 'project-template', '--quiet=true', 'list',
     ])).toBe(false);
@@ -154,6 +160,32 @@ describe('project-template CLI entrypoint contract', () => {
     expect(isProjectTemplateCliInvocation([
       '-qc', 'workflow', 'init', 'project-template',
     ])).toBe(false);
+  });
+
+  it.each(rootLongBooleanOptions)(
+    'keeps --flag=value for boolean %s in one machine error at every phase',
+    (option) => {
+      for (const args of [
+        [`${option}=true`, 'project-template', 'list'],
+        ['project-template', `${option}=true`, 'list'],
+        ['project-template', 'list', `${option}=true`],
+      ]) {
+        const result = run(args);
+        expect(result.status).toBe(20);
+        expect(result.stderr).toBe('');
+        expect(result.stdout.trim().split('\n')).toHaveLength(1);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          schemaVersion: '1.0', status: 'error', error: { code: 'UNKNOWN_OPTION' },
+        });
+      }
+    },
+  );
+
+  it('routes a lone root dash through the real legacy lifecycle', () => {
+    const result = run(['-', 'project-template']);
+    expect(result.error).toBeUndefined();
+    expect(result.stdout).not.toContain('"command":"project-template');
+    expect(result.stdout).not.toContain('"schemaVersion":"1.0"');
   });
 
   it.each([
@@ -549,5 +581,20 @@ writeFileSync(
       error: { code: 'UNKNOWN_OPTION' },
     });
     expect(result.stdout).not.toMatch(/secret-root-value|\/private\/entrypoint/iu);
+  });
+
+  it('recovers apply identity through trailing group-global grammar', () => {
+    const result = run([
+      '--wat', 'project-template', '--quiet', 'apply', 'missing.taktpack', '--apply',
+    ]);
+
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template apply', mode: 'apply',
+      error: { code: 'UNKNOWN_OPTION' },
+    });
   });
 });

@@ -53,8 +53,6 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
           continue
         case --auto-pr --draft --pipeline --copy-workspace --skip-git --quiet --continue
           continue
-        case '--auto-pr=*' '--draft=*' '--pipeline=*' '--copy-workspace=*' '--skip-git=*' '--quiet=*' '--continue=*'
-          continue
         case '--'
           set delimiter_seen 1
           continue
@@ -62,6 +60,7 @@ function __takt_matches_commandline --argument-names expected_root expected_chil
           set root_ambiguous 1
           continue
         case '-'
+          set root_ambiguous 1
           continue
         case '-*'
           set -l short_names (string split '' -- (string sub -s 2 -- $word))
