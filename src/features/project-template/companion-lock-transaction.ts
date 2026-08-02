@@ -954,6 +954,15 @@ async function recoverOwnedStorage(
       assertOwned(storage, lease);
       return { status: 'none' };
     }
+    // Why: rollback-owned journals bind recovery to independently staged bytes.
+    // The companion-lock path only understands apply journals and must never
+    // reinterpret the mutable historical backup as rollback authority.
+    if (
+      journal.transactionId.startsWith('rollback-')
+      || journal.rollbackManifestSha256 !== undefined
+    ) {
+      throw new ProjectTemplateCompanionLockRecoveryError();
+    }
     let manifest: ProjectTemplateBackupManifest;
     try {
       manifest = await readProjectTemplateBackupManifest({

@@ -11,7 +11,6 @@ import {
 import {
   acquireProjectTemplateApplyLease,
   assertProjectTemplateMutationLeaseOwned,
-  clearProjectTemplateRecoveryRequiredMarker,
   reclaimStaleProjectTemplateApplyLeaseForRecovery,
   writeProjectTemplateRecoveryRequiredMarker,
   type ProjectTemplateApplyLease,
@@ -290,10 +289,10 @@ function writeRecoveryMarker(options: {
   });
 }
 
-function clearRecoveryMarker(
+async function clearRecoveryMarker(
   storage: ProjectTemplateApplyStorage,
   transactionId: string,
-): void {
+): Promise<void> {
   const marker = readProjectTemplateJsonStrict(
     resolveProjectTemplateRecoveryRequiredPath(storage.repoRoot),
   );
@@ -301,10 +300,15 @@ function clearRecoveryMarker(
   if (marker.kind !== 'value') {
     throw new Error('recovery marker cannot be proven safe');
   }
-  clearProjectTemplateRecoveryRequiredMarker(storage.repoRoot, {
-    token: transactionId,
-    transactionId,
-  });
+  const value = marker.value as Record<string, unknown>;
+  if (
+    value['version'] !== 1
+    || value['token'] !== transactionId
+    || value['transactionId'] !== transactionId
+  ) throw new Error('recovery marker identity does not match its journal');
+  const markerPath = resolveProjectTemplateRecoveryRequiredPath(storage.repoRoot);
+  await storage.io.unlink(markerPath);
+  await storage.io.fsyncDirectory(dirname(markerPath));
 }
 
 async function readApplyJournal(
@@ -1486,9 +1490,10 @@ async function performOwnedRollback(options: {
       assertOwned();
       if (options.drainTerminalJournal) {
         try {
-          // Why: journal removal is the public terminal boundary. Removing its
-          // evidence first cannot strand a live journal that references data
-          // already deleted; leftover private staging is bounded orphan state.
+          // Why: a recovery marker without its journal is not self-describing.
+          // Clear it durably first, then remove the journal; staging remains
+          // bounded private evidence until both public blockers are gone.
+          await clearRecoveryMarker(storage, transactionId);
           await removeRollbackJournal(storage);
           assertOwned();
           await removeProjectTemplateStagingTransaction({
@@ -1780,8 +1785,8 @@ export async function recoverProjectTemplateApply(options: {
       if (!await verifyManifestState(storage, manifest, 'after')) {
         throw new Error('committed state verification failed');
       }
+      await clearRecoveryMarker(storage, journal.transactionId);
       await removeRollbackJournal(storage);
-      clearRecoveryMarker(storage, journal.transactionId);
       try {
         await removeProjectTemplateStagingTransaction({
           storage,
@@ -1802,8 +1807,8 @@ export async function recoverProjectTemplateApply(options: {
         throw new Error('rolled back state verification failed');
       }
       invalidateResolvedConfigCache(options.projectRoot);
+      await clearRecoveryMarker(storage, journal.transactionId);
       await removeRollbackJournal(storage);
-      clearRecoveryMarker(storage, journal.transactionId);
       try {
         await removeProjectTemplateStagingTransaction({
           storage,
@@ -1884,8 +1889,8 @@ export async function recoverProjectTemplateApply(options: {
       storage,
       transactionId: recoveryStagingId,
     });
+    await clearRecoveryMarker(storage, journal.transactionId);
     await removeRollbackJournal(storage);
-    clearRecoveryMarker(storage, journal.transactionId);
     try {
       await removeProjectTemplateStagingTransaction({
         storage,

@@ -25,6 +25,7 @@ import {
 import { inspectProjectTemplateApplyGuard } from '../../features/project-template/apply-guard.js';
 import {
   acquireProjectTemplateApplyLease,
+  writeProjectTemplateRecoveryRequiredMarker,
 } from '../../features/project-template/apply-lease.js';
 import {
   createProjectTemplateApplyStorageIo,
@@ -35,7 +36,9 @@ import {
   type ProjectTemplateApplyStorage,
 } from '../../features/project-template/apply-storage.js';
 import {
+  ProjectTemplateCompanionLockRecoveryError,
   executeOwnedProjectTemplateCompanionLockTransaction,
+  recoverProjectTemplateCompanionLockTransactionForTest,
 } from '../../features/project-template/companion-lock-transaction.js';
 import {
   readProjectTemplateCompanionLockState,
@@ -216,6 +219,73 @@ describe('owned project template rollback executor', () => {
     expect(existsSync(storage.journalPath)).toBe(false);
     expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
       .toBe(true);
+  });
+
+  it('routes rollback-owned journal recovery away from the companion-lock path', async () => {
+    const value = await updatedInstallation();
+    let journalPath = '';
+    let crashed = false;
+    const crashIo = createProjectTemplateApplyStorageIo({
+      after(operation, path) {
+        if (!crashed && operation === 'rename' && path === journalPath) {
+          crashed = true;
+          throw new Error('process terminated after rollback journal publication');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io: crashIo,
+    });
+    journalPath = storage.journalPath;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'recovery_required' });
+    } finally {
+      lease.release();
+    }
+
+    const journal = JSON.parse(readFileSync(journalPath, 'utf8')) as {
+      transactionId: string;
+    };
+    const originalManifestPath = join(
+      storage.backupsRoot, value.backupId, 'manifest.json',
+    );
+    const replacement = JSON.parse(readFileSync(originalManifestPath, 'utf8')) as {
+      createdAt: string;
+    };
+    replacement.createdAt = '2026-08-02T03:04:05.000Z';
+    writeFileSync(originalManifestPath, `${JSON.stringify(replacement)}\n`);
+    chmodSync(originalManifestPath, 0o600);
+    const targetBefore = readFileSync(value.contentPath);
+    let originalManifestRead = false;
+    const companionIo = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (operation === 'read' && path === originalManifestPath) {
+          originalManifestRead = true;
+          throw new Error('companion recovery read rollback original manifest');
+        }
+      },
+    });
+
+    await expect(recoverProjectTemplateCompanionLockTransactionForTest({
+      projectRoot: value.projectRoot,
+      io: companionIo,
+    })).rejects.toBeInstanceOf(ProjectTemplateCompanionLockRecoveryError);
+    expect(originalManifestRead).toBe(false);
+    expect(readFileSync(value.contentPath)).toEqual(targetBefore);
+    expect(existsSync(journalPath)).toBe(true);
+    expect(existsSync(join(storage.stagingRoot, journal.transactionId))).toBe(true);
+
+    await expect(recoverProjectTemplateApply({ projectRoot: value.projectRoot }))
+      .resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
+    expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
+    expect(existsSync(journalPath)).toBe(false);
   });
 
   it('rejects backup blob drift between preview and owned apply before journaling', async () => {
@@ -913,6 +983,112 @@ describe('owned project template rollback executor', () => {
     }
     expect(existsSync(journalPath)).toBe(false);
   });
+
+  it.each(['marker-unlink', 'marker-fsync', 'marker-corrupt', 'journal-unlink'] as const)(
+    'retains a recoverable journal when terminal cleanup fails at %s',
+    async (fault) => {
+      const value = await installed();
+      let setupJournalPath = '';
+      let setupInjected = false;
+      const setupIo = createProjectTemplateApplyStorageIo({
+        before(operation, path) {
+          if (!setupInjected && operation === 'unlink' && path === setupJournalPath) {
+            setupInjected = true;
+            throw new Error('retain terminal journal for cleanup recovery test');
+          }
+        },
+      });
+      const storage = await initializeProjectTemplateApplyStorage({
+        repoPath: value.projectRoot,
+        io: setupIo,
+      });
+      setupJournalPath = storage.journalPath;
+      const manifest = await readProjectTemplateBackupManifest({
+        storage,
+        backupId: value.backupId,
+      });
+      const plan = await deriveProjectTemplateRollbackPlan({
+        storage,
+        backupId: value.backupId,
+      });
+      const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+      try {
+        await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+          .resolves.toEqual({ status: 'indeterminate', backupId: value.backupId });
+      } finally {
+        lease.release();
+      }
+      expect(setupInjected).toBe(true);
+      const journal = JSON.parse(readFileSync(storage.journalPath, 'utf8')) as {
+        transactionId: string;
+      };
+      const markerPath = join(storage.controlRoot, 'recovery-required.json');
+      writeProjectTemplateRecoveryRequiredMarker(value.projectRoot, {
+        token: journal.transactionId,
+        transactionId: journal.transactionId,
+      });
+      if (fault === 'marker-corrupt') {
+        writeFileSync(markerPath, '{corrupt');
+      }
+      let markerRemoved = false;
+      let injected = false;
+      const recoveryIo = createProjectTemplateApplyStorageIo({
+        before(operation, path) {
+          if (
+            !injected
+            && fault === 'marker-unlink'
+            && operation === 'unlink'
+            && path === markerPath
+          ) {
+            injected = true;
+            throw new Error('injected marker unlink failure');
+          }
+          if (
+            !injected
+            && fault === 'marker-fsync'
+            && markerRemoved
+            && operation === 'directory-fsync'
+            && path === storage.controlRoot
+          ) {
+            injected = true;
+            throw new Error('injected marker directory fsync failure');
+          }
+          if (
+            !injected
+            && fault === 'journal-unlink'
+            && operation === 'unlink'
+            && path === storage.journalPath
+          ) {
+            injected = true;
+            throw new Error('injected journal unlink failure');
+          }
+        },
+        after(operation, path) {
+          if (operation === 'unlink' && path === markerPath) markerRemoved = true;
+        },
+      });
+
+      await expect(recoverProjectTemplateApply({
+        projectRoot: value.projectRoot,
+        io: recoveryIo,
+      })).resolves.toMatchObject({ status: 'recovery_required' });
+      expect(existsSync(storage.journalPath)).toBe(true);
+      if (fault !== 'marker-corrupt') expect(injected).toBe(true);
+
+      if (fault === 'marker-corrupt') {
+        writeFileSync(markerPath, `${JSON.stringify({
+          version: 1,
+          token: journal.transactionId,
+          transactionId: journal.transactionId,
+        })}\n`);
+        chmodSync(markerPath, 0o600);
+      }
+      await expect(recoverProjectTemplateApply({ projectRoot: value.projectRoot }))
+        .resolves.toEqual({ status: 'rolled_back', backupId: manifest.backupId });
+      expect(existsSync(storage.journalPath)).toBe(false);
+      expect(existsSync(markerPath)).toBe(false);
+    },
+  );
 
   it('rejects a structural clone of the sealed rollback authority', async () => {
     const value = await installed();
