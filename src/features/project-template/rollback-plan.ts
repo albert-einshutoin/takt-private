@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { types } from 'node:util';
+import { join } from 'node:path';
 import { canonicalizeTaktpackJson } from './canonical-json.js';
 import {
   readProjectTemplateBackupManifest,
@@ -10,7 +11,10 @@ import {
   type ProjectTemplateBackupManifest,
 } from './apply-storage.js';
 import { readProjectTemplateCompanionLockState } from './companion-lock-state-reader.js';
-import { projectTemplateTransactionTargetByteLimit } from './transaction-limits.js';
+import {
+  PROJECT_TEMPLATE_TRANSACTION_LIMITS,
+  projectTemplateTransactionTargetByteLimit,
+} from './transaction-limits.js';
 
 const ROLLBACK_PLAN_DOMAIN = 'takt.project-template.rollback-plan.v1\u0000';
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -44,7 +48,20 @@ interface ActiveRollbackPlanAuthority {
   readonly storage: ProjectTemplateApplyStorage;
   readonly repoRoot: string;
   readonly manifest: ProjectTemplateBackupManifest;
+  readonly backupBytes: ReadonlyMap<string, Buffer>;
   state: 'active' | 'consumed';
+}
+
+export interface ProjectTemplateRollbackPlanAuthority {
+  readonly manifest: ProjectTemplateBackupManifest;
+  readonly backupBytes: ReadonlyMap<string, Buffer>;
+}
+
+export class ProjectTemplateRollbackBackupUnavailableError extends Error {
+  constructor() {
+    super('rollback backup is unavailable');
+    this.name = 'ProjectTemplateRollbackBackupUnavailableError';
+  }
 }
 
 const ROLLBACK_PLAN_AUTHORITIES =
@@ -179,6 +196,52 @@ function requireActive(signal: AbortSignal | undefined): void {
   }
 }
 
+/** @internal Reads every rollback blob before mutation authority is issued. */
+export async function preflightProjectTemplateRollbackBackupBytes(options: {
+  readonly storage: ProjectTemplateApplyStorage;
+  readonly manifest: ProjectTemplateBackupManifest;
+  readonly signal?: AbortSignal;
+}): Promise<ReadonlyMap<string, Buffer>> {
+  const result = new Map<string, Buffer>();
+  let totalBytes = 0;
+  try {
+    for (const entry of options.manifest.entries) {
+      requireActive(options.signal);
+      if (entry.before.kind === 'absent') continue;
+      const target = resolveProjectTemplateApplyTarget(options.storage, entry.target);
+      const maxBytes = projectTemplateTransactionTargetByteLimit(entry.target.kind);
+      if (entry.before.bytes > maxBytes) {
+        throw new ProjectTemplateRollbackBackupUnavailableError();
+      }
+      totalBytes += entry.before.bytes;
+      if (
+        !Number.isSafeInteger(totalBytes)
+        || totalBytes > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxRecoveryBytes
+      ) throw new ProjectTemplateRollbackBackupUnavailableError();
+      const content = await options.storage.io.readPrivateFile(
+        join(
+          options.storage.backupsRoot,
+          options.manifest.backupId,
+          entry.before.blobRelativePath,
+        ),
+        entry.before.bytes,
+        options.storage.device,
+      );
+      requireActive(options.signal);
+      if (
+        content.byteLength !== entry.before.bytes
+        || sha256(content) !== entry.before.sha256
+      ) throw new ProjectTemplateRollbackBackupUnavailableError();
+      result.set(target.key, content);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error;
+    if (error instanceof ProjectTemplateRollbackBackupUnavailableError) throw error;
+    throw new ProjectTemplateRollbackBackupUnavailableError();
+  }
+  return result;
+}
+
 /** Seals every read-only witness that must remain exact at rollback admission. */
 export function createProjectTemplateRollbackPlan(
   options: CreateProjectTemplateRollbackPlanOptions,
@@ -242,6 +305,12 @@ export async function deriveProjectTemplateRollbackPlan(options: {
   ).join(',') !== 'content-lock,repertoire-lock,source-provenance') {
     throw new Error('rollback backup does not contain an exact companion cohort');
   }
+  const backupBytes = await preflightProjectTemplateRollbackBackupBytes({
+    storage,
+    manifest,
+    ...(signal === undefined ? {} : { signal }),
+  });
+  requireActive(signal);
   const states = [];
   for (const entry of manifest.entries) {
     requireActive(signal);
@@ -281,6 +350,9 @@ export async function deriveProjectTemplateRollbackPlan(options: {
     storage,
     repoRoot: storage.repoRoot,
     manifest,
+    // Keep the validated bytes process-local so rollback never re-opens a
+    // replaceable path after its durable journal has admitted mutation.
+    backupBytes,
     state: 'active',
   });
   return plan;
@@ -290,7 +362,7 @@ export async function deriveProjectTemplateRollbackPlan(options: {
 export function consumeProjectTemplateRollbackPlanAuthority(options: {
   readonly plan: ProjectTemplateRollbackPlan;
   readonly storage: ProjectTemplateApplyStorage;
-}): ProjectTemplateBackupManifest | undefined {
+}): ProjectTemplateRollbackPlanAuthority | undefined {
   const authority = ROLLBACK_PLAN_AUTHORITIES.get(options.plan);
   if (
     authority === undefined
@@ -299,5 +371,8 @@ export function consumeProjectTemplateRollbackPlanAuthority(options: {
     || authority.repoRoot !== options.storage.repoRoot
   ) return undefined;
   authority.state = 'consumed';
-  return authority.manifest;
+  return {
+    manifest: authority.manifest,
+    backupBytes: authority.backupBytes,
+  };
 }

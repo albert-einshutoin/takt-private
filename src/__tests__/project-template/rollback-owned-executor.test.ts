@@ -1,9 +1,12 @@
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +24,7 @@ import {
 import {
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
+  readProjectTemplateBackupManifest,
   writeProjectTemplateBackupManifest,
 } from '../../features/project-template/apply-storage.js';
 import {
@@ -144,7 +148,132 @@ async function installed(): Promise<{
   return { projectRoot, ...await applyVersion(projectRoot, 10) };
 }
 
+async function updatedInstallation(): Promise<{
+  readonly projectRoot: string;
+  readonly backupId: string;
+  readonly contentPath: string;
+  readonly blobPath: string;
+}> {
+  const first = await installed();
+  const updated = await applyVersion(first.projectRoot, 11);
+  const storage = await initializeProjectTemplateApplyStorage({
+    repoPath: first.projectRoot,
+  });
+  const manifest = await readProjectTemplateBackupManifest({
+    storage,
+    backupId: updated.backupId,
+  });
+  const file = manifest.entries.find((entry) => entry.before.kind === 'file');
+  if (file?.before.kind !== 'file') throw new Error('expected rollback backup blob');
+  return {
+    projectRoot: first.projectRoot,
+    backupId: updated.backupId,
+    contentPath: first.contentPath,
+    blobPath: join(storage.backupsRoot, updated.backupId, file.before.blobRelativePath),
+  };
+}
+
 describe('owned project template rollback executor', () => {
+  it.each([
+    ['corrupt', (path: string) => writeFileSync(path, 'corrupt')],
+    ['missing', (path: string) => unlinkSync(path)],
+    ['symlink', (path: string) => {
+      const outside = `${path}.outside`;
+      writeFileSync(outside, 'outside', { mode: 0o600 });
+      unlinkSync(path);
+      symlinkSync(outside, path);
+    }],
+    ['hardlink', (path: string) => linkSync(path, `${path}.alias`)],
+  ] as const)('rejects a %s schema 1.1 backup blob before preview authority', async (
+    _kind,
+    mutate,
+  ) => {
+    const value = await updatedInstallation();
+    const before = readFileSync(value.contentPath);
+    mutate(value.blobPath);
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+    });
+
+    const preview = await createProductionProjectTemplateCliRollbackService().rollback({
+      cwd: value.projectRoot,
+      backupId: value.backupId,
+      force: false,
+      mode: 'dry-run',
+    });
+
+    expect(preview.envelope).toMatchObject({
+      status: 'error', error: { code: 'BACKUP_UNAVAILABLE' },
+    });
+    expect(readFileSync(value.contentPath)).toEqual(before);
+    expect(existsSync(storage.journalPath)).toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
+      .toBe(true);
+  });
+
+  it('rejects backup blob drift between preview and owned apply before journaling', async () => {
+    const value = await updatedInstallation();
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+    });
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const before = readFileSync(value.contentPath);
+    writeFileSync(value.blobPath, 'drifted');
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'not_started', code: 'BACKUP_UNAVAILABLE' });
+    } finally {
+      lease.release();
+    }
+    expect(readFileSync(value.contentPath)).toEqual(before);
+    expect(existsSync(storage.journalPath)).toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
+      .toBe(true);
+  });
+
+  it('restores from staged bytes when the blob path drifts after fresh preflight', async () => {
+    const value = await updatedInstallation();
+    let blobReads = 0;
+    let armed = false;
+    let raced = false;
+    const io = createProjectTemplateApplyStorageIo({
+      after(operation, path) {
+        if (operation !== 'read') return;
+        if (path === value.blobPath) {
+          blobReads += 1;
+          if (blobReads === 2) armed = true;
+          return;
+        }
+        if (armed && !raced) {
+          raced = true;
+          writeFileSync(value.blobPath, 'post-preflight-drift');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io,
+    });
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
+    } finally {
+      lease.release();
+    }
+    expect(raced).toBe(true);
+    expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
+    expect(existsSync(storage.journalPath)).toBe(false);
+  });
+
   it('keeps an explicit schema 1.0 backup unavailable to CLI rollback', async () => {
     const projectRoot = root('takt-legacy-cli-rollback-');
     const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });

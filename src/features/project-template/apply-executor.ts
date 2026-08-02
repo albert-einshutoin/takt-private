@@ -70,6 +70,8 @@ import {
 import {
   consumeProjectTemplateRollbackPlanAuthority,
   deriveProjectTemplateRollbackPlan,
+  preflightProjectTemplateRollbackBackupBytes,
+  ProjectTemplateRollbackBackupUnavailableError,
   type ProjectTemplateRollbackPlan,
 } from './rollback-plan.js';
 import { readProjectTemplateCompanionLockState } from './companion-lock-state-reader.js';
@@ -766,6 +768,7 @@ async function restoreOperations(
   manifest: ProjectTemplateBackupManifest,
   transactionId: string,
   operationKeys: ReadonlySet<string>,
+  backupBytes?: ReadonlyMap<string, Buffer>,
 ): Promise<void> {
   const selected = manifest.entries.filter(
     (entry) => operationKeys.has(operationKey(storage, entry.target)),
@@ -784,12 +787,18 @@ async function restoreOperations(
       await deleteTarget(storage, entry.target, entry.after);
       continue;
     }
-    const blobPath = join(
-      storage.backupsRoot,
-      manifest.backupId,
-      entry.before.blobRelativePath,
-    );
-    const content = await storage.io.readFile(blobPath, entry.before.bytes);
+    let content: Buffer;
+    if (backupBytes === undefined) {
+      content = await storage.io.readFile(join(
+        storage.backupsRoot,
+        manifest.backupId,
+        entry.before.blobRelativePath,
+      ), entry.before.bytes);
+    } else {
+      const staged = backupBytes.get(operationKey(storage, entry.target));
+      if (staged === undefined) throw new Error('validated backup blob is missing');
+      content = staged;
+    }
     if (hash(content) !== entry.before.sha256) {
       throw new Error('backup blob failed integrity validation');
     }
@@ -1313,6 +1322,7 @@ async function performOwnedRollback(options: {
   readonly storage: ProjectTemplateApplyStorage;
   readonly lease: ProjectTemplateApplyLease;
   readonly manifest: ProjectTemplateBackupManifest;
+  readonly backupBytes?: ReadonlyMap<string, Buffer>;
   readonly strictCompanionVerification: boolean;
   readonly drainTerminalJournal: boolean;
 }): Promise<ProjectTemplateRollbackResult> {
@@ -1324,6 +1334,9 @@ async function performOwnedRollback(options: {
   );
   let rollbackMutationStarted = false;
   try {
+    assertOwned();
+    const backupBytes = options.backupBytes
+      ?? await preflightProjectTemplateRollbackBackupBytes({ storage, manifest });
     assertOwned();
     for (const entry of manifest.entries) {
       if (!stateMatches(
@@ -1356,6 +1369,7 @@ async function performOwnedRollback(options: {
           manifest,
           transactionId,
           new Set([key]),
+          backupBytes,
         );
         assertOwned();
         restoredOperations.push(key);
@@ -1500,6 +1514,9 @@ export async function rollbackOwnedProjectTemplateApply(options: {
       interrupted()
       || (error instanceof Error && error.name === 'AbortError')
     ) return rollbackNotStarted('INTERRUPTED', 'rollback was interrupted');
+    if (error instanceof ProjectTemplateRollbackBackupUnavailableError) {
+      return rollbackNotStarted('BACKUP_UNAVAILABLE', 'backup generation changed');
+    }
     return rollbackNotStarted('ROLLBACK_DRIFT', 'rollback evidence changed');
   }
   assertProjectTemplateMutationLeaseOwned(
@@ -1515,17 +1532,18 @@ export async function rollbackOwnedProjectTemplateApply(options: {
       !== options.plan.currentCompanionLocksSha256
     || fresh.planId !== options.plan.planId
   ) return rollbackNotStarted('ROLLBACK_DRIFT', 'rollback evidence changed');
-  const manifest = consumeProjectTemplateRollbackPlanAuthority({
+  const authority = consumeProjectTemplateRollbackPlanAuthority({
     plan: fresh,
     storage: options.storage,
   });
-  if (manifest === undefined) {
+  if (authority === undefined) {
     return rollbackNotStarted('SECURITY_GUARD', 'rollback authority is invalid');
   }
   return await performOwnedRollback({
     storage: options.storage,
     lease: options.lease,
-    manifest,
+    manifest: authority.manifest,
+    backupBytes: authority.backupBytes,
     strictCompanionVerification: true,
     drainTerminalJournal: true,
   });
