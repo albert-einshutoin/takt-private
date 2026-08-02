@@ -15,7 +15,7 @@ import {
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { writeTaktpack } from '../../features/project-template/archive-writer.js';
 import { createProjectTemplateExportPlan } from '../../features/project-template/export-plan.js';
 import {
@@ -55,6 +55,48 @@ import {
 } from '../../features/project-template/cli-rollback-service.js';
 import { startProjectTemplateCliLifecycle } from '../../features/project-template/cli-lifecycle.js';
 
+const rollbackMarkerFault = vi.hoisted(() => ({
+  failNextFsync: false,
+  injected: false,
+  fdPaths: new Map<number, string>(),
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    openSync(
+      path: Parameters<typeof actual.openSync>[0],
+      flags: Parameters<typeof actual.openSync>[1],
+      mode?: Parameters<typeof actual.openSync>[2],
+    ) {
+      const fd = actual.openSync(path, flags, mode);
+      rollbackMarkerFault.fdPaths.set(fd, String(path));
+      return fd;
+    },
+    closeSync(fd: number) {
+      try {
+        actual.closeSync(fd);
+      } finally {
+        rollbackMarkerFault.fdPaths.delete(fd);
+      }
+    },
+    fsyncSync(fd: number) {
+      actual.fsyncSync(fd);
+      if (
+        rollbackMarkerFault.failNextFsync
+        && rollbackMarkerFault.fdPaths.get(fd)?.endsWith('recovery-required.json')
+      ) {
+        rollbackMarkerFault.failNextFsync = false;
+        rollbackMarkerFault.injected = true;
+        throw Object.assign(new Error('injected marker file fsync failure'), {
+          code: 'EIO',
+        });
+      }
+    },
+  };
+});
+
 const roots: string[] = [];
 
 type RollbackTestOptions =
@@ -87,6 +129,9 @@ function root(prefix: string): string {
 }
 
 afterEach(() => {
+  rollbackMarkerFault.failNextFsync = false;
+  rollbackMarkerFault.injected = false;
+  rollbackMarkerFault.fdPaths.clear();
   for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true });
 });
 
@@ -286,6 +331,57 @@ describe('owned project template rollback executor', () => {
       .resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
     expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
     expect(existsSync(journalPath)).toBe(false);
+  });
+
+  it('publishes rollback recovery identity before a marker fsync failure', async () => {
+    const value = await updatedInstallation();
+    const targetBefore = readFileSync(value.contentPath);
+    let journalPath = '';
+    let firstJournalFailureInjected = false;
+    const faultIo = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (
+          !firstJournalFailureInjected
+          && operation === 'rename'
+          && path === journalPath
+        ) {
+          firstJournalFailureInjected = true;
+          rollbackMarkerFault.failNextFsync = true;
+          throw new Error('injected first rolling-back journal publication failure');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io: faultIo,
+    });
+    journalPath = storage.journalPath;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'recovery_required' });
+    } finally {
+      lease.release();
+    }
+
+    const markerPath = join(storage.controlRoot, 'recovery-required.json');
+    expect(firstJournalFailureInjected).toBe(true);
+    expect(rollbackMarkerFault.injected).toBe(true);
+    expect(readFileSync(value.contentPath)).toEqual(targetBefore);
+    expect(existsSync(markerPath)).toBe(true);
+    expect(existsSync(journalPath)).toBe(true);
+
+    await expect(recoverProjectTemplateApply({ projectRoot: value.projectRoot }))
+      .resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
+    expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
+    expect(existsSync(markerPath)).toBe(false);
+    expect(existsSync(journalPath)).toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
+      .toBe(true);
   });
 
   it('rejects backup blob drift between preview and owned apply before journaling', async () => {

@@ -1532,7 +1532,9 @@ async function performOwnedRollback(options: {
           storage,
           transactionId: restoreTransactionId,
         });
-        writeRecoveryMarker({ storage, transactionId });
+        // Why: a marker is only actionable while its journal identity exists.
+        // Publish or rewrite the journal first so a marker durability failure
+        // cannot strand a valid marker with no recovery state behind it.
         await writeJournal(storage, {
           transactionId,
           planId: manifest.planId,
@@ -1543,6 +1545,7 @@ async function performOwnedRollback(options: {
           updatedAt: new Date().toISOString(),
           rollbackManifestSha256,
         }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
+        writeRecoveryMarker({ storage, transactionId });
       } catch {
         // The recovery-required result remains closed if storage also fails.
       }
