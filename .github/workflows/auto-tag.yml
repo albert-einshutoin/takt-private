@@ -498,21 +498,26 @@ jobs:
         # `--ignore-scripts` is a credential boundary: package-controlled
         # lifecycle hooks must never execute while NODE_AUTH_TOKEN is present.
         run: |
-          # Recheck the immutable tag in the credential-bearing step itself so
-          # deletion or retargeting cannot race a prior read-only check.
-          object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')
-          type=${object%%$'\t'*}
-          sha=${object#*$'\t'}
-          for _ in 1 2 3 4 5; do
-            [ "$type" = tag ] || break
-            object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object | [.type, .sha] | @tsv')
+          assert_remote_tag() {
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')
             type=${object%%$'\t'*}
             sha=${object#*$'\t'}
-          done
-          if [ "$type" != commit ] || [ "$sha" != "$EXPECTED_COMMIT" ]; then
-            echo 'Remote release tag no longer resolves to the expected merged commit.' >&2
-            exit 1
-          fi
+            for _ in 1 2 3 4 5; do
+              [ "$type" = tag ] || break
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object | [.type, .sha] | @tsv')
+              type=${object%%$'\t'*}
+              sha=${object#*$'\t'}
+            done
+            if [ "$type" != commit ] || [ "$sha" != "$EXPECTED_COMMIT" ]; then
+              echo 'Remote release tag no longer resolves to the expected merged commit.' >&2
+              return 1
+            fi
+          }
+
+          # Repeated reads narrow the observation-to-mutation window but are
+          # not atomic. An active repository ruleset that blocks update and
+          # deletion of refs/tags/v* is the durable immutability invariant.
+          assert_remote_tag
 
           LOCAL_INTEGRITY=$(node -e '
             const { createHash } = require("node:crypto");
@@ -570,6 +575,7 @@ jobs:
           }
           NODE
           elif grep -Eq 'E404|404 Not Found' "$registry_error"; then
+            assert_remote_tag
             npm publish "$RUNNER_TEMP/takt-package/$PACKAGE_FILENAME" --tag "$NPM_DIST_TAG" --ignore-scripts
           else
             echo 'Unable to determine whether the package version already exists.' >&2
@@ -577,6 +583,7 @@ jobs:
           fi
 
           for tag in $tags; do
+            assert_remote_tag
             npm dist-tag add "${PACKAGE_NAME}@${EXPECTED_VERSION}" "$tag"
           done
 

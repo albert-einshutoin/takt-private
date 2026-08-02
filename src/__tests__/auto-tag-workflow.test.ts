@@ -556,6 +556,10 @@ describe('auto-tag workflow release boundary', () => {
     });
     expect(publish.run).toContain('gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"');
     expect(publish.run?.indexOf('gh api')).toBeLessThan(publish.run?.indexOf('npm view') ?? -1);
+    expect(publish.run).toContain('assert_remote_tag()');
+    expect(publish.run?.match(/^\s*assert_remote_tag$/gmu)).toHaveLength(3);
+    expect(publish.run).toMatch(/assert_remote_tag\n\s+npm publish/u);
+    expect(publish.run).toMatch(/for tag in \$tags; do\n\s+assert_remote_tag\n\s+npm dist-tag add/u);
   });
 
   it('proves directory lifecycle control while documenting tarball publish limits', () => {
@@ -607,6 +611,8 @@ describe('auto-tag workflow release boundary', () => {
     ['newer dist-tag would be downgraded', 'same', '9.0.0', 'matching', false, false],
     ['remote tag deleted before mutation', 'same', '1.2.3', 'deleted', false, false],
     ['remote tag retargeted before mutation', 'same', '1.2.3', 'retargeted', false, false],
+    ['remote tag deleted immediately before publish', 'missing', '', 'deleted-after-first', false, false],
+    ['remote tag retargeted immediately before dist-tag', 'same', '1.2.3', 'retargeted-after-first', false, false],
   ])('converges npm publication for %s', (
     _description,
     registryMode,
@@ -618,6 +624,7 @@ describe('auto-tag workflow release boundary', () => {
     const directory = createTemporaryDirectory('takt-auto-tag-registry-rerun-');
     const candidateDirectory = join(directory, 'takt-package');
     const bin = join(directory, 'bin');
+    const ghLog = join(directory, 'gh.log');
     const log = join(directory, 'npm.log');
     const filename = 'takt-1.2.3.tgz';
     const tarball = Buffer.from('exact candidate bytes');
@@ -643,9 +650,24 @@ case "$*" in
 esac
 `);
     writeFileSync(join(bin, 'gh'), `#!/bin/sh
+count=0
+[ ! -f "$GH_LOG" ] || count=$(cat "$GH_LOG")
+count=$((count + 1))
+printf '%s\n' "$count" > "$GH_LOG"
 case "$REMOTE_TAG_MODE" in
   deleted) exit 1 ;;
   retargeted) printf 'commit\t%s\n' "ffffffffffffffffffffffffffffffffffffffff" ;;
+  deleted-after-first)
+    [ "$count" -eq 1 ] || exit 1
+    printf 'commit\t%s\n' "$EXPECTED_COMMIT"
+    ;;
+  retargeted-after-first)
+    if [ "$count" -eq 1 ]; then
+      printf 'commit\t%s\n' "$EXPECTED_COMMIT"
+    else
+      printf 'commit\t%s\n' "ffffffffffffffffffffffffffffffffffffffff"
+    fi
+    ;;
   matching) printf 'commit\t%s\n' "$EXPECTED_COMMIT" ;;
   *) exit 99 ;;
 esac
@@ -667,6 +689,7 @@ esac
           EXPECTED_VERSION: '1.2.3',
           GH_TOKEN: 'read-only-test-token',
           GITHUB_REPOSITORY: 'example/takt',
+          GH_LOG: ghLog,
           NPM_DIST_TAG: 'latest',
           NPM_LOG: log,
           PACKAGE_FILENAME: filename,
@@ -687,7 +710,11 @@ esac
     const npmLog = existsSync(log) ? readFileSync(log, 'utf8') : '';
     expect(npmLog.split('\n').some(line => line.startsWith('publish ')))
       .toBe(expectedPublish);
-    if (remoteTagMode !== 'matching') expect(npmLog).toBe('');
+    if (remoteTagMode !== 'matching') {
+      expect(npmLog.split('\n').some(line => (
+        line.startsWith('publish ') || line.startsWith('dist-tag add ')
+      ))).toBe(false);
+    }
   });
 
   it.each([
