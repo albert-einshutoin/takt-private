@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -32,6 +33,7 @@ type WorkflowJob = {
 };
 
 type Workflow = {
+  concurrency?: { group?: string; 'cancel-in-progress'?: boolean };
   permissions?: Record<string, string>;
   jobs: Record<string, WorkflowJob>;
 };
@@ -47,6 +49,7 @@ type ScriptResult = {
 
 const EXEC_TIMEOUT_MS = 3_000;
 const HEAD_SHA = '0123456789abcdef0123456789abcdef01234567';
+const MERGE_SHA = '89abcdef0123456789abcdef0123456789abcdef';
 const ACTION_PINS = {
   checkout: 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
   downloadArtifact: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
@@ -175,7 +178,7 @@ function validatePackage(
     name: options.name ?? 'takt', version,
   }));
   return runScript(script as string, directory, {
-    HEAD_SHA,
+    MERGE_COMMIT_SHA: MERGE_SHA,
     NPM_DIST_TAG: options.npmDistTag ?? 'latest',
     RELEASE_TAG: `v${releaseVersion}`,
     RELEASE_VERSION: releaseVersion,
@@ -241,6 +244,14 @@ describe('auto-tag workflow release boundary', () => {
     });
   });
 
+  it.each([
+    '9007199254740992.0.0',
+    '1.2.3-9007199254740992',
+  ])('rejects npm-unsafe numeric SemVer with a matching release branch: %s', (version) => {
+    const result = validateRelease(`Release v${version}`, `release/v${version}`);
+    expect(result).toMatchObject({ success: false, githubEnv: '', githubOutput: '' });
+  });
+
   it('treats a sentinel command in the title as inert data', () => {
     const directory = createTemporaryDirectory('takt-auto-tag-sentinel-title-');
     const sentinel = join(directory, 'title-sentinel');
@@ -296,7 +307,7 @@ describe('auto-tag workflow release boundary', () => {
     const result = validatePackage('1.2.3');
     expect(result.success).toBe(true);
     expect(outputMap(result.githubOutput)).toEqual({
-      commit: HEAD_SHA,
+      commit: MERGE_SHA,
       npm_dist_tag: 'latest',
       package_name: 'takt',
       package_version: '1.2.3',
@@ -332,7 +343,7 @@ describe('auto-tag workflow release boundary', () => {
 
   it.each([
     ['package name', { name: '@attacker/takt' }],
-    ['head commit', { environment: { HEAD_SHA: 'deadbeef' } }],
+    ['merge commit', { environment: { MERGE_COMMIT_SHA: 'deadbeef' } }],
     ['release tag', { environment: { RELEASE_TAG: 'v9.9.9' } }],
     ['npm dist-tag', { environment: { NPM_DIST_TAG: 'next' } }],
   ] as const)('rejects a mismatched %s before exposing the release tuple', (
@@ -360,12 +371,12 @@ describe('auto-tag workflow release boundary', () => {
     });
   });
 
-  it('checks out only package.json from the exact head without credentials', () => {
-    const checkout = findStep('validate', 'Read package metadata from PR head');
+  it('checks out package.json from the exact merged main commit, not the PR head', () => {
+    const checkout = findStep('validate', 'Read package metadata from merged commit');
     expect(checkout.uses).toBe(ACTION_PINS.checkout);
     expect(checkout.with).toMatchObject({
       'persist-credentials': false,
-      ref: '${{ github.event.pull_request.head.sha }}',
+      ref: '${{ github.event.pull_request.merge_commit_sha }}',
       'sparse-checkout': 'package.json',
       'sparse-checkout-cone-mode': false,
     });
@@ -374,6 +385,7 @@ describe('auto-tag workflow release boundary', () => {
       .filter(step => step.uses === ACTION_PINS.checkout);
     expect(allCheckouts.length).toBeGreaterThan(0);
     expect(allCheckouts.every(step => step.with?.['persist-credentials'] === false)).toBe(true);
+    expect(JSON.stringify(workflow.jobs)).not.toContain('github.event.pull_request.head.sha');
   });
 
   it('pins every external action to the reviewed full commit SHA set', () => {
@@ -395,11 +407,17 @@ describe('auto-tag workflow release boundary', () => {
     expect(findStep('validate', 'release').env?.PR_TITLE)
       .toBe('${{ github.event.pull_request.title }}');
     expect(workflow.permissions).toEqual({});
+    expect(workflow.concurrency).toEqual({
+      group: 'auto-tag-${{ github.repository }}',
+      'cancel-in-progress': false,
+    });
     expect(workflow.jobs.validate?.permissions).toEqual({ contents: 'read' });
     expect(workflow.jobs.tag?.permissions).toEqual({ contents: 'write' });
     expect(workflow.jobs.publish?.permissions).toEqual({ contents: 'read' });
-    expect(workflow.jobs.tag?.needs).toBe('validate');
-    expect(workflow.jobs.publish?.needs).toEqual(['tag', 'package']);
+    expect(workflow.jobs['candidate-pack']?.needs).toBe('validate');
+    expect(workflow.jobs.test?.needs).toEqual(['validate', 'candidate-pack']);
+    expect(workflow.jobs.tag?.needs).toEqual(['validate', 'test']);
+    expect(workflow.jobs.publish?.needs).toEqual(['validate', 'candidate-pack', 'test', 'tag']);
     expect(workflow.jobs.validate?.outputs).toEqual({
       commit: '${{ steps.package.outputs.commit }}',
       npm_dist_tag: '${{ steps.package.outputs.npm_dist_tag }}',
@@ -415,19 +433,11 @@ describe('auto-tag workflow release boundary', () => {
       tag: '${{ needs.validate.outputs.tag }}',
     });
     expect(findStep('tag', 'tag').env).toMatchObject({
-      HEAD_SHA: '${{ needs.validate.outputs.commit }}',
+      EXPECTED_COMMIT: '${{ needs.validate.outputs.commit }}',
       RELEASE_TAG: '${{ needs.validate.outputs.tag }}',
     });
-    expect(findStep('publish', 'Publish verified package').env?.NPM_DIST_TAG)
-      .toBe('${{ needs.tag.outputs.npm_dist_tag }}');
-    expect(findStep('publish', 'Sync next tag on stable release')).toMatchObject({
-      if: "needs.tag.outputs.npm_dist_tag == 'latest'",
-      env: {
-        NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}',
-        PACKAGE_NAME: '${{ needs.tag.outputs.package_name }}',
-        RELEASE_VERSION: '${{ needs.tag.outputs.package_version }}',
-      },
-    });
+    expect(findStep('publish', 'Publish or verify existing package').env?.NPM_DIST_TAG)
+      .toBe('${{ needs.validate.outputs.npm_dist_tag }}');
     expect(workflow.jobs.validate?.if)
       .toContain('github.event.pull_request.head.repo.full_name == github.repository');
   });
@@ -437,7 +447,7 @@ describe('auto-tag workflow release boundary', () => {
     const tagCheckout = tagJob.steps.find(step => step.uses === ACTION_PINS.checkout);
     const verify = findStep('tag', 'Verify checkout commit binding');
     const verifyIndex = tagJob.steps.indexOf(verify);
-    const mutationIndex = tagJob.steps.indexOf(findStep('tag', 'Create and push tag on PR head commit'));
+    const mutationIndex = tagJob.steps.indexOf(findStep('tag', 'Create or verify exact merged-commit tag'));
 
     expect(tagCheckout?.with).toMatchObject({
       ref: '${{ needs.validate.outputs.commit }}',
@@ -451,36 +461,53 @@ describe('auto-tag workflow release boundary', () => {
     expect(verifyIndex).toBeLessThan(mutationIndex);
   });
 
-  it('builds and packs without secrets before a checkout-free publish job', () => {
-    const packageJob = workflow.jobs.package!;
+  it('creates one immutable candidate before separate test and checkout-free publish jobs', () => {
+    const packageJob = workflow.jobs['candidate-pack']!;
+    const testJob = workflow.jobs.test!;
     const publishJob = workflow.jobs.publish!;
     const packageCheckout = packageJob.steps.find(step => step.uses === ACTION_PINS.checkout);
     const publishCheckout = publishJob.steps.find(step => step.uses === ACTION_PINS.checkout);
-    const publish = findStep('publish', 'Publish verified package');
+    const publish = findStep('publish', 'Publish or verify existing package');
     const packageScripts = packageJob.steps.map(step => step.run ?? '').join('\n');
     const secretSteps = publishJob.steps.filter(step => (
       JSON.stringify(step.env ?? {}).includes('NPM_TOKEN')
     ));
 
-    expect(packageJob.needs).toBe('tag');
-    expect(packageJob.outputs).toEqual({ filename: '${{ steps.pack.outputs.filename }}' });
+    expect(packageJob.needs).toBe('validate');
+    expect(packageJob.outputs).toEqual({
+      artifact_digest: '${{ steps.candidate.outputs.artifact-digest }}',
+      artifact_id: '${{ steps.candidate.outputs.artifact-id }}',
+      filename: '${{ steps.pack.outputs.filename }}',
+      integrity: '${{ steps.pack.outputs.integrity }}',
+    });
     expect(packageCheckout?.with).toMatchObject({
-      ref: '${{ needs.tag.outputs.commit }}',
+      ref: '${{ needs.validate.outputs.commit }}',
       'fetch-depth': 0,
       'persist-credentials': false,
     });
-    expect(findStep('package', 'Verify checkout and tag commit binding').env).toEqual({
-      EXPECTED_COMMIT: '${{ needs.tag.outputs.commit }}',
-      RELEASE_TAG: '${{ needs.tag.outputs.tag }}',
+    expect(findStep('candidate-pack', 'Verify exact merged checkout binding').env).toEqual({
+      EXPECTED_COMMIT: '${{ needs.validate.outputs.commit }}',
     });
     expect(packageScripts).toContain('npm ci');
-    expect(packageScripts).toContain('npm run build');
-    expect(packageScripts).toContain('npm test');
+    expect(packageScripts).not.toContain('npm run build');
+    expect(packageScripts).not.toContain('npm test');
     expect(packageScripts).toContain('npm pack');
+    expect(packageScripts).toContain('npm audit --audit-level=high');
     expect(JSON.stringify(packageJob)).not.toContain('NPM_TOKEN');
-    expect(publishJob.needs).toEqual(['tag', 'package']);
+    expect(testJob.steps.some(step => step.uses === ACTION_PINS.uploadArtifact)).toBe(false);
+    expect(findStep('test', 'Download exact candidate artifact for testing').with?.['artifact-ids'])
+      .toBe('${{ needs.candidate-pack.outputs.artifact_id }}');
+    expect(findStep('test', 'Smoke test the exact candidate tarball in isolation').run)
+      .toContain('npm install --prefix "$prefix" --ignore-scripts');
+    expect(testJob.steps.indexOf(findStep('test', 'Smoke test the exact candidate tarball in isolation')))
+      .toBeLessThan(testJob.steps.indexOf(findStep(
+        'test', 'Audit, build, and test exact merged source without secrets',
+      )));
+    expect(publishJob.needs).toEqual(['validate', 'candidate-pack', 'test', 'tag']);
     expect(publishCheckout).toBeUndefined();
-    expect(secretSteps).toEqual([publish, findStep('publish', 'Sync next tag on stable release')]);
+    expect(secretSteps).toEqual([publish]);
+    expect(findStep('publish', 'Download exact release artifact').with?.['artifact-ids'])
+      .toBe('${{ needs.candidate-pack.outputs.artifact_id }}');
     expect(publish.run).toMatch(
       /npm publish "\$RUNNER_TEMP\/takt-package\/\$PACKAGE_FILENAME" .*--ignore-scripts/u,
     );
@@ -522,47 +549,90 @@ describe('auto-tag workflow release boundary', () => {
   });
 
   it('detects removal of --ignore-scripts from the exact production publish argv', () => {
-    const source = findStep('publish', 'Publish verified package').run as string;
-    const execute = (script: string): string => {
-      const directory = createTemporaryDirectory('takt-auto-tag-publish-argv-');
-      const bin = join(directory, 'bin');
-      const log = join(directory, 'npm.log');
-      mkdirSync(bin);
-      writeFileSync(join(bin, 'npm'), '#!/bin/sh\nprintf \'%s\\n\' "$*" > "$NPM_LOG"\n');
-      chmodSync(join(bin, 'npm'), 0o755);
-      execFileSync('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script], {
+    const source = findStep('publish', 'Publish or verify existing package').run as string;
+    expect(source).toMatch(/npm publish .* --ignore-scripts/u);
+    const mutated = source.replace(' --ignore-scripts', '');
+    expect(mutated).not.toBe(source);
+    expect(mutated).not.toMatch(/npm publish .* --ignore-scripts/u);
+  });
+
+  it.each([
+    ['published with same integrity', 'same', '1.2.3', true, false],
+    ['published with different integrity', 'different', '1.2.3', false, false],
+    ['not published and dist-tags absent', 'missing', '', true, true],
+    ['newer dist-tag would be downgraded', 'same', '9.0.0', false, false],
+  ])('converges npm publication for %s', (
+    _description,
+    registryMode,
+    currentTag,
+    expectedSuccess,
+    expectedPublish,
+  ) => {
+    const directory = createTemporaryDirectory('takt-auto-tag-registry-rerun-');
+    const candidateDirectory = join(directory, 'takt-package');
+    const bin = join(directory, 'bin');
+    const log = join(directory, 'npm.log');
+    const filename = 'takt-1.2.3.tgz';
+    const tarball = Buffer.from('exact candidate bytes');
+    const integrity = `sha512-${createHash('sha512').update(tarball).digest('base64')}`;
+    mkdirSync(candidateDirectory);
+    mkdirSync(bin);
+    writeFileSync(join(candidateDirectory, filename), tarball);
+    writeFileSync(join(bin, 'npm'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$NPM_LOG"
+case "$*" in
+  'view takt dist-tags.latest'|'view takt dist-tags.next')
+    [ -n "$CURRENT_TAG" ] && printf '%s\\n' "$CURRENT_TAG"
+    exit 0
+    ;;
+  'view takt@1.2.3 name version dist.integrity --json')
+    if [ "$REGISTRY_MODE" = missing ]; then echo 'E404 Not Found' >&2; exit 1; fi
+    registry_integrity=$EXPECTED_INTEGRITY
+    [ "$REGISTRY_MODE" = same ] || registry_integrity='sha512-different'
+    printf '{"name":"takt","version":"1.2.3","dist.integrity":"%s"}\\n' "$registry_integrity"
+    ;;
+  publish*|dist-tag*) exit 0 ;;
+  *) exit 99 ;;
+esac
+`);
+    chmodSync(join(bin, 'npm'), 0o755);
+    let success = true;
+    try {
+      execFileSync('/bin/bash', [
+        '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
+        findStep('publish', 'Publish or verify existing package').run as string,
+      ], {
         cwd: directory,
         env: {
           ...process.env,
+          CURRENT_TAG: currentTag,
+          EXPECTED_INTEGRITY: integrity,
+          EXPECTED_VERSION: '1.2.3',
           NPM_DIST_TAG: 'latest',
           NPM_LOG: log,
-          PACKAGE_FILENAME: 'takt-1.2.3.tgz',
+          PACKAGE_FILENAME: filename,
+          PACKAGE_NAME: 'takt',
           PATH: `${bin}:${process.env.PATH ?? ''}`,
+          REGISTRY_MODE: registryMode,
           RUNNER_TEMP: directory,
         },
         stdio: 'pipe',
         timeout: EXEC_TIMEOUT_MS,
       });
-      return readFileSync(log, 'utf8').trim();
-    };
-    const assertSafePublishArgv = (argv: string): void => {
-      expect(argv.split(' ')).toContain('--ignore-scripts');
-    };
-
-    assertSafePublishArgv(execute(source));
-    const mutated = source.replace(' --ignore-scripts', '');
-    expect(mutated).not.toBe(source);
-    expect(() => assertSafePublishArgv(execute(mutated))).toThrow();
+    } catch {
+      success = false;
+    }
+    expect(success).toBe(expectedSuccess);
+    expect(readFileSync(log, 'utf8').split('\n').some(line => line.startsWith('publish ')))
+      .toBe(expectedPublish);
   });
 
   it.each([
-    ['matching checkout and tag', HEAD_SHA, HEAD_SHA, true],
-    ['wrong checkout', 'e'.repeat(40), HEAD_SHA, false],
-    ['retargeted tag', HEAD_SHA, 'f'.repeat(40), false],
-  ])('executes package commit binding and rejects %s', (
+    ['matching checkout', MERGE_SHA, true],
+    ['wrong checkout', 'e'.repeat(40), false],
+  ])('executes candidate commit binding and rejects %s', (
     _description,
     checkedOutCommit,
-    taggedCommit,
     success,
   ) => {
     const directory = createTemporaryDirectory('takt-auto-tag-tag-binding-');
@@ -570,7 +640,6 @@ describe('auto-tag workflow release boundary', () => {
     writeFileSync(git, `#!/bin/sh
 case "$*" in
   'rev-parse --verify HEAD^{commit}') printf '%s\\n' "$CHECKED_OUT_COMMIT" ;;
-  'rev-parse --verify refs/tags/v1.2.3^{commit}') printf '%s\\n' "$TAGGED_COMMIT" ;;
   *) exit 99 ;;
 esac
 `);
@@ -579,16 +648,14 @@ esac
     try {
       execFileSync('/bin/bash', [
         '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c',
-        findStep('package', 'Verify checkout and tag commit binding').run as string,
+        findStep('candidate-pack', 'Verify exact merged checkout binding').run as string,
       ], {
         cwd: directory,
         env: {
           ...process.env,
           CHECKED_OUT_COMMIT: checkedOutCommit,
-          EXPECTED_COMMIT: HEAD_SHA,
+          EXPECTED_COMMIT: MERGE_SHA,
           PATH: `${directory}:${process.env.PATH ?? ''}`,
-          RELEASE_TAG: 'v1.2.3',
-          TAGGED_COMMIT: taggedCommit,
         },
         stdio: 'pipe',
         timeout: EXEC_TIMEOUT_MS,
@@ -646,11 +713,15 @@ esac
     const verify = findStep('publish', 'Verify published package identity');
     expect(verify.env).toMatchObject({
       EXPECTED_DIST_TAG: '${{ needs.tag.outputs.npm_dist_tag }}',
-      EXPECTED_VERSION: '${{ needs.tag.outputs.package_version }}',
-      PACKAGE_NAME: '${{ needs.tag.outputs.package_name }}',
+      EXPECTED_INTEGRITY: '${{ needs.candidate-pack.outputs.integrity }}',
+      EXPECTED_VERSION: '${{ needs.validate.outputs.package_version }}',
+      PACKAGE_NAME: '${{ needs.validate.outputs.package_name }}',
     });
     expect(verify.run).toContain(
       'npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" version',
+    );
+    expect(verify.run).toContain(
+      'npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" dist.integrity',
     );
     expect(verify.run).toContain(
       'npm view "$PACKAGE_NAME" "dist-tags.${EXPECTED_DIST_TAG}"',
@@ -661,13 +732,15 @@ esac
   });
 
   it.each([
-    ['matching registry identity', '1.2.3', '1.2.3', true],
-    ['mismatched package version', '9.9.9', '1.2.3', false],
-    ['mismatched dist-tag', '1.2.3', '9.9.9', false],
+    ['matching registry identity', '1.2.3', '1.2.3', 'same', true],
+    ['mismatched package version', '9.9.9', '1.2.3', 'same', false],
+    ['mismatched dist-tag', '1.2.3', '9.9.9', 'same', false],
+    ['mismatched integrity', '1.2.3', '1.2.3', 'different', false],
   ])('executes exact registry identity verification: %s', (
     _description,
     publishedVersion,
     taggedVersion,
+    integrity,
     expectedSuccess,
   ) => {
     const directory = createTemporaryDirectory('takt-auto-tag-registry-');
@@ -678,6 +751,7 @@ esac
 printf '%s\\n' "$*" >> "$NPM_LOG"
 case "$*" in
   'view takt@1.2.3 version') printf '%s\\n' "$PUBLISHED_VERSION" ;;
+  'view takt@1.2.3 dist.integrity') printf '%s\\n' "$PUBLISHED_INTEGRITY" ;;
   'view takt dist-tags.latest') printf '%s\\n' "$TAGGED_VERSION" ;;
   *) exit 99 ;;
 esac
@@ -696,11 +770,13 @@ esac
           env: {
             ...process.env,
             EXPECTED_DIST_TAG: 'latest',
+            EXPECTED_INTEGRITY: 'same',
             EXPECTED_VERSION: '1.2.3',
             NPM_LOG: log,
             PACKAGE_NAME: 'takt',
             PATH: `${bin}:${process.env.PATH ?? ''}`,
             PUBLISHED_VERSION: publishedVersion,
+            PUBLISHED_INTEGRITY: integrity,
             TAGGED_VERSION: taggedVersion,
           },
           stdio: 'pipe',
@@ -714,12 +790,13 @@ esac
     const commands = readFileSync(log, 'utf8').trim().split('\n');
     expect(new Set(commands)).toEqual(new Set([
       'view takt@1.2.3 version',
+      'view takt@1.2.3 dist.integrity',
       'view takt dist-tags.latest',
     ]));
   });
 
   it('uses option-safe, fully qualified tag refspecs in the actual mutation script', () => {
-    const script = findStep('tag', 'Create and push tag on PR head commit').run;
+    const script = findStep('tag', 'Create or verify exact merged-commit tag').run;
     expect(script).toBeDefined();
     const directory = createTemporaryDirectory('takt-auto-tag-mutation-');
     const gitPath = join(directory, 'git');
@@ -734,7 +811,7 @@ esac
         ...process.env,
         GIT_LOG: logPath,
         GH_TOKEN: 'test-token',
-        HEAD_SHA,
+        EXPECTED_COMMIT: HEAD_SHA,
         PATH: `${directory}:${process.env.PATH ?? ''}`,
         RELEASE_TAG: 'v1.2.3',
       },
@@ -742,38 +819,59 @@ esac
       timeout: EXEC_TIMEOUT_MS,
     });
     expect(readFileSync(logPath, 'utf8').trim().split('\n')).toEqual([
+      'ls-remote --refs origin refs/tags/v1.2.3',
       `tag -- v1.2.3 ${HEAD_SHA}`,
       'push -- origin refs/tags/v1.2.3:refs/tags/v1.2.3',
     ]);
   });
 
-  it('does not push or publish when creating the tag fails because it already exists', () => {
-    const script = findStep('tag', 'Create and push tag on PR head commit').run;
+  it.each([
+    ['same existing tag', HEAD_SHA, true, false],
+    ['different existing tag', 'f'.repeat(40), false, false],
+    ['missing tag', '', true, true],
+  ])('converges tag reruns for %s', (_description, existingCommit, success, createsTag) => {
+    const script = findStep('tag', 'Create or verify exact merged-commit tag').run;
     expect(script).toBeDefined();
     const directory = createTemporaryDirectory('takt-auto-tag-existing-');
     const gitPath = join(directory, 'git');
     const ghPath = join(directory, 'gh');
     const logPath = join(directory, 'git.log');
-    writeFileSync(gitPath, '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$GIT_LOG"\n[ "$1" != tag ]\n');
+    writeFileSync(gitPath, `#!/bin/sh
+printf '%s\\n' "$*" >> "$GIT_LOG"
+case "$*" in
+  'ls-remote --refs origin refs/tags/v1.2.3')
+    [ -n "$EXISTING_COMMIT" ] && printf '%s\\trefs/tags/v1.2.3\\n' "$EXISTING_COMMIT"
+    exit 0
+    ;;
+  'fetch --no-tags origin refs/tags/v1.2.3') ;;
+  'rev-parse --verify FETCH_HEAD^{commit}') printf '%s\\n' "$EXISTING_COMMIT" ;;
+esac
+`);
     writeFileSync(ghPath, '#!/bin/sh\n[ "$*" = "auth setup-git" ]\n');
     chmodSync(gitPath, 0o755);
     chmodSync(ghPath, 0o755);
-    expect(() => execFileSync(
-      '/bin/bash',
-      ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script as string],
-      {
+    let actualSuccess = true;
+    try {
+      execFileSync('/bin/bash', [
+        '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script as string,
+      ], {
         env: {
           ...process.env,
+          EXISTING_COMMIT: existingCommit,
+          EXPECTED_COMMIT: HEAD_SHA,
           GIT_LOG: logPath,
           GH_TOKEN: 'test-token',
-          HEAD_SHA,
           PATH: `${directory}:${process.env.PATH ?? ''}`,
           RELEASE_TAG: 'v1.2.3',
         },
         stdio: 'pipe',
         timeout: EXEC_TIMEOUT_MS,
-      },
-    )).toThrow();
-    expect(readFileSync(logPath, 'utf8').trim()).toBe(`tag -- v1.2.3 ${HEAD_SHA}`);
+      });
+    } catch {
+      actualSuccess = false;
+    }
+    expect(actualSuccess).toBe(success);
+    const log = readFileSync(logPath, 'utf8');
+    expect(log.includes(`tag -- v1.2.3 ${HEAD_SHA}`)).toBe(createsTag);
   });
 });
