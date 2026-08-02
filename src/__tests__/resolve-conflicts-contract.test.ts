@@ -105,6 +105,39 @@ describe('resolve-conflicts contract', () => {
     );
   });
 
+  it('rejects more than twenty conflict blocks across the contract', () => {
+    const repo = makeConflict();
+    const blocks = Array.from({ length: 21 }, (_, index) => [
+      '<<<<<<< HEAD',
+      `ours-${index}`,
+      '||||||| base',
+      `base-${index}`,
+      '=======',
+      `theirs-${index}`,
+      '>>>>>>> theirs',
+      '',
+    ].join('\n')).join('');
+    writeFileSync(join(repo, 'note.txt'), blocks);
+
+    expect(run(repo, 'prepare', repo, join(repo, 'input.json')).status).not.toBe(0);
+  });
+
+  it('bounds the serialized contract after JSON escaping', () => {
+    const repo = makeConflict();
+    writeFileSync(join(repo, 'note.txt'), [
+      '<<<<<<< HEAD',
+      '\u0001'.repeat(400 * 1024),
+      '||||||| base',
+      'base',
+      '=======',
+      'theirs',
+      '>>>>>>> theirs',
+      '',
+    ].join('\n'));
+
+    expect(run(repo, 'prepare', repo, join(repo, 'input.json')).status).not.toBe(0);
+  });
+
   it('rejects stale preimages, digest mismatch, extra keys, and incomplete or duplicate IDs', () => {
     const cases = [
       (input: any) => ({ schema_version: 1, input_digest: '0'.repeat(64), resolutions: [{ conflict_id: input.conflicts[0].conflict_id, replacement: 'ok\n' }] }),

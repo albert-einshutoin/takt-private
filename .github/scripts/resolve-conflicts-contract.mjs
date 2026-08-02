@@ -16,8 +16,10 @@ import { TextDecoder } from 'node:util';
 
 const SCHEMA_VERSION = 1;
 const MAX_FILES = 20;
+const MAX_CONFLICTS = 20;
 const MAX_FILE_BYTES = 512 * 1024;
 const MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+const MAX_CONTRACT_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_REPLACEMENT_BYTES = 512 * 1024;
 const CONTEXT_LINES = 3;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
@@ -204,7 +206,13 @@ function buildContract(repoRoot) {
     totalBytes += bytes.length;
     if (totalBytes > MAX_TOTAL_BYTES) fail('conflict files exceed the total byte limit');
     const text = decodeUtf8(bytes, path);
-    conflicts.push(...parseBlocks(text, path, sha256(bytes)));
+    const fileConflicts = parseBlocks(text, path, sha256(bytes));
+    // Keep this aligned with the workflow response schema. Otherwise a valid
+    // prepare result could be impossible for the tool-less model to return.
+    if (conflicts.length + fileConflicts.length > MAX_CONFLICTS) {
+      fail(`more than ${MAX_CONFLICTS} conflict blocks`);
+    }
+    conflicts.push(...fileConflicts);
   }
   const payload = canonicalPayload(conflicts);
   return { ...payload, input_digest: sha256(JSON.stringify(payload)) };
@@ -223,7 +231,7 @@ function atomicWrite(path, bytes, mode) {
 
 function readJson(path, label) {
   const bytes = readFileSync(path);
-  if (bytes.length > MAX_TOTAL_BYTES * 4) fail(`${label} exceeds its byte limit`);
+  if (bytes.length > MAX_CONTRACT_JSON_BYTES) fail(`${label} exceeds its serialized byte limit`);
   const text = decodeUtf8(bytes, label);
   try {
     return JSON.parse(text);
@@ -235,7 +243,8 @@ function readJson(path, label) {
 function validateInput(input) {
   ownKeysExactly(input, ['schema_version', 'conflicts', 'input_digest'], 'input contract');
   if (input.schema_version !== SCHEMA_VERSION || !HASH_PATTERN.test(input.input_digest)) fail('input contract version or digest is invalid');
-  if (!Array.isArray(input.conflicts) || input.conflicts.length === 0) fail('input contract has no conflicts');
+  if (!Array.isArray(input.conflicts) || input.conflicts.length === 0 || input.conflicts.length > MAX_CONFLICTS) fail('input contract conflict count is invalid');
+  if (Buffer.byteLength(JSON.stringify(input), 'utf8') > MAX_CONTRACT_JSON_BYTES) fail('input contract exceeds its serialized byte limit');
   for (const [index, conflict] of input.conflicts.entries()) {
     ownKeysExactly(conflict, [
       'conflict_id', 'path', 'preimage_sha256', 'marker_start', 'marker_end',
@@ -257,6 +266,7 @@ function validateProposal(proposal, input) {
   ownKeysExactly(proposal, ['schema_version', 'input_digest', 'resolutions'], 'proposal');
   if (proposal.schema_version !== SCHEMA_VERSION || proposal.input_digest !== input.input_digest) fail('proposal input digest mismatch');
   if (!Array.isArray(proposal.resolutions)) fail('proposal resolutions must be an array');
+  if (Buffer.byteLength(JSON.stringify(proposal), 'utf8') > MAX_CONTRACT_JSON_BYTES) fail('proposal exceeds its serialized byte limit');
   const expected = new Set(input.conflicts.map((item) => item.conflict_id));
   if (expected.size !== input.conflicts.length) fail('input contains duplicate conflict IDs');
   const seen = new Set();
@@ -276,7 +286,11 @@ function validateProposal(proposal, input) {
 function prepare(repoRootArg, outputPath) {
   const repoRoot = normalizeRepoRoot(repoRootArg);
   const contract = buildContract(repoRoot);
-  atomicWrite(resolve(outputPath), Buffer.from(`${JSON.stringify(contract, null, 2)}\n`), 0o600);
+  const serialized = Buffer.from(`${JSON.stringify(contract, null, 2)}\n`);
+  // Measure the bytes actually handed to the model after JSON escaping rather
+  // than only the smaller source file bytes.
+  if (serialized.length > MAX_CONTRACT_JSON_BYTES) fail('input contract exceeds its serialized byte limit');
+  atomicWrite(resolve(outputPath), serialized, 0o600);
 }
 
 function apply(repoRootArg, inputPath, proposalPath) {
