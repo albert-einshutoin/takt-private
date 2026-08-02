@@ -183,12 +183,15 @@ describe('project-template CLI entrypoint contract', () => {
     },
   );
 
-  it('routes a lone root dash through the real legacy lifecycle', () => {
-    // Root help terminates before the legacy interactive workflow picker. The
-    // contract under test is entrypoint classification, not terminal prompts.
-    const result = run(['-', 'project-template', '--help']);
+  it('routes a lone root dash through a bounded legacy parser failure', () => {
+    // The trailing unknown option terminates before interactive routing. If
+    // project-template is misclassified, the same parser failure is converted
+    // into a machine envelope instead of this legacy stderr contract.
+    const result = run(['-', 'project-template', '--wat']);
     expect(result.error).toBeUndefined();
-    expect(result.stdout).toContain('Usage: takt');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain("error: unknown option '--wat'");
     expect(result.stdout).not.toContain('"command":"project-template');
     expect(result.stdout).not.toContain('"schemaVersion":"1.0"');
   });
