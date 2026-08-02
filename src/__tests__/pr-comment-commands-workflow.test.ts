@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 
 const workflowPath = resolve('.github/workflows/pr-comment-commands.yml');
+const reviewWorkflowPath = resolve('builtins/en/workflows/review-takt-default.yaml');
 const ACTION_PINS = {
   checkout: 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
   downloadArtifact: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
@@ -424,6 +425,37 @@ describe('PR Comment Commands workflow contract', () => {
     expect(JSON.stringify(providerOptions)).not.toMatch(
       /bash|shell|websearch|webfetch|network_access":true/iu,
     );
+  });
+
+  it('inlines every parallel review result for the tool-less supervisor', () => {
+    const builtin = parseYaml(readFileSync(reviewWorkflowPath, 'utf8')) as {
+      steps: Array<{
+        name: string;
+        parallel?: Array<{ name: string }>;
+        pass_previous_response?: boolean;
+        previous_response_max_bytes?: number;
+        previous_response_overflow?: string;
+        instruction?: string;
+      }>;
+    };
+    const reviewers = builtin.steps.find(step => step.name === 'reviewers');
+    const supervise = builtin.steps.find(step => step.name === 'supervise');
+
+    expect(reviewers?.parallel?.map(step => step.name)).toEqual([
+      'arch-review',
+      'security-review',
+      'qa-review',
+      'testing-review',
+      'ai-antipattern-review-2nd',
+      'pure-review',
+      'coding-review',
+    ]);
+    // The provider has no tools in this workflow, so the engine's bounded
+    // previous-response channel is the supervisor's only review-data input.
+    expect(supervise?.pass_previous_response).toBe(true);
+    expect(supervise?.previous_response_max_bytes).toBe(65_536);
+    expect(supervise?.previous_response_overflow).toBe('error');
+    expect(supervise?.instruction).toContain('{previous_response}');
   });
 
   it('separates immutable PR data collection from provider-secret execution', () => {

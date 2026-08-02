@@ -32,8 +32,26 @@ function preparePolicyContent(content: string, sourcePath?: string): string {
   return preparePolicyContentGeneric(content, CONTEXT_MAX_CHARS, sourcePath);
 }
 
-function preparePreviousResponseContent(content: string, sourcePath?: string): string {
-  const prepared = trimContextContent(content, CONTEXT_MAX_CHARS);
+function preparePreviousResponseContent(
+  content: string,
+  sourcePath?: string,
+  maxBytes?: number,
+  overflow?: 'error',
+): string {
+  const hasMax = maxBytes !== undefined;
+  const hasOverflow = overflow !== undefined;
+  if (hasMax !== hasOverflow) {
+    throw new Error('Full Previous Response delivery requires both a byte limit and overflow: error.');
+  }
+  const fullDelivery = hasMax && overflow === 'error';
+  if (fullDelivery && Buffer.byteLength(content, 'utf8') > maxBytes) {
+    throw new Error(`Previous Response exceeds the configured ${maxBytes} byte limit.`);
+  }
+  // The cap covers only the prior agent's untrusted UTF-8 body. Trusted local
+  // source-path and conflict notices are appended outside that provider boundary.
+  const prepared = fullDelivery
+    ? { content, truncated: false }
+    : trimContextContent(content, CONTEXT_MAX_CHARS);
   const lines: string[] = [prepared.content];
   if (prepared.truncated && sourcePath) {
     lines.push('', `Previous Response is truncated. Source: ${sourcePath}`);
@@ -116,6 +134,8 @@ export class InstructionBuilder {
       ? preparePreviousResponseContent(
           this.context.previousOutput.content,
           this.context.previousResponseSourcePath,
+          this.step.previousResponseMaxBytes,
+          this.step.previousResponseOverflow,
         )
       : '';
     const previousResponse = hasPreviousResponse

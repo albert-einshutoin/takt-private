@@ -265,6 +265,63 @@ describe('instruction-builder', () => {
       expect(result).not.toContain('...TRUNCATED...');
     });
 
+    it('should inline every reviewer body when full previous response is explicitly bounded', () => {
+      const step = createMinimalStep('Synthesize all reviews: {previous_response}');
+      step.passPreviousResponse = true;
+      step.previousResponseMaxBytes = 16_384;
+      step.previousResponseOverflow = 'error';
+      const reviewerNames = [
+        'architecture',
+        'security',
+        'qa',
+        'testing',
+        'ai-antipattern',
+        'requirements',
+        'coding',
+      ];
+      const bodies = reviewerNames.map((name, index) => (
+        `## ${name}\n${String(index).repeat(400)}\nEND-${name}`
+      ));
+      const aggregated = bodies.join('\n\n---\n\n');
+      expect(aggregated.length).toBeGreaterThan(2000);
+      const context = createMinimalContext({
+        previousOutput: {
+          persona: 'reviewers',
+          status: 'done',
+          content: aggregated,
+          timestamp: new Date(),
+        },
+      });
+
+      const result = buildInstruction(step, context);
+
+      for (const name of reviewerNames) {
+        expect(result).toContain(`END-${name}`);
+      }
+      expect(result).not.toContain('...TRUNCATED...');
+    });
+
+    it('should fail closed instead of truncating an explicitly bounded full previous response', () => {
+      const step = createMinimalStep('Synthesize: {previous_response}');
+      step.passPreviousResponse = true;
+      step.previousResponseMaxBytes = 7;
+      step.previousResponseOverflow = 'error';
+      const context = createMinimalContext({
+        previousOutput: {
+          persona: 'reviewers',
+          status: 'done',
+          // Two emoji are four UTF-16 code units but eight UTF-8 bytes. The
+          // provider boundary is byte-based, so this must exceed a 7-byte cap.
+          content: '😀😀',
+          timestamp: new Date(),
+        },
+      });
+
+      expect(() => buildInstruction(step, context)).toThrow(
+        'Previous Response exceeds the configured 7 byte limit.',
+      );
+    });
+
     it('should inject required truncated warning and source path for knowledge/policy', () => {
       const step = createMinimalStep('Do work');
       const longKnowledge = 'k'.repeat(2200);
