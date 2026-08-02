@@ -81,6 +81,24 @@ function findStep(job: WorkflowJob, idOrName: string): WorkflowStep {
   return step as WorkflowStep;
 }
 
+function assertResolveExecutionBoundary(workflow: WorkflowContract): void {
+  const apply = workflow.jobs['resolve-apply']!;
+  const test = workflow.jobs['resolve-test']!;
+  const publish = workflow.jobs['resolve-publish']!;
+
+  expect(apply.permissions).toEqual({ contents: 'read' });
+  expect(test.permissions).toEqual({ contents: 'read' });
+  expect(publish.permissions).toEqual({ contents: 'write' });
+  expect(JSON.stringify(apply)).not.toMatch(/secrets\.|ANTHROPIC|npm test|npm run build/iu);
+  expect(JSON.stringify(test)).not.toMatch(/secrets\.|ANTHROPIC|upload-artifact/iu);
+  expect(test.outputs).toBeUndefined();
+  expect(publish.needs).toEqual([
+    'resolve-prepare', 'resolve-propose', 'resolve-apply', 'resolve-test',
+  ]);
+  expect(findStep(publish, 'Download exact candidate artifact').with?.['artifact-ids'])
+    .toBe('${{ needs.resolve-apply.outputs.artifact_id }}');
+}
+
 function assertTrustedClaudeInstall(
   job: WorkflowJob,
   providerStepName: string,
@@ -371,36 +389,45 @@ describe('PR Comment Commands workflow contract', () => {
     )).toThrow(/trusted association set/u);
   });
 
-  it('keeps resolve behind four explicit least-privilege job boundaries', () => {
+  it('keeps resolve behind five explicit least-privilege job boundaries', () => {
     const jobs = readWorkflow().jobs;
     const prepare = jobs['resolve-prepare']!;
     const propose = jobs['resolve-propose']!;
-    const applyTest = jobs['resolve-apply-test']!;
+    const apply = jobs['resolve-apply']!;
+    const test = jobs['resolve-test']!;
     const publish = jobs['resolve-publish']!;
 
     expect(Object.keys(jobs).filter(name => name.startsWith('resolve'))).toEqual([
       'resolve-prepare',
       'resolve-propose',
-      'resolve-apply-test',
+      'resolve-apply',
+      'resolve-test',
       'resolve-publish',
     ]);
     expect(jobs.resolve).toBeUndefined();
 
     expect(prepare.permissions).toEqual({ contents: 'read', 'pull-requests': 'read' });
     expect(propose.permissions).toEqual({});
-    expect(applyTest.permissions).toEqual({ contents: 'read' });
+    expect(apply.permissions).toEqual({ contents: 'read' });
+    expect(test.permissions).toEqual({ contents: 'read' });
     expect(publish.permissions).toEqual({ contents: 'write' });
     expect(propose.needs).toBe('resolve-prepare');
-    expect(applyTest.needs).toEqual(['resolve-prepare', 'resolve-propose']);
-    expect(publish.needs).toEqual(['resolve-prepare', 'resolve-apply-test']);
+    expect(apply.needs).toEqual(['resolve-prepare', 'resolve-propose']);
+    expect(test.needs).toEqual(['resolve-prepare', 'resolve-propose', 'resolve-apply']);
+    expect(publish.needs).toEqual([
+      'resolve-prepare', 'resolve-propose', 'resolve-apply', 'resolve-test',
+    ]);
 
     expect(JSON.stringify(prepare)).not.toMatch(/secrets\.|ANTHROPIC|Acknowledge/iu);
-    expect(JSON.stringify(applyTest)).not.toMatch(/secrets\.|ANTHROPIC/iu);
+    expect(JSON.stringify(apply)).not.toMatch(/secrets\.|ANTHROPIC|npm test|npm run/iu);
+    expect(JSON.stringify(test)).not.toMatch(/secrets\.|ANTHROPIC|upload-artifact/iu);
+    expect(test.outputs).toBeUndefined();
     expect(JSON.stringify(publish)).not.toMatch(/ANTHROPIC|claude-code|npm ci/iu);
     expect(JSON.stringify(propose)).toContain('secrets.ANTHROPIC_API_KEY');
     expect(propose.steps.some(step => step.uses === ACTION_PINS.checkout)).toBe(false);
+    assertResolveExecutionBoundary(readWorkflow());
 
-    for (const job of [prepare, applyTest, publish]) {
+    for (const job of [prepare, apply, test, publish]) {
       for (const checkout of job.steps.filter(step => step.uses === ACTION_PINS.checkout)) {
         expect(checkout.with?.['persist-credentials']).toBe(false);
       }
@@ -411,7 +438,8 @@ describe('PR Comment Commands workflow contract', () => {
     const jobs = readWorkflow().jobs;
     const prepare = jobs['resolve-prepare']!;
     const propose = jobs['resolve-propose']!;
-    const applyTest = jobs['resolve-apply-test']!;
+    const apply = jobs['resolve-apply']!;
+    const test = jobs['resolve-test']!;
     const publish = jobs['resolve-publish']!;
 
     expect(prepare.outputs).toEqual({
@@ -425,25 +453,28 @@ describe('PR Comment Commands workflow contract', () => {
       artifact_id: '${{ steps.proposal.outputs.artifact-id }}',
       artifact_digest: '${{ steps.proposal.outputs.artifact-digest }}',
     });
-    expect(applyTest.outputs).toEqual({
-      artifact_id: '${{ steps.validated.outputs.artifact-id }}',
-      artifact_digest: '${{ steps.validated.outputs.artifact-digest }}',
+    expect(apply.outputs).toEqual({
+      artifact_id: '${{ steps.candidate.outputs.artifact-id }}',
+      artifact_digest: '${{ steps.candidate.outputs.artifact-digest }}',
     });
 
     expect(findStep(propose, 'Download exact prepare artifact').with).toMatchObject({
       'artifact-ids': '${{ needs.resolve-prepare.outputs.artifact_id }}',
     });
-    expect(findStep(applyTest, 'Download exact prepare artifact').with).toMatchObject({
+    expect(findStep(apply, 'Download exact prepare artifact').with).toMatchObject({
       'artifact-ids': '${{ needs.resolve-prepare.outputs.artifact_id }}',
     });
-    expect(findStep(applyTest, 'Download exact proposal artifact').with).toMatchObject({
+    expect(findStep(apply, 'Download exact proposal artifact').with).toMatchObject({
       'artifact-ids': '${{ needs.resolve-propose.outputs.artifact_id }}',
     });
-    expect(findStep(publish, 'Download exact validated artifact').with).toMatchObject({
-      'artifact-ids': '${{ needs.resolve-apply-test.outputs.artifact_id }}',
+    expect(findStep(test, 'Download exact candidate artifact').with).toMatchObject({
+      'artifact-ids': '${{ needs.resolve-apply.outputs.artifact_id }}',
+    });
+    expect(findStep(publish, 'Download exact candidate artifact').with).toMatchObject({
+      'artifact-ids': '${{ needs.resolve-apply.outputs.artifact_id }}',
     });
 
-    for (const job of [propose, applyTest, publish]) {
+    for (const job of [propose, apply, test, publish]) {
       const source = JSON.stringify(job);
       expect(source).toContain('needs.resolve-prepare.outputs.head_sha');
       expect(source).toContain('needs.resolve-prepare.outputs.base_sha');
@@ -512,17 +543,33 @@ describe('PR Comment Commands workflow contract', () => {
     expect(extract.run).toContain('2097152');
   });
 
-  it('reapplies the exact proposal and fails closed through full build and test', () => {
-    const applyTest = readWorkflow().jobs['resolve-apply-test']!;
-    const apply = findStep(applyTest, 'Recreate exact merge and apply proposal');
-    const validate = findStep(applyTest, 'Run full build and test without secrets');
+  it('creates the immutable candidate before a separate runner executes PR code', () => {
+    const applyJob = readWorkflow().jobs['resolve-apply']!;
+    const testJob = readWorkflow().jobs['resolve-test']!;
+    const apply = findStep(applyJob, 'Recreate exact merge and apply proposal');
+    const bind = findStep(applyJob, 'Bind immutable candidate patch');
+    const upload = findStep(applyJob, 'Upload immutable candidate artifact');
+    const replay = findStep(testJob, 'Reproduce exact candidate before testing');
+    const validate = findStep(testJob, 'Run full build and test without secrets');
+    const verify = findStep(testJob, 'Verify tests did not mutate candidate');
 
     expect(apply.run).toContain('resolve-conflicts-contract.mjs" \\');
     expect(apply.run).toMatch(/\n\s+apply /u);
-    expect(apply.run).toContain('test -z "$(git diff --name-only --diff-filter=U)"');
-    expect(apply.run).toContain('conflict marker remains');
-    expect(apply.run).toContain('git diff --cached --check');
     expect(apply.run).toContain('git diff --cached --binary --full-index');
+    expect(bind.run).toContain('input_sha256');
+    expect(bind.run).toContain('proposal_sha256');
+    expect(bind.run).toContain('patch_sha256');
+    expect(upload.with?.name).toBe('resolve-candidate-${{ github.run_id }}');
+    expect(JSON.stringify(applyJob)).not.toMatch(/npm test|npm run build/iu);
+    expect(testJob.steps.some(step => step.uses === ACTION_PINS.uploadArtifact)).toBe(false);
+    expect(replay.run).toContain('resolve-conflicts-contract.mjs" \\');
+    expect(replay.run).toContain('cmp -- "$CANDIDATE_DIR/candidate.patch"');
+    expect(apply.run).toContain('const marker = /^(<{7,}|\\|{7,}|={7,}|>{7,})');
+    expect(testJob.steps.indexOf(verify)).toBeGreaterThan(testJob.steps.indexOf(validate));
+    expect(verify.run).toContain('git diff --exit-code');
+    expect(verify.run).toContain('git diff --cached --binary --full-index');
+    expect(verify.run).toContain('cmp -- "$CANDIDATE_DIR/candidate.patch"');
+    expect(verify.run).toContain('git ls-files --others --exclude-standard');
     expect(validate.run?.trim().split('\n')).toEqual([
       'npm ci --ignore-scripts --no-audit --no-fund',
       'npm run build',
@@ -530,10 +577,64 @@ describe('PR Comment Commands workflow contract', () => {
     ]);
   });
 
+  it('fails closed when a mutation crosses the resolve execution boundaries', () => {
+    const workflow = readWorkflow();
+    const apply = workflow.jobs['resolve-apply']!;
+    const test = workflow.jobs['resolve-test']!;
+    const publish = workflow.jobs['resolve-publish']!;
+    const candidateDownloadIndex = publish.steps.findIndex(
+      step => step.name === 'Download exact candidate artifact',
+    );
+    const cases: WorkflowContract[] = [
+      {
+        ...workflow,
+        jobs: {
+          ...workflow.jobs,
+          'resolve-apply': {
+            ...apply,
+            steps: [...apply.steps, { name: 'Run untrusted tests too early', run: 'npm test' }],
+          },
+        },
+      },
+      {
+        ...workflow,
+        jobs: {
+          ...workflow.jobs,
+          'resolve-test': {
+            ...test,
+            outputs: { artifact_id: '${{ steps.mutated.outputs.artifact-id }}' },
+            steps: [
+              ...test.steps,
+              { name: 'Upload mutable result', uses: ACTION_PINS.uploadArtifact },
+            ],
+          },
+        },
+      },
+      {
+        ...workflow,
+        jobs: {
+          ...workflow.jobs,
+          'resolve-publish': {
+            ...publish,
+            steps: publish.steps.map((step, index) => (
+              index === candidateDownloadIndex
+                ? { ...step, with: { ...step.with, 'artifact-ids': '${{ needs.resolve-test.outputs.artifact_id }}' } }
+                : step
+            )),
+          },
+        },
+      },
+    ];
+
+    for (const mutated of cases) {
+      expect(() => assertResolveExecutionBoundary(mutated)).toThrow();
+    }
+  });
+
   it('publishes only reproduced tested bytes and exposes the token only while pushing', () => {
     const publish = readWorkflow().jobs['resolve-publish']!;
-    const reapply = findStep(publish, 'Reapply only the validated resolution');
-    const push = findStep(publish, 'Push exact validated commit without force');
+    const reapply = findStep(publish, 'Reapply only the tested candidate');
+    const push = findStep(publish, 'Push exact candidate commit without force');
     const confirm = findStep(publish, 'Confirm push and CI validation');
     const tokenSteps = publish.steps.filter(step => (
       JSON.stringify(step.env ?? {}).includes('github.token')
@@ -543,7 +644,12 @@ describe('PR Comment Commands workflow contract', () => {
     expect(JSON.stringify(publish)).not.toMatch(/npm test|npm run|ANTHROPIC/iu);
     expect(reapply.run).toContain('resolve-conflicts-contract.mjs" \\');
     expect(reapply.run).toMatch(/\n\s+apply /u);
-    expect(reapply.run).toContain('cmp -- "$VALIDATED_DIR/validated.patch"');
+    expect(reapply.run).toContain('cmp -- "$CANDIDATE_DIR/candidate.patch"');
+    expect(reapply.run).toContain('prepare_artifact_id');
+    expect(reapply.run).toContain('proposal_artifact_id');
+    expect(reapply.run).toContain('input_sha256');
+    expect(reapply.run).toContain('proposal_sha256');
+    expect(reapply.run).toContain('patch_sha256');
     expect(push.run).toContain('gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"');
     expect(push.run).toContain("'.head.repo.full_name'");
     expect(push.run).toContain("'.head.ref'");
@@ -975,9 +1081,9 @@ describe('PR Comment Commands workflow contract', () => {
     expect(scripts).not.toContain('${{ steps.pr.outputs.branch }}');
   });
 
-  it('passes the validated branch through env and uses an explicit non-force push refspec', () => {
+  it('passes the candidate branch through env and uses an explicit non-force push refspec', () => {
     const publish = readWorkflow().jobs['resolve-publish']!;
-    const push = findStep(publish, 'Push exact validated commit without force');
+    const push = findStep(publish, 'Push exact candidate commit without force');
 
     expect(push.env).toMatchObject({
       BRANCH: '${{ needs.resolve-prepare.outputs.branch }}',
