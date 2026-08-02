@@ -49,14 +49,18 @@ _takt_project_template() {
     fi
   done
   if (( pt_index < 0 )); then
-    case "$root_command" in
+    if (( root_ambiguous )); then
+      candidates=""
+    else
+      case "$root_command" in
 reset) candidates="config categories" ;;
 workflow) candidates="init doctor" ;;
 metrics) candidates="review" ;;
 repertoire) candidates="add remove list" ;;
 "") candidates="$root_commands project-template" ;;
 *) candidates="" ;;
-    esac
+      esac
+    fi
   elif [[ -z $command ]]; then
     candidates="$pt_commands --cwd"
   else

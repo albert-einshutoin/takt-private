@@ -53,13 +53,15 @@ _takt() {
     fi
   done
   if (( pt_index == 0 )); then
-    case $root_command in
-      reset) _values 'reset command' config categories ;;
-      workflow) _values 'workflow command' init doctor ;;
-      metrics) _values 'metrics command' review ;;
-      repertoire) _values 'repertoire command' add remove list ;;
-      '') _describe 'command' root_commands; _values 'command' project-template ;;
-    esac
+    if (( ! root_ambiguous )); then
+      case $root_command in
+        reset) _values 'reset command' config categories ;;
+        workflow) _values 'workflow command' init doctor ;;
+        metrics) _values 'metrics command' review ;;
+        repertoire) _values 'repertoire command' add remove list ;;
+        '') _describe 'command' root_commands; _values 'command' project-template ;;
+      esac
+    fi
     return
   fi
   if [[ -z $command ]]; then

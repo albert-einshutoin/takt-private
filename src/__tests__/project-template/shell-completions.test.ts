@@ -144,6 +144,30 @@ describe('project-template shell completions', () => {
   });
 
   it.each([
+    ['reset', 'categories'],
+    ['workflow', 'doctor'],
+    ['metrics', 'review'],
+    ['repertoire', 'remove'],
+  ] as const)(
+    'fails closed for bash %s completion after unknown root options',
+    (group, child) => {
+      const complete = (option: string): string => execFileSync(
+        'bash',
+        ['-c', [
+          'source bin/completions/takt.bash',
+          `COMP_WORDS=(takt ${option} ${group} "")`,
+          'COMP_CWORD=3',
+          '_takt_project_template',
+          'printf "%s\\n" "${COMPREPLY[@]}"',
+        ].join('; ')],
+        { encoding: 'utf8' },
+      );
+      expect(complete('-x')).not.toContain(child);
+      expect(complete('--mystery')).not.toContain(child);
+    },
+  );
+
+  it.each([
     ['root group', '(takt project-template "")', '3', true],
     ['positional operand', '(takt add project-template "")', '4', false],
   ] as const)('limits zsh project-template children for %s', (
@@ -213,6 +237,30 @@ describe('project-template shell completions', () => {
     expect(complete(`(takt ${group} "")`, 3)).toContain(child);
     expect(complete(`(takt run ${group} "")`, 4)).not.toContain(child);
   });
+
+  it.each([
+    ['reset', 'categories'],
+    ['workflow', 'doctor'],
+    ['metrics', 'review'],
+    ['repertoire', 'remove'],
+  ] as const)(
+    'fails closed for zsh %s completion after unknown root options',
+    (group, child) => {
+      const complete = (option: string): string => execFileSync(
+        'zsh',
+        ['-c', [
+          '_values() { shift; print -l -- "$@"; }',
+          '_describe() { local array_name=$2; eval "print -l -- \\${${array_name}[@]}"; }',
+          `words=(takt ${option} ${group} "")`,
+          'CURRENT=4',
+          'source bin/completions/_takt',
+        ].join('; ')],
+        { encoding: 'utf8' },
+      );
+      expect(complete('-x')).not.toContain(child);
+      expect(complete('--mystery')).not.toContain(child);
+    },
+  );
 
   it('binds every fish project-template child and option to its root predicate', () => {
     const fish = readFileSync(resolve('bin/completions/takt.fish'), 'utf8');
