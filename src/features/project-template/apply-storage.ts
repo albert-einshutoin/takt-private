@@ -1475,6 +1475,66 @@ export async function writeProjectTemplateStagingFile(options: {
   };
 }
 
+/** Reads one already-durable staging member without falling back to backups. */
+export async function readProjectTemplateStagingFile(options: {
+  storage: ProjectTemplateApplyStorage;
+  transactionId: string;
+  target: ProjectTemplateApplyTarget;
+  expectedSha256: string;
+  expectedBytes: number;
+  io?: ProjectTemplateApplyStorageIo;
+}): Promise<Buffer> {
+  const transactionId = assertSafeIdentifier(options.transactionId, 'transactionId');
+  const target = resolveProjectTemplateApplyTarget(options.storage, options.target);
+  const expectedSha256 = assertHash(options.expectedSha256, 'expectedSha256');
+  if (!Number.isSafeInteger(options.expectedBytes) || options.expectedBytes < 0) {
+    throw new ProjectTemplateApplyStorageError(
+      'LIMIT_EXCEEDED',
+      'staging byte budget is invalid',
+    );
+  }
+  const io = options.io ?? options.storage.io;
+  const transactionRoot = join(options.storage.stagingRoot, transactionId);
+  for (const directory of [
+    options.storage.stagingRoot,
+    transactionRoot,
+    ...target.stagingRelativePath.split('/').slice(0, -1).map(
+      (_segment, index, segments) => join(
+        transactionRoot,
+        ...segments.slice(0, index + 1),
+      ),
+    ),
+  ]) {
+    const entry = await io.lstat(directory);
+    if (
+      entry.isSymbolicLink()
+      || !entry.isDirectory()
+      || entry.dev !== options.storage.device
+      || !isProjectTemplatePrivateDirectoryMode(entry.mode, options.storage.platform)
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'project template staging directory is unsafe',
+      );
+    }
+  }
+  const content = await io.readPrivateFile(
+    join(transactionRoot, target.stagingRelativePath),
+    options.expectedBytes,
+    options.storage.device,
+  );
+  if (
+    content.byteLength !== options.expectedBytes
+    || sha256(content) !== expectedSha256
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'HASH_MISMATCH',
+      'staging content does not match durable rollback evidence',
+    );
+  }
+  return content;
+}
+
 function formatMode(mode: number): string {
   return `0${(mode & 0o777).toString(8).padStart(3, '0')}`;
 }

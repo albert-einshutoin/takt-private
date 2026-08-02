@@ -35,6 +35,7 @@ import {
   reclaimProjectTemplatePreparationOrphans,
   parseProjectTemplateApplyJournal,
   readProjectTemplateBackupManifest,
+  readProjectTemplateStagingFile,
   removeProjectTemplateBackupGeneration,
   removeProjectTemplateStagingTransaction,
   resolveProjectTemplateApplyTarget,
@@ -768,7 +769,7 @@ async function restoreOperations(
   manifest: ProjectTemplateBackupManifest,
   transactionId: string,
   operationKeys: ReadonlySet<string>,
-  backupBytes?: ReadonlyMap<string, Buffer>,
+  rollbackStagingTransactionId?: string,
 ): Promise<void> {
   const selected = manifest.entries.filter(
     (entry) => operationKeys.has(operationKey(storage, entry.target)),
@@ -787,18 +788,19 @@ async function restoreOperations(
       await deleteTarget(storage, entry.target, entry.after);
       continue;
     }
-    let content: Buffer;
-    if (backupBytes === undefined) {
-      content = await storage.io.readFile(join(
+    const content = rollbackStagingTransactionId === undefined
+      ? await storage.io.readFile(join(
         storage.backupsRoot,
         manifest.backupId,
         entry.before.blobRelativePath,
-      ), entry.before.bytes);
-    } else {
-      const staged = backupBytes.get(operationKey(storage, entry.target));
-      if (staged === undefined) throw new Error('validated backup blob is missing');
-      content = staged;
-    }
+      ), entry.before.bytes)
+      : await readProjectTemplateStagingFile({
+        storage,
+        transactionId: rollbackStagingTransactionId,
+        target: entry.target,
+        expectedSha256: entry.before.sha256,
+        expectedBytes: entry.before.bytes,
+      });
     if (hash(content) !== entry.before.sha256) {
       throw new Error('backup blob failed integrity validation');
     }
@@ -811,6 +813,30 @@ async function restoreOperations(
       targetMode: entry.before.mode,
     });
     await publishStaged(storage, staged, entry.after);
+  }
+}
+
+async function stageRollbackOperations(options: {
+  readonly storage: ProjectTemplateApplyStorage;
+  readonly manifest: ProjectTemplateBackupManifest;
+  readonly transactionId: string;
+  readonly backupBytes: ReadonlyMap<string, Buffer>;
+}): Promise<void> {
+  for (const entry of options.manifest.entries) {
+    if (entry.before.kind === 'absent') continue;
+    const content = options.backupBytes.get(operationKey(
+      options.storage,
+      entry.target,
+    ));
+    if (content === undefined) throw new Error('validated backup blob is missing');
+    await writeProjectTemplateStagingFile({
+      storage: options.storage,
+      transactionId: options.transactionId,
+      target: entry.target,
+      content,
+      expectedSha256: entry.before.sha256,
+      targetMode: entry.before.mode,
+    });
   }
 }
 
@@ -1349,7 +1375,28 @@ async function performOwnedRollback(options: {
       assertOwned();
     }
     const transactionId = `rollback-${randomUUID()}`;
+    const restoreTransactionId = `restore-${transactionId}`;
     const restoredOperations: string[] = [];
+    try {
+      // Why: process memory disappears on a crash. Durably stage the complete
+      // validated cohort before publishing rollback intent so restart recovery
+      // never has to trust the replaceable original backup paths again.
+      await stageRollbackOperations({
+        storage,
+        manifest,
+        transactionId,
+        backupBytes,
+      });
+      assertOwned();
+    } catch (error) {
+      try {
+        await removeProjectTemplateStagingTransaction({ storage, transactionId });
+      } catch {
+        // An unpublished private orphan is reclaimable; journal and targets
+        // remain untouched, which is the rollback admission boundary.
+      }
+      throw error;
+    }
     rollbackMutationStarted = true;
     try {
       for (const entry of [...manifest.entries].reverse()) {
@@ -1367,9 +1414,9 @@ async function performOwnedRollback(options: {
         await restoreOperations(
           storage,
           manifest,
-          transactionId,
+          restoreTransactionId,
           new Set([key]),
-          backupBytes,
+          transactionId,
         );
         assertOwned();
         restoredOperations.push(key);
@@ -1429,6 +1476,10 @@ async function performOwnedRollback(options: {
       assertOwned();
       if (options.drainTerminalJournal) {
         try {
+          await removeProjectTemplateStagingTransaction({
+            storage,
+            transactionId: restoreTransactionId,
+          });
           await removeProjectTemplateStagingTransaction({ storage, transactionId });
           assertOwned();
           await removeRollbackJournal(storage);
@@ -1439,12 +1490,20 @@ async function performOwnedRollback(options: {
           return { status: 'indeterminate', backupId: manifest.backupId };
         }
       } else {
+        await removeProjectTemplateStagingTransaction({
+          storage,
+          transactionId: restoreTransactionId,
+        });
         await removeProjectTemplateStagingTransaction({ storage, transactionId });
         assertOwned();
       }
       return { status: 'rolled_back', backupId: manifest.backupId };
     } catch {
       try {
+        await removeProjectTemplateStagingTransaction({
+          storage,
+          transactionId: restoreTransactionId,
+        });
         writeRecoveryMarker({ storage, transactionId });
         await writeJournal(storage, {
           transactionId,
@@ -1735,6 +1794,16 @@ export async function recoverProjectTemplateApply(options: {
     }
     const restored: string[] = [];
     const recoveryStagingId = `recover-${journal.transactionId}`;
+    if (journal.transactionId.startsWith('rollback-')) {
+      await removeProjectTemplateStagingTransaction({
+        storage,
+        transactionId: `restore-${journal.transactionId}`,
+      });
+      await removeProjectTemplateStagingTransaction({
+        storage,
+        transactionId: recoveryStagingId,
+      });
+    }
     for (const entry of [...manifest.entries].reverse()) {
       const key = operationKey(storage, entry.target);
       if (!mustRestore.has(key)) continue;
@@ -1746,12 +1815,15 @@ export async function recoverProjectTemplateApply(options: {
         completedOperations: restored,
         createdTargetDirectories: manifest.createdTargetDirectories,
         updatedAt: new Date().toISOString(),
-      });
+      }, journal.schemaVersion);
       await restoreOperations(
         storage,
         manifest,
         recoveryStagingId,
         new Set([key]),
+        journal.transactionId.startsWith('rollback-')
+          ? journal.transactionId
+          : undefined,
       );
       restored.push(key);
     }
@@ -1768,7 +1840,7 @@ export async function recoverProjectTemplateApply(options: {
       completedOperations: restored,
       createdTargetDirectories: manifest.createdTargetDirectories,
       updatedAt: new Date().toISOString(),
-    });
+    }, journal.schemaVersion);
     await removeProjectTemplateStagingTransaction({
       storage,
       transactionId: recoveryStagingId,

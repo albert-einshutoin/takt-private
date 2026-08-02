@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { writeTaktpack } from '../../features/project-template/archive-writer.js';
 import { createProjectTemplateExportPlan } from '../../features/project-template/export-plan.js';
 import {
+  recoverProjectTemplateApply,
   rollbackOwnedProjectTemplateApply,
 } from '../../features/project-template/apply-executor.js';
 import { inspectProjectTemplateApplyGuard } from '../../features/project-template/apply-guard.js';
@@ -272,6 +273,97 @@ describe('owned project template rollback executor', () => {
     expect(raced).toBe(true);
     expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
     expect(existsSync(storage.journalPath)).toBe(false);
+  });
+
+  it('recovers a crashed rollback from durable staging without reopening backup blobs', async () => {
+    const value = await updatedInstallation();
+    let journalPath = '';
+    let crashed = false;
+    const crashIo = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (crashed && operation === 'rename' && path === journalPath) {
+          throw new Error('process terminated before journal replacement');
+        }
+      },
+      after(operation, path) {
+        if (!crashed && operation === 'rename' && path === journalPath) {
+          crashed = true;
+          writeFileSync(value.blobPath, 'original-blob-drift-after-journal');
+          throw new Error('process terminated after journal publication');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io: crashIo,
+    });
+    journalPath = storage.journalPath;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'recovery_required' });
+    } finally {
+      lease.release();
+    }
+    expect(crashed).toBe(true);
+    expect(existsSync(storage.journalPath)).toBe(true);
+    const transactionId = (JSON.parse(
+      readFileSync(storage.journalPath, 'utf8'),
+    ) as { transactionId: string }).transactionId;
+
+    const recoveryIo = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (operation === 'read' && path === value.blobPath) {
+          throw new Error('recovery reopened the original backup blob');
+        }
+      },
+    });
+    await expect(recoverProjectTemplateApply({
+      projectRoot: value.projectRoot,
+      io: recoveryIo,
+    })).resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
+    expect(readFileSync(value.contentPath, 'utf8')).toContain('max_steps: 10');
+    expect(existsSync(join(storage.stagingRoot, transactionId))).toBe(false);
+  });
+
+  it('does not publish a journal when durable rollback staging fails', async () => {
+    const value = await updatedInstallation();
+    let stagingRoot = '';
+    let injected = false;
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (!injected && operation === 'write' && path.startsWith(stagingRoot)) {
+          injected = true;
+          throw new Error('durable staging failed');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io,
+    });
+    stagingRoot = storage.stagingRoot;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const before = readFileSync(value.contentPath);
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'not_started', code: 'BACKUP_UNAVAILABLE' });
+    } finally {
+      lease.release();
+    }
+    expect(injected).toBe(true);
+    expect(readFileSync(value.contentPath)).toEqual(before);
+    expect(existsSync(storage.journalPath)).toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
+      .toBe(true);
   });
 
   it('keeps an explicit schema 1.0 backup unavailable to CLI rollback', async () => {
