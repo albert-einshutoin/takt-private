@@ -119,6 +119,52 @@ export {
   projectTemplateCliExitCodeForErrorCode,
   writeProjectTemplateCliOutcome,
 } from './cli-machine-contract.js';
+export {
+  MAX_PROJECT_TEMPLATE_CLI_DETAIL_ITEMS_V1_1,
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION_V1_1,
+  PROJECT_TEMPLATE_CLI_SUPPORTED_SCHEMA_VERSIONS,
+  ProjectTemplateCliV1_1ContractError,
+  createProjectTemplateCliV1_1Failure,
+  createProjectTemplateCliV1_1FailureFor,
+  createProjectTemplateCliV1_1Success,
+  parseProjectTemplateCliV1_1EnvelopeJson,
+  presentProjectTemplateCliV1_1Envelope,
+  snapshotProjectTemplateCliV1_1Envelope,
+  snapshotProjectTemplateCliV1_1Outcome,
+  writeProjectTemplateCliV1_1Outcome,
+} from './cli-machine-contract-v1-1.js';
+export type {
+  ProjectTemplateCliActionV1_1,
+  ProjectTemplateCliCapabilityV1_1,
+  ProjectTemplateCliCapabilityWarningV1_1,
+  ProjectTemplateCliCollectionV1_1,
+  ProjectTemplateCliConflictV1_1,
+  ProjectTemplateCliExportReasonV1_1,
+  ProjectTemplateCliExportResultV1_1,
+  ProjectTemplateCliInspectResultV1_1,
+  ProjectTemplateCliInspectTargetV1_1,
+  ProjectTemplateCliListResultV1_1,
+  ProjectTemplateCliPreviewResultV1_1,
+  ProjectTemplateCliSourceV1_1,
+  ProjectTemplateCliTargetV1_1,
+  ProjectTemplateCliV1_1Envelope,
+  ProjectTemplateCliV1_1FailureEnvelope,
+  ProjectTemplateCliV1_1Outcome,
+  ProjectTemplateCliV1_1Result,
+  ProjectTemplateCliV1_1SuccessEnvelope,
+} from './cli-machine-contract-v1-1.js';
+export {
+  MAX_PROJECT_TEMPLATE_CLI_REVIEW_ITEMS_V1_1,
+  createProjectTemplateCliReviewProjectionV1_1,
+} from './cli-review-projection-v1-1.js';
+export type {
+  ProjectTemplateCliCapabilityWarningV1_1 as ProjectTemplateCliReviewCapabilityWarningV1_1,
+  ProjectTemplateCliReviewConflictV1_1,
+  ProjectTemplateCliReviewItemInputV1_1,
+  ProjectTemplateCliReviewItemV1_1,
+  ProjectTemplateCliReviewProjectionInputV1_1,
+  ProjectTemplateCliReviewProjectionV1_1,
+} from './cli-review-projection-v1-1.js';
 export type {
   ProjectTemplateCliApplyOptions,
   ProjectTemplateCliCommand,
