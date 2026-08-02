@@ -1,15 +1,21 @@
 #compdef takt
 
 _takt() {
-  local -a commands common mutation
-  local command='' index pt_index=0 skip_value=0
-  commands=(export inspect diff apply update rollback list)
+  local -a root_commands pt_commands common mutation
+  local command='' root_command='' index pt_index=0 skip_value=0
+  root_commands=(release-info run watch add list resume clear eject reset prompt export-cc export-codex catalog workflow metrics purge repertoire)
+  pt_commands=(export inspect diff apply update rollback list)
   common=(--cwd --json)
   mutation=(--dry-run --apply --expected-plan-id --force)
   for (( index = 2; index < CURRENT; index++ )); do
     if [[ ${words[index]} == project-template ]]; then
       pt_index=$index
       continue
+    fi
+    if (( pt_index == 0 )) && [[ ${words[index]} != -* ]]; then
+      if (( ${root_commands[(Ie)${words[index]}]} )); then
+        root_command=${words[index]}
+      fi
     fi
     if (( pt_index > 0 )); then
       if (( skip_value )); then skip_value=0; continue; fi
@@ -18,11 +24,17 @@ _takt() {
     fi
   done
   if (( pt_index == 0 )); then
-    _values 'command' project-template
+    case $root_command in
+      reset) _values 'reset command' config categories ;;
+      workflow) _values 'workflow command' init doctor ;;
+      metrics) _values 'metrics command' review ;;
+      repertoire) _values 'repertoire command' add remove list ;;
+      '') _describe 'command' root_commands; _values 'command' project-template ;;
+    esac
     return
   fi
   if [[ -z $command ]]; then
-    _describe 'project template command' commands
+    _describe 'project template command' pt_commands
     _values 'option' --cwd
     return
   fi

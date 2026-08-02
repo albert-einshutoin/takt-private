@@ -1,7 +1,12 @@
 # fish completion for takt project-template
 # Public options: --cwd --json --dry-run --apply --expected-plan-id --force --approve-policy --approve-capability
+set -l root_commands release-info run watch add list resume clear eject reset prompt export-cc export-codex catalog workflow metrics purge repertoire
 set -l pt_commands export inspect diff apply update rollback list
-complete -c takt -n '__fish_use_subcommand' -a project-template
+complete -c takt -n '__fish_use_subcommand' -a "$root_commands project-template"
+complete -c takt -n '__fish_seen_subcommand_from reset' -a 'config categories'
+complete -c takt -n '__fish_seen_subcommand_from workflow' -a 'init doctor'
+complete -c takt -n '__fish_seen_subcommand_from metrics' -a review
+complete -c takt -n '__fish_seen_subcommand_from repertoire' -a 'add remove list'
 complete -c takt -n '__fish_seen_subcommand_from project-template' -a "$pt_commands"
 
 for command in inspect diff

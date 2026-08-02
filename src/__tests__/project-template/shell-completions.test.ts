@@ -13,6 +13,24 @@ const common = ['--cwd', '--json'];
 const mutation = ['--dry-run', '--apply', '--expected-plan-id', '--force'];
 const exportApprovals = ['--approve-policy', '--approve-capability'];
 
+function registeredRootCommands(): string[] {
+  const source = readFileSync(resolve('src/app/cli/commands.ts'), 'utf8');
+  return [...source.matchAll(
+    /(?:^program|^const\s+\w+\s+=\s+program)\s*\n\s*\.command\('([^']+)'\)/gmu,
+  )].map((match) => match[1] as string);
+}
+
+function declaredRootCommands(text: string, file: typeof completionFiles[number]): string[] {
+  const pattern = file.endsWith('.bash')
+    ? /root_commands="([^"]+)"/u
+    : file.endsWith('_takt')
+      ? /root_commands=\(([^)]+)\)/u
+      : /set -l root_commands ([^\n]+)/u;
+  const match = pattern.exec(text);
+  if (match?.[1] === undefined) throw new Error(`missing root command declaration: ${file}`);
+  return match[1].trim().split(/\s+/u);
+}
+
 describe('project-template shell completions', () => {
   for (const file of completionFiles) {
     it(`${file} exposes the deterministic seven-command option contract`, () => {
@@ -22,6 +40,15 @@ describe('project-template shell completions', () => {
       for (const option of mutation) expect(text).toContain(option);
       for (const option of exportApprovals) expect(text).toContain(option);
       expect(text).not.toMatch(/(?:token|password|secret|https?:\/\/)/iu);
+    });
+
+    it(`${file} keeps the root command registry ahead of project-template`, () => {
+      const text = readFileSync(resolve(file), 'utf8');
+      expect(declaredRootCommands(text, file)).toEqual(registeredRootCommands());
+      expect(text).toContain('run');
+      expect(text).toContain('repertoire');
+      expect(text).toContain('review');
+      expect(text.indexOf('root_commands')).toBeLessThan(text.indexOf('pt_commands'));
     });
   }
 
@@ -35,7 +62,10 @@ describe('project-template shell completions', () => {
   });
 
   it.each([
-    ['root', '(takt "")', '1', 'project-template'],
+    ['root run', '(takt r)', '1', 'run'],
+    ['root repertoire', '(takt rep)', '1', 'repertoire'],
+    ['metrics review', '(takt metrics r)', '2', 'review'],
+    ['root project-template', '(takt pro)', '1', 'project-template'],
     ['group', '(takt project-template "")', '2', 'rollback'],
     ['group cwd', '(takt --cwd /work project-template "")', '4', 'rollback'],
     ['command cwd', '(takt project-template --cwd /work rollback "")', '5', '--expected-plan-id'],
