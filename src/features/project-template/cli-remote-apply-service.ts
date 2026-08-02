@@ -9,6 +9,13 @@ import {
   type ProjectTemplateCliReviewCode,
 } from './cli-machine-contract.js';
 import {
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION_V1_1,
+  createProjectTemplateCliV1_1FailureFor,
+  createProjectTemplateCliV1_1Success,
+  type ProjectTemplateCliV1_1Outcome,
+} from './cli-machine-contract-v1-1.js';
+import { snapshotProjectTemplateCliJson } from './cli-bounded-json.js';
+import {
   consumeProjectTemplateCliMutationAdmission,
   ProjectTemplateCliInvalidAdmission,
   snapshotProjectTemplateCliOwnData,
@@ -62,6 +69,18 @@ export interface ProjectTemplateCliRemoteDerivedPlan {
   readonly hardConflict: boolean;
   readonly defaultApplyPossible: boolean;
   readonly forceApplicable: boolean;
+  readonly review?: {
+    readonly manifestId: string;
+    readonly source: Readonly<Record<string, unknown>>;
+    readonly targetCount: number;
+    readonly actionCounts: Readonly<Record<
+      'add' | 'update' | 'keep' | 'delete' | 'conflict' | 'excluded', number
+    >>;
+    readonly items: readonly Readonly<Record<string, unknown>>[];
+    readonly conflicts: readonly Readonly<Record<string, unknown>>[];
+    readonly warnings: readonly Readonly<Record<string, unknown>>[];
+    readonly summary: Readonly<Record<string, number | boolean>>;
+  };
   /** Process-local authority. It is never projected into a CLI result. */
   readonly authority: unknown;
 }
@@ -133,6 +152,8 @@ export interface ProjectTemplateCliRemoteApplyService {
   diff(options: ProjectTemplateCliRemoteBaseOptions): Promise<ProjectTemplateCliOutcome>;
   apply(options: ProjectTemplateCliRemoteMutationOptions): Promise<ProjectTemplateCliOutcome>;
   update(options: ProjectTemplateCliRemoteMutationOptions): Promise<ProjectTemplateCliOutcome>;
+  diffV1_1(options: ProjectTemplateCliRemoteBaseOptions): Promise<ProjectTemplateCliV1_1Outcome>;
+  applyDryRunV1_1(options: ProjectTemplateCliRemoteBaseOptions): Promise<ProjectTemplateCliV1_1Outcome>;
 }
 
 function failure(
@@ -192,7 +213,8 @@ function snapshotPlan(value: ProjectTemplateCliRemoteDerivedPlan): ProjectTempla
     CAPTURED_GET_OWN_PROPERTY_DESCRIPTORS, Object, [value],
   ) as Record<string, PropertyDescriptor>;
   const ownKeys = CAPTURED_REFLECT_APPLY(CAPTURED_OWN_KEYS, Reflect, [descriptors]) as PropertyKey[];
-  if (ownKeys.length !== keys.length) {
+  const reviewDescriptor = descriptors['review'];
+  if (ownKeys.length !== keys.length + (reviewDescriptor === undefined ? 0 : 1)) {
     throw new ProjectTemplateCliRemotePortError('INTERNAL');
   }
   const plan = CAPTURED_REFLECT_APPLY(
@@ -217,6 +239,10 @@ function snapshotPlan(value: ProjectTemplateCliRemoteDerivedPlan): ProjectTempla
     || (typeof plan.authority !== 'object' && typeof plan.authority !== 'function')
     || plan.authority === null || CAPTURED_IS_PROXY(plan.authority)
   ) throw new ProjectTemplateCliRemotePortError('INTERNAL');
+  if (reviewDescriptor !== undefined) {
+    if (!('value' in reviewDescriptor)) throw new ProjectTemplateCliRemotePortError('INTERNAL');
+    plan.review = snapshotProjectTemplateCliJson(reviewDescriptor.value);
+  }
   return CAPTURED_REFLECT_APPLY(
     CAPTURED_OBJECT_FREEZE, Object, [plan],
   ) as unknown as ProjectTemplateCliRemoteDerivedPlan;
@@ -404,6 +430,74 @@ export function createProjectTemplateCliRemoteApplyService(
     });
   };
 
+  const dryV1_1 = async (
+    command: 'project-template diff' | 'project-template apply',
+    options: ProjectTemplateCliRemoteBaseOptions,
+  ): Promise<ProjectTemplateCliV1_1Outcome> => {
+    if (!validBase(options)) {
+      const envelope = createProjectTemplateCliV1_1FailureFor({
+        command, mode: 'dry-run', code: 'INVALID_ARGUMENT',
+      });
+      return { envelope, exitCode: 20 };
+    }
+    const derived = await derive(options, command, 'dry-run');
+    if ('envelope' in derived) {
+      if (derived.envelope.status !== 'error') {
+        throw new ProjectTemplateCliRemotePortError('INTERNAL');
+      }
+      const envelope = createProjectTemplateCliV1_1FailureFor({
+        command, mode: 'dry-run', code: derived.envelope.error.code,
+      });
+      return { envelope, exitCode: derived.exitCode };
+    }
+    if (derived.review === undefined) {
+      const envelope = createProjectTemplateCliV1_1FailureFor({
+        command, mode: 'dry-run', code: 'PROTOCOL_ERROR',
+      });
+      return { envelope, exitCode: 70 };
+    }
+    const detail = derived.review;
+    const summary = review(derived);
+    const truncated = detail.summary['truncated'] === true;
+    const envelope = createProjectTemplateCliV1_1Success({
+      schemaVersion: PROJECT_TEMPLATE_CLI_SCHEMA_VERSION_V1_1,
+      command, status: 'success', mode: 'dry-run',
+      result: {
+        planId: derived.transactionPlanId,
+        changeCount: derived.changeCount,
+        // Why: non-content conflicts block readiness but have no portable file
+        // target. Keep the schema 1.1 target aggregate aligned with its rows.
+        conflictCount: detail.actionCounts.conflict,
+        dependencyCount: derived.dependencyCount,
+        readiness: summary.readiness,
+        reviewCodes: summary.reviewCodes,
+        detail: {
+          manifestId: detail.manifestId,
+          source: detail.source,
+          targetCount: detail.targetCount,
+          actionCounts: detail.actionCounts,
+          targets: {
+            items: detail.items,
+            totalCount: detail.summary['totalItems'],
+            truncated: detail.summary['omittedItems'] !== 0,
+          },
+          conflicts: {
+            items: detail.conflicts,
+            totalCount: detail.summary['totalConflicts'],
+            truncated: detail.summary['omittedConflicts'] !== 0,
+          },
+          capabilityWarnings: {
+            items: detail.warnings,
+            totalCount: detail.summary['totalWarnings'],
+            truncated: detail.summary['omittedWarnings'] !== 0,
+          },
+        },
+      },
+      warnings: truncated ? [{ code: 'PARTIAL_RESULT' }] : [],
+    });
+    return { envelope, exitCode: 0 };
+  };
+
   const mutate = async (
     command: 'project-template apply' | 'project-template update',
     options: Extract<ProjectTemplateCliRemoteMutationOptions, { mode: 'apply' }>,
@@ -465,6 +559,26 @@ export function createProjectTemplateCliRemoteApplyService(
   };
 
   return Object.freeze({
+    async diffV1_1(value: ProjectTemplateCliRemoteBaseOptions) {
+      const options = snapshotOptions(value, false) as ProjectTemplateCliRemoteBaseOptions | undefined;
+      if (options === undefined) {
+        const envelope = createProjectTemplateCliV1_1FailureFor({
+          command: 'project-template diff', mode: 'dry-run', code: 'INVALID_ARGUMENT',
+        });
+        return { envelope, exitCode: 20 };
+      }
+      return await dryV1_1('project-template diff', options);
+    },
+    async applyDryRunV1_1(value: ProjectTemplateCliRemoteBaseOptions) {
+      const options = snapshotOptions(value, false) as ProjectTemplateCliRemoteBaseOptions | undefined;
+      if (options === undefined) {
+        const envelope = createProjectTemplateCliV1_1FailureFor({
+          command: 'project-template apply', mode: 'dry-run', code: 'INVALID_ARGUMENT',
+        });
+        return { envelope, exitCode: 20 };
+      }
+      return await dryV1_1('project-template apply', options);
+    },
     async diff(value: ProjectTemplateCliRemoteBaseOptions) {
       const options = snapshotOptions(value, false) as ProjectTemplateCliRemoteBaseOptions | undefined;
       return options === undefined

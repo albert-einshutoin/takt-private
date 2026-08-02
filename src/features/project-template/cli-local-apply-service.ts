@@ -12,11 +12,18 @@ import {
   type ProjectTemplateCliReviewCode,
 } from './cli-machine-contract.js';
 import {
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION_V1_1,
+  createProjectTemplateCliV1_1FailureFor,
+  createProjectTemplateCliV1_1Success,
+  type ProjectTemplateCliV1_1Outcome,
+} from './cli-machine-contract-v1-1.js';
+import {
   consumeProjectTemplateCliMutationAdmission,
   ProjectTemplateCliInvalidAdmission,
   snapshotProjectTemplateCliOwnData,
   type ProjectTemplateCliMutationAdmission,
 } from './cli-lifecycle.js';
+import { snapshotProjectTemplateCliJson } from './cli-bounded-json.js';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -45,6 +52,19 @@ export interface ProjectTemplateCliLocalDerivedPlan {
   readonly forceApplicable: boolean;
   /** Opaque process-local authority retained only for the trusted core port. */
   readonly authority: unknown;
+  readonly review?: {
+    readonly archiveId: string;
+    readonly manifestId: string;
+    readonly revision: string;
+    readonly targetCount: number;
+    readonly actionCounts: Readonly<Record<
+      'add' | 'update' | 'keep' | 'delete' | 'conflict' | 'excluded', number
+    >>;
+    readonly items: readonly Readonly<Record<string, unknown>>[];
+    readonly conflicts: readonly Readonly<Record<string, unknown>>[];
+    readonly warnings: readonly Readonly<Record<string, unknown>>[];
+    readonly summary: Readonly<Record<string, number | boolean>>;
+  };
 }
 
 export type ProjectTemplateCliLocalExecutionResult =
@@ -125,6 +145,8 @@ export type ProjectTemplateCliLocalApplyOptions =
 export interface ProjectTemplateCliLocalApplyService {
   diff(options: ProjectTemplateCliLocalBaseOptions): Promise<ProjectTemplateCliOutcome>;
   apply(options: ProjectTemplateCliLocalApplyOptions): Promise<ProjectTemplateCliOutcome>;
+  diffV1_1(options: ProjectTemplateCliLocalBaseOptions): Promise<ProjectTemplateCliV1_1Outcome>;
+  applyDryRunV1_1(options: ProjectTemplateCliLocalBaseOptions): Promise<ProjectTemplateCliV1_1Outcome>;
 }
 
 interface SafePort {
@@ -221,6 +243,18 @@ function ownData(value: unknown, key: string): unknown {
   return descriptor.value;
 }
 
+function ownOptionalData(value: unknown, key: string): unknown {
+  if (typeof value !== 'object' || value === null) throw new Error('invalid core result');
+  const descriptor = CAPTURED_REFLECT_APPLY(
+    CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR,
+    Object,
+    [value, key],
+  ) as PropertyDescriptor | undefined;
+  if (descriptor === undefined) return undefined;
+  if (!('value' in descriptor)) throw new Error('invalid core result');
+  return descriptor.value;
+}
+
 function snapshotPlan(value: unknown): ProjectTemplateCliLocalDerivedPlan {
   const transactionPlanId = ownData(value, 'transactionPlanId');
   const changeCount = ownData(value, 'changeCount');
@@ -231,6 +265,7 @@ function snapshotPlan(value: unknown): ProjectTemplateCliLocalDerivedPlan {
   const defaultApplyPossible = ownData(value, 'defaultApplyPossible');
   const forceApplicable = ownData(value, 'forceApplicable');
   const authority = ownData(value, 'authority');
+  const review = ownOptionalData(value, 'review');
   if (typeof transactionPlanId !== 'string' || !testPattern(SHA256_PATTERN, transactionPlanId)
     || !CAPTURED_REFLECT_APPLY(CAPTURED_NUMBER_IS_SAFE_INTEGER, Number, [changeCount])
     || !CAPTURED_REFLECT_APPLY(CAPTURED_NUMBER_IS_SAFE_INTEGER, Number, [conflictCount])
@@ -252,6 +287,9 @@ function snapshotPlan(value: unknown): ProjectTemplateCliLocalDerivedPlan {
     hardConflict,
     defaultApplyPossible,
     forceApplicable,
+    ...(review === undefined ? {} : {
+      review: review as ProjectTemplateCliLocalDerivedPlan['review'],
+    }),
     authority,
   };
 }
@@ -318,6 +356,78 @@ function previewOutcome(
   });
 }
 
+function previewOutcomeV1_1(
+  command: 'project-template diff' | 'project-template apply',
+  plan: ProjectTemplateCliLocalDerivedPlan,
+  guardFailure?: ProjectTemplateCliLocalGuardCode,
+): ProjectTemplateCliV1_1Outcome {
+  if (guardFailure === 'LEASE_UNAVAILABLE' || guardFailure === 'SECURITY_GUARD') {
+    const envelope = createProjectTemplateCliV1_1FailureFor({
+      command, mode: 'dry-run', code: guardFailure,
+    });
+    return { envelope, exitCode: projectTemplateCliExitCodeForErrorCode(guardFailure) };
+  }
+  if (plan.review === undefined) {
+    const envelope = createProjectTemplateCliV1_1FailureFor({
+      command, mode: 'dry-run', code: 'PROTOCOL_ERROR',
+    });
+    return { envelope, exitCode: projectTemplateCliExitCodeForErrorCode('PROTOCOL_ERROR') };
+  }
+  const detail = snapshotProjectTemplateCliJson(plan.review) as unknown as
+    ProjectTemplateCliLocalDerivedPlan['review'];
+  if (detail === undefined) throw new Error('missing local review projection');
+  const summary = guardFailure === 'RECOVERY_REQUIRED'
+    ? { readiness: 'recovery-required' as const, reviewCodes: ['RECOVERY_REQUIRED'] as const }
+    : guardFailure === 'ACTIVE_RUN'
+      ? { readiness: 'blocked' as const, reviewCodes: ['ACTIVE_RUN'] as const }
+      : review(plan);
+  const truncated = detail.summary['truncated'] === true;
+  const envelope = createProjectTemplateCliV1_1Success({
+    schemaVersion: PROJECT_TEMPLATE_CLI_SCHEMA_VERSION_V1_1,
+    command, status: 'success', mode: 'dry-run',
+    result: {
+      planId: plan.transactionPlanId,
+      changeCount: plan.changeCount,
+      // Why: schema 1.1 conflict rows describe content targets. Dependency,
+      // source, and composition conflicts still block readiness through
+      // HARD_CONFLICT, but must not make the target collection self-contradictory.
+      conflictCount: detail.actionCounts.conflict,
+      dependencyCount: plan.dependencyCount,
+      readiness: summary.readiness,
+      reviewCodes: summary.reviewCodes,
+      detail: {
+        manifestId: detail.manifestId,
+        source: {
+          kind: 'local-import',
+          sourceId: detail.archiveId,
+          revision: detail.revision,
+          archiveId: detail.archiveId,
+          manifestId: detail.manifestId,
+        },
+        targetCount: detail.targetCount,
+        actionCounts: detail.actionCounts,
+        targets: {
+          items: detail.items,
+          totalCount: detail.summary['totalItems'],
+          truncated: detail.summary['omittedItems'] !== 0,
+        },
+        conflicts: {
+          items: detail.conflicts,
+          totalCount: detail.summary['totalConflicts'],
+          truncated: detail.summary['omittedConflicts'] !== 0,
+        },
+        capabilityWarnings: {
+          items: detail.warnings,
+          totalCount: detail.summary['totalWarnings'],
+          truncated: detail.summary['omittedWarnings'] !== 0,
+        },
+      },
+    },
+    warnings: truncated ? [{ code: 'PARTIAL_RESULT' }] : [],
+  });
+  return { envelope, exitCode: 0 };
+}
+
 function executionFailure(code: string): ProjectTemplateCliErrorCode {
   if (code === 'PLAN_DRIFT') return 'PLAN_DRIFT';
   if (code === 'TARGET_DRIFT') return 'TARGET_DRIFT';
@@ -349,6 +459,44 @@ export function createProjectTemplateCliLocalApplyService(
     return snapshotPlan(derived);
   };
   return Object.freeze({
+    async diffV1_1(options: ProjectTemplateCliLocalBaseOptions): Promise<ProjectTemplateCliV1_1Outcome> {
+      try {
+        const cwd = resolve(options.cwd);
+        const guard = CAPTURED_REFLECT_APPLY(port.inspectGuard, port.receiver, [cwd]) as
+          ReturnType<ProjectTemplateCliLocalApplyPort['inspectGuard']>;
+        const plan = await derive(options);
+        if (!active(options.signal)) {
+          const envelope = createProjectTemplateCliV1_1FailureFor({
+            command: 'project-template diff', mode: 'dry-run', code: 'INTERRUPTED',
+          });
+          return { envelope, exitCode: 130 };
+        }
+        return previewOutcomeV1_1('project-template diff', plan, guardCode(guard));
+      } catch {
+        const code = active(options.signal) ? 'SOURCE_INTEGRITY_FAILED' : 'INTERRUPTED';
+        const envelope = createProjectTemplateCliV1_1FailureFor({
+          command: 'project-template diff', mode: 'dry-run', code,
+        });
+        return { envelope, exitCode: projectTemplateCliExitCodeForErrorCode(code) };
+      }
+    },
+    async applyDryRunV1_1(
+      options: ProjectTemplateCliLocalBaseOptions,
+    ): Promise<ProjectTemplateCliV1_1Outcome> {
+      try {
+        const cwd = resolve(options.cwd);
+        const guard = CAPTURED_REFLECT_APPLY(port.inspectGuard, port.receiver, [cwd]) as
+          ReturnType<ProjectTemplateCliLocalApplyPort['inspectGuard']>;
+        const plan = await derive(options);
+        return previewOutcomeV1_1('project-template apply', plan, guardCode(guard));
+      } catch {
+        const code = active(options.signal) ? 'SOURCE_INTEGRITY_FAILED' : 'INTERRUPTED';
+        const envelope = createProjectTemplateCliV1_1FailureFor({
+          command: 'project-template apply', mode: 'dry-run', code,
+        });
+        return { envelope, exitCode: projectTemplateCliExitCodeForErrorCode(code) };
+      }
+    },
     async diff(options: ProjectTemplateCliLocalBaseOptions): Promise<ProjectTemplateCliOutcome> {
       try {
         const cwd = resolve(options.cwd);

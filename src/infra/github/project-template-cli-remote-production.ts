@@ -15,6 +15,7 @@ import type { ProjectTemplateReceiptKeyStore } from '../security/project-templat
 import {
   createProjectTemplateRemoteProductionComposition,
   ProjectTemplateRemoteProductionCompositionError,
+  readProjectTemplateRemoteProductionReview,
   type ProjectTemplateRemoteProductionComposition,
 } from './project-template-remote-production-composition.js';
 
@@ -170,6 +171,7 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
           signal,
         });
         signal.throwIfAborted();
+        const review = readProjectTemplateRemoteProductionReview(previewed.summary);
         const authority = Object.freeze({
           kind: 'project-template-cli-remote-authority',
         });
@@ -193,6 +195,7 @@ export function createProjectTemplateCliRemoteProductionRuntimeForTest(value: {
           forceApplicable:
             previewed.summary.reviewRequired && !previewed.summary.hardConflict
               && !advisory.hardBlocked,
+          ...(review === undefined ? {} : { review }),
           authority,
         }) satisfies ProjectTemplateCliRemoteDerivedPlan;
       } catch (error) {

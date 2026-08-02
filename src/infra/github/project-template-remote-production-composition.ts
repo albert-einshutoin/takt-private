@@ -22,7 +22,9 @@ import {
   createProjectTemplateRemoteApplyComposition,
 } from '../../features/project-template/remote-transaction-apply-facade.js';
 import {
+  readGithubProjectTemplateRemoteTransactionReview,
   readGithubProjectTemplateRemoteTransactionSummary,
+  type GithubProjectTemplateRemoteTransactionReview,
 } from '../../features/project-template/remote-transaction-derivation.js';
 import type { ProjectTemplateRepertoireDependencyInspectionPort } from '../../features/project-template/repertoire-dependency-inspection-port.js';
 import type { ProjectTemplateReceiptKeyStore } from '../security/project-template-receipt-key-store.js';
@@ -37,6 +39,21 @@ const MAX_HANDLE_TTL_MS = 60 * 60 * 1_000;
 const MAX_HANDLES = 64;
 const DISPOSE_DRAIN_TIMEOUT_MS = 30_000;
 const INTERNAL_ERROR_CAUSES = new WeakMap<Error, AggregateError>();
+const REMOTE_PRODUCTION_REVIEWS = new WeakMap<
+  object,
+  GithubProjectTemplateRemoteTransactionReview
+>();
+
+/**
+ * Keeps schema 1.1 review data outside the long-standing public preview shape.
+ * This preserves exact-object compatibility for schema 1.0 consumers while the
+ * CLI production adapter can opt into the richer projection by object identity.
+ */
+export function readProjectTemplateRemoteProductionReview(
+  summary: object,
+): GithubProjectTemplateRemoteTransactionReview | undefined {
+  return REMOTE_PRODUCTION_REVIEWS.get(summary);
+}
 
 export type ProjectTemplateRemoteProductionCompositionErrorCode =
   | 'INVALID_ARGUMENT'
@@ -498,7 +515,8 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
         });
         if (preview.transactionPlanId === undefined) failure('OPERATION_FAILED');
         const summary = readGithubProjectTemplateRemoteTransactionSummary(preview);
-        if (summary === undefined) failure('OPERATION_FAILED');
+        const review = readGithubProjectTemplateRemoteTransactionReview(preview);
+        if (summary === undefined || review === undefined) failure('OPERATION_FAILED');
         if (operationGate !== undefined) await Reflect.apply(
           operationGate as (operation: 'preview') => Promise<void>, undefined, ['preview'],
         );
@@ -509,6 +527,7 @@ async function createProjectTemplateRemoteProductionCompositionInternal(
           receiptKey, preview, projectRoot, baselineStrategy,
           expiresAt: Math.min(receipt.expiresAt, expiresAfter(completionNow)),
         });
+        REMOTE_PRODUCTION_REVIEWS.set(summary, review);
         return Object.freeze({
           previewId: preview.previewId,
           transactionPlanId: preview.transactionPlanId,

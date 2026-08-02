@@ -6,7 +6,9 @@ import {
 } from '../../features/project-template/cli-export-service.js';
 import {
   inspectProjectTemplateForCli,
+  inspectProjectTemplateForCliV1_1,
   listProjectTemplatesForCli,
+  listProjectTemplatesForCliV1_1,
 } from '../../features/project-template/cli-inspect-list-service.js';
 import {
   createProductionProjectTemplateCliLocalApplyService,
@@ -30,6 +32,10 @@ import {
   type ProjectTemplateCliErrorCode,
   type ProjectTemplateCliOutcome,
 } from '../../features/project-template/cli-machine-contract.js';
+import {
+  createProjectTemplateCliV1_1FailureFor,
+  type ProjectTemplateCliV1_1Outcome,
+} from '../../features/project-template/cli-machine-contract-v1-1.js';
 import type {
   ProjectTemplateCliCommandAdapterDependencies,
   ProjectTemplateCliCommandRequest,
@@ -202,12 +208,16 @@ function createRemoteRuntimeOwner(factory: RemoteRuntimeFactory) {
 function failure(
   request: ProjectTemplateCliCommandRequest,
   code: ProjectTemplateCliErrorCode,
-): ProjectTemplateCliOutcome {
+): ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome {
   const mode = request.mutation?.mode ?? 'dry-run';
+  if (request.schemaVersion === '1.1') {
+    return {
+      envelope: createProjectTemplateCliV1_1FailureFor({ command: request.command, mode, code }),
+      exitCode: projectTemplateCliExitCodeForErrorCode(code),
+    };
+  }
   return {
-    envelope: createProjectTemplateCliFailure({
-      command: request.command, mode, code,
-    }),
+    envelope: createProjectTemplateCliFailure({ command: request.command, mode, code }),
     exitCode: projectTemplateCliExitCodeForErrorCode(code),
   };
 }
@@ -216,18 +226,24 @@ async function dispatchProjectTemplateCommand(
   request: ProjectTemplateCliCommandRequest,
   context: ProjectTemplateCliLifecycleContext,
   acquireRemoteRuntime: RemoteRuntimeFactory,
-): Promise<ProjectTemplateCliOutcome> {
+): Promise<ProjectTemplateCliOutcome | ProjectTemplateCliV1_1Outcome> {
   if (request.command === 'project-template inspect') {
     if (request.source?.kind !== 'local') return failure(request, 'INVALID_ARGUMENT');
-    return await inspectProjectTemplateForCli({
+    const inspectOptions = {
       cwd: request.cwd,
       sourcePath: request.source.value,
       currentTaktVersion: request.currentTaktVersion,
       signal: context.signal,
-    });
+    };
+    return request.schemaVersion === '1.1'
+      ? await inspectProjectTemplateForCliV1_1({ ...inspectOptions, schemaVersion: '1.1' })
+      : await inspectProjectTemplateForCli(inspectOptions);
   }
   if (request.command === 'project-template list') {
-    return await listProjectTemplatesForCli({ cwd: request.cwd, signal: context.signal });
+    const options = { cwd: request.cwd, signal: context.signal };
+    return request.schemaVersion === '1.1'
+      ? await listProjectTemplatesForCliV1_1(options)
+      : await listProjectTemplatesForCli(options);
   }
   if (request.command === 'project-template export') {
     const metadata = request.exportMetadata;
@@ -252,14 +268,17 @@ async function dispatchProjectTemplateCommand(
       }
       throw error;
     }
-    return await executeProjectTemplateCliExport({
+    if (request.schemaVersion === '1.1' && request.mutation.mode === 'apply') {
+      return failure(request, 'INVALID_ARGUMENT');
+    }
+    const exportInput = {
       projectRoot: request.cwd,
       outputPath: request.outputPath,
       exportOptions: {
         packVersion: metadata.packVersion,
         takt: { minVersion: metadata.minTaktVersion },
         source: {
-          kind: 'local', uri: '.', ref: 'workspace',
+          kind: 'local' as const, uri: '.', ref: 'workspace' as const,
           commit: metadata.sourceCommit,
         },
         ...approvals,
@@ -269,9 +288,13 @@ async function dispatchProjectTemplateCommand(
       ...(request.mutation.mode === 'apply'
         ? { admitMutation: context.admitMutation }
         : {}),
-    });
+    };
+    return request.schemaVersion === '1.1'
+      ? await executeProjectTemplateCliExport({ ...exportInput, schemaVersion: '1.1' })
+      : await executeProjectTemplateCliExport(exportInput);
   }
   if (request.command === 'project-template rollback') {
+    if (request.schemaVersion === '1.1') return failure(request, 'INVALID_ARGUMENT');
     if (request.mutation === undefined || request.backupId === undefined) {
       return failure(request, 'INVALID_ARGUMENT');
     }
@@ -291,6 +314,10 @@ async function dispatchProjectTemplateCommand(
   }
   if (request.source?.kind === 'github') {
     if (request.mutation === undefined) return failure(request, 'INVALID_ARGUMENT');
+    if (request.schemaVersion === '1.1'
+      && (request.command === 'project-template update' || request.mutation.mode === 'apply')) {
+      return failure(request, 'INVALID_ARGUMENT');
+    }
     const runtime = await acquireRemoteRuntime(request.cwd);
     context.signal.throwIfAborted();
     const base = {
@@ -302,8 +329,11 @@ async function dispatchProjectTemplateCommand(
       signal: context.signal,
     };
     if (request.command === 'project-template diff') {
-      return await runtime.service.diff(base);
+      return request.schemaVersion === '1.1'
+        ? await runtime.service.diffV1_1(base)
+        : await runtime.service.diff(base);
     }
+    if (request.schemaVersion === '1.1') return await runtime.service.applyDryRunV1_1(base);
     const options = request.mutation.mode === 'apply'
       ? {
         ...base,
@@ -330,6 +360,12 @@ async function dispatchProjectTemplateCommand(
     force: request.mutation.force,
     signal: context.signal,
   };
+  if (request.schemaVersion === '1.1') {
+    if (request.mutation.mode === 'apply') return failure(request, 'INVALID_ARGUMENT');
+    return request.command === 'project-template diff'
+      ? await service.diffV1_1(base)
+      : await service.applyDryRunV1_1(base);
+  }
   if (request.command === 'project-template diff') return await service.diff(base);
   return await service.apply(request.mutation.mode === 'apply'
     ? {

@@ -450,6 +450,11 @@ and lock, preserve source commit and every entry digest, then require users to
 review the generated apply plan. Do not rewrite a v1 manifest in place or guess
 new capabilities from file contents.
 
+This section describes the manifest, lock, and archive schemas. The CLI machine
+envelope evolves independently: archive schema `1.0` remains unchanged when a
+caller negotiates CLI schema `1.1`. A CLI `schemaVersion` must therefore never
+be used to select an archive parser.
+
 ## Operator CLI and TaktDesk handoff
 
 Use `takt project-template` as the portable operator boundary. All commands
@@ -539,6 +544,84 @@ rollback/recovery/indeterminate operation, `70` internal/protocol failure, and
 `130` interruption before mutation admission. After admission, the process
 drains commit, rollback, or recovery before returning; callers must not infer
 failure or success from a cancelled UI task alone.
+
+### CLI schema 1.1 negotiation and migration
+
+CLI schema `1.0` remains the default throughout the compatibility period. Its
+canonical bytes, exact keys, result shapes, and exit-code mapping remain stable.
+Schema `1.1` is returned only after an explicit `--schema-version 1.1` request;
+the negotiation surface selects exactly `1.0` or `1.1`, rather than accepting
+version ranges or choosing a newer version implicitly. Omitting the option is
+byte-compatible with schema `1.0`. Duplicate and unsupported selections fail
+closed. Schema `1.1` currently supports reads and dry runs; apply mode is
+rejected until its mutation protocol is implemented as a separate change.
+
+Consumers must maintain separate closed decoders for `1.0` and `1.1`. Do not
+decode a common permissive superset. An unknown version, key, enum value,
+duplicate stable identifier, or inconsistent parent/child identity is a protocol
+failure and must be rejected before any write. Schema `1.1` keeps the existing
+envelope and places its bounded review projection under `result.detail`; it does
+not change the `.taktpack` manifest, lock, or archive schema.
+
+The safe TaktDesk migration order is:
+
+1. Ship both closed decoders while continuing to request schema `1.0`.
+2. Validate the schema `1.1` library, export, preview, conflict, local-source,
+   and GitHub-source fixtures without enabling mutations.
+3. Explicitly request `1.1` for read and dry-run operations and verify that an
+   unsupported producer fails visibly instead of falling back silently.
+4. Enable apply only after preview and apply use the same negotiated version and
+   a fresh `planId`. Changing the default is a separate compatibility decision.
+
+### TaktDesk schema 1.1 review mapping
+
+The following names describe the agreed review contract. They are presentation
+data, not mutation authority.
+
+| TaktDesk surface | `result.detail` projection | Consumer use |
+|---|---|---|
+| Library card | `identity.packFormatVersion`, `identity.packVersion`, `identity.archiveId`, `identity.manifestId` | Display the pack version and immutable identity without opening the archive |
+| Compatibility | `compatibility.status`, `compatibility.minTaktVersion`, optional `compatibility.maxTaktVersion` and `compatibility.currentTaktVersion` | Render compatible, unknown, and incompatible states |
+| Source | the closed `source` union | Distinguish a local import from a GitHub source without interpreting a URI |
+| Capabilities | `declaredCapabilities`, `detectedCapabilities`, and bounded `capabilityWarnings` | Build capability badges and file/target warnings |
+| Export review | `securitySummary.counts` and bounded `securitySummary.reasons` | Show portable, excluded, blocked, and review-required totals before saving |
+| Target preview | `manifestId`, `targetCount`, `actionCounts`, and bounded `targets` | Build per-target add/update/keep/delete/conflict/excluded summaries |
+| Conflict review | bounded `conflicts` | Display stable conflict identity, portable path when safe, symbolic reason, safe default, and allowed actions |
+
+Capabilities are the closed enum `executable`, `github-write`, and
+`external-command`. Preview actions are the closed enum `add`, `update`, `keep`,
+`delete`, `conflict`, and `excluded`. Until the core implements and verifies a
+resolution operation, a conflict exposes `abort` as both its safe default and
+its only allowed action; a UI must not manufacture `replace` or `keep-local`
+authority.
+
+The GitHub source variant separates `requestedRef` from the immutable
+`resolvedCommit` and may include `owner`, `repo`, `releaseTag`, and `assetName`.
+The UI must never present a requested branch or tag as the resolved commit. The
+local-import variant exposes only safe immutable identities such as `sourceId`,
+`revision`, `archiveId`, and `manifestId`; it never exposes an absolute path.
+Neither variant carries credentials, receipt or lease identifiers, approval
+evidence, precondition tokens, file contents, or internal plan objects.
+
+Every path in the detail projection has already passed the portable relative
+path validator. A sensitive filename is represented by a symbolic reason and a
+count, not by returning the filename. Item and conflict identifiers are derived
+from a domain-separated canonical projection and do not depend on array order.
+Each child `targetId` and `manifestId` must equal its parent preview values,
+identifiers must be unique, aggregate counts must equal the corresponding item
+counts, and the conflict count must equal the number of conflict items.
+
+Schema `1.1` remains within the core ceilings: at most 4,096 template entries,
+portable paths of at most 512 code points with 255-code-point segments, and one
+machine envelope of at most 1 MiB, depth 64, 20,001 graph nodes, and 10,000
+entries in any container. The review projection applies a smaller
+256-row budget to each detailed collection. A producer that intentionally
+returns fewer detail rows to remain within those ceilings preserves the
+aggregate counts, truncates in deterministic canonical order, and adds the
+`PARTIAL_RESULT` warning.
+TaktDesk must present that result as incomplete and must not interpret an absent
+tail as an empty or safe set. Limits that prevent a trustworthy aggregate or
+security decision fail closed instead of returning a partial success.
 
 The older `devloopd onboard-repo` workflow remains available as advisory
 compatibility for personal automation setup. It is not a portable pack

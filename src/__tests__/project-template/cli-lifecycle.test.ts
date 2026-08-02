@@ -3,6 +3,10 @@ import {
   createProjectTemplateCliSuccess,
 } from '../../features/project-template/cli-machine-contract.js';
 import {
+  createProjectTemplateCliV1_1FailureFor,
+  type ProjectTemplateCliV1_1Outcome,
+} from '../../features/project-template/cli-machine-contract-v1-1.js';
+import {
   consumeProjectTemplateCliMutationAdmission,
   ProjectTemplateCliInvalidAdmission,
   snapshotProjectTemplateCliOwnData,
@@ -24,6 +28,44 @@ function deferred(): {
 }
 
 describe('project template CLI lifecycle', () => {
+  it('keeps schema 1.1 for interruption and disposal failures', async () => {
+    const entered = deferred();
+    const interrupted = startProjectTemplateCliLifecycle({
+      command: 'project-template inspect', mode: 'dry-run', schemaVersion: '1.1',
+      dispose: () => undefined,
+      async handle({ signal }): Promise<ProjectTemplateCliV1_1Outcome> {
+        entered.resolve();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        throw new Error('unreachable');
+      },
+    });
+    await entered.promise;
+    interrupted.interrupt();
+    await expect(interrupted.result).resolves.toMatchObject({
+      exitCode: 130,
+      envelope: { schemaVersion: '1.1', error: { code: 'INTERRUPTED' } },
+    });
+
+    const disposal = startProjectTemplateCliLifecycle({
+      command: 'project-template inspect', mode: 'dry-run', schemaVersion: '1.1',
+      dispose: () => Promise.reject(new Error('private cleanup detail')),
+      async handle(): Promise<ProjectTemplateCliV1_1Outcome> {
+        return {
+          envelope: createProjectTemplateCliV1_1FailureFor({
+            command: 'project-template inspect', mode: 'dry-run', code: 'INTERNAL',
+          }),
+          exitCode: 70,
+        };
+      },
+    });
+    await expect(disposal.result).resolves.toMatchObject({
+      exitCode: 70,
+      envelope: { schemaVersion: '1.1', error: { code: 'INTERNAL' } },
+    });
+  });
+
   it('rejects arbitrary and proxied mutation admission functions', () => {
     expect(() => consumeProjectTemplateCliMutationAdmission(() => undefined))
       .toThrow(ProjectTemplateCliInvalidAdmission);
