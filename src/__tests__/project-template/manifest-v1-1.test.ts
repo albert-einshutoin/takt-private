@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Ajv from 'ajv';
 import {
   parseProjectTemplateManifest,
@@ -44,7 +44,7 @@ describe('project template manifest v1.1', () => {
       derivation: {
         kind: 'derived',
         operation: 'editor-save',
-        draftId: 'c'.repeat(64),
+        draftId: 'aa81b5c1de5ed1316a38e2c054461e762b16ba33537eca44e4dca8f530003366',
         parent: { packVersion: '1.2.4' },
       },
       repertoireDependencies: [{ scope: '@acme/editor-tools' }],
@@ -148,9 +148,34 @@ describe('project template manifest v1.1', () => {
     (mismatchedDraft['source'] as Record<string, unknown>)['draftId'] = 'e'.repeat(64);
     expectValidationCode(mismatchedDraft, 'INVALID_MANIFEST');
 
+    const forgedDraft = readFixture('derived.json');
+    (forgedDraft['source'] as Record<string, unknown>)['draftId'] = 'e'.repeat(64);
+    (forgedDraft['derivation'] as Record<string, unknown>)['draftId'] = 'e'.repeat(64);
+    expectValidationCode(forgedDraft, 'INVALID_MANIFEST');
+
     const derivedFromRemote = readFixture('derived.json');
     derivedFromRemote['source'] = readFixture('root.json')['source'];
     expectValidationCode(derivedFromRemote, 'INVALID_MANIFEST');
+  });
+
+  it('does not consult mutable string prototypes while validating metadata', () => {
+    const normalize = Object.getOwnPropertyDescriptor(String.prototype, 'normalize')!;
+    const trim = Object.getOwnPropertyDescriptor(String.prototype, 'trim')!;
+    const charCodeAt = Object.getOwnPropertyDescriptor(String.prototype, 'charCodeAt')!;
+    const hook = vi.fn(() => {
+      throw new Error('poisoned string intrinsic');
+    });
+    try {
+      Object.defineProperty(String.prototype, 'normalize', { ...normalize, value: hook });
+      Object.defineProperty(String.prototype, 'trim', { ...trim, value: hook });
+      Object.defineProperty(String.prototype, 'charCodeAt', { ...charCodeAt, value: hook });
+      expect(() => parseProjectTemplateManifest(readFixture('root.json'))).not.toThrow();
+    } finally {
+      Object.defineProperty(String.prototype, 'normalize', normalize);
+      Object.defineProperty(String.prototype, 'trim', trim);
+      Object.defineProperty(String.prototype, 'charCodeAt', charCodeAt);
+    }
+    expect(hook).not.toHaveBeenCalled();
   });
 
   it('uses the canonical repertoire dependency parser, including stable order and unique scopes', () => {

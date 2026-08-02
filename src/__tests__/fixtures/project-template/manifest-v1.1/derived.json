@@ -8,7 +8,7 @@
   "derivation": {
     "kind": "derived",
     "operation": "editor-save",
-    "draftId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "draftId": "aa81b5c1de5ed1316a38e2c054461e762b16ba33537eca44e4dca8f530003366",
     "editDocumentSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "parent": {
       "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -22,7 +22,7 @@
   "source": {
     "kind": "derived",
     "method": "takt-editor-v1",
-    "draftId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    "draftId": "aa81b5c1de5ed1316a38e2c054461e762b16ba33537eca44e4dca8f530003366"
   },
   "repertoireDependencies": [
     {

@@ -11,6 +11,7 @@ import {
   parseProjectTemplateRepertoireDependencies,
   type ProjectTemplateRepertoireDependencyV1,
 } from './source-descriptor.js';
+import { calculateProjectTemplateDraftId } from './template-editor-draft-identity.js';
 import {
   assertAllowedKeys,
   compareSemVer,
@@ -38,7 +39,11 @@ const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
 const CAPTURED_ARRAY_FROM = Array.from;
 const CAPTURED_ARRAY_RECEIVER = Array;
+const CAPTURED_REGEXP_EXEC = RegExp.prototype.exec;
+const CAPTURED_STRING_CHAR_CODE_AT = String.prototype.charCodeAt;
+const CAPTURED_STRING_NORMALIZE = String.prototype.normalize;
 const CAPTURED_STRING_TRIM = String.prototype.trim;
+const SCHEMA_VERSION_PATTERN = /^(\d+)\.(\d+)$/;
 
 function append<T>(values: T[], value: T): void {
   CAPTURED_REFLECT_APPLY(
@@ -258,11 +263,14 @@ function parseProjectTemplateManifestV1_0(
 }
 
 function requireManifestV1_1SchemaVersion(value: unknown): void {
-  if (typeof value !== 'string' || !/^\d+\.\d+$/.test(value)) {
+  const match = typeof value === 'string'
+    ? CAPTURED_REFLECT_APPLY(CAPTURED_REGEXP_EXEC, SCHEMA_VERSION_PATTERN, [value]) as RegExpExecArray | null
+    : null;
+  if (match === null) {
     throw new ProjectTemplateValidationError('INVALID_MANIFEST', 'schemaVersion must use major.minor notation', 'schemaVersion');
   }
-  if (!value.startsWith('1.')) {
-    throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_MAJOR', `schemaVersion major ${value.split('.', 1)[0]} is not supported`, 'schemaVersion');
+  if (match[1] !== '1') {
+    throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_MAJOR', `schemaVersion major ${match[1]} is not supported`, 'schemaVersion');
   }
   if (value !== '1.1') {
     throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_VERSION', `schemaVersion version ${value} is not supported`, 'schemaVersion');
@@ -289,7 +297,7 @@ function parseMetadataText(
   // Metadata reaches UIs and machine-readable exports. NFC plus control-free
   // text gives each user-visible identity one stable, non-spoofing byte form.
   if (
-    value.normalize('NFC') !== value
+    CAPTURED_REFLECT_APPLY(CAPTURED_STRING_NORMALIZE, value, ['NFC']) !== value
     || containsForbiddenMetadataControl(value, options.allowLineFeed)
     || (options.forbidOuterWhitespace && CAPTURED_REFLECT_APPLY(
       CAPTURED_STRING_TRIM,
@@ -304,7 +312,11 @@ function parseMetadataText(
 
 function containsForbiddenMetadataControl(value: string, allowLineFeed: boolean): boolean {
   for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
+    const code = CAPTURED_REFLECT_APPLY(
+      CAPTURED_STRING_CHAR_CODE_AT,
+      value,
+      [index],
+    ) as number;
     if (
       (code <= 0x1F && (!allowLineFeed || code !== 0x0A))
       || (code >= 0x7F && code <= 0x9F)
@@ -404,6 +416,21 @@ function parseProjectTemplateManifestV1_1(
     && source.draftId !== derivation.draftId
   ) {
     throw new ProjectTemplateValidationError('INVALID_MANIFEST', 'source.draftId must equal derivation.draftId', 'source.draftId');
+  }
+  if (
+    derivation.kind === 'derived'
+    && calculateProjectTemplateDraftId({
+      parentArchiveSha256: derivation.parent.archiveSha256,
+      parentManifestSha256: derivation.parent.manifestSha256,
+      parentPackVersion: derivation.parent.packVersion,
+      editDocumentSha256: derivation.editDocumentSha256,
+    }) !== derivation.draftId
+  ) {
+    throw new ProjectTemplateValidationError(
+      'INVALID_MANIFEST',
+      'derivation.draftId does not match its immutable base and edit document',
+      'derivation.draftId',
+    );
   }
   return {
     schemaVersion: '1.1',
