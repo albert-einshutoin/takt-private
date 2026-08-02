@@ -80,6 +80,98 @@ describe('project-template shell completions', () => {
     expect(output).toContain(expected);
   });
 
+  it('does not treat a bash positional operand as the project-template root command', () => {
+    const output = execFileSync('bash', ['-c', [
+      'source bin/completions/takt.bash',
+      'COMP_WORDS=(takt add project-template "")',
+      'COMP_CWORD=3',
+      '_takt_project_template',
+      'printf "%s\\n" "${COMPREPLY[@]}"',
+    ].join('; ')], { encoding: 'utf8' });
+    expect(output).not.toContain('rollback');
+  });
+
+  it.each([
+    ['reset', 'categories'],
+    ['workflow', 'doctor'],
+    ['metrics', 'review'],
+    ['repertoire', 'remove'],
+  ] as const)('limits bash %s children to the actual root command', (group, child) => {
+    const complete = (words: string, current: number): string => execFileSync(
+      'bash',
+      ['-c', [
+        'source bin/completions/takt.bash',
+        `COMP_WORDS=${words}`,
+        `COMP_CWORD=${String(current)}`,
+        '_takt_project_template',
+        'printf "%s\\n" "${COMPREPLY[@]}"',
+      ].join('; ')],
+      { encoding: 'utf8' },
+    );
+    expect(complete(`(takt ${group} "")`, 2)).toContain(child);
+    expect(complete(`(takt run ${group} "")`, 3)).not.toContain(child);
+  });
+
+  it.each([
+    ['root group', '(takt project-template "")', '3', true],
+    ['positional operand', '(takt add project-template "")', '4', false],
+  ] as const)('limits zsh project-template children for %s', (
+    _name,
+    words,
+    current,
+    expected,
+  ) => {
+    const output = execFileSync('zsh', ['-c', [
+      '_values() { shift; print -l -- "$@"; }',
+      '_describe() { local array_name=$2; eval "print -l -- \\${${array_name}[@]}"; }',
+      `words=${words}`,
+      `CURRENT=${current}`,
+      'source bin/completions/_takt',
+    ].join('; ')], { encoding: 'utf8' });
+    expect(output.includes('rollback')).toBe(expected);
+  });
+
+  it.each([
+    ['reset', 'categories'],
+    ['workflow', 'doctor'],
+    ['metrics', 'review'],
+    ['repertoire', 'remove'],
+  ] as const)('limits zsh %s children to the actual root command', (group, child) => {
+    const complete = (words: string, current: number): string => execFileSync(
+      'zsh',
+      ['-c', [
+        '_values() { shift; print -l -- "$@"; }',
+        '_describe() { local array_name=$2; eval "print -l -- \\${${array_name}[@]}"; }',
+        `words=${words}`,
+        `CURRENT=${String(current)}`,
+        'source bin/completions/_takt',
+      ].join('; ')],
+      { encoding: 'utf8' },
+    );
+    expect(complete(`(takt ${group} "")`, 3)).toContain(child);
+    expect(complete(`(takt run ${group} "")`, 4)).not.toContain(child);
+  });
+
+  it('binds every fish project-template child and option to its root predicate', () => {
+    const fish = readFileSync(resolve('bin/completions/takt.fish'), 'utf8');
+    expect(fish).toContain('function __takt_is_root_command');
+    expect(fish).toContain('function __takt_project_template_is_root_command');
+    expect(fish).not.toMatch(
+      /__fish_seen_subcommand_from (?:project-template|reset|workflow|metrics|repertoire)/u,
+    );
+    for (const group of ['reset', 'workflow', 'metrics', 'repertoire']) {
+      expect(fish).toContain(`-n '__takt_is_root_command ${group}'`);
+    }
+    for (const line of fish.split('\n').filter((candidate) => (
+      candidate.startsWith('complete -c takt')
+      && !candidate.includes('__fish_use_subcommand')
+      && !candidate.includes('__takt_is_root_command reset')
+      && !candidate.includes('__takt_is_root_command workflow')
+      && !candidate.includes('__takt_is_root_command metrics')
+      && !candidate.includes('__takt_is_root_command repertoire')
+    ))) expect(line).toContain('__takt_project_template_is_root_command');
+  });
+
   it('keeps the English and Japanese operator contracts synchronized', () => {
     const guides = [
       readFileSync(resolve('docs/project-templates.md'), 'utf8'),

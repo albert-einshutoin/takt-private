@@ -2,20 +2,28 @@
 
 _takt() {
   local -a root_commands pt_commands common mutation
-  local command='' root_command='' index pt_index=0 skip_value=0
+  local command='' root_command='' index pt_index=0 skip_value=0 root_skip_value=0
   root_commands=(release-info run watch add list resume clear eject reset prompt export-cc export-codex catalog workflow metrics purge repertoire)
   pt_commands=(export inspect diff apply update rollback list)
   common=(--cwd --json)
   mutation=(--dry-run --apply --expected-plan-id --force)
   for (( index = 2; index < CURRENT; index++ )); do
-    if [[ ${words[index]} == project-template ]]; then
-      pt_index=$index
-      continue
-    fi
-    if (( pt_index == 0 )) && [[ ${words[index]} != -* ]]; then
-      if (( ${root_commands[(Ie)${words[index]}]} )); then
-        root_command=${words[index]}
-      fi
+    if (( pt_index == 0 )); then
+      if (( root_skip_value )); then root_skip_value=0; continue; fi
+      case ${words[index]} in
+        -i|--issue|--pr|-w|--workflow|-b|--branch|--repo|--provider|--model|-t|--task|--isolation|--cwd)
+          root_skip_value=1; continue ;;
+        -*) continue ;;
+        project-template)
+          if [[ -z $root_command ]]; then
+            root_command=project-template
+            pt_index=$index
+          fi
+          continue ;;
+        *)
+          if [[ -z $root_command ]]; then root_command=${words[index]}; fi
+          continue ;;
+      esac
     fi
     if (( pt_index > 0 )); then
       if (( skip_value )); then skip_value=0; continue; fi

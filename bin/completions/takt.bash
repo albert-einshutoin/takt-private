@@ -2,15 +2,23 @@
 _takt_project_template() {
   local root_commands="release-info run watch add list resume clear eject reset prompt export-cc export-codex catalog workflow metrics purge repertoire"
   local pt_commands="export inspect diff apply update rollback list"
-  local command="" root_command="" candidates="" index pt_index=-1 skip_value=0
+  local command="" root_command="" candidates="" index pt_index=-1 skip_value=0 root_skip_value=0
   for ((index = 1; index < COMP_CWORD; index++)); do
-    if [[ ${COMP_WORDS[index]} == project-template ]]; then
-      pt_index=$index
-      continue
-    fi
-    if (( pt_index < 0 )) && [[ ${COMP_WORDS[index]} != -* ]]; then
-      case " $root_commands " in
-        *" ${COMP_WORDS[index]} "*) root_command=${COMP_WORDS[index]} ;;
+    if (( pt_index < 0 )); then
+      if (( root_skip_value )); then root_skip_value=0; continue; fi
+      case ${COMP_WORDS[index]} in
+        -i|--issue|--pr|-w|--workflow|-b|--branch|--repo|--provider|--model|-t|--task|--isolation|--cwd)
+          root_skip_value=1; continue ;;
+        -*) continue ;;
+        project-template)
+          if [[ -z $root_command ]]; then
+            root_command=project-template
+            pt_index=$index
+          fi
+          continue ;;
+        *)
+          if [[ -z $root_command ]]; then root_command=${COMP_WORDS[index]}; fi
+          continue ;;
       esac
     fi
     if (( pt_index >= 0 )); then
