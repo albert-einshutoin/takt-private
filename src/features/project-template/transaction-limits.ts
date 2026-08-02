@@ -28,6 +28,9 @@ const SERIALIZED_CONTROL_FIXED_BYTES = 4 * 1024;
 // Portable paths cannot contain JSON escape characters, while this fixed
 // allowance conservatively covers both before/after witnesses and metadata.
 const SERIALIZED_JSON_ITEM_OVERHEAD_BYTES = 1024;
+// One property name, quoted lowercase SHA-256, separator, and conservative
+// punctuation allowance for rollback journal manifest binding.
+const ROLLBACK_MANIFEST_BINDING_BYTES = 128;
 
 /** Shared bounds for apply evidence, durable journals, and offline recovery. */
 export const PROJECT_TEMPLATE_TRANSACTION_LIMITS = Object.freeze({
@@ -54,7 +57,8 @@ export const PROJECT_TEMPLATE_TRANSACTION_LIMITS = Object.freeze({
       // and rollback progress representation remains readable by this contract.
       + MAX_OPERATIONS * 2 * (MAX_OPERATION_KEY_LENGTH + 3)
       + MAX_CREATED_TARGET_DIRECTORIES
-        * (MAX_TEMPLATE_PATH_LENGTH + 3),
+        * (MAX_TEMPLATE_PATH_LENGTH + 3)
+      + ROLLBACK_MANIFEST_BINDING_BYTES,
   ),
 });
 

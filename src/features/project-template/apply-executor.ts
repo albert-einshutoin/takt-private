@@ -823,7 +823,7 @@ async function stageRollbackOperations(options: {
   readonly manifest: ProjectTemplateBackupManifest;
   readonly transactionId: string;
   readonly backupBytes: ReadonlyMap<string, Buffer>;
-}): Promise<void> {
+}): Promise<string> {
   for (const entry of options.manifest.entries) {
     if (entry.before.kind === 'absent') continue;
     const content = options.backupBytes.get(operationKey(
@@ -843,7 +843,7 @@ async function stageRollbackOperations(options: {
   // Why: backup manifests are operator-visible retained history and can be
   // replaced after journal publication. Recovery identity and ordering must
   // travel with the already-validated private rollback cohort instead.
-  await writeProjectTemplateRollbackStagingManifest(options);
+  return await writeProjectTemplateRollbackStagingManifest(options);
 }
 
 export async function applyProjectTemplatePlan(options: {
@@ -1365,6 +1365,7 @@ async function performOwnedRollback(options: {
     options.lease as ProjectTemplateMutationLease,
   );
   let rollbackMutationStarted = false;
+  let rollbackManifestSha256: string;
   try {
     assertOwned();
     const backupBytes = options.backupBytes
@@ -1387,7 +1388,7 @@ async function performOwnedRollback(options: {
       // Why: process memory disappears on a crash. Durably stage the complete
       // validated cohort before publishing rollback intent so restart recovery
       // never has to trust the replaceable original backup paths again.
-      await stageRollbackOperations({
+      rollbackManifestSha256 = await stageRollbackOperations({
         storage,
         manifest,
         transactionId,
@@ -1415,6 +1416,7 @@ async function performOwnedRollback(options: {
           completedOperations: restoredOperations,
           createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
+          rollbackManifestSha256,
         }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
         assertOwned();
         await restoreOperations(
@@ -1434,6 +1436,7 @@ async function performOwnedRollback(options: {
           completedOperations: restoredOperations,
           createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
+          rollbackManifestSha256,
         }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
         assertOwned();
       }
@@ -1478,18 +1481,21 @@ async function performOwnedRollback(options: {
         completedOperations: restoredOperations,
         createdTargetDirectories: manifest.createdTargetDirectories,
         updatedAt: new Date().toISOString(),
+        rollbackManifestSha256,
       }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
       assertOwned();
       if (options.drainTerminalJournal) {
         try {
+          // Why: journal removal is the public terminal boundary. Removing its
+          // evidence first cannot strand a live journal that references data
+          // already deleted; leftover private staging is bounded orphan state.
+          await removeRollbackJournal(storage);
+          assertOwned();
           await removeProjectTemplateStagingTransaction({
             storage,
             transactionId: restoreTransactionId,
           });
           await removeProjectTemplateStagingTransaction({ storage, transactionId });
-          assertOwned();
-          await removeRollbackJournal(storage);
-          assertOwned();
         } catch {
           // The target is durably rolled back, but cleanup/release certainty is
           // part of the CLI result contract and cannot be reported as success.
@@ -1500,7 +1506,8 @@ async function performOwnedRollback(options: {
           storage,
           transactionId: restoreTransactionId,
         });
-        await removeProjectTemplateStagingTransaction({ storage, transactionId });
+        // Public core compatibility keeps the terminal journal. Its bound
+        // rollback cohort must remain until a later recovery drains both.
         assertOwned();
       }
       return { status: 'rolled_back', backupId: manifest.backupId };
@@ -1519,6 +1526,7 @@ async function performOwnedRollback(options: {
           completedOperations: restoredOperations,
           createdTargetDirectories: manifest.createdTargetDirectories,
           updatedAt: new Date().toISOString(),
+          rollbackManifestSha256,
         }, options.strictCompanionVerification ? manifest.schemaVersion : '1.0');
       } catch {
         // The recovery-required result remains closed if storage also fails.
@@ -1752,6 +1760,7 @@ export async function recoverProjectTemplateApply(options: {
           transactionId: journal.transactionId,
           expectedPlanId: journal.planId,
           expectedBackupId: journal.backupId,
+          expectedManifestSha256: journal.rollbackManifestSha256!,
         })
       : await readProjectTemplateBackupManifest({
           storage,
@@ -1771,11 +1780,17 @@ export async function recoverProjectTemplateApply(options: {
       if (!await verifyManifestState(storage, manifest, 'after')) {
         throw new Error('committed state verification failed');
       }
-      await removeProjectTemplateStagingTransaction({
-        storage,
-        transactionId: journal.transactionId,
-      });
+      await removeRollbackJournal(storage);
       clearRecoveryMarker(storage, journal.transactionId);
+      try {
+        await removeProjectTemplateStagingTransaction({
+          storage,
+          transactionId: journal.transactionId,
+        });
+      } catch {
+        // A terminal journal is already drained; bounded private staging can
+        // be reclaimed by the next storage initialization.
+      }
       return {
         status: 'committed',
         backupId: manifest.backupId,
@@ -1787,11 +1802,16 @@ export async function recoverProjectTemplateApply(options: {
         throw new Error('rolled back state verification failed');
       }
       invalidateResolvedConfigCache(options.projectRoot);
-      await removeProjectTemplateStagingTransaction({
-        storage,
-        transactionId: journal.transactionId,
-      });
+      await removeRollbackJournal(storage);
       clearRecoveryMarker(storage, journal.transactionId);
+      try {
+        await removeProjectTemplateStagingTransaction({
+          storage,
+          transactionId: journal.transactionId,
+        });
+      } catch {
+        // See committed terminal cleanup above.
+      }
       return { status: 'rolled_back', backupId: manifest.backupId };
     }
 
@@ -1828,6 +1848,9 @@ export async function recoverProjectTemplateApply(options: {
         completedOperations: restored,
         createdTargetDirectories: manifest.createdTargetDirectories,
         updatedAt: new Date().toISOString(),
+        ...(journal.rollbackManifestSha256 === undefined
+          ? {}
+          : { rollbackManifestSha256: journal.rollbackManifestSha256 }),
       }, journal.schemaVersion);
       await restoreOperations(
         storage,
@@ -1853,16 +1876,24 @@ export async function recoverProjectTemplateApply(options: {
       completedOperations: restored,
       createdTargetDirectories: manifest.createdTargetDirectories,
       updatedAt: new Date().toISOString(),
+      ...(journal.rollbackManifestSha256 === undefined
+        ? {}
+        : { rollbackManifestSha256: journal.rollbackManifestSha256 }),
     }, journal.schemaVersion);
     await removeProjectTemplateStagingTransaction({
       storage,
       transactionId: recoveryStagingId,
     });
-    await removeProjectTemplateStagingTransaction({
-      storage,
-      transactionId: journal.transactionId,
-    });
+    await removeRollbackJournal(storage);
     clearRecoveryMarker(storage, journal.transactionId);
+    try {
+      await removeProjectTemplateStagingTransaction({
+        storage,
+        transactionId: journal.transactionId,
+      });
+    } catch {
+      // The terminal journal is gone; private staging is a bounded orphan.
+    }
     return { status: 'rolled_back', backupId: manifest.backupId };
   } catch {
     if (storage !== undefined && journal !== undefined) {

@@ -411,6 +411,8 @@ export interface ProjectTemplateApplyJournal {
   completedOperations: readonly string[];
   createdTargetDirectories: readonly string[];
   updatedAt: string;
+  /** Required only for rollback-* transactions and bound before journal publish. */
+  rollbackManifestSha256?: string;
 }
 
 export interface ProjectTemplateStagingFile extends ProjectTemplateStoredFile {
@@ -1956,7 +1958,7 @@ export async function writeProjectTemplateRollbackStagingManifest(options: {
   storage: ProjectTemplateApplyStorage;
   transactionId: string;
   manifest: ProjectTemplateBackupManifest;
-}): Promise<void> {
+}): Promise<string> {
   const transactionId = assertSafeIdentifier(options.transactionId, 'transactionId');
   const manifest = validateBackupManifest(options.manifest);
   const content = Buffer.from(`${canonicalizeTaktpackJson(manifest)}\n`);
@@ -1979,6 +1981,7 @@ export async function writeProjectTemplateRollbackStagingManifest(options: {
     replace: false,
     io: options.storage.io,
   });
+  return sha256(content);
 }
 
 export async function readProjectTemplateRollbackStagingManifest(options: {
@@ -1986,10 +1989,15 @@ export async function readProjectTemplateRollbackStagingManifest(options: {
   transactionId: string;
   expectedPlanId: string;
   expectedBackupId: string;
+  expectedManifestSha256: string;
 }): Promise<ProjectTemplateBackupManifest> {
   const transactionId = assertSafeIdentifier(options.transactionId, 'transactionId');
   const expectedPlanId = assertHash(options.expectedPlanId, 'expectedPlanId');
   const expectedBackupId = assertSafeIdentifier(options.expectedBackupId, 'expectedBackupId');
+  const expectedManifestSha256 = assertHash(
+    options.expectedManifestSha256,
+    'expectedManifestSha256',
+  );
   const transactionRoot = join(options.storage.stagingRoot, transactionId);
   let parsed: unknown;
   try {
@@ -2007,6 +2015,14 @@ export async function readProjectTemplateRollbackStagingManifest(options: {
       PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes,
       options.storage.device,
     );
+    // Why: pathname parents cannot be held open portably in Node. The journal's
+    // durable digest freezes the semantic authority of this byte sequence, so
+    // even an ABA directory swap can only supply the originally bound cohort.
+    if (sha256(content) !== expectedManifestSha256) {
+      throw new ProjectTemplateApplyStorageError(
+        'HASH_MISMATCH', 'rollback staging manifest does not match its journal',
+      );
+    }
     const directoriesAfter = await assertPrivateStagingDirectories({
       storage: options.storage,
       transactionRoot,
@@ -2042,6 +2058,8 @@ export function parseProjectTemplateApplyJournal(
     );
   }
   const journal = value as Partial<ProjectTemplateApplyJournal>;
+  const rollbackTransaction = typeof journal.transactionId === 'string'
+    && journal.transactionId.startsWith('rollback-');
   const validStates = new Set<ProjectTemplateApplyJournalState>([
     'prepared',
     'committing',
@@ -2062,6 +2080,7 @@ export function parseProjectTemplateApplyJournal(
       'completedOperations',
       'createdTargetDirectories',
       'updatedAt',
+      ...(rollbackTransaction ? ['rollbackManifestSha256'] : []),
     ])
     || typeof journal.transactionId !== 'string'
     || typeof journal.planId !== 'string'
@@ -2079,6 +2098,7 @@ export function parseProjectTemplateApplyJournal(
       ),
     )
     || typeof journal.updatedAt !== 'string'
+    || (rollbackTransaction && typeof journal.rollbackManifestSha256 !== 'string')
   ) {
     throw new ProjectTemplateApplyStorageError(
       'INVALID_JOURNAL',
@@ -2098,6 +2118,14 @@ export function parseProjectTemplateApplyJournal(
     completedOperations: [...journal.completedOperations],
     createdTargetDirectories,
     updatedAt: assertTimestamp(journal.updatedAt, 'updatedAt'),
+    ...(rollbackTransaction
+      ? {
+          rollbackManifestSha256: assertHash(
+            journal.rollbackManifestSha256!,
+            'rollbackManifestSha256',
+          ),
+        }
+      : {}),
   };
 }
 

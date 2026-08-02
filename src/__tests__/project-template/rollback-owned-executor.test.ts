@@ -1,4 +1,6 @@
 import {
+  chmodSync,
+  cpSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -10,6 +12,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,7 +30,9 @@ import {
   createProjectTemplateApplyStorageIo,
   initializeProjectTemplateApplyStorage,
   readProjectTemplateBackupManifest,
+  resolveProjectTemplateApplyTarget,
   writeProjectTemplateBackupManifest,
+  type ProjectTemplateApplyStorage,
 } from '../../features/project-template/apply-storage.js';
 import {
   executeOwnedProjectTemplateCompanionLockTransaction,
@@ -353,17 +358,65 @@ describe('owned project template rollback executor', () => {
   });
 
   it.each([
-    ['manifest tamper', (stagingRoot: string, transactionId: string) => {
+    ['manifest tamper', (storage: ProjectTemplateApplyStorage, transactionId: string) => {
       writeFileSync(
-        join(stagingRoot, transactionId, 'rollback-manifest.json'),
+        join(storage.stagingRoot, transactionId, 'rollback-manifest.json'),
         '{tampered',
       );
     }],
-    ['transaction directory symlink', (stagingRoot: string, transactionId: string) => {
-      const transactionRoot = join(stagingRoot, transactionId);
-      const outside = join(stagingRoot, `${transactionId}-outside`);
+    ['valid same-ID cohort replacement', (
+      storage: ProjectTemplateApplyStorage,
+      transactionId: string,
+    ) => {
+      const manifestPath = join(
+        storage.stagingRoot, transactionId, 'rollback-manifest.json',
+      );
+      const staged = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        createdAt: string;
+        entries: Array<{
+          target: Parameters<typeof resolveProjectTemplateApplyTarget>[1];
+          before: { kind: string; sha256?: string; bytes?: number };
+        }>;
+      };
+      staged.createdAt = '2026-08-02T01:02:03.000Z';
+      const file = staged.entries.find((entry) => entry.before.kind === 'file');
+      if (file === undefined) throw new Error('expected staged file entry');
+      const replacement = Buffer.from('alternate rollback bytes');
+      file.before.sha256 = createHash('sha256').update(replacement).digest('hex');
+      file.before.bytes = replacement.byteLength;
+      const stagedBlobPath = join(
+        storage.stagingRoot,
+        transactionId,
+        resolveProjectTemplateApplyTarget(storage, file.target).stagingRelativePath,
+      );
+      writeFileSync(stagedBlobPath, replacement);
+      chmodSync(stagedBlobPath, 0o600);
+      writeFileSync(manifestPath, `${JSON.stringify(staged)}\n`);
+      chmodSync(manifestPath, 0o600);
+    }],
+    ['transaction directory symlink', (
+      storage: ProjectTemplateApplyStorage,
+      transactionId: string,
+    ) => {
+      const transactionRoot = join(storage.stagingRoot, transactionId);
+      const outside = join(storage.stagingRoot, `${transactionId}-outside`);
       renameSync(transactionRoot, outside);
       symlinkSync(outside, transactionRoot);
+    }],
+    ['journal binding missing', (storage: ProjectTemplateApplyStorage) => {
+      const journal = JSON.parse(readFileSync(storage.journalPath, 'utf8')) as Record<string, unknown>;
+      delete journal.rollbackManifestSha256;
+      writeFileSync(storage.journalPath, `${JSON.stringify(journal)}\n`);
+    }],
+    ['journal binding invalid', (storage: ProjectTemplateApplyStorage) => {
+      const journal = JSON.parse(readFileSync(storage.journalPath, 'utf8')) as Record<string, unknown>;
+      journal.rollbackManifestSha256 = 'invalid';
+      writeFileSync(storage.journalPath, `${JSON.stringify(journal)}\n`);
+    }],
+    ['journal binding tampered', (storage: ProjectTemplateApplyStorage) => {
+      const journal = JSON.parse(readFileSync(storage.journalPath, 'utf8')) as Record<string, unknown>;
+      journal.rollbackManifestSha256 = '0'.repeat(64);
+      writeFileSync(storage.journalPath, `${JSON.stringify(journal)}\n`);
     }],
   ] as const)('fails closed after crashed rollback %s', async (_case, mutateStaging) => {
     const value = await updatedInstallation();
@@ -396,7 +449,8 @@ describe('owned project template rollback executor', () => {
     const transactionId = (JSON.parse(
       readFileSync(storage.journalPath, 'utf8'),
     ) as { transactionId: string }).transactionId;
-    mutateStaging(storage.stagingRoot, transactionId);
+    const targetBefore = readFileSync(value.contentPath);
+    mutateStaging(storage, transactionId);
 
     await expect(recoverProjectTemplateApply({ projectRoot: value.projectRoot }))
       .resolves.toMatchObject({
@@ -404,8 +458,79 @@ describe('owned project template rollback executor', () => {
         code: 'RECOVERY_REQUIRED',
       });
     expect(existsSync(storage.journalPath)).toBe(true);
+    expect(readFileSync(value.contentPath)).toEqual(targetBefore);
     expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
       .toBe(false);
+  });
+
+  it('fails closed when a private transaction directory performs an ABA swap during read', async () => {
+    const value = await updatedInstallation();
+    let journalPath = '';
+    let crashed = false;
+    const crashIo = createProjectTemplateApplyStorageIo({
+      after(operation, path) {
+        if (!crashed && operation === 'rename' && path === journalPath) {
+          crashed = true;
+          throw new Error('process terminated after journal publication');
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io: crashIo,
+    });
+    journalPath = storage.journalPath;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toMatchObject({ status: 'recovery_required' });
+    } finally {
+      lease.release();
+    }
+    const transactionId = (JSON.parse(readFileSync(journalPath, 'utf8')) as {
+      transactionId: string;
+    }).transactionId;
+    const transactionRoot = join(storage.stagingRoot, transactionId);
+    const alternateRoot = join(storage.stagingRoot, `${transactionId}-alternate`);
+    const savedRoot = join(storage.stagingRoot, `${transactionId}-saved`);
+    cpSync(transactionRoot, alternateRoot, { recursive: true });
+    const alternateManifestPath = join(alternateRoot, 'rollback-manifest.json');
+    const alternateManifest = JSON.parse(
+      readFileSync(alternateManifestPath, 'utf8'),
+    ) as { createdAt: string };
+    alternateManifest.createdAt = '2026-08-02T02:03:04.000Z';
+    writeFileSync(alternateManifestPath, `${JSON.stringify(alternateManifest)}\n`);
+    chmodSync(alternateManifestPath, 0o600);
+    const stagedManifestPath = join(transactionRoot, 'rollback-manifest.json');
+    let swapped = false;
+    const recoveryIo = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (!swapped && operation === 'read' && path === stagedManifestPath) {
+          renameSync(transactionRoot, savedRoot);
+          renameSync(alternateRoot, transactionRoot);
+          swapped = true;
+        }
+      },
+      after(operation, path) {
+        if (swapped && operation === 'read' && path === stagedManifestPath) {
+          renameSync(transactionRoot, alternateRoot);
+          renameSync(savedRoot, transactionRoot);
+        }
+      },
+    });
+    const targetBefore = readFileSync(value.contentPath);
+
+    await expect(recoverProjectTemplateApply({
+      projectRoot: value.projectRoot,
+      io: recoveryIo,
+    })).resolves.toMatchObject({ status: 'recovery_required' });
+    expect(swapped).toBe(true);
+    expect(readFileSync(value.contentPath)).toEqual(targetBefore);
+    expect(existsSync(journalPath)).toBe(true);
   });
 
   it('does not publish a journal when durable rollback staging fails', async () => {
@@ -447,6 +572,42 @@ describe('owned project template rollback executor', () => {
     expect(existsSync(storage.journalPath)).toBe(false);
     expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
       .toBe(true);
+  });
+
+  it('retains one manifest digest through every rollback journal rewrite', async () => {
+    const value = await updatedInstallation();
+    let journalPath = '';
+    const observed: string[] = [];
+    const io = createProjectTemplateApplyStorageIo({
+      after(operation, path) {
+        if (operation !== 'rename' || path !== journalPath) return;
+        const journal = JSON.parse(readFileSync(path, 'utf8')) as {
+          rollbackManifestSha256?: string;
+        };
+        if (journal.rollbackManifestSha256 !== undefined) {
+          observed.push(journal.rollbackManifestSha256);
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io,
+    });
+    journalPath = storage.journalPath;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      await expect(rollbackOwnedProjectTemplateApply({ storage, lease, plan }))
+        .resolves.toEqual({ status: 'rolled_back', backupId: value.backupId });
+    } finally {
+      lease.release();
+    }
+    expect(observed.length).toBeGreaterThan(1);
+    expect(new Set(observed).size).toBe(1);
+    expect(observed[0]).toMatch(/^[a-f0-9]{64}$/u);
   });
 
   it('keeps an explicit schema 1.0 backup unavailable to CLI rollback', async () => {
@@ -708,6 +869,49 @@ describe('owned project template rollback executor', () => {
       lease.release();
     }
     expect(existsSync(value.contentPath)).toBe(false);
+  });
+
+  it('removes the terminal journal before reporting staging cleanup failure', async () => {
+    const value = await installed();
+    let journalPath = '';
+    let stagingRoot = '';
+    let rollbackStagingRoot = '';
+    const io = createProjectTemplateApplyStorageIo({
+      before(operation, path) {
+        if (
+          operation === 'rmdir'
+          && rollbackStagingRoot !== ''
+          && path === rollbackStagingRoot
+        ) throw new Error('injected terminal staging cleanup failure');
+      },
+      after(operation, path) {
+        if (operation !== 'rename' || path !== journalPath) return;
+        const transactionId = (JSON.parse(readFileSync(path, 'utf8')) as {
+          transactionId: string;
+        }).transactionId;
+        if (transactionId.startsWith('rollback-')) {
+          rollbackStagingRoot = join(stagingRoot, transactionId);
+        }
+      },
+    });
+    const storage = await initializeProjectTemplateApplyStorage({
+      repoPath: value.projectRoot,
+      io,
+    });
+    journalPath = storage.journalPath;
+    stagingRoot = storage.stagingRoot;
+    const plan = await deriveProjectTemplateRollbackPlan({
+      storage,
+      backupId: value.backupId,
+    });
+    const lease = acquireProjectTemplateApplyLease(value.projectRoot);
+    try {
+      const result = await rollbackOwnedProjectTemplateApply({ storage, lease, plan });
+      expect(result).toEqual({ status: 'indeterminate', backupId: value.backupId });
+    } finally {
+      lease.release();
+    }
+    expect(existsSync(journalPath)).toBe(false);
   });
 
   it('rejects a structural clone of the sealed rollback authority', async () => {
