@@ -201,6 +201,11 @@ describe('auto-tag workflow release boundary', () => {
     ['Release v1.2.3+build.7', 'v1.2.3+build.7', 'latest'],
     ['Release v1.2.3+build-7', 'v1.2.3+build-7', 'latest'],
     ['Release v1.2.3-alpha+build-7', 'v1.2.3-alpha+build-7', 'next'],
+    [
+      'Release v1.2.3-foo-1+9007199254740992',
+      'v1.2.3-foo-1+9007199254740992',
+      'next',
+    ],
   ])('accepts the complete release grammar: %s', (title, expectedTag, expectedNpmTag) => {
     const result = validateRelease(title, `release/${expectedTag}`);
     expect(result.success).toBe(true);
@@ -247,6 +252,8 @@ describe('auto-tag workflow release boundary', () => {
   it.each([
     '9007199254740992.0.0',
     '1.2.3-9007199254740992',
+    '1.2.3-foo-1.9007199254740992',
+    '1.2.3-alpha-beta.9007199254740992+build.7',
   ])('rejects npm-unsafe numeric SemVer with a matching release branch: %s', (version) => {
     const result = validateRelease(`Release v${version}`, `release/v${version}`);
     expect(result).toMatchObject({ success: false, githubEnv: '', githubOutput: '' });

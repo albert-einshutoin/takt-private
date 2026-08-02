@@ -57,7 +57,15 @@ jobs:
           node - "$VERSION" <<'NODE'
           const version = process.argv[2];
           const withoutBuild = version.split('+', 1)[0];
-          const [core, prerelease = ''] = withoutBuild.split('-', 2);
+          // Split only at the first hyphen so later hyphens remain part of the
+          // complete prerelease suffix and cannot hide a numeric identifier.
+          const prereleaseIndex = withoutBuild.indexOf('-');
+          const core = prereleaseIndex === -1
+            ? withoutBuild
+            : withoutBuild.slice(0, prereleaseIndex);
+          const prerelease = prereleaseIndex === -1
+            ? ''
+            : withoutBuild.slice(prereleaseIndex + 1);
           const numeric = [...core.split('.'), ...prerelease.split('.').filter(Boolean)]
             .filter((identifier) => /^[0-9]+$/u.test(identifier));
           if (numeric.some((identifier) => !Number.isSafeInteger(Number(identifier)))) {
