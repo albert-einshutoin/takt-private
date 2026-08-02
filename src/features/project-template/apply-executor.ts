@@ -469,13 +469,23 @@ async function writeJournal(
   });
 }
 
+class RollbackJournalRemovalDurabilityError extends Error {
+  constructor() {
+    super('rollback journal directory fsync failed after unlink');
+    this.name = 'RollbackJournalRemovalDurabilityError';
+  }
+}
+
 async function removeRollbackJournal(
   storage: ProjectTemplateApplyStorage,
 ): Promise<void> {
+  let unlinked = false;
   try {
     await storage.io.unlink(storage.journalPath);
+    unlinked = true;
     await storage.io.fsyncDirectory(dirname(storage.journalPath));
   } catch (error) {
+    if (unlinked) throw new RollbackJournalRemovalDurabilityError();
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
@@ -1900,8 +1910,14 @@ export async function recoverProjectTemplateApply(options: {
       // The terminal journal is gone; private staging is a bounded orphan.
     }
     return { status: 'rolled_back', backupId: manifest.backupId };
-  } catch {
-    if (storage !== undefined && journal !== undefined) {
+  } catch (error) {
+    if (
+      storage !== undefined
+      && journal !== undefined
+      // Why: unlink already changed the current namespace. Recreating only a
+      // marker would leave no journal identity for a later recovery to clear.
+      && !(error instanceof RollbackJournalRemovalDurabilityError)
+    ) {
       try {
         writeRecoveryMarker({
           storage,

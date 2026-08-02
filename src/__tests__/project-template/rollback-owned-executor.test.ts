@@ -984,8 +984,11 @@ describe('owned project template rollback executor', () => {
     expect(existsSync(journalPath)).toBe(false);
   });
 
-  it.each(['marker-unlink', 'marker-fsync', 'marker-corrupt', 'journal-unlink'] as const)(
-    'retains a recoverable journal when terminal cleanup fails at %s',
+  it.each([
+    'marker-unlink', 'marker-fsync', 'marker-corrupt',
+    'journal-unlink', 'journal-fsync',
+  ] as const)(
+    'converges terminal cleanup when %s fails',
     async (fault) => {
       const value = await installed();
       let setupJournalPath = '';
@@ -1031,6 +1034,7 @@ describe('owned project template rollback executor', () => {
         writeFileSync(markerPath, '{corrupt');
       }
       let markerRemoved = false;
+      let journalRemoved = false;
       let injected = false;
       const recoveryIo = createProjectTemplateApplyStorageIo({
         before(operation, path) {
@@ -1062,9 +1066,20 @@ describe('owned project template rollback executor', () => {
             injected = true;
             throw new Error('injected journal unlink failure');
           }
+          if (
+            !injected
+            && fault === 'journal-fsync'
+            && journalRemoved
+            && operation === 'directory-fsync'
+            && path === storage.controlRoot
+          ) {
+            injected = true;
+            throw new Error('injected journal directory fsync failure');
+          }
         },
         after(operation, path) {
           if (operation === 'unlink' && path === markerPath) markerRemoved = true;
+          if (operation === 'unlink' && path === storage.journalPath) journalRemoved = true;
         },
       });
 
@@ -1072,8 +1087,19 @@ describe('owned project template rollback executor', () => {
         projectRoot: value.projectRoot,
         io: recoveryIo,
       })).resolves.toMatchObject({ status: 'recovery_required' });
-      expect(existsSync(storage.journalPath)).toBe(true);
+      expect(existsSync(storage.journalPath)).toBe(fault !== 'journal-fsync');
       if (fault !== 'marker-corrupt') expect(injected).toBe(true);
+
+      if (fault === 'journal-fsync') {
+        // The journal is absent in the current namespace, so recreating only
+        // its marker would permanently block every subsequent recovery.
+        expect(existsSync(markerPath)).toBe(false);
+        await expect(recoverProjectTemplateApply({ projectRoot: value.projectRoot }))
+          .resolves.toMatchObject({ status: 'not_started', code: 'NO_RECOVERY_STATE' });
+        expect(inspectProjectTemplateApplyGuard({ repoPath: value.projectRoot }).passed)
+          .toBe(true);
+        return;
+      }
 
       if (fault === 'marker-corrupt') {
         writeFileSync(markerPath, `${JSON.stringify({
