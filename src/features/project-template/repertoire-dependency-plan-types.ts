@@ -25,6 +25,12 @@ export interface ProjectTemplateRepertoireDependencyPlanOptions {
     ProjectTemplateRepertoireDependencyPreviousLockInput;
 }
 
+export interface ProjectTemplateLocalEmptyRepertoireDependencyPlanOptions {
+  readonly incomingLock: ProjectTemplateRepertoireDependencyLockV1;
+  readonly previousLock:
+    ProjectTemplateRepertoireDependencyPreviousLockInput;
+}
+
 export type ProjectTemplateRepertoireDependencyPlanAction =
   | 'add'
   | 'keep'

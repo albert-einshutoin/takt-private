@@ -95,6 +95,37 @@ function sourceLock(): Record<string, unknown> {
   };
 }
 
+function localContentLock(): Record<string, unknown> {
+  return {
+    ...contentLock(),
+    source: {
+      kind: 'local',
+      uri: '.',
+      ref: 'workspace',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+    },
+  };
+}
+
+function localSourceLock(): Record<string, unknown> {
+  return {
+    ...sourceLock(),
+    source: {
+      kind: 'local-import',
+      uri: '.',
+      ref: 'workspace',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+      descriptorSha256: 'a'.repeat(64),
+    },
+    dependencyVerification: {
+      method: 'local-empty-v1',
+      declarationSha256:
+        calculateProjectTemplateRepertoireDependencyDeclarationSha256([]),
+      count: 0,
+    },
+  };
+}
+
 function canonicalContents(): Readonly<Record<string, string>> {
   return {
     [CONTENT_LOCK_PATH]: serializeTemplateLock(contentLock()),
@@ -154,6 +185,29 @@ describe('project template companion lock state reader', () => {
     ));
     expect(result.previousLocksSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(Object.isFrozen(result.lockSha256)).toBe(true);
+  });
+
+  it('accepts an exact local-import 111 cohort without GitHub authority', () => {
+    const projectRoot = root();
+    writeFileSync(
+      join(projectRoot, CONTENT_LOCK_PATH),
+      serializeTemplateLock(localContentLock()),
+    );
+    writeFileSync(
+      join(projectRoot, PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH),
+      serializeProjectTemplateRepertoireDependencyLock(repertoireLock()),
+    );
+    writeFileSync(
+      join(projectRoot, PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH),
+      serializeProjectTemplateSourceProvenance(localSourceLock()),
+    );
+
+    const result = readProjectTemplateCompanionLockState(projectRoot);
+
+    expect(result.state).toBe('update');
+    if (result.state !== 'update') throw new Error('expected update state');
+    expect(result.contentLock.source.kind).toBe('local');
+    expect(result.sourceProvenance.source).not.toHaveProperty('repositoryUrl');
   });
 
   it.each([

@@ -22,7 +22,10 @@ import type {
   TemplateEntryPolicy,
   TemplateLockV1,
 } from './types.js';
-import { requireRecord } from './validation.js';
+import {
+  isProjectTemplateCliExportApprovalError,
+  snapshotProjectTemplateExportApprovals,
+} from './cli-export-approvals.js';
 
 const DESCRIPTOR: TaktpackDescriptorV1 = {
   format: 'taktpack',
@@ -45,6 +48,7 @@ interface ExportSourceState {
 }
 
 const EXPORT_SOURCE_STATES = new WeakMap<ProjectTemplateExportPlan, ExportSourceState>();
+const CAPTURED_UINT8_ARRAY = Uint8Array;
 
 function deepFreeze<T>(value: T): T {
   if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
@@ -85,41 +89,22 @@ function incrementReason(
   reasons[reason] = (reasons[reason] ?? 0) + 1;
 }
 
-function parseExportPolicies(
-  value: ProjectTemplateExportOptions['policies'],
-): ReadonlyMap<string, Exclude<TemplateEntryPolicy, 'excluded'>> {
-  let record: Record<string, unknown>;
-  try {
-    record = requireRecord(value ?? {}, 'policies');
-  } catch {
-    throw new TaktpackError(
-      'INVALID_EXPORT_PLAN',
-      'policies must be a plain own-property object without accessors',
-      'policies',
-    );
+function findPolicyApprovalIndex(
+  entries: readonly Readonly<{ path: string }>[],
+  path: string,
+): number {
+  // Why: the approval snapshot is canonical path order. Binary search keeps the
+  // public 4096-entry bound from becoming a quadratic argv-to-scan CPU surface.
+  let lower = 0;
+  let upper = entries.length - 1;
+  while (lower <= upper) {
+    const middle = (lower + upper) >>> 1;
+    const candidate = entries[middle]!.path;
+    if (candidate === path) return middle;
+    if (candidate < path) lower = middle + 1;
+    else upper = middle - 1;
   }
-  if (Object.getOwnPropertySymbols(record).length > 0) {
-    throw new TaktpackError(
-      'INVALID_EXPORT_PLAN',
-      'policies must contain string keys only',
-      'policies',
-    );
-  }
-  const policies = new Map<string, Exclude<TemplateEntryPolicy, 'excluded'>>();
-  // Approval lookup and unknown-key validation must consume the same immutable
-  // own-property snapshot; reading the prototype could silently grant approval.
-  for (const [path, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(record))) {
-    const policy = descriptor.value;
-    if (policy !== 'managed' && policy !== 'merge' && policy !== 'scaffold') {
-      throw new TaktpackError(
-        'INVALID_EXPORT_PLAN',
-        'policy value is not supported',
-        'policies',
-      );
-    }
-    policies.set(path, policy);
-  }
-  return policies;
+  return -1;
 }
 
 /**
@@ -131,7 +116,23 @@ export async function createProjectTemplateExportPlan(
   projectRoot: string,
   options: ProjectTemplateExportOptions,
 ): Promise<ProjectTemplateExportPlan> {
-  const policies = parseExportPolicies(options.policies);
+  let approvals: ReturnType<typeof snapshotProjectTemplateExportApprovals>;
+  try {
+    approvals = snapshotProjectTemplateExportApprovals(options);
+  } catch (error) {
+    if (!isProjectTemplateCliExportApprovalError(error)) throw error;
+    throw new TaktpackError(
+      'INVALID_EXPORT_PLAN',
+      'export approvals must be canonical own data',
+      error.field,
+    );
+  }
+  const policyEntries = approvals.projection.policies;
+  // Why: a typed bitmap has dense own indexed storage. Array prototype numeric
+  // setters therefore cannot swallow match writes and bypass unused approvals.
+  const matchedPolicies = new CAPTURED_UINT8_ARRAY(policyEntries.length);
+  const approvedCapabilityValues = approvals.projection.approvedCapabilities;
+  const matchedCapabilities = new CAPTURED_UINT8_ARRAY(approvedCapabilityValues.length);
   const scan = await scanProjectTemplateDirectory(projectRoot);
   if (scan.scanStatus !== 'complete') {
     throw new TaktpackError(
@@ -141,8 +142,6 @@ export async function createProjectTemplateExportPlan(
     );
   }
 
-  const approvedCapabilities = new Set(options.approvedCapabilities ?? []);
-  const includedPaths = new Set<string>();
   const entries: TemplateEntry[] = [];
   const files: ProjectTemplateExportFile[] = [];
   const topCapabilities = new Set<TemplateCapability>();
@@ -168,7 +167,10 @@ export async function createProjectTemplateExportPlan(
       throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'capability inspection is incomplete', entryField);
     }
 
-    const explicitPolicy = policies.get(result.relativePath);
+    const policyIndex = findPolicyApprovalIndex(policyEntries, result.relativePath);
+    const explicitPolicy: Exclude<TemplateEntryPolicy, 'excluded'> | undefined =
+      policyIndex < 0 ? undefined : policyEntries[policyIndex]!.policy;
+    if (policyIndex >= 0) matchedPolicies[policyIndex] = 1;
     if (result.classification === 'project-owned' && explicitPolicy === undefined) {
       throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'project-owned entry requires an explicit policy', entryField);
     }
@@ -176,14 +178,24 @@ export async function createProjectTemplateExportPlan(
     if (policy === undefined || policy === 'excluded') {
       throw new TaktpackError('INVALID_EXPORT_PLAN', 'included entry requires an export policy', entryField);
     }
-    for (const capability of result.detectedCapabilities.capabilities) {
-      if (!approvedCapabilities.has(capability)) {
+    for (let capabilityIndex = 0;
+      capabilityIndex < result.detectedCapabilities.capabilities.length;
+      capabilityIndex += 1) {
+      const capability = result.detectedCapabilities.capabilities[capabilityIndex]!;
+      let approvalIndex = -1;
+      for (let index = 0; index < approvedCapabilityValues.length; index += 1) {
+        if (approvedCapabilityValues[index] === capability) {
+          approvalIndex = index;
+          break;
+        }
+      }
+      if (approvalIndex < 0) {
         throw new TaktpackError('EXPORT_REVIEW_REQUIRED', `capability requires approval: ${capability}`, entryField);
       }
+      matchedCapabilities[approvalIndex] = 1;
       topCapabilities.add(capability);
     }
 
-    includedPaths.add(result.relativePath);
     counts[policy] += 1;
     entries.push({
       path: result.relativePath,
@@ -224,9 +236,19 @@ export async function createProjectTemplateExportPlan(
     });
   }
 
-  const unknownPolicies = [...policies.keys()].filter((path) => !includedPaths.has(path));
-  if (unknownPolicies.length > 0) {
-    throw new TaktpackError('INVALID_EXPORT_PLAN', 'policy references a non-exportable path', 'policies');
+  for (let index = 0; index < policyEntries.length; index += 1) {
+    if (!matchedPolicies[index]) {
+      throw new TaktpackError('INVALID_EXPORT_PLAN', 'policy references a non-exportable path', 'policies');
+    }
+  }
+  for (let index = 0; index < approvedCapabilityValues.length; index += 1) {
+    if (!matchedCapabilities[index]) {
+      throw new TaktpackError(
+        'INVALID_EXPORT_PLAN',
+        'approved capability was not detected in exportable content',
+        'approvedCapabilities',
+      );
+    }
   }
 
   entries.sort((left, right) => left.path.localeCompare(right.path, 'en-US'));

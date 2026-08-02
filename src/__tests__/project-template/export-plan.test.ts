@@ -6,6 +6,7 @@ import {
   createProjectTemplateExportPlan,
   validateManifestLockPair,
 } from '../../features/project-template/index.js';
+import { TEMPLATE_CAPABILITIES } from '../../features/project-template/validation.js';
 
 const roots: string[] = [];
 const source = {
@@ -24,6 +25,51 @@ function makeProject(files: Record<string, string>): string {
     writeFileSync(absolutePath, content);
   }
   return root;
+}
+
+async function withPoisonedArrayNumericSetters<T>(run: () => Promise<T>): Promise<T> {
+  const keys = ['0', '1', '2'] as const;
+  const originals = keys.map((key) => Object.getOwnPropertyDescriptor(Array.prototype, key));
+  const defineProperty = Object.defineProperty;
+  try {
+    for (const key of keys) {
+      Object.defineProperty(Array.prototype, key, {
+        configurable: true,
+        set(value: unknown) {
+          if (typeof value === 'boolean') return;
+          defineProperty(this, key, {
+            configurable: true, enumerable: true, value, writable: true,
+          });
+        },
+      });
+    }
+    return await run();
+  } finally {
+    for (let index = 0; index < keys.length; index += 1) {
+      const original = originals[index];
+      if (original === undefined) delete (Array.prototype as unknown as Record<string, unknown>)[keys[index]];
+      else Object.defineProperty(Array.prototype, keys[index], original);
+    }
+  }
+}
+
+async function withPoisonedTypedArrayLength<T>(run: () => Promise<T>): Promise<T> {
+  const prototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(prototype, 'length')!;
+  const byteLengthDescriptor = Object.getOwnPropertyDescriptor(prototype, 'byteLength')!;
+  Object.defineProperty(prototype, 'length', {
+    ...lengthDescriptor,
+    get(this: Uint8Array) {
+      const bytes = byteLengthDescriptor.get!.call(this) as number;
+      return Object.getPrototypeOf(this) === Uint8Array.prototype && bytes <= 2
+        ? 0 : lengthDescriptor.get!.call(this) as number;
+    },
+  });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(prototype, 'length', lengthDescriptor);
+  }
 }
 
 afterEach(() => {
@@ -97,6 +143,52 @@ describe('project template export plan', () => {
     expect(approved.manifest.entries[0]?.capabilities).toEqual(['external-command']);
   });
 
+  it('does not consume a live capability iterator or poisoned includes', async () => {
+    const root = makeProject({
+      'workflows/release.yaml': 'steps:\n  - run: npm test\n',
+    });
+    const approvedCapabilities: string[] = [];
+    const originalIterator = Array.prototype[Symbol.iterator];
+    const originalIncludes = Array.prototype.includes;
+    let outcome: unknown;
+    try {
+      Array.prototype[Symbol.iterator] = function iterator() {
+        return this === approvedCapabilities
+          ? originalIterator.call(['external-command'])
+          : originalIterator.call(this);
+      };
+      Array.prototype.includes = function includes(value, fromIndex) {
+        return this === TEMPLATE_CAPABILITIES
+          ? true
+          : originalIncludes.call(this, value, fromIndex);
+      };
+      outcome = await createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        approvedCapabilities: approvedCapabilities as never,
+      }).catch((error: unknown) => error);
+    } finally {
+      Array.prototype[Symbol.iterator] = originalIterator;
+      Array.prototype.includes = originalIncludes;
+    }
+    expect(outcome).toMatchObject({ code: 'EXPORT_REVIEW_REQUIRED' });
+  });
+
+  it.each([
+    ['duplicate', ['external-command', 'external-command']],
+    ['unknown', ['credential']],
+    ['unused', ['external-command', 'github-write']],
+  ] as const)('rejects %s capability approvals', async (_label, approvedCapabilities) => {
+    const root = makeProject({
+      'workflows/release.yaml': 'steps:\n  - run: npm test\n',
+    });
+    await expect(createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+      approvedCapabilities: approvedCapabilities as never,
+    })).rejects.toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'approvedCapabilities',
+    });
+  });
+
   it('requires an explicit policy for project-owned configuration', async () => {
     const root = makeProject({ 'config.yaml': 'language: ja\n' });
     const options = {
@@ -113,6 +205,106 @@ describe('project template export plan', () => {
       policies: { 'config.yaml': 'managed' },
     });
     expect(approved.manifest.entries[0]?.policy).toBe('managed');
+  });
+
+  it('does not reinterpret a public policy object through poisoned Object globals', async () => {
+    const root = makeProject({ 'config.yaml': 'language: ja\n' });
+    const policies = {};
+    const originalDescriptors = Object.getOwnPropertyDescriptors;
+    const originalSymbols = Object.getOwnPropertySymbols;
+    const originalEntries = Object.entries;
+    let outcome: unknown;
+    try {
+      Object.getOwnPropertyDescriptors = ((value: object) => value === policies
+        ? { 'config.yaml': { configurable: true, enumerable: true, value: 'managed', writable: true } }
+        : originalDescriptors(value)) as typeof Object.getOwnPropertyDescriptors;
+      Object.getOwnPropertySymbols = ((value: object) => value === policies
+        ? [] : originalSymbols(value)) as typeof Object.getOwnPropertySymbols;
+      Object.entries = ((value: object) => value === policies
+        ? [['config.yaml', { value: 'managed' }]]
+        : originalEntries(value)) as typeof Object.entries;
+      outcome = await createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source, policies,
+      }).catch((error: unknown) => error);
+    } finally {
+      Object.getOwnPropertyDescriptors = originalDescriptors;
+      Object.getOwnPropertySymbols = originalSymbols;
+      Object.entries = originalEntries;
+    }
+    expect(outcome).toMatchObject({ code: 'EXPORT_REVIEW_REQUIRED' });
+  });
+
+  it('matches a large reverse-ordered policy set through canonical lookup', async () => {
+    const files: Record<string, string> = {};
+    const policies: Record<string, 'merge'> = {};
+    for (let index = 255; index >= 0; index -= 1) {
+      const path = `workflows/review-${String(index).padStart(3, '0')}.yaml`;
+      files[path] = 'name: review\n';
+      policies[path] = 'merge';
+    }
+    const root = makeProject(files);
+    const plan = await createProjectTemplateExportPlan(root, {
+      packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source, policies,
+    });
+    expect(plan.manifest.entries).toHaveLength(256);
+    expect(plan.manifest.entries[0]?.path).toBe('workflows/review-000.yaml');
+    expect(plan.manifest.entries[255]?.path).toBe('workflows/review-255.yaml');
+  });
+
+  it('rejects an unknown policy under Array prototype numeric setter poisoning', async () => {
+    const root = makeProject({ 'workflows/review.yaml': 'name: review\n' });
+    const outcome = await withPoisonedArrayNumericSetters(() => (
+      createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        policies: { 'missing.yaml': 'managed' },
+      }).catch((error: unknown) => error)
+    ));
+    expect(outcome).toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'policies',
+    });
+  });
+
+  it('rejects an unused capability under Array prototype numeric setter poisoning', async () => {
+    const root = makeProject({
+      'workflows/release.yaml': 'steps:\n  - run: npm test\n',
+    });
+    const outcome = await withPoisonedArrayNumericSetters(() => (
+      createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        approvedCapabilities: ['external-command', 'github-write'],
+      }).catch((error: unknown) => error)
+    ));
+    expect(outcome).toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'approvedCapabilities',
+    });
+  });
+
+  it('rejects an unknown policy under TypedArray length getter poisoning', async () => {
+    const root = makeProject({ 'workflows/review.yaml': 'name: review\n' });
+    const outcome = await withPoisonedTypedArrayLength(() => (
+      createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        policies: { 'missing.yaml': 'managed' },
+      }).catch((error: unknown) => error)
+    ));
+    expect(outcome).toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'policies',
+    });
+  });
+
+  it('rejects an unused capability under TypedArray length getter poisoning', async () => {
+    const root = makeProject({
+      'workflows/release.yaml': 'steps:\n  - run: npm test\n',
+    });
+    const outcome = await withPoisonedTypedArrayLength(() => (
+      createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        approvedCapabilities: ['external-command', 'github-write'],
+      }).catch((error: unknown) => error)
+    ));
+    expect(outcome).toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'approvedCapabilities',
+    });
   });
 
   it('does not treat an inherited policy as explicit approval', async () => {

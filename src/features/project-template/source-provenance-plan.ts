@@ -3,6 +3,8 @@ import { types } from 'node:util';
 import {
   calculateProjectTemplateSourceProvenanceSha256,
   parseProjectTemplateSourceProvenance,
+  type ProjectTemplateGithubSourceProvenanceV1,
+  type ProjectTemplateLocalSourceProvenanceV1,
   type ProjectTemplateSourceProvenanceV1,
 } from './source-provenance.js';
 import { compareSemVer } from './validation.js';
@@ -121,6 +123,18 @@ function evidenceChanged(
     || left.count !== right.count;
 }
 
+function isLocalSourceProvenance(
+  value: ProjectTemplateSourceProvenanceV1,
+): value is ProjectTemplateLocalSourceProvenanceV1 {
+  return 'kind' in value.source && value.source.kind === 'local-import';
+}
+
+function isGithubSourceProvenance(
+  value: ProjectTemplateSourceProvenanceV1,
+): value is ProjectTemplateGithubSourceProvenanceV1 {
+  return !isLocalSourceProvenance(value);
+}
+
 function calculatePlanId(value: Readonly<{
   action: string;
   changes: readonly string[];
@@ -151,20 +165,35 @@ export function createProjectTemplateSourceProvenancePlan(
   if (previous === undefined) {
     changes.push('SOURCE_ADDED');
   } else {
-    const repositoryChanged =
-      previous.source.owner !== incoming.source.owner
-      || previous.source.repo !== incoming.source.repo
-      || previous.source.repositoryUrl !== incoming.source.repositoryUrl;
+    const bothGithub = isGithubSourceProvenance(previous)
+      && isGithubSourceProvenance(incoming);
+    const bothLocal = isLocalSourceProvenance(previous)
+      && isLocalSourceProvenance(incoming);
+    // Changing provenance authority (local versus GitHub) is treated as a
+    // source replacement, even if their content hashes happen to coincide.
+    const repositoryChanged = bothGithub
+      ? previous.source.owner !== incoming.source.owner
+        || previous.source.repo !== incoming.source.repo
+        || previous.source.repositoryUrl !== incoming.source.repositoryUrl
+      : bothLocal
+        ? previous.source.uri !== incoming.source.uri
+        : true;
     changed(changes, repositoryChanged, 'REPOSITORY_CHANGED');
     changed(
       changes,
-      previous.source.requestedRef !== incoming.source.requestedRef
-        || previous.source.canonicalSource !== incoming.source.canonicalSource,
+      bothGithub
+        ? previous.source.requestedRef !== incoming.source.requestedRef
+          || previous.source.canonicalSource !== incoming.source.canonicalSource
+        : bothLocal
+          ? previous.source.ref !== incoming.source.ref
+          : true,
       'REF_CHANGED',
     );
     changed(
       changes,
-      previous.source.releaseTag !== incoming.source.releaseTag,
+      bothGithub
+        ? previous.source.releaseTag !== incoming.source.releaseTag
+        : false,
       'RELEASE_TAG_CHANGED',
     );
     changed(
@@ -206,7 +235,8 @@ export function createProjectTemplateSourceProvenancePlan(
       conflicts.push('VERSION_DOWNGRADE');
     }
     if (
-      !repositoryChanged
+      bothGithub
+      && !repositoryChanged
       && previous.source.releaseTag === incoming.source.releaseTag
       && previous.source.commit !== incoming.source.commit
     ) conflicts.push('TAG_REPUBLISHED');

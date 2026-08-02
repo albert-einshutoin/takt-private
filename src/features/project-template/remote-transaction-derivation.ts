@@ -52,6 +52,8 @@ export interface DeriveGithubProjectTemplateRemoteTransactionOptions {
 
 export interface DerivedGithubProjectTemplateRemoteTransaction {
   readonly preview: ProjectTemplateRemoteApplyPreview;
+  /** Internal target set used to revalidate the precondition under the lease. */
+  readonly candidatePaths: readonly string[];
   readonly contentEntries: readonly (
     | {
       readonly path: string;
@@ -66,6 +68,27 @@ export interface DerivedGithubProjectTemplateRemoteTransaction {
     readonly repertoireLock: Uint8Array;
     readonly sourceProvenance: Uint8Array;
   };
+}
+
+export interface GithubProjectTemplateRemoteTransactionSummary {
+  readonly changeCount: number;
+  readonly conflictCount: number;
+  readonly dependencyCount: number;
+  readonly reviewRequired: boolean;
+  readonly hardConflict: boolean;
+  readonly defaultApplyPossible: boolean;
+}
+
+const REMOTE_TRANSACTION_SUMMARIES = new WeakMap<
+  ProjectTemplateRemoteApplyPreview,
+  GithubProjectTemplateRemoteTransactionSummary
+>();
+
+export function readGithubProjectTemplateRemoteTransactionSummary(
+  preview: ProjectTemplateRemoteApplyPreview,
+): GithubProjectTemplateRemoteTransactionSummary | undefined {
+  const summary = REMOTE_TRANSACTION_SUMMARIES.get(preview);
+  return summary === undefined ? undefined : Object.freeze({ ...summary });
 }
 
 function requireActive(
@@ -278,8 +301,22 @@ export async function deriveGithubProjectTemplateRemoteTransaction(
       mode: entry.afterMode,
     });
   }
+  REMOTE_TRANSACTION_SUMMARIES.set(preview, Object.freeze({
+    changeCount: contentEntries.length,
+    conflictCount: preview.compositionConflicts.length
+      + preview.contentHardConflicts.length
+      + (preview.dependencyHardConflict ? 1 : 0)
+      + (preview.sourceHardConflict ? 1 : 0),
+    dependencyCount: dependencyPlan.dependencies.length,
+    reviewRequired: preview.reviewRequired,
+    hardConflict: preview.hardConflict,
+    defaultApplyPossible: preview.defaultApplyPossible,
+  }));
   return Object.freeze({
     preview,
+    candidatePaths: Object.freeze(
+      contentPlan.entries.map((entry) => entry.path),
+    ),
     contentEntries: Object.freeze(contentEntries),
     companionOutputs: Object.freeze({
       contentLock: new TextEncoder().encode(serializeTemplateLock(nextContentLock)),

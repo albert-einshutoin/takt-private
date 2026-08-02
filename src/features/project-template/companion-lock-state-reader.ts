@@ -316,14 +316,20 @@ function verifyCohortSemantics(
     calculateProjectTemplateRepertoireDependencyDeclarationSha256(
       repertoire.dependencies,
     );
+  const sourceIdentityMatches = 'kind' in source.source
+    ? content.source.kind === 'local'
+      && content.source.uri === source.source.uri
+      && content.source.ref === source.source.ref
+      && content.source.commit === source.source.commit
+    : content.source.kind === 'github'
+      && content.source.uri === source.source.repositoryUrl
+      && content.source.ref === source.source.releaseTag
+      && content.source.commit === source.source.commit;
   if (
     content.manifestSha256 !== repertoire.manifestSha256
     || content.manifestSha256 !== source.archive.manifestSha256
     || content.packVersion !== source.archive.version
-    || content.source.kind !== 'github'
-    || content.source.uri !== source.source.repositoryUrl
-    || content.source.ref !== source.source.releaseTag
-    || content.source.commit !== source.source.commit
+    || !sourceIdentityMatches
     || repertoire.sourceDescriptorSha256
       !== source.source.descriptorSha256
     || repertoire.dependencies.length

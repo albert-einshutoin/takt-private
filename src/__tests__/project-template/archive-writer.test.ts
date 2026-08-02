@@ -4,8 +4,11 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,7 +19,9 @@ import {
   writeTaktpack,
 } from '../../features/project-template/index.js';
 import {
+  captureTaktpackOutputPrecondition,
   syncTaktpackOutputDirectory,
+  writeTaktpackWithOutputPrecondition,
   writeTaktpackWithIoSeam,
   type TaktpackWriterIoPhase,
 } from '../../features/project-template/archive-writer.js';
@@ -33,6 +38,31 @@ function writeProjectFile(root: string, path: string, content: string): void {
   const absolutePath = join(root, '.takt', path);
   mkdirSync(dirname(absolutePath), { recursive: true });
   writeFileSync(absolutePath, content);
+}
+
+function recoveryFiles(root: string): string[] {
+  if (!existsSync(root)) return [];
+  const found: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.name === 'archive.tmp' || entry.name === 'rollback') {
+        found.push(path);
+      }
+    }
+  };
+  visit(root);
+  return found;
+}
+
+function recoveryDirectories(root: string): string[] {
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory()
+      && (entry.name.startsWith('.taktpack-recovery-')
+        || entry.name.startsWith('.taktpack-cleanup-')))
+    .map((entry) => join(root, entry.name));
 }
 
 async function makePlan(root: string) {
@@ -53,6 +83,738 @@ afterEach(() => {
 });
 
 describe('taktpack deterministic writer', () => {
+  it('exposes only a path-redacted deterministic projection from an output authority', async () => {
+    const root = makeRoot();
+    const output = join(root, 'projection.taktpack');
+
+    const first = await captureTaktpackOutputPrecondition(output);
+    const second = await captureTaktpackOutputPrecondition(output);
+
+    expect(first.projection).toEqual(second.projection);
+    expect(first.projection).toMatchObject({
+      schemaVersion: '1.0',
+      pathSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      target: { state: 'absent' },
+    });
+    expect(JSON.stringify(first.projection)).not.toContain(root);
+    expect(Object.keys(first.authority)).toEqual([]);
+  });
+
+  it('rejects cloned, reused, and foreign-path output authorities before creating temp files', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'authorized.taktpack');
+    const foreign = join(root, 'foreign.taktpack');
+    const clonedCapture = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      { ...clonedCapture.authority } as typeof clonedCapture.authority,
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+
+    const foreignCapture = await captureTaktpackOutputPrecondition(output);
+    await expect(writeTaktpackWithOutputPrecondition(
+      foreign,
+      plan,
+      foreignCapture.authority,
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+
+    const singleUse = await captureTaktpackOutputPrecondition(output);
+    await writeTaktpackWithOutputPrecondition(output, plan, singleUse.authority);
+    rmSync(output);
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      singleUse.authority,
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(existsSync(output)).toBe(false);
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('does not let force authorize an absent target that appeared after capture', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'appeared.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    writeFileSync(output, 'foreign');
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readFileSync(output, 'utf8')).toBe('foreign');
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('rejects a parent identity swap captured by the output authority', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    const movedDirectory = join(root, 'moved-exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'pack.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    renameSync(outputDirectory, movedDirectory);
+    mkdirSync(outputDirectory);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(existsSync(output)).toBe(false);
+    expect(recoveryDirectories(movedDirectory)).toHaveLength(0);
+    expect(readdirSync(outputDirectory)).toEqual([]);
+  });
+
+  it('revalidates exact target identity at the publication boundary even with force', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'replaced-at-publish.taktpack');
+    writeFileSync(output, 'approved');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'publish') {
+            rmSync(output);
+            writeFileSync(output, 'replacement');
+          }
+        },
+      },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readFileSync(output, 'utf8')).toBe('replacement');
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('publishes nothing and cleans staging when the authorized parent swaps at commit', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    const movedDirectory = join(root, 'moved-exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'pack.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'publish') {
+            renameSync(outputDirectory, movedDirectory);
+            mkdirSync(outputDirectory);
+          }
+        },
+      },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readdirSync(outputDirectory)).toEqual([]);
+    expect(recoveryDirectories(movedDirectory)).toHaveLength(1);
+    expect(readdirSync(root).some((name) => name.endsWith('.tmp'))).toBe(false);
+  });
+
+  it('preserves a foreign post-publication replacement and retains recovery artifacts', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'post-publish-race.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'post-publish') {
+            rmSync(output);
+            writeFileSync(output, 'foreign-replacement');
+            throw new Error('post-publish witness changed');
+          }
+        },
+      },
+    ).catch((caught: unknown) => caught);
+    expect(readFileSync(output, 'utf8')).toBe('foreign-replacement');
+    expect(recoveryFiles(outputDirectory)).toHaveLength(2);
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(String(error)).not.toContain(root);
+  });
+
+  it('uses force evacuation as a CAS and restores a foreign object moved by the race', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'force-cas.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'force-cas') {
+            rmSync(output);
+            writeFileSync(output, 'foreign-racer');
+          }
+        },
+      },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readFileSync(output, 'utf8')).toBe('foreign-racer');
+    expect(recoveryFiles(root).length).toBeGreaterThan(0);
+  });
+
+  it('rejects same-inode same-size force drift even when mtime is restored', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'digest-cas.taktpack');
+    const approved = 'approved-original';
+    const foreign = 'foreign--original';
+    expect(Buffer.byteLength(foreign)).toBe(Buffer.byteLength(approved));
+    writeFileSync(output, approved);
+    utimesSync(output, 1_700_000_000, 1_700_000_000);
+    const originalTimes = statSync(output);
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'force-cas') {
+            writeFileSync(output, foreign);
+            utimesSync(
+              output,
+              originalTimes.atimeMs / 1_000,
+              originalTimes.mtimeMs / 1_000,
+            );
+          }
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(readFileSync(output, 'utf8')).toBe(foreign);
+    expect(recoveryFiles(outputDirectory)).toHaveLength(2);
+  });
+
+  it('restores the approved target with no-replace when publication fails after evacuation', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'link-failure.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'authority-link') throw new Error('link unavailable');
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'ARCHIVE_WRITE_FAILED',
+      artifactState: 'not-published',
+    });
+    expect(readFileSync(output, 'utf8')).toBe('approved-old');
+    expect(recoveryFiles(outputDirectory)).toEqual([]);
+  });
+
+  it('durably proves an evacuated target restoration before reporting not-published', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'durable-restore.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    const phases: string[] = [];
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          phases.push(phase);
+          if (phase === 'authority-link') throw new Error('link unavailable');
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'ARCHIVE_WRITE_FAILED',
+      artifactState: 'not-published',
+    });
+    expect(phases).toEqual(expect.arrayContaining([
+      'rollback-restored-directory-fsync',
+      'rollback-restored-witness',
+      'rollback-unlink',
+      'rollback-final-directory-fsync',
+      'rollback-final-witness',
+    ]));
+    expect(phases.indexOf('rollback-restored-directory-fsync'))
+      .toBeLessThan(phases.indexOf('rollback-restored-witness'));
+    expect(phases.indexOf('rollback-restored-witness'))
+      .toBeLessThan(phases.indexOf('rollback-unlink'));
+    expect(phases.indexOf('rollback-unlink'))
+      .toBeLessThan(phases.indexOf('rollback-final-directory-fsync'));
+    expect(phases.indexOf('rollback-final-directory-fsync'))
+      .toBeLessThan(phases.indexOf('rollback-final-witness'));
+    expect(readFileSync(output, 'utf8')).toBe('approved-old');
+  });
+
+  it('syncs and re-witnesses the staging parent after rollback removal', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'staging-durable-restore.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    const phases: string[] = [];
+
+    await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          phases.push(phase);
+          if (phase === 'authority-link') throw new Error('link unavailable');
+        },
+      },
+    ).catch(() => undefined);
+
+    expect(phases.indexOf('rollback-unlink'))
+      .toBeLessThan(phases.indexOf('rollback-staging-directory-fsync'));
+    expect(phases.indexOf('rollback-staging-directory-fsync'))
+      .toBeLessThan(phases.indexOf('rollback-staging-parent-witness'));
+    expect(phases.indexOf('rollback-staging-parent-witness'))
+      .toBeLessThan(phases.indexOf('rollback-final-directory-fsync'));
+  });
+
+  it('preserves a foreign staging-parent replacement at rollback unlink', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'staging-swap-restore.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    let foreignRollback: string | undefined;
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'authority-link') throw new Error('link unavailable');
+          if (String(phase) !== 'rollback-unlink') return;
+          foreignRollback = recoveryFiles(outputDirectory)
+            .find((path) => path.endsWith('/rollback'))!;
+          renameSync(foreignRollback, `${foreignRollback}.original`);
+          writeFileSync(foreignRollback, 'foreign-staging-entry');
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(foreignRollback).toBeDefined();
+    expect(readFileSync(foreignRollback!, 'utf8')).toBe('foreign-staging-entry');
+    expect(existsSync(`${foreignRollback!}.original`)).toBe(true);
+  });
+
+  it('durably removes staging entries on a successful authorized publish', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'staging-success.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    const phases: string[] = [];
+
+    await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      { onPhase: (phase) => phases.push(phase) },
+    );
+
+    for (const entry of ['temp', 'rollback'] as const) {
+      expect(phases.indexOf(`staging-${entry}-unlink`))
+        .toBeLessThan(phases.indexOf(`staging-${entry}-directory-fsync`));
+      expect(phases.indexOf(`staging-${entry}-directory-fsync`))
+        .toBeLessThan(phases.indexOf(`staging-${entry}-parent-witness`));
+    }
+    expect(phases.indexOf('recovery-directory-close'))
+      .toBeLessThan(phases.indexOf('output-directory-close'));
+    expect(phases.indexOf('output-directory-close'))
+      .toBeLessThan(phases.indexOf('staging-directory-close'));
+    expect(recoveryDirectories(outputDirectory)).toEqual([]);
+  });
+
+  it('never path-unlinks a foreign staging entry during authority cleanup', async () => {
+    const projectRoot = makeRoot();
+    const outputRoot = makeRoot();
+    writeProjectFile(projectRoot, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(projectRoot);
+    const outputDirectory = join(outputRoot, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'cleanup-swap.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    let foreignTemp: string | undefined;
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      {},
+      {
+        onPhase(phase) {
+          if (String(phase) !== 'staging-temp-unlink') return;
+          foreignTemp = recoveryFiles(outputDirectory)
+            .find((path) => path.endsWith('/archive.tmp'))!;
+          renameSync(foreignTemp, `${foreignTemp}.original`);
+          writeFileSync(foreignTemp, 'foreign-staging-entry');
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(foreignTemp).toBeDefined();
+    expect(readFileSync(foreignTemp!, 'utf8')).toBe('foreign-staging-entry');
+  });
+
+  it('reports a staging-directory close failure as indeterminate', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'staging-close.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      {},
+      {
+        onPhase(phase) {
+          if (String(phase) === 'staging-directory-close') {
+            throw new Error('close failed');
+          }
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(existsSync(output)).toBe(true);
+  });
+
+  it.each([
+    ['pipeline', 'ARCHIVE_WRITE_FAILED'],
+    ['archive-read', 'ARCHIVE_WRITE_FAILED'],
+    ['file-fsync', 'DURABILITY_FAILED'],
+  ] as const)(
+    'preserves the original %s failure after private pre-publish cleanup',
+    async (failedPhase, code) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const outputDirectory = join(root, 'exports');
+      mkdirSync(outputDirectory);
+      const output = join(outputDirectory, 'pre-publish-failure.taktpack');
+      const captured = await captureTaktpackOutputPrecondition(output);
+
+      const error = await writeTaktpackWithOutputPrecondition(
+        output,
+        plan,
+        captured.authority,
+        {},
+        {
+          onPhase(phase) {
+            if (phase === failedPhase) throw new Error('pre-publish failure');
+          },
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code, artifactState: 'not-published' });
+      expect(existsSync(output)).toBe(false);
+      expect(recoveryDirectories(outputDirectory)).toEqual([]);
+    },
+  );
+
+  it('preserves an authority-mode pre-publish abort after private cleanup', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'pre-publish-abort.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+    const controller = new AbortController();
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { signal: controller.signal },
+      {
+        onPhase(phase) {
+          if (phase === 'archive-read') controller.abort();
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ name: 'AbortError' });
+    expect(existsSync(output)).toBe(false);
+    expect(recoveryDirectories(outputDirectory)).toEqual([]);
+  });
+
+  it.each([
+    'rollback-restored-directory-fsync',
+    'rollback-restored-witness',
+    'rollback-unlink',
+    'rollback-final-directory-fsync',
+    'rollback-final-witness',
+  ] as const)(
+    'retains recovery evidence when %s cannot prove restoration',
+    async (failedPhase) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const outputDirectory = join(root, 'exports');
+      mkdirSync(outputDirectory);
+      const output = join(outputDirectory, 'uncertain-restore.taktpack');
+      writeFileSync(output, 'approved-old');
+      const captured = await captureTaktpackOutputPrecondition(output);
+
+      const error = await writeTaktpackWithOutputPrecondition(
+        output,
+        plan,
+        captured.authority,
+        { force: true },
+        {
+          onPhase(phase) {
+            if (phase === 'authority-link') throw new Error('link unavailable');
+            if (String(phase) === failedPhase) throw new Error('restore uncertain');
+          },
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: 'UNSAFE_OUTPUT_TARGET',
+        artifactState: 'published',
+      });
+      expect(readFileSync(output, 'utf8')).toBe('approved-old');
+      expect(recoveryFiles(outputDirectory).length).toBeGreaterThan(0);
+    },
+  );
+
+  it.each([
+    'rollback-restored-witness',
+    'rollback-final-witness',
+  ] as const)(
+    'rejects same-size restored-target content drift at %s',
+    async (witnessPhase) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const outputDirectory = join(root, 'exports');
+      mkdirSync(outputDirectory);
+      const output = join(outputDirectory, 'restore-digest.taktpack');
+      const approved = 'approved-old';
+      const foreign = 'foreign--old';
+      expect(Buffer.byteLength(foreign)).toBe(Buffer.byteLength(approved));
+      writeFileSync(output, approved);
+      utimesSync(output, 1_700_000_000, 1_700_000_000);
+      const originalTimes = statSync(output);
+      const captured = await captureTaktpackOutputPrecondition(output);
+
+      const error = await writeTaktpackWithOutputPrecondition(
+        output,
+        plan,
+        captured.authority,
+        { force: true },
+        {
+          onPhase(phase) {
+            if (phase === 'authority-link') throw new Error('link unavailable');
+            if (String(phase) === witnessPhase) {
+              writeFileSync(output, foreign);
+              utimesSync(
+                output,
+                originalTimes.atimeMs / 1_000,
+                originalTimes.mtimeMs / 1_000,
+              );
+            }
+          },
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        code: 'UNSAFE_OUTPUT_TARGET',
+        artifactState: 'published',
+      });
+      expect(readFileSync(output, 'utf8')).toBe(foreign);
+      expect(recoveryFiles(outputDirectory).length).toBeGreaterThan(0);
+    },
+  );
+
+  it('routes an evacuated-witness close failure through retained recovery', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const outputDirectory = join(root, 'exports');
+    mkdirSync(outputDirectory);
+    const output = join(outputDirectory, 'witness-close.taktpack');
+    writeFileSync(output, 'approved-old');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    const error = await writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (String(phase) === 'evacuated-witness-close') {
+            throw new Error('close failed');
+          }
+        },
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'UNSAFE_OUTPUT_TARGET',
+      artifactState: 'published',
+    });
+    expect(readFileSync(output, 'utf8')).toBe('approved-old');
+    expect(recoveryFiles(outputDirectory)).toHaveLength(2);
+  });
+
+  it('does not overwrite a foreign insertion when publishing an authorized absent target', async () => {
+    const root = makeRoot();
+    writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+    const plan = await makePlan(root);
+    const output = join(root, 'absent-cas.taktpack');
+    const captured = await captureTaktpackOutputPrecondition(output);
+
+    await expect(writeTaktpackWithOutputPrecondition(
+      output,
+      plan,
+      captured.authority,
+      { force: true },
+      {
+        onPhase(phase) {
+          if (phase === 'publish') writeFileSync(output, 'foreign-racer');
+        },
+      },
+    )).rejects.toMatchObject({ code: 'UNSAFE_OUTPUT_TARGET' });
+    expect(readFileSync(output, 'utf8')).toBe('foreign-racer');
+  });
+
+  it.each(['parent', 'target'] as const)(
+    'rejects a %s swap during held-directory fsync instead of reporting success',
+    async (swap) => {
+      const root = makeRoot();
+      writeProjectFile(root, 'workflows/a.yaml', 'name: a\n');
+      const plan = await makePlan(root);
+      const outputDirectory = join(root, 'exports');
+      const movedDirectory = join(root, 'moved-exports');
+      mkdirSync(outputDirectory);
+      const output = join(outputDirectory, 'fsync-race.taktpack');
+      const captured = await captureTaktpackOutputPrecondition(output);
+
+      const error = await writeTaktpackWithOutputPrecondition(
+        output,
+        plan,
+        captured.authority,
+        { force: true },
+        {
+          onPhase(phase) {
+            if (phase !== 'directory-fsync') return;
+            if (swap === 'parent') {
+              renameSync(outputDirectory, movedDirectory);
+              mkdirSync(outputDirectory);
+            } else {
+              rmSync(output);
+              writeFileSync(output, 'foreign-after-fsync');
+            }
+          },
+        },
+      ).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ artifactState: 'published' });
+      if (swap === 'target') {
+        expect(readFileSync(output, 'utf8')).toBe('foreign-after-fsync');
+      } else {
+        expect(existsSync(output)).toBe(false);
+      }
+    },
+  );
+
   it('treats directory fsync as unsupported on Windows without reporting failure', () => {
     let calls = 0;
 

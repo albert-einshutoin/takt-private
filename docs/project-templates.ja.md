@@ -377,3 +377,91 @@ major 1 の未対応 version は `UNSUPPORTED_SCHEMA_VERSION` になります。
 lock を作成して、source の commit と各 entry の digest を保存します。その後に
 生成した適用計画をユーザーが確認します。v1 をその場で書き換えたり、ファイル内容
 から新しい capability を推測したりしてはいけません。
+
+## 運用CLIとTaktDesk連携
+
+portableな運用境界には `takt project-template` を使います。全コマンドで
+`--cwd <path>` と `--json` を利用できます。変更可能なコマンドも既定は
+`--dry-run` で、変更にはfresh previewが返した完全一致の
+`--expected-plan-id <sha256>` と `--apply` の両方が必要です。
+
+group名だけでは操作になりません。`takt project-template` は`--json`や`--cwd`の
+有無にかかわらず、`command: "project-template"`、`INVALID_ARGUMENT`、exit `20`を持つ
+schema `1.0` error envelopeを1件だけ返します。`takt project-template --help`だけは
+helpを表示してexit `0`を返します。
+
+| コマンド | 引数 | 追加オプション | 変更 |
+|---|---|---|---|
+| `export` | 出力 `.taktpack` | `--pack-version`, `--min-takt-version`, `--source-commit`、繰り返し可能な`--approve-policy <path=policy>`、`--approve-capability <capability>` | dry-run/apply |
+| `inspect` | local `.taktpack` | `--current-takt-version` | なし |
+| `diff` | local packまたはcanonical GitHub source | `--current-takt-version` | なし |
+| `apply` | local packまたはcanonical GitHub source | `--current-takt-version` | dry-run/apply |
+| `update` | canonical GitHub source | `--current-takt-version` | dry-run/apply |
+| `rollback` | backup ID | なし | dry-run/apply |
+| `list` | なし | なし | なし |
+
+`--force` は `--apply` と同時にだけ指定でき、previewがreviewableと明示した変更を
+承認します。hard conflict、recovery state、active run、lease、integrity check、
+target drift、plan driftは迂回しません。
+project-owned pathやcapabilityの承認も兼ねません。これらをexportする場合は、繰り返し可能な
+`--approve-policy`と`--approve-capability`で明示的に承認し、fresh previewとapplyで同じ
+承認setを指定してください。指定順はcanonical化されますが、承認内容を変えるとplanも変わります。
+capability承認はpreviewがそのcapabilityを検出した場合だけ指定し、未使用の承認は不正入力になります。
+
+`--current-takt-version` はTaktDesk互換のために残す任意のruntime一致確認であり、
+simulationやoverrideではありません。指定時は実行中Takt binaryのversionと完全一致が
+必要です。高い値、低い値、形式不正な値はいずれもdispatch前に`INVALID_ARGUMENT`となり、
+完全一致planの`--apply --force`でも同じです。互換性判定は常に実runtime versionを使うため、
+previewとapplyの間でこの値を変えてもhard conflictを迂回できません。
+
+local移行例:
+
+```sh
+takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --approve-policy config.yaml=managed --dry-run --json
+takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --approve-policy config.yaml=managed --apply --expected-plan-id <sha256> --json
+takt project-template inspect ./team.taktpack --cwd ./destination --json
+takt project-template apply ./team.taktpack --cwd ./destination --dry-run --json
+takt project-template apply ./team.taktpack --cwd ./destination --apply --expected-plan-id <sha256> --force --json
+```
+
+canonical GitHub例（source引数へcredentialを含めてはいけません）:
+
+```sh
+takt project-template diff github:team/repository@v1.2.3 --cwd ./destination --json
+takt project-template apply github:team/repository@v1.2.3 --cwd ./destination --dry-run --json
+takt project-template update github:team/repository@v1.2.3 --cwd ./destination --dry-run --json
+takt project-template update github:team/repository@v1.2.3 --cwd ./destination --apply --expected-plan-id <sha256> --force --json
+```
+
+preview authorityはprocess-localかつsingle-useです。TaktDeskが保存できるのは安全なJSONの
+`planId`、件数、readiness、review code、backup ID、recovery stateだけです。内部plan
+objectを保存したり、別process・別machineへauthorityを移動したりしてはいけません。
+Apply時はTaktDeskが`--expected-plan-id`付きで新しいCLI processを起動します。そのprocessが
+leaseを取得し、sourceと3-lock cohortをfresh readしてplanを再導出します。証拠が変わって
+いれば、古いpreviewを適用せずdriftを返します。
+
+backupの一覧とrollbackはboundedかつ明示的です:
+
+```sh
+takt project-template list --cwd ./destination --json
+takt project-template rollback backup-20260801 --cwd ./destination --dry-run --json
+takt project-template rollback backup-20260801 --cwd ./destination --apply --expected-plan-id <sha256> --json
+```
+
+templateがinstall済みの場合、`list`はboundedな`sourceProvenance`射影として
+`kind`、immutableな`sourceId`、`revision`、`version`、`archiveId`、`manifestId`を
+返します。local path、repository URL、credential、mutable refは意図的に含めません。
+単一list操作中にprovenance射影が変化した場合は、状態を混在表示せずtarget driftとして扱います。
+
+machine出力はclosed schema `1.0`の単一envelopeです。`status`、`command`、`mode`、
+`warnings`と、`result`または安定した`error.code`を持ちます。exit codeは`0`成功、
+`20`不正な呼び出し、`21`review/conflict、`22`drift、`23`coordination/security guard、
+`24`source/backupの利用不可または不正、`25`rollback/recovery/結果不確定、`70`内部・
+protocol failure、mutation admission前のinterruptは`130`です。admission後はcommit、
+rollback、recoveryの終端までdrainします。UI taskのcancelだけから成否を推測してはいけません。
+
+従来の `devloopd onboard-repo` はpersonal automation設定向けのadvisory compatibilityとして
+残ります。portable packのexport/apply protocolではなく、TaktDesk移行authorityには使いません。
+
+completionは`bin/completions/`にあります。bashは`takt.bash`をsourceし、zshは`_takt`を
+含むdirectoryを`fpath`へ追加し、fishは`takt.fish`をcompletion directoryへ配置します。

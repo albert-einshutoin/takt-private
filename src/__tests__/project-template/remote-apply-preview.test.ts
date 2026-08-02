@@ -33,8 +33,10 @@ import {
 import { serializeTemplateLock } from '../../features/project-template/lock.js';
 import {
   consumeProjectTemplateApplyPreviewApproval,
+  issueOwnedProjectTemplateApplyPreviewApproval,
   issueTrustedProjectTemplateApplyPreviewApproval,
 } from '../../features/project-template/apply-preview-approval.js';
+import { acquireProjectTemplateApplyLease } from '../../features/project-template/apply-lease.js';
 import {
   initializeProjectTemplateApplyStorage,
 } from '../../features/project-template/apply-storage.js';
@@ -302,5 +304,37 @@ describe('remote project template composite preview', () => {
       evidence: tamperedEvidence,
       now: new Date('2026-08-01T00:01:00.000Z'),
     })).resolves.toBe(false);
+  });
+
+  it('issues internal approval only through a currently owned apply lease', async () => {
+    const projectRoot = repository();
+    const lease = acquireProjectTemplateApplyLease(projectRoot);
+    const storage = await initializeProjectTemplateApplyStorage({ repoPath: projectRoot });
+    const value = preview();
+    const evidence = await issueOwnedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      storage,
+      lease,
+      preview: value,
+      baselineStrategy: 'adopt-identical',
+      now: new Date('2026-08-01T00:00:00.000Z'),
+    });
+
+    await expect(consumeProjectTemplateApplyPreviewApproval({
+      storage,
+      preview: value,
+      baselineStrategy: 'adopt-identical',
+      evidence,
+      now: new Date('2026-08-01T00:01:00.000Z'),
+    })).resolves.toBe(true);
+    lease.release();
+
+    await expect(issueOwnedProjectTemplateApplyPreviewApproval({
+      projectRoot,
+      storage,
+      lease,
+      preview: preview(),
+      baselineStrategy: 'adopt-identical',
+    })).rejects.toThrow();
   });
 });

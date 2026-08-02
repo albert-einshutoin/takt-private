@@ -449,3 +449,101 @@ command or adapter. The adapter should parse v1 first, write a new v2 manifest
 and lock, preserve source commit and every entry digest, then require users to
 review the generated apply plan. Do not rewrite a v1 manifest in place or guess
 new capabilities from file contents.
+
+## Operator CLI and TaktDesk handoff
+
+Use `takt project-template` as the portable operator boundary. All commands
+accept `--cwd <path>` and `--json`. Commands that can mutate default to
+`--dry-run`; mutation requires both `--apply` and the exact
+`--expected-plan-id <sha256>` returned by a fresh preview.
+
+The group name alone is not an operation. `takt project-template` (with or
+without `--json` or `--cwd`) returns one schema `1.0` error envelope with
+`command: "project-template"`, `INVALID_ARGUMENT`, and exit `20`. Only
+`takt project-template --help` returns help with exit `0`.
+
+| Command | Operand | Additional options | Mutation |
+|---|---|---|---|
+| `export` | output `.taktpack` | `--pack-version`, `--min-takt-version`, `--source-commit`, repeatable `--approve-policy <path=policy>`, repeatable `--approve-capability <capability>` | dry-run/apply |
+| `inspect` | local `.taktpack` | `--current-takt-version` | never |
+| `diff` | local pack or canonical GitHub source | `--current-takt-version` | never |
+| `apply` | local pack or canonical GitHub source | `--current-takt-version` | dry-run/apply |
+| `update` | canonical GitHub source | `--current-takt-version` | dry-run/apply |
+| `rollback` | backup ID | none | dry-run/apply |
+| `list` | none | none | never |
+
+`--force` is valid only with `--apply`. It approves changes that the preview
+explicitly classified as reviewable. It never bypasses a hard conflict,
+recovery state, active run, lease, integrity check, target drift, or plan drift.
+It does not approve project-owned paths or capabilities. Export those only with
+explicit, repeatable `--approve-policy` and `--approve-capability` flags. Use a
+capability approval only when the preview detects that capability; unused
+approvals are invalid. Repeat
+the exact approval set on the fresh preview and apply commands; approval order is
+canonicalized, while a changed approval produces a different plan.
+
+`--current-takt-version` is an optional caller assertion retained for TaktDesk
+compatibility; it is not a simulation or override. When present, it must
+exactly equal the version of the Takt binary executing the command. A higher,
+lower, or invalid value returns `INVALID_ARGUMENT` before dispatch, including
+for an exact-plan `--apply --force`. Compatibility checks always use the actual
+runtime version, so changing this assertion between preview and apply cannot
+bypass a hard conflict.
+
+Local transfer example:
+
+```sh
+takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --approve-policy config.yaml=managed --dry-run --json
+takt project-template export ./team.taktpack --cwd ./source --pack-version 1.0.0 --min-takt-version 0.48.0 --source-commit 0123456789abcdef0123456789abcdef01234567 --approve-policy config.yaml=managed --apply --expected-plan-id <sha256> --json
+takt project-template inspect ./team.taktpack --cwd ./destination --json
+takt project-template apply ./team.taktpack --cwd ./destination --dry-run --json
+takt project-template apply ./team.taktpack --cwd ./destination --apply --expected-plan-id <sha256> --force --json
+```
+
+Canonical GitHub example (never place credentials in the source argument):
+
+```sh
+takt project-template diff github:team/repository@v1.2.3 --cwd ./destination --json
+takt project-template apply github:team/repository@v1.2.3 --cwd ./destination --dry-run --json
+takt project-template update github:team/repository@v1.2.3 --cwd ./destination --dry-run --json
+takt project-template update github:team/repository@v1.2.3 --cwd ./destination --apply --expected-plan-id <sha256> --force --json
+```
+
+Preview authority is process-local, single-use state. TaktDesk may persist the
+safe JSON `planId`, counts, readiness, review codes, backup ID, and recovery
+state, but must not persist an internal plan object or attempt to move its
+authority to another process or machine. On Apply, TaktDesk invokes a new CLI
+process with `--expected-plan-id`; that process reacquires the lease, re-reads
+the source and three-lock cohort, and re-derives the plan. Changed evidence
+returns drift instead of applying the old preview.
+
+List and rollback remain bounded and explicit:
+
+```sh
+takt project-template list --cwd ./destination --json
+takt project-template rollback backup-20260801 --cwd ./destination --dry-run --json
+takt project-template rollback backup-20260801 --cwd ./destination --apply --expected-plan-id <sha256> --json
+```
+
+For an installed template, `list` returns the bounded `sourceProvenance`
+projection: `kind`, immutable `sourceId`, `revision`, `version`, `archiveId`,
+and `manifestId`. It intentionally excludes local paths, repository URLs,
+credentials, and mutable refs. Treat a changed provenance projection during a
+single list operation as target drift rather than displaying mixed state.
+
+Machine output is one closed schema `1.0` envelope with `status`, `command`,
+`mode`, `warnings`, and either `result` or a stable `error.code`. Exit codes are
+`0` success, `20` invalid invocation, `21` review/conflict, `22` drift, `23`
+coordination/security guard, `24` unavailable or invalid source/backup, `25`
+rollback/recovery/indeterminate operation, `70` internal/protocol failure, and
+`130` interruption before mutation admission. After admission, the process
+drains commit, rollback, or recovery before returning; callers must not infer
+failure or success from a cancelled UI task alone.
+
+The older `devloopd onboard-repo` workflow remains available as advisory
+compatibility for personal automation setup. It is not a portable pack
+export/apply protocol and must not be used as TaktDesk migration authority.
+
+Completion files ship in `bin/completions/`: source `takt.bash` for bash, add
+the directory containing `_takt` to zsh `fpath`, or copy `takt.fish` into the
+fish completions directory.

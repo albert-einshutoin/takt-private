@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { TextDecoder, types } from 'node:util';
 import { ProjectTemplateValidationError } from './errors.js';
 import { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
-import { requireSemVer } from './validation.js';
+import { parseSource, requireSemVer } from './validation.js';
 
 export const PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH =
   '.takt-template-source-lock.json';
@@ -27,7 +27,13 @@ const HASH_SAMPLE = CAPTURED_CREATE_HASH('sha256');
 const CAPTURED_HASH_UPDATE = HASH_SAMPLE.update;
 const CAPTURED_HASH_DIGEST = HASH_SAMPLE.digest;
 
-export interface ProjectTemplateSourceProvenanceV1 {
+interface ProjectTemplateSourceProvenanceArchiveV1 {
+  readonly sha256: string;
+  readonly version: string;
+  readonly manifestSha256: string;
+}
+
+export interface ProjectTemplateGithubSourceProvenanceV1 {
   readonly schemaVersion: '1.0';
   readonly source: {
     readonly owner: string;
@@ -40,17 +46,34 @@ export interface ProjectTemplateSourceProvenanceV1 {
     readonly commit: string;
     readonly descriptorSha256: string;
   };
-  readonly archive: {
-    readonly sha256: string;
-    readonly version: string;
-    readonly manifestSha256: string;
-  };
+  readonly archive: ProjectTemplateSourceProvenanceArchiveV1;
   readonly dependencyVerification: {
     readonly method: 'github-ref-to-commit-v1';
     readonly declarationSha256: string;
     readonly count: number;
   };
 }
+
+export interface ProjectTemplateLocalSourceProvenanceV1 {
+  readonly schemaVersion: '1.0';
+  readonly source: {
+    readonly kind: 'local-import';
+    readonly uri: string;
+    readonly ref: 'workspace';
+    readonly commit: string;
+    readonly descriptorSha256: string;
+  };
+  readonly archive: ProjectTemplateSourceProvenanceArchiveV1;
+  readonly dependencyVerification: {
+    readonly method: 'local-empty-v1';
+    readonly declarationSha256: string;
+    readonly count: 0;
+  };
+}
+
+export type ProjectTemplateSourceProvenanceV1 =
+  | ProjectTemplateGithubSourceProvenanceV1
+  | ProjectTemplateLocalSourceProvenanceV1;
 
 function validationError(
   code: ProjectTemplateValidationError['code'],
@@ -165,7 +188,7 @@ export function parseProjectTemplateSourceProvenance(
     );
   }
 
-  const sourceKeys = [
+  const githubSourceKeys = [
     'owner',
     'repo',
     'repositoryUrl',
@@ -175,14 +198,105 @@ export function parseProjectTemplateSourceProvenance(
     'commit',
     'descriptorSha256',
   ] as const;
+  const localSourceKeys = [
+    'kind',
+    'uri',
+    'ref',
+    'commit',
+    'descriptorSha256',
+  ] as const;
   const rawSource = exactRecordVariant(
     root['source'],
     [
-      sourceKeys,
-      [...sourceKeys, 'assetName'],
+      githubSourceKeys,
+      [...githubSourceKeys, 'assetName'],
+      localSourceKeys,
     ],
     'sourceProvenance.source',
   );
+
+  const rawArchive = exactRecord(
+    root['archive'],
+    ['sha256', 'version', 'manifestSha256'],
+    'sourceProvenance.archive',
+  );
+  const version = requireSemVer(
+    rawArchive['version'],
+    'sourceProvenance.archive.version',
+  );
+  const archive = freeze({
+    sha256: sha256(
+      rawArchive['sha256'],
+      'sourceProvenance.archive.sha256',
+    ),
+    version,
+    manifestSha256: sha256(
+      rawArchive['manifestSha256'],
+      'sourceProvenance.archive.manifestSha256',
+    ),
+  });
+  const rawEvidence = exactRecord(
+    root['dependencyVerification'],
+    ['method', 'declarationSha256', 'count'],
+    'sourceProvenance.dependencyVerification',
+  );
+
+  if (rawSource['kind'] === 'local-import') {
+    let parsedLocalSource;
+    try {
+      parsedLocalSource = parseSource({
+        kind: 'local',
+        uri: rawSource['uri'],
+        ref: rawSource['ref'],
+        commit: rawSource['commit'],
+      });
+    } catch {
+      validationError(
+        'INVALID_SOURCE',
+        'local source provenance identity is invalid',
+        'sourceProvenance.source',
+      );
+    }
+    if (
+      parsedLocalSource.kind !== 'local'
+      || rawEvidence['method'] !== 'local-empty-v1'
+      || rawEvidence['count'] !== 0
+    ) {
+      validationError(
+        'INVALID_SOURCE',
+        'local source provenance requires empty local dependency verification',
+        'sourceProvenance.dependencyVerification',
+      );
+    }
+
+    // A local import can attest to the inspected archive, but it must never
+    // manufacture GitHub repository or ref authority that the archive lacks.
+    const source = freeze({
+      kind: 'local-import' as const,
+      uri: parsedLocalSource.uri,
+      ref: parsedLocalSource.ref,
+      commit: parsedLocalSource.commit,
+      descriptorSha256: sha256(
+        rawSource['descriptorSha256'],
+        'sourceProvenance.source.descriptorSha256',
+      ),
+    });
+    const dependencyVerification = freeze({
+      method: 'local-empty-v1' as const,
+      declarationSha256: sha256(
+        rawEvidence['declarationSha256'],
+        'sourceProvenance.dependencyVerification.declarationSha256',
+      ),
+      count: 0 as const,
+    });
+    return freeze({
+      schemaVersion: '1.0' as const,
+      source,
+      archive,
+      dependencyVerification,
+    });
+  }
+
   const owner = string(rawSource['owner'], 'sourceProvenance.source.owner');
   const repo = string(rawSource['repo'], 'sourceProvenance.source.repo');
   const repositoryUrl = string(
@@ -240,15 +354,6 @@ export function parseProjectTemplateSourceProvenance(
     );
   }
 
-  const rawArchive = exactRecord(
-    root['archive'],
-    ['sha256', 'version', 'manifestSha256'],
-    'sourceProvenance.archive',
-  );
-  const version = requireSemVer(
-    rawArchive['version'],
-    'sourceProvenance.archive.version',
-  );
   const tagVersion = requireSemVer(
     releaseTag.startsWith('v') ? releaseTag.slice(1) : releaseTag,
     'sourceProvenance.source.releaseTag',
@@ -261,11 +366,6 @@ export function parseProjectTemplateSourceProvenance(
     );
   }
 
-  const rawEvidence = exactRecord(
-    root['dependencyVerification'],
-    ['method', 'declarationSha256', 'count'],
-    'sourceProvenance.dependencyVerification',
-  );
   if (rawEvidence['method'] !== 'github-ref-to-commit-v1') {
     validationError(
       'INVALID_SOURCE',
@@ -301,17 +401,6 @@ export function parseProjectTemplateSourceProvenance(
     descriptorSha256: sha256(
       rawSource['descriptorSha256'],
       'sourceProvenance.source.descriptorSha256',
-    ),
-  });
-  const archive = freeze({
-    sha256: sha256(
-      rawArchive['sha256'],
-      'sourceProvenance.archive.sha256',
-    ),
-    version,
-    manifestSha256: sha256(
-      rawArchive['manifestSha256'],
-      'sourceProvenance.archive.manifestSha256',
     ),
   });
   const dependencyVerification = freeze({

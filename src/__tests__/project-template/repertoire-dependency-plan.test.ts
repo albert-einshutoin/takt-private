@@ -11,6 +11,7 @@ import {
 } from '../../features/project-template/repertoire-dependency-lock.js';
 import {
   calculateProjectTemplateRepertoireDependencyPlanId,
+  createLocalEmptyProjectTemplateRepertoireDependencyPlan,
   createProjectTemplateRepertoireDependencyPlan,
 } from '../../features/project-template/repertoire-dependency-plan.js';
 
@@ -99,6 +100,52 @@ function create(
 }
 
 describe('project template repertoire dependency plan G4.2', () => {
+  it('creates a formal empty local plan for exact 000 and 111 cohorts', () => {
+    const incoming = lock([]);
+    const firstInstall = createLocalEmptyProjectTemplateRepertoireDependencyPlan({
+      incomingLock: incoming,
+      previousLock: { state: 'absent' },
+    });
+    const existing = createLocalEmptyProjectTemplateRepertoireDependencyPlan({
+      incomingLock: incoming,
+      previousLock: {
+        state: 'present',
+        content: serializeProjectTemplateRepertoireDependencyLock(incoming),
+      },
+    });
+
+    expect(firstInstall).toMatchObject({
+      previousLockState: 'absent',
+      dependencies: [],
+      globalConflicts: [],
+      hardConflict: false,
+      nextLock: incoming,
+    });
+    expect(existing).toMatchObject({
+      previousLockState: 'valid',
+      dependencies: [],
+      globalConflicts: [],
+      reviewRequired: false,
+      defaultApplyPossible: true,
+      nextLock: incoming,
+    });
+    expect(calculateProjectTemplateRepertoireDependencyPlanId(firstInstall))
+      .toBe(firstInstall.planId);
+    expect(firstInstall.preconditionToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(firstInstall.preconditionToken).not.toBe(existing.preconditionToken);
+  });
+
+  it('rejects non-empty and unavailable input at the local empty boundary', () => {
+    expect(() => createLocalEmptyProjectTemplateRepertoireDependencyPlan({
+      incomingLock: lock(),
+      previousLock: { state: 'absent' },
+    })).toThrow();
+    expect(() => createLocalEmptyProjectTemplateRepertoireDependencyPlan({
+      incomingLock: lock([]),
+      previousLock: { state: 'unavailable' },
+    })).toThrow();
+  });
+
   it('creates a deterministic immutable add plan and next lock', () => {
     const incoming = lock();
     const plan = create(incoming);

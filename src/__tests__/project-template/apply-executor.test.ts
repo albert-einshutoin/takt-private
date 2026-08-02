@@ -2539,6 +2539,6 @@ describe('project template atomic apply executor', () => {
     expect(existsSync(join(root, '.takt'))).toBe(false);
     expect(existsSync(markerPath)).toBe(false);
     await expect(recoverProjectTemplateApply({ projectRoot: root }))
-      .resolves.toMatchObject({ status: 'rolled_back' });
+      .resolves.toMatchObject({ status: 'not_started', code: 'NO_RECOVERY_STATE' });
   });
 });

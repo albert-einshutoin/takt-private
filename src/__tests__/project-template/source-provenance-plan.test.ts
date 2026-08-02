@@ -35,6 +35,29 @@ function provenance(version = '2.1.0'): Record<string, unknown> {
   };
 }
 
+function localProvenance(version = '2.1.0'): Record<string, unknown> {
+  return {
+    schemaVersion: '1.0',
+    source: {
+      kind: 'local-import',
+      uri: '.',
+      ref: 'workspace',
+      commit: COMMIT_A,
+      descriptorSha256: 'a'.repeat(64),
+    },
+    archive: {
+      sha256: 'b'.repeat(64),
+      version,
+      manifestSha256: 'c'.repeat(64),
+    },
+    dependencyVerification: {
+      method: 'local-empty-v1',
+      declarationSha256: 'd'.repeat(64),
+      count: 0,
+    },
+  };
+}
+
 function nested(value: Record<string, unknown>, key: string): Record<string, unknown> {
   return value[key] as Record<string, unknown>;
 }
@@ -70,6 +93,29 @@ describe('project template source provenance plan', () => {
     expect(plan.reviewRequired).toBe(false);
     expect(plan.hardConflict).toBe(false);
     expect(plan.previousProvenanceSha256).toBe(plan.nextProvenanceSha256);
+  });
+
+  it('recognizes an unchanged local import without inventing release changes', () => {
+    const incoming = localProvenance();
+    const plan = createProjectTemplateSourceProvenancePlan({
+      incoming,
+      previous: { state: 'present', provenance: incoming },
+    });
+
+    expect(plan.action).toBe('keep');
+    expect(plan.changes).toEqual([]);
+    expect(plan.conflicts).toEqual([]);
+  });
+
+  it('hard-blocks switching provenance authority between local and GitHub', () => {
+    const plan = createProjectTemplateSourceProvenancePlan({
+      incoming: localProvenance(),
+      previous: { state: 'present', provenance: provenance() },
+    });
+
+    expect(plan.changes).toContain('REPOSITORY_CHANGED');
+    expect(plan.conflicts).toContain('REPOSITORY_CHANGED');
+    expect(plan.hardConflict).toBe(true);
   });
 
   it('plans an ordinary forward release update', () => {

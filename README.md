@@ -299,6 +299,7 @@ See the [Builtin Catalog](./docs/builtin-catalog.md) for all workflows and perso
 | `takt workflow init` | Create a new workflow scaffold |
 | `takt workflow doctor` | Validate workflow definitions |
 | `takt repertoire add` | Install a repertoire package from GitHub |
+| [`takt project-template`](./docs/project-templates.md#operator-cli-and-taktdesk-handoff) | Export, inspect, apply, update, list, and roll back portable `.takt` templates |
 | `devloopd doctor --subscription-only` | Validate local subscription-only provider readiness |
 | `devloopd provider-smoke --cwd /path/to/repo` | Report pass/fail/skip for configured local provider CLIs |
 | `devloopd onboard-repo --cwd /path/to/repo --repo owner/repo` | Dry-run personal automation onboarding for a target repo |

@@ -118,6 +118,7 @@ export {
   renderProjectTemplateApplyPreviewHuman,
   renderProjectTemplateApplyPreviewJson,
   createGithubProjectTemplateRemotePreview,
+  createProductionProjectTemplateCliRollbackService,
   inspectProjectTemplateApplyGuard,
   runProjectTemplateDoctor,
   PROJECT_TEMPLATE_LOCK_PATH,
@@ -125,6 +126,12 @@ export {
   recoverProjectTemplateApply,
   rollbackProjectTemplateApply,
   canonicalizeTaktpackJson,
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
+  PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES,
+  parseProjectTemplateCliEnvelopeJson,
+  parseProjectTemplateCliMutationOptions,
+  presentProjectTemplateCliEnvelope,
+  createProductionProjectTemplateCliLocalApplyService,
   TAKTPACK_ENTRY_NAMES,
   TAKTPACK_BLOB_PREFIX,
   DEFAULT_TAKTPACK_LIMITS,
@@ -146,6 +153,9 @@ export {
   createProjectTemplateRemoteProductionComposition,
   ProjectTemplateRemoteProductionCompositionError,
 } from './infra/github/project-template-remote-production-composition.js';
+export {
+  createProjectTemplateCliRemoteProductionRuntime,
+} from './infra/github/project-template-cli-remote-production.js';
 export type {
   ProjectTemplateGithubArchiveAssetPortDependencies,
 } from './infra/github/project-template-github-archive-asset-port.js';
@@ -162,6 +172,10 @@ export type {
   ProjectTemplateRemoteProductionComposition,
   ProjectTemplateRemoteProductionCompositionErrorCode,
 } from './infra/github/project-template-remote-production-composition.js';
+export type {
+  ProjectTemplateCliRemoteProductionOptions,
+  ProjectTemplateCliRemoteProductionRuntime,
+} from './infra/github/project-template-cli-remote-production.js';
 export type {
   ProjectTemplateManifestV1,
   ProjectTemplateGithubRefSourceSpec,
@@ -262,4 +276,17 @@ export type {
   ProjectTemplateApplyResult,
   ProjectTemplateRecoveryResult,
   ProjectTemplateRollbackResult,
+  ProjectTemplateCliCommand,
+  ProjectTemplateCliEnvelope,
+  ProjectTemplateCliExitCode,
+  ProjectTemplateCliMode,
+  ProjectTemplateCliMutationOptions,
+  ProjectTemplateCliResult,
+  ProjectTemplateCliReadiness,
+  ProjectTemplateCliRecoveryState,
+  ProjectTemplateCliReviewCode,
+  ProjectTemplateCliApplyOptions,
+  ProjectTemplateCliDryRunOptions,
+  ProjectTemplateCliRollbackOptions,
+  ProjectTemplateCliRollbackService,
 } from './features/project-template/index.js';

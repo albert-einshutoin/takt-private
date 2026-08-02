@@ -34,9 +34,15 @@ import {
   linearizePreparedProjectTemplateRemoteTransaction,
   ProjectTemplateRemoteTransactionLinearizationError,
 } from './remote-transaction-linearization.js';
+import { readProjectTemplateCompanionLockState } from './companion-lock-state-reader.js';
+import {
+  calculateProjectTemplateTargetPreconditionToken,
+  captureProjectTemplateTargetSnapshot,
+} from './target-snapshot.js';
 
 type TransactionTargetPhase =
   | `content-entry-${number}`
+  | `merge-baseline-${number}`
   | 'content-lock'
   | 'repertoire-lock'
   | 'source-provenance';
@@ -99,6 +105,17 @@ export class ProjectTemplateCompanionLockRecoveryError extends Error {
   constructor() {
     super('project template companion lock recovery is blocked');
     this.name = 'ProjectTemplateCompanionLockRecoveryError';
+    Object.freeze(this);
+  }
+}
+
+export class ProjectTemplateCompanionLockTargetDriftError extends Error {
+  readonly code = 'TARGET_DRIFT' as const;
+  readonly operatorDetail = 'target-precondition-changed' as const;
+
+  constructor() {
+    super('project template target changed before approval consumption');
+    this.name = 'ProjectTemplateCompanionLockTargetDriftError';
     Object.freeze(this);
   }
 }
@@ -173,6 +190,7 @@ async function publish(
   staged: ProjectTemplateStagingFile,
   phasePrefix?: TransactionTargetPhase,
   onPhase?: (phase: ProjectTemplateCompanionLockTransactionPhase) => void,
+  expectedBefore?: ProjectTemplateBackupEntryState,
 ): Promise<void> {
   const target = resolveProjectTemplateApplyTarget(storage, staged.target);
   if (staged.target.kind === 'template-entry') {
@@ -223,6 +241,14 @@ async function publish(
   await storage.io.fsyncFile(staged.absolutePath);
   if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-after-fsync`);
   if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-before-rename`);
+  if (
+    expectedBefore !== undefined
+    && !stateMatches(
+      await currentState(storage, staged.target),
+      expectedBefore,
+      storage.platform,
+    )
+  ) throw new Error('transaction target changed immediately before publish');
   await storage.io.rename(staged.absolutePath, target.absolutePath);
   if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-after-rename`);
   await storage.io.fsyncDirectory(dirname(target.absolutePath));
@@ -301,9 +327,21 @@ async function removeCreatedTargetDirectories(
 async function deletePublishedTarget(
   storage: ProjectTemplateApplyStorage,
   target: ProjectTemplateApplyTarget,
+  expectedBefore?: ProjectTemplateBackupEntryState,
+  phasePrefix?: TransactionTargetPhase,
+  onPhase?: (phase: ProjectTemplateCompanionLockTransactionPhase) => void,
 ): Promise<void> {
   const resolved = resolveProjectTemplateApplyTarget(storage, target);
   try {
+    if (phasePrefix !== undefined) onPhase?.(`${phasePrefix}-before-rename`);
+    if (
+      expectedBefore !== undefined
+      && !stateMatches(
+        await currentState(storage, target),
+        expectedBefore,
+        storage.platform,
+      )
+    ) throw new Error('transaction delete target changed before publish');
     const stat = await storage.io.lstat(resolved.absolutePath);
     if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
       throw new Error('transaction delete target is unsafe');
@@ -340,6 +378,8 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
     readonly lease: ProjectTemplateApplyLease;
     readonly transactionPlanId: string;
     readonly preconditionToken: string;
+    readonly candidatePaths: readonly string[];
+    readonly expectedPreviousLocksSha256?: string;
     readonly outputs: {
       readonly contentEntries?: readonly (
         | {
@@ -350,6 +390,10 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
         }
         | { readonly path: string; readonly action: 'delete' }
       )[];
+      readonly mergeBaselines?: readonly {
+        readonly sha256: string;
+        readonly content: Uint8Array;
+      }[];
       readonly contentLock: Uint8Array;
       readonly repertoireLock: Uint8Array;
       readonly sourceProvenance: Uint8Array;
@@ -365,6 +409,22 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
 }> {
   const storage = options.storage;
   assertOwned(storage, options.lease);
+  let targetDrift = false;
+  const assertContentPrecondition = async (): Promise<void> => {
+    const snapshot = await captureProjectTemplateTargetSnapshot(
+      storage.repoRoot,
+      options.candidatePaths,
+    );
+    assertOwned(storage, options.lease);
+    if (
+      calculateProjectTemplateTargetPreconditionToken(snapshot)
+      !== options.preconditionToken
+    ) {
+      targetDrift = true;
+      throw new ProjectTemplateCompanionLockTargetDriftError();
+    }
+  };
+  await assertContentPrecondition();
   const transactionId = `remote-${randomUUID()}`;
   const backupId = `backup-${randomUUID()}`;
   const contentOutputs = (options.outputs.contentEntries ?? [])
@@ -383,7 +443,27 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
             content: entry.content,
             targetMode: entry.mode,
           });
+  const baselineOutputs = (options.outputs.mergeBaselines ?? [])
+    .slice()
+    .sort((left, right) => left.sha256.localeCompare(right.sha256))
+    .map((entry, index): TransactionOutput => ({
+      target: { kind: 'merge-baseline', sha256: entry.sha256 },
+      phasePrefix: `merge-baseline-${index}`,
+      action: 'write',
+      content: entry.content,
+      targetMode: '0600',
+    }));
+  if (
+    new Set(baselineOutputs.map((output) => (
+      (output.target as { sha256: string }).sha256
+    ))).size !== baselineOutputs.length
+    || baselineOutputs.some((output) => (
+      hash(output.content!)
+      !== (output.target as { sha256: string }).sha256
+    ))
+  ) throw new Error('merge baseline outputs are invalid');
   const outputs: readonly TransactionOutput[] = [
+    ...baselineOutputs,
     ...contentOutputs,
     { target: { kind: 'content-lock' }, phasePrefix: 'content-lock', action: 'write', content: options.outputs.contentLock, targetMode: '0600' },
     { target: { kind: 'repertoire-lock' }, phasePrefix: 'repertoire-lock', action: 'write', content: options.outputs.repertoireLock, targetMode: '0600' },
@@ -398,8 +478,17 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
         observed.set(output.phasePrefix, await currentState(storage, output.target));
         assertOwned(storage, options.lease);
       }
+      const effectiveOutputs = outputs.filter((output) => {
+        if (output.target.kind !== 'merge-baseline') return true;
+        const before = observed.get(output.phasePrefix)!;
+        if (before.kind === 'absent') return true;
+        if (before.sha256 !== output.target.sha256) {
+          throw new Error('merge baseline target is not immutable');
+        }
+        return false;
+      });
       const staged: Array<TransactionOutput & { staged?: ProjectTemplateStagingFile }> = [];
-      for (const output of outputs) {
+      for (const output of effectiveOutputs) {
         let stagedFile: ProjectTemplateStagingFile | undefined;
         if (output.action === 'write') {
           stagedFile = await writeProjectTemplateStagingFile({
@@ -460,8 +549,12 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
       }
       const createdTargetDirectories = await collectMissingTargetDirectories(
         storage,
-        outputs,
+        effectiveOutputs,
       );
+      // Why: staging and backup copy await filesystem I/O. Re-reading the
+      // sealed candidate set here prevents a concurrent editor from becoming
+      // the transaction's accidental rollback baseline.
+      await assertContentPrecondition();
       await writeJournal(storage, {
         transactionId,
         planId: options.transactionPlanId,
@@ -499,6 +592,19 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
       });
     },
     async consumeApproval() {
+      // This is the last pre-consume boundary. If journal durability yielded
+      // to a foreign editor, authority remains unconsumed and cleanup below
+      // removes only private preparation artifacts.
+      await assertContentPrecondition();
+      if (options.expectedPreviousLocksSha256 !== undefined) {
+        assertOwned(storage, options.lease);
+        const current = readProjectTemplateCompanionLockState(storage.repoRoot);
+        assertOwned(storage, options.lease);
+        if (
+          current.previousLocksSha256
+          !== options.expectedPreviousLocksSha256
+        ) throw new Error('project template companion lock cohort changed');
+      }
       const consumed = await options.consumeApproval();
       if (consumed) options.onPhase?.('approval-consumed');
       return consumed;
@@ -516,14 +622,26 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
       });
       assertOwned(storage, options.lease);
       for (const operation of prepared.operations) {
+        if (!stateMatches(
+          await currentState(storage, operation.target),
+          operation.before,
+          storage.platform,
+        )) throw new Error('transaction target changed after durable intent');
         if (operation.action === 'delete') {
-          await deletePublishedTarget(storage, operation.target);
+          await deletePublishedTarget(
+            storage,
+            operation.target,
+            operation.before,
+            operation.phasePrefix,
+            options.onPhase,
+          );
         } else {
           await publish(
             storage,
             operation.staged!,
             operation.phasePrefix,
             options.onPhase,
+            operation.before,
           );
         }
         assertOwned(storage, options.lease);
@@ -571,6 +689,18 @@ export async function executeOwnedProjectTemplateCompanionLockTransaction(
     },
     });
   } catch (error) {
+    if (targetDrift) {
+      // No approval was consumed and no target mutation began. These are
+      // private preparation artifacts only; foreign target bytes stay intact.
+      try {
+        await removeProjectTemplateStagingTransaction({ storage, transactionId });
+        await removeProjectTemplateBackupGeneration({ storage, backupId });
+        await removeJournal(storage);
+      } catch {
+        throw new ProjectTemplateCompanionLockRecoveryError();
+      }
+      throw new ProjectTemplateCompanionLockTargetDriftError();
+    }
     if (error instanceof ProjectTemplateRemoteTransactionLinearizationError) {
       // Recovery runs under the already-owned lease. It never reacquires or
       // consults network, receipt, cache, or approval state; a post-consume
@@ -823,6 +953,15 @@ async function recoverOwnedStorage(
       await reclaimProjectTemplatePreparationOrphans({ storage });
       assertOwned(storage, lease);
       return { status: 'none' };
+    }
+    // Why: rollback-owned journals bind recovery to independently staged bytes.
+    // The companion-lock path only understands apply journals and must never
+    // reinterpret the mutable historical backup as rollback authority.
+    if (
+      journal.transactionId.startsWith('rollback-')
+      || journal.rollbackManifestSha256 !== undefined
+    ) {
+      throw new ProjectTemplateCompanionLockRecoveryError();
     }
     let manifest: ProjectTemplateBackupManifest;
     try {

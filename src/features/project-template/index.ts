@@ -107,6 +107,54 @@ export type {
   DeepReadonly,
 } from './archive-types.js';
 export { canonicalizeTaktpackJson } from './canonical-json.js';
+export {
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
+  PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES,
+  ProjectTemplateCliContractError,
+  createProjectTemplateCliFailure,
+  createProjectTemplateCliSuccess,
+  parseProjectTemplateCliMutationOptions,
+  parseProjectTemplateCliEnvelopeJson,
+  presentProjectTemplateCliEnvelope,
+  projectTemplateCliExitCodeForErrorCode,
+  writeProjectTemplateCliOutcome,
+} from './cli-machine-contract.js';
+export type {
+  ProjectTemplateCliApplyOptions,
+  ProjectTemplateCliCommand,
+  ProjectTemplateCliEnvelope,
+  ProjectTemplateCliErrorCode,
+  ProjectTemplateCliExitCode,
+  ProjectTemplateCliFailureEnvelope,
+  ProjectTemplateCliJson,
+  ProjectTemplateCliMode,
+  ProjectTemplateCliMutationOptions,
+  ProjectTemplateCliOutcome,
+  ProjectTemplateCliSuccessEnvelope,
+  ProjectTemplateCliWarning,
+  ProjectTemplateCliWarningCode,
+  ProjectTemplateCliDryRunOptions,
+  ProjectTemplateCliResult,
+  ProjectTemplateCliReadiness,
+  ProjectTemplateCliRecoveryState,
+  ProjectTemplateCliReviewCode,
+  ProjectTemplateCliSuccessInput,
+} from './cli-machine-contract.js';
+export { startProjectTemplateCliLifecycle } from './cli-lifecycle.js';
+export {
+  createProductionProjectTemplateCliLocalApplyService,
+} from './cli-local-apply-service.js';
+export {
+  createProductionProjectTemplateCliRollbackService,
+} from './cli-rollback-service.js';
+export type {
+  ProjectTemplateCliRollbackOptions,
+  ProjectTemplateCliRollbackService,
+} from './cli-rollback-service.js';
+export type {
+  ProjectTemplateCliLifecycleContext,
+  ProjectTemplateCliLifecycleExecution,
+} from './cli-lifecycle.js';
 export { createProjectTemplateExportPlan } from './export-plan.js';
 export { writeTaktpack } from './archive-writer.js';
 export { inspectTaktpack } from './archive-inspector.js';
@@ -143,6 +191,8 @@ export type {
   ProjectTemplateRemoteApplyPreview,
 } from './apply-preview-types.js';
 export type {
+  ProjectTemplateGithubSourceProvenanceV1,
+  ProjectTemplateLocalSourceProvenanceV1,
   ProjectTemplateSourceProvenanceV1,
 } from './source-provenance.js';
 export type {

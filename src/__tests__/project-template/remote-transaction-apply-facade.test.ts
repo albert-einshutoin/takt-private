@@ -498,6 +498,172 @@ describe('GitHub project template remote transaction apply facade', () => {
     })).rejects.toMatchObject({ code: 'TRANSACTION_PLAN_MISMATCH' });
   });
 
+  it('issues internal approval under the lease and returns the durable backup id', async () => {
+    const value = await storedFixture();
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    const phases: string[] = [];
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: inspectionPort(),
+      onLeasePhase(phase) { phases.push(`lease:${phase}`); },
+      onApprovalPhase(phase) { phases.push(`approval:${phase}`); },
+    });
+    const { approvalEvidence: _callerAuthority, ...internalOptions } =
+      publicOptions(value.cacheRoot, value.projectRoot);
+
+    const result = await composition.applyWithInternalApproval({
+      ...internalOptions,
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: preview.transactionPlanId,
+    });
+
+    expect(result).toMatchObject({
+      status: 'committed',
+      planId: preview.transactionPlanId,
+      backupId: expect.stringMatching(/^backup-/),
+    });
+    expect(phases).toEqual([
+      'lease:acquired',
+      'approval:issued',
+      'approval:consumed',
+      'lease:released',
+    ]);
+  });
+
+  it('preserves foreign target drift and does not consume internal approval', async () => {
+    const value = await storedFixture();
+    const preview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    const targetPath = join(value.projectRoot, '.takt', 'workflows', 'review.yaml');
+    const foreign = 'name: foreign editor\n';
+    const phases: string[] = [];
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(),
+      repertoireInspectionPort: inspectionPort(),
+      onApprovalPhase(phase) {
+        phases.push(phase);
+        if (phase === 'issued') {
+          mkdirSync(dirname(targetPath), { recursive: true });
+          writeFileSync(targetPath, foreign);
+        }
+      },
+    });
+    const { approvalEvidence: _callerAuthority, ...internalOptions } =
+      publicOptions(value.cacheRoot, value.projectRoot);
+
+    await expect(composition.applyWithInternalApproval({
+      ...internalOptions,
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: preview.transactionPlanId,
+    })).rejects.toMatchObject({ code: 'TARGET_DRIFT' });
+
+    expect(phases).toEqual(['issued']);
+    expect(readFileSync(targetPath, 'utf8')).toBe(foreign);
+  });
+
+  it.each(['false', 'throw'] as const)(
+    'reports RESULT_INDETERMINATE when unused approval revocation returns %s',
+    async (failureMode) => {
+      const value = await storedFixture();
+      const preview = await createGithubProjectTemplateRemotePreview({
+        cacheRoot: value.cacheRoot,
+        receiptKey: value.prepared.receiptKey,
+        verifier: verifier(),
+        projectRoot: value.projectRoot,
+        currentTaktVersion: '0.48.0',
+        repertoireInspectionPort: inspectionPort(),
+        baselineStrategy: 'conflict',
+      });
+      const targetPath = join(value.projectRoot, '.takt', 'workflows', 'review.yaml');
+      const foreign = `name: foreign ${failureMode}\n`;
+      const composition = createProjectTemplateRemoteApplyComposition({
+        verifier: verifier(),
+        repertoireInspectionPort: inspectionPort(),
+        onApprovalPhase(phase) {
+          if (phase === 'issued') {
+            mkdirSync(dirname(targetPath), { recursive: true });
+            writeFileSync(targetPath, foreign);
+          }
+        },
+        async revokeApproval() {
+          if (failureMode === 'throw') throw new Error('private cleanup fault');
+          return false;
+        },
+      });
+      const { approvalEvidence: _callerAuthority, ...internalOptions } =
+        publicOptions(value.cacheRoot, value.projectRoot);
+
+      await expect(composition.applyWithInternalApproval({
+        ...internalOptions,
+        receiptKey: value.prepared.receiptKey,
+        expectedTransactionPlanId: preview.transactionPlanId,
+      })).rejects.toMatchObject({ code: 'RESULT_INDETERMINATE' });
+      expect(readFileSync(targetPath, 'utf8')).toBe(foreign);
+    },
+  );
+
+  it('applies an exact default-safe plan without manufacturing approval evidence', async () => {
+    const value = await storedFixture();
+    const firstPreview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    const composition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(), repertoireInspectionPort: inspectionPort(),
+    });
+    const { approvalEvidence: _callerAuthority, ...internalOptions } =
+      publicOptions(value.cacheRoot, value.projectRoot);
+    await composition.applyWithInternalApproval({
+      ...internalOptions,
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: firstPreview.transactionPlanId,
+    });
+    const defaultPreview = await createGithubProjectTemplateRemotePreview({
+      cacheRoot: value.cacheRoot,
+      receiptKey: value.prepared.receiptKey,
+      verifier: verifier(),
+      projectRoot: value.projectRoot,
+      currentTaktVersion: '0.48.0',
+      repertoireInspectionPort: inspectionPort(),
+      baselineStrategy: 'conflict',
+    });
+    expect(defaultPreview).toMatchObject({
+      reviewRequired: false, hardConflict: false, defaultApplyPossible: true,
+    });
+    const approvalPhases: string[] = [];
+    const defaultComposition = createProjectTemplateRemoteApplyComposition({
+      verifier: verifier(), repertoireInspectionPort: inspectionPort(),
+      onApprovalPhase(phase) { approvalPhases.push(phase); },
+    });
+
+    await expect(defaultComposition.applyWithInternalApproval({
+      ...internalOptions,
+      receiptKey: value.prepared.receiptKey,
+      expectedTransactionPlanId: defaultPreview.transactionPlanId,
+    })).resolves.toMatchObject({ status: 'committed' });
+    expect(approvalPhases).toEqual([]);
+  });
+
   it.each([
     [
       'content',
@@ -650,9 +816,7 @@ describe('GitHub project template remote transaction apply facade', () => {
     await expect(composition.apply({
       ...publicOptions(value.cacheRoot, value.projectRoot),
       receiptKey: value.prepared.receiptKey,
-    } as never)).rejects.toMatchObject({
-      code: 'PROJECT_TEMPLATE_COORDINATION_UNAVAILABLE',
-    });
+    } as never)).rejects.toMatchObject({ code: 'RESULT_INDETERMINATE' });
     expect(inspections).toBe(0);
   });
 

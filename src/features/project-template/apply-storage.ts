@@ -44,6 +44,7 @@ import {
 
 export { PROJECT_TEMPLATE_CONTROL_DIRECTORY } from './control-root-contract.js';
 export const DEFAULT_PROJECT_TEMPLATE_BACKUP_GENERATIONS = 5;
+export const MAX_PROJECT_TEMPLATE_LISTED_BACKUPS = 32;
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -331,7 +332,8 @@ export type ProjectTemplateApplyTarget =
   | { kind: 'lock' }
   | { kind: 'content-lock' }
   | { kind: 'repertoire-lock' }
-  | { kind: 'source-provenance' };
+  | { kind: 'source-provenance' }
+  | { kind: 'merge-baseline'; sha256: string };
 
 export interface ResolvedProjectTemplateApplyTarget {
   target: ProjectTemplateApplyTarget;
@@ -409,6 +411,8 @@ export interface ProjectTemplateApplyJournal {
   completedOperations: readonly string[];
   createdTargetDirectories: readonly string[];
   updatedAt: string;
+  /** Required only for rollback-* transactions and bound before journal publish. */
+  rollbackManifestSha256?: string;
 }
 
 export interface ProjectTemplateStagingFile extends ProjectTemplateStoredFile {
@@ -857,6 +861,24 @@ export function resolveProjectTemplateApplyTarget(
       displayPath: '.takt-template-lock.json',
     };
   }
+  if (value.kind === 'merge-baseline') {
+    if (
+      !hasExactDataKeys(value, ['kind', 'sha256'])
+      || !/^[a-f0-9]{64}$/.test(value.sha256)
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_PATH',
+        'project template merge baseline target is invalid',
+      );
+    }
+    return {
+      target: { kind: 'merge-baseline', sha256: value.sha256 },
+      key: `baseline:${value.sha256}`,
+      absolutePath: join(storage.baselinesRoot, value.sha256),
+      stagingRelativePath: `baselines/${value.sha256}`,
+      displayPath: `.takt-template-state/merge-baselines/${value.sha256}`,
+    };
+  }
   const companion = value.kind === 'content-lock'
     ? {
         key: 'content-lock',
@@ -949,6 +971,20 @@ function validateManifestTarget(
       path: safeRelativePath((target as { path: string }).path),
     };
   }
+  if (target.kind === 'merge-baseline') {
+    if (
+      schemaVersion !== '1.1'
+      || !hasExactDataKeys(value, ['kind', 'sha256'])
+      || typeof target.sha256 !== 'string'
+      || !/^[a-f0-9]{64}$/.test(target.sha256)
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'INVALID_MANIFEST',
+        'backup manifest merge baseline target is invalid',
+      );
+    }
+    return { kind: 'merge-baseline', sha256: target.sha256 };
+  }
   const expectedKinds = schemaVersion === '1.0'
     ? ['lock'] as const
     : ['content-lock', 'repertoire-lock', 'source-provenance'] as const;
@@ -1038,7 +1074,7 @@ async function ensurePrivateParents(
   // makes a maximum-length portable target longer than the public path bound.
   const segments = relativePath.split('/');
   if (
-    !['entries', 'lock', 'locks'].includes(segments[0]!)
+    !['entries', 'lock', 'locks', 'baselines'].includes(segments[0]!)
     || segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')
   ) {
     throw new ProjectTemplateApplyStorageError(
@@ -1441,6 +1477,110 @@ export async function writeProjectTemplateStagingFile(options: {
   };
 }
 
+async function assertPrivateStagingDirectories(options: {
+  storage: ProjectTemplateApplyStorage;
+  transactionRoot: string;
+  relativePath: string;
+  io: ProjectTemplateApplyStorageIo;
+}): Promise<Array<Awaited<ReturnType<ProjectTemplateApplyStorageIo['lstat']>>>> {
+  const snapshots: Array<Awaited<ReturnType<ProjectTemplateApplyStorageIo['lstat']>>> = [];
+  for (const directory of [
+    options.storage.stagingRoot,
+    options.transactionRoot,
+    ...options.relativePath.split('/').slice(0, -1).map(
+      (_segment, index, segments) => join(
+        options.transactionRoot,
+        ...segments.slice(0, index + 1),
+      ),
+    ),
+  ]) {
+    const entry = await options.io.lstat(directory);
+    if (
+      entry.isSymbolicLink()
+      || !entry.isDirectory()
+      || entry.dev !== options.storage.device
+      || !isProjectTemplatePrivateDirectoryMode(
+        entry.mode,
+        options.storage.platform,
+      )
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'project template staging directory is unsafe',
+      );
+    }
+    snapshots.push(entry);
+  }
+  return snapshots;
+}
+
+function assertStableStagingDirectoryWitnesses(
+  before: readonly Awaited<ReturnType<ProjectTemplateApplyStorageIo['lstat']>>[],
+  after: readonly Awaited<ReturnType<ProjectTemplateApplyStorageIo['lstat']>>[],
+): void {
+  if (
+    before.length !== after.length
+    || before.some((entry, index) => (
+      !areProjectTemplateDirectorySnapshotsStable(entry, after[index]!)
+    ))
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'project template staging directory changed while reading',
+    );
+  }
+}
+
+/** Reads one already-durable staging member without falling back to backups. */
+export async function readProjectTemplateStagingFile(options: {
+  storage: ProjectTemplateApplyStorage;
+  transactionId: string;
+  target: ProjectTemplateApplyTarget;
+  expectedSha256: string;
+  expectedBytes: number;
+  io?: ProjectTemplateApplyStorageIo;
+}): Promise<Buffer> {
+  const transactionId = assertSafeIdentifier(options.transactionId, 'transactionId');
+  const target = resolveProjectTemplateApplyTarget(options.storage, options.target);
+  const expectedSha256 = assertHash(options.expectedSha256, 'expectedSha256');
+  if (!Number.isSafeInteger(options.expectedBytes) || options.expectedBytes < 0) {
+    throw new ProjectTemplateApplyStorageError(
+      'LIMIT_EXCEEDED',
+      'staging byte budget is invalid',
+    );
+  }
+  const io = options.io ?? options.storage.io;
+  const transactionRoot = join(options.storage.stagingRoot, transactionId);
+  const directoriesBefore = await assertPrivateStagingDirectories({
+    storage: options.storage,
+    transactionRoot,
+    relativePath: target.stagingRelativePath,
+    io,
+  });
+  const content = await io.readPrivateFile(
+    join(transactionRoot, target.stagingRelativePath),
+    options.expectedBytes,
+    options.storage.device,
+  );
+  const directoriesAfter = await assertPrivateStagingDirectories({
+    storage: options.storage,
+    transactionRoot,
+    relativePath: target.stagingRelativePath,
+    io,
+  });
+  assertStableStagingDirectoryWitnesses(directoriesBefore, directoriesAfter);
+  if (
+    content.byteLength !== options.expectedBytes
+    || sha256(content) !== expectedSha256
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'HASH_MISMATCH',
+      'staging content does not match durable rollback evidence',
+    );
+  }
+  return content;
+}
+
 function formatMode(mode: number): string {
   return `0${(mode & 0o777).toString(8).padStart(3, '0')}`;
 }
@@ -1651,7 +1791,9 @@ function validateBackupManifest(
     );
     const targetKey = target.kind === 'template-entry'
       ? `entry:${target.path}`
-      : target.kind;
+      : target.kind === 'merge-baseline'
+        ? `baseline:${target.sha256}`
+        : target.kind;
     if (paths.has(targetKey)) {
       throw new ProjectTemplateApplyStorageError(
         'INVALID_MANIFEST',
@@ -1810,6 +1952,102 @@ export async function writeProjectTemplateBackupManifest(options: {
   });
 }
 
+const ROLLBACK_STAGING_MANIFEST_NAME = 'rollback-manifest.json';
+
+export async function writeProjectTemplateRollbackStagingManifest(options: {
+  storage: ProjectTemplateApplyStorage;
+  transactionId: string;
+  manifest: ProjectTemplateBackupManifest;
+}): Promise<string> {
+  const transactionId = assertSafeIdentifier(options.transactionId, 'transactionId');
+  const manifest = validateBackupManifest(options.manifest);
+  const content = Buffer.from(`${canonicalizeTaktpackJson(manifest)}\n`);
+  if (content.byteLength > PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST', 'rollback staging manifest exceeds its serialized byte budget',
+    );
+  }
+  const transactionRoot = join(options.storage.stagingRoot, transactionId);
+  await ensurePrivateDirectory(
+    options.storage.io,
+    transactionRoot,
+    options.storage.device,
+    options.storage.platform,
+  );
+  await writePrivateDurableFile({
+    storage: options.storage,
+    finalPath: join(transactionRoot, ROLLBACK_STAGING_MANIFEST_NAME),
+    content,
+    replace: false,
+    io: options.storage.io,
+  });
+  return sha256(content);
+}
+
+export async function readProjectTemplateRollbackStagingManifest(options: {
+  storage: ProjectTemplateApplyStorage;
+  transactionId: string;
+  expectedPlanId: string;
+  expectedBackupId: string;
+  expectedManifestSha256: string;
+}): Promise<ProjectTemplateBackupManifest> {
+  const transactionId = assertSafeIdentifier(options.transactionId, 'transactionId');
+  const expectedPlanId = assertHash(options.expectedPlanId, 'expectedPlanId');
+  const expectedBackupId = assertSafeIdentifier(options.expectedBackupId, 'expectedBackupId');
+  const expectedManifestSha256 = assertHash(
+    options.expectedManifestSha256,
+    'expectedManifestSha256',
+  );
+  const transactionRoot = join(options.storage.stagingRoot, transactionId);
+  let parsed: unknown;
+  try {
+    const directoriesBefore = await assertPrivateStagingDirectories({
+      storage: options.storage,
+      transactionRoot,
+      relativePath: ROLLBACK_STAGING_MANIFEST_NAME,
+      io: options.storage.io,
+    });
+    const content = await options.storage.io.readPrivateFile(
+      join(
+        transactionRoot,
+        ROLLBACK_STAGING_MANIFEST_NAME,
+      ),
+      PROJECT_TEMPLATE_TRANSACTION_LIMITS.maxManifestBytes,
+      options.storage.device,
+    );
+    // Why: pathname parents cannot be held open portably in Node. The journal's
+    // durable digest freezes the semantic authority of this byte sequence, so
+    // even an ABA directory swap can only supply the originally bound cohort.
+    if (sha256(content) !== expectedManifestSha256) {
+      throw new ProjectTemplateApplyStorageError(
+        'HASH_MISMATCH', 'rollback staging manifest does not match its journal',
+      );
+    }
+    const directoriesAfter = await assertPrivateStagingDirectories({
+      storage: options.storage,
+      transactionRoot,
+      relativePath: ROLLBACK_STAGING_MANIFEST_NAME,
+      io: options.storage.io,
+    });
+    assertStableStagingDirectoryWitnesses(directoriesBefore, directoriesAfter);
+    parsed = JSON.parse(content.toString('utf8')) as unknown;
+  } catch {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST', 'rollback staging manifest cannot be read',
+    );
+  }
+  const manifest = validateBackupManifest(parsed as ProjectTemplateBackupManifest);
+  if (
+    manifest.planId !== expectedPlanId
+    || manifest.backupId !== expectedBackupId
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'INVALID_MANIFEST', 'rollback staging manifest does not match its journal',
+    );
+  }
+  return manifest;
+}
+
 export function parseProjectTemplateApplyJournal(
   value: unknown,
 ): ProjectTemplateApplyJournal {
@@ -1820,6 +2058,8 @@ export function parseProjectTemplateApplyJournal(
     );
   }
   const journal = value as Partial<ProjectTemplateApplyJournal>;
+  const rollbackTransaction = typeof journal.transactionId === 'string'
+    && journal.transactionId.startsWith('rollback-');
   const validStates = new Set<ProjectTemplateApplyJournalState>([
     'prepared',
     'committing',
@@ -1840,6 +2080,7 @@ export function parseProjectTemplateApplyJournal(
       'completedOperations',
       'createdTargetDirectories',
       'updatedAt',
+      ...(rollbackTransaction ? ['rollbackManifestSha256'] : []),
     ])
     || typeof journal.transactionId !== 'string'
     || typeof journal.planId !== 'string'
@@ -1857,6 +2098,7 @@ export function parseProjectTemplateApplyJournal(
       ),
     )
     || typeof journal.updatedAt !== 'string'
+    || (rollbackTransaction && typeof journal.rollbackManifestSha256 !== 'string')
   ) {
     throw new ProjectTemplateApplyStorageError(
       'INVALID_JOURNAL',
@@ -1876,6 +2118,14 @@ export function parseProjectTemplateApplyJournal(
     completedOperations: [...journal.completedOperations],
     createdTargetDirectories,
     updatedAt: assertTimestamp(journal.updatedAt, 'updatedAt'),
+    ...(rollbackTransaction
+      ? {
+          rollbackManifestSha256: assertHash(
+            journal.rollbackManifestSha256!,
+            'rollbackManifestSha256',
+          ),
+        }
+      : {}),
   };
 }
 
@@ -1894,7 +2144,8 @@ function isOperationKeyForSchema(
   }
   return schemaVersion === '1.0'
     ? value === 'lock'
-    : value === 'content-lock'
+    : /^baseline:[a-f0-9]{64}$/.test(value)
+      || value === 'content-lock'
       || value === 'repertoire-lock'
       || value === 'source-provenance';
 }
@@ -1948,6 +2199,91 @@ export async function readProjectTemplateBackupManifest(options: {
     );
   }
   return manifest;
+}
+
+/**
+ * Lists complete backup generations without allowing the control directory to
+ * become an unbounded input. The directory and every generation are witnessed
+ * before and after manifest validation so callers never receive IDs collected
+ * across a pathname replacement race.
+ */
+export async function listProjectTemplateBackupIdsBounded(options: {
+  storage: ProjectTemplateApplyStorage;
+  io?: ProjectTemplateApplyStorageIo;
+}): Promise<string[]> {
+  const io = options.io ?? options.storage.io;
+  const backupsBefore = await io.lstat(options.storage.backupsRoot);
+  const backupsRealpathBefore = await io.realpath(options.storage.backupsRoot);
+  if (
+    backupsRealpathBefore !== options.storage.backupsRoot
+    || !backupsBefore.isDirectory()
+    || backupsBefore.isSymbolicLink()
+    || backupsBefore.dev !== options.storage.device
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'backup directory cannot be proven safe',
+    );
+  }
+  // Why: the storage iterator throws while observing the 33rd entry. This is
+  // a resource bound, not a presentation truncation that could hide drift.
+  const entries = await io.readdir(
+    options.storage.backupsRoot,
+    MAX_PROJECT_TEMPLATE_LISTED_BACKUPS,
+  );
+  const generations: Array<{ backupId: string; createdAt: string }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'backup root contains an unsafe entry',
+      );
+    }
+    const backupId = assertSafeIdentifier(entry.name, 'backupId');
+    const generationPath = join(options.storage.backupsRoot, backupId);
+    const generationBefore = await io.lstat(generationPath);
+    const generationRealpath = await io.realpath(generationPath);
+    if (
+      generationRealpath !== generationPath
+      || !generationBefore.isDirectory()
+      || generationBefore.isSymbolicLink()
+      || generationBefore.dev !== options.storage.device
+    ) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'backup generation cannot be proven safe',
+      );
+    }
+    const manifest = await readProjectTemplateBackupManifest({
+      storage: options.storage,
+      backupId,
+      io,
+    });
+    const generationAfter = await io.lstat(generationPath);
+    if (!areProjectTemplateDirectorySnapshotsStable(generationBefore, generationAfter)) {
+      throw new ProjectTemplateApplyStorageError(
+        'UNSAFE_CONTROL_ROOT',
+        'backup generation changed during inspection',
+      );
+    }
+    generations.push({ backupId, createdAt: manifest.createdAt });
+  }
+  const backupsAfter = await io.lstat(options.storage.backupsRoot);
+  const backupsRealpathAfter = await io.realpath(options.storage.backupsRoot);
+  if (
+    backupsRealpathAfter !== options.storage.backupsRoot
+    || !areProjectTemplateDirectorySnapshotsStable(backupsBefore, backupsAfter)
+  ) {
+    throw new ProjectTemplateApplyStorageError(
+      'UNSAFE_CONTROL_ROOT',
+      'backup directory changed during inspection',
+    );
+  }
+  generations.sort((left, right) => (
+    right.createdAt.localeCompare(left.createdAt)
+    || right.backupId.localeCompare(left.backupId)
+  ));
+  return generations.map(({ backupId }) => backupId);
 }
 
 async function removeControlTree(
