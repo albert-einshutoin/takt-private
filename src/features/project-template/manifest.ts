@@ -341,7 +341,9 @@ function parseMetadata(value: unknown): ProjectTemplateManifestV1_1['metadata'] 
   };
 }
 
-function parseDerivation(value: unknown): ProjectTemplateManifestDerivationV1_1 {
+export function parseProjectTemplateManifestV1_1Derivation(
+  value: unknown,
+): ProjectTemplateManifestDerivationV1_1 {
   const derivation = requireRecord(value, 'derivation');
   if (derivation['kind'] === 'root') {
     assertAllowedKeys(derivation, ['kind'], 'derivation');
@@ -376,7 +378,7 @@ function parseDerivation(value: unknown): ProjectTemplateManifestDerivationV1_1 
   };
 }
 
-function parseV1_1Source(
+export function parseProjectTemplateManifestV1_1Source(
   value: unknown,
 ): ProjectTemplateManifestV1_1['source'] {
   const source = requireRecord(value, 'source');
@@ -392,18 +394,11 @@ function parseV1_1Source(
   } satisfies DerivedTemplateSourceV1_1;
 }
 
-function parseProjectTemplateManifestV1_1(
-  manifest: Record<string, unknown>,
-): ProjectTemplateManifestV1_1 {
-  assertAllowedKeys(
-    manifest,
-    ['schemaVersion', 'packVersion', 'metadata', 'derivation', 'takt', 'source', 'repertoireDependencies', 'capabilities', 'entries'],
-    'manifest',
-  );
-  requireManifestV1_1SchemaVersion(manifest['schemaVersion']);
-  const capabilities = parseCapabilities(manifest['capabilities'], 'capabilities', 'INVALID_MANIFEST') ?? [];
-  const derivation = parseDerivation(manifest['derivation']);
-  const source = parseV1_1Source(manifest['source']);
+/** Shares the immutable editor-save authority check with companion locks. */
+export function validateProjectTemplateManifestV1_1SourceAndDerivation(
+  source: ProjectTemplateManifestV1_1['source'],
+  derivation: ProjectTemplateManifestDerivationV1_1,
+): void {
   if (
     (derivation.kind === 'derived' && source.kind !== 'derived')
     || (derivation.kind === 'root' && source.kind === 'derived')
@@ -432,6 +427,21 @@ function parseProjectTemplateManifestV1_1(
       'derivation.draftId',
     );
   }
+}
+
+function parseProjectTemplateManifestV1_1(
+  manifest: Record<string, unknown>,
+): ProjectTemplateManifestV1_1 {
+  assertAllowedKeys(
+    manifest,
+    ['schemaVersion', 'packVersion', 'metadata', 'derivation', 'takt', 'source', 'repertoireDependencies', 'capabilities', 'entries'],
+    'manifest',
+  );
+  requireManifestV1_1SchemaVersion(manifest['schemaVersion']);
+  const capabilities = parseCapabilities(manifest['capabilities'], 'capabilities', 'INVALID_MANIFEST') ?? [];
+  const derivation = parseProjectTemplateManifestV1_1Derivation(manifest['derivation']);
+  const source = parseProjectTemplateManifestV1_1Source(manifest['source']);
+  validateProjectTemplateManifestV1_1SourceAndDerivation(source, derivation);
   return {
     schemaVersion: '1.1',
     packVersion: requireSemVer(manifest['packVersion'], 'packVersion'),

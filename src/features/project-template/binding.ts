@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import { ProjectTemplateValidationError } from './errors.js';
 import { parseProjectTemplateManifest, serializeProjectTemplateManifest } from './manifest.js';
 import { parseTemplateLock } from './lock.js';
-import type { ProjectTemplateManifestV1, TemplateLockV1 } from './types.js';
+import type {
+  ProjectTemplateManifestDerivationV1_1,
+  ProjectTemplateManifestV1,
+  TemplateLockV1,
+} from './types.js';
 
 const CAPTURED_CREATE_HASH = createHash;
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
@@ -49,10 +53,51 @@ function sourcesMatch(
 ): boolean {
   // Source identity is fixed-schema evidence. Explicit comparisons keep
   // toJSON or serializer hooks from changing which repository/ref was bound.
-  return lock.kind === manifest.kind
-    && lock.uri === manifest.uri
+  if (lock.kind !== manifest.kind) return false;
+  if (lock.kind === 'derived' || manifest.kind === 'derived') {
+    return lock.kind === 'derived'
+      && manifest.kind === 'derived'
+      && lock.method === manifest.method
+      && lock.draftId === manifest.draftId;
+  }
+  return lock.uri === manifest.uri
     && lock.ref === manifest.ref
     && lock.commit === manifest.commit;
+}
+
+function derivationsMatch(
+  lock: ProjectTemplateManifestDerivationV1_1,
+  manifest: ProjectTemplateManifestDerivationV1_1,
+): boolean {
+  if (lock.kind !== manifest.kind) return false;
+  if (lock.kind === 'root' || manifest.kind === 'root') {
+    return lock.kind === 'root' && manifest.kind === 'root';
+  }
+  return lock.operation === manifest.operation
+    && lock.draftId === manifest.draftId
+    && lock.editDocumentSha256 === manifest.editDocumentSha256
+    && lock.parent.archiveSha256 === manifest.parent.archiveSha256
+    && lock.parent.manifestSha256 === manifest.parent.manifestSha256
+    && lock.parent.packVersion === manifest.parent.packVersion;
+}
+
+function repertoireDependenciesMatch(
+  lock: TemplateLockV1 & { readonly schemaVersion: '1.1' },
+  manifest: Extract<ProjectTemplateManifestV1, { readonly schemaVersion: '1.1' }>,
+): boolean {
+  if (lock.repertoireDependencies.length !== manifest.repertoireDependencies.length) return false;
+  for (let index = 0; index < lock.repertoireDependencies.length; index += 1) {
+    const lockDependency = lock.repertoireDependencies[index]!;
+    const manifestDependency = manifest.repertoireDependencies[index]!;
+    if (
+      lockDependency.scope !== manifestDependency.scope
+      || lockDependency.version !== manifestDependency.version
+      || lockDependency.source !== manifestDependency.source
+      || lockDependency.commit !== manifestDependency.commit
+      || !capabilitiesMatch(lockDependency.capabilities, manifestDependency.capabilities)
+    ) return false;
+  }
+  return true;
 }
 
 /**
@@ -63,7 +108,15 @@ function sourcesMatch(
 export function validateManifestLockPair(manifestValue: unknown, lockValue: unknown): void {
   const manifest: ProjectTemplateManifestV1 = parseProjectTemplateManifest(manifestValue);
   const lock: TemplateLockV1 = parseTemplateLock(lockValue);
+  assertLockMatch(lock.schemaVersion === manifest.schemaVersion, 'schemaVersion');
   assertLockMatch(lock.packVersion === manifest.packVersion, 'packVersion');
+  if (manifest.schemaVersion === '1.1' && lock.schemaVersion === '1.1') {
+    assertLockMatch(derivationsMatch(lock.derivation, manifest.derivation), 'derivation');
+    assertLockMatch(
+      repertoireDependenciesMatch(lock, manifest),
+      'repertoireDependencies',
+    );
+  }
   assertLockMatch(sourcesMatch(lock.source, manifest.source), 'source');
   assertLockMatch(
     capabilitiesMatch(lock.capabilities, manifest.capabilities),

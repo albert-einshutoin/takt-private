@@ -263,3 +263,46 @@ export const projectTemplateLockV1JsonSchema = {
     },
   },
 } as const;
+
+/**
+ * Draft-07 editor-save lock structure. Metadata stays only in the manifest:
+ * its digest binds that display content, while this lock repeats authority
+ * fields needed to prevent a reviewed lineage or dependency substitution.
+ */
+export const projectTemplateLockV1_1JsonSchema = {
+  $schema: draft,
+  $id: 'https://takt.dev/schemas/project-template-lock-v1.1.json',
+  title: 'TAKT Project Template Lock v1.1',
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'schemaVersion',
+    'manifestSha256',
+    'packVersion',
+    'source',
+    'derivation',
+    'repertoireDependencies',
+    'capabilities',
+    'entries',
+  ],
+  properties: {
+    schemaVersion: { const: '1.1' },
+    manifestSha256: { type: 'string', pattern: SHA256_PATTERN_SOURCE },
+    packVersion: semverSchema,
+    source: sourceSchemaV1_1,
+    derivation: projectTemplateManifestV1_1JsonSchema.properties.derivation,
+    repertoireDependencies:
+      projectTemplateSourceDescriptorV1JsonSchema.properties.repertoireDependencies,
+    capabilities: capabilitiesSchema,
+    entries: {
+      type: 'array',
+      maxItems: MAX_TEMPLATE_ENTRIES,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path', 'policy', 'mode', 'sha256', 'capabilities'],
+        properties: entryProperties,
+      },
+    },
+  },
+} as const;

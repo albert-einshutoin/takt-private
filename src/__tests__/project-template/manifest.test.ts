@@ -130,7 +130,7 @@ describe('project template manifest public contract', () => {
   it.each([
     ['lock', undefined, 'INVALID_LOCK'],
     ['lock', 1, 'INVALID_LOCK'],
-    ['lock', '1.1', 'UNSUPPORTED_SCHEMA_VERSION'],
+    ['lock', '1.1', 'NON_PLAIN_OBJECT'],
     ['lock', '2.0', 'UNSUPPORTED_SCHEMA_MAJOR'],
   ])('should classify %s schemaVersion %j precisely', (_kind, schemaVersion, code) => {
     const lock = validLock();

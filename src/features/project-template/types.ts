@@ -149,7 +149,7 @@ export interface TemplateLockEntry {
 }
 
 /** Immutable reviewed state bound to one canonical manifest digest. */
-export interface TemplateLockV1 {
+export interface TemplateLockV1_0 {
   schemaVersion: '1.0';
   manifestSha256: string;
   packVersion: string;
@@ -157,3 +157,22 @@ export interface TemplateLockV1 {
   capabilities: TemplateCapability[];
   entries: TemplateLockEntry[];
 }
+
+/**
+ * Immutable reviewed state for an editor-save manifest. These authority fields
+ * deliberately duplicate the manifest: a lock must not be replayable against
+ * another reviewed lineage merely because pack content happens to look alike.
+ * Human-readable metadata is still manifest-hash-bound and is not duplicated.
+ */
+export interface TemplateLockV1_1 {
+  schemaVersion: '1.1';
+  manifestSha256: string;
+  packVersion: string;
+  source: ProjectTemplateManifestV1_1['source'];
+  derivation: ProjectTemplateManifestDerivationV1_1;
+  repertoireDependencies: ProjectTemplateRepertoireDependencyV1[];
+  capabilities: TemplateCapability[];
+  entries: TemplateLockEntry[];
+}
+
+export type TemplateLockV1 = TemplateLockV1_0 | TemplateLockV1_1;
