@@ -614,9 +614,30 @@ writeFileSync(
     });
   });
 
+  it('uses the startup argv snapshot for a rollback global value', () => {
+    const result = run([
+      '--wat', 'project-template', 'rollback', '--cwd', '--apply',
+    ]);
+
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template rollback', mode: 'dry-run',
+      error: { code: 'UNKNOWN_OPTION' },
+    });
+  });
+
   it('does not recover apply mode from a delimited operand', () => {
     expect(projectTemplateNamedCommandUsesApplyMode([
       '--wat', 'project-template', 'apply', 'missing.taktpack', '--', '--apply',
     ], 'apply')).toBe(false);
+    expect(projectTemplateNamedCommandUsesApplyMode([
+      '--wat', 'project-template', 'rollback', '--', '--apply',
+    ], 'rollback')).toBe(false);
+    expect(projectTemplateNamedCommandUsesApplyMode([
+      '--', 'project-template', 'rollback', '--apply',
+    ], 'rollback')).toBe(true);
   });
 });

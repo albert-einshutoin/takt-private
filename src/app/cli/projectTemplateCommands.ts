@@ -28,11 +28,12 @@ import {
 } from '../../features/project-template/cli-export-approvals.js';
 import { projectTemplateNamedCommandUsesApplyMode } from './projectTemplateInvocation.js';
 
-function parserFailureMode(commandName: string): 'dry-run' | 'apply' {
-  // Why: Commander's option object can include flag-shaped values after an
-  // earlier parser error. Re-tokenize the original argv before reporting mode.
+function parserFailureMode(
+  args: readonly string[],
+  commandName: string,
+): 'dry-run' | 'apply' {
   return projectTemplateNamedCommandUsesApplyMode(
-    process.argv.slice(2),
+    args,
     commandName,
   ) ? 'apply' : 'dry-run';
 }
@@ -266,7 +267,18 @@ const collectCapabilityApproval = collectBounded(TEMPLATE_CAPABILITIES.length);
 export function registerProjectTemplateCommands(
   root: Command,
   dependencies: ProjectTemplateCliCommandAdapterDependencies,
+  invocationArgs?: readonly string[],
 ): Command {
+  // Why: Commander and runner layers may normalize delimiters while parsing.
+  // Production supplies the entrypoint's immutable startup snapshot; embedded
+  // adapters fall back to Commander's original rawArgs for testability.
+  const startupArgs = invocationArgs === undefined
+    ? undefined
+    : Object.freeze([...invocationArgs]);
+  const rawArgs = (): readonly string[] => {
+    const embeddedRawArgs = (root as Command & { rawArgs?: readonly string[] }).rawArgs;
+    return startupArgs ?? embeddedRawArgs?.slice(2) ?? [];
+  };
   const group = root.command('project-template')
     .description('Portable .takt project template operations')
     .exitOverride()
@@ -418,12 +430,13 @@ export function registerProjectTemplateCommands(
     .action(async (output: string | undefined, flags: CommonFlags, command: Command) => {
       if (hasUnknownOption(command)) {
         await invalid(
-          'project-template export', parserFailureMode('export'), 'UNKNOWN_OPTION',
+          'project-template export', parserFailureMode(rawArgs(), 'export'), 'UNKNOWN_OPTION',
         );
         return;
       }
       const parsedMutation = mutation(
-        'project-template export', flags, parserFailureMode('export') === 'apply',
+        'project-template export', flags,
+        parserFailureMode(rawArgs(), 'export') === 'apply',
       );
       const cwd = requestedCwd(root, command, flags, dependencies);
       // Why: version metadata is operator input, so reject it before planning
@@ -474,11 +487,11 @@ export function registerProjectTemplateCommands(
       .action(async (source: string | undefined, flags: CommonFlags, action: Command) => {
         const machineCommand = `project-template ${name}` as ProjectTemplateCliCommand;
         if (hasUnknownOption(action)) {
-          await invalid(machineCommand, parserFailureMode(name), 'UNKNOWN_OPTION');
+          await invalid(machineCommand, parserFailureMode(rawArgs(), name), 'UNKNOWN_OPTION');
           return;
         }
         const parsedMutation = mutating
-          ? mutation(machineCommand, flags, parserFailureMode(name) === 'apply')
+          ? mutation(machineCommand, flags, parserFailureMode(rawArgs(), name) === 'apply')
           : ({ mode: 'dry-run', force: false } as const);
         const cwd = requestedCwd(root, action, flags, dependencies);
         const parsedSource = canonicalSource(cwd, source);
@@ -503,12 +516,13 @@ export function registerProjectTemplateCommands(
     .action(async (backupId: string | undefined, flags: CommonFlags, command: Command) => {
       if (hasUnknownOption(command)) {
         await invalid(
-          'project-template rollback', parserFailureMode('rollback'), 'UNKNOWN_OPTION',
+          'project-template rollback', parserFailureMode(rawArgs(), 'rollback'), 'UNKNOWN_OPTION',
         );
         return;
       }
       const parsedMutation = mutation(
-        'project-template rollback', flags, parserFailureMode('rollback') === 'apply',
+        'project-template rollback', flags,
+        parserFailureMode(rawArgs(), 'rollback') === 'apply',
       );
       if ('envelope' in parsedMutation || backupId === undefined) {
         const result = invalidMutationInput('project-template rollback', parsedMutation);

@@ -40,6 +40,7 @@ import { executeInteractiveDefaultActionLoop } from './routing.js';
 registerProjectTemplateCommands(
   program,
   createProjectTemplateCliCommandProductionDependencies(cliVersion),
+  entrypointArgs,
 );
 
 if (projectTemplateInvocation) {
