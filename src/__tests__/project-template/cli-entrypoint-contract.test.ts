@@ -72,6 +72,7 @@ function run(args: readonly string[], envOverrides: NodeJS.ProcessEnv = {}) {
       ...process.env,
       NO_COLOR: '1',
       FORCE_COLOR: '0',
+      NO_UPDATE_NOTIFIER: '1',
       ...envOverrides,
     },
   });
@@ -183,8 +184,11 @@ describe('project-template CLI entrypoint contract', () => {
   );
 
   it('routes a lone root dash through the real legacy lifecycle', () => {
-    const result = run(['-', 'project-template']);
+    // Root help terminates before the legacy interactive workflow picker. The
+    // contract under test is entrypoint classification, not terminal prompts.
+    const result = run(['-', 'project-template', '--help']);
     expect(result.error).toBeUndefined();
+    expect(result.stdout).toContain('Usage: takt');
     expect(result.stdout).not.toContain('"command":"project-template');
     expect(result.stdout).not.toContain('"schemaVersion":"1.0"');
   });
