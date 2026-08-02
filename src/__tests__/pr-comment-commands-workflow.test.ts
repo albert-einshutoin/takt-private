@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -79,6 +80,153 @@ function findStep(job: WorkflowJob, idOrName: string): WorkflowStep {
   ));
   expect(step, `missing workflow step: ${idOrName}`).toBeDefined();
   return step as WorkflowStep;
+}
+
+function executeResolvePushFixture(options: {
+  readonly branch?: string;
+  readonly defaultBranch?: string;
+  readonly remoteHead: string;
+  readonly leaseReject?: boolean;
+  readonly merged?: boolean;
+  readonly state?: 'open' | 'closed';
+}): { readonly status: number; readonly gitLog: string; readonly output: string } {
+  const root = mkdtempSync(resolve(tmpdir(), 'takt-resolve-push-'));
+  temporaryDirectories.push(root);
+  const bin = resolve(root, 'bin');
+  mkdirSync(bin);
+  const gitLog = resolve(root, 'git.log');
+  const pushed = resolve(root, 'pushed');
+  const output = resolve(root, 'github-output');
+  const headSha = '0123456789abcdef0123456789abcdef01234567';
+  const baseSha = '123456789abcdef0123456789abcdef012345678';
+  const candidateSha = '23456789abcdef0123456789abcdef0123456789';
+  const branch = options.branch ?? 'fix/conflicts';
+  const defaultBranch = options.defaultBranch ?? 'main';
+  const gitScript = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'printf "%s\\n" "$*" >> "$MOCK_GIT_LOG"',
+    'case " $* " in',
+    '  *" check-ref-format --branch "*) exit 0 ;;',
+    '  *" ls-remote origin "*)',
+    '    if [ -f "$MOCK_PUSHED" ]; then printf "%s\\trefs/heads/%s\\n" "$MOCK_CANDIDATE_SHA" "$BRANCH";',
+    '    elif [ -n "$MOCK_REMOTE_HEAD" ]; then printf "%s\\trefs/heads/%s\\n" "$MOCK_REMOTE_HEAD" "$BRANCH"; fi',
+    '    exit 0 ;;',
+    '  *" push "*)',
+    '    [[ "$*" == *"--force-with-lease=refs/heads/$BRANCH:$HEAD_SHA"* ]] || exit 90',
+    '    [ "$MOCK_LEASE_REJECT" != 1 ] || exit 1',
+    '    : > "$MOCK_PUSHED"',
+    '    exit 0 ;;',
+    '  *" rev-parse HEAD "*) printf "%s\\n" "$MOCK_CANDIDATE_SHA"; exit 0 ;;',
+    'esac',
+    'exit 91',
+  ].join('\n');
+  const ghScript = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'if [[ "$*" == *"/pulls/"* ]]; then printf "%s\\n" "$MOCK_PR_JSON";',
+    'else printf "%s\\n" "$MOCK_REPO_JSON"; fi',
+  ].join('\n');
+  for (const [name, source] of [['git', gitScript], ['gh', ghScript]] as const) {
+    const path = resolve(bin, name);
+    writeFileSync(path, `${source}\n`);
+    chmodSync(path, 0o755);
+  }
+  const push = findStep(readWorkflow().jobs['resolve-publish']!, 'Push exact candidate commit with lease');
+  const result = spawnSync('bash', ['-euo', 'pipefail', '-c', push.run!], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      BASE_SHA: baseSha,
+      BRANCH: branch,
+      DEFAULT_BRANCH: defaultBranch,
+      GH_TOKEN: 'test-token',
+      GITHUB_OUTPUT: output,
+      GITHUB_REPOSITORY: 'owner/repo',
+      HEAD_SHA: headSha,
+      MOCK_CANDIDATE_SHA: candidateSha,
+      MOCK_GIT_LOG: gitLog,
+      MOCK_LEASE_REJECT: options.leaseReject ? '1' : '0',
+      MOCK_PR_JSON: JSON.stringify({
+        state: options.state ?? 'open', merged: options.merged ?? false,
+        head: { ref: branch, sha: headSha, repo: { full_name: 'owner/repo' } },
+        base: { sha: baseSha, repo: { full_name: 'owner/repo' } },
+      }),
+      MOCK_PUSHED: pushed,
+      MOCK_REMOTE_HEAD: options.remoteHead,
+      MOCK_REPO_JSON: JSON.stringify({ default_branch: defaultBranch }),
+      PR_NUMBER: '164',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return {
+    status: result.status ?? 1,
+    gitLog: readFileSync(gitLog, 'utf8'),
+    output: existsSync(output) ? readFileSync(output, 'utf8') : '',
+  };
+}
+
+function executeResolvePrepareIdentityFixture(options: {
+  readonly branch?: string;
+  readonly merged?: boolean;
+  readonly state?: 'open' | 'closed';
+}): { readonly status: number; readonly output: string } {
+  const root = mkdtempSync(resolve(tmpdir(), 'takt-resolve-prepare-'));
+  temporaryDirectories.push(root);
+  const bin = resolve(root, 'bin');
+  mkdirSync(bin);
+  const output = resolve(root, 'github-output');
+  const branch = options.branch ?? 'fix/conflicts';
+  const prJson = JSON.stringify({
+    state: options.state ?? 'open',
+    merged: options.merged ?? false,
+    head: {
+      ref: branch,
+      sha: '0123456789abcdef0123456789abcdef01234567',
+      repo: { full_name: 'owner/repo' },
+    },
+    base: {
+      sha: '123456789abcdef0123456789abcdef012345678',
+      repo: { full_name: 'owner/repo' },
+    },
+  });
+  const scripts = {
+    gh: [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'if [[ "$*" == *"/pulls/"* ]]; then printf "%s\\n" "$MOCK_PR_JSON";',
+      'else printf "%s\\n" "$MOCK_REPO_JSON"; fi',
+    ].join('\n'),
+    git: '#!/usr/bin/env bash\n[ "$1" = check-ref-format ]\n',
+  };
+  for (const [name, source] of Object.entries(scripts)) {
+    const path = resolve(bin, name);
+    writeFileSync(path, `${source}\n`);
+    chmodSync(path, 0o755);
+  }
+  const prepare = readWorkflow().jobs['resolve-prepare']!;
+  const identity = findStep(prepare, 'Capture exact same-repository PR identity');
+  const result = spawnSync('bash', ['-euo', 'pipefail', '-c', identity.run!], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GH_TOKEN: 'test-token',
+      GITHUB_OUTPUT: output,
+      GITHUB_REPOSITORY: 'owner/repo',
+      MOCK_PR_JSON: prJson,
+      MOCK_REPO_JSON: JSON.stringify({ default_branch: 'main' }),
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      PR_NUMBER: '164',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return {
+    status: result.status ?? 1,
+    output: existsSync(output) ? readFileSync(output, 'utf8') : '',
+  };
 }
 
 function assertResolveExecutionBoundary(workflow: WorkflowContract): void {
@@ -447,6 +595,7 @@ describe('PR Comment Commands workflow contract', () => {
       artifact_digest: '${{ steps.bundle.outputs.artifact-digest }}',
       base_sha: '${{ steps.pr.outputs.base_sha }}',
       branch: '${{ steps.pr.outputs.branch }}',
+      default_branch: '${{ steps.pr.outputs.default_branch }}',
       head_sha: '${{ steps.pr.outputs.head_sha }}',
     });
     expect(propose.outputs).toEqual({
@@ -492,6 +641,13 @@ describe('PR Comment Commands workflow contract', () => {
     expect(identity.run).toContain("base_repo=$(jq -r '.base.repo.full_name'");
     expect(identity.run).toContain("head_sha=$(jq -r '.head.sha'");
     expect(identity.run).toContain("base_sha=$(jq -r '.base.sha'");
+    expect(identity.run).toContain("state=$(jq -r '.state'");
+    expect(identity.run).toContain("merged=$(jq -r '.merged'");
+    expect(identity.run).toContain('repos/$GITHUB_REPOSITORY');
+    expect(identity.run).toContain("default_branch=$(jq -r '.default_branch'");
+    expect(identity.run).toContain('[ "$state" != open ]');
+    expect(identity.run).toContain('[ "$merged" != false ]');
+    expect(identity.run).toContain('[ "$branch" = "$default_branch" ]');
     expect(identity.run).toContain('git check-ref-format --branch "$branch"');
     expect(checkouts.map(step => step.with?.ref)).toEqual([
       '${{ github.sha }}',
@@ -502,6 +658,23 @@ describe('PR Comment Commands workflow contract', () => {
     expect(merge.run).toContain('test -n "$(git diff --name-only --diff-filter=U)"');
     expect(merge.run).toContain('resolve-conflicts-contract.mjs" \\');
     expect(merge.run).toMatch(/\n\s+prepare /u);
+  });
+
+  it('executes prepare identity only for an open unmerged non-default PR head', () => {
+    const accepted = executeResolvePrepareIdentityFixture({});
+    expect(accepted.status).toBe(0);
+    expect(accepted.output).toContain('branch=fix/conflicts');
+    expect(accepted.output).toContain('default_branch=main');
+
+    for (const fixture of [
+      { state: 'closed' as const },
+      { merged: true },
+      { branch: 'main' },
+    ]) {
+      const rejected = executeResolvePrepareIdentityFixture(fixture);
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.output).toBe('');
+    }
   });
 
   it('runs the provider alone with bounded structured output and every bypass disabled', () => {
@@ -634,7 +807,7 @@ describe('PR Comment Commands workflow contract', () => {
   it('publishes only reproduced tested bytes and exposes the token only while pushing', () => {
     const publish = readWorkflow().jobs['resolve-publish']!;
     const reapply = findStep(publish, 'Reapply only the tested candidate');
-    const push = findStep(publish, 'Push exact candidate commit without force');
+    const push = findStep(publish, 'Push exact candidate commit with lease');
     const confirm = findStep(publish, 'Confirm push and CI validation');
     const tokenSteps = publish.steps.filter(step => (
       JSON.stringify(step.env ?? {}).includes('github.token')
@@ -655,8 +828,11 @@ describe('PR Comment Commands workflow contract', () => {
     expect(push.run).toContain("'.head.ref'");
     expect(push.run).toContain("'.head.sha'");
     expect(push.run).toContain("'.base.sha'");
-    expect(push.run).toContain('push origin "HEAD:refs/heads/$BRANCH"');
-    expect(push.run).not.toMatch(/--force|-f\b/u);
+    expect(push.run).toContain("'.state'");
+    expect(push.run).toContain("'.merged'");
+    expect(push.run).toContain("'.default_branch'");
+    expect(push.run).toContain('test "$BRANCH" != "$default_branch"');
+    expect(push.run).toContain('--force-with-lease="refs/heads/$BRANCH:$HEAD_SHA"');
     expect(confirm.if).toBe("${{ steps.push.outputs.pushed == 'true' }}");
   });
 
@@ -1081,17 +1257,51 @@ describe('PR Comment Commands workflow contract', () => {
     expect(scripts).not.toContain('${{ steps.pr.outputs.branch }}');
   });
 
-  it('passes the candidate branch through env and uses an explicit non-force push refspec', () => {
+  it('passes the candidate branch through env and uses an explicit CAS lease refspec', () => {
     const publish = readWorkflow().jobs['resolve-publish']!;
-    const push = findStep(publish, 'Push exact candidate commit without force');
+    const push = findStep(publish, 'Push exact candidate commit with lease');
 
     expect(push.env).toMatchObject({
       BRANCH: '${{ needs.resolve-prepare.outputs.branch }}',
+      DEFAULT_BRANCH: '${{ needs.resolve-prepare.outputs.default_branch }}',
       HEAD_SHA: '${{ needs.resolve-prepare.outputs.head_sha }}',
     });
     expect(push.run).toContain('git check-ref-format --branch "$BRANCH"');
-    expect(push.run).toContain('push origin "HEAD:refs/heads/$BRANCH"');
-    expect(push.run).not.toMatch(/--force|-f\b/u);
+    expect(push.run).toContain('--force-with-lease="refs/heads/$BRANCH:$HEAD_SHA"');
     expect(push.run).not.toContain('${{ needs.resolve-prepare.outputs.branch }}');
+  });
+
+  it('executes the publish boundary with a CAS lease and rejects stale, missing, or raced heads', () => {
+    const expectedHead = '0123456789abcdef0123456789abcdef01234567';
+    const success = executeResolvePushFixture({ remoteHead: expectedHead });
+    expect(success.status).toBe(0);
+    expect(success.gitLog).toContain(
+      'push --force-with-lease=refs/heads/fix/conflicts:0123456789abcdef0123456789abcdef01234567',
+    );
+    expect(success.output).toContain('pushed=true');
+
+    for (const fixture of [
+      { remoteHead: '' },
+      { remoteHead: 'f'.repeat(40) },
+      { remoteHead: expectedHead, leaseReject: true },
+    ]) {
+      const rejected = executeResolvePushFixture(fixture);
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.output).toBe('');
+    }
+  });
+
+  it('executes the publish boundary only for a live open unmerged non-default head', () => {
+    const expectedHead = '0123456789abcdef0123456789abcdef01234567';
+    for (const fixture of [
+      { remoteHead: expectedHead, state: 'closed' as const },
+      { remoteHead: expectedHead, merged: true },
+      { remoteHead: expectedHead, branch: 'main' },
+    ]) {
+      const rejected = executeResolvePushFixture(fixture);
+      expect(rejected.status).not.toBe(0);
+      expect(rejected.gitLog).not.toContain(' push ');
+      expect(rejected.output).toBe('');
+    }
   });
 });

@@ -350,6 +350,7 @@ jobs:
       artifact_digest: ${{ steps.bundle.outputs.artifact-digest }}
       base_sha: ${{ steps.pr.outputs.base_sha }}
       branch: ${{ steps.pr.outputs.branch }}
+      default_branch: ${{ steps.pr.outputs.default_branch }}
       head_sha: ${{ steps.pr.outputs.head_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -370,13 +371,21 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           pr_json=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          repo_json=$(gh api "repos/$GITHUB_REPOSITORY")
           head_repo=$(jq -r '.head.repo.full_name' <<<"$pr_json")
           base_repo=$(jq -r '.base.repo.full_name' <<<"$pr_json")
           head_sha=$(jq -r '.head.sha' <<<"$pr_json")
           base_sha=$(jq -r '.base.sha' <<<"$pr_json")
           branch=$(jq -r '.head.ref' <<<"$pr_json")
+          state=$(jq -r '.state' <<<"$pr_json")
+          merged=$(jq -r '.merged' <<<"$pr_json")
+          default_branch=$(jq -r '.default_branch' <<<"$repo_json")
           if [ "$head_repo" != "$GITHUB_REPOSITORY" ] || [ "$base_repo" != "$GITHUB_REPOSITORY" ]; then
             echo 'Only same-repository PRs are accepted.' >&2
+            exit 1
+          fi
+          if [ "$state" != open ] || [ "$merged" != false ]; then
+            echo 'Only open, unmerged PRs are accepted.' >&2
             exit 1
           fi
           if [[ ! "$head_sha" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
@@ -384,7 +393,13 @@ jobs:
             exit 1
           fi
           git check-ref-format --branch "$branch" >/dev/null
-          printf 'head_sha=%s\nbase_sha=%s\nbranch=%s\n' "$head_sha" "$base_sha" "$branch" >> "$GITHUB_OUTPUT"
+          git check-ref-format --branch "$default_branch" >/dev/null
+          if [ "$branch" = "$default_branch" ]; then
+            echo 'The PR head must not be the live default branch.' >&2
+            exit 1
+          fi
+          printf 'head_sha=%s\nbase_sha=%s\nbranch=%s\ndefault_branch=%s\n' \
+            "$head_sha" "$base_sha" "$branch" "$default_branch" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -422,6 +437,7 @@ jobs:
         env:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           BRANCH: ${{ steps.pr.outputs.branch }}
+          DEFAULT_BRANCH: ${{ steps.pr.outputs.default_branch }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           PREPARE_DIR: ${{ runner.temp }}/resolve-prepare
         run: |
@@ -478,6 +494,7 @@ jobs:
             head_sha: process.env.HEAD_SHA,
             base_sha: process.env.BASE_SHA,
             branch: process.env.BRANCH,
+            default_branch: process.env.DEFAULT_BRANCH,
             input_sha256: createHash('sha256').update(input).digest('hex'),
             proposal_schema_sha256: createHash('sha256').update(schemaBytes).digest('hex'),
           };
@@ -518,6 +535,7 @@ jobs:
       - name: Validate prepare binding and install locked provider
         env:
           BASE_SHA: ${{ needs.resolve-prepare.outputs.base_sha }}
+          DEFAULT_BRANCH: ${{ needs.resolve-prepare.outputs.default_branch }}
           EXPECTED_ARTIFACT_DIGEST: ${{ needs.resolve-prepare.outputs.artifact_digest }}
           HEAD_SHA: ${{ needs.resolve-prepare.outputs.head_sha }}
           PREPARE_DIR: ${{ runner.temp }}/resolve-prepare
@@ -533,6 +551,7 @@ jobs:
           if (binding.repository !== process.env.GITHUB_REPOSITORY
             || binding.head_sha !== process.env.HEAD_SHA
             || binding.base_sha !== process.env.BASE_SHA
+            || binding.default_branch !== process.env.DEFAULT_BRANCH
             || binding.input_sha256 !== createHash('sha256').update(input).digest('hex')
             || binding.proposal_schema_sha256 !== createHash('sha256').update(schema).digest('hex')) {
             throw new Error('prepare artifact binding mismatch');
@@ -612,6 +631,7 @@ jobs:
       - name: Extract and locally validate structured proposal
         env:
           BASE_SHA: ${{ needs.resolve-prepare.outputs.base_sha }}
+          DEFAULT_BRANCH: ${{ needs.resolve-prepare.outputs.default_branch }}
           HEAD_SHA: ${{ needs.resolve-prepare.outputs.head_sha }}
           PREPARE_ARTIFACT_DIGEST: ${{ needs.resolve-prepare.outputs.artifact_digest }}
           PREPARE_ARTIFACT_ID: ${{ needs.resolve-prepare.outputs.artifact_id }}
@@ -664,6 +684,7 @@ jobs:
             repository: process.env.GITHUB_REPOSITORY,
             head_sha: process.env.HEAD_SHA,
             base_sha: process.env.BASE_SHA,
+            default_branch: process.env.DEFAULT_BRANCH,
             prepare_artifact_id: process.env.PREPARE_ARTIFACT_ID,
             prepare_artifact_digest: process.env.PREPARE_ARTIFACT_DIGEST,
             proposal_sha256: createHash('sha256').update(proposalBytes).digest('hex'),
@@ -734,6 +755,7 @@ jobs:
         env:
           BASE_SHA: ${{ needs.resolve-prepare.outputs.base_sha }}
           BRANCH: ${{ needs.resolve-prepare.outputs.branch }}
+          DEFAULT_BRANCH: ${{ needs.resolve-prepare.outputs.default_branch }}
           HEAD_SHA: ${{ needs.resolve-prepare.outputs.head_sha }}
           PREPARE_ARTIFACT_DIGEST: ${{ needs.resolve-prepare.outputs.artifact_digest }}
           PREPARE_ARTIFACT_ID: ${{ needs.resolve-prepare.outputs.artifact_id }}
@@ -751,6 +773,7 @@ jobs:
           const proposal = readFileSync(process.argv[3]);
           if (binding.repository !== process.env.GITHUB_REPOSITORY
             || binding.head_sha !== process.env.HEAD_SHA || binding.base_sha !== process.env.BASE_SHA
+            || binding.default_branch !== process.env.DEFAULT_BRANCH
             || binding.prepare_artifact_id !== process.env.PREPARE_ARTIFACT_ID
             || binding.prepare_artifact_digest !== process.env.PREPARE_ARTIFACT_DIGEST
             || binding.proposal_sha256 !== createHash('sha256').update(proposal).digest('hex')) {
@@ -799,6 +822,7 @@ jobs:
           PROPOSAL_ARTIFACT_ID: ${{ needs.resolve-propose.outputs.artifact_id }}
           PROPOSAL_DIR: ${{ runner.temp }}/resolve-proposal
           BRANCH: ${{ needs.resolve-prepare.outputs.branch }}
+          DEFAULT_BRANCH: ${{ needs.resolve-prepare.outputs.default_branch }}
           CANDIDATE_DIR: ${{ runner.temp }}/resolve-candidate
         run: |
           mkdir -p -- "$CANDIDATE_DIR"
@@ -818,6 +842,7 @@ jobs:
             head_sha: process.env.HEAD_SHA,
             base_sha: process.env.BASE_SHA,
             branch: process.env.BRANCH,
+            default_branch: process.env.DEFAULT_BRANCH,
             prepare_artifact_id: process.env.PREPARE_ARTIFACT_ID,
             prepare_artifact_digest: process.env.PREPARE_ARTIFACT_DIGEST,
             proposal_artifact_id: process.env.PROPOSAL_ARTIFACT_ID,
@@ -876,6 +901,7 @@ jobs:
         env:
           BASE_SHA: ${{ needs.resolve-prepare.outputs.base_sha }}
           BRANCH: ${{ needs.resolve-prepare.outputs.branch }}
+          DEFAULT_BRANCH: ${{ needs.resolve-prepare.outputs.default_branch }}
           CANDIDATE_ARTIFACT_DIGEST: ${{ needs.resolve-apply.outputs.artifact_digest }}
           CANDIDATE_ARTIFACT_ID: ${{ needs.resolve-apply.outputs.artifact_id }}
           CANDIDATE_DIR: ${{ runner.temp }}/resolve-candidate
@@ -902,6 +928,7 @@ jobs:
             || binding.repository !== process.env.GITHUB_REPOSITORY
             || binding.head_sha !== process.env.HEAD_SHA || binding.base_sha !== process.env.BASE_SHA
             || binding.branch !== process.env.BRANCH
+            || binding.default_branch !== process.env.DEFAULT_BRANCH
             || binding.prepare_artifact_id !== process.env.PREPARE_ARTIFACT_ID
             || binding.prepare_artifact_digest !== process.env.PREPARE_ARTIFACT_DIGEST
             || binding.proposal_artifact_id !== process.env.PROPOSAL_ARTIFACT_ID
@@ -996,6 +1023,7 @@ jobs:
         env:
           BASE_SHA: ${{ needs.resolve-prepare.outputs.base_sha }}
           BRANCH: ${{ needs.resolve-prepare.outputs.branch }}
+          DEFAULT_BRANCH: ${{ needs.resolve-prepare.outputs.default_branch }}
           HEAD_SHA: ${{ needs.resolve-prepare.outputs.head_sha }}
           PREPARE_ARTIFACT_DIGEST: ${{ needs.resolve-prepare.outputs.artifact_digest }}
           PREPARE_ARTIFACT_ID: ${{ needs.resolve-prepare.outputs.artifact_id }}
@@ -1021,6 +1049,7 @@ jobs:
           if (binding.schema_version !== 1 || binding.repository !== process.env.GITHUB_REPOSITORY
             || binding.head_sha !== process.env.HEAD_SHA || binding.base_sha !== process.env.BASE_SHA
             || binding.branch !== process.env.BRANCH
+            || binding.default_branch !== process.env.DEFAULT_BRANCH
             || binding.prepare_artifact_id !== process.env.PREPARE_ARTIFACT_ID
             || binding.prepare_artifact_digest !== process.env.PREPARE_ARTIFACT_DIGEST
             || binding.proposal_artifact_id !== process.env.PROPOSAL_ARTIFACT_ID
@@ -1054,29 +1083,40 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix: resolve merge conflicts'
 
-      - name: Push exact candidate commit without force
+      - name: Push exact candidate commit with lease
         id: push
         working-directory: ${{ github.workspace }}/resolve-worktree
         env:
           BASE_SHA: ${{ needs.resolve-prepare.outputs.base_sha }}
           BRANCH: ${{ needs.resolve-prepare.outputs.branch }}
+          DEFAULT_BRANCH: ${{ needs.resolve-prepare.outputs.default_branch }}
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.resolve-prepare.outputs.head_sha }}
           PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           git check-ref-format --branch "$BRANCH" >/dev/null
           pr_json=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          repo_json=$(gh api "repos/$GITHUB_REPOSITORY")
           test "$(jq -r '.head.repo.full_name' <<<"$pr_json")" = "$GITHUB_REPOSITORY"
           test "$(jq -r '.base.repo.full_name' <<<"$pr_json")" = "$GITHUB_REPOSITORY"
           test "$(jq -r '.head.ref' <<<"$pr_json")" = "$BRANCH"
           test "$(jq -r '.head.sha' <<<"$pr_json")" = "$HEAD_SHA"
           test "$(jq -r '.base.sha' <<<"$pr_json")" = "$BASE_SHA"
+          test "$(jq -r '.state' <<<"$pr_json")" = open
+          test "$(jq -r '.merged' <<<"$pr_json")" = false
+          default_branch=$(jq -r '.default_branch' <<<"$repo_json")
+          test "$default_branch" = "$DEFAULT_BRANCH"
+          git check-ref-format --branch "$default_branch" >/dev/null
+          test "$BRANCH" != "$default_branch"
           auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           remote_head=$(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
             ls-remote origin "refs/heads/$BRANCH" | cut -f1)
           test "$remote_head" = "$HEAD_SHA"
+          # The explicit expected OID turns the final write into a CAS operation;
+          # a branch update or deletion after ls-remote must reject the push.
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
-            push origin "HEAD:refs/heads/$BRANCH"
+            push --force-with-lease="refs/heads/$BRANCH:$HEAD_SHA" \
+            origin "HEAD:refs/heads/$BRANCH"
           pushed_head=$(git rev-parse HEAD)
           remote_after=$(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
             ls-remote origin "refs/heads/$BRANCH" | cut -f1)
@@ -1092,7 +1132,7 @@ jobs:
             echo '## Resolve result'
             echo
             echo "Published tested conflict resolution commit: $COMMIT_SHA"
-            echo 'The resolution passed the full build and test job before the non-force push.'
+            echo 'The resolution passed the full build and test job before the lease-bound push.'
           } >> "$GITHUB_STEP_SUMMARY"
 
   # /ci — CI Trigger
