@@ -17,6 +17,11 @@ const rootLongBooleanOptions = [
   '--auto-pr', '--draft', '--pipeline', '--copy-workspace', '--skip-git',
   '--quiet', '--continue',
 ] as const;
+const rootBooleanAssignmentCases = rootLongBooleanOptions.flatMap((option) => ([
+  [option, 'root', [`${option}=true`, 'project-template', 'list']],
+  [option, 'group', ['project-template', `${option}=true`, 'list']],
+  [option, 'child', ['project-template', 'list', `${option}=true`]],
+] as const));
 const duplicateRuntimeAssertionCases = [
   [
     'inspect', './missing.taktpack',
@@ -164,22 +169,16 @@ describe('project-template CLI entrypoint contract', () => {
     ])).toBe(false);
   });
 
-  it.each(rootLongBooleanOptions)(
-    'keeps --flag=value for boolean %s in one machine error at every phase',
-    (option) => {
-      for (const args of [
-        [`${option}=true`, 'project-template', 'list'],
-        ['project-template', `${option}=true`, 'list'],
-        ['project-template', 'list', `${option}=true`],
-      ]) {
-        const result = run(args);
-        expect(result.status).toBe(20);
-        expect(result.stderr).toBe('');
-        expect(result.stdout.trim().split('\n')).toHaveLength(1);
-        expect(JSON.parse(result.stdout)).toMatchObject({
-          schemaVersion: '1.0', status: 'error', error: { code: 'UNKNOWN_OPTION' },
-        });
-      }
+  it.each(rootBooleanAssignmentCases)(
+    'keeps boolean %s assignment at %s phase in one machine error',
+    (_option, _phase, args) => {
+      const result = run(args);
+      expect(result.status).toBe(20);
+      expect(result.stderr).toBe('');
+      expect(result.stdout.trim().split('\n')).toHaveLength(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        schemaVersion: '1.0', status: 'error', error: { code: 'UNKNOWN_OPTION' },
+      });
     },
   );
 
