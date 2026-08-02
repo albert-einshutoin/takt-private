@@ -179,6 +179,9 @@ function parseBlocks(text, path, preimageSha) {
       coveredMarkers.push(marker.index);
     }
   }
+  // The coverage loop may look one marker past the current block. Reset the
+  // stateful global regexp so malformed trailing markers cannot be skipped.
+  MARKER_LINE_PATTERN.lastIndex = 0;
   const allMarkers = [...text.matchAll(MARKER_LINE_PATTERN)].map((item) => item.index);
   if (blocks.length === 0 || allMarkers.length !== blocks.length * 4 ||
       coveredMarkers.length !== allMarkers.length || coveredMarkers.some((value, index) => value !== allMarkers[index])) {

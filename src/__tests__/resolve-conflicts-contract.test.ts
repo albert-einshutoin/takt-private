@@ -1,10 +1,16 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const script = resolve('.github/scripts/resolve-conflicts-contract.mjs');
+const temporaryRepositories = new Set<string>();
+
+afterEach(() => {
+  for (const repo of temporaryRepositories) rmSync(repo, { recursive: true, force: true });
+  temporaryRepositories.clear();
+});
 
 function git(repo: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
@@ -12,6 +18,7 @@ function git(repo: string, ...args: string[]): string {
 
 function makeConflict(): string {
   const repo = mkdtempSync(join(tmpdir(), 'takt-resolve-contract-'));
+  temporaryRepositories.add(repo);
   git(repo, 'init', '-q');
   git(repo, 'config', 'user.email', 'test@example.com');
   git(repo, 'config', 'user.name', 'Test');
@@ -84,9 +91,18 @@ describe('resolve-conflicts contract', () => {
 
     const linked = makeConflict();
     writeFileSync(join(linked, 'outside.txt'), readFileSync(join(linked, 'note.txt')));
-    execFileSync('rm', [join(linked, 'note.txt')]);
+    unlinkSync(join(linked, 'note.txt'));
     symlinkSync('outside.txt', join(linked, 'note.txt'));
     expect(run(linked, 'prepare', linked, join(linked, 'input.json')).status).not.toBe(0);
+  });
+
+  it('rejects an extra marker after a valid conflict block', () => {
+    const repo = makeConflict();
+    writeFileSync(join(repo, 'note.txt'), `${readFileSync(join(repo, 'note.txt'), 'utf8')}<<<<<<< stray\n`);
+    expect(run(repo, 'prepare', repo, join(repo, 'input.json')).status).not.toBe(0);
+    expect(readFileSync(script, 'utf8')).toContain(
+      "MARKER_LINE_PATTERN.lastIndex = 0;\n  const allMarkers = [...text.matchAll(MARKER_LINE_PATTERN)]",
+    );
   });
 
   it('rejects stale preimages, digest mismatch, extra keys, and incomplete or duplicate IDs', () => {
@@ -147,11 +163,44 @@ describe('resolve-conflicts contract', () => {
 
   it('fails closed when there are no unresolved files or a conflicted path is outside limits', () => {
     const empty = mkdtempSync(join(tmpdir(), 'takt-resolve-empty-'));
+    temporaryRepositories.add(empty);
     git(empty, 'init', '-q');
     expect(run(empty, 'prepare', empty, join(empty, 'input.json')).status).not.toBe(0);
 
     const oversized = makeConflict();
     writeFileSync(join(oversized, 'note.txt'), `<<<<<<< HEAD\n${'a'.repeat(512 * 1024)}\n||||||| base\nb\n=======\nc\n>>>>>>> theirs\n`);
     expect(run(oversized, 'prepare', oversized, join(oversized, 'input.json')).status).not.toBe(0);
+  });
+
+  it('validates every file preimage before changing any file', () => {
+    const repo = makeConflict();
+    writeFileSync(join(repo, 'second.txt'), readFileSync(join(repo, 'note.txt')));
+    git(repo, 'add', 'second.txt');
+    // Reuse the three index stages so the second path is a genuine unresolved
+    // entry while keeping this regression fixture small and deterministic.
+    for (const stage of ['1', '2', '3']) {
+      const source = git(repo, 'rev-parse', `:${stage}:note.txt`);
+      execFileSync('git', ['update-index', '--index-info'], {
+        cwd: repo,
+        input: `100644 ${source} ${stage}\tsecond.txt\n`,
+      });
+    }
+    const inputPath = join(repo, 'input.json');
+    const proposalPath = join(repo, 'proposal.json');
+    expect(run(repo, 'prepare', repo, inputPath).status).toBe(0);
+    const input = JSON.parse(readFileSync(inputPath, 'utf8'));
+    writeFileSync(proposalPath, JSON.stringify({
+      schema_version: 1,
+      input_digest: input.input_digest,
+      resolutions: input.conflicts.map((conflict: { conflict_id: string }) => ({
+        conflict_id: conflict.conflict_id,
+        replacement: 'resolved\n',
+      })),
+    }));
+    const firstBefore = readFileSync(join(repo, 'note.txt'));
+    writeFileSync(join(repo, 'second.txt'), readFileSync(join(repo, 'second.txt'), 'utf8').replace('theirs', 'stale'));
+
+    expect(run(repo, 'apply', repo, inputPath, proposalPath).status).not.toBe(0);
+    expect(readFileSync(join(repo, 'note.txt'))).toEqual(firstBefore);
   });
 });
