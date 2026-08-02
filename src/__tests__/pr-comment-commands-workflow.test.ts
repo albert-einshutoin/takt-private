@@ -18,6 +18,8 @@ import { parse as parseYaml } from 'yaml';
 
 const workflowPath = resolve('.github/workflows/pr-comment-commands.yml');
 const reviewWorkflowPath = resolve('builtins/en/workflows/review-takt-default.yaml');
+const claudeToolchainManifestPath = resolve('.github/toolchains/claude-code/package.json');
+const claudeToolchainLockPath = resolve('.github/toolchains/claude-code/package-lock.json');
 const ACTION_PINS = {
   checkout: 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
   downloadArtifact: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
@@ -83,6 +85,7 @@ function findStep(job: WorkflowJob, idOrName: string): WorkflowStep {
 function assertTrustedClaudeInstall(
   job: WorkflowJob,
   providerStepName: string,
+  manifestRoot = '$GITHUB_WORKSPACE',
 ): void {
   const install = findStep(job, 'Install trusted Claude Code');
   const installIndex = job.steps.indexOf(install);
@@ -90,14 +93,27 @@ function assertTrustedClaudeInstall(
 
   expect(providerIndex).toBeGreaterThan(-1);
   expect(installIndex).toBeLessThan(providerIndex);
-  expect(install.env).toBeUndefined();
+  expect(install.env).toEqual({
+    CLAUDE_TOOLCHAIN_DIR: '${{ runner.temp }}/claude-code-toolchain',
+  });
   expect(JSON.stringify(install)).not.toMatch(/ANTHROPIC_API_KEY|secrets\./u);
-  expect(install.run?.trimEnd().split('\n')).toEqual([
-    'npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.0',
-    'command -v claude >/dev/null',
-    "claude --version | grep -Eq '^2\\.1\\.0([[:space:]]|$)'",
-  ]);
-  expect(install.run).not.toMatch(/@(?:latest|next|beta)\b|claude-code\s*$/mu);
+  expect(install.run).toContain(
+    `cp -- "${manifestRoot}/.github/toolchains/claude-code/package.json" "$CLAUDE_TOOLCHAIN_DIR/package.json"`,
+  );
+  expect(install.run).toContain(
+    `cp -- "${manifestRoot}/.github/toolchains/claude-code/package-lock.json" "$CLAUDE_TOOLCHAIN_DIR/package-lock.json"`,
+  );
+  expect(install.run).toContain(
+    'npm ci --prefix "$CLAUDE_TOOLCHAIN_DIR" --ignore-scripts --no-audit --no-fund',
+  );
+  expect(install.run).toContain(
+    'claude_bin="$CLAUDE_TOOLCHAIN_DIR/node_modules/.bin/claude"',
+  );
+  expect(install.run).toContain('test -x "$claude_bin"');
+  expect(install.run).toContain(
+    '"$claude_bin" --version | grep -Eq \'^2\\.1\\.0([[:space:]]|$)\'',
+  );
+  expect(install.run).not.toMatch(/npm install|--global|@(?:latest|next|beta)\b/u);
 }
 
 function runResolveShellStep(
@@ -515,8 +531,12 @@ describe('PR Comment Commands workflow contract', () => {
 
   it('installs a verified exact Claude Code version before exposing the provider secret', () => {
     const review = readWorkflow().jobs.review!;
+    const run = findStep(review, 'Run trusted TAKT review');
 
     assertTrustedClaudeInstall(review, 'Run trusted TAKT review');
+    expect(run.env?.TAKT_CLAUDE_CLI_PATH).toBe(
+      '${{ runner.temp }}/claude-code-toolchain/node_modules/.bin/claude',
+    );
 
     const withoutInstall: WorkflowJob = {
       ...review,
@@ -529,7 +549,77 @@ describe('PR Comment Commands workflow contract', () => {
   });
 
   it('uses the same lifecycle-disabled exact Claude Code install for resolve', () => {
-    assertTrustedClaudeInstall(readWorkflow().jobs.resolve!, 'Resolve');
+    const resolveJob = readWorkflow().jobs.resolve!;
+    const run = findStep(resolveJob, 'Resolve');
+    const install = findStep(resolveJob, 'Install trusted Claude Code');
+    const trustedCheckout = resolveJob.steps.find(step => (
+      step.uses === ACTION_PINS.checkout && step.with?.path === 'trusted-base'
+    ));
+    const prCheckout = resolveJob.steps.find(step => (
+      step.uses === ACTION_PINS.checkout
+      && step.with?.ref === '${{ steps.pr.outputs.head_sha }}'
+    ));
+
+    assertTrustedClaudeInstall(resolveJob, 'Resolve', '$GITHUB_WORKSPACE/trusted-base');
+    expect(trustedCheckout?.with).toMatchObject({
+      ref: '${{ github.sha }}',
+      path: 'trusted-base',
+      'persist-credentials': false,
+    });
+    expect(prCheckout).toBeDefined();
+    expect(resolveJob.steps.indexOf(install)).toBeLessThan(
+      resolveJob.steps.indexOf(prCheckout!),
+    );
+    expect(run.run).toContain(
+      '"$RUNNER_TEMP/claude-code-toolchain/node_modules/.bin/claude" -p',
+    );
+    expect(run.run).not.toMatch(/^\s*claude -p/mu);
+  });
+
+  it('locks the dedicated Claude Code toolchain including every installed package', () => {
+    const manifest = JSON.parse(readFileSync(claudeToolchainManifestPath, 'utf8')) as {
+      private?: boolean;
+      dependencies?: Record<string, string>;
+    };
+    const lock = JSON.parse(readFileSync(claudeToolchainLockPath, 'utf8')) as {
+      lockfileVersion?: number;
+      packages?: Record<string, {
+        version?: string;
+        resolved?: string;
+        integrity?: string;
+        dependencies?: Record<string, string>;
+        optionalDependencies?: Record<string, string>;
+      }>;
+    };
+
+    expect(manifest.private).toBe(true);
+    expect(manifest.dependencies).toEqual({ '@anthropic-ai/claude-code': '2.1.0' });
+    expect(lock.lockfileVersion).toBe(3);
+    expect(lock.packages?.['']?.version).toBeUndefined();
+    expect(lock.packages?.['']).toMatchObject({
+      dependencies: { '@anthropic-ai/claude-code': '2.1.0' },
+    });
+
+    const installedPackages = Object.entries(lock.packages ?? {})
+      .filter(([path]) => path.startsWith('node_modules/'));
+    expect(installedPackages.length).toBeGreaterThan(0);
+    for (const [path, pkg] of installedPackages) {
+      expect(pkg.version, `${path} must have an exact version`).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u);
+      expect(pkg.resolved, `${path} must have a resolved artifact`).toMatch(/^https:\/\//u);
+      expect(pkg.integrity, `${path} must have integrity`).toMatch(/^sha512-/u);
+      for (const dependency of Object.keys({
+        ...pkg.dependencies,
+        ...pkg.optionalDependencies,
+      })) {
+        expect(
+          installedPackages.some(([candidate]) => (
+            candidate === `node_modules/${dependency}`
+            || candidate.endsWith(`/node_modules/${dependency}`)
+          )),
+          `${path} dependency ${dependency} must have a locked package`,
+        ).toBe(true);
+      }
+    }
   });
 
   it('executes the trusted builder and embeds bounded PR bytes into one task', () => {

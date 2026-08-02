@@ -51,10 +51,16 @@ jobs:
           cache: npm
 
       - name: Install trusted Claude Code
+        env:
+          CLAUDE_TOOLCHAIN_DIR: ${{ runner.temp }}/claude-code-toolchain
         run: |
-          npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.0
-          command -v claude >/dev/null
-          claude --version | grep -Eq '^2\.1\.0([[:space:]]|$)'
+          mkdir -p -- "$CLAUDE_TOOLCHAIN_DIR"
+          cp -- "$GITHUB_WORKSPACE/.github/toolchains/claude-code/package.json" "$CLAUDE_TOOLCHAIN_DIR/package.json"
+          cp -- "$GITHUB_WORKSPACE/.github/toolchains/claude-code/package-lock.json" "$CLAUDE_TOOLCHAIN_DIR/package-lock.json"
+          npm ci --prefix "$CLAUDE_TOOLCHAIN_DIR" --ignore-scripts --no-audit --no-fund
+          claude_bin="$CLAUDE_TOOLCHAIN_DIR/node_modules/.bin/claude"
+          test -x "$claude_bin"
+          "$claude_bin" --version | grep -Eq '^2\.1\.0([[:space:]]|$)'
 
       - name: Build trusted base TAKT
         run: |
@@ -147,6 +153,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           HOME: ${{ runner.temp }}/takt-review-home
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+          TAKT_CLAUDE_CLI_PATH: ${{ runner.temp }}/claude-code-toolchain/node_modules/.bin/claude
           TAKT_OBSERVABILITY_ENABLED: 'false'
           TAKT_PROVIDER_OPTIONS: '{"claude":{"allowed_tools":[]},"codex":{"network_access":false,"skills":{"repo":false,"user":false}},"opencode":{"network_access":false,"allowed_tools":[]}}'
           TAKT_WORKFLOW_ARPEGGIO_CUSTOM_DATA_SOURCE_MODULES: 'false'
@@ -377,6 +384,30 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          # Keep the installer inputs outside the later untrusted PR checkout.
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: trusted-base
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
+      - name: Install trusted Claude Code
+        env:
+          CLAUDE_TOOLCHAIN_DIR: ${{ runner.temp }}/claude-code-toolchain
+        run: |
+          mkdir -p -- "$CLAUDE_TOOLCHAIN_DIR"
+          cp -- "$GITHUB_WORKSPACE/trusted-base/.github/toolchains/claude-code/package.json" "$CLAUDE_TOOLCHAIN_DIR/package.json"
+          cp -- "$GITHUB_WORKSPACE/trusted-base/.github/toolchains/claude-code/package-lock.json" "$CLAUDE_TOOLCHAIN_DIR/package-lock.json"
+          npm ci --prefix "$CLAUDE_TOOLCHAIN_DIR" --ignore-scripts --no-audit --no-fund
+          claude_bin="$CLAUDE_TOOLCHAIN_DIR/node_modules/.bin/claude"
+          test -x "$claude_bin"
+          "$claude_bin" --version | grep -Eq '^2\.1\.0([[:space:]]|$)'
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
@@ -410,19 +441,9 @@ jobs:
             echo "stale_markers=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 20
-
-      - name: Install trusted Claude Code
-        run: |
-          npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.0
-          command -v claude >/dev/null
-          claude --version | grep -Eq '^2\.1\.0([[:space:]]|$)'
-
       - name: Resolve
         run: |
-          claude -p --dangerously-skip-permissions "$(cat <<'PROMPT'
+          "$RUNNER_TEMP/claude-code-toolchain/node_modules/.bin/claude" -p --dangerously-skip-permissions "$(cat <<'PROMPT'
           このPRのコンフリクトを解決してください。
 
           ## 状況判定
