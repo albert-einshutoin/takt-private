@@ -193,15 +193,15 @@ describe('dependency versions', () => {
 
     const mixedOtelFixture: PackageLock = {
       packages: {
-        'node_modules/@opentelemetry/sdk-metrics': { version: '2.9.0' },
-        'node_modules/example/node_modules/@opentelemetry/sdk-metrics': { version: '2.8.0' },
+        'node_modules/@opentelemetry/sdk-metrics': { version: '2.10.0' },
+        'node_modules/example/node_modules/@opentelemetry/sdk-metrics': { version: '2.9.0' },
       },
     };
     expect(() => assertAllLockedPackageVersions(
       mixedOtelFixture,
       '@opentelemetry/sdk-metrics',
-      (version) => isStableVersionInSeries(version, 2, 9),
-    )).toThrow(/node_modules\/example\/node_modules\/@opentelemetry\/sdk-metrics@2\.8\.0/u);
+      (version) => isStableVersionInSeries(version, 2, 10),
+    )).toThrow(/node_modules\/example\/node_modules\/@opentelemetry\/sdk-metrics@2\.9\.0/u);
   });
 
   it('declares OpenTelemetry foundation dependencies', () => {
@@ -288,11 +288,11 @@ describe('dependency versions', () => {
     const packageJson = readPackageJson();
     const packageLock = readPackageLock();
     const expected = {
-      '@opentelemetry/exporter-metrics-otlp-http': ['^0.220.0', 0, 220],
-      '@opentelemetry/exporter-trace-otlp-http': ['^0.220.0', 0, 220],
-      '@opentelemetry/sdk-metrics': ['^2.9.0', 2, 9],
-      '@opentelemetry/sdk-node': ['^0.220.0', 0, 220],
-      '@opentelemetry/sdk-trace-base': ['^2.9.0', 2, 9],
+      '@opentelemetry/exporter-metrics-otlp-http': ['^0.221.0', 0, 221],
+      '@opentelemetry/exporter-trace-otlp-http': ['^0.221.0', 0, 221],
+      '@opentelemetry/sdk-metrics': ['^2.10.0', 2, 10],
+      '@opentelemetry/sdk-node': ['^0.221.0', 0, 221],
+      '@opentelemetry/sdk-trace-base': ['^2.10.0', 2, 10],
     } as const;
 
     for (const [name, [declared, major, minor]] of Object.entries(expected)) {
@@ -301,7 +301,7 @@ describe('dependency versions', () => {
         (version) => isStableVersionInSeries(version, major, minor));
     }
     assertAllLockedPackageVersions(packageLock, '@opentelemetry/propagator-jaeger',
-      (version) => isStableVersionInSeries(version, 2, 9));
+      (version) => isStableVersionInSeries(version, 2, 10));
   });
 
   it('imports the real Anthropic and MCP SDK entrypoints', () => {
