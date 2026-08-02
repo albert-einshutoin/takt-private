@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "1.1",
+  "packVersion": "1.2.5",
+  "metadata": {
+    "name": "Team workflow defaults",
+    "description": "Saved after an editor review."
+  },
+  "derivation": {
+    "kind": "derived",
+    "operation": "editor-save",
+    "draftId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "editDocumentSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "parent": {
+      "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "packVersion": "1.2.4"
+    }
+  },
+  "takt": {
+    "minVersion": "0.48.0"
+  },
+  "source": {
+    "kind": "derived",
+    "method": "takt-editor-v1",
+    "draftId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "repertoireDependencies": [
+    {
+      "scope": "@acme/editor-tools",
+      "version": "2.3.4",
+      "source": "github:acme/editor-tools@v2.3.4",
+      "commit": "abcdef0123456789abcdef0123456789abcdef01",
+      "capabilities": ["edit"]
+    }
+  ],
+  "entries": []
+}

@@ -115,7 +115,7 @@ describe('project template manifest public contract', () => {
   it.each([
     ['manifest', undefined, 'INVALID_MANIFEST'],
     ['manifest', 1, 'INVALID_MANIFEST'],
-    ['manifest', '1.1', 'UNSUPPORTED_SCHEMA_VERSION'],
+    ['manifest', '1.2', 'UNSUPPORTED_SCHEMA_VERSION'],
     ['manifest', '2.0', 'UNSUPPORTED_SCHEMA_MAJOR'],
   ])('should classify %s schemaVersion %j precisely', (_kind, schemaVersion, code) => {
     const manifest = validManifest();
