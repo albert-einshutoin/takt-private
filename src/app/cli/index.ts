@@ -13,6 +13,7 @@ import { resolveRemovedRootCommand, resolveSlashFallbackTask } from './helpers.j
 import { installImmediateSigintExit } from './immediateSigintExit.js';
 import { installOpencodeExitCleanup } from './opencodeExitCleanup.js';
 import {
+  findProjectTemplateGroupIndex,
   isProjectTemplateCliInvocation,
   projectTemplateCommandCandidate,
   projectTemplateCommandUsesApplyMode,
@@ -58,11 +59,6 @@ const PROJECT_TEMPLATE_COMMANDS: ReadonlySet<string> = new Set(
 const PROJECT_TEMPLATE_APPLY_COMMANDS: ReadonlySet<ProjectTemplateCommandName> = new Set([
   'export', 'apply', 'update', 'rollback',
 ] as const);
-const ROOT_OPTIONS_WITH_VALUE = new Set([
-  '-i', '--issue', '--pr', '-w', '--workflow', '-b', '--branch', '--repo',
-  '--provider', '--model', '-t', '--task', '--isolation', '--cwd',
-]);
-
 interface ProjectTemplateParserFailureIdentity {
   readonly command: ProjectTemplateCliCommand;
   readonly mode: 'dry-run' | 'apply';
@@ -82,22 +78,8 @@ function isProjectTemplateCommandName(
 function projectTemplateParserFailureIdentity(
   args: readonly string[],
 ): ProjectTemplateParserFailureIdentity {
-  const consumedValues = new Set<number>();
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index]!;
-    const equals = argument.indexOf('=');
-    const option = equals < 0 ? argument : argument.slice(0, equals);
-    if (!ROOT_OPTIONS_WITH_VALUE.has(option)) continue;
-    if (equals < 0 && args[index + 1] !== undefined) {
-      consumedValues.add(index + 1);
-      index += 1;
-    }
-  }
-
-  const groupIndex = args.findIndex((argument, index) => (
-    argument === 'project-template' && !consumedValues.has(index)
-  ));
-  if (groupIndex < 0) {
+  const groupIndex = findProjectTemplateGroupIndex(args);
+  if (groupIndex === null) {
     return { command: 'project-template list', mode: 'dry-run' };
   }
 

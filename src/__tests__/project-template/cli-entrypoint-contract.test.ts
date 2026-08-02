@@ -599,6 +599,22 @@ writeFileSync(
     });
   });
 
+  it('skips a project-template value consumed by a short option cluster', () => {
+    const result = run([
+      '-qi', 'project-template', '--wat', 'project-template',
+      'apply', 'missing.taktpack', '--apply',
+    ]);
+
+    expect(result.status).toBe(20);
+    expect(result.stderr).toBe('');
+    expect(result.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      schemaVersion: '1.0', status: 'error',
+      command: 'project-template apply', mode: 'apply',
+      error: { code: 'UNKNOWN_OPTION' },
+    });
+  });
+
   it('does not recover apply mode from a global value', () => {
     const result = run([
       '--wat', 'project-template', 'apply', 'missing.taktpack', '--task', '--apply',

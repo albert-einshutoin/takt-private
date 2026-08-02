@@ -125,29 +125,26 @@ export function projectTemplateNamedCommandUsesApplyMode(
   args: readonly string[],
   commandName: string,
 ): boolean {
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== 'project-template') continue;
-    const candidate = projectTemplateCommandCandidate(args, index);
-    if (
-      candidate?.commandIndex !== null
-      && candidate?.commandIndex !== undefined
-      && args[candidate.commandIndex] === commandName
-    ) return projectTemplateCommandUsesApplyMode(args, candidate.commandIndex);
-  }
-  return false;
+  const groupIndex = findProjectTemplateGroupIndex(args);
+  if (groupIndex === null) return false;
+  const candidate = projectTemplateCommandCandidate(args, groupIndex);
+  return candidate?.commandIndex !== null
+    && candidate?.commandIndex !== undefined
+    && args[candidate.commandIndex] === commandName
+    && projectTemplateCommandUsesApplyMode(args, candidate.commandIndex);
 }
 
-/** Pure command detection that never mistakes an option value or later operand for a command. */
-export function isProjectTemplateCliInvocation(args: readonly string[]): boolean {
+/** Finds the actual root command without mistaking option values for commands. */
+export function findProjectTemplateGroupIndex(args: readonly string[]): number | null {
   let unknownOptionValuePending = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
-    if (argument === '--') return args[index + 1] === 'project-template';
+    if (argument === '--') return args[index + 1] === 'project-template' ? index + 1 : null;
     if (unknownOptionValuePending) {
       // Why: an unknown option is ambiguous, but a complete known command
       // shape must still enter the redacted machine-error lifecycle. A value
       // named project-template followed by an unrelated command remains data.
-      if (projectTemplateCommandCandidate(args, index) !== null) return true;
+      if (projectTemplateCommandCandidate(args, index) !== null) return index;
       unknownOptionValuePending = false;
       continue;
     }
@@ -159,13 +156,13 @@ export function isProjectTemplateCliInvocation(args: readonly string[]): boolean
       }
       continue;
     }
-    if (ROOT_TERMINAL_OPTIONS.has(argument)) return false;
+    if (ROOT_TERMINAL_OPTIONS.has(argument)) return null;
     if (ROOT_BOOLEAN_OPTIONS.has(argument)) continue;
-    if (argument === '-') return false;
+    if (argument === '-') return null;
     if (argument.startsWith('-') && !argument.startsWith('--')) {
       const shape = shortOptionShape(argument);
       if (shape === 'consumes-next' && args[index + 1] !== undefined) index += 1;
-      else if (shape === 'terminal') return false;
+      else if (shape === 'terminal') return null;
       else if (shape === 'unknown') unknownOptionValuePending = true;
       continue;
     }
@@ -177,7 +174,12 @@ export function isProjectTemplateCliInvocation(args: readonly string[]): boolean
     }
     // Why: Commander assigns the first positional operand to the root command;
     // later values named project-template still belong to commands such as add.
-    return argument === 'project-template';
+    return argument === 'project-template' ? index : null;
   }
-  return false;
+  return null;
+}
+
+/** Pure command detection that never mistakes an option value or later operand for a command. */
+export function isProjectTemplateCliInvocation(args: readonly string[]): boolean {
+  return findProjectTemplateGroupIndex(args) !== null;
 }
