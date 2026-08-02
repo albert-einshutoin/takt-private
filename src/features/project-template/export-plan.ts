@@ -236,12 +236,12 @@ export async function createProjectTemplateExportPlan(
     });
   }
 
-  for (let index = 0; index < matchedPolicies.length; index += 1) {
+  for (let index = 0; index < policyEntries.length; index += 1) {
     if (!matchedPolicies[index]) {
       throw new TaktpackError('INVALID_EXPORT_PLAN', 'policy references a non-exportable path', 'policies');
     }
   }
-  for (let index = 0; index < matchedCapabilities.length; index += 1) {
+  for (let index = 0; index < approvedCapabilityValues.length; index += 1) {
     if (!matchedCapabilities[index]) {
       throw new TaktpackError(
         'INVALID_EXPORT_PLAN',

@@ -53,6 +53,25 @@ async function withPoisonedArrayNumericSetters<T>(run: () => Promise<T>): Promis
   }
 }
 
+async function withPoisonedTypedArrayLength<T>(run: () => Promise<T>): Promise<T> {
+  const prototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(prototype, 'length')!;
+  const byteLengthDescriptor = Object.getOwnPropertyDescriptor(prototype, 'byteLength')!;
+  Object.defineProperty(prototype, 'length', {
+    ...lengthDescriptor,
+    get(this: Uint8Array) {
+      const bytes = byteLengthDescriptor.get!.call(this) as number;
+      return Object.getPrototypeOf(this) === Uint8Array.prototype && bytes <= 2
+        ? 0 : lengthDescriptor.get!.call(this) as number;
+    },
+  });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(prototype, 'length', lengthDescriptor);
+  }
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -250,6 +269,34 @@ describe('project template export plan', () => {
       'workflows/release.yaml': 'steps:\n  - run: npm test\n',
     });
     const outcome = await withPoisonedArrayNumericSetters(() => (
+      createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        approvedCapabilities: ['external-command', 'github-write'],
+      }).catch((error: unknown) => error)
+    ));
+    expect(outcome).toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'approvedCapabilities',
+    });
+  });
+
+  it('rejects an unknown policy under TypedArray length getter poisoning', async () => {
+    const root = makeProject({ 'workflows/review.yaml': 'name: review\n' });
+    const outcome = await withPoisonedTypedArrayLength(() => (
+      createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        policies: { 'missing.yaml': 'managed' },
+      }).catch((error: unknown) => error)
+    ));
+    expect(outcome).toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'policies',
+    });
+  });
+
+  it('rejects an unused capability under TypedArray length getter poisoning', async () => {
+    const root = makeProject({
+      'workflows/release.yaml': 'steps:\n  - run: npm test\n',
+    });
+    const outcome = await withPoisonedTypedArrayLength(() => (
       createProjectTemplateExportPlan(root, {
         packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
         approvedCapabilities: ['external-command', 'github-write'],
