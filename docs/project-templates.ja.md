@@ -378,6 +378,10 @@ lock を作成して、source の commit と各 entry の digest を保存しま
 生成した適用計画をユーザーが確認します。v1 をその場で書き換えたり、ファイル内容
 から新しい capability を推測したりしてはいけません。
 
+この節が扱うのはmanifest、lock、archiveのschemaです。CLI machine envelopeは独立して
+進化するため、callerがCLI schema `1.1`を選択してもarchive schema `1.0`は変わりません。
+CLIの`schemaVersion`をarchive parserの選択に使ってはいけません。
+
 ## 運用CLIとTaktDesk連携
 
 portableな運用境界には `takt project-template` を使います。全コマンドで
@@ -459,6 +463,74 @@ machine出力はclosed schema `1.0`の単一envelopeです。`status`、`command
 `24`source/backupの利用不可または不正、`25`rollback/recovery/結果不確定、`70`内部・
 protocol failure、mutation admission前のinterruptは`130`です。admission後はcommit、
 rollback、recoveryの終端までdrainします。UI taskのcancelだけから成否を推測してはいけません。
+
+### CLI schema 1.1 のnegotiationと移行
+
+互換期間中はCLI schema `1.0`をdefaultとして維持します。canonical bytes、exact key、
+result shape、exit-code mappingは変更しません。schema `1.1`はcallerが
+`--schema-version 1.1`で明示的に要求した
+場合だけ返します。negotiationはversion rangeや暗黙の最新版選択ではなく、`1.0`または
+`1.1`を完全一致で選択します。option省略時はschema `1.0`とbyte互換で、重複指定と未対応
+versionはfail closedします。schema `1.1`が現在対応するのはreadとdry-runだけで、apply modeは
+別変更としてmutation protocolを実装するまで拒否します。
+
+consumerは`1.0`と`1.1`に別々のclosed decoderを持ち、共通の緩いsuperset decoderを
+作ってはいけません。未知version、未知key、未知enum、stable IDの重複、親子identityの
+不一致はprotocol failureとしてwrite前に拒否します。schema `1.1`のboundedなreview射影は
+既存envelopeの`result.detail`以下に置き、`.taktpack`のmanifest、lock、archive schemaは
+変更しません。
+
+TaktDeskの安全な移行順は次の通りです。
+
+1. `1.0`の要求を維持したまま、version別の2つのclosed decoderを先に配布する。
+2. mutationを有効にせず、`1.1`のlibrary、export、preview、conflict、local source、
+   GitHub source fixtureを検証する。
+3. readとdry-runだけで`1.1`を明示要求し、未対応producerが暗黙fallbackせず明確に
+   失敗することを確認する。
+4. previewとapplyが同じnegotiated versionとfreshな`planId`を使うことを確認してから
+   applyを有効にする。default変更は別の互換性判断として扱う。
+
+### TaktDesk schema 1.1 review mapping
+
+次の名称を合意済みreview contractとして使います。いずれも表示用データであり、mutation
+authorityではありません。
+
+| TaktDesk画面 | `result.detail`の射影 | consumerでの用途 |
+|---|---|---|
+| Library card | `identity.packFormatVersion`、`identity.packVersion`、`identity.archiveId`、`identity.manifestId` | archiveを開かずpack versionとimmutable identityを表示する |
+| 互換性 | `compatibility.status`、`compatibility.minTaktVersion`、任意の`compatibility.maxTaktVersion`と`compatibility.currentTaktVersion` | compatible、unknown、incompatibleを表示する |
+| Source | closedな`source` union | URIを再解釈せずlocal importとGitHub sourceを区別する |
+| Capability | `declaredCapabilities`、`detectedCapabilities`、boundedな`capabilityWarnings` | capability badgeとfile/target warningを構築する |
+| Export review | `securitySummary.counts`とboundedな`securitySummary.reasons` | 保存前にportable、excluded、blocked、review-required件数を表示する |
+| Target preview | `manifestId`、`targetCount`、`actionCounts`、boundedな`targets` | target別のadd/update/keep/delete/conflict/excluded内訳を構築する |
+| Conflict review | boundedな`conflicts` | stable conflict identity、安全な場合だけportable path、symbolic reason、安全なdefault、allowed actionを表示する |
+
+capabilityは`executable`、`github-write`、`external-command`のclosed enumです。preview actionは
+`add`、`update`、`keep`、`delete`、`conflict`、`excluded`のclosed enumです。coreが解決操作を
+実装して検証するまでは、conflictのsafe defaultとallowed actionはともに`abort`だけです。
+UIが`replace`や`keep-local`のauthorityを独自に作ってはいけません。
+
+GitHub source variantは`requestedRef`とimmutableな`resolvedCommit`を分離し、`owner`、`repo`、
+`releaseTag`、`assetName`を持つ場合があります。requested branch/tagをresolved commitとして
+表示してはいけません。local-import variantが公開するのは`sourceId`、`revision`、`archiveId`、
+`manifestId`などの安全なimmutable identityだけで、absolute pathは公開しません。どちらの
+variantにもcredential、receipt/lease ID、approval evidence、precondition token、file content、
+internal plan objectを含めません。
+
+detail内のpathはportable relative path validatorを通過済みのものだけです。sensitive filenameは
+filenameを返さず、symbolic reasonと件数だけで表します。item/conflict IDはdomain-separatedな
+canonical projectionから導出し、array順序へ依存しません。各childの`targetId`と`manifestId`は
+親previewの値と一致し、IDは重複せず、aggregate countsはitem集計と一致し、conflict件数は
+conflict item数と一致しなければなりません。
+
+schema `1.1`もcore上限内に収めます。template entryは最大4,096件、portable pathは最大512
+code point、各segmentは最大255 code pointです。machine envelopeは最大1 MiB、深さ64、
+graph node 20,001件、各container 10,000 entriesです。review projectionでは、
+各detail collectionにさらに小さい256 rowの上限を適用します。producerが上限内へ収めるため
+意図的にdetail rowを減らす場合は、aggregate countsを保持し、canonical順で決定的にtruncateして、
+`PARTIAL_RESULT` warningを追加します。TaktDeskはこれをincompleteとして表示し、省略されたtailを
+emptyまたはsafeと解釈してはいけません。信頼できるaggregateやsecurity判断を返せない上限超過は、
+partial successではなくfail closedにします。
 
 従来の `devloopd onboard-repo` はpersonal automation設定向けのadvisory compatibilityとして
 残ります。portable packのexport/apply protocolではなく、TaktDesk移行authorityには使いません。

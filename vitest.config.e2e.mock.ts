@@ -47,6 +47,7 @@ export default defineConfig({
       'e2e/specs/repertoire-real.e2e.ts',
       'e2e/specs/project-template-pack.e2e.ts',
       'e2e/specs/project-template-cli.e2e.ts',
+      'e2e/specs/project-template-cli-schema-1-1.e2e.ts',
       'e2e/specs/workflow-selection-branches.e2e.ts',
       'e2e/specs/clone-branch-resolution.e2e.ts',
     ],
