@@ -80,6 +80,26 @@ function findStep(job: WorkflowJob, idOrName: string): WorkflowStep {
   return step as WorkflowStep;
 }
 
+function assertTrustedClaudeInstall(
+  job: WorkflowJob,
+  providerStepName: string,
+): void {
+  const install = findStep(job, 'Install trusted Claude Code');
+  const installIndex = job.steps.indexOf(install);
+  const providerIndex = job.steps.findIndex(step => step.name === providerStepName);
+
+  expect(providerIndex).toBeGreaterThan(-1);
+  expect(installIndex).toBeLessThan(providerIndex);
+  expect(install.env).toBeUndefined();
+  expect(JSON.stringify(install)).not.toMatch(/ANTHROPIC_API_KEY|secrets\./u);
+  expect(install.run?.trimEnd().split('\n')).toEqual([
+    'npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.0',
+    'command -v claude >/dev/null',
+    "claude --version | grep -Eq '^2\\.1\\.0([[:space:]]|$)'",
+  ]);
+  expect(install.run).not.toMatch(/@(?:latest|next|beta)\b|claude-code\s*$/mu);
+}
+
 function runResolveShellStep(
   stepName: string,
   branch: string,
@@ -491,6 +511,25 @@ describe('PR Comment Commands workflow contract', () => {
     expect(run.run).toContain('base64 --decode');
     expect(run.run).not.toMatch(/PR-METADATA\.json|PR-DIFF\.patch|\b(?:cat|find|grep)\b/iu);
     expect(run.env?.TAKT_PROVIDER_OPTIONS).toContain('"allowed_tools":[]');
+  });
+
+  it('installs a verified exact Claude Code version before exposing the provider secret', () => {
+    const review = readWorkflow().jobs.review!;
+
+    assertTrustedClaudeInstall(review, 'Run trusted TAKT review');
+
+    const withoutInstall: WorkflowJob = {
+      ...review,
+      steps: review.steps.filter(step => step.name !== 'Install trusted Claude Code'),
+    };
+    expect(() => assertTrustedClaudeInstall(
+      withoutInstall,
+      'Run trusted TAKT review',
+    )).toThrow(/missing workflow step: Install trusted Claude Code/u);
+  });
+
+  it('uses the same lifecycle-disabled exact Claude Code install for resolve', () => {
+    assertTrustedClaudeInstall(readWorkflow().jobs.resolve!, 'Resolve');
   });
 
   it('executes the trusted builder and embeds bounded PR bytes into one task', () => {

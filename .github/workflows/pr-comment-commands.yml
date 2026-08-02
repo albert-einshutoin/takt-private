@@ -50,6 +50,12 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Install trusted Claude Code
+        run: |
+          npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.0
+          command -v claude >/dev/null
+          claude --version | grep -Eq '^2\.1\.0([[:space:]]|$)'
+
       - name: Build trusted base TAKT
         run: |
           npm ci
@@ -408,8 +414,11 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install trusted Claude Code
+        run: |
+          npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/claude-code@2.1.0
+          command -v claude >/dev/null
+          claude --version | grep -Eq '^2\.1\.0([[:space:]]|$)'
 
       - name: Resolve
         run: |
