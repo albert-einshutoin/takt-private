@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -57,7 +56,7 @@ interface WorkflowStep {
 
 interface WorkflowJob {
   readonly if?: string;
-  readonly needs?: string;
+  readonly needs?: string | readonly string[];
   readonly environment?: string;
   readonly outputs?: Readonly<Record<string, string>>;
   readonly permissions?: Readonly<Record<string, string>>;
@@ -107,87 +106,40 @@ function assertTrustedClaudeInstall(
     'npm ci --prefix "$CLAUDE_TOOLCHAIN_DIR" --ignore-scripts --no-audit --no-fund',
   );
   expect(install.run).toContain(
-    'claude_bin="$CLAUDE_TOOLCHAIN_DIR/node_modules/.bin/claude"',
+    'npm audit --prefix "$CLAUDE_TOOLCHAIN_DIR" --audit-level=high --omit=dev',
+  );
+  expect(install.run).toContain(
+    'claude_bin="$CLAUDE_TOOLCHAIN_DIR/node_modules/@anthropic-ai/claude-code-linux-x64/claude"',
   );
   expect(install.run).toContain('test -x "$claude_bin"');
   expect(install.run).toContain(
-    '"$claude_bin" --version | grep -Eq \'^2\\.1\\.0([[:space:]]|$)\'',
+    '"$claude_bin" --version | grep -Eq \'^2\\.1\\.220([[:space:]]|$)\'',
   );
   expect(install.run).not.toMatch(/npm install|--global|@(?:latest|next|beta)\b/u);
 }
 
-function runResolveShellStep(
-  stepName: string,
-  branch: string,
-): readonly string[][] {
-  const directory = mkdtempSync(resolve(tmpdir(), 'takt-resolve-shell-'));
-  temporaryDirectories.push(directory);
-  const binDirectory = resolve(directory, 'bin');
-  const logPath = resolve(directory, 'commands.ndjson');
-  mkdirSync(binDirectory);
-
-  const mock = `#!/bin/sh
-node -e 'const fs = require("node:fs"); fs.appendFileSync(process.env.COMMAND_LOG, JSON.stringify(process.argv.slice(1)) + "\\n")' "$0" "$@"
-if [ "$(basename "$0")" = git ]; then
-  case "$1" in
-    diff) exit 0 ;;
-    rev-parse) printf '%s\\n' '0123456789abcdef0123456789abcdef01234567'; exit 0 ;;
-    rev-list) printf '%s\\n' "$MOCK_AHEAD"; exit 0 ;;
-  esac
-fi
-exit 0
-`;
-  for (const command of ['git', 'gh']) {
-    const commandPath = resolve(binDirectory, command);
-    writeFileSync(commandPath, mock);
-    chmodSync(commandPath, 0o755);
-  }
-
-  const step = findStep(readWorkflow().jobs.resolve!, stepName);
-  // GitHub expands expressions before handing the script to bash. Reproduce
-  // that boundary so command substitution in an expression value is observable.
-  const expandedRun = step.run!.replaceAll('${{ steps.pr.outputs.branch }}', branch);
-  execFileSync('bash', ['-eu', '-o', 'pipefail', '-c', expandedRun], {
-    cwd: directory,
-    env: {
-      ...process.env,
-      COMMAND_LOG: logPath,
-      GITHUB_OUTPUT: resolve(directory, 'github-output'),
-      MOCK_AHEAD: stepName === 'Commit and push' ? '1' : '0',
-      PATH: `${binDirectory}:${process.env.PATH ?? ''}`,
-      PR_BRANCH: branch,
-      PR_HEAD_SHA: REVIEWED_HEAD_SHA,
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 3_000,
-  });
-
-  return readFileSync(logPath, 'utf8')
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .map(line => JSON.parse(line) as string[]);
-}
-
-function compileReviewCondition(
+function compileCommandCondition(
   condition: string,
+  expectedCommand: string,
+  expectedAssociations: readonly string[],
 ): (event: ReviewEventFixture) => boolean {
   const normalized = condition.replace(/\s+/gu, ' ').trim();
   const semanticShape = normalized.match(
     /^github\.event\.issue\.pull_request != null && \( github\.event\.comment\.body == '(\/[a-z]+)' \|\| startsWith\(github\.event\.comment\.body, '\1 '\) \|\| startsWith\(github\.event\.comment\.body, format\('\1\{0\}', fromJSON\('"\\n"'\)\)\) \) && contains\(fromJSON\('(\[[^']+\])'\), github\.event\.comment\.author_association\)$/u,
   );
   if (semanticShape === null) {
-    throw new Error('review condition is outside the closed security grammar');
+    throw new Error('command condition is outside the closed security grammar');
   }
 
   const command = semanticShape[1]!;
+  if (command !== expectedCommand) {
+    throw new Error('command condition changed the command name');
+  }
   const allowedAssociations = JSON.parse(semanticShape[2]!) as unknown;
   if (!Array.isArray(allowedAssociations)
     || allowedAssociations.some(value => typeof value !== 'string')
-    || JSON.stringify(allowedAssociations) !== JSON.stringify([
-      'OWNER', 'MEMBER', 'COLLABORATOR',
-    ])) {
-    throw new Error('review condition changed the trusted association set');
+    || JSON.stringify(allowedAssociations) !== JSON.stringify(expectedAssociations)) {
+    throw new Error('command condition changed the trusted association set');
   }
 
   return (event) => event.isPullRequest
@@ -197,6 +149,14 @@ function compileReviewCondition(
       || event.body.startsWith(`${command}\n`)
     )
     && allowedAssociations.includes(event.authorAssociation);
+}
+
+function compileReviewCondition(condition: string): (event: ReviewEventFixture) => boolean {
+  return compileCommandCondition(
+    condition,
+    '/review',
+    ['OWNER', 'MEMBER', 'COLLABORATOR'],
+  );
 }
 
 const REVIEWED_HEAD_SHA = '0123456789abcdef0123456789abcdef01234567';
@@ -380,6 +340,221 @@ describe('PR Comment Commands workflow contract', () => {
   });
 
   it.each([
+    ['/resolve', true],
+    ['/resolve args', true],
+    ['/resolve\nbody', true],
+    ['/resolver', false],
+    ['/resolve-other', false],
+    ['/resolve\tbody', false],
+    [' /resolve', false],
+  ] as const)('matches resolve command body %j: %s', (body, expected) => {
+    const prepare = readWorkflow().jobs['resolve-prepare']!;
+    const matches = compileCommandCondition(prepare.if!, '/resolve', ['OWNER']);
+
+    expect(matches({ body, isPullRequest: true, authorAssociation: 'OWNER' })).toBe(expected);
+  });
+
+  it('restricts resolve to an exact PR command from OWNER', () => {
+    const condition = readWorkflow().jobs['resolve-prepare']!.if!;
+    const matches = compileCommandCondition(condition, '/resolve', ['OWNER']);
+
+    expect(matches({
+      body: '/resolve', isPullRequest: false, authorAssociation: 'OWNER',
+    })).toBe(false);
+    expect(matches({
+      body: '/resolve', isPullRequest: true, authorAssociation: 'MEMBER',
+    })).toBe(false);
+    expect(() => compileCommandCondition(
+      condition.replace('["OWNER"]', '["OWNER", "MEMBER"]'),
+      '/resolve',
+      ['OWNER'],
+    )).toThrow(/trusted association set/u);
+  });
+
+  it('keeps resolve behind four explicit least-privilege job boundaries', () => {
+    const jobs = readWorkflow().jobs;
+    const prepare = jobs['resolve-prepare']!;
+    const propose = jobs['resolve-propose']!;
+    const applyTest = jobs['resolve-apply-test']!;
+    const publish = jobs['resolve-publish']!;
+
+    expect(Object.keys(jobs).filter(name => name.startsWith('resolve'))).toEqual([
+      'resolve-prepare',
+      'resolve-propose',
+      'resolve-apply-test',
+      'resolve-publish',
+    ]);
+    expect(jobs.resolve).toBeUndefined();
+
+    expect(prepare.permissions).toEqual({ contents: 'read', 'pull-requests': 'read' });
+    expect(propose.permissions).toEqual({});
+    expect(applyTest.permissions).toEqual({ contents: 'read' });
+    expect(publish.permissions).toEqual({ contents: 'write' });
+    expect(propose.needs).toBe('resolve-prepare');
+    expect(applyTest.needs).toEqual(['resolve-prepare', 'resolve-propose']);
+    expect(publish.needs).toEqual(['resolve-prepare', 'resolve-apply-test']);
+
+    expect(JSON.stringify(prepare)).not.toMatch(/secrets\.|ANTHROPIC|Acknowledge/iu);
+    expect(JSON.stringify(applyTest)).not.toMatch(/secrets\.|ANTHROPIC/iu);
+    expect(JSON.stringify(publish)).not.toMatch(/ANTHROPIC|claude-code|npm ci/iu);
+    expect(JSON.stringify(propose)).toContain('secrets.ANTHROPIC_API_KEY');
+    expect(propose.steps.some(step => step.uses === ACTION_PINS.checkout)).toBe(false);
+
+    for (const job of [prepare, applyTest, publish]) {
+      for (const checkout of job.steps.filter(step => step.uses === ACTION_PINS.checkout)) {
+        expect(checkout.with?.['persist-credentials']).toBe(false);
+      }
+    }
+  });
+
+  it('binds every resolve artifact to exact immutable IDs, digests, head, and base', () => {
+    const jobs = readWorkflow().jobs;
+    const prepare = jobs['resolve-prepare']!;
+    const propose = jobs['resolve-propose']!;
+    const applyTest = jobs['resolve-apply-test']!;
+    const publish = jobs['resolve-publish']!;
+
+    expect(prepare.outputs).toEqual({
+      artifact_id: '${{ steps.bundle.outputs.artifact-id }}',
+      artifact_digest: '${{ steps.bundle.outputs.artifact-digest }}',
+      base_sha: '${{ steps.pr.outputs.base_sha }}',
+      branch: '${{ steps.pr.outputs.branch }}',
+      head_sha: '${{ steps.pr.outputs.head_sha }}',
+    });
+    expect(propose.outputs).toEqual({
+      artifact_id: '${{ steps.proposal.outputs.artifact-id }}',
+      artifact_digest: '${{ steps.proposal.outputs.artifact-digest }}',
+    });
+    expect(applyTest.outputs).toEqual({
+      artifact_id: '${{ steps.validated.outputs.artifact-id }}',
+      artifact_digest: '${{ steps.validated.outputs.artifact-digest }}',
+    });
+
+    expect(findStep(propose, 'Download exact prepare artifact').with).toMatchObject({
+      'artifact-ids': '${{ needs.resolve-prepare.outputs.artifact_id }}',
+    });
+    expect(findStep(applyTest, 'Download exact prepare artifact').with).toMatchObject({
+      'artifact-ids': '${{ needs.resolve-prepare.outputs.artifact_id }}',
+    });
+    expect(findStep(applyTest, 'Download exact proposal artifact').with).toMatchObject({
+      'artifact-ids': '${{ needs.resolve-propose.outputs.artifact_id }}',
+    });
+    expect(findStep(publish, 'Download exact validated artifact').with).toMatchObject({
+      'artifact-ids': '${{ needs.resolve-apply-test.outputs.artifact_id }}',
+    });
+
+    for (const job of [propose, applyTest, publish]) {
+      const source = JSON.stringify(job);
+      expect(source).toContain('needs.resolve-prepare.outputs.head_sha');
+      expect(source).toContain('needs.resolve-prepare.outputs.base_sha');
+      expect(source).toContain('artifact_digest');
+    }
+  });
+
+  it('prepares conflicts from exact same-repository head and base without write credentials', () => {
+    const prepare = readWorkflow().jobs['resolve-prepare']!;
+    const identity = findStep(prepare, 'Capture exact same-repository PR identity');
+    const merge = findStep(prepare, 'Merge exact base and prepare immutable conflict input');
+    const checkouts = prepare.steps.filter(step => step.uses === ACTION_PINS.checkout);
+
+    expect(identity.run).toContain("head_repo=$(jq -r '.head.repo.full_name'");
+    expect(identity.run).toContain("base_repo=$(jq -r '.base.repo.full_name'");
+    expect(identity.run).toContain("head_sha=$(jq -r '.head.sha'");
+    expect(identity.run).toContain("base_sha=$(jq -r '.base.sha'");
+    expect(identity.run).toContain('git check-ref-format --branch "$branch"');
+    expect(checkouts.map(step => step.with?.ref)).toEqual([
+      '${{ github.sha }}',
+      '${{ steps.pr.outputs.head_sha }}',
+    ]);
+    expect(merge.run).toContain('git fetch --no-tags origin "$BASE_SHA"');
+    expect(merge.run).toContain('git config merge.conflictStyle diff3');
+    expect(merge.run).toContain('test -n "$(git diff --name-only --diff-filter=U)"');
+    expect(merge.run).toContain('resolve-conflicts-contract.mjs" \\');
+    expect(merge.run).toMatch(/\n\s+prepare /u);
+  });
+
+  it('runs the provider alone with bounded structured output and every bypass disabled', () => {
+    const prepare = readWorkflow().jobs['resolve-prepare']!;
+    const propose = readWorkflow().jobs['resolve-propose']!;
+    const schema = findStep(prepare, 'Bind trusted resolver inputs');
+    const setupNode = propose.steps.find(step => step.uses === ACTION_PINS.setupNode)!;
+    const provider = findStep(propose, 'Generate tool-less structured proposal');
+    const extract = findStep(propose, 'Extract and locally validate structured proposal');
+    const secretSteps = propose.steps.filter(step => (
+      JSON.stringify(step.env ?? {}).includes('ANTHROPIC_API_KEY')
+    ));
+
+    expect(secretSteps).toEqual([provider]);
+    expect(setupNode.with?.['node-version']).toBe(22);
+    expect(provider['working-directory']).toBe('${{ runner.temp }}/resolve-provider/work');
+    expect(provider.env).toMatchObject({
+      HOME: '${{ runner.temp }}/resolve-provider/home',
+      XDG_CONFIG_HOME: '${{ runner.temp }}/resolve-provider/home/xdg',
+    });
+    expect(provider.run).toContain('--input-format text --output-format json');
+    expect(provider.run).toContain('--bare --safe-mode');
+    expect(provider.run).toContain("--tools ''");
+    expect(provider.run).toContain(
+      "--disallowedTools 'Bash,WebFetch,WebSearch,mcp__*'",
+    );
+    expect(provider.run).toContain('--strict-mcp-config');
+    expect(provider.run).toContain('--no-chrome --disable-slash-commands');
+    expect(provider.run).toContain("--setting-sources ''");
+    expect(provider.run).toContain('--permission-mode dontAsk --no-session-persistence');
+    expect(provider.run).toContain('3145728');
+    expect(extract.run).toContain("response.structured_output");
+    expect(extract.run).toContain("response.type !== 'result'");
+    expect(extract.run).toContain("response.subtype !== 'success'");
+    expect(extract.run).toContain('response.is_error !== false');
+    expect(schema.run).toContain("action: { const: 'replace' }");
+    expect(schema.run).toContain("action: { const: 'delete' }");
+    expect(extract.run).toContain("conflict.kind !== 'modify-delete'");
+    expect(extract.run).toContain('2097152');
+  });
+
+  it('reapplies the exact proposal and fails closed through full build and test', () => {
+    const applyTest = readWorkflow().jobs['resolve-apply-test']!;
+    const apply = findStep(applyTest, 'Recreate exact merge and apply proposal');
+    const validate = findStep(applyTest, 'Run full build and test without secrets');
+
+    expect(apply.run).toContain('resolve-conflicts-contract.mjs" \\');
+    expect(apply.run).toMatch(/\n\s+apply /u);
+    expect(apply.run).toContain('test -z "$(git diff --name-only --diff-filter=U)"');
+    expect(apply.run).toContain('conflict marker remains');
+    expect(apply.run).toContain('git diff --cached --check');
+    expect(apply.run).toContain('git diff --cached --binary --full-index');
+    expect(validate.run?.trim().split('\n')).toEqual([
+      'npm ci --ignore-scripts --no-audit --no-fund',
+      'npm run build',
+      'npm test',
+    ]);
+  });
+
+  it('publishes only reproduced tested bytes and exposes the token only while pushing', () => {
+    const publish = readWorkflow().jobs['resolve-publish']!;
+    const reapply = findStep(publish, 'Reapply only the validated resolution');
+    const push = findStep(publish, 'Push exact validated commit without force');
+    const confirm = findStep(publish, 'Confirm push and CI validation');
+    const tokenSteps = publish.steps.filter(step => (
+      JSON.stringify(step.env ?? {}).includes('github.token')
+    ));
+
+    expect(tokenSteps).toEqual([push]);
+    expect(JSON.stringify(publish)).not.toMatch(/npm test|npm run|ANTHROPIC/iu);
+    expect(reapply.run).toContain('resolve-conflicts-contract.mjs" \\');
+    expect(reapply.run).toMatch(/\n\s+apply /u);
+    expect(reapply.run).toContain('cmp -- "$VALIDATED_DIR/validated.patch"');
+    expect(push.run).toContain('gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"');
+    expect(push.run).toContain("'.head.repo.full_name'");
+    expect(push.run).toContain("'.head.ref'");
+    expect(push.run).toContain("'.head.sha'");
+    expect(push.run).toContain("'.base.sha'");
+    expect(push.run).toContain('push origin "HEAD:refs/heads/$BRANCH"');
+    expect(push.run).not.toMatch(/--force|-f\b/u);
+    expect(confirm.if).toBe("${{ steps.push.outputs.pushed == 'true' }}");
+  });
+
+  it.each([
     ['OR changed to AND', (condition: string) => condition.replace(/\|\|/u, '&&')],
     ['unconditional suffix', (condition: string) => `${condition.trim()} || true`],
     [
@@ -532,10 +707,12 @@ describe('PR Comment Commands workflow contract', () => {
   it('installs a verified exact Claude Code version before exposing the provider secret', () => {
     const review = readWorkflow().jobs.review!;
     const run = findStep(review, 'Run trusted TAKT review');
+    const setupNode = review.steps.find(step => step.uses === ACTION_PINS.setupNode)!;
 
     assertTrustedClaudeInstall(review, 'Run trusted TAKT review');
+    expect(setupNode.with?.['node-version']).toBe(22);
     expect(run.env?.TAKT_CLAUDE_CLI_PATH).toBe(
-      '${{ runner.temp }}/claude-code-toolchain/node_modules/.bin/claude',
+      '${{ runner.temp }}/claude-code-toolchain/node_modules/@anthropic-ai/claude-code-linux-x64/claude',
     );
 
     const withoutInstall: WorkflowJob = {
@@ -549,31 +726,27 @@ describe('PR Comment Commands workflow contract', () => {
   });
 
   it('uses the same lifecycle-disabled exact Claude Code install for resolve', () => {
-    const resolveJob = readWorkflow().jobs.resolve!;
-    const run = findStep(resolveJob, 'Resolve');
-    const install = findStep(resolveJob, 'Install trusted Claude Code');
-    const trustedCheckout = resolveJob.steps.find(step => (
-      step.uses === ACTION_PINS.checkout && step.with?.path === 'trusted-base'
-    ));
-    const prCheckout = resolveJob.steps.find(step => (
-      step.uses === ACTION_PINS.checkout
-      && step.with?.ref === '${{ steps.pr.outputs.head_sha }}'
-    ));
+    const propose = readWorkflow().jobs['resolve-propose']!;
+    const install = findStep(propose, 'Validate prepare binding and install locked provider');
+    const run = findStep(propose, 'Generate tool-less structured proposal');
 
-    assertTrustedClaudeInstall(resolveJob, 'Resolve', '$GITHUB_WORKSPACE/trusted-base');
-    expect(trustedCheckout?.with).toMatchObject({
-      ref: '${{ github.sha }}',
-      path: 'trusted-base',
-      'persist-credentials': false,
-    });
-    expect(prCheckout).toBeDefined();
-    expect(resolveJob.steps.indexOf(install)).toBeLessThan(
-      resolveJob.steps.indexOf(prCheckout!),
+    expect(install.run).toContain(
+      'npm ci --prefix "$TOOLCHAIN_DIR" --ignore-scripts --no-audit --no-fund',
     );
+    expect(install.run).toContain(
+      'npm audit --prefix "$TOOLCHAIN_DIR" --audit-level=high --omit=dev',
+    );
+    expect(install.run).not.toMatch(/npm install|--global|@(?:latest|next|beta)\b/u);
     expect(run.run).toContain(
-      '"$RUNNER_TEMP/claude-code-toolchain/node_modules/.bin/claude" -p',
+      '"$RUNNER_TEMP/claude-code-toolchain/node_modules/@anthropic-ai/claude-code-linux-x64/claude"',
     );
-    expect(run.run).not.toMatch(/^\s*claude -p/mu);
+    expect(run.run).toContain("--tools ''");
+    expect(run.run).toContain('--output-format json');
+    expect(run.run).toContain('--json-schema "$schema"');
+    expect(run.run).toContain('--strict-mcp-config');
+    expect(run.run).toContain('--permission-mode dontAsk');
+    expect(run.run).toContain('--no-session-persistence');
+    expect(run.run).not.toContain('--dangerously-skip-permissions');
   });
 
   it('locks the dedicated Claude Code toolchain including every installed package', () => {
@@ -593,11 +766,17 @@ describe('PR Comment Commands workflow contract', () => {
     };
 
     expect(manifest.private).toBe(true);
-    expect(manifest.dependencies).toEqual({ '@anthropic-ai/claude-code': '2.1.0' });
+    expect(manifest.dependencies).toEqual({ '@anthropic-ai/claude-code': '2.1.220' });
     expect(lock.lockfileVersion).toBe(3);
     expect(lock.packages?.['']?.version).toBeUndefined();
     expect(lock.packages?.['']).toMatchObject({
-      dependencies: { '@anthropic-ai/claude-code': '2.1.0' },
+      dependencies: { '@anthropic-ai/claude-code': '2.1.220' },
+    });
+    expect(lock.packages?.['node_modules/@anthropic-ai/claude-code']).toMatchObject({
+      version: '2.1.220',
+    });
+    expect(lock.packages?.['node_modules/@anthropic-ai/claude-code-linux-x64']).toMatchObject({
+      version: '2.1.220',
     });
 
     const installedPackages = Object.entries(lock.packages ?? {})
@@ -796,20 +975,17 @@ describe('PR Comment Commands workflow contract', () => {
     expect(scripts).not.toContain('${{ steps.pr.outputs.branch }}');
   });
 
-  it.each(['Commit and push', 'Trigger CI'])(
-    'passes a command-shaped PR branch literally in %s',
-    (stepName) => {
-      const branch = 'x$(printf${IFS}PWNED)';
-      const commands = runResolveShellStep(stepName, branch);
-      const flattenedArguments = commands.flat();
-      expect(flattenedArguments).toContain(branch);
-      expect(flattenedArguments.some(argument => argument.includes('xPWNED'))).toBe(false);
-      if (stepName === 'Commit and push') {
-        expect(commands.some(command => (
-          command.includes('push')
-          && command.includes(`HEAD:refs/heads/${branch}`)
-        ))).toBe(true);
-      }
-    },
-  );
+  it('passes the validated branch through env and uses an explicit non-force push refspec', () => {
+    const publish = readWorkflow().jobs['resolve-publish']!;
+    const push = findStep(publish, 'Push exact validated commit without force');
+
+    expect(push.env).toMatchObject({
+      BRANCH: '${{ needs.resolve-prepare.outputs.branch }}',
+      HEAD_SHA: '${{ needs.resolve-prepare.outputs.head_sha }}',
+    });
+    expect(push.run).toContain('git check-ref-format --branch "$BRANCH"');
+    expect(push.run).toContain('push origin "HEAD:refs/heads/$BRANCH"');
+    expect(push.run).not.toMatch(/--force|-f\b/u);
+    expect(push.run).not.toContain('${{ needs.resolve-prepare.outputs.branch }}');
+  });
 });
