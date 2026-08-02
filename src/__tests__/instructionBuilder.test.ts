@@ -349,6 +349,34 @@ describe('instruction-builder', () => {
       );
     });
 
+    it.each(['$&', "$'", '$`'])(
+      'should preserve replacement token %s literally in a bounded explicit previous response',
+      (replacementToken) => {
+        const body = `BEGIN:${replacementToken}:END`;
+        const step = createMinimalStep('before [{previous_response}] after');
+        step.passPreviousResponse = true;
+        step.previousResponseMaxBytes = Buffer.byteLength(body, 'utf8');
+        step.previousResponseOverflow = 'error';
+        const context = createMinimalContext({
+          previousOutput: {
+            persona: 'reviewer',
+            status: 'done',
+            content: body,
+            timestamp: new Date(),
+          },
+        });
+
+        const result = buildInstruction(step, context);
+
+        expect(result).toContain(`before [${body}`);
+        expect(result.match(/before \[/g)).toHaveLength(1);
+        expect(result.match(/\] after/g)).toHaveLength(1);
+        expect(result.match(/BEGIN:/g)).toHaveLength(1);
+        expect(result.match(/:END/g)).toHaveLength(1);
+        expect(result).not.toContain('{previous_response}');
+      },
+    );
+
     it('should inject required truncated warning and source path for knowledge/policy', () => {
       const step = createMinimalStep('Do work');
       const longKnowledge = 'k'.repeat(2200);

@@ -55,6 +55,18 @@ describe('replaceTemplatePlaceholders', () => {
     expect(result).toBe('fix ｛bug｝ in code');
   });
 
+  it.each(['$&', "$'", '$`'])(
+    'should insert replacement token %s literally from task content',
+    (replacementToken) => {
+      const step = makeStep();
+      const ctx = makeInstructionContext({ task: `task:${replacementToken}:end` });
+
+      const result = replaceTemplatePlaceholders('prefix [{task}] suffix', step, ctx);
+
+      expect(result).toBe(`prefix [task:${replacementToken}:end] suffix`);
+    },
+  );
+
   it('should replace {iteration} and {max_steps}', () => {
     const step = makeStep();
     const ctx = makeInstructionContext({ iteration: 3, maxSteps: 20 });
@@ -117,6 +129,24 @@ describe('replaceTemplatePlaceholders', () => {
     expect(result).toBe('Previous: escaped ｛review｝');
   });
 
+  it.each(['$&', "$'", '$`'])(
+    'should insert %s literally from an already escaped previous response',
+    (replacementToken) => {
+      const step = makeStep({ passPreviousResponse: true });
+      const ctx = makeInstructionContext({
+        previousResponseEscapedText: `body:${replacementToken}:end`,
+      });
+
+      const result = replaceTemplatePlaceholders(
+        'prefix [{previous_response}] suffix',
+        step,
+        ctx,
+      );
+
+      expect(result).toBe(`prefix [body:${replacementToken}:end] suffix`);
+    },
+  );
+
   it('should replace {previous_response} with empty string when no previous output', () => {
     const step = makeStep({ passPreviousResponse: true });
     const ctx = makeInstructionContext();
@@ -150,6 +180,18 @@ describe('replaceTemplatePlaceholders', () => {
     const result = replaceTemplatePlaceholders(template, step, ctx);
     expect(result).toBe('Inputs: input 1\ninput 2\ninput 3');
   });
+
+  it.each(['$&', "$'", '$`'])(
+    'should insert replacement token %s literally from user input',
+    (replacementToken) => {
+      const step = makeStep();
+      const ctx = makeInstructionContext({ userInputs: [`input:${replacementToken}:end`] });
+
+      const result = replaceTemplatePlaceholders('prefix [{user_inputs}] suffix', step, ctx);
+
+      expect(result).toBe(`prefix [input:${replacementToken}:end] suffix`);
+    },
+  );
 
   it('should replace {report_dir} with report directory', () => {
     const step = makeStep();
