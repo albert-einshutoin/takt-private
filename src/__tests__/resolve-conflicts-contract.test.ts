@@ -7,6 +7,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 const script = resolve('.github/scripts/resolve-conflicts-contract.mjs');
 const temporaryRepositories = new Set<string>();
 
+interface PreparedContract {
+  readonly input_digest: string;
+  readonly conflicts: readonly { readonly conflict_id: string }[];
+}
+
 afterEach(() => {
   for (const repo of temporaryRepositories) rmSync(repo, { recursive: true, force: true });
   temporaryRepositories.clear();
@@ -280,12 +285,12 @@ describe('resolve-conflicts contract', () => {
 
   it('rejects stale preimages, digest mismatch, extra keys, and incomplete or duplicate IDs', () => {
     const cases = [
-      (input: any) => ({ schema_version: 1, input_digest: '0'.repeat(64), resolutions: [{ conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'ok\n' }] }),
-      (input: any) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [{ conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'ok\n', extra: true }] }),
-      (input: any) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [] }),
-      (input: any) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [
-        { conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'one\n' },
-        { conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'two\n' },
+      (input: PreparedContract) => ({ schema_version: 1, input_digest: '0'.repeat(64), resolutions: [{ conflict_id: input.conflicts[0]!.conflict_id, action: 'replace', replacement: 'ok\n' }] }),
+      (input: PreparedContract) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [{ conflict_id: input.conflicts[0]!.conflict_id, action: 'replace', replacement: 'ok\n', extra: true }] }),
+      (input: PreparedContract) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [] }),
+      (input: PreparedContract) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [
+        { conflict_id: input.conflicts[0]!.conflict_id, action: 'replace', replacement: 'one\n' },
+        { conflict_id: input.conflicts[0]!.conflict_id, action: 'replace', replacement: 'two\n' },
       ] }),
     ];
     for (const proposal of cases) {

@@ -26,14 +26,67 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const MARKER_LINE_PATTERN = /^(?:<{7,}|\|{7,}|={7,}|>{7,})(?: .*|)\r?$/gm;
 const BLOCK_PATTERN = /^<<<<<<< ([^\r\n]+)\r?\n([\s\S]*?)^\|\|\|\|\|\|\| ([^\r\n]+)\r?\n([\s\S]*?)^=======\r?\n([\s\S]*?)^>>>>>>> ([^\r\n]+)(?:\r?\n|$)/gm;
 
+/** @typedef {'content' | 'add-add' | 'modify-delete'} ConflictKind */
+/** @typedef {{ stage: number, mode: string, oid: string }} ConflictStage */
+/** @typedef {{ path: string, kind: ConflictKind, stages: ConflictStage[] }} UnresolvedEntry */
+/**
+ * @typedef {object} ConflictBlock
+ * @property {string} conflict_id
+ * @property {ConflictKind} kind
+ * @property {string} path
+ * @property {ConflictStage[]} stages
+ * @property {number} worktree_mode
+ * @property {string} preimage_sha256
+ * @property {number} marker_start
+ * @property {number} marker_end
+ * @property {string[]} context_before
+ * @property {string} ours
+ * @property {string} base
+ * @property {string} theirs
+ * @property {string[]} context_after
+ */
+/** @typedef {{ schema_version: number, conflicts: ConflictBlock[], input_digest: string }} InputContract */
+/** @typedef {{ conflict_id: string, action: 'replace', replacement: string } | { conflict_id: string, action: 'delete' }} Resolution */
+/** @typedef {{ schema_version: number, input_digest: string, resolutions: Resolution[] }} Proposal */
+/**
+ * @typedef {object} PathBinding
+ * @property {string} absolute
+ * @property {string} canonicalParent
+ * @property {string} targetName
+ * @property {number} parentDev
+ * @property {number} parentIno
+ * @property {number} targetDev
+ * @property {number} targetIno
+ * @property {number} mode
+ */
+/**
+ * @typedef {object} MutationPlan
+ * @property {string} path
+ * @property {PathBinding} binding
+ * @property {number} mode
+ * @property {ConflictStage[]} stages
+ * @property {ConflictKind} kind
+ * @property {Buffer} originalBytes
+ * @property {boolean} delete
+ * @property {Buffer | undefined} bytes
+ */
+
+/** @param {string} message @returns {never} */
 function fail(message) {
   throw new Error(message);
 }
 
+/** @param {import('node:crypto').BinaryLike} value @returns {string} */
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+/**
+ * @param {unknown} value
+ * @param {readonly string[]} expected
+ * @param {string} label
+ * @returns {asserts value is Record<string, unknown>}
+ */
 function ownKeysExactly(value, expected, label) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     fail(`${label} must be an object`);
@@ -45,6 +98,7 @@ function ownKeysExactly(value, expected, label) {
   }
 }
 
+/** @param {Buffer} buffer @param {string} label @param {boolean} [allowNul] @returns {string} */
 function decodeUtf8(buffer, label, allowNul = false) {
   if (!allowNul && buffer.includes(0)) fail(`${label} contains NUL bytes`);
   try {
@@ -54,6 +108,7 @@ function decodeUtf8(buffer, label, allowNul = false) {
   }
 }
 
+/** @param {unknown} value @param {string} label @param {number} maxBytes @returns {asserts value is string} */
 function assertValidString(value, label, maxBytes) {
   if (typeof value !== 'string') fail(`${label} must be a string`);
   if (value.includes('\0')) fail(`${label} contains NUL`);
@@ -63,15 +118,44 @@ function assertValidString(value, label, maxBytes) {
   if (Buffer.byteLength(value, 'utf8') > maxBytes) fail(`${label} exceeds its byte limit`);
 }
 
+/**
+ * @overload
+ * @param {string} repoRoot
+ * @param {readonly string[]} args
+ * @param {'utf8'} encoding
+ * @returns {string}
+ */
+/**
+ * @overload
+ * @param {string} repoRoot
+ * @param {readonly string[]} args
+ * @param {'buffer'} [encoding]
+ * @returns {Buffer}
+ */
+/**
+ * @param {string} repoRoot
+ * @param {readonly string[]} args
+ * @param {'utf8' | 'buffer'} [encoding]
+ * @returns {string | Buffer}
+ */
 function git(repoRoot, args, encoding = 'buffer') {
+  if (encoding === 'utf8') {
+    return execFileSync('git', args, {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: MAX_TOTAL_BYTES * 4,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  }
   return execFileSync('git', args, {
     cwd: repoRoot,
-    encoding,
+    encoding: 'buffer',
     maxBuffer: MAX_TOTAL_BYTES * 4,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
+/** @param {string} repoRootArg @returns {string} */
 function normalizeRepoRoot(repoRootArg) {
   const root = realpathSync(resolve(repoRootArg));
   if (!lstatSync(root).isDirectory()) fail('repository root is not a directory');
@@ -80,6 +164,7 @@ function normalizeRepoRoot(repoRootArg) {
   return root;
 }
 
+/** @param {unknown} path @returns {asserts path is string} */
 function validateRelativePath(path) {
   if (typeof path !== 'string' || path.length === 0 || path.includes('\0') || path.includes('\\')) {
     fail('conflict path is invalid');
@@ -89,6 +174,7 @@ function validateRelativePath(path) {
   }
 }
 
+/** @param {string} repoRoot @param {string} path @returns {PathBinding} */
 function resolveRegularPath(repoRoot, path) {
   validateRelativePath(path);
   const absolute = resolve(repoRoot, path);
@@ -123,6 +209,7 @@ function resolveRegularPath(repoRoot, path) {
   };
 }
 
+/** @param {string} path @param {ConflictStage[]} stages @returns {ConflictKind} */
 function classifyStages(path, stages) {
   const signature = stages.map((entry) => entry.stage).join(',');
   if (signature === '1,2,3') return 'content';
@@ -131,6 +218,7 @@ function classifyStages(path, stages) {
   fail(`${path} has unsupported or ambiguous unmerged stages (${signature || 'none'}); rename conflicts require manual resolution`);
 }
 
+/** @param {string} repoRoot @returns {UnresolvedEntry[]} */
 function unresolvedEntries(repoRoot) {
   const namesRaw = git(repoRoot, ['diff', '--name-only', '--diff-filter=U', '-z']);
   const namesText = decodeUtf8(namesRaw, 'unresolved path list', true);
@@ -143,11 +231,13 @@ function unresolvedEntries(repoRoot) {
   const stageRaw = git(repoRoot, ['ls-files', '-u', '-z']);
   const stageText = decodeUtf8(stageRaw, 'unmerged index', true);
   if (stageText.length > 0 && !stageText.endsWith('\0')) fail('Git returned a malformed unmerged index');
+  /** @type {Map<string, ConflictStage[]>} */
   const byPath = new Map();
   for (const record of stageText.length === 0 ? [] : stageText.slice(0, -1).split('\0')) {
     const match = /^(\d{6}) ([a-f0-9]{40,64}) ([123])\t([\s\S]+)$/.exec(record);
     if (!match) fail('Git returned a malformed unmerged index record');
     const [, mode, oid, stageTextValue, path] = match;
+    if (!mode || !oid || !stageTextValue || !path) fail('Git returned incomplete unmerged index metadata');
     if (mode === '160000') fail(`${path} is a submodule conflict`);
     if (mode !== '100644' && mode !== '100755') fail(`${path} is not a supported regular-file conflict`);
     const stages = byPath.get(path) ?? [];
@@ -156,6 +246,7 @@ function unresolvedEntries(repoRoot) {
     stages.push({ stage, mode, oid });
     byPath.set(path, stages);
   }
+  /** @type {UnresolvedEntry[]} */
   const entries = [];
   for (const path of paths) {
     validateRelativePath(path);
@@ -168,20 +259,32 @@ function unresolvedEntries(repoRoot) {
   return entries.sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)));
 }
 
+/** @param {string} text @param {number} start @param {number} end @returns {{ before: string[], after: string[] }} */
 function surroundingLines(text, start, end) {
   const before = text.slice(0, start).replace(/\r?\n$/, '').split(/\r?\n/).filter(Boolean).slice(-CONTEXT_LINES);
   const after = text.slice(end).split(/\r?\n/).filter(Boolean).slice(0, CONTEXT_LINES);
   return { before, after };
 }
 
+/**
+ * @param {string} text
+ * @param {string} path
+ * @param {string} preimageSha
+ * @param {ConflictKind} kind
+ * @param {ConflictStage[]} stages
+ * @param {number} worktreeMode
+ * @returns {ConflictBlock[]}
+ */
 function parseBlocks(text, path, preimageSha, kind, stages, worktreeMode) {
+  /** @type {ConflictBlock[]} */
   const blocks = [];
   const coveredMarkers = [];
   let match;
   BLOCK_PATTERN.lastIndex = 0;
   while ((match = BLOCK_PATTERN.exec(text)) !== null) {
     const [raw, headLabel, ours, baseLabel, base, theirs, theirsLabel] = match;
-    if (!headLabel || !baseLabel || !theirsLabel) fail(`${path} has an empty conflict label`);
+    if (!raw || !headLabel || ours === undefined || !baseLabel || base === undefined ||
+        theirs === undefined || !theirsLabel) fail(`${path} has incomplete conflict markers`);
     for (const section of [ours, base, theirs]) {
       if (MARKER_LINE_PATTERN.test(section)) fail(`${path} has nested or ambiguous conflict markers`);
       MARKER_LINE_PATTERN.lastIndex = 0;
@@ -223,10 +326,12 @@ function parseBlocks(text, path, preimageSha, kind, stages, worktreeMode) {
   return blocks;
 }
 
+/** @param {ConflictBlock[]} conflicts @returns {{ schema_version: number, conflicts: ConflictBlock[] }} */
 function canonicalPayload(conflicts) {
   return { schema_version: SCHEMA_VERSION, conflicts };
 }
 
+/** @param {string} repoRoot @param {UnresolvedEntry} entry @param {number} stage @returns {string} */
 function readStageText(repoRoot, entry, stage) {
   const metadata = entry.stages.find((candidate) => candidate.stage === stage);
   if (!metadata) return '';
@@ -235,6 +340,14 @@ function readStageText(repoRoot, entry, stage) {
   return decodeUtf8(bytes, `${entry.path} stage ${stage}`);
 }
 
+/**
+ * @param {string} repoRoot
+ * @param {UnresolvedEntry} entry
+ * @param {string} text
+ * @param {Buffer} bytes
+ * @param {number} worktreeMode
+ * @returns {ConflictBlock}
+ */
 function buildModifyDeleteConflict(repoRoot, entry, text, bytes, worktreeMode) {
   const preimageSha = sha256(bytes);
   const ours = readStageText(repoRoot, entry, 2);
@@ -266,7 +379,9 @@ function buildModifyDeleteConflict(repoRoot, entry, text, bytes, worktreeMode) {
   };
 }
 
+/** @param {string} repoRoot @returns {InputContract} */
 function buildContract(repoRoot) {
+  /** @type {ConflictBlock[]} */
   const conflicts = [];
   let totalBytes = 0;
   for (const entry of unresolvedEntries(repoRoot)) {
@@ -291,6 +406,7 @@ function buildContract(repoRoot) {
   return { ...payload, input_digest: sha256(JSON.stringify(payload)) };
 }
 
+/** @param {string} path @param {Buffer} bytes @param {number} mode @returns {void} */
 function atomicWriteUnbound(path, bytes, mode) {
   const temp = `${path}.takt-resolve-${process.pid}-${randomBytes(8).toString('hex')}`;
   try {
@@ -302,6 +418,7 @@ function atomicWriteUnbound(path, bytes, mode) {
   }
 }
 
+/** @param {PathBinding} binding @returns {void} */
 function assertParentBinding(binding) {
   const canonicalNow = realpathSync(binding.canonicalParent);
   const stat = lstatSync(binding.canonicalParent);
@@ -311,6 +428,7 @@ function assertParentBinding(binding) {
   }
 }
 
+/** @param {PathBinding} binding @returns {string} */
 function targetPathFor(binding) {
   const target = resolve(binding.canonicalParent, binding.targetName);
   if (dirname(target) !== binding.canonicalParent || basename(target) !== binding.targetName) {
@@ -319,6 +437,7 @@ function targetPathFor(binding) {
   return target;
 }
 
+/** @param {PathBinding} binding @param {Buffer} expectedBytes @returns {string} */
 function assertBoundTarget(binding, expectedBytes) {
   assertParentBinding(binding);
   const target = targetPathFor(binding);
@@ -331,6 +450,7 @@ function assertBoundTarget(binding, expectedBytes) {
   return target;
 }
 
+/** @param {PathBinding} binding @returns {string} */
 function assertBoundTargetMissing(binding) {
   assertParentBinding(binding);
   const target = targetPathFor(binding);
@@ -338,11 +458,12 @@ function assertBoundTargetMissing(binding) {
     lstatSync(target);
     fail('bound target unexpectedly exists');
   } catch (error) {
-    if (!(error && typeof error === 'object' && error.code === 'ENOENT')) throw error;
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
   }
   return target;
 }
 
+/** @param {PathBinding} binding @param {Buffer} expectedBytes @param {number} mode @returns {PathBinding} */
 function refreshBinding(binding, expectedBytes, mode) {
   assertParentBinding(binding);
   const target = targetPathFor(binding);
@@ -354,6 +475,13 @@ function refreshBinding(binding, expectedBytes, mode) {
   return { ...binding, absolute: target, targetDev: stat.dev, targetIno: stat.ino, mode };
 }
 
+/**
+ * @param {PathBinding} binding
+ * @param {Buffer} expectedBytes
+ * @param {Buffer} bytes
+ * @param {number} mode
+ * @returns {PathBinding}
+ */
 function atomicWriteBound(binding, expectedBytes, bytes, mode) {
   const target = assertBoundTarget(binding, expectedBytes);
   const temp = resolve(binding.canonicalParent, `.${binding.targetName}.takt-resolve-${process.pid}-${randomBytes(8).toString('hex')}`);
@@ -374,6 +502,7 @@ function atomicWriteBound(binding, expectedBytes, bytes, mode) {
   }
 }
 
+/** @param {PathBinding} binding @param {Buffer} bytes @param {number} mode @returns {PathBinding} */
 function atomicCreateBound(binding, bytes, mode) {
   const target = assertBoundTargetMissing(binding);
   const temp = resolve(binding.canonicalParent, `.${binding.targetName}.takt-resolve-${process.pid}-${randomBytes(8).toString('hex')}`);
@@ -391,6 +520,7 @@ function atomicCreateBound(binding, bytes, mode) {
   }
 }
 
+/** @param {PathBinding} binding @param {Buffer} expectedBytes @returns {void} */
 function deleteBound(binding, expectedBytes) {
   const target = assertBoundTarget(binding, expectedBytes);
   assertParentBinding(binding);
@@ -399,6 +529,7 @@ function deleteBound(binding, expectedBytes) {
   assertBoundTargetMissing(binding);
 }
 
+/** @param {number} index @returns {void} */
 function waitForTestMutationGate(index) {
   if (process.env.NODE_ENV !== 'test' || Number(process.env.TAKT_RESOLVE_TEST_GATE_AT) !== index + 1) return;
   const signal = process.env.TAKT_RESOLVE_TEST_GATE_SIGNAL;
@@ -411,13 +542,14 @@ function waitForTestMutationGate(index) {
       lstatSync(release);
       return;
     } catch (error) {
-      if (!(error && typeof error === 'object' && error.code === 'ENOENT')) throw error;
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
     }
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
   }
   fail('test mutation gate timed out');
 }
 
+/** @param {string} path @param {string} label @returns {unknown} */
 function readJson(path, label) {
   const bytes = readFileSync(path);
   if (bytes.length > MAX_CONTRACT_JSON_BYTES) fail(`${label} exceeds its serialized byte limit`);
@@ -429,9 +561,10 @@ function readJson(path, label) {
   }
 }
 
+/** @param {unknown} input @returns {asserts input is InputContract} */
 function validateInput(input) {
   ownKeysExactly(input, ['schema_version', 'conflicts', 'input_digest'], 'input contract');
-  if (input.schema_version !== SCHEMA_VERSION || !HASH_PATTERN.test(input.input_digest)) fail('input contract version or digest is invalid');
+  if (input.schema_version !== SCHEMA_VERSION || typeof input.input_digest !== 'string' || !HASH_PATTERN.test(input.input_digest)) fail('input contract version or digest is invalid');
   if (!Array.isArray(input.conflicts) || input.conflicts.length === 0 || input.conflicts.length > MAX_CONFLICTS) fail('input contract conflict count is invalid');
   if (Buffer.byteLength(JSON.stringify(input), 'utf8') > MAX_CONTRACT_JSON_BYTES) fail('input contract exceeds its serialized byte limit');
   for (const [index, conflict] of input.conflicts.entries()) {
@@ -439,21 +572,23 @@ function validateInput(input) {
       'conflict_id', 'kind', 'path', 'stages', 'worktree_mode', 'preimage_sha256', 'marker_start', 'marker_end',
       'context_before', 'ours', 'base', 'theirs', 'context_after',
     ], `input conflict ${index}`);
-    validateRelativePath(conflict.path);
-    if (!['content', 'add-add', 'modify-delete'].includes(conflict.kind)) fail('input conflict kind is invalid');
-    if (!Array.isArray(conflict.stages)) fail('input conflict stages are invalid');
-    for (const [stageIndex, stage] of conflict.stages.entries()) {
+    const typedConflict = /** @type {ConflictBlock} */ (conflict);
+    validateRelativePath(typedConflict.path);
+    if (!['content', 'add-add', 'modify-delete'].includes(typedConflict.kind)) fail('input conflict kind is invalid');
+    if (!Array.isArray(typedConflict.stages)) fail('input conflict stages are invalid');
+    for (const [stageIndex, stage] of typedConflict.stages.entries()) {
       ownKeysExactly(stage, ['stage', 'mode', 'oid'], `input conflict stage ${stageIndex}`);
-      if (![1, 2, 3].includes(stage.stage) || !['100644', '100755'].includes(stage.mode) || !/^[a-f0-9]{40,64}$/.test(stage.oid)) {
+      const typedStage = /** @type {ConflictStage} */ (stage);
+      if (![1, 2, 3].includes(typedStage.stage) || !['100644', '100755'].includes(typedStage.mode) || !/^[a-f0-9]{40,64}$/.test(typedStage.oid)) {
         fail('input conflict stage metadata is invalid');
       }
     }
-    if (classifyStages(conflict.path, conflict.stages) !== conflict.kind) fail('input conflict kind and stages disagree');
-    if (!Number.isInteger(conflict.worktree_mode) || conflict.worktree_mode < 0 || conflict.worktree_mode > 0o777) fail('input worktree mode is invalid');
-    if (!HASH_PATTERN.test(conflict.conflict_id) || !HASH_PATTERN.test(conflict.preimage_sha256)) fail('input conflict hash is invalid');
-    if (!Number.isSafeInteger(conflict.marker_start) || !Number.isSafeInteger(conflict.marker_end) || conflict.marker_start < 0 || conflict.marker_end <= conflict.marker_start) fail('input marker range is invalid');
-    if (!Array.isArray(conflict.context_before) || !Array.isArray(conflict.context_after)) fail('input context is invalid');
-    for (const value of [...conflict.context_before, ...conflict.context_after, conflict.ours, conflict.base, conflict.theirs]) {
+    if (classifyStages(typedConflict.path, typedConflict.stages) !== typedConflict.kind) fail('input conflict kind and stages disagree');
+    if (!Number.isInteger(typedConflict.worktree_mode) || typedConflict.worktree_mode < 0 || typedConflict.worktree_mode > 0o777) fail('input worktree mode is invalid');
+    if (!HASH_PATTERN.test(typedConflict.conflict_id) || !HASH_PATTERN.test(typedConflict.preimage_sha256)) fail('input conflict hash is invalid');
+    if (!Number.isSafeInteger(typedConflict.marker_start) || !Number.isSafeInteger(typedConflict.marker_end) || typedConflict.marker_start < 0 || typedConflict.marker_end <= typedConflict.marker_start) fail('input marker range is invalid');
+    if (!Array.isArray(typedConflict.context_before) || !Array.isArray(typedConflict.context_after)) fail('input context is invalid');
+    for (const value of [...typedConflict.context_before, ...typedConflict.context_after, typedConflict.ours, typedConflict.base, typedConflict.theirs]) {
       assertValidString(value, 'input conflict text', MAX_FILE_BYTES);
     }
   }
@@ -461,6 +596,7 @@ function validateInput(input) {
   if (sha256(JSON.stringify(payload)) !== input.input_digest) fail('input digest mismatch');
 }
 
+/** @param {unknown} proposal @param {InputContract} input @returns {asserts proposal is Proposal} */
 function validateProposal(proposal, input) {
   ownKeysExactly(proposal, ['schema_version', 'input_digest', 'resolutions'], 'proposal');
   if (proposal.schema_version !== SCHEMA_VERSION || proposal.input_digest !== input.input_digest) fail('proposal input digest mismatch');
@@ -479,6 +615,7 @@ function validateProposal(proposal, input) {
       fail('proposal contains an unknown or duplicate conflict ID');
     }
     const conflict = conflictById.get(resolution.conflict_id);
+    if (!conflict) fail('proposal conflict ID has no input conflict');
     if (!isReplace && !isDelete) fail('resolution action is invalid');
     if (isDelete && conflict.kind !== 'modify-delete') fail('delete is only valid for modify/delete conflicts');
     if (isReplace) {
@@ -491,6 +628,7 @@ function validateProposal(proposal, input) {
   if (seen.size !== expected.size) fail('proposal must resolve every conflict exactly once');
 }
 
+/** @param {string} repoRootArg @param {string} outputPath @returns {void} */
 function prepare(repoRootArg, outputPath) {
   const repoRoot = normalizeRepoRoot(repoRootArg);
   const contract = buildContract(repoRoot);
@@ -501,6 +639,7 @@ function prepare(repoRootArg, outputPath) {
   atomicWriteUnbound(resolve(outputPath), serialized, 0o600);
 }
 
+/** @param {string} repoRootArg @param {string} inputPath @param {string} proposalPath @returns {void} */
 function apply(repoRootArg, inputPath, proposalPath) {
   const repoRoot = normalizeRepoRoot(repoRootArg);
   const input = readJson(resolve(inputPath), 'input contract');
@@ -513,7 +652,9 @@ function apply(repoRootArg, inputPath, proposalPath) {
   const current = buildContract(repoRoot);
   if (JSON.stringify(current) !== JSON.stringify(input)) fail('conflict preimage changed after prepare');
   const resolutions = new Map(proposal.resolutions.map((item) => [item.conflict_id, item]));
+  /** @type {MutationPlan[]} */
   const plans = [];
+  /** @type {Map<string, ConflictBlock[]>} */
   const grouped = new Map();
   for (const conflict of input.conflicts) {
     const entries = grouped.get(conflict.path) ?? [];
@@ -526,11 +667,13 @@ function apply(repoRootArg, inputPath, proposalPath) {
     const originalBytes = readFileSync(absolute);
     const original = decodeUtf8(originalBytes, path);
     const representative = conflicts[0];
+    if (!representative) fail(`${path} has no conflict representative`);
     if (mode !== representative.worktree_mode || sha256(originalBytes) !== representative.preimage_sha256) {
       fail(`${path} mode or content changed while planning`);
     }
     if (representative.kind === 'modify-delete') {
       const resolution = resolutions.get(representative.conflict_id);
+      if (!resolution) fail(`${path} has no matching resolution`);
       plans.push({
         path,
         binding,
@@ -545,7 +688,9 @@ function apply(repoRootArg, inputPath, proposalPath) {
     }
     let result = original;
     for (const conflict of [...conflicts].sort((a, b) => b.marker_start - a.marker_start)) {
-      result = result.slice(0, conflict.marker_start) + resolutions.get(conflict.conflict_id).replacement + result.slice(conflict.marker_end);
+      const resolution = resolutions.get(conflict.conflict_id);
+      if (!resolution || resolution.action !== 'replace') fail(`${path} content conflict requires replacement`);
+      result = result.slice(0, conflict.marker_start) + resolution.replacement + result.slice(conflict.marker_end);
     }
     if (MARKER_LINE_PATTERN.test(result)) fail(`${path} still contains conflict markers`);
     MARKER_LINE_PATTERN.lastIndex = 0;
@@ -561,6 +706,7 @@ function apply(repoRootArg, inputPath, proposalPath) {
     });
   }
 
+  /** @type {{ plan: MutationPlan, postBinding: PathBinding | undefined }[]} */
   const applied = [];
   try {
     for (const [index, plan] of plans.entries()) {
@@ -582,9 +728,14 @@ function apply(repoRootArg, inputPath, proposalPath) {
       if (process.env.NODE_ENV === 'test' && Number(process.env.TAKT_RESOLVE_TEST_FAIL_WRITE_AT) === index + 1) {
         fail(`injected write failure at mutation ${index + 1}`);
       }
-      const postBinding = plan.delete
-        ? (deleteBound(plan.binding, plan.originalBytes), undefined)
-        : atomicWriteBound(plan.binding, plan.originalBytes, plan.bytes, plan.mode);
+      /** @type {PathBinding | undefined} */
+      let postBinding;
+      if (plan.delete) {
+        deleteBound(plan.binding, plan.originalBytes);
+      } else {
+        if (!plan.bytes) fail(`${plan.path} replacement bytes are missing`);
+        postBinding = atomicWriteBound(plan.binding, plan.originalBytes, plan.bytes, plan.mode);
+      }
       applied.push({ plan, postBinding });
     }
   } catch (error) {
@@ -593,7 +744,10 @@ function apply(repoRootArg, inputPath, proposalPath) {
       const { plan, postBinding } = appliedMutation;
       try {
         if (plan.delete) atomicCreateBound(plan.binding, plan.originalBytes, plan.mode);
-        else atomicWriteBound(postBinding, plan.bytes, plan.originalBytes, plan.mode);
+        else {
+          if (!postBinding || !plan.bytes) fail(`${plan.path} rollback binding is missing`);
+          atomicWriteBound(postBinding, plan.bytes, plan.originalBytes, plan.mode);
+        }
       } catch (rollbackError) {
         rollbackErrors.push(`${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
       }
@@ -603,10 +757,19 @@ function apply(repoRootArg, inputPath, proposalPath) {
   }
 }
 
+/** @returns {void} */
 function main() {
   const [command, ...args] = process.argv.slice(2);
-  if (command === 'prepare' && args.length === 2) return prepare(args[0], args[1]);
-  if (command === 'apply' && args.length === 3) return apply(args[0], args[1], args[2]);
+  if (command === 'prepare' && args.length === 2) {
+    const [repoRootArg, outputPath] = args;
+    if (!repoRootArg || !outputPath) fail('prepare arguments are missing');
+    return prepare(repoRootArg, outputPath);
+  }
+  if (command === 'apply' && args.length === 3) {
+    const [repoRootArg, inputPath, proposalPath] = args;
+    if (!repoRootArg || !inputPath || !proposalPath) fail('apply arguments are missing');
+    return apply(repoRootArg, inputPath, proposalPath);
+  }
   fail('usage: resolve-conflicts-contract.mjs prepare <repoRoot> <outputJson> | apply <repoRoot> <inputJson> <proposalJson>');
 }
 

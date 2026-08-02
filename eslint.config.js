@@ -29,12 +29,32 @@ export default tseslint.config(
     },
   },
   {
+    files: [
+      '.github/scripts/resolve-conflicts-contract.mjs',
+      'src/__tests__/pr-comment-commands-workflow.test.ts',
+      'src/__tests__/resolve-conflicts-contract.test.ts',
+    ],
+    languageOptions: {
+      globals: {
+        Buffer: 'readonly',
+        process: 'readonly',
+      },
+      parserOptions: {
+        project: './tsconfig.resolve-contracts.json',
+        projectService: false,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+  {
     ignores: [
       'dist/',
       'node_modules/',
       '*.config.js',
-      'src/__tests__/*',
+      'src/__tests__/**/*',
       '!src/__tests__/auto-tag-workflow.test.ts',
+      '!src/__tests__/pr-comment-commands-workflow.test.ts',
+      '!src/__tests__/resolve-conflicts-contract.test.ts',
     ],
   }
 );
