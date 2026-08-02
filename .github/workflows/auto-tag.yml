@@ -335,6 +335,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.candidate-pack.outputs.artifact_id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/takt-package
 
       - name: Verify exact candidate before executing project code
@@ -386,7 +387,7 @@ jobs:
           }
           NODE
           tar -tzf "$CANDIDATE_DIR/$EXPECTED_FILENAME" | \
-            awk 'BEGIN { found=0 } $0 !~ /^package\// || $0 ~ /(^|\/)\.\.\// { exit 1 } $0 == "package/package.json" { found=1 } END { exit !found }'
+            awk 'BEGIN { found=0; bad=0 } $0 !~ /^package\// || $0 ~ /(^|\/)\.\.\// { bad=1; next } $0 == "package/package.json" { found=1 } END { exit bad || !found }'
           tar -xOf "$CANDIDATE_DIR/$EXPECTED_FILENAME" package/package.json | \
             node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => { const p=JSON.parse(s); if (p.name !== process.env.EXPECTED_NAME || p.version !== process.env.EXPECTED_VERSION) process.exit(1); });'
 
@@ -426,6 +427,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.candidate-pack.outputs.artifact_id }}
+          merge-multiple: true
           path: ${{ runner.temp }}/takt-package
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -478,16 +480,26 @@ jobs:
           }
           NODE
           tar -tzf "$CANDIDATE_DIR/$EXPECTED_FILENAME" | \
-            awk 'BEGIN { found=0 } $0 !~ /^package\// || $0 ~ /(^|\/)\.\.\// { exit 1 } $0 == "package/package.json" { found=1 } END { exit !found }'
+            awk 'BEGIN { found=0; bad=0 } $0 !~ /^package\// || $0 ~ /(^|\/)\.\.\// { bad=1; next } $0 == "package/package.json" { found=1 } END { exit bad || !found }'
           tar -xOf "$CANDIDATE_DIR/$EXPECTED_FILENAME" package/package.json | \
             node -e 'let s=""; process.stdin.on("data", c => s += c); process.stdin.on("end", () => { const p=JSON.parse(s); if (p.name !== process.env.EXPECTED_NAME || p.version !== process.env.EXPECTED_VERSION) process.exit(1); });'
 
-      - name: Reverify immutable remote tag
+      - name: Publish or verify existing package
         env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           EXPECTED_COMMIT: ${{ needs.validate.outputs.commit }}
+          EXPECTED_INTEGRITY: ${{ needs.candidate-pack.outputs.integrity }}
+          EXPECTED_VERSION: ${{ needs.validate.outputs.package_version }}
           GH_TOKEN: ${{ github.token }}
+          NPM_DIST_TAG: ${{ needs.validate.outputs.npm_dist_tag }}
+          PACKAGE_FILENAME: ${{ needs.candidate-pack.outputs.filename }}
+          PACKAGE_NAME: ${{ needs.validate.outputs.package_name }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        # `--ignore-scripts` is a credential boundary: package-controlled
+        # lifecycle hooks must never execute while NODE_AUTH_TOKEN is present.
         run: |
+          # Recheck the immutable tag in the credential-bearing step itself so
+          # deletion or retargeting cannot race a prior read-only check.
           object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')
           type=${object%%$'\t'*}
           sha=${object#*$'\t'}
@@ -502,17 +514,6 @@ jobs:
             exit 1
           fi
 
-      - name: Publish or verify existing package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          EXPECTED_INTEGRITY: ${{ needs.candidate-pack.outputs.integrity }}
-          EXPECTED_VERSION: ${{ needs.validate.outputs.package_version }}
-          NPM_DIST_TAG: ${{ needs.validate.outputs.npm_dist_tag }}
-          PACKAGE_FILENAME: ${{ needs.candidate-pack.outputs.filename }}
-          PACKAGE_NAME: ${{ needs.validate.outputs.package_name }}
-        # `--ignore-scripts` is a credential boundary: package-controlled
-        # lifecycle hooks must never execute while NODE_AUTH_TOKEN is present.
-        run: |
           LOCAL_INTEGRITY=$(node -e '
             const { createHash } = require("node:crypto");
             const { readFileSync } = require("node:fs");
