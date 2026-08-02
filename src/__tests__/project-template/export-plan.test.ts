@@ -27,6 +27,32 @@ function makeProject(files: Record<string, string>): string {
   return root;
 }
 
+async function withPoisonedArrayNumericSetters<T>(run: () => Promise<T>): Promise<T> {
+  const keys = ['0', '1', '2'] as const;
+  const originals = keys.map((key) => Object.getOwnPropertyDescriptor(Array.prototype, key));
+  const defineProperty = Object.defineProperty;
+  try {
+    for (const key of keys) {
+      Object.defineProperty(Array.prototype, key, {
+        configurable: true,
+        set(value: unknown) {
+          if (typeof value === 'boolean') return;
+          defineProperty(this, key, {
+            configurable: true, enumerable: true, value, writable: true,
+          });
+        },
+      });
+    }
+    return await run();
+  } finally {
+    for (let index = 0; index < keys.length; index += 1) {
+      const original = originals[index];
+      if (original === undefined) delete (Array.prototype as unknown as Record<string, unknown>)[keys[index]];
+      else Object.defineProperty(Array.prototype, keys[index], original);
+    }
+  }
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -204,6 +230,34 @@ describe('project template export plan', () => {
     expect(plan.manifest.entries).toHaveLength(256);
     expect(plan.manifest.entries[0]?.path).toBe('workflows/review-000.yaml');
     expect(plan.manifest.entries[255]?.path).toBe('workflows/review-255.yaml');
+  });
+
+  it('rejects an unknown policy under Array prototype numeric setter poisoning', async () => {
+    const root = makeProject({ 'workflows/review.yaml': 'name: review\n' });
+    const outcome = await withPoisonedArrayNumericSetters(() => (
+      createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        policies: { 'missing.yaml': 'managed' },
+      }).catch((error: unknown) => error)
+    ));
+    expect(outcome).toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'policies',
+    });
+  });
+
+  it('rejects an unused capability under Array prototype numeric setter poisoning', async () => {
+    const root = makeProject({
+      'workflows/release.yaml': 'steps:\n  - run: npm test\n',
+    });
+    const outcome = await withPoisonedArrayNumericSetters(() => (
+      createProjectTemplateExportPlan(root, {
+        packVersion: '1.0.0', takt: { minVersion: '0.48.0' }, source,
+        approvedCapabilities: ['external-command', 'github-write'],
+      }).catch((error: unknown) => error)
+    ));
+    expect(outcome).toMatchObject({
+      code: 'INVALID_EXPORT_PLAN', field: 'approvedCapabilities',
+    });
   });
 
   it('does not treat an inherited policy as explicit approval', async () => {

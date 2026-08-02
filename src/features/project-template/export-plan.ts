@@ -48,6 +48,7 @@ interface ExportSourceState {
 }
 
 const EXPORT_SOURCE_STATES = new WeakMap<ProjectTemplateExportPlan, ExportSourceState>();
+const CAPTURED_UINT8_ARRAY = Uint8Array;
 
 function deepFreeze<T>(value: T): T {
   if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value;
@@ -127,15 +128,11 @@ export async function createProjectTemplateExportPlan(
     );
   }
   const policyEntries = approvals.projection.policies;
-  const matchedPolicies: boolean[] = [];
-  for (let index = 0; index < policyEntries.length; index += 1) {
-    matchedPolicies[index] = false;
-  }
+  // Why: a typed bitmap has dense own indexed storage. Array prototype numeric
+  // setters therefore cannot swallow match writes and bypass unused approvals.
+  const matchedPolicies = new CAPTURED_UINT8_ARRAY(policyEntries.length);
   const approvedCapabilityValues = approvals.projection.approvedCapabilities;
-  const matchedCapabilities: boolean[] = [];
-  for (let index = 0; index < approvedCapabilityValues.length; index += 1) {
-    matchedCapabilities[index] = false;
-  }
+  const matchedCapabilities = new CAPTURED_UINT8_ARRAY(approvedCapabilityValues.length);
   const scan = await scanProjectTemplateDirectory(projectRoot);
   if (scan.scanStatus !== 'complete') {
     throw new TaktpackError(
@@ -173,7 +170,7 @@ export async function createProjectTemplateExportPlan(
     const policyIndex = findPolicyApprovalIndex(policyEntries, result.relativePath);
     const explicitPolicy: Exclude<TemplateEntryPolicy, 'excluded'> | undefined =
       policyIndex < 0 ? undefined : policyEntries[policyIndex]!.policy;
-    if (policyIndex >= 0) matchedPolicies[policyIndex] = true;
+    if (policyIndex >= 0) matchedPolicies[policyIndex] = 1;
     if (result.classification === 'project-owned' && explicitPolicy === undefined) {
       throw new TaktpackError('EXPORT_REVIEW_REQUIRED', 'project-owned entry requires an explicit policy', entryField);
     }
@@ -195,7 +192,7 @@ export async function createProjectTemplateExportPlan(
       if (approvalIndex < 0) {
         throw new TaktpackError('EXPORT_REVIEW_REQUIRED', `capability requires approval: ${capability}`, entryField);
       }
-      matchedCapabilities[approvalIndex] = true;
+      matchedCapabilities[approvalIndex] = 1;
       topCapabilities.add(capability);
     }
 
