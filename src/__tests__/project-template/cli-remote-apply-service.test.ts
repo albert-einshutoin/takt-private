@@ -193,6 +193,23 @@ describe('project template remote CLI service', () => {
     expect(admitMutation).not.toHaveBeenCalled();
   });
 
+  it.each(['STALE_RUN', 'PERSONAL_DAEMON_RUNNING'] as const)(
+    'classifies %s as an active-run block',
+    async (code) => {
+      const derive = vi.fn(port().derive);
+      const service = createProjectTemplateCliRemoteApplyService(port({
+        inspectGuard: () => ({ passed: false, blocks: [{ code }] }),
+        derive,
+      }));
+
+      await expect(service.diff(base)).resolves.toMatchObject({
+        exitCode: 23,
+        envelope: { error: { code: 'ACTIVE_RUN' } },
+      });
+      expect(derive).not.toHaveBeenCalled();
+    },
+  );
+
   it('requires approval when force is applicable but missing', async () => {
     const execute = vi.fn(port().execute);
     const forceApplicable = createProjectTemplateCliRemoteApplyService(port({

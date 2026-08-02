@@ -206,4 +206,25 @@ describe('project template CLI rollback service', () => {
       result: { readiness: 'blocked', recoveryState: 'clean', reviewCodes: ['ACTIVE_RUN'] },
     });
   });
+
+  it('reports a stale run with the stable active-run classification', async () => {
+    const service = createProjectTemplateCliRollbackService(port({
+      inspectGuard: () => ({ passed: false, blocks: [{ code: 'STALE_RUN' }] }),
+    }));
+    const preview = await service.rollback({
+      cwd: '/safe/repo', backupId: 'backup-1', force: false, mode: 'dry-run',
+    });
+    const applied = await service.rollback({
+      cwd: '/safe/repo', backupId: 'backup-1', force: true, mode: 'apply',
+      expectedPlanId: planId,
+    });
+    expect(preview.envelope).toMatchObject({
+      status: 'success',
+      result: { readiness: 'blocked', recoveryState: 'clean', reviewCodes: ['ACTIVE_RUN'] },
+    });
+    expect(applied).toMatchObject({
+      exitCode: 23,
+      envelope: { status: 'error', error: { code: 'ACTIVE_RUN' } },
+    });
+  });
 });

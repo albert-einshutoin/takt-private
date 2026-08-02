@@ -304,6 +304,45 @@ describe('local project-template CLI diff/apply service', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('classifies stale-run state consistently for diff, preview, and apply', async () => {
+    const inspectGuard = vi.fn(() => ({
+      passed: false,
+      blocks: [{ code: 'STALE_RUN' }],
+    }));
+    const derive = vi.fn(port().derive);
+    const execute = vi.fn();
+    const service = createProjectTemplateCliLocalApplyService(port({
+      inspectGuard,
+      derive,
+      execute,
+    }));
+    const base = {
+      cwd: '/safe/repo',
+      sourcePath: 'pack.taktpack',
+      currentTaktVersion: '0.48.0',
+      force: false,
+    };
+
+    await expect(service.diff(base)).resolves.toMatchObject({
+      exitCode: 0,
+      envelope: { result: { readiness: 'blocked', reviewCodes: ['ACTIVE_RUN'] } },
+    });
+    await expect(service.apply({ ...base, mode: 'dry-run' })).resolves.toMatchObject({
+      exitCode: 0,
+      envelope: { result: { readiness: 'blocked', reviewCodes: ['ACTIVE_RUN'] } },
+    });
+    await expect(service.apply({
+      ...base,
+      mode: 'apply',
+      expectedPlanId: PLAN_ID,
+    })).resolves.toMatchObject({
+      exitCode: 23,
+      envelope: { status: 'error', error: { code: 'ACTIVE_RUN' } },
+    });
+    expect(derive).toHaveBeenCalledTimes(2);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('maps pre-admission abort to INTERRUPTED without calling execute', async () => {
     const controller = new AbortController();
     const execute = vi.fn();

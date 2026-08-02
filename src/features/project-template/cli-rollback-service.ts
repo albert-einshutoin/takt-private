@@ -91,7 +91,11 @@ ProjectTemplateCliErrorCode | undefined {
   if (codes.includes('RECOVERY_REQUIRED') || codes.includes('RECOVERY_REQUIRED_UNKNOWN')) {
     return 'RECOVERY_REQUIRED';
   }
-  if (codes.includes('ACTIVE_RUN') || codes.includes('PERSONAL_DAEMON_RUNNING')) {
+  if (
+    codes.includes('ACTIVE_RUN')
+    || codes.includes('STALE_RUN')
+    || codes.includes('PERSONAL_DAEMON_RUNNING')
+  ) {
     return 'ACTIVE_RUN';
   }
   if (codes.includes('APPLY_LEASE_PRESENT') || codes.includes('APPLY_LEASE_UNKNOWN')) {

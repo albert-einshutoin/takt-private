@@ -234,7 +234,11 @@ function guardCode(blocks: readonly { readonly code: string }[]): ProjectTemplat
     if (code === 'RECOVERY_REQUIRED' || code === 'RECOVERY_REQUIRED_UNKNOWN') {
       recoveryRequired = true;
     }
-    if (code === 'ACTIVE_RUN') activeRun = true;
+    if (
+      code === 'ACTIVE_RUN'
+      || code === 'STALE_RUN'
+      || code === 'PERSONAL_DAEMON_RUNNING'
+    ) activeRun = true;
     if (code === 'SECURITY_GUARD') securityGuard = true;
   }
   if (recoveryRequired) return 'RECOVERY_REQUIRED';
