@@ -11,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { TextDecoder } from 'node:util';
 
 const SCHEMA_VERSION = 1;
@@ -106,6 +106,14 @@ function resolveRegularPath(repoRoot, path) {
   return { absolute, mode: stat.mode & 0o777 };
 }
 
+function classifyStages(path, stages) {
+  const signature = stages.map((entry) => entry.stage).join(',');
+  if (signature === '1,2,3') return 'content';
+  if (signature === '2,3') return 'add-add';
+  if (signature === '1,2' || signature === '1,3') return 'modify-delete';
+  fail(`${path} has unsupported or ambiguous unmerged stages (${signature || 'none'}); rename conflicts require manual resolution`);
+}
+
 function unresolvedEntries(repoRoot) {
   const namesRaw = git(repoRoot, ['diff', '--name-only', '--diff-filter=U', '-z']);
   const namesText = decodeUtf8(namesRaw, 'unresolved path list', true);
@@ -120,25 +128,27 @@ function unresolvedEntries(repoRoot) {
   if (stageText.length > 0 && !stageText.endsWith('\0')) fail('Git returned a malformed unmerged index');
   const byPath = new Map();
   for (const record of stageText.length === 0 ? [] : stageText.slice(0, -1).split('\0')) {
-    const match = /^(\d{6}) [a-f0-9]{40,64} ([123])\t([\s\S]+)$/.exec(record);
+    const match = /^(\d{6}) ([a-f0-9]{40,64}) ([123])\t([\s\S]+)$/.exec(record);
     if (!match) fail('Git returned a malformed unmerged index record');
-    const [, mode, stage, path] = match;
+    const [, mode, oid, stageTextValue, path] = match;
     if (mode === '160000') fail(`${path} is a submodule conflict`);
-    if (!mode.startsWith('100')) fail(`${path} is not a regular-file conflict`);
-    const stages = byPath.get(path) ?? new Set();
-    if (stages.has(stage)) fail(`${path} has a duplicate index stage`);
-    stages.add(stage);
+    if (mode !== '100644' && mode !== '100755') fail(`${path} is not a supported regular-file conflict`);
+    const stages = byPath.get(path) ?? [];
+    const stage = Number(stageTextValue);
+    if (stages.some((entry) => entry.stage === stage)) fail(`${path} has a duplicate index stage`);
+    stages.push({ stage, mode, oid });
     byPath.set(path, stages);
   }
+  const entries = [];
   for (const path of paths) {
     validateRelativePath(path);
     const stages = byPath.get(path);
-    if (!stages || stages.size !== 3 || !['1', '2', '3'].every((stage) => stages.has(stage))) {
-      fail(`${path} must have exactly base, HEAD, and theirs index stages`);
-    }
+    if (!stages) fail(`${path} has no unmerged index stages`);
+    stages.sort((left, right) => left.stage - right.stage);
+    entries.push({ path, kind: classifyStages(path, stages), stages });
   }
   if (byPath.size !== paths.length) fail('unmerged index and unresolved path list disagree');
-  return paths.sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
+  return entries.sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)));
 }
 
 function surroundingLines(text, start, end) {
@@ -147,7 +157,7 @@ function surroundingLines(text, start, end) {
   return { before, after };
 }
 
-function parseBlocks(text, path, preimageSha) {
+function parseBlocks(text, path, preimageSha, kind, stages, worktreeMode) {
   const blocks = [];
   const coveredMarkers = [];
   let match;
@@ -163,9 +173,13 @@ function parseBlocks(text, path, preimageSha) {
     const end = start + raw.length;
     const context = surroundingLines(text, start, end);
     const ordinal = blocks.length;
+    const identity = JSON.stringify({ path, kind, stages, worktree_mode: worktreeMode, preimage_sha256: preimageSha, ordinal, raw });
     blocks.push({
-      conflict_id: sha256(`${path}\0${preimageSha}\0${ordinal}\0${raw}`),
+      conflict_id: sha256(identity),
+      kind,
       path,
+      stages,
+      worktree_mode: worktreeMode,
       preimage_sha256: preimageSha,
       marker_start: start,
       marker_end: end,
@@ -196,17 +210,59 @@ function canonicalPayload(conflicts) {
   return { schema_version: SCHEMA_VERSION, conflicts };
 }
 
+function readStageText(repoRoot, entry, stage) {
+  const metadata = entry.stages.find((candidate) => candidate.stage === stage);
+  if (!metadata) return '';
+  const bytes = git(repoRoot, ['cat-file', 'blob', metadata.oid]);
+  if (bytes.length > MAX_FILE_BYTES) fail(`${entry.path} stage ${stage} exceeds the byte limit`);
+  return decodeUtf8(bytes, `${entry.path} stage ${stage}`);
+}
+
+function buildModifyDeleteConflict(repoRoot, entry, text, bytes, worktreeMode) {
+  const preimageSha = sha256(bytes);
+  const ours = readStageText(repoRoot, entry, 2);
+  const base = readStageText(repoRoot, entry, 1);
+  const theirs = readStageText(repoRoot, entry, 3);
+  const presentSide = entry.stages.some((stage) => stage.stage === 2) ? ours : theirs;
+  if (text !== presentSide) fail(`${entry.path} worktree does not match the surviving modify/delete stage`);
+  const identity = JSON.stringify({
+    path: entry.path,
+    kind: entry.kind,
+    stages: entry.stages,
+    worktree_mode: worktreeMode,
+    preimage_sha256: preimageSha,
+  });
+  return {
+    conflict_id: sha256(identity),
+    kind: entry.kind,
+    path: entry.path,
+    stages: entry.stages,
+    worktree_mode: worktreeMode,
+    preimage_sha256: preimageSha,
+    marker_start: 0,
+    marker_end: text.length,
+    context_before: [],
+    ours,
+    base,
+    theirs,
+    context_after: [],
+  };
+}
+
 function buildContract(repoRoot) {
   const conflicts = [];
   let totalBytes = 0;
-  for (const path of unresolvedEntries(repoRoot)) {
-    const { absolute } = resolveRegularPath(repoRoot, path);
+  for (const entry of unresolvedEntries(repoRoot)) {
+    const { path } = entry;
+    const { absolute, mode: worktreeMode } = resolveRegularPath(repoRoot, path);
     const bytes = readFileSync(absolute);
     if (bytes.length > MAX_FILE_BYTES) fail(`${path} exceeds the per-file byte limit`);
     totalBytes += bytes.length;
     if (totalBytes > MAX_TOTAL_BYTES) fail('conflict files exceed the total byte limit');
     const text = decodeUtf8(bytes, path);
-    const fileConflicts = parseBlocks(text, path, sha256(bytes));
+    const fileConflicts = entry.kind === 'modify-delete'
+      ? [buildModifyDeleteConflict(repoRoot, entry, text, bytes, worktreeMode)]
+      : parseBlocks(text, path, sha256(bytes), entry.kind, entry.stages, worktreeMode);
     // Keep this aligned with the workflow response schema. Otherwise a valid
     // prepare result could be impossible for the tool-less model to return.
     if (conflicts.length + fileConflicts.length > MAX_CONFLICTS) {
@@ -247,10 +303,20 @@ function validateInput(input) {
   if (Buffer.byteLength(JSON.stringify(input), 'utf8') > MAX_CONTRACT_JSON_BYTES) fail('input contract exceeds its serialized byte limit');
   for (const [index, conflict] of input.conflicts.entries()) {
     ownKeysExactly(conflict, [
-      'conflict_id', 'path', 'preimage_sha256', 'marker_start', 'marker_end',
+      'conflict_id', 'kind', 'path', 'stages', 'worktree_mode', 'preimage_sha256', 'marker_start', 'marker_end',
       'context_before', 'ours', 'base', 'theirs', 'context_after',
     ], `input conflict ${index}`);
     validateRelativePath(conflict.path);
+    if (!['content', 'add-add', 'modify-delete'].includes(conflict.kind)) fail('input conflict kind is invalid');
+    if (!Array.isArray(conflict.stages)) fail('input conflict stages are invalid');
+    for (const [stageIndex, stage] of conflict.stages.entries()) {
+      ownKeysExactly(stage, ['stage', 'mode', 'oid'], `input conflict stage ${stageIndex}`);
+      if (![1, 2, 3].includes(stage.stage) || !['100644', '100755'].includes(stage.mode) || !/^[a-f0-9]{40,64}$/.test(stage.oid)) {
+        fail('input conflict stage metadata is invalid');
+      }
+    }
+    if (classifyStages(conflict.path, conflict.stages) !== conflict.kind) fail('input conflict kind and stages disagree');
+    if (!Number.isInteger(conflict.worktree_mode) || conflict.worktree_mode < 0 || conflict.worktree_mode > 0o777) fail('input worktree mode is invalid');
     if (!HASH_PATTERN.test(conflict.conflict_id) || !HASH_PATTERN.test(conflict.preimage_sha256)) fail('input conflict hash is invalid');
     if (!Number.isSafeInteger(conflict.marker_start) || !Number.isSafeInteger(conflict.marker_end) || conflict.marker_start < 0 || conflict.marker_end <= conflict.marker_start) fail('input marker range is invalid');
     if (!Array.isArray(conflict.context_before) || !Array.isArray(conflict.context_after)) fail('input context is invalid');
@@ -268,16 +334,25 @@ function validateProposal(proposal, input) {
   if (!Array.isArray(proposal.resolutions)) fail('proposal resolutions must be an array');
   if (Buffer.byteLength(JSON.stringify(proposal), 'utf8') > MAX_CONTRACT_JSON_BYTES) fail('proposal exceeds its serialized byte limit');
   const expected = new Set(input.conflicts.map((item) => item.conflict_id));
+  const conflictById = new Map(input.conflicts.map((item) => [item.conflict_id, item]));
   if (expected.size !== input.conflicts.length) fail('input contains duplicate conflict IDs');
   const seen = new Set();
   for (const [index, resolution] of proposal.resolutions.entries()) {
-    ownKeysExactly(resolution, ['conflict_id', 'replacement'], `resolution ${index}`);
+    if (resolution === null || typeof resolution !== 'object' || Array.isArray(resolution)) fail(`resolution ${index} must be an object`);
+    const isReplace = resolution.action === 'replace';
+    const isDelete = resolution.action === 'delete';
+    ownKeysExactly(resolution, isReplace ? ['conflict_id', 'action', 'replacement'] : ['conflict_id', 'action'], `resolution ${index}`);
     if (typeof resolution.conflict_id !== 'string' || !expected.has(resolution.conflict_id) || seen.has(resolution.conflict_id)) {
       fail('proposal contains an unknown or duplicate conflict ID');
     }
-    assertValidString(resolution.replacement, 'replacement', MAX_REPLACEMENT_BYTES);
-    if (MARKER_LINE_PATTERN.test(resolution.replacement)) fail('replacement contains conflict markers');
-    MARKER_LINE_PATTERN.lastIndex = 0;
+    const conflict = conflictById.get(resolution.conflict_id);
+    if (!isReplace && !isDelete) fail('resolution action is invalid');
+    if (isDelete && conflict.kind !== 'modify-delete') fail('delete is only valid for modify/delete conflicts');
+    if (isReplace) {
+      assertValidString(resolution.replacement, 'replacement', MAX_REPLACEMENT_BYTES);
+      if (MARKER_LINE_PATTERN.test(resolution.replacement)) fail('replacement contains conflict markers');
+      MARKER_LINE_PATTERN.lastIndex = 0;
+    }
     seen.add(resolution.conflict_id);
   }
   if (seen.size !== expected.size) fail('proposal must resolve every conflict exactly once');
@@ -304,7 +379,7 @@ function apply(repoRootArg, inputPath, proposalPath) {
   // model-tampered preimages fail closed. All files are validated before writes.
   const current = buildContract(repoRoot);
   if (JSON.stringify(current) !== JSON.stringify(input)) fail('conflict preimage changed after prepare');
-  const replacements = new Map(proposal.resolutions.map((item) => [item.conflict_id, item.replacement]));
+  const resolutions = new Map(proposal.resolutions.map((item) => [item.conflict_id, item]));
   const plans = [];
   const grouped = new Map();
   for (const conflict of input.conflicts) {
@@ -314,16 +389,77 @@ function apply(repoRootArg, inputPath, proposalPath) {
   }
   for (const [path, conflicts] of grouped) {
     const { absolute, mode } = resolveRegularPath(repoRoot, path);
-    const original = decodeUtf8(readFileSync(absolute), path);
+    const originalBytes = readFileSync(absolute);
+    const original = decodeUtf8(originalBytes, path);
+    const representative = conflicts[0];
+    if (mode !== representative.worktree_mode || sha256(originalBytes) !== representative.preimage_sha256) {
+      fail(`${path} mode or content changed while planning`);
+    }
+    if (representative.kind === 'modify-delete') {
+      const resolution = resolutions.get(representative.conflict_id);
+      plans.push({
+        path,
+        absolute,
+        mode,
+        stages: representative.stages,
+        kind: representative.kind,
+        originalBytes,
+        delete: resolution.action === 'delete',
+        bytes: resolution.action === 'replace' ? Buffer.from(resolution.replacement, 'utf8') : undefined,
+      });
+      continue;
+    }
     let result = original;
     for (const conflict of [...conflicts].sort((a, b) => b.marker_start - a.marker_start)) {
-      result = result.slice(0, conflict.marker_start) + replacements.get(conflict.conflict_id) + result.slice(conflict.marker_end);
+      result = result.slice(0, conflict.marker_start) + resolutions.get(conflict.conflict_id).replacement + result.slice(conflict.marker_end);
     }
     if (MARKER_LINE_PATTERN.test(result)) fail(`${path} still contains conflict markers`);
     MARKER_LINE_PATTERN.lastIndex = 0;
-    plans.push({ absolute, mode, bytes: Buffer.from(result, 'utf8') });
+    plans.push({
+      path,
+      absolute,
+      mode,
+      stages: representative.stages,
+      kind: representative.kind,
+      originalBytes,
+      delete: false,
+      bytes: Buffer.from(result, 'utf8'),
+    });
   }
-  for (const plan of plans) atomicWrite(plan.absolute, plan.bytes, plan.mode);
+
+  const applied = [];
+  try {
+    for (const [index, plan] of plans.entries()) {
+      const currentEntry = unresolvedEntries(repoRoot).find((entry) => entry.path === plan.path);
+      if (!currentEntry || currentEntry.kind !== plan.kind || JSON.stringify(currentEntry.stages) !== JSON.stringify(plan.stages)) {
+        fail(`${plan.path} index stages changed immediately before mutation`);
+      }
+      const currentPath = resolveRegularPath(repoRoot, plan.path);
+      const currentBytes = readFileSync(currentPath.absolute);
+      if (currentPath.absolute !== plan.absolute || currentPath.mode !== plan.mode || sha256(currentBytes) !== sha256(plan.originalBytes)) {
+        fail(`${plan.path} canonical path, mode, or content changed immediately before mutation`);
+      }
+      // Test-only failpoint proves that a later-file failure restores earlier
+      // mutations. In production, the variable is inert and can only fail closed.
+      if (process.env.NODE_ENV === 'test' && Number(process.env.TAKT_RESOLVE_TEST_FAIL_WRITE_AT) === index + 1) {
+        fail(`injected write failure at mutation ${index + 1}`);
+      }
+      if (plan.delete) rmSync(plan.absolute);
+      else atomicWrite(plan.absolute, plan.bytes, plan.mode);
+      applied.push(plan);
+    }
+  } catch (error) {
+    const rollbackErrors = [];
+    for (const plan of [...applied].reverse()) {
+      try {
+        atomicWrite(plan.absolute, plan.originalBytes, plan.mode);
+      } catch (rollbackError) {
+        rollbackErrors.push(`${plan.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+    }
+    if (rollbackErrors.length > 0) fail(`apply failed and rollback was incomplete: ${rollbackErrors.join('; ')}`);
+    throw error;
+  }
 }
 
 function main() {

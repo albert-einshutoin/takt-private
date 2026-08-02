@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -37,11 +37,136 @@ function makeConflict(): string {
   return repo;
 }
 
+function makeAddAddConflict(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'takt-resolve-add-add-'));
+  temporaryRepositories.add(repo);
+  git(repo, 'init', '-q');
+  git(repo, 'config', 'user.email', 'test@example.com');
+  git(repo, 'config', 'user.name', 'Test');
+  git(repo, 'config', 'merge.conflictStyle', 'diff3');
+  writeFileSync(join(repo, '.keep'), 'base\n');
+  git(repo, 'add', '.keep');
+  git(repo, 'commit', '-qm', 'base');
+  git(repo, 'checkout', '-qb', 'theirs');
+  writeFileSync(join(repo, 'added.txt'), 'theirs\n');
+  git(repo, 'add', 'added.txt');
+  git(repo, 'commit', '-qm', 'theirs adds');
+  git(repo, 'checkout', '-q', '-');
+  writeFileSync(join(repo, 'added.txt'), 'ours\n');
+  git(repo, 'add', 'added.txt');
+  git(repo, 'commit', '-qm', 'ours adds');
+  expect(spawnSync('git', ['merge', '--no-edit', 'theirs'], { cwd: repo }).status).not.toBe(0);
+  return repo;
+}
+
+function makeModifyDeleteConflict(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'takt-resolve-modify-delete-'));
+  temporaryRepositories.add(repo);
+  git(repo, 'init', '-q');
+  git(repo, 'config', 'user.email', 'test@example.com');
+  git(repo, 'config', 'user.name', 'Test');
+  writeFileSync(join(repo, 'target.txt'), 'base\n');
+  git(repo, 'add', 'target.txt');
+  git(repo, 'commit', '-qm', 'base');
+  git(repo, 'checkout', '-qb', 'theirs');
+  git(repo, 'rm', '-q', 'target.txt');
+  git(repo, 'commit', '-qm', 'theirs deletes');
+  git(repo, 'checkout', '-q', '-');
+  writeFileSync(join(repo, 'target.txt'), 'ours modified\n');
+  git(repo, 'commit', '-qam', 'ours modifies');
+  expect(spawnSync('git', ['merge', '--no-edit', 'theirs'], { cwd: repo }).status).not.toBe(0);
+  return repo;
+}
+
+function makeDeleteModifyConflict(): string {
+  const repo = mkdtempSync(join(tmpdir(), 'takt-resolve-delete-modify-'));
+  temporaryRepositories.add(repo);
+  git(repo, 'init', '-q');
+  git(repo, 'config', 'user.email', 'test@example.com');
+  git(repo, 'config', 'user.name', 'Test');
+  writeFileSync(join(repo, 'target.txt'), 'base\n');
+  git(repo, 'add', 'target.txt');
+  git(repo, 'commit', '-qm', 'base');
+  git(repo, 'checkout', '-qb', 'theirs');
+  writeFileSync(join(repo, 'target.txt'), 'theirs modified\n');
+  git(repo, 'commit', '-qam', 'theirs modifies');
+  git(repo, 'checkout', '-q', '-');
+  git(repo, 'rm', '-q', 'target.txt');
+  git(repo, 'commit', '-qm', 'ours deletes');
+  expect(spawnSync('git', ['merge', '--no-edit', 'theirs'], { cwd: repo }).status).not.toBe(0);
+  return repo;
+}
+
 function run(repo: string, ...args: string[]) {
   return spawnSync(process.execPath, [script, ...args], { cwd: repo, encoding: 'utf8' });
 }
 
+function runWithEnv(repo: string, env: NodeJS.ProcessEnv, ...args: string[]) {
+  return spawnSync(process.execPath, [script, ...args], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+  });
+}
+
 describe('resolve-conflicts contract', () => {
+  it('supports typed add/add and modify/delete contracts', () => {
+    const addAdd = makeAddAddConflict();
+    const addInputPath = join(addAdd, 'input.json');
+    expect(run(addAdd, 'prepare', addAdd, addInputPath).status).toBe(0);
+    const addInput = JSON.parse(readFileSync(addInputPath, 'utf8'));
+    expect(addInput.conflicts[0]).toMatchObject({
+      kind: 'add-add',
+      stages: [{ stage: 2 }, { stage: 3 }],
+    });
+    const addProposalPath = join(addAdd, 'proposal.json');
+    writeFileSync(addProposalPath, JSON.stringify({
+      schema_version: 1,
+      input_digest: addInput.input_digest,
+      resolutions: [{ conflict_id: addInput.conflicts[0].conflict_id, action: 'replace', replacement: 'added resolved\n' }],
+    }));
+    expect(run(addAdd, 'apply', addAdd, addInputPath, addProposalPath).status).toBe(0);
+    expect(readFileSync(join(addAdd, 'added.txt'), 'utf8')).toBe('added resolved\n');
+
+    const modifyDelete = makeModifyDeleteConflict();
+    const mdInputPath = join(modifyDelete, 'input.json');
+    expect(run(modifyDelete, 'prepare', modifyDelete, mdInputPath).status).toBe(0);
+    const mdInput = JSON.parse(readFileSync(mdInputPath, 'utf8'));
+    expect(mdInput.conflicts[0]).toMatchObject({
+      kind: 'modify-delete',
+      stages: [{ stage: 1 }, { stage: 2 }],
+      ours: 'ours modified\n',
+      theirs: '',
+    });
+    const mdProposalPath = join(modifyDelete, 'proposal.json');
+    writeFileSync(mdProposalPath, JSON.stringify({
+      schema_version: 1,
+      input_digest: mdInput.input_digest,
+      resolutions: [{ conflict_id: mdInput.conflicts[0].conflict_id, action: 'delete' }],
+    }));
+    expect(run(modifyDelete, 'apply', modifyDelete, mdInputPath, mdProposalPath).status).toBe(0);
+    expect(existsSync(join(modifyDelete, 'target.txt'))).toBe(false);
+
+    const deleteModify = makeDeleteModifyConflict();
+    const dmInputPath = join(deleteModify, 'input.json');
+    expect(run(deleteModify, 'prepare', deleteModify, dmInputPath).status).toBe(0);
+    const dmInput = JSON.parse(readFileSync(dmInputPath, 'utf8'));
+    expect(dmInput.conflicts[0]).toMatchObject({
+      kind: 'modify-delete',
+      stages: [{ stage: 1 }, { stage: 3 }],
+      ours: '',
+      theirs: 'theirs modified\n',
+    });
+    const dmProposalPath = join(deleteModify, 'proposal.json');
+    writeFileSync(dmProposalPath, JSON.stringify({
+      schema_version: 1,
+      input_digest: dmInput.input_digest,
+      resolutions: [{ conflict_id: dmInput.conflicts[0].conflict_id, action: 'replace', replacement: 'kept and resolved\n' }],
+    }));
+    expect(run(deleteModify, 'apply', deleteModify, dmInputPath, dmProposalPath).status).toBe(0);
+    expect(readFileSync(join(deleteModify, 'target.txt'), 'utf8')).toBe('kept and resolved\n');
+  });
+
   it('prepares a deterministic bounded diff3 conflict contract and applies exact replacements', () => {
     const repo = makeConflict();
     const inputPath = join(repo, 'input.json');
@@ -53,7 +178,14 @@ describe('resolve-conflicts contract', () => {
     expect(input.input_digest).toMatch(/^[a-f0-9]{64}$/);
     expect(input.conflicts).toHaveLength(1);
     expect(input.conflicts[0]).toMatchObject({
+      kind: 'content',
       path: 'note.txt',
+      stages: [
+        { stage: 1, mode: '100644', oid: expect.stringMatching(/^[a-f0-9]{40,64}$/) },
+        { stage: 2, mode: '100644', oid: expect.stringMatching(/^[a-f0-9]{40,64}$/) },
+        { stage: 3, mode: '100644', oid: expect.stringMatching(/^[a-f0-9]{40,64}$/) },
+      ],
+      worktree_mode: 0o644,
       ours: 'ours\n',
       base: 'base\n',
       theirs: 'theirs\n',
@@ -70,7 +202,7 @@ describe('resolve-conflicts contract', () => {
     writeFileSync(proposalPath, `${JSON.stringify({
       schema_version: 1,
       input_digest: input.input_digest,
-      resolutions: [{ conflict_id: input.conflicts[0].conflict_id, replacement: 'resolved\n' }],
+      resolutions: [{ conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'resolved\n' }],
     })}\n`);
     expect(run(repo, 'apply', repo, inputPath, proposalPath).status).toBe(0);
     expect(readFileSync(join(repo, 'note.txt'), 'utf8')).toBe('before\nresolved\nafter\n');
@@ -140,12 +272,12 @@ describe('resolve-conflicts contract', () => {
 
   it('rejects stale preimages, digest mismatch, extra keys, and incomplete or duplicate IDs', () => {
     const cases = [
-      (input: any) => ({ schema_version: 1, input_digest: '0'.repeat(64), resolutions: [{ conflict_id: input.conflicts[0].conflict_id, replacement: 'ok\n' }] }),
-      (input: any) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [{ conflict_id: input.conflicts[0].conflict_id, replacement: 'ok\n', extra: true }] }),
+      (input: any) => ({ schema_version: 1, input_digest: '0'.repeat(64), resolutions: [{ conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'ok\n' }] }),
+      (input: any) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [{ conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'ok\n', extra: true }] }),
       (input: any) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [] }),
       (input: any) => ({ schema_version: 1, input_digest: input.input_digest, resolutions: [
-        { conflict_id: input.conflicts[0].conflict_id, replacement: 'one\n' },
-        { conflict_id: input.conflicts[0].conflict_id, replacement: 'two\n' },
+        { conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'one\n' },
+        { conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'two\n' },
       ] }),
     ];
     for (const proposal of cases) {
@@ -165,9 +297,26 @@ describe('resolve-conflicts contract', () => {
     const input = JSON.parse(readFileSync(inputPath, 'utf8'));
     writeFileSync(join(stale, 'note.txt'), readFileSync(join(stale, 'note.txt'), 'utf8').replace('ours', 'changed'));
     writeFileSync(proposalPath, JSON.stringify({ schema_version: 1, input_digest: input.input_digest, resolutions: [
-      { conflict_id: input.conflicts[0].conflict_id, replacement: 'ok\n' },
+      { conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'ok\n' },
     ] }));
     expect(run(stale, 'apply', stale, inputPath, proposalPath).status).not.toBe(0);
+  });
+
+  it('binds the worktree mode and rejects chmod changes after prepare', () => {
+    const repo = makeConflict();
+    const inputPath = join(repo, 'input.json');
+    const proposalPath = join(repo, 'proposal.json');
+    expect(run(repo, 'prepare', repo, inputPath).status).toBe(0);
+    const input = JSON.parse(readFileSync(inputPath, 'utf8'));
+    writeFileSync(proposalPath, JSON.stringify({
+      schema_version: 1,
+      input_digest: input.input_digest,
+      resolutions: [{ conflict_id: input.conflicts[0].conflict_id, action: 'replace', replacement: 'resolved\n' }],
+    }));
+    chmodSync(join(repo, 'note.txt'), 0o600);
+
+    expect(run(repo, 'apply', repo, inputPath, proposalPath).status).not.toBe(0);
+    expect(readFileSync(join(repo, 'note.txt'), 'utf8')).toContain('<<<<<<< HEAD');
   });
 
   it('rejects path escape, invalid UTF-8/NUL replacement, and oversized replacements', () => {
@@ -188,7 +337,7 @@ describe('resolve-conflicts contract', () => {
     const clean = JSON.parse(readFileSync(cleanInputPath, 'utf8'));
     for (const replacement of ['bad\0value', '<<<<<<< injected\n', 'x'.repeat(512 * 1024 + 1)]) {
       writeFileSync(proposalPath, JSON.stringify({ schema_version: 1, input_digest: clean.input_digest, resolutions: [
-        { conflict_id: clean.conflicts[0].conflict_id, replacement },
+        { conflict_id: clean.conflicts[0].conflict_id, action: 'replace', replacement },
       ] }));
       expect(run(cleanRepo, 'apply', cleanRepo, cleanInputPath, proposalPath).status).not.toBe(0);
     }
@@ -205,7 +354,7 @@ describe('resolve-conflicts contract', () => {
     expect(run(oversized, 'prepare', oversized, join(oversized, 'input.json')).status).not.toBe(0);
   });
 
-  it('validates every file preimage before changing any file', () => {
+  it('rolls back the first file when a later mutation fails', () => {
     const repo = makeConflict();
     writeFileSync(join(repo, 'second.txt'), readFileSync(join(repo, 'note.txt')));
     git(repo, 'add', 'second.txt');
@@ -227,13 +376,16 @@ describe('resolve-conflicts contract', () => {
       input_digest: input.input_digest,
       resolutions: input.conflicts.map((conflict: { conflict_id: string }) => ({
         conflict_id: conflict.conflict_id,
+        action: 'replace',
         replacement: 'resolved\n',
       })),
     }));
     const firstBefore = readFileSync(join(repo, 'note.txt'));
-    writeFileSync(join(repo, 'second.txt'), readFileSync(join(repo, 'second.txt'), 'utf8').replace('theirs', 'stale'));
+    const secondBefore = readFileSync(join(repo, 'second.txt'));
 
-    expect(run(repo, 'apply', repo, inputPath, proposalPath).status).not.toBe(0);
+    expect(runWithEnv(repo, { NODE_ENV: 'test', TAKT_RESOLVE_TEST_FAIL_WRITE_AT: '2' },
+      'apply', repo, inputPath, proposalPath).status).not.toBe(0);
     expect(readFileSync(join(repo, 'note.txt'))).toEqual(firstBefore);
+    expect(readFileSync(join(repo, 'second.txt'))).toEqual(secondBefore);
   });
 });
