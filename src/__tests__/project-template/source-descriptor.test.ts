@@ -576,14 +576,10 @@ describe('project template source descriptor', () => {
     expectDescriptorError(reversed, 'INVALID_SOURCE');
   });
 
-  it('keeps dependencies out of manifest v1 and keeps schema 1.1 unsupported', () => {
+  it('keeps legacy dependencies out of manifest v1.0', () => {
     const manifest = validManifest();
     manifest['dependencies'] = [];
     expectManifestError(manifest, 'UNKNOWN_KEY');
-
-    const futureManifest = validManifest();
-    futureManifest['schemaVersion'] = '1.1';
-    expectManifestError(futureManifest, 'UNSUPPORTED_SCHEMA_VERSION');
   });
 
   it.each([

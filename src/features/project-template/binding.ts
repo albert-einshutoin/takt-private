@@ -4,8 +4,8 @@ import { parseProjectTemplateManifest, serializeProjectTemplateManifest } from '
 import { parseTemplateLock } from './lock.js';
 import type {
   ProjectTemplateManifestDerivationV1_1,
-  ProjectTemplateManifestV1,
-  TemplateLockV1,
+  ProjectTemplateManifest,
+  TemplateLock,
 } from './types.js';
 
 const CAPTURED_CREATE_HASH = createHash;
@@ -48,8 +48,8 @@ function capabilitiesMatch(
 }
 
 function sourcesMatch(
-  lock: TemplateLockV1['source'],
-  manifest: ProjectTemplateManifestV1['source'],
+  lock: TemplateLock['source'],
+  manifest: ProjectTemplateManifest['source'],
 ): boolean {
   // Source identity is fixed-schema evidence. Explicit comparisons keep
   // toJSON or serializer hooks from changing which repository/ref was bound.
@@ -82,8 +82,8 @@ function derivationsMatch(
 }
 
 function repertoireDependenciesMatch(
-  lock: TemplateLockV1 & { readonly schemaVersion: '1.1' },
-  manifest: Extract<ProjectTemplateManifestV1, { readonly schemaVersion: '1.1' }>,
+  lock: TemplateLock & { readonly schemaVersion: '1.1' },
+  manifest: Extract<ProjectTemplateManifest, { readonly schemaVersion: '1.1' }>,
 ): boolean {
   if (lock.repertoireDependencies.length !== manifest.repertoireDependencies.length) return false;
   for (let index = 0; index < lock.repertoireDependencies.length; index += 1) {
@@ -106,8 +106,8 @@ function repertoireDependenciesMatch(
  * accidentally being omitted from this comparison.
  */
 export function validateManifestLockPair(manifestValue: unknown, lockValue: unknown): void {
-  const manifest: ProjectTemplateManifestV1 = parseProjectTemplateManifest(manifestValue);
-  const lock: TemplateLockV1 = parseTemplateLock(lockValue);
+  const manifest: ProjectTemplateManifest = parseProjectTemplateManifest(manifestValue);
+  const lock: TemplateLock = parseTemplateLock(lockValue);
   assertLockMatch(lock.schemaVersion === manifest.schemaVersion, 'schemaVersion');
   assertLockMatch(lock.packVersion === manifest.packVersion, 'packVersion');
   if (manifest.schemaVersion === '1.1' && lock.schemaVersion === '1.1') {

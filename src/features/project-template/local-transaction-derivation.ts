@@ -111,6 +111,13 @@ export async function deriveLocalProjectTemplateTransaction(
   });
   requireActive(options.signal);
   const manifest = materialized.inspection.manifest;
+  if (manifest.schemaVersion !== '1.0') {
+    throw new TaktpackError(
+      'UNSUPPORTED_PACK_VERSION',
+      'local transaction derivation requires taktpack 1.0',
+      'pack.json.version',
+    );
+  }
   const localImportSource = manifest.source.kind === 'local'
     ? manifest.source
     : Object.freeze({

@@ -20,7 +20,7 @@ import type {
   TemplateCapability,
   TemplateEntry,
   TemplateEntryPolicy,
-  TemplateLockV1,
+  TemplateLock,
 } from './types.js';
 import {
   isProjectTemplateCliExportApprovalError,
@@ -42,7 +42,7 @@ interface ExportSourceState {
   sealedPlan: {
     descriptor: TaktpackDescriptorV1;
     manifest: ReturnType<typeof parseProjectTemplateManifest>;
-    lock: TemplateLockV1;
+    lock: TemplateLock;
     report: TaktpackExportReportV1;
   };
 }
@@ -254,7 +254,7 @@ export async function createProjectTemplateExportPlan(
   entries.sort((left, right) => left.path.localeCompare(right.path, 'en-US'));
   files.sort((left, right) => left.sha256.localeCompare(right.sha256, 'en-US'));
   const capabilities = [...topCapabilities].sort((left, right) => left.localeCompare(right, 'en-US'));
-  const manifest = parseProjectTemplateManifest({
+  const parsedManifest = parseProjectTemplateManifest({
     schemaVersion: '1.0',
     packVersion: options.packVersion,
     takt: options.takt,
@@ -262,6 +262,10 @@ export async function createProjectTemplateExportPlan(
     ...(capabilities.length === 0 ? {} : { capabilities }),
     entries,
   });
+  if (parsedManifest.schemaVersion !== '1.0') {
+    throw new TaktpackError('INVALID_EXPORT_PLAN', 'export must produce manifest schema 1.0');
+  }
+  const manifest = parsedManifest;
   const lock = {
     schemaVersion: '1.0' as const,
     manifestSha256: calculateProjectTemplateManifestSha256(manifest),

@@ -405,7 +405,16 @@ describe('project template manifest public contract', () => {
       }],
     };
 
-    expect(JSON.parse(serializeTemplateLock(parseTemplateLock(lock)))).toEqual(lock);
+    const serialized = serializeTemplateLock(parseTemplateLock(lock));
+    expect(JSON.parse(serialized)).toEqual(lock);
+    expect(serialized).toBe(JSON.stringify({
+      schemaVersion: lock.schemaVersion,
+      manifestSha256: lock.manifestSha256,
+      packVersion: lock.packVersion,
+      source: lock.source,
+      capabilities: lock.capabilities,
+      entries: lock.entries,
+    }, null, 2));
   });
 
   it('should reject duplicate and case-colliding paths in a lock', () => {

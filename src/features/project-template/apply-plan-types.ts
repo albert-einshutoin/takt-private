@@ -1,8 +1,8 @@
 import type {
-  ProjectTemplateManifestV1,
+  ProjectTemplateManifest,
   TemplateCapability,
   TemplateEntryPolicy,
-  TemplateLockV1,
+  TemplateLock,
 } from './types.js';
 import type {
   CapturedProjectTemplateTargetEntry,
@@ -34,8 +34,8 @@ export interface ProjectTemplateIncomingInspectionEvidence {
 }
 
 export interface ProjectTemplateApplyPlanInput {
-  baseLock?: TemplateLockV1;
-  incomingManifest: ProjectTemplateManifestV1;
+  baseLock?: TemplateLock;
+  incomingManifest: ProjectTemplateManifest;
   localEntries: readonly ProjectTemplateLocalSnapshotEntry[];
   targetRootState?: 'missing' | 'directory';
   missingPathTracking?: Readonly<Record<string, ProjectTemplateGitTrackingStatus>>;

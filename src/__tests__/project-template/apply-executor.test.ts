@@ -31,6 +31,7 @@ import {
   createProjectTemplateApplyPlan,
   inspectProjectTemplateApplyGuard,
   prepareProjectTemplateApplyPlan,
+  type ProjectTemplateManifest,
   type ProjectTemplateManifestV1,
   type ProjectTemplateIncomingContent,
   type ProjectTemplateIncomingInspectionEvidence,
@@ -111,7 +112,7 @@ function incomingContents(
 }
 
 function incomingInspection(
-  incomingManifest: ProjectTemplateManifestV1,
+  incomingManifest: ProjectTemplateManifest,
 ): ProjectTemplateIncomingInspectionEvidence {
   return {
     archiveSha256: 'd'.repeat(64),
@@ -173,7 +174,7 @@ function baseLockFor(
 
 async function createPlan(
   root: string,
-  incomingManifest: ProjectTemplateManifestV1,
+  incomingManifest: ProjectTemplateManifest,
   contents: ProjectTemplateIncomingContent[],
   baseLock?: TemplateLockV1,
 ) {
@@ -233,6 +234,30 @@ afterEach(() => {
 });
 
 describe('project template atomic apply executor', () => {
+  it('rejects schema 1.1 before creating apply state without editor authority', async () => {
+    const root = makeRoot();
+    const contents = { 'settings.yaml': 'enabled: true\n' };
+    const legacy = manifest(contents);
+    const incomingManifest: ProjectTemplateManifest = {
+      ...legacy,
+      schemaVersion: '1.1',
+      metadata: { name: 'Editor draft', description: '' },
+      derivation: { kind: 'root' },
+      repertoireDependencies: [],
+    };
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+
+    await expect(applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    })).resolves.toMatchObject({ status: 'not_started', code: 'INVALID_APPLY_INPUT' });
+    expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+    expect(existsSync(join(root, '.takt', 'settings.yaml'))).toBe(false);
+  });
+
   it('applies resolved merge bytes and durably retains incoming baselines across rollback', async () => {
     const root = makeRoot();
     const base = 'provider_routing:\n  personas:\n    planner: codex\n';

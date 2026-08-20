@@ -76,7 +76,7 @@ export interface TemplateEntry {
   capabilities?: TemplateCapability[];
 }
 
-export interface ProjectTemplateManifestV1_0 {
+export interface ProjectTemplateManifestV1 {
   schemaVersion: '1.0';
   packVersion: string;
   takt: {
@@ -87,6 +87,8 @@ export interface ProjectTemplateManifestV1_0 {
   capabilities?: TemplateCapability[];
   entries: TemplateEntry[];
 }
+
+export type ProjectTemplateManifestV1_0 = ProjectTemplateManifestV1;
 
 /** Human-readable identity shown by the editor before a save is approved. */
 export interface ProjectTemplateManifestMetadataV1_1 {
@@ -136,7 +138,7 @@ export interface ProjectTemplateManifestV1_1 {
   entries: TemplateEntry[];
 }
 
-export type ProjectTemplateManifestV1 =
+export type ProjectTemplateManifest =
   | ProjectTemplateManifestV1_0
   | ProjectTemplateManifestV1_1;
 
@@ -149,7 +151,7 @@ export interface TemplateLockEntry {
 }
 
 /** Immutable reviewed state bound to one canonical manifest digest. */
-export interface TemplateLockV1_0 {
+export interface TemplateLockV1 {
   schemaVersion: '1.0';
   manifestSha256: string;
   packVersion: string;
@@ -157,6 +159,8 @@ export interface TemplateLockV1_0 {
   capabilities: TemplateCapability[];
   entries: TemplateLockEntry[];
 }
+
+export type TemplateLockV1_0 = TemplateLockV1;
 
 /**
  * Immutable reviewed state for an editor-save manifest. These authority fields
@@ -175,4 +179,4 @@ export interface TemplateLockV1_1 {
   entries: TemplateLockEntry[];
 }
 
-export type TemplateLockV1 = TemplateLockV1_0 | TemplateLockV1_1;
+export type TemplateLock = TemplateLockV1_0 | TemplateLockV1_1;

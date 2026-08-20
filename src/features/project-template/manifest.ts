@@ -1,7 +1,7 @@
 import { ProjectTemplateValidationError } from './errors.js';
 import type {
   ProjectTemplateManifestDerivationV1_1,
-  ProjectTemplateManifestV1,
+  ProjectTemplateManifest,
   ProjectTemplateManifestV1_0,
   ProjectTemplateManifestV1_1,
   DerivedTemplateSourceV1_1,
@@ -37,13 +37,15 @@ const CAPTURED_JSON_RECEIVER = JSON;
 const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
-const CAPTURED_ARRAY_FROM = Array.from;
-const CAPTURED_ARRAY_RECEIVER = Array;
 const CAPTURED_REGEXP_EXEC = RegExp.prototype.exec;
 const CAPTURED_STRING_CHAR_CODE_AT = String.prototype.charCodeAt;
 const CAPTURED_STRING_NORMALIZE = String.prototype.normalize;
 const CAPTURED_STRING_TRIM = String.prototype.trim;
 const SCHEMA_VERSION_PATTERN = /^(\d+)\.(\d+)$/;
+const FORBIDDEN_METADATA_IGNORABLE_PATTERN =
+  // These ranges intentionally contain combining and default-ignorable code points.
+  // eslint-disable-next-line no-misleading-character-class
+  /[\u00AD\u034F\u061C\u115F-\u1160\u17B4-\u17B5\u180B-\u180F\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFF8]/u;
 
 function append<T>(values: T[], value: T): void {
   CAPTURED_REFLECT_APPLY(
@@ -286,12 +288,11 @@ function parseMetadataText(
   if (typeof value !== 'string' || (!options.allowEmpty && value.length === 0)) {
     throw new ProjectTemplateValidationError('INVALID_MANIFEST', `${field} must be ${options.allowEmpty ? 'a string' : 'a non-empty string'}`, field);
   }
-  const codePoints = CAPTURED_REFLECT_APPLY(
-    CAPTURED_ARRAY_FROM,
-    CAPTURED_ARRAY_RECEIVER,
-    [value],
-  ) as string[];
-  if (codePoints.length > maxLength) {
+  const length = countCodePoints(value);
+  if (length === undefined) {
+    throw new ProjectTemplateValidationError('INVALID_MANIFEST', `${field} must not contain unpaired surrogates`, field);
+  }
+  if (length > maxLength) {
     throw new ProjectTemplateValidationError('LIMIT_EXCEEDED', `${field} exceeds the ${maxLength} character limit`, field);
   }
   // Metadata reaches UIs and machine-readable exports. NFC plus control-free
@@ -310,7 +311,37 @@ function parseMetadataText(
   return value;
 }
 
+function countCodePoints(value: string): number | undefined {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = CAPTURED_REFLECT_APPLY(
+      CAPTURED_STRING_CHAR_CODE_AT,
+      value,
+      [index],
+    ) as number;
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      if (index + 1 >= value.length) return undefined;
+      const next = CAPTURED_REFLECT_APPLY(
+        CAPTURED_STRING_CHAR_CODE_AT,
+        value,
+        [index + 1],
+      ) as number;
+      if (next < 0xDC00 || next > 0xDFFF) return undefined;
+      index += 1;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      return undefined;
+    }
+    count += 1;
+  }
+  return count;
+}
+
 function containsForbiddenMetadataControl(value: string, allowLineFeed: boolean): boolean {
+  if (CAPTURED_REFLECT_APPLY(
+    CAPTURED_REGEXP_EXEC,
+    FORBIDDEN_METADATA_IGNORABLE_PATTERN,
+    [value],
+  ) !== null) return true;
   for (let index = 0; index < value.length; index += 1) {
     const code = CAPTURED_REFLECT_APPLY(
       CAPTURED_STRING_CHAR_CODE_AT,
@@ -458,7 +489,7 @@ function parseProjectTemplateManifestV1_1(
   };
 }
 
-export function parseProjectTemplateManifest(value: unknown): ProjectTemplateManifestV1 {
+export function parseProjectTemplateManifest(value: unknown): ProjectTemplateManifest {
   const manifest = requireRecord(value, 'manifest');
   return manifest['schemaVersion'] === '1.0'
     ? parseProjectTemplateManifestV1_0(manifest)

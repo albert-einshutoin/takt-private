@@ -75,17 +75,41 @@ const sourceSchema = {
   ],
 } as const;
 
+const derivedSourceSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['kind', 'method', 'draftId'],
+  properties: {
+    kind: { const: 'derived' },
+    method: { const: 'takt-editor-v1' },
+    draftId: { type: 'string', pattern: SHA256_PATTERN_SOURCE },
+  },
+} as const;
+
 const sourceSchemaV1_1 = {
+  oneOf: [...sourceSchema.oneOf, derivedSourceSchema],
+} as const;
+
+const sourceDerivationPairSchema = {
   oneOf: [
-    ...sourceSchema.oneOf,
     {
-      type: 'object',
-      additionalProperties: false,
-      required: ['kind', 'method', 'draftId'],
       properties: {
-        kind: { const: 'derived' },
-        method: { const: 'takt-editor-v1' },
-        draftId: { type: 'string', pattern: SHA256_PATTERN_SOURCE },
+        source: sourceSchema,
+        derivation: {
+          type: 'object',
+          required: ['kind'],
+          properties: { kind: { const: 'root' } },
+        },
+      },
+    },
+    {
+      properties: {
+        source: derivedSourceSchema,
+        derivation: {
+          type: 'object',
+          required: ['kind'],
+          properties: { kind: { const: 'derived' } },
+        },
       },
     },
   ],
@@ -149,6 +173,7 @@ export const projectTemplateManifestV1_1JsonSchema = {
   title: 'TAKT Project Template Manifest v1.1',
   type: 'object',
   additionalProperties: false,
+  allOf: [sourceDerivationPairSchema],
   required: [
     'schemaVersion',
     'packVersion',
@@ -171,13 +196,13 @@ export const projectTemplateManifestV1_1JsonSchema = {
           type: 'string',
           minLength: 1,
           maxLength: 128,
-          pattern: '^[^\\u0000-\\u001F\\u007F-\\u009F]*$',
+          pattern: '^(?!\\s)(?!.*\\s$)(?!.*[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF]))(?!.*(?:^|[^\\uD800-\\uDBFF])[\\uDC00-\\uDFFF])[^\\u0000-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F-\\u1160\\u17B4-\\u17B5\\u180B-\\u180F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFF8]*$',
         },
         description: {
           type: 'string',
           minLength: 0,
           maxLength: 2048,
-          pattern: '^[^\\u0000-\\u0009\\u000B-\\u001F\\u007F-\\u009F]*$',
+          pattern: '^(?!.*[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF]))(?!.*(?:^|[^\\uD800-\\uDBFF])[\\uDC00-\\uDFFF])[^\\u0000-\\u0009\\u000B-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F-\\u1160\\u17B4-\\u17B5\\u180B-\\u180F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFF8]*$',
         },
       },
     },
@@ -275,6 +300,7 @@ export const projectTemplateLockV1_1JsonSchema = {
   title: 'TAKT Project Template Lock v1.1',
   type: 'object',
   additionalProperties: false,
+  allOf: [sourceDerivationPairSchema],
   required: [
     'schemaVersion',
     'manifestSha256',

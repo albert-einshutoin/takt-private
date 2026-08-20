@@ -11,10 +11,12 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   canonicalizeTaktpackJson,
+  calculateProjectTemplateManifestSha256,
   createProjectTemplateExportPlan,
   inspectTaktpack,
   writeTaktpack,
 } from '../../features/project-template/index.js';
+import { calculateProjectTemplateDraftId } from '../../features/project-template/template-editor-draft-identity.js';
 import {
   materializeTaktpackContentsWithIoSeam,
 } from '../../features/project-template/archive-inspector.js';
@@ -98,7 +100,13 @@ function rewriteArchiveJson(
   const manifest = entryJson(archive, 'manifest.json');
   mutate(metadata, manifest);
   const manifestContent = Buffer.from(canonicalizeTaktpackJson(manifest));
-  metadata.manifestSha256 = createHash('sha256').update(manifestContent).digest('hex');
+  try {
+    metadata.manifestSha256 = calculateProjectTemplateManifestSha256(manifest);
+  } catch {
+    // Version-matrix fixtures must reach the inspector's early negotiation
+    // gate even though the intentionally crossed manifest is not parseable.
+    metadata.manifestSha256 = createHash('sha256').update(manifestContent).digest('hex');
+  }
   archive = replaceTarEntry(archive, 'manifest.json', manifestContent);
   archive = replaceTarEntry(
     archive,
@@ -127,7 +135,7 @@ function promoteToV1_1(
   archivePath: string,
   options: { derived?: boolean; withDependency?: boolean } = {},
 ): void {
-  const draftId = 'c'.repeat(64);
+  const draftId = '0e3bd58e83cfafbeb4f59cc9e73277065b6b4d5c6319b1ae2fabca6cdffa15f3';
   const dependencies: ArchiveRecord[] = options.withDependency === true
     ? [{
       scope: '@acme/editor-tools',
@@ -292,6 +300,14 @@ describe('taktpack archive v1.1 version negotiation contract', () => {
       const seedDerivation = (metadata.lockSeed as ArchiveRecord).derivation as ArchiveRecord;
       const parent = seedDerivation.parent as ArchiveRecord;
       parent.archiveSha256 = 'e'.repeat(64);
+      const changedDraftId = calculateProjectTemplateDraftId({
+        parentArchiveSha256: parent.archiveSha256,
+        parentManifestSha256: parent.manifestSha256,
+        parentPackVersion: parent.packVersion,
+        editDocumentSha256: seedDerivation.editDocumentSha256,
+      });
+      seedDerivation.draftId = changedDraftId;
+      ((metadata.lockSeed as ArchiveRecord).source as ArchiveRecord).draftId = changedDraftId;
     });
     await expect(inspectTaktpack(derivationArchive), 'derived parent provenance').rejects.toMatchObject({
       code: 'LOCK_MISMATCH',

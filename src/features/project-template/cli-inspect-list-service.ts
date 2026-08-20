@@ -18,7 +18,11 @@ import {
   createProjectTemplateCliV1_1Success,
   type ProjectTemplateCliV1_1Outcome,
 } from './cli-machine-contract-v1-1.js';
-import type { TemplateCapability, TemplateEntryPolicy, TemplateSource } from './types.js';
+import type {
+  ProjectTemplateManifest,
+  TemplateCapability,
+  TemplateEntryPolicy,
+} from './types.js';
 import {
   ProjectTemplateCompanionLockStateError,
   readProjectTemplateCompanionLockState,
@@ -73,8 +77,10 @@ class ProjectTemplateCliInspectProjectionError extends Error {}
 interface InspectArchiveProjection {
   readonly archiveSha256: string;
   readonly manifestSha256?: string;
-  readonly descriptor?: { readonly version: '1.0' };
+  readonly descriptor?: { readonly version: '1.0' | '1.1' };
+  readonly lockSeed?: { readonly schemaVersion: '1.0' | '1.1' };
   readonly manifest: {
+    readonly schemaVersion?: '1.0' | '1.1';
     readonly entries: readonly {
       readonly path?: string;
       readonly policy?: TemplateEntryPolicy;
@@ -82,7 +88,7 @@ interface InspectArchiveProjection {
     }[];
     readonly packVersion?: string;
     readonly takt?: { readonly minVersion?: string; readonly maxVersion?: string };
-    readonly source?: TemplateSource;
+    readonly source?: ProjectTemplateManifest['source'];
     readonly capabilities?: readonly TemplateCapability[];
   };
   readonly compatibility: {
@@ -434,8 +440,15 @@ function snapshotInspectionV1_1(value: unknown, archiveBytes: number): ProjectTe
   requirePlainInspectRecord(value);
   const archiveId = ownValue(value, 'archiveSha256');
   const manifestId = ownValue(value, 'manifestSha256');
+  const descriptor = ownValue(value, 'descriptor');
+  requirePlainInspectRecord(descriptor);
+  const packFormatVersion = ownValue(descriptor, 'version');
+  const lockSeed = ownValue(value, 'lockSeed');
+  requirePlainInspectRecord(lockSeed);
+  const lockSchemaVersion = ownValue(lockSeed, 'schemaVersion');
   const manifest = ownValue(value, 'manifest');
   requirePlainInspectRecord(manifest);
+  const manifestSchemaVersion = ownValue(manifest, 'schemaVersion');
   const entries = ownValue(manifest, 'entries');
   const packVersion = ownValue(manifest, 'packVersion');
   const takt = ownValue(manifest, 'takt');
@@ -452,7 +465,10 @@ function snapshotInspectionV1_1(value: unknown, archiveBytes: number): ProjectTe
   requirePlainInspectRecord(compatibility);
   const compatibilityStatus = ownValue(compatibility, 'status');
   const currentTaktVersion = ownOptionalValue(compatibility, 'currentVersion');
-  if (typeof archiveId !== 'string' || !testPattern(SHA256_PATTERN, archiveId)
+  if (packFormatVersion !== '1.0'
+    || manifestSchemaVersion !== '1.0'
+    || lockSchemaVersion !== '1.0'
+    || typeof archiveId !== 'string' || !testPattern(SHA256_PATTERN, archiveId)
     || typeof manifestId !== 'string' || !testPattern(SHA256_PATTERN, manifestId)
     || typeof packVersion !== 'string' || typeof minTaktVersion !== 'string'
     || (maxTaktVersion !== undefined && typeof maxTaktVersion !== 'string')
@@ -571,7 +587,7 @@ function snapshotInspectionV1_1(value: unknown, archiveBytes: number): ProjectTe
       packId: archiveId, entryCount: rawEntries.length, archiveBytes, dependencyCount: 0,
       ...review,
       detail: {
-        identity: { packFormatVersion: '1.0', packVersion, archiveId, manifestId },
+        identity: { packFormatVersion, packVersion, archiveId, manifestId },
         compatibility: {
           status: compatibilityStatus, minTaktVersion,
           maxTaktVersion: maxTaktVersion ?? null,

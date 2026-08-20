@@ -9,7 +9,7 @@ import {
 } from './source-descriptor.js';
 import type {
   TemplateLockEntry,
-  TemplateLockV1,
+  TemplateLock,
   TemplateLockV1_0,
   TemplateLockV1_1,
 } from './types.js';
@@ -110,10 +110,14 @@ function parseLockBase(
 
 function parseTemplateLockV1_0(lock: Record<string, unknown>): TemplateLockV1_0 {
   assertAllowedKeys(lock, ['schemaVersion', 'manifestSha256', 'packVersion', 'source', 'capabilities', 'entries'], 'lock');
+  const base = parseLockBase(lock);
   return {
     schemaVersion: '1.0',
-    ...parseLockBase(lock),
+    manifestSha256: base.manifestSha256,
+    packVersion: base.packVersion,
     source: parseSource(lock['source']),
+    capabilities: base.capabilities,
+    entries: base.entries,
   };
 }
 
@@ -125,20 +129,24 @@ function parseTemplateLockV1_1(lock: Record<string, unknown>): TemplateLockV1_1 
   );
   const source = parseProjectTemplateManifestV1_1Source(lock['source']);
   const derivation = parseProjectTemplateManifestV1_1Derivation(lock['derivation']);
+  const base = parseLockBase(lock);
   validateProjectTemplateManifestV1_1SourceAndDerivation(source, derivation);
   return {
     schemaVersion: '1.1',
-    ...parseLockBase(lock),
+    manifestSha256: base.manifestSha256,
+    packVersion: base.packVersion,
     source,
     derivation,
     repertoireDependencies: parseProjectTemplateRepertoireDependencies(
       lock['repertoireDependencies'],
       'lock.repertoireDependencies',
     ),
+    capabilities: base.capabilities,
+    entries: base.entries,
   };
 }
 
-export function parseTemplateLock(value: unknown): TemplateLockV1 {
+export function parseTemplateLock(value: unknown): TemplateLock {
   const lock = requireRecord(value, 'lock');
   return requireLockSchemaVersion(lock['schemaVersion']) === '1.0'
     ? parseTemplateLockV1_0(lock)

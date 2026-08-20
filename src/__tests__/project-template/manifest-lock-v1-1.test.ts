@@ -70,6 +70,10 @@ describe('project template manifest lock v1.1', () => {
     expect(validate(lock), JSON.stringify(validate.errors)).toBe(true);
     expect(() => parseTemplateLock(lock)).not.toThrow();
 
+    const mismatchedSource = lockFor(manifest('derived.json'));
+    mismatchedSource['source'] = manifest('root.json')['source'];
+    expect(validate(mismatchedSource)).toBe(false);
+
     delete lock['derivation'];
     expect(validate(lock)).toBe(false);
     expect(() => parseTemplateLock(lock)).toThrow(ProjectTemplateValidationError);
