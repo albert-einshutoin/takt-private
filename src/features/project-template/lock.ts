@@ -1,5 +1,18 @@
 import { ProjectTemplateValidationError } from './errors.js';
-import type { TemplateLockEntry, TemplateLockV1 } from './types.js';
+import {
+  parseProjectTemplateManifestV1_1Derivation,
+  parseProjectTemplateManifestV1_1Source,
+  validateProjectTemplateManifestV1_1SourceAndDerivation,
+} from './manifest.js';
+import {
+  parseProjectTemplateRepertoireDependencies,
+} from './source-descriptor.js';
+import type {
+  TemplateLockEntry,
+  TemplateLock,
+  TemplateLockV1_0,
+  TemplateLockV1_1,
+} from './types.js';
 import {
   assertAllowedKeys,
   MAX_TEMPLATE_ENTRIES,
@@ -11,7 +24,6 @@ import {
   parseSource,
   requireArray,
   requireRecord,
-  requireSchemaVersionV1,
   requireSemVer,
   validateDeclaredCapabilities,
   validatePathIdentities,
@@ -20,6 +32,8 @@ import {
 const CAPTURED_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const CAPTURED_OBJECT_RECEIVER = Object;
 const CAPTURED_REFLECT_APPLY = Reflect.apply;
+const CAPTURED_REGEXP_EXEC = RegExp.prototype.exec;
+const LOCK_SCHEMA_VERSION_PATTERN = /^(\d+)\.(\d+)$/;
 
 function append<T>(values: T[], value: T): void {
   CAPTURED_REFLECT_APPLY(
@@ -51,10 +65,30 @@ function parseLockEntry(value: unknown, index: number): TemplateLockEntry {
   };
 }
 
-export function parseTemplateLock(value: unknown): TemplateLockV1 {
-  const lock = requireRecord(value, 'lock');
-  assertAllowedKeys(lock, ['schemaVersion', 'manifestSha256', 'packVersion', 'source', 'capabilities', 'entries'], 'lock');
-  requireSchemaVersionV1(lock['schemaVersion'], 'lock.schemaVersion', 'INVALID_LOCK');
+function requireLockSchemaVersion(value: unknown): '1.0' | '1.1' {
+  if (typeof value !== 'string') {
+    throw new ProjectTemplateValidationError('INVALID_LOCK', 'lock.schemaVersion must be a string', 'lock.schemaVersion');
+  }
+  const match = CAPTURED_REFLECT_APPLY(
+    CAPTURED_REGEXP_EXEC,
+    LOCK_SCHEMA_VERSION_PATTERN,
+    [value],
+  ) as RegExpExecArray | null;
+  if (match === null) {
+    throw new ProjectTemplateValidationError('INVALID_LOCK', 'lock.schemaVersion must use major.minor notation', 'lock.schemaVersion');
+  }
+  if (match[1] !== '1') {
+    throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_MAJOR', `lock.schemaVersion major ${match[1]} is not supported`, 'lock.schemaVersion');
+  }
+  if (value !== '1.0' && value !== '1.1') {
+    throw new ProjectTemplateValidationError('UNSUPPORTED_SCHEMA_VERSION', `lock.schemaVersion version ${value} is not supported`, 'lock.schemaVersion');
+  }
+  return value;
+}
+
+function parseLockBase(
+  lock: Record<string, unknown>,
+): Omit<TemplateLockV1_0, 'schemaVersion' | 'source'> {
   const rawEntries = requireArray(lock['entries'], 'lock.entries', MAX_TEMPLATE_ENTRIES, 'INVALID_LOCK');
   const capabilities = parseCapabilities(lock['capabilities'], 'lock.capabilities', 'INVALID_LOCK');
   if (capabilities === undefined) {
@@ -67,13 +101,56 @@ export function parseTemplateLock(value: unknown): TemplateLockV1 {
   validatePathIdentities(entries, 'lock.entries');
   validateDeclaredCapabilities(entries, capabilities, 'lock.entries.capabilities');
   return {
-    schemaVersion: '1.0',
     manifestSha256: parseSha256(lock['manifestSha256'], 'lock.manifestSha256'),
     packVersion: requireSemVer(lock['packVersion'], 'lock.packVersion'),
-    source: parseSource(lock['source']),
     capabilities,
     entries,
   };
+}
+
+function parseTemplateLockV1_0(lock: Record<string, unknown>): TemplateLockV1_0 {
+  assertAllowedKeys(lock, ['schemaVersion', 'manifestSha256', 'packVersion', 'source', 'capabilities', 'entries'], 'lock');
+  const base = parseLockBase(lock);
+  return {
+    schemaVersion: '1.0',
+    manifestSha256: base.manifestSha256,
+    packVersion: base.packVersion,
+    source: parseSource(lock['source']),
+    capabilities: base.capabilities,
+    entries: base.entries,
+  };
+}
+
+function parseTemplateLockV1_1(lock: Record<string, unknown>): TemplateLockV1_1 {
+  assertAllowedKeys(
+    lock,
+    ['schemaVersion', 'manifestSha256', 'packVersion', 'source', 'derivation', 'repertoireDependencies', 'capabilities', 'entries'],
+    'lock',
+  );
+  const source = parseProjectTemplateManifestV1_1Source(lock['source']);
+  const derivation = parseProjectTemplateManifestV1_1Derivation(lock['derivation']);
+  const base = parseLockBase(lock);
+  validateProjectTemplateManifestV1_1SourceAndDerivation(source, derivation);
+  return {
+    schemaVersion: '1.1',
+    manifestSha256: base.manifestSha256,
+    packVersion: base.packVersion,
+    source,
+    derivation,
+    repertoireDependencies: parseProjectTemplateRepertoireDependencies(
+      lock['repertoireDependencies'],
+      'lock.repertoireDependencies',
+    ),
+    capabilities: base.capabilities,
+    entries: base.entries,
+  };
+}
+
+export function parseTemplateLock(value: unknown): TemplateLock {
+  const lock = requireRecord(value, 'lock');
+  return requireLockSchemaVersion(lock['schemaVersion']) === '1.0'
+    ? parseTemplateLockV1_0(lock)
+    : parseTemplateLockV1_1(lock);
 }
 
 export function serializeTemplateLock(value: unknown): string {

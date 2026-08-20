@@ -7,9 +7,11 @@ import {
   TAKTPACK_ENTRY_NAMES,
   type InspectTaktpackOptions,
   type TaktpackDescriptorV1,
+  type TaktpackDescriptorV1_1,
   type TaktpackExportReportV1,
   type TaktpackInspectResult,
   type TaktpackLockSeedV1,
+  type TaktpackLockSeedV1_1,
   type TaktpackBlobIndexEntry,
 } from './archive-types.js';
 import {
@@ -26,9 +28,9 @@ import { parseTemplateLock } from './lock.js';
 import { parseProjectTemplateManifest } from './manifest.js';
 import type {
   DetectedTemplateCapabilities,
-  ProjectTemplateManifestV1,
+  ProjectTemplateManifest,
   TemplateEntryPolicy,
-  TemplateLockV1,
+  TemplateLock,
 } from './types.js';
 import { compareSemVer, requireSemVer } from './validation.js';
 import { parseSha256 } from './validation.js';
@@ -56,13 +58,16 @@ interface ParsedHeader {
   size: number;
 }
 
-interface PackMetadata {
-  descriptor: TaktpackDescriptorV1;
+interface PackMetadataCommon {
   manifestSha256: string;
   exportReportSha256: string;
-  lockSeed: TaktpackLockSeedV1;
   blobs: TaktpackBlobIndexEntry[];
 }
+
+type PackMetadata = PackMetadataCommon & (
+  | { descriptor: TaktpackDescriptorV1; lockSeed: TaktpackLockSeedV1 }
+  | { descriptor: TaktpackDescriptorV1_1; lockSeed: TaktpackLockSeedV1_1 }
+);
 
 function requireActiveInspection(
   signal: AbortSignal | undefined,
@@ -201,6 +206,17 @@ function parsePackMetadata(content: Buffer): PackMetadata {
     throw new TaktpackError('INVALID_PACK', 'pack.json must be an object', 'pack.json');
   }
   const record = value as Record<string, unknown>;
+  const formatVersion = record['version'];
+  if (typeof formatVersion !== 'string') {
+    throw new TaktpackError('INVALID_PACK', 'pack version must be a string', 'pack.json.version');
+  }
+  if (formatVersion !== '1.0' && formatVersion !== '1.1') {
+    throw new TaktpackError(
+      'UNSUPPORTED_PACK_VERSION',
+      'pack version is not supported',
+      'pack.json.version',
+    );
+  }
   const keys = Object.keys(record).sort();
   const expected = [
     'archive',
@@ -214,7 +230,6 @@ function parsePackMetadata(content: Buffer): PackMetadata {
   ].sort();
   if (JSON.stringify(keys) !== JSON.stringify(expected)
     || record['format'] !== 'taktpack'
-    || record['version'] !== '1.0'
     || record['archive'] !== 'ustar'
     || record['contentAddressed'] !== true) {
     throw new TaktpackError('INVALID_PACK', 'unsupported pack descriptor', 'pack.json');
@@ -256,19 +271,37 @@ function parsePackMetadata(content: Buffer): PackMetadata {
   }
   const seedRecord = record['lockSeed'] as Record<string, unknown>;
   const seedKeys = Object.keys(seedRecord).sort();
-  const expectedSeedKeys = [
-    'capabilities',
-    'entries',
-    'kind',
-    'packVersion',
-    'schemaVersion',
-    'source',
-  ];
+  const expectedSeedKeys = formatVersion === '1.0'
+    ? [
+      'capabilities',
+      'entries',
+      'kind',
+      'packVersion',
+      'schemaVersion',
+      'source',
+    ]
+    : [
+      'capabilities',
+      'derivation',
+      'entries',
+      'kind',
+      'packVersion',
+      'repertoireDependencies',
+      'schemaVersion',
+      'source',
+    ];
   if (JSON.stringify(seedKeys) !== JSON.stringify(expectedSeedKeys)) {
     throw new TaktpackError(
       'INVALID_PACK',
       'pack lock seed has unknown or missing fields',
       'pack.json.lockSeed',
+    );
+  }
+  if (seedRecord['schemaVersion'] !== formatVersion) {
+    throw new TaktpackError(
+      'INVALID_PACK',
+      'pack and lock seed versions do not match',
+      'pack.json.lockSeed.schemaVersion',
     );
   }
   const seedFields = { ...seedRecord };
@@ -277,25 +310,54 @@ function parsePackMetadata(content: Buffer): PackMetadata {
     ...seedFields,
     manifestSha256: '0'.repeat(64),
   });
-  const lockSeed: TaktpackLockSeedV1 = {
-    kind: 'project-template-lock-seed',
-    schemaVersion: parsedSeed.schemaVersion,
-    packVersion: parsedSeed.packVersion,
-    source: parsedSeed.source,
-    capabilities: parsedSeed.capabilities,
-    entries: parsedSeed.entries,
+  const commonMetadata = {
+    manifestSha256: parseSha256(record['manifestSha256'], 'pack.json.manifestSha256'),
+    exportReportSha256: parseSha256(record['exportReportSha256'], 'pack.json.exportReportSha256'),
+    blobs,
   };
+  if (formatVersion === '1.0') {
+    if (parsedSeed.schemaVersion !== '1.0') {
+      throw new TaktpackError('INVALID_PACK', 'lock seed parser returned the wrong version', 'pack.json.lockSeed.schemaVersion');
+    }
+    return {
+      descriptor: {
+        format: 'taktpack',
+        version: '1.0',
+        archive: 'ustar',
+        contentAddressed: true,
+      },
+      lockSeed: {
+        kind: 'project-template-lock-seed',
+        schemaVersion: parsedSeed.schemaVersion,
+        packVersion: parsedSeed.packVersion,
+        source: parsedSeed.source,
+        capabilities: parsedSeed.capabilities,
+        entries: parsedSeed.entries,
+      },
+      ...commonMetadata,
+    };
+  }
+  if (parsedSeed.schemaVersion !== '1.1') {
+    throw new TaktpackError('INVALID_PACK', 'lock seed parser returned the wrong version', 'pack.json.lockSeed.schemaVersion');
+  }
   return {
     descriptor: {
       format: 'taktpack',
-      version: '1.0',
+      version: '1.1',
       archive: 'ustar',
       contentAddressed: true,
     },
-    manifestSha256: parseSha256(record['manifestSha256'], 'pack.json.manifestSha256'),
-    exportReportSha256: parseSha256(record['exportReportSha256'], 'pack.json.exportReportSha256'),
-    lockSeed,
-    blobs,
+    lockSeed: {
+      kind: 'project-template-lock-seed',
+      schemaVersion: parsedSeed.schemaVersion,
+      packVersion: parsedSeed.packVersion,
+      source: parsedSeed.source,
+      derivation: parsedSeed.derivation,
+      repertoireDependencies: parsedSeed.repertoireDependencies,
+      capabilities: parsedSeed.capabilities,
+      entries: parsedSeed.entries,
+    },
+    ...commonMetadata,
   };
 }
 
@@ -371,7 +433,7 @@ function parseReport(content: Buffer): TaktpackExportReportV1 {
 
 function validateReportAgainstManifest(
   report: TaktpackExportReportV1,
-  manifest: ProjectTemplateManifestV1,
+  manifest: ProjectTemplateManifest,
 ): void {
   for (const policy of ['managed', 'merge', 'scaffold'] as const) {
     if (report.counts[policy] !== manifest.entries.filter((entry) => entry.policy === policy).length) {
@@ -459,7 +521,7 @@ async function inspectTaktpackWithExpectedLinks(
   let totalPayloadBytes = 0;
   let entryCount = 0;
   let metadata: PackMetadata | undefined;
-  let manifest: ProjectTemplateManifestV1 | undefined;
+  let manifest: ProjectTemplateManifest | undefined;
   let report: TaktpackExportReportV1 | undefined;
   const detections: DetectedTemplateCapabilities[] = [];
   let primaryError: Error | undefined;
@@ -581,7 +643,21 @@ async function inspectTaktpackWithExpectedLinks(
       if (header.name === 'pack.json') {
         metadata = parsePackMetadata(content);
       } else if (header.name === 'manifest.json') {
-        manifest = parseProjectTemplateManifest(parseJson(content, 'manifest.json'));
+        const manifestValue = parseJson(content, 'manifest.json');
+        if (
+          typeof manifestValue !== 'object'
+          || manifestValue === null
+          || Array.isArray(manifestValue)
+          || (manifestValue as Record<string, unknown>)['schemaVersion']
+            !== metadata?.descriptor.version
+        ) {
+          throw new TaktpackError(
+            'INVALID_PACK',
+            'pack and manifest versions do not match',
+            'manifest.json.schemaVersion',
+          );
+        }
+        manifest = parseProjectTemplateManifest(manifestValue);
         if (
           metadata === undefined
           || calculateProjectTemplateManifestSha256(manifest) !== metadata.manifestSha256
@@ -649,14 +725,25 @@ async function inspectTaktpackWithExpectedLinks(
     if (entryCount !== expectedEntries) {
       throw new TaktpackError('MISSING_ARCHIVE_ENTRY', 'one or more content-addressed blobs are missing');
     }
-    const lock: TemplateLockV1 = {
-      schemaVersion: metadata.lockSeed.schemaVersion,
-      packVersion: metadata.lockSeed.packVersion,
-      source: metadata.lockSeed.source,
-      capabilities: metadata.lockSeed.capabilities,
-      entries: metadata.lockSeed.entries,
-      manifestSha256: metadata.manifestSha256,
-    };
+    const lock: TemplateLock = metadata.lockSeed.schemaVersion === '1.0'
+      ? {
+        schemaVersion: metadata.lockSeed.schemaVersion,
+        packVersion: metadata.lockSeed.packVersion,
+        source: metadata.lockSeed.source,
+        capabilities: metadata.lockSeed.capabilities,
+        entries: metadata.lockSeed.entries,
+        manifestSha256: metadata.manifestSha256,
+      }
+      : {
+        schemaVersion: metadata.lockSeed.schemaVersion,
+        packVersion: metadata.lockSeed.packVersion,
+        source: metadata.lockSeed.source,
+        derivation: metadata.lockSeed.derivation,
+        repertoireDependencies: metadata.lockSeed.repertoireDependencies,
+        capabilities: metadata.lockSeed.capabilities,
+        entries: metadata.lockSeed.entries,
+        manifestSha256: metadata.manifestSha256,
+      };
     validateManifestLockPair(manifest, lock);
     validateDetectedTemplateCapabilities(manifest, detections);
     validateReportAgainstManifest(report, manifest);
@@ -678,21 +765,41 @@ async function inspectTaktpackWithExpectedLinks(
         && (manifest.takt.maxVersion === undefined
           || compareSemVer(currentVersion, manifest.takt.maxVersion) <= 0)
       );
-    result = {
-      descriptor: metadata.descriptor,
-      manifest,
-      lockSeed: metadata.lockSeed,
+    const compatibilityStatus: 'unknown' | 'compatible' | 'incompatible' =
+      compatible === undefined ? 'unknown' : compatible ? 'compatible' : 'incompatible';
+    const commonResult = {
       report,
       archiveSha256: archiveDigest.digest('hex'),
       manifestSha256: metadata.manifestSha256,
       compatibility: {
-        status: compatible === undefined ? 'unknown' : compatible ? 'compatible' : 'incompatible',
+        status: compatibilityStatus,
         ...(compatible === undefined ? {} : { compatible }),
         ...(currentVersion === undefined ? {} : { currentVersion }),
         minVersion: manifest.takt.minVersion,
         ...(manifest.takt.maxVersion === undefined ? {} : { maxVersion: manifest.takt.maxVersion }),
       },
     };
+    if (metadata.descriptor.version === '1.0') {
+      if (manifest.schemaVersion !== '1.0' || metadata.lockSeed.schemaVersion !== '1.0') {
+        throw new TaktpackError('INVALID_PACK', 'schema version cohort is inconsistent', 'pack.json.version');
+      }
+      result = {
+        descriptor: metadata.descriptor,
+        manifest,
+        lockSeed: metadata.lockSeed,
+        ...commonResult,
+      };
+    } else {
+      if (manifest.schemaVersion !== '1.1' || metadata.lockSeed.schemaVersion !== '1.1') {
+        throw new TaktpackError('INVALID_PACK', 'schema version cohort is inconsistent', 'pack.json.version');
+      }
+      result = {
+        descriptor: metadata.descriptor,
+        manifest,
+        lockSeed: metadata.lockSeed,
+        ...commonResult,
+      };
+    }
   } catch (error) {
     primaryError = error instanceof TaktpackError
       || error instanceof ProjectTemplateValidationError

@@ -1,5 +1,7 @@
 /** Public contract for a portable `.takt/` project template pack. */
 
+import type { ProjectTemplateRepertoireDependencyV1 } from './source-descriptor.js';
+
 /** Replaces the destination file and keeps it managed by future updates. */
 export type ManagedTemplateEntryPolicy = 'managed';
 /** Uses a three-way merge against the previously locked pack version. */
@@ -58,6 +60,13 @@ export interface LocalTemplateSource {
 
 export type TemplateSource = GithubTemplateSource | GitTemplateSource | LocalTemplateSource;
 
+/** A save draft issued by the editor authority, never a user-selected URL. */
+export interface DerivedTemplateSourceV1_1 {
+  kind: 'derived';
+  method: 'takt-editor-v1';
+  draftId: string;
+}
+
 export interface TemplateEntry {
   /** ASCII path relative to `.takt/`; each segment is at most 255 characters. */
   path: string;
@@ -79,6 +88,60 @@ export interface ProjectTemplateManifestV1 {
   entries: TemplateEntry[];
 }
 
+export type ProjectTemplateManifestV1_0 = ProjectTemplateManifestV1;
+
+/** Human-readable identity shown by the editor before a save is approved. */
+export interface ProjectTemplateManifestMetadataV1_1 {
+  name: string;
+  description: string;
+}
+
+/** A pack created independently of a prior archive. */
+export interface ProjectTemplateManifestRootDerivationV1_1 {
+  kind: 'root';
+}
+
+/** Immutable evidence that an editor save derived from a reviewed pack. */
+export interface ProjectTemplateManifestDerivedDerivationV1_1 {
+  kind: 'derived';
+  operation: 'editor-save';
+  draftId: string;
+  editDocumentSha256: string;
+  parent: {
+    archiveSha256: string;
+    manifestSha256: string;
+    packVersion: string;
+  };
+}
+
+export type ProjectTemplateManifestDerivationV1_1 =
+  | ProjectTemplateManifestRootDerivationV1_1
+  | ProjectTemplateManifestDerivedDerivationV1_1;
+
+/**
+ * Editor-save manifest contract. A derived manifest records only its immutable
+ * parent archive identity; it never asserts the hash of the archive currently
+ * being written, which prevents a self-referential hash contract.
+ */
+export interface ProjectTemplateManifestV1_1 {
+  schemaVersion: '1.1';
+  packVersion: string;
+  metadata: ProjectTemplateManifestMetadataV1_1;
+  derivation: ProjectTemplateManifestDerivationV1_1;
+  takt: {
+    minVersion: string;
+    maxVersion?: string;
+  };
+  source: TemplateSource | DerivedTemplateSourceV1_1;
+  repertoireDependencies: ProjectTemplateRepertoireDependencyV1[];
+  capabilities?: TemplateCapability[];
+  entries: TemplateEntry[];
+}
+
+export type ProjectTemplateManifest =
+  | ProjectTemplateManifestV1_0
+  | ProjectTemplateManifestV1_1;
+
 export interface TemplateLockEntry {
   path: string;
   policy: TemplateEntryPolicy;
@@ -96,3 +159,24 @@ export interface TemplateLockV1 {
   capabilities: TemplateCapability[];
   entries: TemplateLockEntry[];
 }
+
+export type TemplateLockV1_0 = TemplateLockV1;
+
+/**
+ * Immutable reviewed state for an editor-save manifest. These authority fields
+ * deliberately duplicate the manifest: a lock must not be replayable against
+ * another reviewed lineage merely because pack content happens to look alike.
+ * Human-readable metadata is still manifest-hash-bound and is not duplicated.
+ */
+export interface TemplateLockV1_1 {
+  schemaVersion: '1.1';
+  manifestSha256: string;
+  packVersion: string;
+  source: ProjectTemplateManifestV1_1['source'];
+  derivation: ProjectTemplateManifestDerivationV1_1;
+  repertoireDependencies: ProjectTemplateRepertoireDependencyV1[];
+  capabilities: TemplateCapability[];
+  entries: TemplateLockEntry[];
+}
+
+export type TemplateLock = TemplateLockV1_0 | TemplateLockV1_1;

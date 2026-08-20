@@ -210,6 +210,30 @@ describe('project template companion lock state reader', () => {
     expect(result.sourceProvenance.source).not.toHaveProperty('repositoryUrl');
   });
 
+  it('rejects schema 1.1 until the reader can verify the editor authority cohort', () => {
+    const projectRoot = root();
+    const lock = {
+      ...contentLock(),
+      schemaVersion: '1.1',
+      derivation: { kind: 'root' },
+      repertoireDependencies: [],
+    };
+    writeFileSync(join(projectRoot, CONTENT_LOCK_PATH), serializeTemplateLock(lock));
+    writeFileSync(
+      join(projectRoot, PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH),
+      serializeProjectTemplateRepertoireDependencyLock(repertoireLock()),
+    );
+    writeFileSync(
+      join(projectRoot, PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH),
+      serializeProjectTemplateSourceProvenance(sourceLock()),
+    );
+
+    expectStateError(
+      () => readProjectTemplateCompanionLockState(projectRoot),
+      'INVALID_LOCK',
+    );
+  });
+
   it.each([
     [CONTENT_LOCK_PATH],
     [PROJECT_TEMPLATE_REPERTOIRE_DEPENDENCY_LOCK_PATH],

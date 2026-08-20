@@ -2,10 +2,12 @@ import type {
   ProjectTemplateClassificationReason,
 } from './classifier-types.js';
 import type {
-  ProjectTemplateManifestV1,
+  ProjectTemplateManifestV1_0,
+  ProjectTemplateManifestV1_1,
   TemplateCapability,
   TemplateEntryPolicy,
-  TemplateLockV1,
+  TemplateLockV1_0,
+  TemplateLockV1_1,
   TemplateSource,
 } from './types.js';
 
@@ -46,6 +48,17 @@ export interface TaktpackDescriptorV1 {
   archive: 'ustar';
   contentAddressed: true;
 }
+
+export interface TaktpackDescriptorV1_1 {
+  format: 'taktpack';
+  version: '1.1';
+  archive: 'ustar';
+  contentAddressed: true;
+}
+
+export type TaktpackDescriptor =
+  | TaktpackDescriptorV1
+  | TaktpackDescriptorV1_1;
 
 export interface TaktpackExportReportV1 {
   schemaVersion: '1.0';
@@ -89,15 +102,12 @@ export type DeepReadonly<T> = T extends (...args: never[]) => unknown
 
 export interface ProjectTemplateExportPlan {
   readonly descriptor: DeepReadonly<TaktpackDescriptorV1>;
-  readonly manifest: DeepReadonly<ProjectTemplateManifestV1>;
-  readonly lock: DeepReadonly<TemplateLockV1>;
+  readonly manifest: DeepReadonly<ProjectTemplateManifestV1_0>;
+  readonly lock: DeepReadonly<TemplateLockV1_0>;
   readonly report: DeepReadonly<TaktpackExportReportV1>;
 }
 
-export interface TaktpackInspectResult {
-  descriptor: TaktpackDescriptorV1;
-  manifest: ProjectTemplateManifestV1;
-  lockSeed: TaktpackLockSeedV1;
+interface TaktpackInspectResultCommon {
   report: TaktpackExportReportV1;
   archiveSha256: string;
   manifestSha256: string;
@@ -110,14 +120,39 @@ export interface TaktpackInspectResult {
   };
 }
 
+export type TaktpackInspectResult =
+  | TaktpackInspectResultCommon & {
+    descriptor: TaktpackDescriptorV1;
+    manifest: ProjectTemplateManifestV1_0;
+    lockSeed: TaktpackLockSeedV1;
+  }
+  | TaktpackInspectResultCommon & {
+    descriptor: TaktpackDescriptorV1_1;
+    manifest: ProjectTemplateManifestV1_1;
+    lockSeed: TaktpackLockSeedV1_1;
+  };
+
 export interface TaktpackLockSeedV1 {
   kind: 'project-template-lock-seed';
-  schemaVersion: TemplateLockV1['schemaVersion'];
-  packVersion: TemplateLockV1['packVersion'];
-  source: TemplateLockV1['source'];
-  capabilities: TemplateLockV1['capabilities'];
-  entries: TemplateLockV1['entries'];
+  schemaVersion: TemplateLockV1_0['schemaVersion'];
+  packVersion: TemplateLockV1_0['packVersion'];
+  source: TemplateLockV1_0['source'];
+  capabilities: TemplateLockV1_0['capabilities'];
+  entries: TemplateLockV1_0['entries'];
 }
+
+export interface TaktpackLockSeedV1_1 {
+  kind: 'project-template-lock-seed';
+  schemaVersion: TemplateLockV1_1['schemaVersion'];
+  packVersion: TemplateLockV1_1['packVersion'];
+  source: TemplateLockV1_1['source'];
+  derivation: TemplateLockV1_1['derivation'];
+  repertoireDependencies: TemplateLockV1_1['repertoireDependencies'];
+  capabilities: TemplateLockV1_1['capabilities'];
+  entries: TemplateLockV1_1['entries'];
+}
+
+export type TaktpackLockSeed = TaktpackLockSeedV1 | TaktpackLockSeedV1_1;
 
 export interface TaktpackBlobIndexEntry {
   sha256: string;
@@ -128,6 +163,13 @@ export interface TaktpackIndexV1 extends TaktpackDescriptorV1 {
   manifestSha256: string;
   exportReportSha256: string;
   lockSeed: TaktpackLockSeedV1;
+  blobs: TaktpackBlobIndexEntry[];
+}
+
+export interface TaktpackIndexV1_1 extends TaktpackDescriptorV1_1 {
+  manifestSha256: string;
+  exportReportSha256: string;
+  lockSeed: TaktpackLockSeedV1_1;
   blobs: TaktpackBlobIndexEntry[];
 }
 

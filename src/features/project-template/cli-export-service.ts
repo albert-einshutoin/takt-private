@@ -226,6 +226,7 @@ function mapError(error: unknown): ProjectTemplateCliErrorCode {
     case 'TRUNCATED_ARCHIVE':
     case 'TRAILING_ARCHIVE_DATA':
     case 'INVALID_PACK':
+    case 'UNSUPPORTED_PACK_VERSION':
     case 'MISSING_ARCHIVE_ENTRY':
     case 'ORPHAN_BLOB': return 'SECURITY_GUARD';
     case 'ARCHIVE_READ_FAILED': return 'SOURCE_UNAVAILABLE';

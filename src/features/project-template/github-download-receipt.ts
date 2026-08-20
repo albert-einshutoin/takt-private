@@ -320,6 +320,12 @@ function createPayload(
   materialized: MaterializedGithubTemplateCache,
 ): GithubTemplateDownloadReceiptV1['payload'] {
   const inspection = materialized.inspection;
+  if (inspection.manifest.schemaVersion !== '1.0') {
+    throw receiptError(
+      'BINDING_MISMATCH',
+      'GitHub template download receipt requires taktpack 1.0',
+    );
+  }
   const dependencyVerification = resolved.dependencyVerification
     ?? (
       descriptor.repertoireDependencies.length === 0

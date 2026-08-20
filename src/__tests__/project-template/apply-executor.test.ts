@@ -31,9 +31,11 @@ import {
   createProjectTemplateApplyPlan,
   inspectProjectTemplateApplyGuard,
   prepareProjectTemplateApplyPlan,
+  type ProjectTemplateManifest,
   type ProjectTemplateManifestV1,
   type ProjectTemplateIncomingContent,
   type ProjectTemplateIncomingInspectionEvidence,
+  type TemplateLock,
   type TemplateLockV1,
 } from '../../features/project-template/index.js';
 import {
@@ -111,7 +113,7 @@ function incomingContents(
 }
 
 function incomingInspection(
-  incomingManifest: ProjectTemplateManifestV1,
+  incomingManifest: ProjectTemplateManifest,
 ): ProjectTemplateIncomingInspectionEvidence {
   return {
     archiveSha256: 'd'.repeat(64),
@@ -173,9 +175,9 @@ function baseLockFor(
 
 async function createPlan(
   root: string,
-  incomingManifest: ProjectTemplateManifestV1,
+  incomingManifest: ProjectTemplateManifest,
   contents: ProjectTemplateIncomingContent[],
-  baseLock?: TemplateLockV1,
+  baseLock?: TemplateLock,
 ) {
   const candidates = [
     ...new Set([
@@ -233,6 +235,59 @@ afterEach(() => {
 });
 
 describe('project template atomic apply executor', () => {
+  it('rejects schema 1.1 before creating apply state without editor authority', async () => {
+    const root = makeRoot();
+    const contents = { 'settings.yaml': 'enabled: true\n' };
+    const legacy = manifest(contents);
+    const incomingManifest: ProjectTemplateManifest = {
+      ...legacy,
+      schemaVersion: '1.1',
+      metadata: { name: 'Editor draft', description: '' },
+      derivation: { kind: 'root' },
+      repertoireDependencies: [],
+    };
+    const blobs = incomingContents(contents);
+    const plan = await createPlan(root, incomingManifest, blobs);
+
+    await expect(applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    })).resolves.toMatchObject({ status: 'not_started', code: 'INVALID_APPLY_INPUT' });
+    expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
+    expect(existsSync(join(root, '.takt', 'settings.yaml'))).toBe(false);
+  });
+
+  it('rejects a schema 1.1 base lock before the legacy executor mutates the target', async () => {
+    const root = makeRoot();
+    const baseManifest = manifest({ 'settings.yaml': 'enabled: false\n' });
+    const legacyBaseLock = baseLockFor(baseManifest);
+    const baseLock: TemplateLock = {
+      ...legacyBaseLock,
+      schemaVersion: '1.1',
+      derivation: { kind: 'root' },
+      repertoireDependencies: [],
+    };
+    writeTakt(root, 'settings.yaml', 'enabled: false\n');
+    writeFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      `${JSON.stringify(baseLock)}\n`,
+    );
+    const incomingManifest = manifest({ 'settings.yaml': 'enabled: true\n' });
+    const blobs = incomingContents({ 'settings.yaml': 'enabled: true\n' });
+    const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+
+    await expect(applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    })).resolves.toMatchObject({ status: 'not_started', code: 'INVALID_APPLY_INPUT' });
+    expect(readFileSync(join(root, '.takt', 'settings.yaml'), 'utf8')).toBe('enabled: false\n');
+    expect(JSON.parse(readFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), 'utf8'))).toEqual(baseLock);
+  });
+
   it('applies resolved merge bytes and durably retains incoming baselines across rollback', async () => {
     const root = makeRoot();
     const base = 'provider_routing:\n  personas:\n    planner: codex\n';

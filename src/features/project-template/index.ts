@@ -2,6 +2,7 @@ export {
   parseProjectTemplateManifest,
   serializeProjectTemplateManifest,
 } from './manifest.js';
+export { calculateProjectTemplateDraftId } from './template-editor-draft-identity.js';
 export { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
 export type {
   ProjectTemplateGithubRefSourceSpec,
@@ -77,7 +78,9 @@ export {
 export { scanProjectTemplateDirectory } from './filesystem-scan.js';
 export {
   projectTemplateManifestV1JsonSchema,
+  projectTemplateManifestV1_1JsonSchema,
   projectTemplateLockV1JsonSchema,
+  projectTemplateLockV1_1JsonSchema,
 } from './schema.js';
 export {
   ProjectTemplateValidationError,
@@ -94,7 +97,9 @@ export {
 } from './archive-types.js';
 export type {
   TaktpackLimits,
+  TaktpackDescriptor,
   TaktpackDescriptorV1,
+  TaktpackDescriptorV1_1,
   TaktpackExportReportV1,
   ProjectTemplateExportOptions,
   ProjectTemplateExportPlan,
@@ -103,7 +108,10 @@ export type {
   WriteTaktpackOptions,
   WriteTaktpackResult,
   TaktpackIndexV1,
+  TaktpackIndexV1_1,
   TaktpackLockSeedV1,
+  TaktpackLockSeedV1_1,
+  TaktpackLockSeed,
   DeepReadonly,
 } from './archive-types.js';
 export { canonicalizeTaktpackJson } from './canonical-json.js';
@@ -305,11 +313,22 @@ export type {
   ProjectTemplatePolicyActionMap,
 } from './apply-plan-types.js';
 export type {
+  ProjectTemplateManifest,
   ProjectTemplateManifestV1,
+  ProjectTemplateManifestV1_0,
+  ProjectTemplateManifestV1_1,
+  ProjectTemplateManifestMetadataV1_1,
+  ProjectTemplateManifestDerivationV1_1,
+  ProjectTemplateManifestRootDerivationV1_1,
+  ProjectTemplateManifestDerivedDerivationV1_1,
+  DerivedTemplateSourceV1_1,
   TemplateCapability,
   TemplateEntry,
   TemplateEntryPolicy,
+  TemplateLock,
   TemplateLockV1,
+  TemplateLockV1_0,
+  TemplateLockV1_1,
   TemplateLockEntry,
   TemplateSource,
   GithubTemplateSource,

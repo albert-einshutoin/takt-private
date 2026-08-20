@@ -278,7 +278,8 @@ describe('dependency versions', () => {
       (version) => isAtLeastStableVersion(version, [3, 1, 4]));
     assertAllLockedPackageVersions(packageLock, 'hono',
       (version) => isAtLeastStableVersion(version, [4, 12, 27]));
-    expect(getLockedPackage(packageLock, 'node_modules/ip-address').version).toBe('10.2.0');
+    assertAllLockedPackageVersions(packageLock, 'ip-address',
+      (version) => isAtLeastStableVersion(version, [10, 5, 0]));
     assertAllLockedPackageVersions(packageLock, 'protobufjs',
       (version) => isAtLeastStableVersion(version, [7, 6, 5]));
     expect(getLockedPackage(packageLock, 'node_modules/qs').version).toBe('6.15.2');

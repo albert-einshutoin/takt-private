@@ -59,7 +59,12 @@ import {
   calculateProjectTemplateTargetPreconditionToken,
   captureProjectTemplateTargetSnapshot,
 } from './target-snapshot.js';
-import type { ProjectTemplateManifestV1, TemplateLockV1 } from './types.js';
+import type {
+  ProjectTemplateManifest,
+  ProjectTemplateManifestV1_0,
+  TemplateLock,
+  TemplateLockV1,
+} from './types.js';
 import {
   readProjectTemplateMergeBaseline,
   writeProjectTemplateMergeBaseline,
@@ -171,7 +176,7 @@ function rollbackNotStarted(
   return { status: 'not_started', code, message };
 }
 
-function buildLock(manifest: ProjectTemplateManifestV1): TemplateLockV1 {
+function buildLock(manifest: ProjectTemplateManifestV1_0): TemplateLockV1 {
   return {
     schemaVersion: '1.0',
     manifestSha256: calculateProjectTemplateManifestSha256(manifest),
@@ -508,7 +513,7 @@ async function verifyBaseLock(
   | {
     matched: true;
     observed: ProjectTemplateBackupEntryState;
-    baseLock?: TemplateLockV1;
+    baseLock?: TemplateLock;
   }
   | { matched: false }
 > {
@@ -520,7 +525,7 @@ async function verifyBaseLock(
   }
   if (state.kind !== 'file') return { matched: false };
   const content = await storage.io.readFile(storage.lockTargetPath, state.bytes);
-  let parsed: TemplateLockV1;
+  let parsed: TemplateLock;
   try {
     parsed = parseTemplateLock(JSON.parse(content.toString('utf8')) as unknown);
   } catch {
@@ -559,13 +564,13 @@ async function observedBaseLockMatchesPlan(
 async function verifyCompletePlanSemantics(options: {
   projectRoot: string;
   plan: ProjectTemplateApplyPlan;
-  manifest: ProjectTemplateManifestV1;
+  manifest: ProjectTemplateManifest;
   incomingContents: ReadonlyMap<string, Buffer>;
   resolvedContents: ReadonlyMap<string, Buffer>;
   baseContents: readonly ProjectTemplateIncomingContent[];
   incomingInspection: ProjectTemplateIncomingInspectionEvidence;
   baselineStrategy: 'conflict' | 'adopt-identical';
-  baseLock?: TemplateLockV1;
+  baseLock?: TemplateLock;
 }): Promise<boolean> {
   let expected: Awaited<ReturnType<
     typeof deriveProjectTemplateApplyPlanFromCurrentTarget
@@ -606,12 +611,12 @@ async function verifyCompletePlanSemantics(options: {
 
 function validateApplyInput(options: {
   plan: ProjectTemplateApplyPlan;
-  incomingManifest: ProjectTemplateManifestV1;
+  incomingManifest: ProjectTemplateManifest;
   incomingContents: readonly ProjectTemplateIncomingContent[];
   resolvedContents?: readonly ProjectTemplateIncomingContent[];
   approvalEvidence?: ProjectTemplateApplyApprovalEvidence;
 }): {
-  manifest: ProjectTemplateManifestV1;
+  manifest: ProjectTemplateManifest;
   incomingContents: Map<string, Buffer>;
   resolvedContents: Map<string, Buffer>;
   contents: Map<string, Buffer>;
@@ -863,7 +868,7 @@ async function stageRollbackOperations(options: {
 export async function applyProjectTemplatePlan(options: {
   projectRoot: string;
   plan: ProjectTemplateApplyPlan;
-  incomingManifest: ProjectTemplateManifestV1;
+  incomingManifest: ProjectTemplateManifest;
   incomingContents: readonly ProjectTemplateIncomingContent[];
   resolvedContents?: readonly ProjectTemplateIncomingContent[];
   incomingInspection: ProjectTemplateIncomingInspectionEvidence;
@@ -877,6 +882,12 @@ export async function applyProjectTemplatePlan(options: {
     validated = validateApplyInput(options);
   } catch {
     return notStarted('INVALID_APPLY_INPUT', 'project template apply input is invalid');
+  }
+  if (validated.manifest.schemaVersion !== '1.0') {
+    return notStarted(
+      'INVALID_APPLY_INPUT',
+      'project template apply requires taktpack 1.0',
+    );
   }
   const initialGuard = inspectProjectTemplateApplyGuard({
     repoPath: options.projectRoot,
@@ -918,6 +929,12 @@ export async function applyProjectTemplatePlan(options: {
     const baseLockVerification = await verifyBaseLock(storage, options.plan);
     if (!baseLockVerification.matched) {
       return notStarted('BASE_LOCK_DRIFT', 'formal template lock changed after preview');
+    }
+    if (baseLockVerification.baseLock?.schemaVersion === '1.1') {
+      return notStarted(
+        'INVALID_APPLY_INPUT',
+        'project template apply requires a taktpack 1.0 base lock',
+      );
     }
     const baseContents: ProjectTemplateIncomingContent[] = [];
     try {

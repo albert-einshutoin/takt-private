@@ -178,14 +178,14 @@ describe('CodexClient retry', () => {
             HOME: join(root, 'home'),
             CODEX_HOME: join(root, 'codex-home'),
           }),
-          config: {
+          config: expect.objectContaining({
             skills: {
               config: [
                 { path: realpathSync(join(repoSkill, 'SKILL.md')), enabled: false },
                 { path: realpathSync(join(userSkill, 'SKILL.md')), enabled: false },
               ].sort((left, right) => left.path.localeCompare(right.path)),
             },
-          },
+          }),
         }),
       ]);
     } finally {
@@ -196,6 +196,54 @@ describe('CodexClient retry', () => {
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it('Codexを非対話権限で起動しtool shellへPATHを継承する', async () => {
+    vi.stubEnv('PATH', '/opt/takt/bin:/usr/bin:/bin');
+    runPlans = [{
+      type: 'events',
+      events: [
+        { type: 'thread.started', thread_id: 'thread-1' },
+        { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+      ],
+    }];
+
+    const result = await new CodexClient().call('coder', 'prompt', { cwd: '/tmp' });
+
+    expect(result.status).toBe('done');
+    expect(startThreadCalls[0]).toMatchObject({ approvalPolicy: 'never' });
+    expect(codexConstructorCalls[0]).toMatchObject({
+      env: { PATH: '/opt/takt/bin:/usr/bin:/bin' },
+      config: {
+        shell_environment_policy: {
+          set: { PATH: '/opt/takt/bin:/usr/bin:/bin' },
+        },
+      },
+    });
+  });
+
+  it('Windows形式のPathもtool shellのPATHへ継承する', async () => {
+    vi.stubEnv('PATH', undefined);
+    vi.stubEnv('Path', 'C:\\takt\\bin;C:\\Windows\\System32');
+    runPlans = [{
+      type: 'events',
+      events: [
+        { type: 'thread.started', thread_id: 'thread-1' },
+        { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+      ],
+    }];
+
+    const result = await new CodexClient().call('coder', 'prompt', { cwd: 'C:\\repo' });
+
+    expect(result.status).toBe('done');
+    expect(codexConstructorCalls[0]).toMatchObject({
+      config: {
+        shell_environment_policy: {
+          set: { PATH: 'C:\\takt\\bin;C:\\Windows\\System32' },
+        },
+      },
+    });
   });
 
   it('turn.failed が rate limit を示す場合は retry せず rate_limited を返す', async () => {

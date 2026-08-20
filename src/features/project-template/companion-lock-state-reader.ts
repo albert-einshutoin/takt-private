@@ -23,7 +23,7 @@ import {
   PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
   type ProjectTemplateSourceProvenanceV1,
 } from './source-provenance.js';
-import type { TemplateLockV1 } from './types.js';
+import type { TemplateLock, TemplateLockV1 } from './types.js';
 import {
   calculateProjectTemplateRepertoireDependencyDeclarationSha256,
 } from './repertoire-dependency-canonical.js';
@@ -290,12 +290,13 @@ function parseContentLock(content: Uint8Array): Readonly<TemplateLockV1> {
   } catch {
     fail('INVALID_LOCK');
   }
-  let parsed: TemplateLockV1;
+  let parsed: TemplateLock;
   try {
     parsed = parseTemplateLock(raw);
   } catch {
     fail('INVALID_LOCK');
   }
+  if (parsed.schemaVersion !== '1.0') fail('INVALID_LOCK');
   if (serializeTemplateLock(parsed) !== json) fail('INVALID_LOCK');
   Object.freeze(parsed.source);
   for (let index = 0; index < parsed.entries.length; index += 1) {

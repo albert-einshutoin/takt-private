@@ -115,7 +115,7 @@ describe('project template manifest public contract', () => {
   it.each([
     ['manifest', undefined, 'INVALID_MANIFEST'],
     ['manifest', 1, 'INVALID_MANIFEST'],
-    ['manifest', '1.1', 'UNSUPPORTED_SCHEMA_VERSION'],
+    ['manifest', '1.2', 'UNSUPPORTED_SCHEMA_VERSION'],
     ['manifest', '2.0', 'UNSUPPORTED_SCHEMA_MAJOR'],
   ])('should classify %s schemaVersion %j precisely', (_kind, schemaVersion, code) => {
     const manifest = validManifest();
@@ -130,7 +130,7 @@ describe('project template manifest public contract', () => {
   it.each([
     ['lock', undefined, 'INVALID_LOCK'],
     ['lock', 1, 'INVALID_LOCK'],
-    ['lock', '1.1', 'UNSUPPORTED_SCHEMA_VERSION'],
+    ['lock', '1.1', 'NON_PLAIN_OBJECT'],
     ['lock', '2.0', 'UNSUPPORTED_SCHEMA_MAJOR'],
   ])('should classify %s schemaVersion %j precisely', (_kind, schemaVersion, code) => {
     const lock = validLock();
@@ -405,7 +405,16 @@ describe('project template manifest public contract', () => {
       }],
     };
 
-    expect(JSON.parse(serializeTemplateLock(parseTemplateLock(lock)))).toEqual(lock);
+    const serialized = serializeTemplateLock(parseTemplateLock(lock));
+    expect(JSON.parse(serialized)).toEqual(lock);
+    expect(serialized).toBe(JSON.stringify({
+      schemaVersion: lock.schemaVersion,
+      manifestSha256: lock.manifestSha256,
+      packVersion: lock.packVersion,
+      source: lock.source,
+      capabilities: lock.capabilities,
+      entries: lock.entries,
+    }, null, 2));
   });
 
   it('should reject duplicate and case-colliding paths in a lock', () => {

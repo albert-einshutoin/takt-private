@@ -7,7 +7,7 @@ import type {
 import {
   captureProjectTemplateTargetSnapshot,
 } from './target-snapshot.js';
-import type { ProjectTemplateManifestV1, TemplateLockV1 } from './types.js';
+import type { ProjectTemplateManifest, TemplateLock } from './types.js';
 import type {
   ProjectTemplateRemotePreviewOperationContext,
 } from './remote-preview-operation.js';
@@ -19,9 +19,9 @@ import type {
  */
 export async function deriveProjectTemplateApplyPlanFromCurrentTarget(options: {
   readonly projectRoot: string;
-  readonly baseLock?: TemplateLockV1;
+  readonly baseLock?: TemplateLock;
   readonly baseContents: readonly ProjectTemplateIncomingContent[];
-  readonly incomingManifest: ProjectTemplateManifestV1;
+  readonly incomingManifest: ProjectTemplateManifest;
   readonly incomingContents: readonly ProjectTemplateIncomingContent[];
   readonly incomingInspection: ProjectTemplateIncomingInspectionEvidence;
   readonly baselineStrategy: 'conflict' | 'adopt-identical';

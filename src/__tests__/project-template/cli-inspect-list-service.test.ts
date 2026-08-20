@@ -132,7 +132,9 @@ function inspectV1_1Archive(entries: readonly unknown[], sourceKind: string = 'l
     archiveSha256: SHA,
     manifestSha256: SHA_B,
     descriptor: { version: '1.0' as const },
+    lockSeed: { schemaVersion: '1.0' as const },
     manifest: {
+      schemaVersion: '1.0' as const,
       packVersion: '1.2.3',
       takt: { minVersion: '0.48.0' },
       source: {
@@ -298,6 +300,44 @@ describe('project-template inspect CLI service', () => {
     });
     },
   );
+
+  it('fails closed instead of reporting a taktpack 1.1 archive as 1.0', async () => {
+    const archive = inspectV1_1Archive([
+      { path: 'workflows/a.yaml', policy: 'managed', capabilities: [] },
+    ]);
+    const outcome = await inspectProjectTemplateForCliV1_1WithDependencies({
+      cwd: '/safe/repo', sourcePath: 'template.taktpack', schemaVersion: '1.1',
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => ({
+        ...archive,
+        descriptor: { version: '1.1' as const },
+      })),
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 24,
+      envelope: { schemaVersion: '1.1', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
+  });
+
+  it('fails closed for a crossed 1.0 descriptor and 1.1 manifest cohort', async () => {
+    const archive = inspectV1_1Archive([
+      { path: 'workflows/a.yaml', policy: 'managed', capabilities: [] },
+    ]);
+    const outcome = await inspectProjectTemplateForCliV1_1WithDependencies({
+      cwd: '/safe/repo', sourcePath: 'template.taktpack', schemaVersion: '1.1',
+    }, inspectDependencies({
+      inspectTaktpack: vi.fn(async () => ({
+        ...archive,
+        manifest: { ...archive.manifest, schemaVersion: '1.1' as const },
+      })),
+    }));
+
+    expect(outcome).toMatchObject({
+      exitCode: 24,
+      envelope: { schemaVersion: '1.1', error: { code: 'SOURCE_INTEGRITY_FAILED' } },
+    });
+  });
 
   it('projects bounded archive inspection into the exact closed 1.0 DTO', async () => {
     const inspect = vi.fn(async () => ({

@@ -241,6 +241,13 @@ export function parseProjectTemplateRepertoireDependencies(
     field !== 'sourceDescriptor.repertoireDependencies'
     && field !== 'repertoireDependencyLock.dependencies'
     && field !== 'request.dependencies'
+    // Manifest v1.1 saves need the same canonical declaration evidence as the
+    // authenticated descriptor; allow only its fixed internal field path.
+    && field !== 'manifest.repertoireDependencies'
+    // A v1.1 content lock repeats the reviewed dependency authority. Its
+    // parser must share descriptor validation rather than accepting a drifted
+    // shape at a second boundary.
+    && field !== 'lock.repertoireDependencies'
   ) {
     throw new ProjectTemplateValidationError(
       'INVALID_SOURCE',
