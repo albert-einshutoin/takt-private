@@ -223,6 +223,29 @@ describe('CodexClient retry', () => {
     });
   });
 
+  it('Windows形式のPathもtool shellのPATHへ継承する', async () => {
+    vi.stubEnv('PATH', undefined);
+    vi.stubEnv('Path', 'C:\\takt\\bin;C:\\Windows\\System32');
+    runPlans = [{
+      type: 'events',
+      events: [
+        { type: 'thread.started', thread_id: 'thread-1' },
+        { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+      ],
+    }];
+
+    const result = await new CodexClient().call('coder', 'prompt', { cwd: 'C:\\repo' });
+
+    expect(result.status).toBe('done');
+    expect(codexConstructorCalls[0]).toMatchObject({
+      config: {
+        shell_environment_policy: {
+          set: { PATH: 'C:\\takt\\bin;C:\\Windows\\System32' },
+        },
+      },
+    });
+  });
+
   it('turn.failed が rate limit を示す場合は retry せず rate_limited を返す', async () => {
     runPlans = [
       {

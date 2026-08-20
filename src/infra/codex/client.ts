@@ -374,7 +374,8 @@ export class CodexClient {
     let accumulatedProviderUsage: ProviderUsageSnapshot | undefined;
     let skillConfig: CodexOptions['config'] | undefined;
     const codexEnvironment = buildCodexEnvironment(options.childProcessEnv);
-    const shellPath = codexEnvironment.PATH;
+    const shellPath = codexEnvironment.PATH
+      ?? Object.entries(codexEnvironment).find(([key]) => key.toUpperCase() === 'PATH')?.[1];
     try {
       skillConfig = options.skills
         ? buildCodexSkillConfig({
