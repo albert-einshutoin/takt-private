@@ -43,9 +43,7 @@ const CAPTURED_STRING_NORMALIZE = String.prototype.normalize;
 const CAPTURED_STRING_TRIM = String.prototype.trim;
 const SCHEMA_VERSION_PATTERN = /^(\d+)\.(\d+)$/;
 const FORBIDDEN_METADATA_IGNORABLE_PATTERN =
-  // These ranges intentionally contain combining and default-ignorable code points.
-  // eslint-disable-next-line no-misleading-character-class
-  /[\u00AD\u034F\u061C\u115F-\u1160\u17B4-\u17B5\u180B-\u180F\u200B-\u200F\u2028-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFF8]/u;
+  /[\p{Default_Ignorable_Code_Point}\u2028\u2029\uFFF9-\uFFFB]/u;
 
 function append<T>(values: T[], value: T): void {
   CAPTURED_REFLECT_APPLY(

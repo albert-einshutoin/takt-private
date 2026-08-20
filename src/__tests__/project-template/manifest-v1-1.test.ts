@@ -134,6 +134,9 @@ describe('project template manifest v1.1', () => {
     ['zero-width separator', 'safe\u200Bname'],
     ['line separator', 'safe\u2028name'],
     ['paragraph separator', 'safe\u2029name'],
+    ['supplementary variation selector', 'safe\u{E0100}name'],
+    ['tag character', 'safe\u{E0020}name'],
+    ['interlinear annotation', 'safe\uFFF9name'],
     ['unpaired high surrogate', 'safe\uD800name'],
     ['unpaired low surrogate', 'safe\uDC00name'],
   ])('rejects metadata containing %s in both parser and JSON schema', (_label, name) => {
@@ -143,6 +146,11 @@ describe('project template manifest v1.1', () => {
 
     const ajv = new Ajv({ allErrors: true, strict: false });
     expect(ajv.compile(projectTemplateManifestV1_1JsonSchema)(value)).toBe(false);
+    for (const field of ['name', 'description'] as const) {
+      const pattern = projectTemplateManifestV1_1JsonSchema
+        .properties.metadata.properties[field].pattern;
+      expect(new RegExp(pattern, 'u').test(name)).toBe(false);
+    }
   });
 
   it('accepts a valid surrogate pair in both parser and JSON schema', () => {

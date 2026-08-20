@@ -35,6 +35,7 @@ import {
   type ProjectTemplateManifestV1,
   type ProjectTemplateIncomingContent,
   type ProjectTemplateIncomingInspectionEvidence,
+  type TemplateLock,
   type TemplateLockV1,
 } from '../../features/project-template/index.js';
 import {
@@ -176,7 +177,7 @@ async function createPlan(
   root: string,
   incomingManifest: ProjectTemplateManifest,
   contents: ProjectTemplateIncomingContent[],
-  baseLock?: TemplateLockV1,
+  baseLock?: TemplateLock,
 ) {
   const candidates = [
     ...new Set([
@@ -256,6 +257,35 @@ describe('project template atomic apply executor', () => {
     })).resolves.toMatchObject({ status: 'not_started', code: 'INVALID_APPLY_INPUT' });
     expect(existsSync(join(root, PROJECT_TEMPLATE_LOCK_PATH))).toBe(false);
     expect(existsSync(join(root, '.takt', 'settings.yaml'))).toBe(false);
+  });
+
+  it('rejects a schema 1.1 base lock before the legacy executor mutates the target', async () => {
+    const root = makeRoot();
+    const baseManifest = manifest({ 'settings.yaml': 'enabled: false\n' });
+    const legacyBaseLock = baseLockFor(baseManifest);
+    const baseLock: TemplateLock = {
+      ...legacyBaseLock,
+      schemaVersion: '1.1',
+      derivation: { kind: 'root' },
+      repertoireDependencies: [],
+    };
+    writeTakt(root, 'settings.yaml', 'enabled: false\n');
+    writeFileSync(
+      join(root, PROJECT_TEMPLATE_LOCK_PATH),
+      `${JSON.stringify(baseLock)}\n`,
+    );
+    const incomingManifest = manifest({ 'settings.yaml': 'enabled: true\n' });
+    const blobs = incomingContents({ 'settings.yaml': 'enabled: true\n' });
+    const plan = await createPlan(root, incomingManifest, blobs, baseLock);
+
+    await expect(applyProjectTemplatePlan({
+      projectRoot: root,
+      plan,
+      incomingManifest,
+      incomingContents: blobs,
+    })).resolves.toMatchObject({ status: 'not_started', code: 'INVALID_APPLY_INPUT' });
+    expect(readFileSync(join(root, '.takt', 'settings.yaml'), 'utf8')).toBe('enabled: false\n');
+    expect(JSON.parse(readFileSync(join(root, PROJECT_TEMPLATE_LOCK_PATH), 'utf8'))).toEqual(baseLock);
   });
 
   it('applies resolved merge bytes and durably retains incoming baselines across rollback', async () => {

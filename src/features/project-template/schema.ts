@@ -166,6 +166,8 @@ export const projectTemplateManifestV1JsonSchema = {
  * Draft-07 editor-save manifest structure. NFC normalization and repertoire
  * ordering are enforced by the strict parser because JSON Schema cannot
  * express either portable invariant without implementation-specific extensions.
+ * The metadata pattern pairs Unicode properties with a self-negating legacy
+ * identity escape so both Unicode and non-Unicode validators reject astral controls.
  */
 export const projectTemplateManifestV1_1JsonSchema = {
   $schema: draft,
@@ -196,13 +198,13 @@ export const projectTemplateManifestV1_1JsonSchema = {
           type: 'string',
           minLength: 1,
           maxLength: 128,
-          pattern: '^(?!\\s)(?!.*\\s$)(?!.*[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF]))(?!.*(?:^|[^\\uD800-\\uDBFF])[\\uDC00-\\uDFFF])[^\\u0000-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F-\\u1160\\u17B4-\\u17B5\\u180B-\\u180F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFF8]*$',
+          pattern: '^(?!\\s)(?!.*\\s$)(?![\\s\\S]*(?:\\p{Default_Ignorable_Code_Point}(?<!p\\{Default_Ignorable_Code_Point\\})|\\uD82F[\\uDCA0-\\uDCA3]|\\uD834[\\uDD73-\\uDD7A]|[\\uDB40-\\uDB43][\\uDC00-\\uDFFF]))(?!.*[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF]))(?!.*(?:^|[^\\uD800-\\uDBFF])[\\uDC00-\\uDFFF])[^\\u0000-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F-\\u1160\\u17B4-\\u17B5\\u180B-\\u180F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFFB]*$',
         },
         description: {
           type: 'string',
           minLength: 0,
           maxLength: 2048,
-          pattern: '^(?!.*[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF]))(?!.*(?:^|[^\\uD800-\\uDBFF])[\\uDC00-\\uDFFF])[^\\u0000-\\u0009\\u000B-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F-\\u1160\\u17B4-\\u17B5\\u180B-\\u180F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFF8]*$',
+          pattern: '^(?![\\s\\S]*(?:\\p{Default_Ignorable_Code_Point}(?<!p\\{Default_Ignorable_Code_Point\\})|\\uD82F[\\uDCA0-\\uDCA3]|\\uD834[\\uDD73-\\uDD7A]|[\\uDB40-\\uDB43][\\uDC00-\\uDFFF]))(?!.*[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF]))(?!.*(?:^|[^\\uD800-\\uDBFF])[\\uDC00-\\uDFFF])[^\\u0000-\\u0009\\u000B-\\u001F\\u007F-\\u009F\\u00AD\\u034F\\u061C\\u115F-\\u1160\\u17B4-\\u17B5\\u180B-\\u180F\\u200B-\\u200F\\u2028-\\u202E\\u2060-\\u206F\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF0-\\uFFFB]*$',
         },
       },
     },

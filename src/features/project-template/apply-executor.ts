@@ -930,6 +930,12 @@ export async function applyProjectTemplatePlan(options: {
     if (!baseLockVerification.matched) {
       return notStarted('BASE_LOCK_DRIFT', 'formal template lock changed after preview');
     }
+    if (baseLockVerification.baseLock?.schemaVersion === '1.1') {
+      return notStarted(
+        'INVALID_APPLY_INPUT',
+        'project template apply requires a taktpack 1.0 base lock',
+      );
+    }
     const baseContents: ProjectTemplateIncomingContent[] = [];
     try {
       for (const entry of baseLockVerification.baseLock?.entries ?? []) {
