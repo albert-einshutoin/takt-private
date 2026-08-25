@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   getBuiltinFacetDir,
@@ -11,6 +10,7 @@ import {
   isPathSafe,
 } from '../paths.js';
 import { getPackageFromWorkflowDir, getWorkflowBaseDir, type FacetResolutionContext } from './workflowPackageScope.js';
+import { resourceExists } from './repertoireResourceReadAccess.js';
 
 function getWorkflowPersonaBases(context: FacetResolutionContext): string[] {
   const bases = [
@@ -69,7 +69,7 @@ export function assertAllowedPersonaPath(personaPath: string, context?: FacetRes
     throw new Error(`Persona prompt file path is not allowed: ${personaPath}`);
   }
 
-  if (!existsSync(personaPath)) {
+  if (!resourceExists(personaPath, context)) {
     throw new Error(`Persona prompt file not found: ${personaPath}`);
   }
 }

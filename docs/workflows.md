@@ -392,6 +392,8 @@ Promotion is not supported on parallel sub-steps.
 | `instruction` | - | Instruction key (references section map) |
 | `edit` | - | Whether the step can edit project files (`true`/`false`) |
 | `pass_previous_response` | `true` | Pass previous step's output to `{previous_response}` |
+| `previous_response_max_bytes` | - | Opt in to full previous-response delivery with a UTF-8 body byte cap (`1`–`98304`). Must be paired with `previous_response_overflow: error` and cannot be used when `pass_previous_response: false`; trusted source-path/conflict notices are appended outside this body cap |
+| `previous_response_overflow` | - | Must be `error` when `previous_response_max_bytes` is set. Exceeding the cap aborts before provider execution instead of truncating; without this pair, the existing 2,000-character truncation remains unchanged |
 | `provider_options.claude.allowed_tools` | - | Claude tool allowlist for the step or workflow |
 | `provider_options.claude.base_url` | - | Anthropic-compatible base URL for `claude` / `claude-sdk` (see [configuration guide](./configuration.md#provider-base-url-base_url)) |
 | `provider_options.claude.effort` | - | Claude reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires Opus 4.7) |

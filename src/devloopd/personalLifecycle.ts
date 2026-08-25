@@ -2,6 +2,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { sanitizeSensitiveText } from '../shared/utils/sensitiveText.js';
 import { writeFileAtomic } from './stateStore.js';
+import { withProjectTemplateRunStartPermit } from '../features/project-template/apply-lease.js';
 
 export type PersonalLifecycleStatus = 'idle' | 'running' | 'stop_requested';
 
@@ -124,7 +125,11 @@ export function writePersonalDaemonState(options: {
     status: 'running',
     cycleCount: options.cycleCount ?? previous?.cycleCount ?? 0,
   };
-  writeJsonFile(paths.statePath, state);
+  // The daemon becomes visible to apply in the same critical section that
+  // proves an apply lease is absent, preventing check-then-start races.
+  withProjectTemplateRunStartPermit(repoPath, () => {
+    writeJsonFile(paths.statePath, state);
+  });
   return {
     ...inspectPersonalLifecycle({ repoPath }),
     changed: true,

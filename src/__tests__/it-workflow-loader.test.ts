@@ -1104,6 +1104,18 @@ describe('Workflow Loader IT: workflow config validation', () => {
     const stepsWithPassPrev = config!.steps.filter((s) => s.passPreviousResponse === true);
     expect(stepsWithPassPrev.length).toBeGreaterThan(0);
   });
+
+  it('should normalize bounded full previous-response delivery from YAML', () => {
+    const config = loadWorkflowConfig('review-takt-default', testDir);
+    expect(config).not.toBeNull();
+
+    const supervise = config!.steps.find((step) => step.name === 'supervise');
+    expect(supervise).toMatchObject({
+      passPreviousResponse: true,
+      previousResponseMaxBytes: 65_536,
+      previousResponseOverflow: 'error',
+    });
+  });
 });
 
 describe('Workflow Loader IT: parallel step loading', () => {

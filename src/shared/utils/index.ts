@@ -3,6 +3,7 @@
  */
 
 export * from './debug.js';
+export * from './child-process-guard.js';
 export * from './delay.js';
 export * from './error.js';
 export * from './notification.js';

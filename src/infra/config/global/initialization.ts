@@ -21,6 +21,7 @@ import {
 } from '../paths.js';
 import { copyProjectResourcesToDir, getLanguageResourcesDir } from '../../resources/index.js';
 import { setLanguage, setProvider } from './globalConfig.js';
+import { ensureGlobalConfigDirectory } from './globalConfigDirectory.js';
 
 type InitialSetupProvider = Exclude<ProviderType, 'mock'>;
 
@@ -103,7 +104,7 @@ export interface InitGlobalDirsOptions {
  * and uses default values so takt works in pipeline/CI environments without config.yaml.
  */
 export async function initGlobalDirs(options?: InitGlobalDirsOptions): Promise<void> {
-  ensureDir(getGlobalConfigDir());
+  ensureGlobalConfigDirectory(getGlobalConfigDir());
 
   if (needsLanguageSetup()) {
     const isInteractive = !options?.nonInteractive && process.stdin.isTTY === true;

@@ -11,6 +11,8 @@ const {
   mockInitializeOtelFoundation,
   mockEnsureWorktreeTaktGitignore,
   mockGenerateReportDir,
+  mockCreateProviderEventLogger,
+  mockInitNdjsonLog,
 } = vi.hoisted(() => ({
   mockWriteFileAtomic: vi.fn(),
   mockResolveWorkflowConfigValues: vi.fn(),
@@ -18,6 +20,12 @@ const {
   mockInitializeOtelFoundation: vi.fn(),
   mockEnsureWorktreeTaktGitignore: vi.fn(),
   mockGenerateReportDir: vi.fn(() => 'generated-run'),
+  mockCreateProviderEventLogger: vi.fn(() => ({
+    wrapCallback: (handler: unknown) => handler,
+  })),
+  mockInitNdjsonLog: vi.fn(
+    () => '/project/.takt/runs/direct-resume/logs/session.ndjson',
+  ),
 }));
 
 vi.mock('../infra/config/index.js', () => ({
@@ -28,6 +36,10 @@ vi.mock('../infra/config/index.js', () => ({
   updatePersonaSession: vi.fn(),
   updateWorktreeSession: vi.fn(),
   writeFileAtomic: mockWriteFileAtomic,
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteFileAtomic,
 }));
 
 vi.mock('../infra/config/resolveConfigValue.js', () => ({
@@ -46,7 +58,7 @@ vi.mock('../infra/config/paths.js', () => ({
 vi.mock('../infra/fs/index.js', () => ({
   createSessionLog: vi.fn(() => ({ history: [] })),
   generateSessionId: vi.fn(() => 'session-1'),
-  initNdjsonLog: vi.fn(() => '/project/.takt/runs/direct-resume/logs/session.ndjson'),
+  initNdjsonLog: mockInitNdjsonLog,
 }));
 
 vi.mock('../shared/context.js', () => ({
@@ -79,9 +91,7 @@ vi.mock('../shared/utils/index.js', () => ({
 }));
 
 vi.mock('../shared/utils/providerEventLogger.js', () => ({
-  createProviderEventLogger: vi.fn(() => ({
-    wrapCallback: (handler: unknown) => handler,
-  })),
+  createProviderEventLogger: mockCreateProviderEventLogger,
   isProviderEventsEnabled: vi.fn(() => false),
 }));
 
@@ -164,6 +174,13 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
       result: vi.fn(),
     });
     mockInitializeOtelFoundation.mockResolvedValue({ shutdown: vi.fn() });
+    mockInitNdjsonLog.mockReturnValue(
+      '/project/.takt/runs/direct-resume/logs/session.ndjson',
+    );
+    mockWriteFileAtomic.mockImplementation(() => undefined);
+    mockCreateProviderEventLogger.mockReturnValue({
+      wrapCallback: (handler: unknown) => handler,
+    });
     mockResolveWorkflowConfigValues.mockReturnValue({
       provider: 'mock',
       model: undefined,
@@ -189,8 +206,9 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
   });
 
   it('Given directResume is passed, When bootstrap creates run meta, Then source metadata is persisted in meta.json', async () => {
-    await createWorkflowExecutionBootstrap(workflowConfig, 'Resume direct run', '/project', {
-      projectCwd: '/project',
+    const projectDir = createTempProject();
+    await createWorkflowExecutionBootstrap(workflowConfig, 'Resume direct run', projectDir, {
+      projectCwd: projectDir,
       provider: 'mock',
       reportDirName: 'direct-resume',
       directResume: {
@@ -200,7 +218,7 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
     });
 
     const metaWrite = mockWriteFileAtomic.mock.calls.find((call) =>
-      call[0] === '/project/.takt/runs/direct-resume/meta.json'
+      String(call[0]).endsWith('/.takt/runs/direct-resume/meta.json')
     );
     expect(metaWrite).toBeDefined();
     const meta = JSON.parse(String(metaWrite![1])) as {
@@ -211,7 +229,26 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
     expect(meta.resume_mode).toBe('retry');
   });
 
+  it('rejects blank direct or CLI task text before publishing run metadata', async () => {
+    const projectDir = createTempProject();
+
+    await expect(createWorkflowExecutionBootstrap(
+      workflowConfig,
+      ' \n\t ',
+      projectDir,
+      {
+        projectCwd: projectDir,
+        provider: 'mock',
+        reportDirName: 'blank-task',
+      },
+    )).rejects.toThrow('Run metadata task must contain non-whitespace text');
+    expect(mockWriteFileAtomic.mock.calls.some(
+      (call) => String(call[0]).endsWith('/meta.json'),
+    )).toBe(false);
+  });
+
   it('Given timezone is configured, When bootstrap creates a generated run slug, Then timezone is passed to report dir generation', async () => {
+    const projectDir = createTempProject();
     mockResolveWorkflowConfigValues.mockReturnValueOnce({
       provider: 'mock',
       model: undefined,
@@ -229,8 +266,8 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
       timezone: 'Asia/Tokyo',
     });
 
-    await createWorkflowExecutionBootstrap(workflowConfig, 'Timezone run', '/project', {
-      projectCwd: '/project',
+    await createWorkflowExecutionBootstrap(workflowConfig, 'Timezone run', projectDir, {
+      projectCwd: projectDir,
       provider: 'mock',
     });
 
@@ -301,4 +338,135 @@ describe('createWorkflowExecutionBootstrap direct resume metadata', () => {
 
     expect(mockEnsureWorktreeTaktGitignore).not.toHaveBeenCalled();
   });
+
+  it.each(['provider', 'ndjson-log', 'provider-log', 'otel'] as const)(
+    'terminalizes published run metadata when %s bootstrap fails',
+    async (failure) => {
+      const projectDir = createTempProject();
+      if (failure === 'provider') {
+        mockResolveWorkflowConfigValues.mockReturnValueOnce({
+          notificationSound: false,
+          notificationSoundEvents: {},
+          rateLimitFallback: undefined,
+          runtime: undefined,
+          preventSleep: false,
+          logging: {},
+          analytics: { enabled: false },
+          observability: {},
+          timezone: undefined,
+        });
+      } else if (failure === 'ndjson-log') {
+        mockInitNdjsonLog.mockImplementationOnce(() => {
+          throw new Error('ndjson log initialization failed');
+        });
+      } else if (failure === 'provider-log') {
+        mockCreateProviderEventLogger.mockImplementationOnce(() => {
+          throw new Error('provider log initialization failed');
+        });
+      } else {
+        mockInitializeOtelFoundation.mockRejectedValueOnce(
+          new Error('otel initialization failed'),
+        );
+      }
+
+      await expect(createWorkflowExecutionBootstrap(
+        workflowConfig,
+        'Bootstrap failure',
+        projectDir,
+        {
+          projectCwd: projectDir,
+          ...(failure === 'provider' ? {} : { provider: 'mock' as const }),
+          reportDirName: `bootstrap-${failure}`,
+        },
+      )).rejects.toThrow();
+
+      const metaWrites = mockWriteFileAtomic.mock.calls
+        .filter((call) => String(call[0]).endsWith('/meta.json'))
+        .map((call) => JSON.parse(String(call[1])) as {
+          status: string;
+          failureReason?: string;
+        });
+      expect(metaWrites[0]?.status).toBe('running');
+      expect(metaWrites.at(-1)).toMatchObject({
+        status: 'aborted',
+        failureReason: expect.stringContaining('workflow bootstrap failed:'),
+      });
+    },
+  );
+
+  it('preserves running evidence when bootstrap terminalization fails', async () => {
+    const projectDir = createTempProject();
+    mockInitializeOtelFoundation.mockRejectedValueOnce(
+      new Error('otel initialization failed'),
+    );
+    let metaWrites = 0;
+    mockWriteFileAtomic.mockImplementation((path) => {
+      if (!String(path).endsWith('/meta.json')) return;
+      metaWrites += 1;
+      if (metaWrites === 2) throw new Error('terminal meta fsync failed');
+    });
+
+    const failure = createWorkflowExecutionBootstrap(
+      workflowConfig,
+      'Bootstrap terminalization failure',
+      projectDir,
+      {
+        projectCwd: projectDir,
+        provider: 'mock',
+        reportDirName: 'bootstrap-terminal-failure',
+      },
+    );
+
+    await expect(failure).rejects.toMatchObject({
+      errors: [
+        expect.objectContaining({ message: 'otel initialization failed' }),
+        expect.objectContaining({ message: 'terminal meta fsync failed' }),
+      ],
+    });
+    expect(metaWrites).toBe(2);
+  });
+
+  it.each([false, true])(
+    'terminalizes onRunningEvidencePublished failure when terminal write failure is %s',
+    async (terminalWriteFails) => {
+      const projectDir = createTempProject();
+      const callbackError = new Error('running evidence handoff failed');
+      let metaWrites = 0;
+      mockWriteFileAtomic.mockImplementation((path) => {
+        if (!String(path).endsWith('/meta.json')) return;
+        metaWrites += 1;
+        if (terminalWriteFails && metaWrites === 2) {
+          throw new Error('callback terminal meta write failed');
+        }
+      });
+
+      const failure = createWorkflowExecutionBootstrap(
+        workflowConfig,
+        'Callback failure',
+        projectDir,
+        {
+          projectCwd: projectDir,
+          provider: 'mock',
+          reportDirName: 'callback-failure',
+          onRunningEvidencePublished() {
+            throw callbackError;
+          },
+        },
+      );
+
+      if (terminalWriteFails) {
+        await expect(failure).rejects.toMatchObject({
+          errors: [
+            callbackError,
+            expect.objectContaining({
+              message: 'callback terminal meta write failed',
+            }),
+          ],
+        });
+      } else {
+        await expect(failure).rejects.toBe(callbackError);
+      }
+      expect(metaWrites).toBe(2);
+    },
+  );
 });

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, rmSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -55,5 +55,15 @@ describe('initGlobalDirs with non-interactive mode', () => {
     await initGlobalDirs({ nonInteractive: true });
 
     expect(existsSync(getGlobalConfigDir())).toBe(true);
+    expect(lstatSync(getGlobalConfigDir()).mode & 0o777).toBe(0o700);
+  });
+
+  it('should preserve an existing trusted 0755 global config directory', async () => {
+    mkdirSync(getGlobalConfigDir(), { recursive: true });
+    chmodSync(getGlobalConfigDir(), 0o755);
+
+    await initGlobalDirs({ nonInteractive: true });
+
+    expect(lstatSync(getGlobalConfigDir()).mode & 0o777).toBe(0o755);
   });
 });

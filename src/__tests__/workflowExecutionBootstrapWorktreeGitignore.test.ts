@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -108,6 +108,7 @@ vi.mock('../core/runtime/runtime-environment.js', () => ({
 }));
 
 import { createWorkflowExecutionBootstrap } from '../features/tasks/execute/workflowExecutionBootstrap.js';
+import { inspectProjectTemplateApplyGuard } from '../features/project-template/apply-guard.js';
 
 const workflowConfig: WorkflowConfig = {
   name: 'default',
@@ -158,6 +159,86 @@ describe('createWorkflowExecutionBootstrap worktree gitignore integration', () =
       providerProfiles: undefined,
     });
   });
+
+  it('unblocks template apply after post-publication bootstrap failure is terminalized', async () => {
+    const projectDir = createTempDir('takt-bootstrap-terminal-');
+    mockInitializeOtelFoundation.mockRejectedValueOnce(
+      new Error('injected otel bootstrap failure'),
+    );
+
+    await expect(createWorkflowExecutionBootstrap(
+      workflowConfig,
+      'Terminalize failed bootstrap',
+      projectDir,
+      {
+        projectCwd: projectDir,
+        provider: 'mock',
+        reportDirName: 'failed-bootstrap',
+      },
+    )).rejects.toThrow('injected otel bootstrap failure');
+
+    const meta = JSON.parse(readFileSync(
+      join(projectDir, '.takt', 'runs', 'failed-bootstrap', 'meta.json'),
+      'utf8',
+    )) as { status: string; failureReason?: string };
+    expect(meta).toMatchObject({
+      status: 'aborted',
+      failureReason: expect.stringContaining('injected otel bootstrap failure'),
+    });
+    expect(inspectProjectTemplateApplyGuard({ repoPath: projectDir }).passed)
+      .toBe(true);
+  });
+
+  it.each([false, true])(
+    'handles running-evidence callback failure fail-closed when terminal write failure is %s',
+    async (terminalWriteFails) => {
+      const projectDir = createTempDir('takt-bootstrap-callback-');
+      const metaPath = join(
+        projectDir,
+        '.takt',
+        'runs',
+        'callback-failure',
+        'meta.json',
+      );
+      const callbackError = new Error('injected running evidence callback failure');
+
+      const failure = createWorkflowExecutionBootstrap(
+        workflowConfig,
+        'Callback terminalization',
+        projectDir,
+        {
+          projectCwd: projectDir,
+          provider: 'mock',
+          reportDirName: 'callback-failure',
+          onRunningEvidencePublished() {
+            if (terminalWriteFails) {
+              rmSync(metaPath);
+              // An unsafe replacement makes terminal publication fail while
+              // preserving fail-closed evidence for the apply guard.
+              mkdirSync(metaPath);
+            }
+            throw callbackError;
+          },
+        },
+      );
+
+      if (terminalWriteFails) {
+        await expect(failure).rejects.toMatchObject({
+          errors: expect.arrayContaining([callbackError]),
+        });
+        expect(inspectProjectTemplateApplyGuard({ repoPath: projectDir }).passed)
+          .toBe(false);
+      } else {
+        await expect(failure).rejects.toBe(callbackError);
+        expect(JSON.parse(readFileSync(metaPath, 'utf8'))).toMatchObject({
+          status: 'aborted',
+          failureReason: expect.stringContaining(callbackError.message),
+        });
+        expect(inspectProjectTemplateApplyGuard({ repoPath: projectDir }).passed)
+          .toBe(true);
+      }
+    },
+  );
 
   afterEach(() => {
     for (const dir of temporaryDirs.splice(0)) {

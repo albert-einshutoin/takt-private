@@ -123,7 +123,7 @@ E2Eテストを追加・変更した場合は、このドキュメントも更�
     - `.takt/tasks.yaml` に pending タスクを追加する（`workflow` に `e2e/fixtures/workflows/mock-single-step.yaml` を指定）。
     - 出力に `Task "watch-task" completed` が含まれることを確認する。
     - `Ctrl+C` で終了する。
-- Run interrupted task cleanup and high-priority run flows（`e2e/specs/run-recovery.e2e.ts`）
+- Run interrupted task cleanup and high-priority run flows（`e2e/specs/run-recovery.e2e.ts`。強制終了ケースは phase 1 公開後の遅延 mock 区間で SIGKILL し、レパートリ調整処理ではなく stale task 回復を決定的に検証）
   - 目的: 高優先度ユースケース（異常終了したrunningタスクのfailed化、並列実行、初期化〜add〜run）をまとめて確認。
   - LLM: 呼び出さない（`--provider mock` 固定）
   - 手順（ユーザー行動/コマンド）:

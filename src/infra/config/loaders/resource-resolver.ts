@@ -7,12 +7,9 @@
  * implementation.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { FacetType } from '../paths.js';
 import {
-  resolveFacetPath as resolveFacetPathGeneric,
-  resolvePersona as resolvePersonaGeneric,
   isResourcePath,
   resolveResourcePath,
   isScopeRef,
@@ -26,6 +23,7 @@ import {
   buildCandidateDirsWithPackage,
   type FacetResolutionContext,
 } from './workflowPackageScope.js';
+import { readResourceText, resourceExists } from './repertoireResourceReadAccess.js';
 
 export interface WorkflowSections {
   personas?: Record<string, string>;
@@ -122,15 +120,16 @@ export function resolveResourceContentWithSource(
   workflowDir: string,
   facetType?: FacetType,
   refName?: string,
+  context?: FacetResolutionContext,
 ): ResolvedFacetContent | undefined {
   if (spec == null) {
     return undefined;
   }
   if (spec.endsWith('.md')) {
     const resolved = resolveResourcePath(spec, workflowDir);
-    if (existsSync(resolved)) {
+    if (resourceExists(resolved, context)) {
       return {
-        content: readFileSync(resolved, 'utf-8'),
+        content: readResourceText(resolved, context, workflowDir),
         sourcePath: resolved,
         facetType,
         refName,
@@ -144,13 +143,14 @@ export function resolveSectionMapWithSource(
   raw: Record<string, string> | undefined,
   workflowDir: string,
   facetType: FacetType,
+  context?: FacetResolutionContext,
 ): ResolvedSectionMap | undefined {
   if (!raw) {
     return undefined;
   }
   const resolved: ResolvedSectionMap = {};
   for (const [name, value] of Object.entries(raw)) {
-    const content = resolveResourceContentWithSource(value, workflowDir, facetType, name);
+    const content = resolveResourceContentWithSource(value, workflowDir, facetType, name, context);
     if (content?.content) {
       resolved[name] = content;
     }
@@ -213,15 +213,16 @@ function resolveFacetFromCandidateDirs(
   candidateDirs: readonly string[],
   refName: string,
   excludeSourcePath?: string,
+  context?: FacetResolutionContext,
 ): ResolvedFacetContent | undefined {
   for (const dir of candidateDirs) {
     const filePath = join(dir, `${name}.md`);
     if (excludeSourcePath && samePath(filePath, excludeSourcePath)) {
       continue;
     }
-    if (existsSync(filePath)) {
+    if (resourceExists(filePath, context)) {
       return {
-        content: readFileSync(filePath, 'utf-8'),
+        content: readResourceText(filePath, context, dir),
         sourcePath: filePath,
         facetType,
         refName,
@@ -244,7 +245,7 @@ function resolveParentFacetWithSource(
   const candidateDirs = buildCandidateDirsWithPackage(facetType, context);
   const sourceLayerIndex = findSourceLayerIndex(currentSourcePath, candidateDirs);
   const searchDirs = candidateDirs.slice(sourceLayerIndex ?? 0);
-  return resolveFacetFromCandidateDirs(parentName, facetType, searchDirs, parentName, currentSourcePath);
+  return resolveFacetFromCandidateDirs(parentName, facetType, searchDirs, parentName, currentSourcePath, context);
 }
 
 function expandFacetInheritance(
@@ -301,9 +302,13 @@ export function resolveFacetPath(
   if (isScopeRef(name) && context.repertoireDir) {
     const scopeRef = parseScopeRef(name);
     const filePath = resolveScopeRef(scopeRef, facetType, context.repertoireDir);
-    return existsSync(filePath) ? filePath : undefined;
+    return resourceExists(filePath, context) ? filePath : undefined;
   }
-  return resolveFacetPathGeneric(name, buildCandidateDirsWithPackage(facetType, context));
+  for (const dir of buildCandidateDirsWithPackage(facetType, context)) {
+    const filePath = join(dir, `${name}.md`);
+    if (resourceExists(filePath, context)) return filePath;
+  }
+  return undefined;
 }
 
 /**
@@ -326,20 +331,27 @@ export function resolveFacetByNameWithSource(
   facetType: FacetType,
   context: FacetResolutionContext,
 ): ResolvedFacetContent | undefined {
-  const filePath = resolveFacetPath(name, facetType, context);
-  if (filePath) {
-    return expandFacetInheritance(
-      {
-        content: readFileSync(filePath, 'utf-8'),
-        sourcePath: filePath,
-        facetType,
-        refName: name,
-      },
+  const resolved = isScopeRef(name) && context.repertoireDir
+    ? (() => {
+        const filePath = resolveScopeRef(parseScopeRef(name), facetType, context.repertoireDir!);
+        return resourceExists(filePath, context)
+          ? {
+              content: readResourceText(filePath, context, context.repertoireDir!),
+              sourcePath: filePath,
+              facetType,
+              refName: name,
+            }
+          : undefined;
+      })()
+    : resolveFacetFromCandidateDirs(
+      name,
       facetType,
+      buildCandidateDirsWithPackage(facetType, context),
+      name,
+      undefined,
       context,
     );
-  }
-  return undefined;
+  return resolved ? expandFacetInheritance(resolved, facetType, context) : undefined;
 }
 
 /**
@@ -373,9 +385,9 @@ export function resolveRefToContentWithSource(
   if (facetType && context && isScopeRef(ref) && context.repertoireDir) {
     const scopeRef = parseScopeRef(ref);
     const filePath = resolveScopeRef(scopeRef, facetType, context.repertoireDir);
-    return existsSync(filePath)
+    return resourceExists(filePath, context)
       ? expandFacetInheritance({
-          content: readFileSync(filePath, 'utf-8'),
+          content: readResourceText(filePath, context, context.repertoireDir),
           sourcePath: filePath,
           facetType,
           refName: ref,
@@ -384,7 +396,7 @@ export function resolveRefToContentWithSource(
   }
 
   if (isResourcePath(ref)) {
-    const resource = resolveResourceContentWithSource(ref, workflowDir, facetType, ref);
+    const resource = resolveResourceContentWithSource(ref, workflowDir, facetType, ref, context);
     return resource ? expandFacetInheritance(resource, facetType, context) : undefined;
   }
 
@@ -392,13 +404,13 @@ export function resolveRefToContentWithSource(
     ? buildCandidateDirsWithPackage(facetType, context)
     : undefined;
   if (candidateDirs) {
-    const facetContent = resolveFacetFromCandidateDirs(ref, facetType!, candidateDirs, ref);
+    const facetContent = resolveFacetFromCandidateDirs(ref, facetType!, candidateDirs, ref, undefined, context);
     if (facetContent !== undefined) {
       return expandFacetInheritance(facetContent, facetType, context);
     }
   }
 
-  const resource = resolveResourceContentWithSource(ref, workflowDir, facetType, ref);
+  const resource = resolveResourceContentWithSource(ref, workflowDir, facetType, ref, context);
   return resource ? expandFacetInheritance(resource, facetType, context) : undefined;
 }
 
@@ -427,11 +439,13 @@ export function resolvePersona(
   workflowDir: string,
   context?: FacetResolutionContext,
 ): { personaSpec?: string; personaPath?: string } {
+  if (!rawPersona) return {};
   if (rawPersona && isScopeRef(rawPersona) && context?.repertoireDir) {
     const scopeRef = parseScopeRef(rawPersona);
     const personaPath = resolveScopeRef(scopeRef, 'personas', context.repertoireDir);
-    if (existsSync(personaPath)) {
-      assertAllowedPersonaPath(personaPath, context);
+    if (resourceExists(personaPath, context)) {
+      // resolveScopeRef constrains this path to the explicitly named package;
+      // the root-bound capability validates its filesystem identity.
       return { personaSpec: rawPersona, personaPath };
     }
     return { personaSpec: rawPersona, personaPath: undefined };
@@ -439,7 +453,30 @@ export function resolvePersona(
   const candidateDirs = context
     ? buildCandidateDirsWithPackage('personas', context)
     : undefined;
-  const resolved = resolvePersonaGeneric(rawPersona, sections, workflowDir, candidateDirs);
+  const mapped = sections.personas?.[rawPersona];
+  let personaPath: string | undefined;
+  let personaSpec = rawPersona;
+  if (mapped) {
+    personaSpec = mapped;
+    const path = resolveResourcePath(mapped, workflowDir);
+    personaPath = resourceExists(path, context) ? path : undefined;
+  } else if (isResourcePath(rawPersona)) {
+    const path = resolveResourcePath(rawPersona, workflowDir);
+    personaPath = resourceExists(path, context) ? path : undefined;
+  } else if (candidateDirs) {
+    for (const dir of candidateDirs) {
+      const path = join(dir, `${rawPersona}.md`);
+      if (resourceExists(path, context)) {
+        personaPath = path;
+        break;
+      }
+    }
+  }
+  if (!personaPath) {
+    const path = resolveResourcePath(rawPersona, workflowDir);
+    personaPath = resourceExists(path, context) ? path : undefined;
+  }
+  const resolved = { personaSpec, personaPath };
   if (resolved.personaPath) {
     assertAllowedPersonaPath(resolved.personaPath, context);
   }

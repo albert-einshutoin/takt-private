@@ -22,6 +22,12 @@ import {
   persistTaskResult,
 } from './taskResultHandler.js';
 import { executeTaskWorkflow } from './taskWorkflowExecution.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+  type ProjectTemplatePreparationReservation,
+} from './projectTemplatePreparationReservation.js';
+import { WorkflowDiscoveryReadError } from '../../../infra/config/loaders/workflowDiscoveryError.js';
 
 export type { TaskExecutionOptions, ExecuteTaskOptions };
 
@@ -75,6 +81,10 @@ export async function executeTaskAndCompleteWithResult(
   const taskAbortController = new AbortController();
   const externalAbortSignal = parallelOptions?.abortSignal;
   const taskAbortSignal = externalAbortSignal ? taskAbortController.signal : undefined;
+  let preparationReservation: ProjectTemplatePreparationReservation | undefined;
+  let preparationPrimaryError: unknown;
+  let hasPreparationPrimaryError = false;
+  let hasRunningEvidencePublished = false;
 
   const onExternalAbort = (): void => {
     taskAbortController.abort();
@@ -89,6 +99,17 @@ export async function executeTaskAndCompleteWithResult(
   }
 
   try {
+    // Preparation can create/reuse a worktree or copy and resolve retry
+    // workflow/config state asynchronously. Publish a normal running record
+    // first so apply remains blocked without holding the short mutex. Terminal
+    // preparation records intentionally remain in run history for audit and
+    // ordinary retention; a crash leaves `running`, which becomes STALE_RUN
+    // and requires the existing explicit recovery flow instead of guessing.
+    preparationReservation = beginProjectTemplatePreparation({
+      projectRoot: cwd,
+      task: task.content,
+      workflow: 'task-preparation',
+    });
     const {
       execCwd,
       workflowIdentifier,
@@ -110,6 +131,7 @@ export async function executeTaskAndCompleteWithResult(
       orderContent,
       maxStepsOverride,
       initialIterationOverride,
+      retrySource,
     } = await resolveTaskExecution(task, cwd, taskAbortSignal);
 
     const executionTask = taskRunner.updateRunningTaskExecution(task.name, {
@@ -137,6 +159,7 @@ export async function executeTaskAndCompleteWithResult(
       taskDisplayLabel: parallelOptions?.taskDisplayLabel,
       maxStepsOverride,
       initialIterationOverride,
+      retrySource,
       currentTaskIssueNumber: issueNumber,
       traceTaskMetadata: buildTraceTaskMetadata({
         task,
@@ -147,6 +170,10 @@ export async function executeTaskAndCompleteWithResult(
         copyWorkspacePath,
         issueNumber,
       }),
+      onRunningEvidencePublished: () => {
+        hasRunningEvidencePublished = true;
+        preparationReservation!.complete();
+      },
     });
 
     if (taskRunResult.exceeded && taskRunResult.exceededInfo) {
@@ -224,10 +251,25 @@ export async function executeTaskAndCompleteWithResult(
     persistTaskResult(taskRunner, taskResult);
     return taskRunResult.success;
   } catch (err) {
+    preparationPrimaryError = err;
+    hasPreparationPrimaryError = true;
     const completedAt = new Date().toISOString();
-    persistTaskError(taskRunner, taskForPersistence, startedAt, completedAt, err);
+    persistTaskError(taskRunner, taskForPersistence, startedAt, completedAt, err, {
+      preserveRetryMetadataOnMissingRunMeta:
+        err instanceof WorkflowDiscoveryReadError && !hasRunningEvidencePublished,
+    });
     return false;
   } finally {
+    if (preparationReservation !== undefined) {
+      if (!hasPreparationPrimaryError) {
+        preparationReservation.abort();
+      } else {
+        abortProjectTemplatePreparationAfterError(
+          preparationReservation,
+          preparationPrimaryError,
+        );
+      }
+    }
     if (externalAbortSignal) {
       externalAbortSignal.removeEventListener('abort', onExternalAbort);
     }

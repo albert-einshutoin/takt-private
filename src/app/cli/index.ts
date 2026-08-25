@@ -12,37 +12,131 @@ import { error as errorLog } from '../../shared/ui/index.js';
 import { resolveRemovedRootCommand, resolveSlashFallbackTask } from './helpers.js';
 import { installImmediateSigintExit } from './immediateSigintExit.js';
 import { installOpencodeExitCleanup } from './opencodeExitCleanup.js';
+import {
+  findProjectTemplateGroupIndex,
+  isProjectTemplateCliInvocation,
+  projectTemplateCommandCandidate,
+  projectTemplateCommandUsesApplyMode,
+} from './projectTemplateInvocation.js';
+import {
+  type ProjectTemplateCliCommand,
+} from '../../features/project-template/index.js';
+import { settleProjectTemplateParserFailure } from './projectTemplateCommands.js';
 
-checkForUpdates();
+// Commander may normalize argv while parsing. Preserve the exact token stream
+// once so parser-failure identity never reclassifies a delimited operand.
+const entrypointArgs = Object.freeze([...process.argv.slice(2)]);
+const projectTemplateInvocation = isProjectTemplateCliInvocation(entrypointArgs);
+if (!projectTemplateInvocation) checkForUpdates();
 
 // Import in dependency order
-import { program, runPreActionHook } from './program.js';
+import { cliVersion, program, runPreActionHook } from './program.js';
 import './commands.js';
+import { registerProjectTemplateCommands } from './projectTemplateCommands.js';
+import {
+  createProjectTemplateCliCommandProductionDependencies,
+} from './projectTemplateCommandProduction.js';
 import { executeInteractiveDefaultActionLoop } from './routing.js';
 
-(async () => {
-  const args = process.argv.slice(2);
-  installOpencodeExitCleanup();
-  const cleanupImmediateSigintExit = installImmediateSigintExit(args[0]);
-  const { operands } = program.parseOptions(args);
-  const removedRootCommand = resolveRemovedRootCommand(operands);
-  if (removedRootCommand !== null) {
-    cleanupImmediateSigintExit();
-    errorLog(`error: unknown command '${removedRootCommand}'`);
-    process.exit(1);
+registerProjectTemplateCommands(
+  program,
+  createProjectTemplateCliCommandProductionDependencies(cliVersion),
+  entrypointArgs,
+);
+
+if (projectTemplateInvocation) {
+  program.exitOverride();
+  program.configureOutput({ writeErr() {} });
+}
+
+const PROJECT_TEMPLATE_COMMAND_NAMES = [
+  'inspect', 'list', 'export', 'diff', 'apply', 'update', 'rollback',
+] as const;
+type ProjectTemplateCommandName = typeof PROJECT_TEMPLATE_COMMAND_NAMES[number];
+const PROJECT_TEMPLATE_COMMANDS: ReadonlySet<string> = new Set(
+  PROJECT_TEMPLATE_COMMAND_NAMES,
+);
+const PROJECT_TEMPLATE_APPLY_COMMANDS: ReadonlySet<ProjectTemplateCommandName> = new Set([
+  'export', 'apply', 'update', 'rollback',
+] as const);
+interface ProjectTemplateParserFailureIdentity {
+  readonly command: ProjectTemplateCliCommand;
+  readonly mode: 'dry-run' | 'apply';
+}
+
+function isProjectTemplateCommandName(
+  value: string | undefined,
+): value is ProjectTemplateCommandName {
+  return value !== undefined && PROJECT_TEMPLATE_COMMANDS.has(value);
+}
+
+/**
+ * Recover only identity fields that are safe to place in a parser-failure envelope.
+ * Unknown group syntax is deliberately mapped to list/dry-run because guessing an
+ * unknown option's arity could turn its value into a fabricated mutation command.
+ */
+function projectTemplateParserFailureIdentity(
+  args: readonly string[],
+): ProjectTemplateParserFailureIdentity {
+  const groupIndex = findProjectTemplateGroupIndex(args);
+  if (groupIndex === null) {
+    return { command: 'project-template list', mode: 'dry-run' };
   }
 
-  const knownCommands = program.commands.map((cmd) => cmd.name());
-  const slashFallbackTask = resolveSlashFallbackTask(args, knownCommands);
+  // Why: parser-failure identity must use the same global-option grammar as
+  // invocation detection. Otherwise a valid trailing global can hide a real
+  // mutation command and report the wrong lifecycle mode.
+  const candidate = projectTemplateCommandCandidate(args, groupIndex);
+  const commandIndex = candidate?.commandIndex;
+  const name = commandIndex === null || commandIndex === undefined
+    ? undefined
+    : args[commandIndex];
+  if (!isProjectTemplateCommandName(name)) {
+    return { command: 'project-template list', mode: 'dry-run' };
+  }
 
-  if (slashFallbackTask !== null) {
-    try {
-      await runPreActionHook();
-      await executeInteractiveDefaultActionLoop(slashFallbackTask);
-    } finally {
+  const apply = PROJECT_TEMPLATE_APPLY_COMMANDS.has(name)
+    && projectTemplateCommandUsesApplyMode(args, commandIndex!);
+  return {
+    command: `project-template ${name}`,
+    mode: apply ? 'apply' : 'dry-run',
+  };
+}
+
+async function writeProjectTemplateEntrypointFailure(): Promise<void> {
+  const { command, mode } = projectTemplateParserFailureIdentity(entrypointArgs);
+  if (!await settleProjectTemplateParserFailure(program, command, mode)) {
+    throw new Error('project template parser lifecycle is unavailable');
+  }
+}
+
+(async () => {
+  const args = [...entrypointArgs];
+  installOpencodeExitCleanup();
+  const cleanupImmediateSigintExit = projectTemplateInvocation
+    ? () => {}
+    : installImmediateSigintExit(args[0]);
+  if (!projectTemplateInvocation) {
+    const { operands } = program.parseOptions(args);
+    const removedRootCommand = resolveRemovedRootCommand(operands);
+    if (removedRootCommand !== null) {
       cleanupImmediateSigintExit();
+      errorLog(`error: unknown command '${removedRootCommand}'`);
+      process.exit(1);
     }
-    process.exit(0);
+
+    const knownCommands = program.commands.map((cmd) => cmd.name());
+    const slashFallbackTask = resolveSlashFallbackTask(args, knownCommands);
+
+    if (slashFallbackTask !== null) {
+      try {
+        await runPreActionHook();
+        await executeInteractiveDefaultActionLoop(slashFallbackTask);
+      } finally {
+        cleanupImmediateSigintExit();
+      }
+      process.exit(0);
+    }
   }
 
   // Normal parsing for all other cases (including '#' prefixed inputs)
@@ -53,10 +147,24 @@ import { executeInteractiveDefaultActionLoop } from './routing.js';
   }
 
   const rootArg = process.argv.slice(2)[0];
-  if (rootArg !== 'watch') {
+  if (rootArg !== 'watch' && !projectTemplateInvocation) {
     process.exit(0);
   }
-})().catch((err) => {
+})().catch(async (err) => {
+  if (projectTemplateInvocation) {
+    if ((err as { code?: string }).code === 'commander.helpDisplayed') {
+      process.exitCode = 0;
+      return;
+    }
+    if ((err as { name?: string }).name === 'CommanderError') {
+      await writeProjectTemplateEntrypointFailure();
+      return;
+    }
+    // Do not claim a second stdout write if an action or its writer failed.
+    process.stderr.write('project-template command failed\n');
+    process.exitCode = 70;
+    return;
+  }
   errorLog(getErrorMessage(err));
   process.exit(1);
 });

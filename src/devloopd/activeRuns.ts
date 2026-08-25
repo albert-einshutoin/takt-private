@@ -20,6 +20,7 @@ export interface ActiveRunRecord {
   ageMinutes: number;
   idleMinutes: number;
   stale: boolean;
+  ownerPid?: number;
 }
 
 export interface ActiveRunsReport {
@@ -72,6 +73,7 @@ function toActiveRunRecord(
     ageMinutes: minutesBetween(now, meta.startTime),
     idleMinutes,
     stale: idleMinutes >= staleAfterMinutes,
+    ...(meta.ownerPid === undefined ? {} : { ownerPid: meta.ownerPid }),
   };
 }
 

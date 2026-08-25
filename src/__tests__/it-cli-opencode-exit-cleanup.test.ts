@@ -10,6 +10,11 @@ vi.mock('../infra/opencode/client.js', () => ({
 
 vi.mock('../shared/utils/index.js', () => ({
   checkForUpdates: vi.fn(),
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+  }),
 }));
 
 vi.mock('../shared/utils/error.js', () => ({
@@ -39,6 +44,7 @@ const {
 }));
 
 vi.mock('../app/cli/program.js', () => ({
+  cliVersion: '0.0.0-test',
   program: {
     parseOptions: (...args: unknown[]) => mockParseOptions(...args),
     parseAsync: (...args: unknown[]) => mockParseAsync(...args),
@@ -48,6 +54,14 @@ vi.mock('../app/cli/program.js', () => ({
 }));
 
 vi.mock('../app/cli/commands.js', () => ({}));
+
+vi.mock('../app/cli/projectTemplateCommands.js', () => ({
+  registerProjectTemplateCommands: vi.fn(),
+}));
+
+vi.mock('../app/cli/projectTemplateCommandProduction.js', () => ({
+  createProjectTemplateCliCommandProductionDependencies: vi.fn(() => ({})),
+}));
 
 vi.mock('../app/cli/routing.js', () => ({
   executeDefaultAction: (...args: unknown[]) => mockExecuteDefaultAction(...args),

@@ -31,6 +31,9 @@ import {
   runPersonalOnboarding,
 } from '../../devloopd/personalOnboarding.js';
 import {
+  executePersonalOnboardingCommand,
+} from '../../devloopd/personalOnboardingCommand.js';
+import {
   formatPersonalCheckReport,
   runPersonalCheck,
 } from '../../devloopd/personalCheck.js';
@@ -607,23 +610,65 @@ program
   .option('--cwd <path>', 'Repository path to prepare', process.cwd())
   .option('--repo <owner/repo>', 'GitHub repository used to verify or create automation labels')
   .option('--apply', 'Apply file and label changes. Without this, only print a dry-run report')
-  .option('--force', 'Allow onboarding outside a detected Git repository and overwrite template files')
+  .option('--force', 'Legacy overwrite without --template; review approval with template apply')
+  .option('--template <source>', 'Local .taktpack or canonical GitHub project template')
+  .option('--expected-plan-id <sha256>', 'Exact dry-run plan required with template --apply')
+  .option('--json', 'Print one machine-readable template result')
   .action(async (options: {
     cwd: string;
     repo?: string;
     apply?: boolean;
     force?: boolean;
+    template?: string;
+    expectedPlanId?: string;
+    json?: boolean;
   }) => {
-    const report = await runPersonalOnboarding({
-      repoPath: resolve(options.cwd),
+    if (options.template === undefined) {
+      // This branch is intentionally byte-for-byte compatible with the
+      // pre-template onboarding command. It must never evaluate the template
+      // production module or create credential/mutation authority.
+      const report = await runPersonalOnboarding({
+        repoPath: resolve(options.cwd),
+        repo: options.repo,
+        apply: options.apply === true,
+        force: options.force === true,
+      });
+
+      console.log(formatPersonalOnboardingReport(report));
+      if (!report.passed) {
+        process.exitCode = 1;
+      }
+      return;
+    }
+
+    const result = await executePersonalOnboardingCommand({
+      cwd: options.cwd,
       repo: options.repo,
-      apply: options.apply === true,
-      force: options.force === true,
+      apply: options.apply,
+      force: options.force,
+      template: options.template,
+      expectedPlanId: options.expectedPlanId,
+      json: options.json,
+    }, {
+      runLegacy: runPersonalOnboarding,
+      formatLegacy: formatPersonalOnboardingReport,
+      createTemplateFacade() {
+        return {
+          async run(templateOptions) {
+            const production = await import(
+              '../../devloopd/personalOnboardingTemplateProduction.js'
+            );
+            return await production.createProductionPersonalOnboardingTemplateFacade({
+              currentTaktVersion: cliVersion,
+            }).run(templateOptions);
+          },
+        };
+      },
     });
 
-    console.log(formatPersonalOnboardingReport(report));
-    if (!report.passed) {
-      process.exitCode = 1;
+    console.log(result.stdout);
+    if (result.exitCode !== 0) {
+      process.exitCode = result.exitCode;
     }
   });
 

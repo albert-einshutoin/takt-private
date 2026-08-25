@@ -14,6 +14,10 @@ import { escapeTemplateChars } from 'faceted-prompting';
 
 export { escapeTemplateChars } from 'faceted-prompting';
 
+// String replacement patterns interpret `$&`, `$'`, and "$`" specially. A
+// callback keeps arbitrary task, response, and report content byte-for-byte literal.
+const literalReplacement = (value: string): (() => string) => () => value;
+
 /**
  * Replace supported placeholders in the resolved instruction body.
  */
@@ -39,7 +43,7 @@ export function replaceTemplatePlaceholders(
   });
 
   // Replace {task}
-  result = result.replace(/\{task\}/g, escapeTemplateChars(context.task));
+  result = result.replace(/\{task\}/g, literalReplacement(escapeTemplateChars(context.task)));
 
   // Replace {iteration}, {max_steps}, and {step_iteration}
   result = result.replace(/\{iteration\}/g, String(context.iteration));
@@ -48,15 +52,20 @@ export function replaceTemplatePlaceholders(
 
   // Replace {previous_response}
   if (step.passPreviousResponse) {
-    if (context.previousResponseText !== undefined) {
+    if (context.previousResponseEscapedText !== undefined) {
       result = result.replace(
         /\{previous_response\}/g,
-        escapeTemplateChars(context.previousResponseText),
+        literalReplacement(context.previousResponseEscapedText),
+      );
+    } else if (context.previousResponseText !== undefined) {
+      result = result.replace(
+        /\{previous_response\}/g,
+        literalReplacement(escapeTemplateChars(context.previousResponseText)),
       );
     } else if (context.previousOutput) {
       result = result.replace(
         /\{previous_response\}/g,
-        escapeTemplateChars(context.previousOutput.content),
+        literalReplacement(escapeTemplateChars(context.previousOutput.content)),
       );
     } else {
       result = result.replace(/\{previous_response\}/g, '');
@@ -67,18 +76,18 @@ export function replaceTemplatePlaceholders(
   const userInputsStr = context.userInputs.join('\n');
   result = result.replace(
     /\{user_inputs\}/g,
-    escapeTemplateChars(userInputsStr),
+    literalReplacement(escapeTemplateChars(userInputsStr)),
   );
 
   // Replace {report_dir}
   if (context.reportDir) {
-    result = result.replace(/\{report_dir\}/g, context.reportDir);
+    result = result.replace(/\{report_dir\}/g, literalReplacement(context.reportDir));
   }
 
-  result = result.replace(/\{current_report\}/g, context.currentReport ?? '');
-  result = result.replace(/\{previous_report\}/g, context.previousReport ?? '');
-  result = result.replace(/\{report_history\}/g, context.reportHistory ?? '');
-  result = result.replace(/\{peer_reports\}/g, context.peerReports ?? '');
+  result = result.replace(/\{current_report\}/g, literalReplacement(context.currentReport ?? ''));
+  result = result.replace(/\{previous_report\}/g, literalReplacement(context.previousReport ?? ''));
+  result = result.replace(/\{report_history\}/g, literalReplacement(context.reportHistory ?? ''));
+  result = result.replace(/\{peer_reports\}/g, literalReplacement(context.peerReports ?? ''));
 
   // Replace {report:filename} with reportDir/filename
   if (context.reportDir) {

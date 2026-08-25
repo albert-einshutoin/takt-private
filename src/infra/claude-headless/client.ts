@@ -91,8 +91,15 @@ async function buildSpawnArgs(
     args.push('--model', options.model);
   }
 
-  if (options.allowedTools && options.allowedTools.length > 0) {
-    args.push('--allowed-tools', options.allowedTools.join(','));
+  if (options.allowedTools !== undefined) {
+    if (options.allowedTools.length === 0) {
+      // `--allowed-tools` only controls auto-approval. An explicit empty
+      // allowlist must also remove the CLI's default built-ins, otherwise Read
+      // remains available and can expose provider-process credentials.
+      args.push('--tools', '');
+    } else {
+      args.push('--allowed-tools', options.allowedTools.join(','));
+    }
   }
 
   if (options.effort) {

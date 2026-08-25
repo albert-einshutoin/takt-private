@@ -168,7 +168,10 @@ function normalizeLine(line: string): string {
   return line.trim().replace(/^\/+/, '');
 }
 
-function ensureRootGitignore(repoPath: string, apply: boolean): PersonalOnboardingAction {
+export function ensurePersonalOnboardingRootGitignore(
+  repoPath: string,
+  apply: boolean,
+): PersonalOnboardingAction {
   const filePath = join(repoPath, '.gitignore');
   const existingContent = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '';
   const existing = new Set(
@@ -240,7 +243,7 @@ function parseLabelList(output: string): Set<string> | undefined {
   }
 }
 
-async function ensureGithubLabels(options: {
+export async function ensurePersonalOnboardingGithubLabels(options: {
   repoPath: string;
   repo?: string;
   apply: boolean;
@@ -322,7 +325,7 @@ export async function runPersonalOnboarding(
   actions.push(gitAction);
   if (gitAction.status !== 'fail') {
     actions.push(
-      ensureRootGitignore(repoPath, apply),
+      ensurePersonalOnboardingRootGitignore(repoPath, apply),
       ensureTemplateFile({
         repoPath,
         relativePath: join('.takt', '.gitignore'),
@@ -355,7 +358,7 @@ export async function runPersonalOnboarding(
         apply,
         force,
       }),
-      ...await ensureGithubLabels({
+      ...await ensurePersonalOnboardingGithubLabels({
         repoPath,
         repo: options.repo,
         apply,

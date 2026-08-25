@@ -18,6 +18,10 @@ import { executeRunTaskAndComplete, type RunTaskExecutionContext } from '../exec
 import { EXIT_SIGINT } from '../../../shared/exitCodes.js';
 import { ShutdownManager } from '../execute/shutdownManager.js';
 import type { RunAllTasksOptions, TaskExecutionOptions } from '../execute/types.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+} from '../execute/projectTemplatePreparationReservation.js';
 
 function resolveWatchExecutionOptions(options?: RunAllTasksOptions): {
   agentOverrides?: TaskExecutionOptions;
@@ -45,6 +49,27 @@ function resolveWatchExecutionOptions(options?: RunAllTasksOptions): {
  * Runs until Ctrl+C.
  */
 export async function watchTasks(cwd: string, options?: RunAllTasksOptions): Promise<void> {
+  // A watcher can claim a task at any time. Lifecycle evidence avoids a
+  // cross-process gap between the claim and the task's own preparation record;
+  // a forced process exit intentionally leaves stale evidence for recovery.
+  const preparationReservation = beginProjectTemplatePreparation({
+    projectRoot: cwd,
+    task: 'Coordinate watch task execution',
+    workflow: 'watch-lifecycle',
+  });
+  try {
+    await watchTasksUnderReservation(cwd, options);
+    preparationReservation.complete();
+  } catch (error) {
+    abortProjectTemplatePreparationAfterError(preparationReservation, error);
+    throw error;
+  }
+}
+
+async function watchTasksUnderReservation(
+  cwd: string,
+  options?: RunAllTasksOptions,
+): Promise<void> {
   const taskRunner = new TaskRunner(cwd, { onWarning: warn });
   const watcher = new TaskWatcher(cwd);
   const failedInterrupted = taskRunner.failInterruptedRunningTasks();

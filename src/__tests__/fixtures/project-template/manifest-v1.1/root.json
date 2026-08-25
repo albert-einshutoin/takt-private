@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.1",
+  "packVersion": "1.2.4",
+  "metadata": {
+    "name": "Team workflow defaults",
+    "description": "Portable review and release workflow defaults."
+  },
+  "derivation": {
+    "kind": "root"
+  },
+  "takt": {
+    "minVersion": "0.48.0"
+  },
+  "source": {
+    "kind": "github",
+    "uri": "https://github.com/example/project-template",
+    "ref": "v1.2.4",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "repertoireDependencies": [],
+  "entries": []
+}

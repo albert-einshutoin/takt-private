@@ -1,0 +1,194 @@
+import type {
+  ProjectTemplateClassificationReason,
+} from './classifier-types.js';
+import type {
+  ProjectTemplateManifestV1_0,
+  ProjectTemplateManifestV1_1,
+  TemplateCapability,
+  TemplateEntryPolicy,
+  TemplateLockV1_0,
+  TemplateLockV1_1,
+  TemplateSource,
+} from './types.js';
+
+export const TAKTPACK_ENTRY_NAMES = [
+  'pack.json',
+  'manifest.json',
+  'export-report.json',
+] as const;
+
+export const TAKTPACK_BLOB_PREFIX = 'blobs/sha256/';
+
+/** Maximum bytes in one validated template cohort across apply and recovery. */
+export const MAX_PROJECT_TEMPLATE_COHORT_BYTES = 32 * 1024 * 1024;
+
+export interface TaktpackLimits {
+  maxEntries: number;
+  maxPackJsonBytes: number;
+  maxManifestJsonBytes: number;
+  maxExportReportJsonBytes: number;
+  maxBlobBytes: number;
+  maxTotalBytes: number;
+  maxArchiveBytes: number;
+}
+
+export const DEFAULT_TAKTPACK_LIMITS: Readonly<TaktpackLimits> = Object.freeze({
+  maxEntries: 4_099,
+  maxPackJsonBytes: 4 * 1024 * 1024,
+  maxManifestJsonBytes: 4 * 1024 * 1024,
+  maxExportReportJsonBytes: 1024 * 1024,
+  maxBlobBytes: 1024 * 1024,
+  maxTotalBytes: MAX_PROJECT_TEMPLATE_COHORT_BYTES,
+  maxArchiveBytes: 40 * 1024 * 1024,
+});
+
+export interface TaktpackDescriptorV1 {
+  format: 'taktpack';
+  version: '1.0';
+  archive: 'ustar';
+  contentAddressed: true;
+}
+
+export interface TaktpackDescriptorV1_1 {
+  format: 'taktpack';
+  version: '1.1';
+  archive: 'ustar';
+  contentAddressed: true;
+}
+
+export type TaktpackDescriptor =
+  | TaktpackDescriptorV1
+  | TaktpackDescriptorV1_1;
+
+export interface TaktpackExportReportV1 {
+  schemaVersion: '1.0';
+  counts: Record<TemplateEntryPolicy, number>;
+  excludedReasons: Partial<Record<ProjectTemplateClassificationReason, number>>;
+  warnings: readonly [];
+}
+
+export interface ProjectTemplateExportOptions {
+  packVersion: string;
+  takt: { minVersion: string; maxVersion?: string };
+  source: TemplateSource;
+  policies?: Readonly<Record<string, Exclude<TemplateEntryPolicy, 'excluded'>>>;
+  approvedCapabilities?: readonly TemplateCapability[];
+}
+
+export interface ProjectTemplateExportFile {
+  path: string;
+  absolutePath: string;
+  bytes: number;
+  mode: string;
+  sha256: string;
+  snapshot: {
+    dev: number;
+    ino: number;
+    nlink: number;
+    size: number;
+    mode: number;
+    mtimeMs: number;
+    ctimeMs: number;
+  };
+}
+
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer Item)[]
+    ? readonly DeepReadonly<Item>[]
+    : T extends object
+      ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+      : T;
+
+export interface ProjectTemplateExportPlan {
+  readonly descriptor: DeepReadonly<TaktpackDescriptorV1>;
+  readonly manifest: DeepReadonly<ProjectTemplateManifestV1_0>;
+  readonly lock: DeepReadonly<TemplateLockV1_0>;
+  readonly report: DeepReadonly<TaktpackExportReportV1>;
+}
+
+interface TaktpackInspectResultCommon {
+  report: TaktpackExportReportV1;
+  archiveSha256: string;
+  manifestSha256: string;
+  compatibility: {
+    status: 'unknown' | 'compatible' | 'incompatible';
+    compatible?: boolean;
+    currentVersion?: string;
+    minVersion: string;
+    maxVersion?: string;
+  };
+}
+
+export type TaktpackInspectResult =
+  | TaktpackInspectResultCommon & {
+    descriptor: TaktpackDescriptorV1;
+    manifest: ProjectTemplateManifestV1_0;
+    lockSeed: TaktpackLockSeedV1;
+  }
+  | TaktpackInspectResultCommon & {
+    descriptor: TaktpackDescriptorV1_1;
+    manifest: ProjectTemplateManifestV1_1;
+    lockSeed: TaktpackLockSeedV1_1;
+  };
+
+export interface TaktpackLockSeedV1 {
+  kind: 'project-template-lock-seed';
+  schemaVersion: TemplateLockV1_0['schemaVersion'];
+  packVersion: TemplateLockV1_0['packVersion'];
+  source: TemplateLockV1_0['source'];
+  capabilities: TemplateLockV1_0['capabilities'];
+  entries: TemplateLockV1_0['entries'];
+}
+
+export interface TaktpackLockSeedV1_1 {
+  kind: 'project-template-lock-seed';
+  schemaVersion: TemplateLockV1_1['schemaVersion'];
+  packVersion: TemplateLockV1_1['packVersion'];
+  source: TemplateLockV1_1['source'];
+  derivation: TemplateLockV1_1['derivation'];
+  repertoireDependencies: TemplateLockV1_1['repertoireDependencies'];
+  capabilities: TemplateLockV1_1['capabilities'];
+  entries: TemplateLockV1_1['entries'];
+}
+
+export type TaktpackLockSeed = TaktpackLockSeedV1 | TaktpackLockSeedV1_1;
+
+export interface TaktpackBlobIndexEntry {
+  sha256: string;
+  bytes: number;
+}
+
+export interface TaktpackIndexV1 extends TaktpackDescriptorV1 {
+  manifestSha256: string;
+  exportReportSha256: string;
+  lockSeed: TaktpackLockSeedV1;
+  blobs: TaktpackBlobIndexEntry[];
+}
+
+export interface TaktpackIndexV1_1 extends TaktpackDescriptorV1_1 {
+  manifestSha256: string;
+  exportReportSha256: string;
+  lockSeed: TaktpackLockSeedV1_1;
+  blobs: TaktpackBlobIndexEntry[];
+}
+
+export interface InspectTaktpackOptions {
+  currentTaktVersion?: string;
+  limits?: Partial<TaktpackLimits>;
+  signal?: AbortSignal;
+  /** Absolute deadline in the monotonic performance time domain. */
+  deadlineMs?: number;
+}
+
+export interface WriteTaktpackOptions {
+  force?: boolean;
+  signal?: AbortSignal;
+  limits?: Partial<TaktpackLimits>;
+}
+
+export interface WriteTaktpackResult {
+  outputPath: string;
+  archiveSha256: string;
+  bytes: number;
+}

@@ -299,6 +299,123 @@ export function assertSubscriptionOnlyConfig(config: ProjectConfig | GlobalConfi
   }
 }
 
+function rawProviderReference(value: unknown): ProviderType | undefined {
+  if (typeof value === 'string') return value as ProviderType;
+  if (!isRecord(value)) return undefined;
+  if (typeof value['provider'] === 'string') {
+    return value['provider'] as ProviderType;
+  }
+  return typeof value['type'] === 'string'
+    ? value['type'] as ProviderType
+    : undefined;
+}
+
+function normalizeRawProviderEntries(
+  value: unknown,
+): Record<string, PersonaProviderEntry> | undefined {
+  if (!isRecord(value)) return undefined;
+  return Object.fromEntries(
+    Object.entries(value).map(([name, entry]) => {
+      const provider = rawProviderReference(entry);
+      return [
+        name,
+        { ...(provider === undefined ? {} : { provider }) },
+      ];
+    }),
+  );
+}
+
+function normalizeRawProviderRouting(value: unknown): ProviderRoutingConfig | undefined {
+  if (!isRecord(value)) return undefined;
+  return {
+    personas: normalizeRawProviderEntries(value['personas']),
+    tags: normalizeRawProviderEntries(value['tags']),
+    steps: normalizeRawProviderEntries(value['steps']),
+  };
+}
+
+/**
+ * Applies the runtime subscription-only provider decision to schema-validated
+ * project YAML. ProjectConfigSchema intentionally preserves snake_case, while
+ * assertSubscriptionOnlyConfig consumes the normalized runtime shape; keeping
+ * this adapter here prevents preview and runtime from drifting into different
+ * provider allowlist decisions.
+ */
+export function assertRawSubscriptionOnlyProjectConfig(
+  rawConfig: Record<string, unknown>,
+  configPath: string,
+): void {
+  assertNoForbiddenSubscriptionOnlyConfigKeys(rawConfig, configPath);
+  if (rawConfig['subscription_only'] !== true) return;
+
+  const rawTaktProviders = isRecord(rawConfig['takt_providers'])
+    ? rawConfig['takt_providers']
+    : undefined;
+  const rawAssistant = isRecord(rawTaktProviders?.['assistant'])
+    ? rawTaktProviders['assistant']
+    : undefined;
+  const rawFallback = isRecord(rawConfig['rate_limit_fallback'])
+    ? rawConfig['rate_limit_fallback']
+    : undefined;
+  const rawSwitchChain = Array.isArray(rawFallback?.['switch_chain'])
+    ? rawFallback['switch_chain']
+    : undefined;
+  const rawProfiles = isRecord(rawConfig['provider_profiles'])
+    ? rawConfig['provider_profiles']
+    : undefined;
+  const providerProfiles = rawProfiles === undefined
+    ? undefined
+    : Object.fromEntries(
+        Object.keys(rawProfiles).map((provider) => [provider, {
+          defaultPermissionMode: 'readonly' as const,
+        }]),
+      ) as ProjectConfig['providerProfiles'];
+  const taktAssistantProvider = rawProviderReference(rawAssistant?.['provider']);
+
+  const normalized: ProjectConfig = {
+    subscriptionOnly: true,
+    allowedProviders:
+      rawConfig['allowed_providers'] as ProjectConfig['allowedProviders'],
+    forbiddenProviders:
+      rawConfig['forbidden_providers'] as ProjectConfig['forbiddenProviders'],
+    provider: rawProviderReference(rawConfig['provider']),
+    personaProviders: normalizeRawProviderEntries(rawConfig['persona_providers']),
+    providerRouting: normalizeRawProviderRouting(rawConfig['provider_routing']),
+    ...(rawAssistant === undefined
+      ? {}
+      : {
+          taktProviders: {
+            assistant: {
+              ...(taktAssistantProvider === undefined
+                ? {}
+                : { provider: taktAssistantProvider }),
+              ...(typeof rawAssistant['model'] === 'string'
+                ? { model: rawAssistant['model'] }
+                : {}),
+            },
+          } as ProjectConfig['taktProviders'],
+        }),
+    ...(rawSwitchChain === undefined
+      ? {}
+      : {
+          rateLimitFallback: {
+            switchChain: rawSwitchChain.flatMap((entry) => (
+              isRecord(entry) && typeof entry['provider'] === 'string'
+                ? [{
+                    provider: entry['provider'] as ProviderType,
+                    ...(typeof entry['model'] === 'string'
+                      ? { model: entry['model'] }
+                      : {}),
+                  }]
+                : []
+            )),
+          },
+        }),
+    providerProfiles,
+  };
+  assertSubscriptionOnlyConfig(normalized);
+}
+
 function collectWorkflowStepProviderRefs(step: WorkflowStep): ProviderReferenceDiagnostic[] {
   const refs: ProviderReferenceDiagnostic[] = [];
   if (step.provider !== undefined) {

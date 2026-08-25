@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createIsolatedEnv, updateIsolatedConfig, type IsolatedEnv } from '../helpers/isolated-env';
@@ -226,7 +232,17 @@ describe('E2E: Workflow selection branch coverage', () => {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain('Workflow "default" not found.');
     expect(result.stdout).not.toContain('Workflow completed');
-    expect(existsSync(join(testRepo.path, '.takt', 'runs'))).toBe(false);
+    const runsRoot = join(testRepo.path, '.takt', 'runs');
+    const metas = readdirSync(runsRoot).map((slug) => JSON.parse(readFileSync(
+      join(runsRoot, slug, 'meta.json'),
+      'utf8',
+    )) as { workflow: string; status: string });
+    expect(metas).toEqual([
+      expect.objectContaining({
+        workflow: 'direct-task-preparation',
+        status: 'completed',
+      }),
+    ]);
   }, 240_000);
 
 });

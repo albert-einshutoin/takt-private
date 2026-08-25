@@ -1,0 +1,184 @@
+import { describe, expect, it } from 'vitest';
+import {
+  CONFIG_SEQUENCE_RULES,
+  resolveProjectTemplateConfigMergeRule,
+} from '../../features/project-template/config-merge-rules.js';
+
+describe('project template config merge rules', () => {
+  it.each([
+    ['provider_routing', 'project-owned'],
+    ['provider_routing.personas.planner.provider', 'project-owned'],
+    ['allowed_providers', 'project-owned'],
+    ['forbidden_providers', 'project-owned'],
+    ['base_branch', 'project-owned'],
+    ['workflow_command_gates.custom_scripts', 'project-owned'],
+    ['runtime.prepare', 'project-owned'],
+    ['workflow_mcp_servers.stdio', 'project-owned'],
+  ] as const)('classifies %s as %s', (path, ownership) => {
+    expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
+      .toMatchObject({ ownership, known: true });
+  });
+
+  it.each([
+    'anthropic_api_key',
+    'openai_api_key',
+    'copilot_github_token',
+    'provider_options.codex.api_key',
+    'provider_options.codex.client_secret',
+    'OpenAI_API_Key',
+    'aws_secret_access_key',
+    'provider_options.codex.apiKey',
+    'provider_options.codex.refreshToken',
+    'provider_options.codex.api.key',
+    'provider_options.codex.access.key',
+    'provider_options.codex.private.key',
+    'provider_options.codex.client.secret',
+    'provider_options.codex.refresh.token',
+  ])('forbids credential-bearing path %s', (path) => {
+    expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
+      .toMatchObject({ ownership: 'forbidden', known: true });
+  });
+
+  it.each([
+    'codex_cli_path',
+    'claude_cli_path',
+    'worktree_dir',
+    'logging',
+    'logging.debug',
+    'bookmarks_file',
+    'analytics.events_path',
+    'notification_sound',
+    'notification_sound_events.workflow_abort',
+    'disabled_builtins',
+    'enable_builtin_workflows',
+    'prevent_sleep',
+    'auto_fetch',
+  ])('keeps machine-local path %s global-only', (path) => {
+    expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
+      .toMatchObject({ ownership: 'global-only', known: true });
+  });
+
+  it('preserves unknown project keys with a warning and atomic sequence fallback', () => {
+    expect(resolveProjectTemplateConfigMergeRule(
+      'config.yaml',
+      ['future_product_policy', 'values'],
+    )).toEqual({
+      ownership: 'project-owned',
+      sequencePolicy: 'atomic',
+      known: false,
+      reviewRequired: true,
+      sequenceIdentity: 'canonical',
+    });
+  });
+
+  it.each([
+    ['allowed_providers', 'unordered-set'],
+    ['forbidden_providers', 'monotonic-set'],
+    ['workflow_overrides.quality_gates', 'ordered-keyed'],
+    ['workflow_overrides.steps.review.quality_gates', 'ordered-keyed'],
+    ['assistant.init_files', 'ordered-keyed'],
+    ['rate_limit_fallback.switch_chain', 'atomic'],
+    ['submodules', 'atomic'],
+    ['runtime.prepare', 'atomic'],
+    ['provider_options.opencode.allowed_tools', 'unordered-set'],
+    ['provider_options.claude.allowed_tools', 'unordered-set'],
+    ['provider_options.claude.sandbox.excluded_commands', 'monotonic-set'],
+  ] as const)('assigns explicit sequence policy %s => %s', (path, policy) => {
+    expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
+      .toMatchObject({ sequencePolicy: policy, known: true });
+  });
+
+  it('exports only explicit known sequence rules', () => {
+    expect(CONFIG_SEQUENCE_RULES.length).toBeGreaterThanOrEqual(7);
+    expect(CONFIG_SEQUENCE_RULES.every((rule) => rule.known)).toBe(true);
+    expect(CONFIG_SEQUENCE_RULES).toContainEqual(expect.objectContaining({
+      document: 'config.yaml',
+      pattern: ['assistant', 'init_files'],
+    }));
+    expect(CONFIG_SEQUENCE_RULES).toContainEqual(expect.objectContaining({
+      document: 'config.yaml',
+      pattern: ['workflow_overrides', 'quality_gates'],
+      sequenceIdentity: 'quality-gate',
+      reviewRequired: true,
+    }));
+  });
+
+  it('allows only the monotonic provider denylist to tighten without review', () => {
+    expect(resolveProjectTemplateConfigMergeRule(
+      'config.yaml',
+      ['forbidden_providers'],
+    )).toMatchObject({
+      ownership: 'project-owned',
+      sequencePolicy: 'monotonic-set',
+      reviewRequired: false,
+    });
+  });
+
+  it.each([
+    'workflow_runtime_prepare.custom_scripts',
+    'workflow_command_gates.custom_scripts',
+    'workflow_arpeggio.custom_merge_inline_js',
+    'workflow_arpeggio.custom_merge_files',
+    'workflow_arpeggio.custom_data_source_modules',
+    'sync_conflict_resolver.auto_approve_tools',
+    'runtime.prepare',
+    'assistant.init_files',
+    'rate_limit_fallback.switch_chain',
+    'submodules',
+    'with_submodules',
+    'subscription_only',
+    'provider',
+    'auto_pr',
+    'vcs_provider',
+    'sync_project_local_takt_on_retry',
+    'provider_options.claude.sandbox.excluded_commands',
+    'provider_options.codex.skills.repo',
+    'provider_options.codex.network_access',
+    'provider_options.opencode.network_access',
+    'provider_options.claude.sandbox.allow_unsandboxed_commands',
+    'provider_routing.personas.planner.provider',
+    'provider_routing.steps.review.provider_options.codex.network_access',
+    'persona_providers.planner.provider',
+    'takt_providers.assistant.provider',
+  ])('requires review for execution capability %s', (path) => {
+    expect(resolveProjectTemplateConfigMergeRule('config.yaml', path.split('.')))
+      .toMatchObject({
+        ownership: 'project-owned',
+        known: true,
+        reviewRequired: true,
+      });
+  });
+
+  it('keeps devloop policy and gates project-owned', () => {
+    expect(resolveProjectTemplateConfigMergeRule(
+      'devloopd.yaml',
+      ['policy', 'quality_gates'],
+    )).toMatchObject({
+      ownership: 'project-owned',
+      sequencePolicy: 'ordered-keyed',
+      known: true,
+      reviewRequired: true,
+    });
+  });
+
+  it('forbids case and separator variants in devloop policy', () => {
+    expect(resolveProjectTemplateConfigMergeRule(
+      'devloopd.yaml',
+      ['Client-Secret'],
+    )).toMatchObject({
+      ownership: 'forbidden',
+      known: true,
+      reviewRequired: true,
+    });
+  });
+
+  it('requires review for future devloop settings by default', () => {
+    expect(resolveProjectTemplateConfigMergeRule(
+      'devloopd.yaml',
+      ['future_runtime_policy'],
+    )).toMatchObject({
+      ownership: 'project-owned',
+      reviewRequired: true,
+    });
+  });
+});

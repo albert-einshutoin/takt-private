@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -13,6 +13,7 @@ import {
   invalidateAllResolvedConfigCache,
   invalidateGlobalConfigCache,
 } from '../infra/config/index.js';
+import { acquireRepertoireCoordinationLease } from '../features/repertoire/coordination-lease.js';
 
 function writeProjectConfig(projectDir: string, content: string): void {
   mkdirSync(join(projectDir, '.takt'), { recursive: true });
@@ -21,6 +22,7 @@ function writeProjectConfig(projectDir: string, content: string): void {
 
 function writeGlobalConfig(globalConfigDir: string, content: string): void {
   mkdirSync(globalConfigDir, { recursive: true });
+  chmodSync(globalConfigDir, 0o700);
   writeFileSync(join(globalConfigDir, 'config.yaml'), content, 'utf-8');
 }
 
@@ -122,6 +124,33 @@ describe('devloopd provider smoke matrix', () => {
       status: 'skip',
     });
     expect(formatProviderSmokeMatrixReport(report)).toContain('provider is not configured');
+  });
+
+  it('runs provider subprocess probes after releasing the repertoire snapshot', async () => {
+    const baseRunner = makeRunner();
+    let writerAcquisitions = 0;
+    const runner: DevloopCommandRunner = {
+      resolveCommand: (...args) => baseRunner.resolveCommand(...args),
+      async exec(...args) {
+        const writer = await acquireRepertoireCoordinationLease({
+          globalConfigDir,
+          mode: 'write',
+          timeoutMs: 250,
+        });
+        writerAcquisitions += 1;
+        writer.release();
+        return baseRunner.exec(...args);
+      },
+    };
+
+    const report = await runProviderSmokeMatrix({
+      repoPath: projectDir,
+      env: { PATH: '/mock/bin' },
+      runner,
+    });
+
+    expect(report.passed).toBe(true);
+    expect(writerAcquisitions).toBeGreaterThan(0);
   });
 
   it('fails when a configured provider command is missing', async () => {

@@ -15,6 +15,9 @@ describe('public API exports', () => {
     expect(typeof api.loadWorkflowByIdentifier).toBe('function');
     expect(typeof api.listWorkflows).toBe('function');
     expect(typeof api.composeTaktPromptPayload).toBe('function');
+    expect(typeof api.calculateProjectTemplateDraftId).toBe('function');
+    expect(typeof api.projectTemplateManifestV1_1JsonSchema).toBe('object');
+    expect(typeof api.projectTemplateLockV1_1JsonSchema).toBe('object');
     expect('WorkflowEngine' in api).toBe(true);
     expect('loadWorkflow' in api).toBe(true);
     expect('loadWorkflowByIdentifier' in api).toBe(true);
@@ -73,6 +76,8 @@ describe('public API exports', () => {
     expect('loadWorktreeSessions' in api).toBe(false);
     expect('updateWorktreeSession' in api).toBe(false);
     expect('listWorkflowEntries' in api).toBe(false);
+    expect('resolveGithubTemplateSourceForAuthenticatedDownload' in api)
+      .toBe(false);
     expect('WorkflowDirEntry' in api).toBe(false);
   });
 });

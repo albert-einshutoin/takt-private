@@ -1,17 +1,24 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+  PROJECT_CLONE_META_DIRECTORY,
+  PROJECT_TAKT_DIRECTORY,
+} from '../../shared/constants/projectTaktPaths.js';
 import { createLogger } from '../../shared/utils/index.js';
 
 const log = createLogger('clone');
-
-const CLONE_META_DIR = 'clone-meta';
 
 function encodeBranchName(branch: string): string {
   return branch.replace(/\//g, '--');
 }
 
 export function getCloneMetaPath(projectDir: string, branch: string): string {
-  return path.join(projectDir, '.takt', CLONE_META_DIR, `${encodeBranchName(branch)}.json`);
+  return path.join(
+    projectDir,
+    PROJECT_TAKT_DIRECTORY,
+    PROJECT_CLONE_META_DIRECTORY,
+    `${encodeBranchName(branch)}.json`,
+  );
 }
 
 export function saveCloneMeta(projectDir: string, branch: string, clonePath: string): void {

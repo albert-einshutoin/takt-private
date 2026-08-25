@@ -26,6 +26,8 @@ import { getTaskSlugFromTaskDir } from '../../../shared/utils/taskPaths.js';
 import { resolveConfigValue } from '../../../infra/config/resolveConfigValue.js';
 import { stageTaskSpecForExecution } from './taskSpecContext.js';
 import { resolveReusedWorktreeExecution } from './reusedWorktree.js';
+import type { WorkflowRetrySource } from './workflowRetryGeneration.js';
+import { WorkflowDiscoveryReadError } from '../../../infra/config/loaders/workflowDiscoveryError.js';
 
 const log = createLogger('task');
 
@@ -59,6 +61,7 @@ export interface ResolvedTaskExecution {
   issueNumber?: number;
   maxStepsOverride?: number;
   initialIterationOverride?: number;
+  retrySource?: WorkflowRetrySource;
 }
 
 function resolveRetryResume(
@@ -308,6 +311,12 @@ export async function resolveTaskExecution(
 
   const resolvedReportDirName = reportDirName ?? generateReportDir(task.content, { timezone });
   const needsWorkflowRetryContext = resumePoint !== undefined || data.exceeded_current_iteration !== undefined;
+  const persistedGenerationWitness = normalizedData.workflow_generation_witness;
+  if (needsWorkflowRetryContext && typeof persistedGenerationWitness !== 'string') {
+    // Legacy continuation metadata cannot prove which workflow generation
+    // produced its cursor. A task without a cursor remains an explicit fresh run.
+    throw new WorkflowDiscoveryReadError();
+  }
   const workflowConfig = needsWorkflowRetryContext
     ? loadWorkflowByIdentifier(workflowIdentifier, defaultCwd, { lookupCwd: execCwd })
     : undefined;
@@ -325,6 +334,19 @@ export async function resolveTaskExecution(
     initialIterationOverride,
     resolveWorkflowMaxSteps(workflowConfig),
   );
+  const retrySource: WorkflowRetrySource | undefined = needsWorkflowRetryContext
+    ? {
+      ...(configuredStartStep ? { configuredStartStep } : {}),
+      ...(resumePoint ? { resumePoint } : {}),
+      ...(data.exceeded_max_steps !== undefined
+        ? { storedMaxSteps: data.exceeded_max_steps }
+        : {}),
+      ...(initialIterationOverride !== undefined
+        ? { initialIteration: initialIterationOverride }
+        : {}),
+      generationWitness: persistedGenerationWitness as string,
+    }
+    : undefined;
 
   const autoPr = data.auto_pr ?? resolveWorkflowConfigValue(defaultCwd, 'autoPr') ?? false;
   const draftPr = data.draft_pr ?? resolveWorkflowConfigValue(defaultCwd, 'draftPr') ?? false;
@@ -353,5 +375,6 @@ export async function resolveTaskExecution(
     ...(data.issue !== undefined ? { issueNumber: data.issue } : {}),
     ...(maxStepsOverride !== undefined ? { maxStepsOverride } : {}),
     ...(initialIterationOverride !== undefined ? { initialIterationOverride } : {}),
+    ...(retrySource ? { retrySource } : {}),
   };
 }

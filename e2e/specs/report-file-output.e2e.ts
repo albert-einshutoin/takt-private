@@ -61,11 +61,16 @@ describe('E2E: Report file output (mock)', () => {
     const runDirs = readdirSync(runsDir).sort();
     expect(runDirs.length).toBeGreaterThan(0);
 
-    const latestRun = runDirs[runDirs.length - 1]!;
-    const reportPath = join(runsDir, latestRun, 'reports', 'report.md');
+    // Preparation coordination records intentionally share run history but do
+    // not contain workflow reports. Select the canonical workflow run instead
+    // of assuming lexical order identifies it.
+    const reportPath = runDirs
+      .map((runDir) => join(runsDir, runDir, 'reports', 'report.md'))
+      .find((candidate) => existsSync(candidate));
 
-    expect(existsSync(reportPath)).toBe(true);
-    const report = readFileSync(reportPath, 'utf-8');
+    expect(reportPath).toBeDefined();
+    expect(existsSync(reportPath!)).toBe(true);
+    const report = readFileSync(reportPath!, 'utf-8');
     expect(report).toContain('Report summary: OK');
   }, 240_000);
 });

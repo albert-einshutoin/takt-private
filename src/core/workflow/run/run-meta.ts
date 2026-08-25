@@ -26,16 +26,21 @@ export interface RunMeta {
   currentIteration?: number;
   phase?: 1 | 2 | 3;
   updatedAt?: string;
+  /** Process that owns long-lived coordination evidence, when applicable. */
+  ownerPid?: number;
+  failureReason?: string;
   observability?: RunMetaObservability;
   resumePoint?: WorkflowResumePoint;
   sourceRunSlug?: string;
   resumeMode?: 'requeue' | 'retry' | 'instruct';
+  workflowGenerationWitness?: string;
 }
 
 interface RawRunMeta extends RunMeta {
   resume_point?: WorkflowResumePoint;
   source_run_slug?: string;
   resume_mode?: 'requeue' | 'retry' | 'instruct';
+  workflow_generation_witness?: string;
 }
 
 export type RunMetaWarningHandler = (warning: string) => void;
@@ -46,6 +51,8 @@ function normalizeRunMeta(raw: RawRunMeta): RunMeta {
     resumePoint: raw.resumePoint ?? raw.resume_point,
     sourceRunSlug: raw.sourceRunSlug ?? raw.source_run_slug,
     resumeMode: raw.resumeMode ?? raw.resume_mode,
+    workflowGenerationWitness:
+      raw.workflowGenerationWitness ?? raw.workflow_generation_witness,
   };
 }
 

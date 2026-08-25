@@ -7,6 +7,7 @@
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { getProjectConfigDir, ensureDir } from '../paths.js';
+import { PROJECT_SESSION_STATE_FILE } from '../../../shared/constants/projectTaktPaths.js';
 import { writeFileAtomic } from './sessionStore.js';
 
 /** Last task execution state */
@@ -31,7 +32,7 @@ export interface SessionState {
  * Get path for storing session state
  */
 export function getSessionStatePath(projectDir: string): string {
-  return join(getProjectConfigDir(projectDir), 'session-state.json');
+  return join(getProjectConfigDir(projectDir), PROJECT_SESSION_STATE_FILE);
 }
 
 /**

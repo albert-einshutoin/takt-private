@@ -320,6 +320,8 @@ export function normalizeStepFromRaw(
     ),
     qualityGates,
     passPreviousResponse: step.pass_previous_response ?? true,
+    previousResponseMaxBytes: step.previous_response_max_bytes,
+    previousResponseOverflow: step.previous_response_overflow,
     policyContents,
     knowledgeContents,
   };

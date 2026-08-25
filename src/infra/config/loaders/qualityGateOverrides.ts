@@ -9,9 +9,8 @@
  * Merge strategy: Additive (config gates + YAML gates)
  */
 
-import * as path from 'node:path';
 import type { WorkflowOverrides } from '../../../core/models/config-types.js';
-import { DEFAULT_COMMAND_GATE_TIMEOUT_MS } from '../../../core/models/quality-gate-defaults.js';
+import { qualityGateDedupeKey } from '../../../core/models/quality-gate-identity.js';
 import type { QualityGate } from '../../../core/models/workflow-types.js';
 
 function getStepQualityGates(
@@ -22,37 +21,6 @@ function getStepQualityGates(
     steps?: Record<string, { qualityGates?: QualityGate[] }>;
   }) | undefined;
   return withSteps?.steps?.[stepName]?.qualityGates ?? overrides?.steps?.[stepName]?.qualityGates;
-}
-
-function normalizeCommandGateCwd(cwd: string | undefined): string {
-  if (cwd === undefined) {
-    return '.';
-  }
-
-  const normalized = path.normalize(cwd);
-  if (normalized === path.parse(normalized).root) {
-    return normalized;
-  }
-
-  const withoutTrailingSeparator = normalized.endsWith(path.sep) ? normalized.slice(0, -1) : normalized;
-  return withoutTrailingSeparator.length > 0 ? withoutTrailingSeparator : '.';
-}
-
-function qualityGateDedupeKey(gate: QualityGate): string {
-  if (typeof gate === 'string') {
-    return `string:${JSON.stringify(gate)}`;
-  }
-
-  const cwd = normalizeCommandGateCwd(gate.cwd);
-  const timeoutMs = gate.timeoutMs ?? DEFAULT_COMMAND_GATE_TIMEOUT_MS;
-
-  return `command:${JSON.stringify([
-    gate.type,
-    gate.name ?? null,
-    gate.command,
-    cwd,
-    timeoutMs,
-  ])}`;
 }
 
 function dedupeQualityGates(gates: QualityGate[]): QualityGate[] {

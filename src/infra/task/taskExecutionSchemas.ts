@@ -34,6 +34,7 @@ export const TaskExecutionConfigObjectSchema = z.object({
   source: z.enum(['pr_review', 'issue', 'manual']).optional(),
   pr_number: z.number().int().positive().optional(),
   resume_point: ResumePointSchema.optional(),
+  workflow_generation_witness: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }).superRefine((data, ctx) => {
   if (data.source === 'pr_review' && data.pr_number === undefined) {
     ctx.addIssue({

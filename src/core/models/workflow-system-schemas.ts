@@ -246,6 +246,8 @@ export function validateSystemStepFields(
       'structured_output',
       'output_contracts',
       'quality_gates',
+      'previous_response_max_bytes',
+      'previous_response_overflow',
     ] as const) {
       if (data[field] !== undefined) {
         ctx.addIssue({

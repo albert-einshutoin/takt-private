@@ -4,17 +4,22 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   formatPersonalRecoveryReport,
   runPersonalRecovery,
 } from '../devloopd/personalRecovery.js';
 import { resolvePersonalLifecyclePaths } from '../devloopd/personalLifecycle.js';
+import {
+  inspectProjectTemplateApplyGuard,
+  resolveProjectTemplateRunStartMutexPath,
+} from '../features/project-template/apply-guard.js';
 
 const cleanupDirs = new Set<string>();
 
@@ -64,6 +69,72 @@ afterEach(() => {
 });
 
 describe('devloopd personal recovery', () => {
+  it('dry-runs then completes abandoned dead coordination recovery', () => {
+    const repoPath = makeTempRepo();
+    const recoveryPath =
+      `${resolveProjectTemplateRunStartMutexPath(repoPath)}.reclaim.recovery`;
+    mkdirSync(dirname(recoveryPath), { recursive: true, mode: 0o700 });
+    writeFileSync(recoveryPath, JSON.stringify({
+      version: 3,
+      token: 'dead-recovery',
+      pid: 99_999,
+      operation: 'namespace-recovery',
+      namespaceToken: 'already-cleaned',
+    }));
+
+    const dryRun = runPersonalRecovery({
+      repoPath,
+      apply: false,
+      probeRunProcess: () => 'dead',
+    });
+    expect(dryRun.actions).toContainEqual(expect.objectContaining({
+      status: 'would_change',
+      name: 'abandoned project template coordination recovery',
+    }));
+    expect(existsSync(recoveryPath)).toBe(true);
+
+    const applied = runPersonalRecovery({
+      repoPath,
+      apply: true,
+      probeRunProcess: () => 'dead',
+    });
+    expect(applied.actions).toContainEqual(expect.objectContaining({
+      status: 'changed',
+      name: 'abandoned project template coordination recovery',
+    }));
+    expect(existsSync(recoveryPath)).toBe(false);
+  });
+
+  it.each(['alive', 'unknown'] as const)(
+    'keeps %s abandoned coordination recovery fail-closed',
+    (processState) => {
+      const repoPath = makeTempRepo();
+      const recoveryPath =
+        `${resolveProjectTemplateRunStartMutexPath(repoPath)}.reclaim.recovery`;
+      mkdirSync(dirname(recoveryPath), { recursive: true, mode: 0o700 });
+      writeFileSync(recoveryPath, JSON.stringify({
+        version: 3,
+        token: 'blocked-recovery',
+        pid: 99_999,
+        operation: 'namespace-recovery',
+        namespaceToken: 'already-cleaned',
+      }));
+
+      const report = runPersonalRecovery({
+        repoPath,
+        apply: true,
+        probeRunProcess: () => processState,
+      });
+
+      expect(report.passed).toBe(false);
+      expect(report.actions).toContainEqual(expect.objectContaining({
+        status: 'fail',
+        name: 'abandoned project template coordination recovery',
+      }));
+      expect(existsSync(recoveryPath)).toBe(true);
+    },
+  );
+
   it('dry-runs stale runs while preserving active runs', () => {
     const repoPath = makeTempRepo();
     writeRunMeta(repoPath, 'run-stale', { updatedAt: '2026-07-06T00:00:00.000Z' });
@@ -106,6 +177,196 @@ describe('devloopd personal recovery', () => {
     expect(meta.status).toBe('aborted');
     expect(meta.endTime).toBe('2026-07-06T03:00:00.000Z');
     expect(meta.recoveryReason).toBe('stale active run recovered by devloopd recover-stale');
+  });
+
+  it.each([
+    ['alive', 'skipped', 'running'],
+    ['dead', 'changed', 'aborted'],
+    ['unknown', 'fail', 'running'],
+  ] as const)(
+    'recovers stale owned preparation only when PID state is verifiably %s',
+    (processState, actionStatus, finalStatus) => {
+      const repoPath = makeTempRepo();
+      const metaPath = writeRunMeta(repoPath, 'owned-preparation', {
+        workflow: 'task-preparation',
+        ownerPid: 42_424,
+      });
+
+      const report = runPersonalRecovery({
+        repoPath,
+        apply: true,
+        staleAfterMinutes: 60,
+        now: new Date('2026-07-06T03:00:00.000Z'),
+        probeRunProcess: () => processState,
+      });
+
+      expect(report.actions).toContainEqual(expect.objectContaining({
+        status: actionStatus,
+      }));
+      expect(JSON.parse(readFileSync(metaPath, 'utf8'))).toMatchObject({
+        status: finalStatus,
+        ownerPid: 42_424,
+      });
+      expect(inspectProjectTemplateApplyGuard({
+        repoPath,
+        now: new Date('2026-07-06T03:00:00.000Z'),
+      }).passed).toBe(finalStatus === 'aborted');
+    },
+  );
+
+  it('does not abort when a heartbeat wins the stale-recovery race', () => {
+    const repoPath = makeTempRepo();
+    const metaPath = writeRunMeta(repoPath, 'heartbeat-race', {
+      workflow: 'watch-preparation',
+      ownerPid: 42_425,
+    });
+    let probes = 0;
+
+    const report = runPersonalRecovery({
+      repoPath,
+      apply: true,
+      staleAfterMinutes: 60,
+      now: new Date('2026-07-06T03:00:00.000Z'),
+      probeRunProcess: () => {
+        probes += 1;
+        const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Record<string, unknown>;
+        writeFileSync(metaPath, JSON.stringify({
+          ...meta,
+          updatedAt: '2026-07-06T02:59:59.000Z',
+        }));
+        return 'dead';
+      },
+    });
+
+    expect(probes).toBe(1);
+    expect(report.actions).toContainEqual(expect.objectContaining({
+      status: 'skipped',
+      message: 'run metadata changed during stale recovery',
+    }));
+    expect(JSON.parse(readFileSync(metaPath, 'utf8')).status).toBe('running');
+  });
+
+  it('explicitly removes only empty crash-left run scaffolding with missing metadata', () => {
+    const repoPath = makeTempRepo();
+    const runPath = join(repoPath, '.takt', 'runs', 'crash-left-run');
+    mkdirSync(join(runPath, 'context', 'task'), { recursive: true });
+    expect(inspectProjectTemplateApplyGuard({ repoPath }).blocks)
+      .toContainEqual(expect.objectContaining({ code: 'RUN_METADATA_MISSING' }));
+
+    const report = runPersonalRecovery({ repoPath, apply: true });
+
+    expect(report.actions).toContainEqual(expect.objectContaining({
+      status: 'changed',
+      name: 'missing run metadata crash-left-run',
+    }));
+    expect(existsSync(runPath)).toBe(false);
+    expect(inspectProjectTemplateApplyGuard({ repoPath }).passed).toBe(true);
+  });
+
+  it.each(['non-empty', 'symlink'] as const)(
+    'leaves %s missing-metadata run evidence fail-closed',
+    (scenario) => {
+      const repoPath = makeTempRepo();
+      const runsRoot = join(repoPath, '.takt', 'runs');
+      mkdirSync(runsRoot, { recursive: true });
+      const runPath = join(runsRoot, `unsafe-${scenario}`);
+      if (scenario === 'non-empty') {
+        mkdirSync(join(runPath, 'context'), { recursive: true });
+        writeFileSync(join(runPath, 'context', 'evidence.txt'), 'keep');
+      } else {
+        const external = join(repoPath, 'external-run');
+        mkdirSync(join(external, 'context'), { recursive: true });
+        symlinkSync(external, runPath);
+      }
+
+      const report = runPersonalRecovery({ repoPath, apply: true });
+
+      expect(report.actions).toContainEqual(expect.objectContaining({
+        status: 'fail',
+        name: `missing run metadata unsafe-${scenario}`,
+      }));
+      expect(existsSync(runPath)).toBe(true);
+      if (scenario === 'symlink') {
+        expect(existsSync(join(repoPath, 'external-run', 'context'))).toBe(true);
+      }
+      expect(inspectProjectTemplateApplyGuard({ repoPath }).passed).toBe(false);
+    },
+  );
+
+  it.each(['takt', 'runs'] as const)(
+    'does not traverse an external empty victim through a %s ancestor symlink',
+    (ancestor) => {
+      const repoPath = makeTempRepo();
+      const externalRoot = makeTempRepo();
+      const externalRuns = ancestor === 'takt'
+        ? join(externalRoot, 'runs')
+        : externalRoot;
+      const victim = join(externalRuns, 'external-victim', 'context');
+      mkdirSync(victim, { recursive: true });
+      if (ancestor === 'takt') {
+        symlinkSync(externalRoot, join(repoPath, '.takt'));
+      } else {
+        mkdirSync(join(repoPath, '.takt'));
+        symlinkSync(externalRoot, join(repoPath, '.takt', 'runs'));
+      }
+
+      const report = runPersonalRecovery({ repoPath, apply: true });
+
+      expect(report).toMatchObject({ passed: false, changed: false });
+      expect(report.actions).toContainEqual(expect.objectContaining({
+        status: 'fail',
+        name: 'unsafe run recovery root',
+      }));
+      expect(existsSync(victim)).toBe(true);
+    },
+  );
+
+  it('does not remove scaffolding when active metadata appears during recovery', () => {
+    const repoPath = makeTempRepo();
+    const runPath = join(repoPath, '.takt', 'runs', 'active-race');
+    mkdirSync(join(runPath, 'context'), { recursive: true });
+
+    const report = runPersonalRecovery({
+      repoPath,
+      apply: true,
+      beforeMissingRunRemoval() {
+        writeRunMeta(repoPath, 'active-race', {
+          updatedAt: new Date().toISOString(),
+        });
+      },
+    });
+
+    expect(report.actions).toContainEqual(expect.objectContaining({
+      status: 'fail',
+      name: 'missing run metadata active-race',
+    }));
+    expect(existsSync(join(runPath, 'context'))).toBe(true);
+    expect(existsSync(join(runPath, 'meta.json'))).toBe(true);
+    expect(inspectProjectTemplateApplyGuard({ repoPath }).passed).toBe(false);
+  });
+
+  it('revalidates runs ancestry before removal and preserves a raced external victim', () => {
+    const repoPath = makeTempRepo();
+    const externalRuns = makeTempRepo();
+    const victim = join(externalRuns, 'external-victim', 'context');
+    mkdirSync(victim, { recursive: true });
+    const runsRoot = join(repoPath, '.takt', 'runs');
+    mkdirSync(join(runsRoot, 'crash-left', 'context'), { recursive: true });
+
+    const report = runPersonalRecovery({
+      repoPath,
+      apply: true,
+      beforeMissingRunRemoval() {
+        rmSync(runsRoot, { recursive: true });
+        symlinkSync(externalRuns, runsRoot);
+      },
+    });
+
+    expect(report.actions).toContainEqual(expect.objectContaining({
+      status: 'fail',
+      message: 'run ancestry changed during recovery and was left fail-closed',
+    }));
+    expect(existsSync(victim)).toBe(true);
   });
 
   it('removes stale lock files but preserves recent locks', () => {

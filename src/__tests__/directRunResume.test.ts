@@ -14,6 +14,8 @@ const {
   mockFormatRunSessionForPrompt,
   mockRunDirectRetryMode,
   mockRunDirectInstructMode,
+  mockEnsureDir,
+  mockWriteFileAtomic,
 } = vi.hoisted(() => ({
   mockFindLatestResumableDirectRun: vi.fn(),
   mockSelectOption: vi.fn(),
@@ -27,6 +29,8 @@ const {
   mockFormatRunSessionForPrompt: vi.fn(),
   mockRunDirectRetryMode: vi.fn(),
   mockRunDirectInstructMode: vi.fn(),
+  mockEnsureDir: vi.fn(),
+  mockWriteFileAtomic: vi.fn(),
 }));
 
 vi.mock('../features/tasks/resume/directRunFinder.js', () => ({
@@ -49,6 +53,8 @@ vi.mock('../features/tasks/execute/taskExecution.js', () => ({
 }));
 
 vi.mock('../infra/config/index.js', () => ({
+  ensureDir: mockEnsureDir,
+  writeFileAtomic: mockWriteFileAtomic,
   loadWorkflowByIdentifier: mockLoadWorkflowByIdentifier,
   getWorkflowDescription: vi.fn(() => ({
     name: 'default',
@@ -57,6 +63,10 @@ vi.mock('../infra/config/index.js', () => ({
     stepPreviews: [],
   })),
   resolveWorkflowConfigValue: vi.fn(() => 3),
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteFileAtomic,
 }));
 
 vi.mock('../core/workflow/run/order-content.js', () => ({
@@ -113,6 +123,7 @@ function createRun(overrides?: Record<string, unknown>) {
       currentIteration: 5,
       iterations: 50,
       resumePoint,
+      workflowGenerationWitness: 'a'.repeat(64),
       ...overrides,
     },
   };
@@ -142,6 +153,19 @@ describe('resumeDirectRun', () => {
     expect(mockInfo).toHaveBeenCalledTimes(1);
     expect(mockInfo).toHaveBeenCalledWith('No resumable direct run found. Use `takt list` for queued tasks.');
     expect(mockSelectOption).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a legacy direct continuation without a generation witness', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun({
+      workflowGenerationWitness: undefined,
+    }));
+    mockSelectOption.mockResolvedValueOnce('requeue');
+
+    await expect(resumeDirectRun('/project')).rejects.toMatchObject({
+      name: 'WorkflowDiscoveryReadError',
+      message: 'Workflow discovery failed',
+    });
+    expect(mockExecuteTaskWithResult).not.toHaveBeenCalled();
   });
 
   it('Given a resumable direct run, When the menu is shown, Then only direct-run actions are offered', async () => {
@@ -219,6 +243,11 @@ describe('resumeDirectRun', () => {
         taskSource: 'manual',
       },
     }));
+    const reservationStates = mockWriteFileAtomic.mock.calls.map((call) =>
+      (JSON.parse(String(call[1])) as { status: string }).status);
+    expect(reservationStates).toEqual(['running', 'completed']);
+    expect(mockWriteFileAtomic.mock.invocationCallOrder[0])
+      .toBeLessThan(mockLoadWorkflowByIdentifier.mock.invocationCallOrder[0]!);
   });
 
   it('Given Requeue is selected without a valid resume point, When currentStep exists in the workflow, Then currentStep is used as startStep', async () => {
@@ -326,10 +355,39 @@ describe('resumeDirectRun', () => {
     }));
     expect(mockExecuteTaskWithResult).toHaveBeenCalledWith(expect.objectContaining({
       retryNote: 'Also update regression coverage',
+      retrySource: expect.objectContaining({
+        configuredStartStep: 'fix',
+        resumePoint,
+        initialIteration: 5,
+        generationWitness: expect.stringMatching(/^[0-9a-f]{64}$/),
+      }),
       directResume: {
         sourceRunSlug: '20260524-direct-failed',
         resumeMode: 'instruct',
       },
+    }));
+  });
+
+  it('Given Instruct changes a same-name workflow, Then generation A remains attached to the old resume stack', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun());
+    mockSelectOption.mockResolvedValueOnce('instruct');
+    mockRunDirectInstructMode.mockImplementationOnce(async () => {
+      mockLoadWorkflowByIdentifier.mockReturnValue({
+        ...workflow,
+        steps: workflow.steps.map((step) => (
+          step.name === 'review' ? { ...step, instruction: 'Generation B review' } : step
+        )),
+      });
+      return { action: 'execute', task: 'Continue after editing the workflow' };
+    });
+
+    await resumeDirectRun('/project');
+
+    expect(mockExecuteTaskWithResult).toHaveBeenCalledWith(expect.objectContaining({
+      retrySource: expect.objectContaining({
+        resumePoint,
+        generationWitness: 'a'.repeat(64),
+      }),
     }));
   });
 
@@ -350,6 +408,37 @@ describe('resumeDirectRun', () => {
         previousOrderContent: null,
       }),
     );
+  });
+
+  it('Given Retry waits for interaction, Then preparation evidence remains active until cancellation', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun());
+    mockSelectOption.mockResolvedValueOnce('retry');
+    mockRunDirectRetryMode.mockImplementationOnce(async () => {
+      const current = JSON.parse(String(mockWriteFileAtomic.mock.calls.at(-1)?.[1])) as {
+        status: string;
+      };
+      expect(current.status).toBe('running');
+      return { action: 'cancel', task: '' };
+    });
+
+    await resumeDirectRun('/project');
+
+    const reservationStates = mockWriteFileAtomic.mock.calls.map((call) =>
+      (JSON.parse(String(call[1])) as { status: string }).status);
+    expect(reservationStates).toEqual(['running', 'aborted']);
+    expect(mockExecuteTaskWithResult).not.toHaveBeenCalled();
+  });
+
+  it('Given context loading fails after reservation, Then the reservation is aborted', async () => {
+    mockFindLatestResumableDirectRun.mockReturnValue(createRun());
+    mockSelectOption.mockResolvedValueOnce('requeue');
+    mockLoadWorkflowByIdentifier.mockReturnValue(undefined);
+
+    await expect(resumeDirectRun('/project')).rejects.toThrow('not found for direct run');
+
+    const reservationStates = mockWriteFileAtomic.mock.calls.map((call) =>
+      (JSON.parse(String(call[1])) as { status: string }).status);
+    expect(reservationStates).toEqual(['running', 'aborted']);
   });
 
   it('Given Instruct is selected and order.md is absent, When meta.task is used, Then previousOrderContent is null', async () => {

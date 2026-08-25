@@ -1,11 +1,17 @@
 import type { WorkflowConfig } from '../../../core/models/index.js';
 import type { WorkflowCallArgResolutionPolicy } from './workflowCallableArgResolver.js';
-import { loadWorkflowFromFile, loadWorkflowFromFileForDiscovery } from './workflowFileLoader.js';
+import {
+  loadWorkflowFromApprovedText,
+  loadWorkflowFromApprovedTextForDiscovery,
+  loadWorkflowFromFile,
+  loadWorkflowFromFileForDiscovery,
+} from './workflowFileLoader.js';
 import {
   resolveWorkflowTrustInfo,
   type WorkflowTrustInfo,
   type WorkflowTrustSource,
 } from './workflowTrustSource.js';
+import type { RepertoireResourceReadAccess } from './workflowPackageScope.js';
 
 type WorkflowLoadMode = 'runtime' | 'discovery';
 
@@ -16,6 +22,7 @@ export interface WorkflowResolvedLoaderOptions {
   parentTrustInfo?: WorkflowTrustInfo;
   projectCwd: string;
   source?: WorkflowTrustSource;
+  repertoireReadAccess?: RepertoireResourceReadAccess;
 }
 
 function buildWorkflowCallArgPolicy(
@@ -48,7 +55,31 @@ export function loadWorkflowFileWithResolutionOptions(
     trustInfo,
     callableArgs: options.callableArgs,
     callableArgPolicy: buildWorkflowCallArgPolicy(options.parentTrustInfo, trustInfo),
+    repertoireReadAccess: options.repertoireReadAccess,
   });
 
   return workflow;
+}
+
+/** @internal Loads descriptor-approved bytes without reopening filePath. */
+export function loadWorkflowApprovedTextWithResolutionOptions(
+  filePath: string,
+  approvedText: string,
+  options: WorkflowResolvedLoaderOptions,
+): WorkflowConfig {
+  const trustInfo = resolveWorkflowTrustInfo({
+    filePath,
+    projectCwd: options.projectCwd,
+    lookupCwd: options.lookupCwd,
+    source: options.source,
+  });
+  const loadWorkflow = options.loadMode === 'discovery'
+    ? loadWorkflowFromApprovedTextForDiscovery
+    : loadWorkflowFromApprovedText;
+  return loadWorkflow(filePath, approvedText, options.projectCwd, {
+    trustInfo,
+    callableArgs: options.callableArgs,
+    callableArgPolicy: buildWorkflowCallArgPolicy(options.parentTrustInfo, trustInfo),
+    repertoireReadAccess: options.repertoireReadAccess,
+  });
 }

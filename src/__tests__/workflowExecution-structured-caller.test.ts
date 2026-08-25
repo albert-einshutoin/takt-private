@@ -16,6 +16,7 @@ const {
   mockEnsureCurrentTmpDirExists,
   mockGetProvider,
   mockRunAgent,
+  mockWriteRunMeta,
 } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { EventEmitter: EE } = require('node:events') as typeof import('node:events');
@@ -75,6 +76,7 @@ const {
     mockEnsureCurrentTmpDirExists: vi.fn(() => getTmpdir()),
     mockGetProvider: vi.fn(),
     mockRunAgent: vi.fn(),
+    mockWriteRunMeta: vi.fn(),
   };
 });
 
@@ -117,7 +119,11 @@ vi.mock('../infra/config/index.js', async (importOriginal) => ({
   }),
   saveSessionState: vi.fn(),
   ensureDir: vi.fn(),
-  writeFileAtomic: vi.fn(),
+  writeFileAtomic: mockWriteRunMeta,
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteRunMeta,
 }));
 
 vi.mock('../shared/context.js', () => ({
@@ -240,6 +246,35 @@ function getInjectedStructuredCaller(): StructuredCaller {
   const structuredCaller = MockWorkflowEngine.lastInstance.receivedOptions.structuredCaller;
   expectStructuredCallerShape(structuredCaller);
   return structuredCaller as StructuredCaller;
+}
+
+function resolveWorkflowCallDuringRun(
+  identifier: string,
+  stepName: string,
+  projectCwd: string,
+  beforeResolve?: () => void,
+): () => WorkflowConfig | null | undefined {
+  let childWorkflow: WorkflowConfig | null | undefined;
+  MockWorkflowEngine.nextRunImpl = async (instance) => {
+    beforeResolve?.();
+    childWorkflow = (
+      instance.receivedOptions.workflowCallResolver as (args: {
+        parentWorkflow: WorkflowConfig;
+        identifier: string;
+        stepName: string;
+        projectCwd: string;
+        lookupCwd: string;
+      }) => WorkflowConfig | null
+    )({
+      parentWorkflow: instance.receivedConfig,
+      identifier,
+      stepName,
+      projectCwd,
+      lookupCwd: projectCwd,
+    });
+    return { status: 'completed', iteration: 1 };
+  };
+  return () => childWorkflow;
 }
 
 describe('executeWorkflow structuredCaller injection', () => {
@@ -586,26 +621,26 @@ steps:
 
     const externalParent = loadWorkflowByIdentifier(externalParentPath, projectDir);
     expect(externalParent).not.toBeNull();
+    const getChildWorkflow = resolveWorkflowCallDuringRun(
+      'takt/coding',
+      'delegate',
+      projectDir,
+      () => writeWorkflow(projectDir, '.takt/workflows/takt/coding.yaml', `name: takt/coding
+subworkflow:
+  callable: true
+initial_step: review
+max_steps: 2
+steps:
+  - name: review
+    persona: generation-b-reviewer
+    instruction: "Generation B child"
+`),
+    );
 
     await executeWorkflow(externalParent!, 'task', projectDir, {
       projectCwd: projectDir,
     });
-
-    const childWorkflow = (
-      MockWorkflowEngine.lastInstance.receivedOptions.workflowCallResolver as (args: {
-        parentWorkflow: WorkflowConfig;
-        identifier: string;
-        stepName: string;
-        projectCwd: string;
-        lookupCwd: string;
-      }) => WorkflowConfig | null
-    )({
-      parentWorkflow: MockWorkflowEngine.lastInstance.receivedConfig,
-      identifier: 'takt/coding',
-      stepName: 'delegate',
-      projectCwd: projectDir,
-      lookupCwd: projectDir,
-    });
+    const childWorkflow = getChildWorkflow();
 
     expect(childWorkflow).not.toBeNull();
     expect(childWorkflow?.steps[0]).toMatchObject({
@@ -641,26 +676,12 @@ steps:
 
     const externalParent = loadWorkflowByIdentifier(externalParentPath, projectDir);
     expect(externalParent).not.toBeNull();
+    const getChildWorkflow = resolveWorkflowCallDuringRun('default', 'delegate', projectDir);
 
     await executeWorkflow(externalParent!, 'task', projectDir, {
       projectCwd: projectDir,
     });
-
-    const childWorkflow = (
-      MockWorkflowEngine.lastInstance.receivedOptions.workflowCallResolver as (args: {
-        parentWorkflow: WorkflowConfig;
-        identifier: string;
-        stepName: string;
-        projectCwd: string;
-        lookupCwd: string;
-      }) => WorkflowConfig | null
-    )({
-      parentWorkflow: MockWorkflowEngine.lastInstance.receivedConfig,
-      identifier: 'default',
-      stepName: 'delegate',
-      projectCwd: projectDir,
-      lookupCwd: projectDir,
-    });
+    const childWorkflow = getChildWorkflow();
 
     expect(childWorkflow).not.toBeNull();
     expect(childWorkflow?.name).toBe('default');
@@ -701,6 +722,7 @@ steps:
 
     const externalParent = loadWorkflowByIdentifier(externalParentPath, projectDir);
     expect(externalParent).not.toBeNull();
+    const getChildWorkflow = resolveWorkflowCallDuringRun('./child.yaml', 'delegate', projectDir);
 
     await executeWorkflow(externalParent!, 'task', projectDir, {
       projectCwd: projectDir,
@@ -708,21 +730,7 @@ steps:
 
     expect(getWorkflowSourcePath(MockWorkflowEngine.lastInstance.receivedConfig)).toBeUndefined();
 
-    const childWorkflow = (
-      MockWorkflowEngine.lastInstance.receivedOptions.workflowCallResolver as (args: {
-        parentWorkflow: WorkflowConfig;
-        identifier: string;
-        stepName: string;
-        projectCwd: string;
-        lookupCwd: string;
-      }) => WorkflowConfig | null
-    )({
-      parentWorkflow: MockWorkflowEngine.lastInstance.receivedConfig,
-      identifier: './child.yaml',
-      stepName: 'delegate',
-      projectCwd: projectDir,
-      lookupCwd: projectDir,
-    });
+    const childWorkflow = getChildWorkflow();
 
     expect(childWorkflow).not.toBeNull();
     expect(childWorkflow?.steps[0]).toMatchObject({

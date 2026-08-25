@@ -8,6 +8,11 @@ import { AbortHandler } from './abortHandler.js';
 import { createIterationLimitHandler, createUserInputHandler } from './iterationLimitHandler.js';
 import { createWorkflowExecutionBootstrap } from './workflowExecutionBootstrap.js';
 import { createWorkflowExecutionContext, createWorkflowCallResolver } from './workflowExecutionContext.js';
+import { snapshotWorkflowRuntimeRead } from './workflowRuntimeReadBoundary.js';
+import {
+  buildWorkflowGenerationSnapshot,
+  disposeWorkflowGenerationSnapshot,
+} from './workflowRetryGeneration.js';
 import { bindWorkflowExecutionEvents, type WorkflowExecutionEventBridge } from './workflowExecutionEvents.js';
 import { createLogger } from '../../../shared/utils/index.js';
 import { getErrorMessage } from '../../../shared/utils/error.js';
@@ -108,7 +113,7 @@ export async function executeWorkflow(
   cwd: string,
   options: WorkflowExecutionOptions,
 ): Promise<WorkflowExecutionResult> {
-  return executeWorkflowInternal(workflowConfig, task, cwd, options);
+  return executeWorkflowWithPinnedGeneration(workflowConfig, task, cwd, options);
 }
 
 export async function executeWorkflowForRun(
@@ -118,7 +123,37 @@ export async function executeWorkflowForRun(
   options: WorkflowExecutionOptions,
   runContext?: WorkflowRunContext,
 ): Promise<WorkflowExecutionResult> {
-  return executeWorkflowInternal(workflowConfig, task, cwd, options, runContext);
+  return executeWorkflowWithPinnedGeneration(workflowConfig, task, cwd, options, runContext);
+}
+
+async function executeWorkflowWithPinnedGeneration(
+  workflowConfig: WorkflowConfig,
+  task: string,
+  cwd: string,
+  options: WorkflowExecutionOptions,
+  runContext?: WorkflowRunContext,
+): Promise<WorkflowExecutionResult> {
+  if (options.workflowGenerationSnapshot) {
+    return executeWorkflowInternal(workflowConfig, task, cwd, options, runContext);
+  }
+  // Public/direct execution may bypass executeTaskWorkflow. Capture its full
+  // callable tree before bootstrap so provider waits can never re-read disk.
+  const snapshot = snapshotWorkflowRuntimeRead({
+    snapshot: (readContext) => buildWorkflowGenerationSnapshot(
+      workflowConfig,
+      options.projectCwd,
+      cwd,
+      readContext,
+    ),
+  });
+  try {
+    return await executeWorkflowInternal(workflowConfig, task, cwd, {
+      ...options,
+      workflowGenerationSnapshot: snapshot,
+    }, runContext);
+  } finally {
+    disposeWorkflowGenerationSnapshot(snapshot);
+  }
 }
 
 async function executeWorkflowInternal(
@@ -166,6 +201,9 @@ async function executeWorkflowInternal(
         newMaxSteps: request.maxSteps + workflowMaxSteps,
         currentIteration: request.currentIteration,
         ...(resumePoint ? { resumePoint } : {}),
+        ...(options.workflowGenerationWitness
+          ? { workflowGenerationWitness: options.workflowGenerationWitness }
+          : {}),
       };
     },
   );
@@ -228,7 +266,11 @@ async function executeWorkflowInternal(
       traceTaskMetadata: options.traceTaskMetadata,
       phase1ProcessSafetyByStep,
       systemStepServicesFactory: createDefaultSystemStepServices,
-      workflowCallResolver: createWorkflowCallResolver(workflowExecutionContext),
+      workflowCallResolver: createWorkflowCallResolver(
+        workflowExecutionContext,
+        options.workflowGenerationSnapshot,
+        bootstrap.effectiveWorkflowConfig,
+      ),
     });
 
     eventBridge = bindWorkflowExecutionEvents({

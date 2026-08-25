@@ -18,6 +18,7 @@ import { initGitProvider } from '../../infra/git/index.js';
 import { setQuietMode } from '../../shared/context.js';
 import { setLogLevel } from '../../shared/ui/index.js';
 import { initDebugLogger, createLogger, setVerboseConsole } from '../../shared/utils/index.js';
+import { isProjectTemplateCliInvocation } from './projectTemplateInvocation.js';
 
 const require = createRequire(import.meta.url);
 const { version: cliVersion } = require('../../../package.json') as { version: string };
@@ -57,6 +58,7 @@ program
   .option('--pipeline', 'Pipeline mode: non-interactive, no worktree, direct branch creation')
   .option('--isolation <mode>', 'Execution isolation mode for pipeline runs (none|worktree|copy)')
   .option('--copy-workspace', 'Run pipeline in a copied workspace (alias for --isolation copy)')
+  .option('--cwd <path>', 'Project root (project-template commands)')
   .option('--skip-git', 'Skip branch creation, commit, and push (pipeline mode)')
   .option('-q, --quiet', 'Minimal output mode: suppress AI output (for CI)')
   .option('-c, --continue', 'Continue from the last assistant session');
@@ -66,9 +68,16 @@ program
  * Exported for use in slash-command fallback logic.
  */
 export async function runPreActionHook(): Promise<void> {
-  resolvedCwd = resolve(process.cwd());
-
   const rootOpts = program.opts();
+  resolvedCwd = resolve(
+    typeof rootOpts.cwd === 'string' ? rootOpts.cwd : process.cwd(),
+  );
+  if (isProjectTemplateCliInvocation(process.argv.slice(2))) {
+    // Project-template owns a closed machine-output lifecycle and must not
+    // initialize interactive config, Git providers, logging, or update UI.
+    return;
+  }
+
   pipelineMode = rootOpts.pipeline === true;
 
   await initGlobalDirs({ nonInteractive: pipelineMode });

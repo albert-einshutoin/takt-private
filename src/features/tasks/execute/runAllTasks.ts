@@ -15,8 +15,33 @@ import { getLabel } from '../../../shared/i18n/index.js';
 import type { RunAllTasksOptions, TaskExecutionOptions } from './types.js';
 import { runWithWorkerPool } from './parallelExecution.js';
 import { toSlackTaskDetail } from './slackSummaryAdapter.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+} from './projectTemplatePreparationReservation.js';
 
 export async function runAllTasks(
+  cwd: string,
+  options?: RunAllTasksOptions,
+): Promise<void> {
+  // The coordinator record spans configuration reads, initial/refill claims,
+  // and the complete worker pool. Per-task records alone leave cross-process
+  // gaps where apply could commit after old scheduling state was loaded.
+  const preparationReservation = beginProjectTemplatePreparation({
+    projectRoot: cwd,
+    task: 'Coordinate queued task execution',
+    workflow: 'run-all-preparation',
+  });
+  try {
+    await runAllTasksUnderReservation(cwd, options);
+    preparationReservation.complete();
+  } catch (error) {
+    abortProjectTemplatePreparationAfterError(preparationReservation, error);
+    throw error;
+  }
+}
+
+async function runAllTasksUnderReservation(
   cwd: string,
   options?: RunAllTasksOptions,
 ): Promise<void> {

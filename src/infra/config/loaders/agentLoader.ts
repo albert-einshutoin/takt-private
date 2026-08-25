@@ -6,8 +6,8 @@
  * 2. Builtin personas: builtins/{lang}/facets/personas/*.md
  */
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import type { CustomAgentConfig } from '../../../core/models/index.js';
 import {
   getGlobalConfigDir,
@@ -20,6 +20,10 @@ import {
   isPathSafe,
 } from '../paths.js';
 import { resolveConfigValue } from '../resolveConfigValue.js';
+import { withImmediateRepertoireReadPermit } from '../../../features/repertoire/read-permit.js';
+import { createInternalWorkflowReadContext } from './workflowDiscovery.js';
+import { createRepertoireResourceReadAccess } from './repertoireResourceReadAccess.js';
+import { readStableWorkflowResourceText } from './workflowResourceSafeReader.js';
 
 /** Get all allowed base directories for persona prompt files */
 function getAllowedPromptBases(cwd: string): string[] {
@@ -46,14 +50,81 @@ function getAllowedPromptBases(cwd: string): string[] {
 }
 
 export function validatePersonaPromptPath(personaPath: string, cwd: string): void {
-  const isValid = getAllowedPromptBases(cwd).some((base) => isPathSafe(base, personaPath));
-  if (!isValid) {
+  const allowed = assertAllowedPromptPath(personaPath, cwd);
+  if (allowed.isRepertoire) {
+    readRepertoirePersonaPrompt(personaPath, false);
+    return;
+  }
+  assertPromptExists(personaPath);
+}
+
+type AllowedPromptPath = {
+  isRepertoire: boolean;
+  trustedBaseDir: string;
+};
+
+function assertAllowedPromptPath(personaPath: string, cwd: string): AllowedPromptPath {
+  const allowedBase = getAllowedPromptBases(cwd).find((base) => isPathSafe(base, personaPath));
+  if (!allowedBase) {
     throw new Error(`Persona prompt file path is not allowed: ${personaPath}`);
   }
+  return {
+    // Repertoire membership follows filesystem identity, not caller spelling.
+    // Otherwise an ancestor alias can select the uncoordinated resource reader.
+    isRepertoire: isRepertoirePromptPath(personaPath),
+    trustedBaseDir: alignBasePathSpelling(allowedBase, personaPath),
+  };
+}
 
-  if (!existsSync(personaPath)) {
-    throw new Error(`Persona prompt file not found: ${personaPath}`);
+function alignBasePathSpelling(allowedBase: string, personaPath: string): string {
+  try {
+    const relativeCanonicalPath = relative(realpathSync(allowedBase), realpathSync(personaPath));
+    if (
+      relativeCanonicalPath === ''
+      || relativeCanonicalPath.startsWith('..')
+      || isAbsolute(relativeCanonicalPath)
+    ) return allowedBase;
+    let alignedBase = personaPath;
+    for (let remainingSegments = relativeCanonicalPath.split(sep).length; remainingSegments > 0; remainingSegments -= 1) {
+      alignedBase = dirname(alignedBase);
+    }
+    return alignedBase;
+  } catch {
+    return allowedBase;
   }
+}
+
+function assertPromptExists(personaPath: string): void {
+  if (!existsSync(personaPath)) throw new Error(`Persona prompt file not found: ${personaPath}`);
+}
+
+function isRepertoirePromptPath(personaPath: string): boolean {
+  const repertoireDir = getRepertoireDir();
+  if (isInsideRepertoire(repertoireDir, personaPath)) return true;
+  try {
+    return isInsideRepertoire(realpathSync(repertoireDir), realpathSync(personaPath));
+  } catch {
+    return false;
+  }
+}
+
+function isInsideRepertoire(repertoireDir: string, personaPath: string): boolean {
+  const candidate = relative(repertoireDir, personaPath);
+  return candidate !== '' && !candidate.startsWith('..') && !isAbsolute(candidate);
+}
+
+function readRepertoirePersonaPrompt(personaPath: string, returnText: boolean): string {
+  const globalConfigDir = getGlobalConfigDir();
+  return withImmediateRepertoireReadPermit({
+    globalConfigDir,
+    operation: (permit) => {
+      const access = createRepertoireResourceReadAccess(
+        createInternalWorkflowReadContext(globalConfigDir, permit),
+      );
+      if (!access.exists(personaPath)) throw new Error(`Persona prompt file not found: ${personaPath}`);
+      return returnText ? access.readText(personaPath) : '';
+    },
+  });
 }
 
 /** Load agents from markdown files in a directory */
@@ -97,13 +168,13 @@ export function loadAgentPrompt(agent: CustomAgentConfig, cwd: string): string {
 
   if (agent.promptFile) {
     const promptFile = agent.promptFile;
-    validatePersonaPromptPath(promptFile, cwd);
+    const allowed = assertAllowedPromptPath(promptFile, cwd);
 
-    if (!existsSync(agent.promptFile)) {
-      throw new Error(`Agent prompt file not found: ${agent.promptFile}`);
-    }
+    if (allowed.isRepertoire) return readRepertoirePersonaPrompt(promptFile, true);
 
-    return readFileSync(agent.promptFile, 'utf-8');
+    assertPromptExists(promptFile);
+
+    return readStableWorkflowResourceText(agent.promptFile, allowed.trustedBaseDir);
   }
 
   throw new Error(`Agent ${agent.name} has no prompt defined`);
@@ -111,6 +182,8 @@ export function loadAgentPrompt(agent: CustomAgentConfig, cwd: string): string {
 
 /** Load persona prompt from a resolved path. */
 export function loadPersonaPromptFromPath(personaPath: string, cwd: string): string {
-  validatePersonaPromptPath(personaPath, cwd);
-  return readFileSync(personaPath, 'utf-8');
+  const allowed = assertAllowedPromptPath(personaPath, cwd);
+  if (allowed.isRepertoire) return readRepertoirePersonaPrompt(personaPath, true);
+  assertPromptExists(personaPath);
+  return readStableWorkflowResourceText(personaPath, allowed.trustedBaseDir);
 }

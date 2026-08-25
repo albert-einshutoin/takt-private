@@ -91,6 +91,22 @@ Before installing, TAKT displays a summary of the package contents (facet counts
 
 Installation is atomic — if it fails partway, no partial state is left behind.
 
+### Cross-machine and Windows coordination
+
+The `.takt` tree can be copied to another TaktDesk machine. Host-specific
+device, inode, timestamp, and canonical-path evidence is never stored as
+portable authorization; the destination proves its own filesystem state before
+reading or mutating the repertoire.
+
+On Windows, coordination is limited to the standard `.takt` directory under
+the OS profile. Local-drive, non-reparse directory identity and a retained
+regular-file sentinel protect the coordination lifetime. An unfinished
+sentinel or lease publication blocks acquisition within the requested timeout
+and is never automatically deleted. Move a tree only while all TaktDesk
+instances using it are stopped; if acquisition reports recovery or unsafe
+state, preserve `.takt-repertoire-coordination` for diagnosis instead of
+manually removing individual files.
+
 ### Security constraints
 
 - Only `.md`, `.yaml`, `.yml` files are copied

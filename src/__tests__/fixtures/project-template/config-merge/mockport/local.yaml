@@ -1,0 +1,21 @@
+# Curated from Mockport without credentials or machine-local paths.
+subscription_only: true
+provider: codex-cli
+allowed_providers:
+  - codex-cli
+  - cursor-cli
+  - opencode-cli
+  - agy-cli
+forbidden_providers:
+  - codex
+  - claude-sdk
+provider_routing:
+  personas:
+    planner:
+      provider: cursor-cli
+      model: mockport-planner
+workflow_overrides:
+  quality_gates:
+    - npm test
+    - go test ./...
+minimal_output: false

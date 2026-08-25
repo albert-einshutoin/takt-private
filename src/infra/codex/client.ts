@@ -4,6 +4,7 @@
  * Uses @openai/codex-sdk for native TypeScript integration.
  */
 
+import './codex-spawn-guard.js';
 import { Codex, type CodexOptions, type Input, type TurnOptions } from '@openai/codex-sdk';
 import { USAGE_MISSING_REASONS } from '../../core/logging/contracts.js';
 import type { AgentResponse, ProviderUsageSnapshot } from '../../core/models/index.js';
@@ -349,6 +350,7 @@ export class CodexClient {
       ...(options.model ? { model: options.model } : {}),
       workingDirectory: options.cwd,
       sandboxMode,
+      approvalPolicy: 'never' as const,
       ...(options.reasoningEffort ? { modelReasoningEffort: options.reasoningEffort } : {}),
       ...(options.networkAccess === undefined ? {} : { networkAccessEnabled: options.networkAccess }),
     };
@@ -372,6 +374,8 @@ export class CodexClient {
     let accumulatedProviderUsage: ProviderUsageSnapshot | undefined;
     let skillConfig: CodexOptions['config'] | undefined;
     const codexEnvironment = buildCodexEnvironment(options.childProcessEnv);
+    const shellPath = codexEnvironment.PATH
+      ?? Object.entries(codexEnvironment).find(([key]) => key.toUpperCase() === 'PATH')?.[1];
     try {
       skillConfig = options.skills
         ? buildCodexSkillConfig({
@@ -396,7 +400,18 @@ export class CodexClient {
         ...(options.openaiApiKey ? { apiKey: options.openaiApiKey } : {}),
         ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
         ...(options.codexPathOverride ? { codexPathOverride: options.codexPathOverride } : {}),
-        ...(skillConfig !== undefined ? { config: skillConfig } : {}),
+        ...(
+          skillConfig !== undefined || shellPath !== undefined
+            ? {
+                config: {
+                  ...(skillConfig ?? {}),
+                  ...(shellPath === undefined
+                    ? {}
+                    : { shell_environment_policy: { set: { PATH: shellPath } } }),
+                },
+              }
+            : {}
+        ),
       };
       const codex = new Codex(codexClientOptions);
       const thread = threadId

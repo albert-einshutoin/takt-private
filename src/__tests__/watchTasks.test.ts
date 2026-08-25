@@ -15,6 +15,9 @@ const {
   mockSuccess,
   mockWarn,
   mockError,
+  mockBeginProjectTemplatePreparation,
+  mockCompleteProjectTemplatePreparation,
+  mockAbortProjectTemplatePreparation,
 } = vi.hoisted(() => ({
   mockFailInterruptedRunningTasks: vi.fn(),
   mockGetTasksFilePath: vi.fn(),
@@ -29,6 +32,9 @@ const {
   mockSuccess: vi.fn(),
   mockWarn: vi.fn(),
   mockError: vi.fn(),
+  mockBeginProjectTemplatePreparation: vi.fn(),
+  mockCompleteProjectTemplatePreparation: vi.fn(),
+  mockAbortProjectTemplatePreparation: vi.fn(),
 }));
 
 vi.mock('../infra/task/index.js', () => ({
@@ -48,6 +54,19 @@ vi.mock('../features/tasks/execute/taskExecution.js', () => ({
 
 vi.mock('../features/tasks/execute/runTaskExecution.js', () => ({
   executeRunTaskAndComplete: mockExecuteRunTaskAndComplete,
+}));
+
+vi.mock('../features/tasks/execute/projectTemplatePreparationReservation.js', () => ({
+  abortProjectTemplatePreparationAfterError: (
+    reservation: { abort(): void },
+  ) => reservation.abort(),
+  beginProjectTemplatePreparation: (...args: unknown[]) => {
+    mockBeginProjectTemplatePreparation(...args);
+    return {
+      complete: mockCompleteProjectTemplatePreparation,
+      abort: mockAbortProjectTemplatePreparation,
+    };
+  },
 }));
 
 vi.mock('../shared/ui/index.js', () => ({
@@ -94,6 +113,13 @@ describe('watchTasks', () => {
     expect(mockInfo).toHaveBeenCalledWith('Marked 1 interrupted running task(s) as failed.');
     expect(mockWatch).toHaveBeenCalledTimes(1);
     expect(mockExecuteRunTaskAndComplete).toHaveBeenCalledTimes(1);
+    expect(mockBeginProjectTemplatePreparation).toHaveBeenCalledWith({
+      projectRoot: '/project',
+      task: 'Coordinate watch task execution',
+      workflow: 'watch-lifecycle',
+    });
+    expect(mockCompleteProjectTemplatePreparation).toHaveBeenCalledTimes(1);
+    expect(mockAbortProjectTemplatePreparation).not.toHaveBeenCalled();
   });
 
   it('watch ループで executeRunTaskAndComplete を呼び出す', async () => {

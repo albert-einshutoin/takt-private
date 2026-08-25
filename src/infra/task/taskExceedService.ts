@@ -8,6 +8,7 @@ export interface ExceedTaskOptions {
   newMaxSteps: number;
   currentIteration: number;
   resumePoint?: WorkflowResumePoint;
+  workflowGenerationWitness?: string;
   worktreePath?: string;
   copyWorkspacePath?: string;
   branch?: string;
@@ -36,6 +37,7 @@ export class TaskExceedService {
         exceeded_max_steps: options.newMaxSteps,
         exceeded_current_iteration: options.currentIteration,
         resume_point: options.resumePoint,
+        workflow_generation_witness: options.workflowGenerationWitness,
         ...(options.worktreePath ? { worktree_path: options.worktreePath } : {}),
         ...(options.copyWorkspacePath ? { copy_workspace_path: options.copyWorkspacePath } : {}),
         ...(options.branch ? { branch: options.branch } : {}),

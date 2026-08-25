@@ -1,4 +1,5 @@
 import {
+  invalidateResolvedConfigCache,
   loadWorkflowByIdentifier,
   isWorkflowPath,
 } from '../../../infra/config/index.js';
@@ -17,10 +18,42 @@ import { buildBooleanTaskResult, persistTaskError, persistTaskResult } from './t
 import { prepareTaskSpecDirectory, cleanupPreparedTaskSpec } from '../attachments.js';
 import { cleanupStagedTaskSpec, stageTaskSpecForExecution, type StagedTaskSpec } from './taskSpecContext.js';
 import { buildTraceTaskMetadata } from './traceTaskMetadata.js';
+import {
+  abortProjectTemplatePreparationAfterError,
+  beginProjectTemplatePreparation,
+} from './projectTemplatePreparationReservation.js';
+import { getWorkflowSourcePath } from '../../../infra/config/loaders/workflowSourceMetadata.js';
 
 export type { WorktreeConfirmationResult, SelectAndExecuteOptions };
 
 const log = createLogger('selectAndExecute');
+
+type WorkflowSourceSnapshot =
+  | { readonly kind: 'resolved'; readonly source: string }
+  | { readonly kind: 'unresolved' }
+  | { readonly kind: 'error'; readonly error: unknown };
+
+function captureSelectedWorkflowSource(
+  cwd: string,
+  workflowIdentifier: string,
+): WorkflowSourceSnapshot {
+  try {
+    const workflow = loadWorkflowByIdentifier(
+      workflowIdentifier,
+      cwd,
+      { lookupCwd: cwd },
+    );
+    if (workflow === null) return { kind: 'unresolved' };
+    const source = getWorkflowSourcePath(workflow);
+    return source === undefined
+      ? { kind: 'unresolved' }
+      : { kind: 'resolved', source };
+  } catch (error) {
+    // Loader failures must be terminalized by the durable preparation
+    // reservation rather than escaping as unaudited pre-reservation errors.
+    return { kind: 'error', error };
+  }
+}
 
 function cleanupTransientTaskSpecs(
   preparedSpecTaskDir: string | undefined,
@@ -111,13 +144,78 @@ export async function selectAndExecuteTask(
   options?: SelectAndExecuteOptions,
   agentOverrides?: TaskExecutionOptions,
 ): Promise<boolean> {
+  // Selection returns only an identifier and carries no loaded template
+  // content forward. Avoid creating an audit run for cancellation, then hold
+  // one generation while that identifier is loaded and all inputs are staged.
   const workflowIdentifier = await determineWorkflow(cwd, options?.workflow);
-
   if (workflowIdentifier === null) {
     info('Cancelled');
     return false;
   }
+  const selectedWorkflowSource = captureSelectedWorkflowSource(
+    cwd,
+    workflowIdentifier,
+  );
+  const preparationReservation = beginProjectTemplatePreparation({
+    projectRoot: cwd,
+    task,
+    workflow: 'direct-task-preparation',
+  });
+  try {
+    // Selection may have populated project config caches before apply commits.
+    // Once the durable reservation freezes the generation, discard every
+    // project-scoped cached value. When selection resolved a concrete source,
+    // prove it is unchanged before TaskRunner or attachment staging mutates
+    // state. An unresolved fallback remains execution's audited error path.
+    invalidateResolvedConfigCache(cwd);
+    const reservedWorkflowSource = captureSelectedWorkflowSource(
+      cwd,
+      workflowIdentifier,
+    );
+    if (reservedWorkflowSource.kind === 'error') {
+      throw reservedWorkflowSource.error;
+    }
+    if (selectedWorkflowSource.kind === 'error') {
+      throw selectedWorkflowSource.error;
+    }
+    if (reservedWorkflowSource.kind !== selectedWorkflowSource.kind) {
+      throw new Error('workflow selection changed during preparation');
+    }
+    if (
+      selectedWorkflowSource.kind === 'resolved'
+      && reservedWorkflowSource.kind === 'resolved'
+      && reservedWorkflowSource.source !== selectedWorkflowSource.source
+    ) {
+      throw new Error('workflow selection changed during preparation');
+    }
+    const result = await selectAndExecuteTaskUnderReservation(
+      cwd,
+      task,
+      workflowIdentifier,
+      options,
+      agentOverrides,
+    );
+    preparationReservation.complete();
+    // A normal workflow failure is not a crashed preparation. Publish the
+    // terminal reservation before honoring the CLI's legacy immediate-exit
+    // behavior, otherwise process.exit would leave a stale active record.
+    if (!result && options?.exitOnFailure !== false) {
+      process.exit(1);
+    }
+    return result;
+  } catch (error) {
+    abortProjectTemplatePreparationAfterError(preparationReservation, error);
+    throw error;
+  }
+}
 
+async function selectAndExecuteTaskUnderReservation(
+  cwd: string,
+  task: string,
+  workflowIdentifier: string,
+  options?: SelectAndExecuteOptions,
+  agentOverrides?: TaskExecutionOptions,
+): Promise<boolean> {
   const execCwd = cwd;
   log.info('Starting task execution', { workflow: workflowIdentifier, worktree: false });
   const taskRunner = new TaskRunner(cwd, { onWarning: warn });
@@ -205,8 +303,5 @@ export async function selectAndExecuteTask(
     persistTaskResult(taskRunner, taskResult);
   }
 
-  if (!taskSuccess && options?.exitOnFailure !== false) {
-    process.exit(1);
-  }
   return taskSuccess;
 }

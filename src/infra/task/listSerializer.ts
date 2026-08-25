@@ -18,6 +18,7 @@ export interface JsonTaskData {
   should_publish_branch_to_origin?: boolean;
   exceeded_max_steps?: number;
   exceeded_current_iteration?: number;
+  workflow_generation_witness?: string;
 }
 
 export interface JsonTaskFailure {
@@ -69,6 +70,7 @@ function serializeTaskData(data: TaskFileData | undefined): JsonTaskData | undef
     should_publish_branch_to_origin: data.should_publish_branch_to_origin,
     exceeded_max_steps: data.exceeded_max_steps,
     exceeded_current_iteration: data.exceeded_current_iteration,
+    workflow_generation_witness: data.workflow_generation_witness,
   };
 }
 

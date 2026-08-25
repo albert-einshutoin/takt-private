@@ -109,6 +109,51 @@ const workflowCallForbiddenFieldCases = [
   { field: 'pass_previous_response', value: false },
 ] as const;
 
+function createAgentStep(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    name: 'supervise',
+    persona: 'supervisor',
+    instruction: 'Synthesize {previous_response}',
+    pass_previous_response: true,
+    rules: [{ condition: 'done', next: 'COMPLETE' }],
+    ...overrides,
+  };
+}
+
+describe('full previous-response delivery schema', () => {
+  it.each([
+    { previous_response_max_bytes: 65_536 },
+    { previous_response_overflow: 'error' },
+  ])('requires max bytes and overflow mode as a pair: %j', (override) => {
+    expect(WorkflowStepRawSchema.safeParse(createAgentStep(override)).success).toBe(false);
+  });
+
+  it('rejects a byte limit above the hard provider boundary', () => {
+    const result = WorkflowStepRawSchema.safeParse(createAgentStep({
+      previous_response_max_bytes: 98_305,
+      previous_response_overflow: 'error',
+    }));
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a full-delivery contract when previous responses are disabled', () => {
+    const result = WorkflowStepRawSchema.safeParse(createAgentStep({
+      pass_previous_response: false,
+      previous_response_max_bytes: 65_536,
+      previous_response_overflow: 'error',
+    }));
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts an enabled, paired, bounded full-delivery contract', () => {
+    const result = WorkflowStepRawSchema.safeParse(createAgentStep({
+      previous_response_max_bytes: 65_536,
+      previous_response_overflow: 'error',
+    }));
+    expect(result.success).toBe(true);
+  });
+});
+
 describe('workflow_call schema', () => {
   it('workflow_call v2 DSL を保持できる', () => {
     const callableResult = WorkflowConfigRawSchema.safeParse({

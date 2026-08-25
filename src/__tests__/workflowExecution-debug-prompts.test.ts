@@ -11,6 +11,7 @@ const {
   mockIsDebugEnabled,
   mockWritePromptLog,
   MockWorkflowEngine,
+  mockWriteRunMeta,
 } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { EventEmitter: EE } = require('node:events') as typeof import('node:events');
@@ -150,6 +151,7 @@ const {
     mockIsDebugEnabled,
     mockWritePromptLog,
     MockWorkflowEngine,
+    mockWriteRunMeta: vi.fn(),
   };
 });
 
@@ -182,7 +184,11 @@ vi.mock('../infra/config/index.js', () => ({
   }),
   saveSessionState: vi.fn(),
   ensureDir: vi.fn(),
-  writeFileAtomic: vi.fn(),
+  writeFileAtomic: mockWriteRunMeta,
+}));
+
+vi.mock('../features/tasks/execute/runMetaStorage.js', () => ({
+  writeRunMetaFileDurably: mockWriteRunMeta,
 }));
 
 vi.mock('../shared/context.js', () => ({

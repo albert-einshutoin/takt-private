@@ -6,6 +6,10 @@ import { encodeWorktreePath } from '../../../infra/config/project/sessionStore.j
 import { info, success, error as logError, warn } from '../../../shared/ui/index.js';
 import { createLogger, getErrorMessage } from '../../../shared/utils/index.js';
 import {
+  PROJECT_TAKT_DIRECTORY,
+  PROJECT_WORKTREE_SESSIONS_DIRECTORY,
+} from '../../../shared/constants/projectTaktPaths.js';
+import {
   type BranchActionTarget,
   ensureRootBranchReady,
   resolveTargetBranch,
@@ -140,7 +144,12 @@ export function deleteBranch(projectDir: string, target: BranchActionTarget): bo
       }
 
       const encodedPath = encodeWorktreePath(worktreePath);
-      const sessionFile = join(projectDir, '.takt', 'worktree-sessions', `${encodedPath}.json`);
+      const sessionFile = join(
+        projectDir,
+        PROJECT_TAKT_DIRECTORY,
+        PROJECT_WORKTREE_SESSIONS_DIRECTORY,
+        `${encodedPath}.json`,
+      );
       if (existsSync(sessionFile)) {
         unlinkSync(sessionFile);
         log.info('Removed worktree-session file', { sessionFile });

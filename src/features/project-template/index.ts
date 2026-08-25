@@ -1,0 +1,348 @@
+export {
+  parseProjectTemplateManifest,
+  serializeProjectTemplateManifest,
+} from './manifest.js';
+export { calculateProjectTemplateDraftId } from './template-editor-draft-identity.js';
+export { parseProjectTemplateGithubSourceSpec } from './github-source-spec.js';
+export type {
+  ProjectTemplateGithubRefSourceSpec,
+  ProjectTemplateGithubReleaseAssetSourceSpec,
+  ProjectTemplateGithubSourceSpec,
+} from './github-source-spec.js';
+export {
+  PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_PATH,
+  MAX_PROJECT_TEMPLATE_SOURCE_DESCRIPTOR_BYTES,
+  projectTemplateSourceDescriptorV1JsonSchema,
+  parseProjectTemplateSourceDescriptor,
+  parseProjectTemplateSourceDescriptorJson,
+  serializeProjectTemplateSourceDescriptor,
+  calculateProjectTemplateSourceDescriptorSha256,
+} from './source-descriptor.js';
+export {
+  PROJECT_TEMPLATE_SOURCE_PROVENANCE_PATH,
+  MAX_PROJECT_TEMPLATE_SOURCE_PROVENANCE_BYTES,
+  parseProjectTemplateSourceProvenance,
+  parseProjectTemplateSourceProvenanceJson,
+  serializeProjectTemplateSourceProvenance,
+  calculateProjectTemplateSourceProvenanceSha256,
+} from './source-provenance.js';
+export type {
+  ProjectTemplateSourceDescriptorPackV1,
+  ProjectTemplateRepertoireCapabilityV1,
+  ProjectTemplateRepertoireDependencyV1,
+  ProjectTemplateSourceDescriptorV1,
+} from './source-descriptor.js';
+export {
+  demoteResolvedGithubTemplateSourceToAdvisory,
+  discardResolvedGithubTemplateSource,
+  GithubTemplateSourceResolutionError,
+  resolveGithubTemplateSource,
+} from './github-update-check.js';
+export type {
+  GithubTemplateSourceResolutionErrorCode,
+  GithubTemplateResolveRefInput,
+  GithubTemplateReadFileInput,
+  GithubTemplateGetReleaseInput,
+  GithubTemplateReadReleaseAssetInput,
+  GithubTemplateSourceMetadataPort,
+  GithubTemplateSourceAdvisory,
+  GithubTemplateCurrentSourceEvidence,
+  GithubTemplateUpdateState,
+  ResolveGithubTemplateSourceOptions,
+  ResolvedGithubTemplateSource,
+} from './github-update-check.js';
+export type {
+  GithubTemplateSourceResolutionInput,
+  GithubTemplateSourceResolverPort,
+} from './github-source-resolver-port.js';
+export {
+  downloadGithubTemplateSource,
+  GithubTemplateDownloadOrchestratorError,
+} from './github-download-orchestrator.js';
+export type {
+  DownloadGithubTemplateSourceOptions,
+  DownloadedGithubTemplateSource,
+  GithubTemplateArchiveAssetInput,
+  GithubTemplateArchiveAssetPort,
+  GithubTemplateDownloadOrchestratorErrorCode,
+} from './github-download-orchestrator.js';
+export { parseTemplateLock, serializeTemplateLock } from './lock.js';
+export {
+  calculateProjectTemplateManifestSha256,
+  validateManifestLockPair,
+} from './binding.js';
+export { validateDetectedTemplateCapabilities } from './capability-detection.js';
+export {
+  classifyProjectTemplateEntry,
+} from './classifier-core.js';
+export { scanProjectTemplateDirectory } from './filesystem-scan.js';
+export {
+  projectTemplateManifestV1JsonSchema,
+  projectTemplateManifestV1_1JsonSchema,
+  projectTemplateLockV1JsonSchema,
+  projectTemplateLockV1_1JsonSchema,
+} from './schema.js';
+export {
+  ProjectTemplateValidationError,
+  TaktpackError,
+} from './errors.js';
+export type {
+  TaktpackArtifactState,
+  TaktpackErrorCode,
+} from './errors.js';
+export {
+  TAKTPACK_ENTRY_NAMES,
+  TAKTPACK_BLOB_PREFIX,
+  DEFAULT_TAKTPACK_LIMITS,
+} from './archive-types.js';
+export type {
+  TaktpackLimits,
+  TaktpackDescriptor,
+  TaktpackDescriptorV1,
+  TaktpackDescriptorV1_1,
+  TaktpackExportReportV1,
+  ProjectTemplateExportOptions,
+  ProjectTemplateExportPlan,
+  TaktpackInspectResult,
+  InspectTaktpackOptions,
+  WriteTaktpackOptions,
+  WriteTaktpackResult,
+  TaktpackIndexV1,
+  TaktpackIndexV1_1,
+  TaktpackLockSeedV1,
+  TaktpackLockSeedV1_1,
+  TaktpackLockSeed,
+  DeepReadonly,
+} from './archive-types.js';
+export { canonicalizeTaktpackJson } from './canonical-json.js';
+export {
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION,
+  PROJECT_TEMPLATE_CLI_ERROR_EXIT_CODES,
+  ProjectTemplateCliContractError,
+  createProjectTemplateCliFailure,
+  createProjectTemplateCliSuccess,
+  parseProjectTemplateCliMutationOptions,
+  parseProjectTemplateCliEnvelopeJson,
+  presentProjectTemplateCliEnvelope,
+  projectTemplateCliExitCodeForErrorCode,
+  writeProjectTemplateCliOutcome,
+} from './cli-machine-contract.js';
+export {
+  MAX_PROJECT_TEMPLATE_CLI_DETAIL_ITEMS_V1_1,
+  PROJECT_TEMPLATE_CLI_SCHEMA_VERSION_V1_1,
+  PROJECT_TEMPLATE_CLI_SUPPORTED_SCHEMA_VERSIONS,
+  ProjectTemplateCliV1_1ContractError,
+  createProjectTemplateCliV1_1Failure,
+  createProjectTemplateCliV1_1FailureFor,
+  createProjectTemplateCliV1_1Success,
+  parseProjectTemplateCliV1_1EnvelopeJson,
+  presentProjectTemplateCliV1_1Envelope,
+  snapshotProjectTemplateCliV1_1Envelope,
+  snapshotProjectTemplateCliV1_1Outcome,
+  writeProjectTemplateCliV1_1Outcome,
+} from './cli-machine-contract-v1-1.js';
+export type {
+  ProjectTemplateCliActionV1_1,
+  ProjectTemplateCliCapabilityV1_1,
+  ProjectTemplateCliCapabilityWarningV1_1,
+  ProjectTemplateCliCollectionV1_1,
+  ProjectTemplateCliConflictV1_1,
+  ProjectTemplateCliExportReasonV1_1,
+  ProjectTemplateCliExportResultV1_1,
+  ProjectTemplateCliInspectResultV1_1,
+  ProjectTemplateCliInspectTargetV1_1,
+  ProjectTemplateCliListResultV1_1,
+  ProjectTemplateCliPreviewResultV1_1,
+  ProjectTemplateCliSourceV1_1,
+  ProjectTemplateCliTargetV1_1,
+  ProjectTemplateCliV1_1Envelope,
+  ProjectTemplateCliV1_1FailureEnvelope,
+  ProjectTemplateCliV1_1Outcome,
+  ProjectTemplateCliV1_1Result,
+  ProjectTemplateCliV1_1SuccessEnvelope,
+} from './cli-machine-contract-v1-1.js';
+export {
+  MAX_PROJECT_TEMPLATE_CLI_REVIEW_ITEMS_V1_1,
+  createProjectTemplateCliReviewProjectionV1_1,
+} from './cli-review-projection-v1-1.js';
+export type {
+  ProjectTemplateCliCapabilityWarningV1_1 as ProjectTemplateCliReviewCapabilityWarningV1_1,
+  ProjectTemplateCliReviewConflictV1_1,
+  ProjectTemplateCliReviewItemInputV1_1,
+  ProjectTemplateCliReviewItemV1_1,
+  ProjectTemplateCliReviewProjectionInputV1_1,
+  ProjectTemplateCliReviewProjectionV1_1,
+} from './cli-review-projection-v1-1.js';
+export type {
+  ProjectTemplateCliApplyOptions,
+  ProjectTemplateCliCommand,
+  ProjectTemplateCliEnvelope,
+  ProjectTemplateCliErrorCode,
+  ProjectTemplateCliExitCode,
+  ProjectTemplateCliFailureEnvelope,
+  ProjectTemplateCliJson,
+  ProjectTemplateCliMode,
+  ProjectTemplateCliMutationOptions,
+  ProjectTemplateCliOutcome,
+  ProjectTemplateCliSuccessEnvelope,
+  ProjectTemplateCliWarning,
+  ProjectTemplateCliWarningCode,
+  ProjectTemplateCliDryRunOptions,
+  ProjectTemplateCliResult,
+  ProjectTemplateCliReadiness,
+  ProjectTemplateCliRecoveryState,
+  ProjectTemplateCliReviewCode,
+  ProjectTemplateCliSuccessInput,
+} from './cli-machine-contract.js';
+export { startProjectTemplateCliLifecycle } from './cli-lifecycle.js';
+export {
+  createProductionProjectTemplateCliLocalApplyService,
+} from './cli-local-apply-service.js';
+export {
+  createProductionProjectTemplateCliRollbackService,
+} from './cli-rollback-service.js';
+export type {
+  ProjectTemplateCliRollbackOptions,
+  ProjectTemplateCliRollbackService,
+} from './cli-rollback-service.js';
+export type {
+  ProjectTemplateCliLifecycleContext,
+  ProjectTemplateCliLifecycleExecution,
+} from './cli-lifecycle.js';
+export { createProjectTemplateExportPlan } from './export-plan.js';
+export { writeTaktpack } from './archive-writer.js';
+export { inspectTaktpack } from './archive-inspector.js';
+export {
+  calculateProjectTemplateTargetPreconditionToken,
+  captureProjectTemplateTargetSnapshot,
+} from './target-snapshot.js';
+export type {
+  ProjectTemplateGitTrackingStatus,
+  CapturedProjectTemplateTargetEntry,
+  ProjectTemplateTargetSnapshot,
+} from './target-snapshot.js';
+export {
+  createProjectTemplateApplyPlan,
+  prepareProjectTemplateApplyPlan,
+} from './apply-plan.js';
+export {
+  renderProjectTemplateApplyPreviewHuman,
+  renderProjectTemplateApplyPreviewJson,
+} from './apply-preview.js';
+export {
+  createGithubProjectTemplateRemotePreview,
+  GithubProjectTemplateRemotePreviewError,
+} from './remote-preview-facade.js';
+export type {
+  CreateGithubProjectTemplateRemotePreviewOptions,
+  GithubProjectTemplateRemotePreviewErrorCode,
+} from './remote-preview-facade.js';
+export type {
+  ProjectTemplateApplyPreview,
+  ProjectTemplateApplyPreviewBindings,
+  ProjectTemplateApplyPreviewCompositionConflictCode,
+  ProjectTemplateApplyPreviewContentHardConflict,
+  ProjectTemplateRemoteApplyPreview,
+} from './apply-preview-types.js';
+export type {
+  ProjectTemplateGithubSourceProvenanceV1,
+  ProjectTemplateLocalSourceProvenanceV1,
+  ProjectTemplateSourceProvenanceV1,
+} from './source-provenance.js';
+export type {
+  ProjectTemplateApplyPreviewApprovalEvidence,
+} from './apply-preview-approval.js';
+export {
+  inspectProjectTemplateApplyGuard,
+} from './apply-guard.js';
+export type {
+  ProjectTemplateApplyGuardBlockCode,
+  ProjectTemplateApplyGuardBlock,
+  ProjectTemplateApplyGuardReport,
+  InspectProjectTemplateApplyGuardOptions,
+} from './apply-guard.js';
+export {
+  runProjectTemplateDoctor,
+} from './apply-doctor.js';
+export type {
+  ProjectTemplateDoctorCheck,
+  ProjectTemplateDoctorCheckKind,
+  ProjectTemplateDoctorReport,
+} from './apply-doctor.js';
+export {
+  PROJECT_TEMPLATE_LOCK_PATH,
+  applyProjectTemplatePlan,
+  recoverProjectTemplateApply,
+  rollbackProjectTemplateApply,
+} from './apply-executor.js';
+export type {
+  ProjectTemplateApplyResult,
+  ProjectTemplateRecoveryResult,
+  ProjectTemplateRollbackResult,
+} from './apply-executor.js';
+export {
+  applyGithubProjectTemplateRemoteTransaction,
+  GithubProjectTemplateRemoteApplyError,
+} from './remote-transaction-apply-facade.js';
+export type {
+  ApplyGithubProjectTemplateRemoteTransactionOptions,
+  GithubProjectTemplateRemoteApplyErrorCode,
+} from './remote-transaction-apply-facade.js';
+export type {
+  ProjectTemplateApplyApprovalEvidence,
+} from './apply-approval.js';
+export type {
+  ProjectTemplateLocalSnapshotEntry,
+  ProjectTemplateBaseContent,
+  ProjectTemplateIncomingContent,
+  ProjectTemplateIncomingInspectionEvidence,
+  ProjectTemplateApplyPlanInput,
+  ProjectTemplateApplyAction,
+  ProjectTemplateApplyReasonCode,
+  ProjectTemplateRollbackImpact,
+  ProjectTemplateEntryDiff,
+  ProjectTemplateApplyMergeDiagnostics,
+  ManagedProjectTemplateApplyPlanEntry,
+  MergeProjectTemplateApplyPlanEntry,
+  ScaffoldProjectTemplateApplyPlanEntry,
+  ExcludedProjectTemplateApplyPlanEntry,
+  ProjectTemplateApplyPlanEntry,
+  ProjectTemplateApplyPlanSummary,
+  ProjectTemplateApplyPlan,
+  PreparedProjectTemplateApplyPlan,
+  ProjectTemplatePolicyActionMap,
+} from './apply-plan-types.js';
+export type {
+  ProjectTemplateManifest,
+  ProjectTemplateManifestV1,
+  ProjectTemplateManifestV1_0,
+  ProjectTemplateManifestV1_1,
+  ProjectTemplateManifestMetadataV1_1,
+  ProjectTemplateManifestDerivationV1_1,
+  ProjectTemplateManifestRootDerivationV1_1,
+  ProjectTemplateManifestDerivedDerivationV1_1,
+  DerivedTemplateSourceV1_1,
+  TemplateCapability,
+  TemplateEntry,
+  TemplateEntryPolicy,
+  TemplateLock,
+  TemplateLockV1,
+  TemplateLockV1_0,
+  TemplateLockV1_1,
+  TemplateLockEntry,
+  TemplateSource,
+  GithubTemplateSource,
+  GitTemplateSource,
+  LocalTemplateSource,
+  DetectedTemplateCapabilities,
+} from './types.js';
+export type { ProjectTemplateValidationErrorCode } from './errors.js';
+export type {
+  ProjectTemplateClassification,
+  ProjectTemplateClassificationReason,
+  ProjectTemplateClassificationResult,
+  ProjectTemplateClassifierInput,
+  ProjectTemplateScanLimits,
+  ProjectTemplateScanOptions,
+  ProjectTemplateScanResult,
+} from './classifier-types.js';

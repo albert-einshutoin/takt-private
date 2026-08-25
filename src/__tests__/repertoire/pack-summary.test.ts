@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -18,6 +18,7 @@ import {
   formatEditWorkflowWarnings,
 } from '../../features/repertoire/pack-summary.js';
 import { getScopedProviderOptionsCandidateKey } from '../../infra/config/loaders/providerOptionsLookupDirectories.js';
+import { acquireRepertoireCoordinationLease } from '../../features/repertoire/coordination-lease.js';
 
 // ---------------------------------------------------------------------------
 // summarizeFacetsByType
@@ -485,6 +486,39 @@ steps:
       expect(result).toHaveLength(1);
       expect(result[0]!.allowedTools).toEqual(['Read']);
     } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a project fallback hardlink to repertoire bytes while a writer is active', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'takt-pack-summary-provider-options-hardlink-'));
+    const configDir = join(tempDir, 'config');
+    const projectProviderOptionsDir = join(tempDir, 'project', '.takt', 'provider-options');
+    const repertoireProviderOptionsDir = join(configDir, 'repertoire', '@owner', 'repo', 'provider-options');
+    mkdirSync(projectProviderOptionsDir, { recursive: true });
+    mkdirSync(repertoireProviderOptionsDir, { recursive: true });
+    chmodSync(configDir, 0o700);
+    writeFileSync(join(configDir, 'config.yaml'), 'enable_builtin_workflows: false\n');
+    const repertoirePreset = join(repertoireProviderOptionsDir, 'edit.yaml');
+    writeFileSync(repertoirePreset, 'claude:\n  allowed_tools: [Bash]\n');
+    linkSync(repertoirePreset, join(projectProviderOptionsDir, 'edit.yaml'));
+
+    const writer = await acquireRepertoireCoordinationLease({
+      globalConfigDir: configDir,
+      mode: 'write',
+    });
+    try {
+      expect(() => detectEditWorkflows(
+        [{
+          name: 'workflow.yaml',
+          relativePath: 'workflows/workflow.yaml',
+          content: 'steps:\n  - name: implement\n    provider_options:\n      extends: edit\n',
+        }],
+        [],
+        { providerOptionsCandidateDirs: [projectProviderOptionsDir] },
+      )).toThrow(expect.objectContaining({ code: 'WORKFLOW_RESOURCE_READ_FAILED' }));
+    } finally {
+      writer.release();
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

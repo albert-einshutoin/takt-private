@@ -4,6 +4,13 @@
   "description": "Workflow control for AI coding agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "bin": {
     "takt": "./bin/takt",
     "takt-dev": "./bin/takt",
@@ -11,7 +18,10 @@
     "devloopd": "./bin/devloopd.mjs"
   },
   "scripts": {
-    "build": "tsc && mkdir -p dist/shared/prompts/en dist/shared/prompts/ja dist/shared/i18n dist/core/runtime/presets && cp src/shared/prompts/en/*.md dist/shared/prompts/en/ && cp src/shared/prompts/ja/*.md dist/shared/prompts/ja/ && cp src/shared/i18n/labels_en.yaml src/shared/i18n/labels_ja.yaml dist/shared/i18n/ && cp src/core/runtime/presets/*.sh dist/core/runtime/presets/",
+    "build": "tsc && npm run typecheck:contracts && npm run typecheck:workflow-tests && npm run typecheck:resolve-contracts && node scripts/copy-build-assets.mjs",
+    "typecheck:contracts": "tsc -p tsconfig.type-tests.json",
+    "typecheck:workflow-tests": "tsc -p tsconfig.workflow-tests.json",
+    "typecheck:resolve-contracts": "tsc -p tsconfig.resolve-contracts.json",
     "watch": "tsc --watch",
     "analyze:usage": "node dist/commands/analyze-usage.js",
     "test": "vitest run",
@@ -30,7 +40,7 @@
     "test:e2e:opencode": "npm run test:e2e:provider:opencode",
     "test:e2e:cursor": "npm run test:e2e:provider:cursor",
     "test:devloopd:soak": "vitest run src/__tests__/devloopd-soak-harness.test.ts src/__tests__/devloopd-staged-scheduler.test.ts src/__tests__/devloopd-ci-fix.test.ts src/__tests__/devloopd-merge-queue.test.ts",
-    "lint": "eslint src/",
+    "lint": "eslint src/ .github/scripts/resolve-conflicts-contract.mjs",
     "check:personal": "npm run build && node dist/app/devloopd/index.js check-personal --cwd . --skip-build",
     "release:personal:check": "npm run check:personal && npm pack --dry-run && node dist/app/devloopd/index.js release-info --json",
     "check:release": "npm run build && npm run lint && npm run test && npm run test:e2e:all; code=$?; if [ \"$code\" -eq 0 ]; then msg='check:release passed'; else msg=\"check:release failed (exit=$code)\"; fi; if command -v osascript >/dev/null 2>&1; then osascript -e \"display notification \\\"$msg\\\" with title \\\"takt\\\" subtitle \\\"Release Check\\\"\" >/dev/null 2>&1 || true; fi; echo \"[takt] $msg\"; exit $code",
@@ -84,16 +94,17 @@
     "@openai/codex-sdk": "^0.137.0",
     "@opencode-ai/sdk": "^1.17.3",
     "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/exporter-metrics-otlp-http": "^0.219.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
-    "@opentelemetry/sdk-metrics": "^2.8.0",
-    "@opentelemetry/sdk-node": "^0.219.0",
-    "@opentelemetry/sdk-trace-base": "^2.8.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "ajv": "^6.12.6",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "cross-spawn": "^7.0.6",
     "faceted-prompting": "^0.5.0",
+    "tar-stream": "3.1.7",
     "traced-config": "^0.3.0",
     "update-notifier": "^7.3.1",
     "wanakana": "^5.3.1",
@@ -103,6 +114,7 @@
   "devDependencies": {
     "@eslint/js": "^9.39.2",
     "@types/node": "^20.14.0",
+    "@types/tar-stream": "^3.1.4",
     "@types/wanakana": "^4.0.6",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
@@ -112,7 +124,9 @@
     "vitest": "^3.2.6"
   },
   "overrides": {
-    "hono": "^4.12.25",
+    "hono": "^4.13.3",
+    "ip-address": "^10.5.0",
+    "nanoid": "^3.3.18",
     "vite": "6.4.3",
     "esbuild": "0.28.1"
   }

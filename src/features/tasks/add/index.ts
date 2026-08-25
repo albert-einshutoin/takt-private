@@ -5,6 +5,10 @@
  */
 
 import * as path from 'node:path';
+import {
+  PROJECT_TASKS_FILE,
+  PROJECT_TAKT_DIRECTORY,
+} from '../../../shared/constants/projectTaktPaths.js';
 import { promptInput, confirm, selectOption } from '../../../shared/prompt/index.js';
 import { info, error, withProgress } from '../../../shared/ui/index.js';
 import { getLabel } from '../../../shared/i18n/index.js';
@@ -98,7 +102,7 @@ export async function saveTaskFile(
     cleanupPreparedTaskSpec(preparedSpec.taskDir);
     throw error;
   }
-  const tasksFile = path.join(cwd, '.takt', 'tasks.yaml');
+  const tasksFile = path.join(cwd, PROJECT_TAKT_DIRECTORY, PROJECT_TASKS_FILE);
   log.info('Task created', { taskName: created.name, tasksFile, config });
   return { taskName: created.name, tasksFile };
 }

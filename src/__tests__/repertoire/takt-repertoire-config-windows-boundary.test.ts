@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('node:fs', () => ({
+  Stats: class {
+    isDirectory() { return true; }
+    isSymbolicLink() { return false; }
+  },
   existsSync: vi.fn().mockReturnValue(true),
   realpathSync: vi.fn((value: string) => value),
 }));

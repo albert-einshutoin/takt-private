@@ -32,17 +32,38 @@ function preparePolicyContent(content: string, sourcePath?: string): string {
   return preparePolicyContentGeneric(content, CONTEXT_MAX_CHARS, sourcePath);
 }
 
-function preparePreviousResponseContent(content: string, sourcePath?: string): string {
-  const prepared = trimContextContent(content, CONTEXT_MAX_CHARS);
-  const lines: string[] = [prepared.content];
+function preparePreviousResponseContent(
+  content: string,
+  sourcePath?: string,
+  maxBytes?: number,
+  overflow?: 'error',
+): string {
+  const hasMax = maxBytes !== undefined;
+  const hasOverflow = overflow !== undefined;
+  if (hasMax !== hasOverflow) {
+    throw new Error('Full Previous Response delivery requires both a byte limit and overflow: error.');
+  }
+  const fullDelivery = hasMax && overflow === 'error';
+  const prepared = fullDelivery
+    ? { content, truncated: false }
+    : trimContextContent(content, CONTEXT_MAX_CHARS);
+  // Escape the untrusted body exactly once before measuring the bytes that the
+  // provider will receive. Full-width brace escaping can expand UTF-8 size.
+  const escapedBody = escapeTemplateChars(prepared.content);
+  if (fullDelivery && Buffer.byteLength(escapedBody, 'utf8') > maxBytes) {
+    throw new Error(`Previous Response exceeds the configured ${maxBytes} byte limit.`);
+  }
+  const trustedNotices: string[] = [];
   if (prepared.truncated && sourcePath) {
-    lines.push('', `Previous Response is truncated. Source: ${sourcePath}`);
+    trustedNotices.push(`Previous Response is truncated. Source: ${sourcePath}`);
   }
   if (sourcePath) {
-    lines.push('', `Source: ${sourcePath}`);
+    trustedNotices.push(`Source: ${sourcePath}`);
   }
-  lines.push('', renderConflictNotice());
-  return lines.join('\n');
+  trustedNotices.push(renderConflictNotice());
+  // Trusted local notices are escaped separately and intentionally remain
+  // outside the byte cap, which protects only the previous agent's body.
+  return [escapedBody, '', escapeTemplateChars(trustedNotices.join('\n\n'))].join('\n');
 }
 
 /**
@@ -116,10 +137,12 @@ export class InstructionBuilder {
       ? preparePreviousResponseContent(
           this.context.previousOutput.content,
           this.context.previousResponseSourcePath,
+          this.step.previousResponseMaxBytes,
+          this.step.previousResponseOverflow,
         )
       : '';
     const previousResponse = hasPreviousResponse
-      ? escapeTemplateChars(previousResponsePrepared)
+      ? previousResponsePrepared
       : '';
 
     // User Inputs
@@ -134,7 +157,7 @@ export class InstructionBuilder {
       this.step,
       {
         ...this.context,
-        previousResponseText: previousResponsePrepared || undefined,
+        previousResponseEscapedText: previousResponsePrepared || undefined,
       },
     ));
 
