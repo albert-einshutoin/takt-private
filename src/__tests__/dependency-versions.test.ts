@@ -263,10 +263,22 @@ describe('dependency versions', () => {
     expect(packageLock.packages?.['node_modules/yaml']?.version).toBe('2.9.0');
   });
 
-  it('locks runtime transitive dependencies to patched security releases', () => {
+  it('declares and locks runtime dependency security floors', () => {
+    const packageJson = readPackageJson();
     const packageLock = readPackageLock();
 
-    // Exact versions keep future lock refreshes from silently restoring known-vulnerable releases.
+    expect(packageJson.dependencies).toMatchObject({
+      '@hono/node-server': '^2.0.5',
+      '@modelcontextprotocol/sdk': '^1.30.0',
+      ajv: '^6.15.0',
+      'body-parser': '^2.3.0',
+      'express-rate-limit': '^8.5.2',
+      'fast-uri': '^3.1.4',
+      hono: '^4.13.3',
+      'ip-address': '^10.5.0',
+      protobufjs: '^7.6.5',
+    });
+
     expect(getLockedPackage(packageLock, 'node_modules/ajv').version).toBe('6.15.0');
     assertAllLockedPackageVersions(packageLock, '@modelcontextprotocol/sdk',
       (version) => isAtLeastStableVersion(version, [1, 30, 0]));
